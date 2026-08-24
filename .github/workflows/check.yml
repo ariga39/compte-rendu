@@ -15,6 +15,7 @@ jobs:
           node-version: '22.18.0'
           cache: true
           run-install: false
+      - run: corepack enable
       - run: vp install --frozen-lockfile
       - run: pnpm check
       - run: pnpm test
