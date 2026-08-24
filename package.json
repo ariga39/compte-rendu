@@ -1,0 +1,15 @@
+{
+  "name": "compte-rendu",
+  "private": true,
+  "scripts": {
+    "check": "vp check",
+    "test": "vp test",
+    "build": "vp run --filter './apps/core' --filter './apps/ingress' --fail-if-no-match build"
+  },
+  "devDependencies": {
+    "effect": "4.0.0-rc.111",
+    "vite-plus": "0.3.0",
+    "vitest": "4.1.11"
+  },
+  "packageManager": "pnpm@11.23.0"
+}

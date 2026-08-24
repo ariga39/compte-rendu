@@ -1,0 +1,21 @@
+name: Check
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: voidzero-dev/setup-vp@v1.18.0
+        with:
+          node-version: '22.18.0'
+          cache: true
+          run-install: false
+      - run: vp install --frozen-lockfile
+      - run: pnpm check
+      - run: pnpm test
+      - run: pnpm build
