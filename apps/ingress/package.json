@@ -1,0 +1,12 @@
+{
+  "name": "@compte-rendu/ingress",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vp build"
+  },
+  "dependencies": {
+    "@compte-rendu/contracts": "workspace:*",
+    "effect": "4.0.0-rc.111"
+  }
+}
