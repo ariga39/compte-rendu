@@ -1,11 +1,82 @@
 import { describe, expect, it } from 'vitest';
 import {
   createReviewSandbox,
+  resolveOpenCodeProcessId,
   type OpenCodeIntegration,
 } from '../apps/core/src/cloudflare-review-adapter';
 import type { OperationalLogEvent } from '../packages/contracts/src';
 
 describe('Cloudflare review Sandbox adapter', () => {
+  it('resolves the uniquely matching OpenCode process despite added and reordered flags', () => {
+    expect(
+      resolveOpenCodeProcessId(
+        [
+          {
+            id: 'matching-process',
+            command: [
+              'opencode',
+              'serve',
+              '--hostname',
+              '0.0.0.0',
+              '--extra',
+              'preview',
+              '--port',
+              '4096',
+            ],
+            cwd: '/workspace/compte-rendu-review',
+            state: 'running',
+          },
+        ],
+        '/workspace/compte-rendu-review',
+      ),
+    ).toBe('matching-process');
+  });
+
+  it('fails closed for wrong identity or ambiguous OpenCode processes', () => {
+    const processes = [
+      {
+        id: 'wrong-cwd',
+        command: ['opencode', 'serve', '--port', '4096'],
+        cwd: '/workspace/other-review',
+        state: 'running' as const,
+      },
+      {
+        id: 'wrong-port',
+        command: ['opencode', 'serve', '--port', '4097'],
+        cwd: '/workspace/compte-rendu-review',
+        state: 'running' as const,
+      },
+      {
+        id: 'not-running',
+        command: ['opencode', 'serve', '--port', '4096'],
+        cwd: '/workspace/compte-rendu-review',
+        state: 'exited' as const,
+      },
+    ];
+
+    expect(resolveOpenCodeProcessId(processes, '/workspace/compte-rendu-review')).toBeUndefined();
+    expect(
+      resolveOpenCodeProcessId(
+        [
+          ...processes,
+          {
+            id: 'matching-process-a',
+            command: ['opencode', 'serve', '--port=4096'],
+            cwd: '/workspace/compte-rendu-review',
+            state: 'running',
+          },
+          {
+            id: 'matching-process-b',
+            command: ['opencode', 'serve', '--port', '4096'],
+            cwd: '/workspace/compte-rendu-review',
+            state: 'running',
+          },
+        ],
+        '/workspace/compte-rendu-review',
+      ),
+    ).toBeUndefined();
+  });
+
   it('runs one review through the managed OpenCode server and closes it', async () => {
     let serverClosed = false;
     const writes: Array<{ path: string; content: string }> = [];
@@ -35,7 +106,7 @@ describe('Cloudflare review Sandbox adapter', () => {
       destroy: async () => undefined,
     };
     const openCodeIntegration: OpenCodeIntegration = {
-      createOpencode: async (_sandbox, options) => {
+      createClient: async (_sandbox, options) => {
         openCodeOptions = options;
         return {
           client: {
@@ -56,10 +127,12 @@ describe('Cloudflare review Sandbox adapter', () => {
               abort: async () => true,
             },
           },
-          server: {
-            close: async () => {
+          process: {
+            id: 'review-process',
+            kill: async () => {
               serverClosed = true;
             },
+            waitForExit: async () => undefined,
           },
         };
       },
@@ -139,7 +212,7 @@ describe('Cloudflare review Sandbox adapter', () => {
       },
     };
     const integration: OpenCodeIntegration = {
-      createOpencode: async () => ({
+      createClient: async () => ({
         client: {
           session: {
             create: async () => ({ id: 'review-session' }),
@@ -147,7 +220,11 @@ describe('Cloudflare review Sandbox adapter', () => {
             abort: async () => true,
           },
         },
-        server: { close: async () => undefined },
+        process: {
+          id: 'review-process',
+          kill: async () => undefined,
+          waitForExit: async () => undefined,
+        },
       }),
     };
 
@@ -177,7 +254,7 @@ describe('Cloudflare review Sandbox adapter', () => {
       destroy: async () => undefined,
     };
     const integration: OpenCodeIntegration = {
-      createOpencode: async () => {
+      createClient: async () => {
         throw new Error('Sandbox transport exposed secret response');
       },
     };
@@ -220,7 +297,7 @@ describe('Cloudflare review Sandbox adapter', () => {
       destroy: async () => undefined,
     };
     const integration: OpenCodeIntegration = {
-      createOpencode: async () => {
+      createClient: async () => {
         signalStartupEntered?.();
         await startupRelease;
         return {
@@ -234,7 +311,11 @@ describe('Cloudflare review Sandbox adapter', () => {
               abort: async () => true,
             },
           },
-          server: { close: async () => undefined },
+          process: {
+            id: 'review-process',
+            kill: async () => undefined,
+            waitForExit: async () => undefined,
+          },
         };
       },
     };
@@ -257,5 +338,143 @@ describe('Cloudflare review Sandbox adapter', () => {
     });
     releaseStartup?.();
     await runPromise;
+  });
+
+  it('exports only bounded process and session activity categories', async () => {
+    const events: OperationalLogEvent[] = [];
+    const log = {
+      record: (event: OperationalLogEvent) => {
+        events.push(event);
+      },
+    };
+    const logEvents: unknown[] = [
+      { type: 'stdout', data: new TextEncoder().encode('repository contents and prompt secret') },
+      {
+        type: 'terminal',
+        state: 'error',
+        error: { message: 'transport response with credential' },
+      },
+    ];
+    const rawSandbox = {
+      writeFile: async () => undefined,
+      exec: async () => {
+        throw new Error('raw CLI must not be used');
+      },
+      destroy: async () => undefined,
+    };
+    const integration: OpenCodeIntegration = {
+      createClient: async () => ({
+        client: {
+          session: {
+            create: async () => ({ id: 'review-session' }),
+            prompt: async () => ({
+              info: {},
+              parts: [{ type: 'text', text: JSON.stringify({ findings: [], summary: 'Done' }) }],
+            }),
+            abort: async () => true,
+          },
+          event: {
+            subscribe: async () =>
+              (async function* () {
+                yield {
+                  type: 'session.status',
+                  properties: { sessionID: 'session/secret', status: { type: 'busy' } },
+                };
+                yield {
+                  type: 'session.status',
+                  properties: {
+                    sessionID: 'session/secret',
+                    status: {
+                      type: 'retry',
+                      attempt: 999,
+                      message: 'model output secret',
+                      next: 1,
+                    },
+                  },
+                };
+                yield { type: 'session.idle', properties: { sessionID: 'session/secret' } };
+              })(),
+          },
+        },
+        process: {
+          id: 'review-process',
+          kill: async () => undefined,
+          waitForExit: async () => undefined,
+          status: async () => ({ state: 'running' }),
+          logs: async function (
+            this: { readonly id: string },
+            _options?: { readonly replay?: boolean; readonly follow?: boolean },
+          ) {
+            if (this.id !== 'review-process') throw new Error('unexpected process receiver');
+            return {
+              getReader: () => {
+                let index = 0;
+                return {
+                  read: async () =>
+                    index < logEvents.length
+                      ? { done: false, value: logEvents[index++] }
+                      : { done: true },
+                  cancel: async () => undefined,
+                };
+              },
+            };
+          },
+        },
+      }),
+    };
+
+    const result = await createReviewSandbox(rawSandbox, integration, undefined, {
+      sandboxId: 'sandbox-activity-1',
+      log,
+    }).runAgent({ modelCredential: 'test-model-key' });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    expect(result.exitCode).toBe(0);
+    expect(events).toContainEqual({
+      phase: 'agent',
+      outcome: 'status',
+      stage: 'process',
+      state: 'running',
+      sandboxId: 'sandbox-activity-1',
+    });
+    expect(events).toContainEqual({
+      phase: 'agent',
+      outcome: 'status',
+      stage: 'session',
+      state: 'busy',
+      sandboxId: 'sandbox-activity-1',
+    });
+    expect(events).toContainEqual({
+      phase: 'agent',
+      outcome: 'activity',
+      stage: 'process',
+      sandboxId: 'sandbox-activity-1',
+    });
+    expect(events).toContainEqual({
+      phase: 'agent',
+      outcome: 'status',
+      stage: 'process',
+      state: 'error',
+      sandboxId: 'sandbox-activity-1',
+    });
+    expect(events).toContainEqual({
+      phase: 'agent',
+      outcome: 'status',
+      stage: 'session',
+      state: 'retry',
+      sandboxId: 'sandbox-activity-1',
+    });
+    expect(events).toContainEqual({
+      phase: 'agent',
+      outcome: 'status',
+      stage: 'session',
+      state: 'idle',
+      sandboxId: 'sandbox-activity-1',
+    });
+    const serialized = JSON.stringify(events);
+    expect(serialized).not.toContain('repository contents');
+    expect(serialized).not.toContain('prompt secret');
+    expect(serialized).not.toContain('credential');
+    expect(serialized).not.toContain('model output secret');
   });
 });

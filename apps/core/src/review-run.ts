@@ -118,7 +118,7 @@ const failure = (
   status: 'failed',
   reason,
   attempt,
-  retryable: reason !== 'cleanup' && reason !== 'lease',
+  retryable: reason !== 'cleanup' && reason !== 'lease' && reason !== 'timeout',
   ...extra,
 });
 

@@ -145,6 +145,26 @@ export type OperationalLogEvent =
       readonly sandboxId: string;
     }
   | {
+      readonly phase: 'agent';
+      readonly outcome: 'status';
+      readonly stage: 'process';
+      readonly state: 'running' | 'exited' | 'error';
+      readonly sandboxId: string;
+    }
+  | {
+      readonly phase: 'agent';
+      readonly outcome: 'status';
+      readonly stage: 'session';
+      readonly state: 'busy' | 'idle' | 'retry' | 'error';
+      readonly sandboxId: string;
+    }
+  | {
+      readonly phase: 'agent';
+      readonly outcome: 'activity';
+      readonly stage: 'process' | 'session';
+      readonly sandboxId: string;
+    }
+  | {
       readonly phase: 'workflow';
       readonly outcome: 'completed';
       readonly runId: string;
@@ -251,7 +271,16 @@ export const sanitizeOperationalLogEvent = (event: OperationalLogEvent): Operati
         sandboxId,
       };
     }
-    return { phase: 'agent', outcome: 'aborted', stage: 'deadline', reason: 'deadline', sandboxId };
+    if (event.outcome === 'aborted') {
+      return {
+        phase: 'agent',
+        outcome: 'aborted',
+        stage: 'deadline',
+        reason: 'deadline',
+        sandboxId,
+      };
+    }
+    return { ...event, sandboxId };
   }
 
   if (event.phase === 'workflow' || event.phase === 'publication') {
