@@ -1,6 +1,7 @@
 import { Effect, Schema } from 'effect';
 import {
   ReviewEvent,
+  GitHubSha,
   type CoreServiceBinding,
   type ReviewEvent as NormalizedReviewEvent,
   type WorkerEntrypoint,
@@ -8,25 +9,52 @@ import {
 
 export const MAX_WEBHOOK_BYTES = 256 * 1024;
 
-const supportedActions = ['opened', 'reopened', 'synchronize', 'ready_for_review'] as const;
-const PullRequestAction = Schema.Literals(supportedActions);
-
-const WebhookAction = Schema.Struct({
-  action: Schema.String,
-});
+const supportedEvents = ['pull_request', 'issue_comment'] as const;
+const supportedPullRequestActions = [
+  'opened',
+  'reopened',
+  'synchronize',
+  'ready_for_review',
+] as const;
+const PullRequestAction = Schema.Literals(supportedPullRequestActions);
+const WebhookAction = Schema.Struct({ action: Schema.String });
 
 const PullRequestWebhook = Schema.Struct({
   action: PullRequestAction,
   number: Schema.Int,
   installation: Schema.Struct({ id: Schema.Int }),
-  repository: Schema.Struct({ id: Schema.Int }),
+  repository: Schema.Struct({
+    id: Schema.Int,
+    visibility: Schema.Literals(['private', 'public']),
+  }),
   pull_request: Schema.Struct({
-    base: Schema.Struct({ sha: Schema.String }),
-    head: Schema.Struct({ sha: Schema.String }),
+    draft: Schema.Boolean,
+    base: Schema.Struct({
+      sha: GitHubSha,
+      repo: Schema.Struct({ id: Schema.Int }),
+    }),
+    head: Schema.Struct({
+      sha: GitHubSha,
+      repo: Schema.Struct({ id: Schema.Int }),
+    }),
   }),
 });
 
-const Signature = Schema.String.check(Schema.isPattern(/^sha256=[0-9a-f]{64}$/i));
+const IssueCommentWebhook = Schema.Struct({
+  action: Schema.Literal('created'),
+  installation: Schema.Struct({ id: Schema.Int }),
+  repository: Schema.Struct({ id: Schema.Int }),
+  issue: Schema.Struct({
+    number: Schema.Int,
+    pull_request: Schema.optional(Schema.Struct({})),
+  }),
+  comment: Schema.Struct({
+    body: Schema.String,
+    user: Schema.Struct({ login: Schema.NonEmptyString }),
+  }),
+});
+
+const Signature = Schema.String.check(Schema.isPattern(new RegExp('^sha256=[0-9a-f]{64}$', 'i')));
 
 export interface IngressDependencies {
   readonly secret: string;
@@ -93,7 +121,7 @@ const verifySignature = (body: string, signature: string, dependencies: IngressD
     }
   });
 
-const normalize = (
+const normalizePullRequest = (
   deliveryId: string,
   payload: Schema.Schema.Type<typeof PullRequestWebhook>,
 ): NormalizedReviewEvent => ({
@@ -103,8 +131,26 @@ const normalize = (
   repositoryId: payload.repository.id,
   pullRequestNumber: payload.number,
   installationId: payload.installation.id,
+  repositoryVisibility: payload.repository.visibility,
+  baseRepositoryId: payload.pull_request.base.repo.id,
+  headRepositoryId: payload.pull_request.head.repo.id,
+  draft: payload.pull_request.draft,
   baseSha: payload.pull_request.base.sha,
   headSha: payload.pull_request.head.sha,
+});
+
+const normalizeIssueComment = (
+  deliveryId: string,
+  payload: Schema.Schema.Type<typeof IssueCommentWebhook>,
+): NormalizedReviewEvent => ({
+  deliveryId,
+  event: 'issue_comment',
+  action: 'created',
+  repositoryId: payload.repository.id,
+  pullRequestNumber: payload.issue.number,
+  installationId: payload.installation.id,
+  commenterLogin: payload.comment.user.login,
+  command: '/ai-review',
 });
 
 const processWebhook = (request: Request, dependencies: IngressDependencies) =>
@@ -133,20 +179,53 @@ const processWebhook = (request: Request, dependencies: IngressDependencies) =>
     const action = yield* Schema.decodeUnknownEffect(WebhookAction)(decodedJson).pipe(
       Effect.mapError(() => invalidWebhook('Webhook action is missing')),
     );
+    if (request.headers.get('x-github-event') === 'pull_request') {
+      if (
+        !supportedPullRequestActions.includes(
+          action.action as (typeof supportedPullRequestActions)[number],
+        )
+      ) {
+        return 'ignored' as const;
+      }
 
-    if (!supportedActions.includes(action.action as (typeof supportedActions)[number])) {
-      return 'ignored';
+      const deliveryId = yield* Schema.decodeUnknownEffect(Schema.NonEmptyString)(
+        request.headers.get('x-github-delivery'),
+      ).pipe(Effect.mapError(() => invalidWebhook('Webhook delivery id is missing')));
+      const payload = yield* Schema.decodeUnknownEffect(PullRequestWebhook)(decodedJson).pipe(
+        Effect.mapError(() => invalidWebhook('Pull request webhook is malformed')),
+      );
+      return yield* forwardEvent(normalizePullRequest(deliveryId, payload), dependencies);
     }
 
-    const payload = yield* Schema.decodeUnknownEffect(PullRequestWebhook)(decodedJson).pipe(
-      Effect.mapError(() => invalidWebhook('Pull request webhook is malformed')),
+    if (request.headers.get('x-github-event') === 'issue_comment') {
+      if (action.action !== 'created') {
+        return 'ignored' as const;
+      }
+
+      const deliveryId = yield* Schema.decodeUnknownEffect(Schema.NonEmptyString)(
+        request.headers.get('x-github-delivery'),
+      ).pipe(Effect.mapError(() => invalidWebhook('Webhook delivery id is missing')));
+      const payload = yield* Schema.decodeUnknownEffect(IssueCommentWebhook)(decodedJson).pipe(
+        Effect.mapError(() => invalidWebhook('Issue comment webhook is malformed')),
+      );
+      if (payload.issue.pull_request === undefined) {
+        return 'ignored' as const;
+      }
+      if (payload.comment.body !== '/ai-review') {
+        return 'ignored' as const;
+      }
+
+      return yield* forwardEvent(normalizeIssueComment(deliveryId, payload), dependencies);
+    }
+
+    return 'ignored' as const;
+  });
+
+const forwardEvent = (event: NormalizedReviewEvent, dependencies: IngressDependencies) =>
+  Effect.gen(function* () {
+    const decodedEvent = yield* Schema.decodeUnknownEffect(ReviewEvent)(event).pipe(
+      Effect.mapError(() => invalidWebhook('Normalized webhook is invalid')),
     );
-    const deliveryId = yield* Schema.decodeUnknownEffect(Schema.NonEmptyString)(
-      request.headers.get('x-github-delivery'),
-    ).pipe(Effect.mapError(() => invalidWebhook('Webhook delivery id is missing')));
-    const event = yield* Schema.decodeUnknownEffect(ReviewEvent)(
-      normalize(deliveryId, payload),
-    ).pipe(Effect.mapError(() => invalidWebhook('Normalized webhook is invalid')));
     const coreResponse = yield* Effect.tryPromise({
       try: () =>
         Promise.resolve(
@@ -155,9 +234,9 @@ const processWebhook = (request: Request, dependencies: IngressDependencies) =>
               method: 'POST',
               headers: {
                 'content-type': 'application/json',
-                'x-compte-rendu-delivery': event.deliveryId,
+                'x-compte-rendu-delivery': decodedEvent.deliveryId,
               },
-              body: JSON.stringify(event),
+              body: JSON.stringify(decodedEvent),
             }),
           ),
         ),
@@ -170,7 +249,7 @@ const processWebhook = (request: Request, dependencies: IngressDependencies) =>
       });
     }
 
-    return 'accepted';
+    return 'accepted' as const;
   });
 
 export function createIngressWorker(dependencies: IngressDependencies): WorkerEntrypoint {
@@ -180,13 +259,13 @@ export function createIngressWorker(dependencies: IngressDependencies): WorkerEn
         return new Response(null, { status: 405 });
       }
 
-      if (request.headers.get('x-github-event') !== 'pull_request') {
+      const eventName = request.headers.get('x-github-event');
+      if (!supportedEvents.includes(eventName as (typeof supportedEvents)[number])) {
         return new Response(null, { status: 204 });
       }
 
       try {
         const result = await Effect.runPromise(processWebhook(request, dependencies));
-
         return new Response(null, { status: result === 'ignored' ? 204 : 202 });
       } catch (error) {
         if (error instanceof InvalidWebhook) {
