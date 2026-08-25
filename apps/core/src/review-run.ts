@@ -106,7 +106,7 @@ export type ReviewRunResult =
     };
 
 const defaultAttempt = 1;
-const leaseDurationMillis = 10 * 60 * 1000;
+const leaseDurationMillis = 12 * 60 * 1000;
 
 const failure = (
   reason: ReviewRunFailureReason,

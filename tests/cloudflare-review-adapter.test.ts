@@ -51,6 +51,7 @@ describe('Cloudflare review Sandbox adapter', () => {
                   ],
                 };
               },
+              abort: async () => true,
             },
           },
           server: {
