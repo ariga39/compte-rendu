@@ -24,6 +24,8 @@ export {
 } from './cloudflare-review-adapter';
 export { createGitHubPublicationAdapter } from './github-review-adapter';
 export type { GitHubPublicationAdapterOptions } from './github-review-adapter';
+export { createGitHubAppTokenProvider } from './github-app-token';
+export type { GitHubAppTokenProvider, GitHubAppTokenProviderOptions } from './github-app-token';
 export * from './review-run';
 
 type GitHubShaValue = typeof GitHubSha.Type;
@@ -135,6 +137,7 @@ export interface GitHubAdapter {
     installationId: number;
     commenterLogin: string;
   }): Promise<unknown>;
+  getRepositoryUrl?(input: { repositoryId: number; installationId: number }): Promise<unknown>;
   loadReviewTarget?(input: {
     repositoryId: number;
     pullRequestNumber: number;
@@ -149,6 +152,7 @@ export interface GitHubAdapter {
   createReview?(input: {
     repositoryId: number;
     pullRequestNumber: number;
+    installationId: number;
     payload: ReviewPublicationPayload;
   }): Promise<ReviewPublicationCreateResult>;
 }
@@ -440,6 +444,7 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
       github.createReview!({
         repositoryId: outcome.repositoryId,
         pullRequestNumber: outcome.pullRequestNumber,
+        installationId: outcome.installationId,
         payload,
       }),
     catch: () => undefined,
