@@ -195,12 +195,14 @@ export interface CoreEnv extends CloudflareSandboxBindings {
   readonly REVIEW_LEASE: LeaseNamespaceLike;
 }
 
-export const createCloudflareReviewRunner = (env: CoreEnv) =>
-  createReviewRunner({
+export const createCloudflareReviewRunner = (env: CoreEnv) => {
+  const log = createCloudflareOperationalLog();
+  return createReviewRunner({
     lease: createDurableLeaseAdapter(env.REVIEW_LEASE),
-    sandbox: createCloudflareSandboxAdapter(env),
-    log: createCloudflareOperationalLog(),
+    sandbox: createCloudflareSandboxAdapter(env, log),
+    log,
   });
+};
 
 class InvalidReviewEvent extends Schema.TaggedError<InvalidReviewEvent>()('InvalidReviewEvent', {
   message: Schema.String,

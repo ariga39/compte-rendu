@@ -119,6 +119,32 @@ export type OperationalLogEvent =
       readonly leaseRetained: boolean;
     }
   | {
+      readonly phase: 'agent';
+      readonly outcome: 'progress';
+      readonly stage: 'server' | 'session' | 'prompt';
+      readonly sandboxId: string;
+    }
+  | {
+      readonly phase: 'agent';
+      readonly outcome: 'completed';
+      readonly stage: 'response';
+      readonly sandboxId: string;
+    }
+  | {
+      readonly phase: 'agent';
+      readonly outcome: 'failed';
+      readonly stage: 'server' | 'session' | 'prompt';
+      readonly reason: 'session_error' | 'transport_failure';
+      readonly sandboxId: string;
+    }
+  | {
+      readonly phase: 'agent';
+      readonly outcome: 'aborted';
+      readonly stage: 'deadline';
+      readonly reason: 'deadline';
+      readonly sandboxId: string;
+    }
+  | {
       readonly phase: 'workflow';
       readonly outcome: 'completed';
       readonly runId: string;
@@ -206,6 +232,26 @@ export const sanitizeOperationalLogEvent = (event: OperationalLogEvent): Operati
         ? {}
         : { sandboxId: sanitizeOperationalLogIdentifier(event.sandboxId) ?? 'redacted' }),
     };
+  }
+
+  if (event.phase === 'agent') {
+    const sandboxId = sanitizeOperationalLogIdentifier(event.sandboxId) ?? 'redacted';
+    if (event.outcome === 'progress') {
+      return { phase: 'agent', outcome: 'progress', stage: event.stage, sandboxId };
+    }
+    if (event.outcome === 'completed') {
+      return { phase: 'agent', outcome: 'completed', stage: 'response', sandboxId };
+    }
+    if (event.outcome === 'failed') {
+      return {
+        phase: 'agent',
+        outcome: 'failed',
+        stage: event.stage,
+        reason: event.reason,
+        sandboxId,
+      };
+    }
+    return { phase: 'agent', outcome: 'aborted', stage: 'deadline', reason: 'deadline', sandboxId };
   }
 
   if (event.phase === 'workflow' || event.phase === 'publication') {
