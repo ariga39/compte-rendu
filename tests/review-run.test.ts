@@ -448,6 +448,113 @@ describe('runWithLease', () => {
     });
   });
 
+  it('rejects an ambiguous review returned by the managed OpenCode client', async () => {
+    const rawSandbox = {
+      writeFile: async () => undefined,
+      exec: async () => ({
+        success: true,
+        exitCode: 0,
+        stdout: `${sha('1')}\n${sha('2')}\n`,
+        stderr: '',
+      }),
+      destroy: async () => undefined,
+    };
+    const runner = createReviewRunner({
+      lease: {
+        register: async () => ({
+          clear: async () => {},
+          rearm: async () => {},
+        }),
+      },
+      sandbox: {
+        getSandbox: async () =>
+          createReviewSandbox(rawSandbox, {
+            createOpencode: async () => ({
+              client: {
+                session: {
+                  create: async () => ({ id: 'review-session' }),
+                  prompt: async () => ({
+                    info: {},
+                    parts: [
+                      { type: 'text', text: JSON.stringify({ findings: [], summary: 'first' }) },
+                      { type: 'text', text: JSON.stringify({ findings: [], summary: 'second' }) },
+                    ],
+                  }),
+                },
+              },
+              server: { close: async () => {} },
+            }),
+          }),
+      },
+    });
+
+    const result = await runner.runWithLease(makeSpec());
+
+    expect(result).toMatchObject({ status: 'failed', reason: 'invalid-output' });
+  });
+
+  it('keeps a valid review when managed OpenCode close fails', async () => {
+    let destroyed = false;
+    let leaseCleared = false;
+    const rawSandbox = {
+      writeFile: async () => undefined,
+      exec: async () => ({
+        success: true,
+        exitCode: 0,
+        stdout: `${sha('1')}\n${sha('2')}\n`,
+        stderr: '',
+      }),
+      destroy: async () => {
+        destroyed = true;
+      },
+    };
+    const runner = createReviewRunner({
+      lease: {
+        register: async () => ({
+          clear: async () => {
+            leaseCleared = true;
+          },
+          rearm: async () => {},
+        }),
+      },
+      sandbox: {
+        getSandbox: async () =>
+          createReviewSandbox(rawSandbox, {
+            createOpencode: async () => ({
+              client: {
+                session: {
+                  create: async () => ({ id: 'review-session' }),
+                  prompt: async () => ({
+                    info: {},
+                    parts: [
+                      {
+                        type: 'text',
+                        text: JSON.stringify({ findings: [], summary: 'No findings' }),
+                      },
+                    ],
+                  }),
+                },
+              },
+              server: {
+                close: async () => {
+                  throw new Error('managed close failed');
+                },
+              },
+            }),
+          }),
+      },
+    });
+
+    const result = await runner.runWithLease(makeSpec());
+
+    expect(result).toMatchObject({
+      status: 'succeeded',
+      output: { findings: [], summary: 'No findings' },
+    });
+    expect(destroyed).toBe(true);
+    expect(leaseCleared).toBe(true);
+  });
+
   it('fails closed when the OpenCode JSONL stream is malformed', async () => {
     const runner = createReviewRunner({
       lease: {

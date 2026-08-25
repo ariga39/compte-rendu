@@ -1,4 +1,6 @@
 import { DateTime, Effect, Option, Schema } from 'effect';
+import type { OpencodeOptions, OpencodeServer } from '@cloudflare/sandbox/opencode';
+import type { Config } from '@opencode-ai/sdk/v2';
 import {
   sanitizeOperationalLogEvent,
   type OperationalLog,
@@ -15,15 +17,15 @@ import type {
 import { createCloudflareOperationalLog } from './operational-log';
 
 export const OPENCODE_VERSION = '1.18.22';
-export const OPENCODE_MODEL = 'opencode-go/deepseek-v4-flash';
+const OPENCODE_PROVIDER = 'opencode-go';
+const OPENCODE_MODEL_ID = 'deepseek-v4-flash';
+export const OPENCODE_MODEL = `${OPENCODE_PROVIDER}/${OPENCODE_MODEL_ID}`;
 export const REVIEW_DIRECTORY = '/workspace/compte-rendu-review';
 
 const ASKPASS_PATH = '/tmp/compte-rendu-git-askpass';
-const OPENCODE_CONFIG_PATH = '/tmp/compte-rendu-opencode-config.json';
 const OPENCODE_DATA_HOME = '/tmp/compte-rendu-opencode-data';
 const OPENCODE_AUTH_PATH = `${OPENCODE_DATA_HOME}/opencode/auth.json`;
 const CHECKOUT_TIMEOUT_MS = 60_000;
-const AGENT_TIMEOUT_MS = 5 * 60_000;
 
 const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
@@ -50,6 +52,53 @@ export interface ReviewSandboxRaw {
   readonly destroy: () => Promise<void>;
 }
 
+type OpenCodePromptInput = {
+  readonly sessionID: string;
+  readonly directory: string;
+  readonly model: { readonly providerID: string; readonly modelID: string };
+  readonly agent: string;
+  readonly parts: Array<{ readonly type: 'text'; readonly text: string }>;
+};
+
+type OpenCodeClient = {
+  readonly session: {
+    readonly create: (parameters: {
+      readonly directory?: string;
+    }) => Promise<{ readonly id: string }>;
+    readonly prompt: (parameters: OpenCodePromptInput) => Promise<{
+      readonly info: { readonly error?: unknown };
+      readonly parts: ReadonlyArray<{ readonly type: string; readonly text?: unknown }>;
+    }>;
+  };
+};
+
+export interface OpenCodeIntegration {
+  readonly createOpencode: (
+    sandbox: ReviewSandboxRaw,
+    options: OpencodeOptions,
+  ) => Promise<{
+    readonly client: OpenCodeClient;
+    readonly server: Pick<OpencodeServer, 'close'>;
+  }>;
+}
+
+const defaultOpenCodeIntegration: OpenCodeIntegration = {
+  createOpencode: async (sandbox, options) => {
+    const { createOpencode } = await import('@cloudflare/sandbox/opencode');
+    const result = await createOpencode(sandbox as Parameters<typeof createOpencode>[0], options);
+    const client: OpenCodeClient = {
+      session: {
+        create: async (parameters) =>
+          (await result.client.session.create(parameters, { throwOnError: true })).data,
+        prompt: async (parameters) =>
+          (await result.client.session.prompt(parameters, { throwOnError: true })).data,
+      },
+    };
+    const server: Pick<OpencodeServer, 'close'> = result.server;
+    return { client, server };
+  },
+};
+
 const checkoutCommand = (input: {
   readonly repositoryUrl: string;
   readonly baseSha: string;
@@ -73,7 +122,7 @@ const credentialCleanupCommand = [
   `rm -f ${ASKPASS_PATH}`,
 ].join(' && ');
 
-const trustedAgentConfig = JSON.stringify({
+const trustedAgentConfig: Config = {
   agent: {
     review: {
       description: 'Read-only pull request reviewer',
@@ -86,15 +135,12 @@ const trustedAgentConfig = JSON.stringify({
       },
     },
   },
-});
+};
 
-const agentCommand =
-  `opencode --pure run --model ${OPENCODE_MODEL} --agent review --dir ${REVIEW_DIRECTORY} --format json ` +
-  shellQuote(
-    'Review the checked-out pull request. Return exactly one JSON object with this shape: ' +
-      '{"findings":[{"path":"string","line":0,"message":"string"}],"summary":"string"}. ' +
-      'Do not run repository build, test, hooks, plugins, MCP, or project configuration.',
-  );
+const reviewPrompt =
+  'Review the checked-out pull request. Return exactly one JSON object with this shape: ' +
+  '{"findings":[{"path":"string","line":0,"message":"string"}],"summary":"string"}. ' +
+  'Do not run repository build, test, hooks, plugins, MCP, or project configuration.';
 
 const checkoutEnvironment = (checkoutToken: string): Readonly<Record<string, string>> => ({
   CHECKOUT_TOKEN: checkoutToken,
@@ -104,8 +150,7 @@ const checkoutEnvironment = (checkoutToken: string): Readonly<Record<string, str
   GIT_CONFIG_NOSYSTEM: '1',
 });
 
-const agentEnvironment = (): Readonly<Record<string, string>> => ({
-  OPENCODE_CONFIG: OPENCODE_CONFIG_PATH,
+const agentEnvironment = (): Record<string, string> => ({
   OPENCODE_DISABLE_PROJECT_CONFIG: '1',
   HOME: '/tmp/compte-rendu-opencode-home',
   XDG_CONFIG_HOME: '/tmp/compte-rendu-opencode-xdg',
@@ -120,7 +165,10 @@ const parseCheckoutResult = (stdout: string): ReviewCheckoutResult => {
   return { baseSha: commits[0], headSha: commits[1] };
 };
 
-export const createReviewSandbox = (sandbox: ReviewSandboxRaw): ReviewSandbox => ({
+export const createReviewSandbox = (
+  sandbox: ReviewSandboxRaw,
+  openCodeIntegration: OpenCodeIntegration = defaultOpenCodeIntegration,
+): ReviewSandbox => ({
   checkout: async (input): Promise<ReviewCheckoutResult> => {
     await sandbox.writeFile(ASKPASS_PATH, askpassScript);
     const result = await sandbox.exec(checkoutCommand(input), {
@@ -143,26 +191,43 @@ export const createReviewSandbox = (sandbox: ReviewSandboxRaw): ReviewSandbox =>
     }
   },
   runAgent: async (input): Promise<ReviewAgentResult> => {
-    await sandbox.writeFile(OPENCODE_CONFIG_PATH, trustedAgentConfig);
     await sandbox.writeFile(
       OPENCODE_AUTH_PATH,
       JSON.stringify({
         'opencode-go': { type: 'api', key: input.modelCredential },
       }),
     );
+    let server: { readonly close: () => Promise<void> } | undefined;
     try {
-      const result = await sandbox.exec(agentCommand, {
-        cwd: REVIEW_DIRECTORY,
+      const opencode = await openCodeIntegration.createOpencode(sandbox, {
+        directory: REVIEW_DIRECTORY,
+        config: trustedAgentConfig,
         env: agentEnvironment(),
-        timeout: AGENT_TIMEOUT_MS,
       });
+      server = opencode.server;
+      const session = await opencode.client.session.create({ directory: REVIEW_DIRECTORY });
+      const response = await opencode.client.session.prompt({
+        sessionID: session.id,
+        directory: REVIEW_DIRECTORY,
+        model: { providerID: OPENCODE_PROVIDER, modelID: OPENCODE_MODEL_ID },
+        agent: 'review',
+        parts: [{ type: 'text', text: reviewPrompt }],
+      });
+      if (response.info.error !== undefined) {
+        return { exitCode: 1, stdout: '', stderr: 'OpenCode failed' };
+      }
+      const textParts = response.parts.filter(
+        (part) => part.type === 'text' && typeof part.text === 'string',
+      );
       return {
-        exitCode: result.exitCode,
-        stdout: result.stdout,
-        stderr: result.stderr,
+        exitCode: 0,
+        stdout: textParts.map((part) => JSON.stringify({ type: 'text', part })).join('\n'),
+        stderr: '',
       };
     } catch {
-      return { exitCode: 1, stdout: '', stderr: 'OpenCode timed out', timedOut: true };
+      return { exitCode: 1, stdout: '', stderr: 'OpenCode failed' };
+    } finally {
+      if (server !== undefined) await server.close().catch(() => undefined);
     }
   },
   destroy: () => sandbox.destroy(),
@@ -177,11 +242,10 @@ export const createCloudflareSandboxAdapter = (
 ): ReviewSandboxAdapter => ({
   getSandbox: async (sandboxId) => {
     const { getSandbox } = await import('@cloudflare/sandbox');
-    return createReviewSandbox(
-      getSandbox(bindings.Sandbox, sandboxId, {
-        enableDefaultSession: false,
-      }),
-    );
+    const cloudflareSandbox = getSandbox(bindings.Sandbox, sandboxId, {
+      enableDefaultSession: false,
+    });
+    return createReviewSandbox(cloudflareSandbox);
   },
 });
 

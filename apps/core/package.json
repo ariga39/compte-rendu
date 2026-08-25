@@ -8,6 +8,7 @@
   "dependencies": {
     "@cloudflare/sandbox": "0.12.8",
     "@compte-rendu/contracts": "workspace:*",
+    "@opencode-ai/sdk": "1.1.40",
     "effect": "4.0.0-rc.111"
   }
 }
