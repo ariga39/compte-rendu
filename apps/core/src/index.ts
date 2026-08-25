@@ -1028,7 +1028,8 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
         (run) =>
           run.job.repositoryId === job.repositoryId &&
           run.job.pullRequestNumber === job.pullRequestNumber &&
-          run.job.headSha === job.headSha,
+          run.job.headSha === job.headSha &&
+          (run.status === 'scheduled' || run.status === 'completed'),
       );
       if (existing !== undefined) {
         const disposition = dispositionForStatus(existing.status);
@@ -1041,6 +1042,33 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
           headSha: job.headSha,
           trigger: job.trigger,
           status: existing.status,
+          createdAt: occurredAt,
+          updatedAt: occurredAt,
+        });
+        return { kind: 'existing', disposition };
+      }
+
+      const historical = [...runs.values()].filter(
+        (run) =>
+          run.job.repositoryId === job.repositoryId &&
+          run.job.pullRequestNumber === job.pullRequestNumber &&
+          run.job.headSha === job.headSha,
+      );
+      if (
+        historical.length > 0 &&
+        (job.trigger !== 'manual' || !historical.some((run) => run.status === 'failed'))
+      ) {
+        const prior = historical[historical.length - 1];
+        const disposition = dispositionForStatus(prior.status);
+        deliveries.set(deliveryId, {
+          deliveryId,
+          installationId: job.installationId,
+          repositoryId: job.repositoryId,
+          pullRequestNumber: job.pullRequestNumber,
+          baseSha: job.baseSha,
+          headSha: job.headSha,
+          trigger: job.trigger,
+          status: prior.status,
           createdAt: occurredAt,
           updatedAt: occurredAt,
         });
