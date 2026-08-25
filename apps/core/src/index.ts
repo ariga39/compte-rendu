@@ -1,4 +1,4 @@
-import { Effect, Schema } from 'effect';
+import { DateTime, Effect, Schema } from 'effect';
 import {
   PullRequestFacts,
   ReviewEvent,
@@ -6,6 +6,16 @@ import {
   type PullRequestFacts as PullRequestFactsType,
   type WorkerEntrypoint,
 } from '@compte-rendu/contracts';
+
+type GitHubShaValue = typeof GitHubSha.Type;
+
+export {
+  createD1ReviewStateStore,
+  type D1DatabaseLike,
+  type D1PreparedStatementLike,
+  type D1ResultLike,
+  type D1ReviewStateStore,
+} from './review-state-store';
 
 export const ReviewJob = Schema.Struct({
   repositoryId: Schema.Int,
@@ -25,8 +35,65 @@ export type ReviewDisposition =
   | 'completed'
   | 'failed';
 
+export type ReviewRunStatus = 'scheduled' | 'failed' | 'completed' | 'superseded';
+export type ReviewStoredStatus = ReviewDisposition | ReviewRunStatus | 'claiming';
+
+export interface ReviewOutcome {
+  deliveryId: string;
+  installationId: number;
+  repositoryId: number;
+  pullRequestNumber: number;
+  baseSha: GitHubShaValue | null;
+  headSha: GitHubShaValue | null;
+  trigger: ReviewJob['trigger'];
+  status: ReviewStoredStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ReviewDeliveryRecord {
+  deliveryId: string;
+  installationId: number;
+  repositoryId: number;
+  pullRequestNumber: number;
+  baseSha: GitHubShaValue | null;
+  headSha: GitHubShaValue | null;
+  trigger: ReviewJob['trigger'];
+  status: ReviewDisposition;
+  occurredAt: string;
+}
+
+export interface ReviewApproval {
+  installationId: number;
+  repositoryId: number;
+  pullRequestNumber: number;
+  baseSha: GitHubShaValue;
+  headSha: GitHubShaValue;
+}
+
+export interface ReviewStateStore {
+  claimReview(input: {
+    deliveryId: string;
+    job: ReviewJob;
+    occurredAt: string;
+    approval?: ReviewApproval;
+  }): Promise<
+    | { kind: 'claimed'; runId: string }
+    | { kind: 'replay'; disposition: ReviewDisposition }
+    | { kind: 'existing'; disposition: ReviewDisposition }
+  >;
+  markSchedulingFailed(input: { runId: string; occurredAt: string }): Promise<void>;
+  recordDelivery: (input: ReviewDeliveryRecord) => Promise<void>;
+}
+
+export interface ReviewStateQueries {
+  markRunCompleted(input: { runId: string; occurredAt: string }): Promise<void>;
+  getDeliveryOutcome(deliveryId: string): Promise<ReviewOutcome | undefined>;
+  getRunOutcome(runId: string): Promise<ReviewOutcome | undefined>;
+}
+
 export interface ReviewScheduler {
-  schedule(job: ReviewJob): Promise<void>;
+  schedule(job: ReviewJob, runId: string): Promise<void>;
 }
 
 export interface GitHubAdapter {
@@ -86,31 +153,107 @@ const jobForFacts = (
   trigger: 'manual',
 });
 
-const schedule = (scheduler: ReviewScheduler, job: ReviewJob) =>
+const currentIso = DateTime.now.pipe(Effect.map(DateTime.formatIso));
+
+const schedule = (scheduler: ReviewScheduler, job: ReviewJob, runId: string) =>
   Schema.decodeUnknownEffect(ReviewJob)(job).pipe(
     Effect.mapError(() => new SchedulingFailed({ message: 'Scheduled review job is invalid' })),
     Effect.flatMap((decodedJob) =>
       Effect.tryPromise({
-        try: () => scheduler.schedule(decodedJob),
+        try: () => scheduler.schedule(decodedJob, runId),
         catch: () => new SchedulingFailed({ message: 'Review scheduler failed' }),
       }),
     ),
   );
 
-const createAutomaticCoordinator = (scheduler: ReviewScheduler) =>
+const claimAndSchedule = (
+  stateStore: ReviewStateStore,
+  scheduler: ReviewScheduler,
+  deliveryId: string,
+  job: ReviewJob,
+  approval?: ReviewApproval,
+) =>
+  Effect.gen(function* () {
+    const occurredAt = yield* currentIso;
+    const claim = yield* Effect.tryPromise({
+      try: () =>
+        stateStore.claimReview({
+          deliveryId,
+          job,
+          occurredAt,
+          approval,
+        }),
+      catch: () => new SchedulingFailed({ message: 'Review state could not be claimed' }),
+    });
+
+    if (claim.kind !== 'claimed') {
+      return claim.disposition;
+    }
+
+    yield* schedule(scheduler, job, claim.runId).pipe(
+      Effect.catchTag('SchedulingFailed', (error) =>
+        Effect.tryPromise({
+          try: () =>
+            stateStore.markSchedulingFailed({
+              runId: claim.runId,
+              occurredAt,
+            }),
+          catch: () => error,
+        }).pipe(Effect.flatMap(() => Effect.fail(error))),
+      ),
+    );
+    return 'scheduled' as const;
+  });
+
+const recordDelivery = (stateStore: ReviewStateStore, input: ReviewDeliveryRecord) => {
+  return Effect.tryPromise({
+    try: () => stateStore.recordDelivery(input),
+    catch: () => new SchedulingFailed({ message: 'Review outcome could not be recorded' }),
+  });
+};
+
+const createAutomaticCoordinator = (stateStore: ReviewStateStore, scheduler: ReviewScheduler) =>
   Effect.fn('handleAutomaticReviewEvent')(function* (
     event: Extract<ReviewEvent, { event: 'pull_request' }>,
   ) {
     if (event.draft) {
+      const occurredAt = yield* currentIso;
+      yield* recordDelivery(stateStore, {
+        deliveryId: event.deliveryId,
+        installationId: event.installationId,
+        repositoryId: event.repositoryId,
+        pullRequestNumber: event.pullRequestNumber,
+        baseSha: event.baseSha,
+        headSha: event.headSha,
+        trigger: 'automatic',
+        status: 'ignored',
+        occurredAt,
+      });
       return 'ignored' as const;
     }
 
     if (!isAutomaticEligible(event)) {
+      const occurredAt = yield* currentIso;
+      yield* recordDelivery(stateStore, {
+        deliveryId: event.deliveryId,
+        installationId: event.installationId,
+        repositoryId: event.repositoryId,
+        pullRequestNumber: event.pullRequestNumber,
+        baseSha: event.baseSha,
+        headSha: event.headSha,
+        trigger: 'automatic',
+        status: 'awaiting approval',
+        occurredAt,
+      });
       return 'awaiting approval' as const;
     }
 
-    yield* schedule(scheduler, jobForEvent(event, 'automatic'));
-    return 'scheduled' as const;
+    return yield* claimAndSchedule(
+      stateStore,
+      scheduler,
+      event.deliveryId,
+      jobForEvent(event, 'automatic'),
+    );
   });
 
 const loadPullRequest = (
@@ -160,7 +303,11 @@ const loadPermission = (
     Effect.catch(() => Effect.succeed(undefined)),
   );
 
-const createManualCoordinator = (github: GitHubAdapter, scheduler: ReviewScheduler) =>
+const createManualCoordinator = (
+  github: GitHubAdapter,
+  stateStore: ReviewStateStore,
+  scheduler: ReviewScheduler,
+) =>
   Effect.fn('handleManualReviewEvent')(function* (
     event: Extract<ReviewEvent, { event: 'issue_comment' }>,
   ) {
@@ -168,34 +315,131 @@ const createManualCoordinator = (github: GitHubAdapter, scheduler: ReviewSchedul
     const permission = yield* loadPermission(github, event);
 
     if (facts === undefined || permission === undefined || facts.draft) {
+      const occurredAt = yield* currentIso;
+      yield* recordDelivery(stateStore, {
+        deliveryId: event.deliveryId,
+        installationId: event.installationId,
+        repositoryId: event.repositoryId,
+        pullRequestNumber: event.pullRequestNumber,
+        baseSha: facts?.baseSha ?? null,
+        headSha: facts?.headSha ?? null,
+        trigger: 'manual',
+        status: 'awaiting approval',
+        occurredAt,
+      });
       return 'awaiting approval' as const;
     }
 
-    yield* schedule(scheduler, jobForFacts(event, facts));
-    return 'scheduled' as const;
+    return yield* claimAndSchedule(
+      stateStore,
+      scheduler,
+      event.deliveryId,
+      jobForFacts(event, facts),
+      {
+        installationId: event.installationId,
+        repositoryId: event.repositoryId,
+        pullRequestNumber: event.pullRequestNumber,
+        baseSha: facts.baseSha,
+        headSha: facts.headSha,
+      },
+    );
   });
 
-const reviewEventEffect = (event: unknown, github: GitHubAdapter, scheduler: ReviewScheduler) =>
+const reviewEventEffect = (
+  event: unknown,
+  github: GitHubAdapter,
+  stateStore: ReviewStateStore,
+  scheduler: ReviewScheduler,
+) =>
   Effect.gen(function* () {
     const decoded = yield* Schema.decodeUnknownEffect(ReviewEvent)(event).pipe(
       Effect.mapError(() => new InvalidReviewEvent({ message: 'Review event is invalid' })),
     );
 
     if (decoded.event === 'pull_request') {
-      return yield* createAutomaticCoordinator(scheduler)(decoded);
+      return yield* createAutomaticCoordinator(stateStore, scheduler)(decoded);
     }
 
-    return yield* createManualCoordinator(github, scheduler)(decoded);
+    return yield* createManualCoordinator(github, stateStore, scheduler)(decoded);
   });
+
+export const createInMemoryReviewStateStore = (): ReviewStateStore => {
+  const deliveries = new Map<string, ReviewDisposition>();
+  const runs = new Map<string, { job: ReviewJob; status: ReviewRunStatus; deliveryId: string }>();
+  let nextRunId = 1;
+
+  return {
+    recordDelivery: async ({ deliveryId, status }) => {
+      if (!deliveries.has(deliveryId)) {
+        deliveries.set(deliveryId, status);
+      }
+    },
+    claimReview: async ({ deliveryId, job }) => {
+      const previous = deliveries.get(deliveryId);
+      if (previous !== undefined) {
+        return { kind: 'replay', disposition: previous };
+      }
+
+      const existing = [...runs.values()].find(
+        (run) =>
+          run.job.repositoryId === job.repositoryId &&
+          run.job.pullRequestNumber === job.pullRequestNumber &&
+          run.job.headSha === job.headSha,
+      );
+      if (existing !== undefined) {
+        const disposition =
+          existing.status === 'failed'
+            ? 'failed'
+            : existing.status === 'completed'
+              ? 'completed'
+              : existing.status === 'superseded'
+                ? 'ignored'
+                : 'scheduled';
+        deliveries.set(deliveryId, disposition);
+        return { kind: 'existing', disposition };
+      }
+
+      for (const run of runs.values()) {
+        if (
+          run.job.repositoryId === job.repositoryId &&
+          run.job.pullRequestNumber === job.pullRequestNumber &&
+          run.status === 'scheduled' &&
+          run.job.headSha !== job.headSha
+        ) {
+          run.status = 'superseded';
+          deliveries.set(run.deliveryId, 'ignored');
+        }
+      }
+
+      const runId = `run-${nextRunId++}`;
+      runs.set(runId, { deliveryId, job, status: 'scheduled' });
+      deliveries.set(deliveryId, 'scheduled');
+      return { kind: 'claimed', runId };
+    },
+    markSchedulingFailed: async ({ runId }) => {
+      const run = runs.get(runId);
+      if (run !== undefined) {
+        run.status = 'failed';
+        deliveries.set(run.deliveryId, 'failed');
+      }
+    },
+  };
+};
 
 export function createReviewCoordinator(dependencies: {
   github: GitHubAdapter;
+  stateStore: ReviewStateStore;
   scheduler: ReviewScheduler;
 }): ReviewCoordinator {
   return {
     handleReviewEvent: async (event) =>
       Effect.runPromise(
-        reviewEventEffect(event, dependencies.github, dependencies.scheduler),
+        reviewEventEffect(
+          event,
+          dependencies.github,
+          dependencies.stateStore,
+          dependencies.scheduler,
+        ),
       ).catch((error) => {
         if (error instanceof InvalidReviewEvent) {
           return 'ignored' as const;
