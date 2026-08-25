@@ -14,11 +14,11 @@ The repository deploys these resources:
 
 | Resource                | Configuration name                                                              | Purpose                                                                                                                       |
 | ----------------------- | ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| Public Worker           | `compte-rendu-ingress`                                                          | Receives GitHub webhooks. `workers_dev` is enabled.                                                                           |
-| Private Worker          | `compte-rendu-core`                                                             | Owns authorization, GitHub API calls, orchestration, and run state. `workers_dev` is disabled.                                |
-| Service binding         | `CORE` → `compte-rendu-core`                                                    | Lets ingress call core without a public core URL.                                                                             |
-| D1 database             | `compte-rendu-review-state`, binding `REVIEW_DB`                                | Stores delivery, approval, run, and finding-fingerprint state.                                                                |
-| Workflow                | `compte-rendu-review`, binding `REVIEW_WORKFLOW`, class `ReviewWorkflow`        | Carries one review through checkout, agent execution, validation, and publication.                                            |
+| Public Worker           | `<INSTANCE_NAME>-ingress`                                                       | Receives GitHub webhooks. `workers_dev` is enabled.                                                                           |
+| Private Worker          | `<INSTANCE_NAME>-core`                                                          | Owns authorization, GitHub API calls, orchestration, and run state. `workers_dev` is disabled.                                |
+| Service binding         | `CORE` → `<INSTANCE_NAME>-core`                                                 | Lets ingress call core without a public core URL.                                                                             |
+| D1 database             | `<INSTANCE_NAME>-review-state`, binding `REVIEW_DB`                             | Stores delivery, approval, run, and finding-fingerprint state.                                                                |
+| Workflow                | `<INSTANCE_NAME>-review`, binding `REVIEW_WORKFLOW`, class `ReviewWorkflow`     | Carries one review through checkout, agent execution, validation, and publication.                                            |
 | Sandbox container class | `Sandbox`                                                                       | Runs the fixed checkout and read-only OpenCode review. The config requests the `lite` instance type and at most one instance. |
 | Durable Object classes  | `Sandbox` and `ReviewLeaseDurableObject`; binding `REVIEW_LEASE` for the latter | Provides Sandbox access and a per-run cleanup lease/alarm.                                                                    |
 
@@ -26,9 +26,9 @@ The request path is:
 
 ```text
 GitHub webhook
-    → compte-rendu-ingress (public, verifies WEBHOOK_SECRET)
+    → <INSTANCE_NAME>-ingress (public, verifies WEBHOOK_SECRET)
     → CORE service binding
-    → compte-rendu-core (private)
+    → <INSTANCE_NAME>-core (private)
        → REVIEW_DB / REVIEW_WORKFLOW / REVIEW_LEASE / Sandbox
        → GitHub App installation token for GitHub API operations
 ```
@@ -38,12 +38,26 @@ used to isolate a Worker from the public Internet. The target Worker must be
 deployed before the Worker that declares the binding:
 [Service bindings](https://developers.cloudflare.com/workers/runtime-apis/bindings/service-bindings/).
 
-The source of truth for names and bindings is
+The tracked configs at
 [`apps/core/wrangler.jsonc`](../apps/core/wrangler.jsonc) and
-[`apps/ingress/wrangler.jsonc`](../apps/ingress/wrangler.jsonc). The committed
-core config deliberately keeps both `GITHUB_APP_ID` as
-`REPLACE_WITH_GITHUB_APP_ID` and D1's `database_id` as
-`REPLACE_WITH_D1_DATABASE_ID`; this manual never invents either value.
+[`apps/ingress/wrangler.jsonc`](../apps/ingress/wrangler.jsonc) are neutral
+templates. From the repository root, render deployment-only sibling configs
+for the chosen instance:
+
+```sh
+corepack pnpm render:wrangler -- <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID>
+```
+
+For example, instance `petit-chiba` produces
+`apps/core/wrangler.petit-chiba.jsonc` and
+`apps/ingress/wrangler.petit-chiba.jsonc`, with names derived as
+`petit-chiba-core`, `petit-chiba-ingress`, `petit-chiba-review-state`, and
+`petit-chiba-review`. Instance names never require editing the repository or
+the tracked templates. The renderer keeps the tracked placeholders unchanged
+and refuses to overwrite an existing generated config.
+
+Independent deployed instances require distinct product GitHub Apps because
+each App has one webhook URL and secret; this does not require a router.
 
 ## Access and credentials
 
@@ -168,7 +182,7 @@ unless that is an explicit operator decision. GitHub describes this choice in
 Enable the App webhook with:
 
 - Webhook URL: `<INGRESS_URL>`, the public URL printed or shown for
-  `compte-rendu-ingress` after deployment. This repository does not establish a
+  `<INSTANCE_NAME>-ingress` after deployment. This repository does not establish a
   fixed hostname.
 - Webhook secret: one high-entropy value, entered into both GitHub and the
   ingress `WEBHOOK_SECRET` Worker secret.
@@ -203,25 +217,32 @@ uses the temporary invocation described above.
    corepack pnpm build
    ```
 
-2. Create the D1 database with the configured name:
+2. Choose an instance name and create the D1 database with its derived name:
 
    ```sh
-   corepack pnpm dlx wrangler@latest d1 create compte-rendu-review-state
+   corepack pnpm dlx wrangler@latest d1 create <INSTANCE_NAME>-review-state
    ```
 
-   Copy only the returned `database_id` into
-   `apps/core/wrangler.jsonc`, replacing
-   `REPLACE_WITH_D1_DATABASE_ID`. Do not copy any account ID, token, or other
-   output into the repository. Verify that the file contains the expected
-   database name, `REVIEW_DB` binding, and a real operator-supplied ID before
-   continuing.
+   Copy only the returned `database_id` into the renderer command below. Do
+   not edit either tracked template or copy any account ID, token, or other
+   output into the repository.
 
-3. Apply the tracked D1 migration remotely. Use the binding name from the
-   config, not a guessed database identifier:
+3. Render deployment-only configs from the repository root:
 
    ```sh
-   corepack pnpm dlx wrangler@latest d1 migrations list REVIEW_DB --remote --config apps/core/wrangler.jsonc
-   corepack pnpm dlx wrangler@latest d1 migrations apply REVIEW_DB --remote --config apps/core/wrangler.jsonc
+   corepack pnpm render:wrangler -- <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID>
+   ```
+
+   This writes `apps/core/wrangler.<INSTANCE_NAME>.jsonc` and
+   `apps/ingress/wrangler.<INSTANCE_NAME>.jsonc`. Use these generated paths
+   for every deployment operation below; never modify the tracked templates.
+
+4. Apply the tracked D1 migration remotely. Use the binding name from the
+   generated config, not a guessed database identifier:
+
+   ```sh
+   corepack pnpm dlx wrangler@latest d1 migrations list REVIEW_DB --remote --config apps/core/wrangler.<INSTANCE_NAME>.jsonc
+   corepack pnpm dlx wrangler@latest d1 migrations apply REVIEW_DB --remote --config apps/core/wrangler.<INSTANCE_NAME>.jsonc
    ```
 
    The current migration is
@@ -230,58 +251,49 @@ uses the temporary invocation described above.
    versioned and applied in order; see
    [D1 migrations](https://developers.cloudflare.com/d1/reference/migrations/).
 
-4. Enter the two core secrets. Each command prompts for the value; do not
+5. Enter the two core secrets. Each command prompts for the value; do not
    append a value to the command line, use `echo`, or redirect a secret from a
    shell command:
 
    Before these `secret put` commands, create a dedicated Compte rendu
-   product GitHub App and generate/download its private key. Copy that App's
-   new, non-secret App ID into `GITHUB_APP_ID` in
-   `apps/core/wrangler.jsonc`, and verify that neither
-   `REPLACE_WITH_GITHUB_APP_ID` nor `REPLACE_WITH_D1_DATABASE_ID` remains.
-
-   ```sh
-   if grep -q 'REPLACE_WITH_' apps/core/wrangler.jsonc; then
-     printf '%s\n' 'error: replace all REPLACE_WITH_ placeholders in apps/core/wrangler.jsonc' >&2
-     exit 1
-   fi
-   ```
+   product GitHub App and generate/download its private key. Supply that App's
+   numeric, non-secret App ID to the renderer command in step 3.
 
    The local repository-operations App and private key are not the product
-   identity; do not reuse them. The webhook URL may remain unset or inactive
-   during installation; set `<INGRESS_URL>` and activate the webhook after
-   ingress has been deployed. Follow GitHub's
+   identity; do not reuse them. Do not install or approve the App yet; after
+   both Workers are deployed, complete the final webhook configuration and
+   installation sequence in step 8. Follow GitHub's
    [private-key guidance](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/managing-private-keys-for-github-apps)
    when generating and downloading the key.
 
    ```sh
-   corepack pnpm dlx wrangler@latest secret put GITHUB_APP_PRIVATE_KEY --config apps/core/wrangler.jsonc
-   corepack pnpm dlx wrangler@latest secret put MODEL_API_KEY --config apps/core/wrangler.jsonc
+   corepack pnpm dlx wrangler@latest secret put GITHUB_APP_PRIVATE_KEY --config apps/core/wrangler.<INSTANCE_NAME>.jsonc
+   corepack pnpm dlx wrangler@latest secret put MODEL_API_KEY --config apps/core/wrangler.<INSTANCE_NAME>.jsonc
    ```
 
-   The private key and model credential belong only to `compte-rendu-core`.
+   The private key and model credential belong only to `<INSTANCE_NAME>-core`.
    Cloudflare's `secret put` creates and deploys a new Worker version
    immediately, so complete the D1 migration before these commands. Worker
    secrets are encrypted bindings and are intentionally separate from
    plaintext `vars`:
    [Worker secrets](https://developers.cloudflare.com/workers/configuration/secrets/).
 
-5. Deploy the private core Worker first:
+6. Deploy the private core Worker first:
 
    ```sh
-   corepack pnpm dlx wrangler@latest deploy --config apps/core/wrangler.jsonc
+   corepack pnpm dlx wrangler@latest deploy --config apps/core/wrangler.<INSTANCE_NAME>.jsonc
    ```
 
    Confirm the deployment reports the configured Workflow, `Sandbox`,
    `REVIEW_LEASE`, and `REVIEW_DB` bindings without a missing-secret or
    missing-D1 error.
 
-6. Enter the ingress webhook secret only after core is deployed, then deploy
+7. Enter the ingress webhook secret only after core is deployed, then deploy
    public ingress second:
 
    ```sh
-   corepack pnpm dlx wrangler@latest secret put WEBHOOK_SECRET --config apps/ingress/wrangler.jsonc
-   corepack pnpm dlx wrangler@latest deploy --config apps/ingress/wrangler.jsonc
+   corepack pnpm dlx wrangler@latest secret put WEBHOOK_SECRET --config apps/ingress/wrangler.<INSTANCE_NAME>.jsonc
+   corepack pnpm dlx wrangler@latest deploy --config apps/ingress/wrangler.<INSTANCE_NAME>.jsonc
    ```
 
    The `secret put` command itself creates an ingress version; the explicit
@@ -289,18 +301,33 @@ uses the temporary invocation described above.
    `WEBHOOK_SECRET` value must match the GitHub App webhook secret exactly.
    Record the resulting public ingress URL as the operator's
    `<INGRESS_URL>`. The `CORE` binding points to the already deployed
-   `compte-rendu-core`; deploying in the opposite order can fail because the
+   `<INSTANCE_NAME>-core`; deploying in the opposite order can fail because the
    target service does not exist yet.
 
-7. Configure and install the GitHub App as described above, then activate its
-   webhook with `<INGRESS_URL>`. Send a test delivery only after activation.
+8. After both Workers are deployed, configure the final webhook URL as
+   `<INGRESS_URL>`, set the matching webhook secret, and confirm the final
+   permissions plus `pull_request` and `issue_comment` subscriptions. Only
+   then perform the one GitHub App installation or approval for the selected
+   repositories. Activate delivery after installation and send a test delivery
+   only after activation.
+
+9. Keep the generated configs through installation and the deployed E2E/D1
+   verification session. After verification is complete, remove exactly the
+   two deployment-only configs:
+
+   ```sh
+   rm apps/core/wrangler.<INSTANCE_NAME>.jsonc apps/ingress/wrangler.<INSTANCE_NAME>.jsonc
+   ```
+
+   Render them again for a later deployment; the tracked templates remain
+   unchanged.
 
 The deployed variables-versus-secrets inventory is deliberately small:
 
-| Worker                 | Plain variable  | Secrets                                   | Non-secret bindings                                       |
-| ---------------------- | --------------- | ----------------------------------------- | --------------------------------------------------------- |
-| `compte-rendu-ingress` | None            | `WEBHOOK_SECRET`                          | `CORE` → `compte-rendu-core`                              |
-| `compte-rendu-core`    | `GITHUB_APP_ID` | `GITHUB_APP_PRIVATE_KEY`, `MODEL_API_KEY` | `REVIEW_DB`, `REVIEW_WORKFLOW`, `Sandbox`, `REVIEW_LEASE` |
+| Worker                    | Plain variable  | Secrets                                   | Non-secret bindings                                       |
+| ------------------------- | --------------- | ----------------------------------------- | --------------------------------------------------------- |
+| `<INSTANCE_NAME>-ingress` | None            | `WEBHOOK_SECRET`                          | `CORE` → `<INSTANCE_NAME>-core`                           |
+| `<INSTANCE_NAME>-core`    | `GITHUB_APP_ID` | `GITHUB_APP_PRIVATE_KEY`, `MODEL_API_KEY` | `REVIEW_DB`, `REVIEW_WORKFLOW`, `Sandbox`, `REVIEW_LEASE` |
 
 `GITHUB_APP_ID` is an application identifier, not a secret. Its value is
 the dedicated product App ID copied into the core Wrangler config before
@@ -356,7 +383,7 @@ do not paste repository contents or model output into tickets.
    run this read-only D1 query with the same unique ID:
 
    ```sh
-   corepack pnpm dlx wrangler@latest d1 execute REVIEW_DB --remote --config apps/core/wrangler.jsonc --command "SELECT delivery_id FROM deliveries WHERE delivery_id = '<UNIQUE_DELIVERY_ID>'; SELECT run_id FROM review_runs WHERE delivery_id = '<UNIQUE_DELIVERY_ID>';"
+   corepack pnpm dlx wrangler@latest d1 execute REVIEW_DB --remote --config apps/core/wrangler.<INSTANCE_NAME>.jsonc --command "SELECT delivery_id FROM deliveries WHERE delivery_id = '<UNIQUE_DELIVERY_ID>'; SELECT run_id FROM review_runs WHERE delivery_id = '<UNIQUE_DELIVERY_ID>';"
    ```
 
    Both result sets should be empty: there must be no matching delivery row
@@ -381,8 +408,8 @@ repository contents, diffs, model output, credentials, or session transcripts.
 Use the Cloudflare Worker logs or `wrangler tail` only to correlate identifiers:
 
 ```sh
-corepack pnpm dlx wrangler@latest tail compte-rendu-ingress
-corepack pnpm dlx wrangler@latest tail compte-rendu-core
+corepack pnpm dlx wrangler@latest tail <INSTANCE_NAME>-ingress
+corepack pnpm dlx wrangler@latest tail <INSTANCE_NAME>-core
 ```
 
 Use the GitHub delivery page for `deliveryId` and then search logs for the
@@ -416,9 +443,11 @@ For a normal compatible release:
    `corepack pnpm build` against the immutable checkout being released.
 2. If there is a new migration, review it and apply it remotely with the D1
    migration command above. Prefer additive, backward-compatible changes.
-3. Deploy `compte-rendu-core`.
-4. Deploy `compte-rendu-ingress`.
-5. Redeliver one controlled GitHub event and inspect the identifier chain.
+3. Render deployment-only configs again with the same
+   `corepack pnpm render:wrangler -- <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID>`
+   inputs, then deploy using `apps/core/wrangler.<INSTANCE_NAME>.jsonc` and
+   `apps/ingress/wrangler.<INSTANCE_NAME>.jsonc`.
+4. Redeliver one controlled GitHub event and inspect the identifier chain.
 
 The core-before-ingress order preserves the service-binding contract. For an
 incompatible change, pause GitHub webhook delivery first, deploy a compatible
@@ -440,22 +469,24 @@ that no review is in flight before proceeding.
 2. Uninstall the GitHub App from every selected repository. Confirm no new
    deliveries arrive, then delete the App registration if it is no longer
    needed and revoke its private key.
-3. Delete the public `compte-rendu-ingress` Worker, then the private
-   `compte-rendu-core` Worker, in that order. Do not use `--force`. Verify the
+3. Render deployment-only configs again with the same
+   `corepack pnpm render:wrangler -- <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID>`
+   inputs. Delete the public `<INSTANCE_NAME>-ingress` Worker, then the private
+   `<INSTANCE_NAME>-core` Worker, in that order. Do not use `--force`. Verify the
    Workflow, `Sandbox`, Durable Object classes, and service binding are no
    longer deployed with the Workers.
 
    ```sh
-   corepack pnpm dlx wrangler@latest delete --config apps/ingress/wrangler.jsonc
-   corepack pnpm dlx wrangler@latest delete --config apps/core/wrangler.jsonc
+   corepack pnpm dlx wrangler@latest delete --config apps/ingress/wrangler.<INSTANCE_NAME>.jsonc
+   corepack pnpm dlx wrangler@latest delete --config apps/core/wrangler.<INSTANCE_NAME>.jsonc
    ```
 
 4. Retain or export only the minimal D1 state required by the owner. If it is
-   no longer needed, delete `compte-rendu-review-state` only after the Workers
+   no longer needed, delete `<INSTANCE_NAME>-review-state` only after the Workers
    are gone and the retention decision is recorded:
 
    ```sh
-   corepack pnpm dlx wrangler@latest d1 delete compte-rendu-review-state
+   corepack pnpm dlx wrangler@latest d1 delete <INSTANCE_NAME>-review-state
    ```
 
    D1 deletion is irreversible for this deployment's live state; stop and
