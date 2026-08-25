@@ -48,6 +48,7 @@ const IssueCommentReviewEvent = Schema.Struct({
   repositoryId: Schema.Int,
   pullRequestNumber: Schema.Int,
   installationId: Schema.Int,
+  commentId: Schema.Int,
   commenterLogin: Schema.NonEmptyString,
   command: Schema.Literal('/ai-review'),
 });

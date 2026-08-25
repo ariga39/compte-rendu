@@ -126,13 +126,13 @@ leave it in a shared shell transcript.
 
 Configure the GitHub App with only these repository permissions:
 
-| GitHub App permission | Level | Concrete operation in this repository                                                                                                                                     |
-| --------------------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Metadata              | Read  | Resolve the repository by numeric ID, validate repository metadata, and check the `/ai-review` commenter's collaborator permission before approving a public fork review. |
-| Contents              | Read  | Fetch the repository at the exact base/head SHAs in the Sandbox checkout. GitHub documents Contents as the permission for HTTP-based Git access.                          |
-| Pull requests         | Read  | Load PR facts and current head SHA, list changed files, and find existing reviews for idempotent publication.                                                             |
-| Pull requests         | Write | Create the `COMMENT` review with inline findings.                                                                                                                         |
-| Issues                | Read  | Make the `issue_comment` webhook available for PR comments. The handler accepts only a created comment whose body is exactly `/ai-review`.                                |
+| GitHub App permission | Level | Concrete operation in this repository                                                                                                                                                                                          |
+| --------------------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Metadata              | Read  | Resolve the repository by numeric ID, validate repository metadata, and check the `/ai-review` commenter's collaborator permission before approving a public fork review.                                                      |
+| Contents              | Read  | Fetch the repository at the exact base/head SHAs in the Sandbox checkout. GitHub documents Contents as the permission for HTTP-based Git access.                                                                               |
+| Pull requests         | Read  | Load PR facts and current head SHA, list changed files, and find existing reviews for idempotent publication.                                                                                                                  |
+| Pull requests         | Write | Create the `COMMENT` review with inline findings.                                                                                                                                                                              |
+| Issues                | Write | Make the `issue_comment` webhook available for PR comments and create `eyes`, `confused`, or `-1` reactions on the originating command comment. The handler accepts only a created comment whose body is exactly `/ai-review`. |
 
 The endpoint-to-permission mapping should be checked against GitHub's
 [permission-to-endpoint reference](https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps)
@@ -150,6 +150,14 @@ Do not subscribe to push, review, check, status, issue, or repository events;
 they are not part of this Worker contract. GitHub's event reference lists the
 available event actions:
 [Webhook events and payloads](https://docs.github.com/en/webhooks/webhook-events-and-payloads).
+
+Manual command reactions are compact operator feedback: `eyes` means the
+authorized command was claimed and scheduled, `confused` means the command
+was denied, the pull request was missing or draft, or the run was superseded,
+and `-1` means the accepted run ended failed. A successful run keeps only
+`eyes`; its published `COMMENT` review is the completion signal. Automatic
+reviews do not react to a command. Reaction writes target the originating
+numeric comment id and may be replayed safely with the same app and content.
 
 Install the App on the owning account with **Only select repositories**, then
 select the target repository or repositories. Do not choose all repositories

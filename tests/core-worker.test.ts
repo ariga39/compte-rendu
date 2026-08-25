@@ -188,7 +188,8 @@ describe('Core Worker', () => {
   it('accepts a manual review after production GitHub policy reads', async () => {
     const database = new SqliteD1Database();
     const workflowInputs: unknown[] = [];
-    const fetcher: typeof fetch = async (input) => {
+    const reactionBodies: unknown[] = [];
+    const fetcher: typeof fetch = async (input, init) => {
       const inputUrl =
         typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
       const url = new URL(inputUrl);
@@ -211,6 +212,10 @@ describe('Core Worker', () => {
       }
       if (url.pathname === '/repos/acme/reviewed/collaborators/alice/permission') {
         return new Response(JSON.stringify({ permission: 'write' }));
+      }
+      if (url.pathname === '/repos/acme/reviewed/issues/comments/987654/reactions') {
+        reactionBodies.push(JSON.parse(typeof init?.body === 'string' ? init.body : '{}'));
+        return new Response(JSON.stringify({ id: 1 }), { status: 201 });
       }
       return new Response('{}', { status: 404 });
     };
@@ -249,6 +254,7 @@ describe('Core Worker', () => {
             repositoryId: 11,
             pullRequestNumber: 42,
             installationId: 7,
+            commentId: 987654,
             commenterLogin: 'alice',
             command: '/ai-review',
           }),
@@ -259,6 +265,7 @@ describe('Core Worker', () => {
       expect(workflowInputs[0]).toMatchObject({
         params: { job: { trigger: 'manual', headSha: eligibleEvent.headSha } },
       });
+      expect(reactionBodies).toEqual([{ content: 'eyes' }]);
     } finally {
       database.close();
     }
@@ -276,6 +283,9 @@ describe('Core Worker', () => {
       }
       if (url.pathname === '/repos/acme/reviewed/pulls/42') {
         return new Response('{}', { status: 404 });
+      }
+      if (url.pathname === '/repos/acme/reviewed/issues/comments/987655/reactions') {
+        return new Response(JSON.stringify({ id: 1 }), { status: 201 });
       }
       return new Response('{}', { status: 404 });
     };
@@ -313,6 +323,7 @@ describe('Core Worker', () => {
             repositoryId: 11,
             pullRequestNumber: 42,
             installationId: 7,
+            commentId: 987655,
             commenterLogin: 'alice',
             command: '/ai-review',
           }),
@@ -347,6 +358,9 @@ describe('Core Worker', () => {
       }
       if (url.pathname === '/repos/acme/reviewed/collaborators/alice/permission') {
         return new Response(JSON.stringify({ permission: 'none' }));
+      }
+      if (url.pathname === '/repos/acme/reviewed/issues/comments/987656/reactions') {
+        return new Response(JSON.stringify({ id: 1 }), { status: 201 });
       }
       return new Response('{}', { status: 404 });
     };
@@ -384,6 +398,7 @@ describe('Core Worker', () => {
             repositoryId: 11,
             pullRequestNumber: 42,
             installationId: 7,
+            commentId: 987656,
             commenterLogin: 'alice',
             command: '/ai-review',
           }),
@@ -444,6 +459,7 @@ describe('Core Worker', () => {
             repositoryId: 11,
             pullRequestNumber: 42,
             installationId: 7,
+            commentId: 987657,
             commenterLogin: 'alice',
             command: '/ai-review',
           }),
@@ -519,6 +535,7 @@ describe('Core Worker', () => {
             repositoryId: 11,
             pullRequestNumber: 42,
             installationId: 7,
+            commentId: 987658,
             commenterLogin: 'alice',
             command: '/ai-review',
           }),

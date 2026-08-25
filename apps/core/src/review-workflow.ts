@@ -1,5 +1,10 @@
 import { DateTime, Effect, Schema } from 'effect';
-import { ReviewJob, type ReviewCoordinator, type ReviewDisposition } from './index';
+import {
+  ReviewJob,
+  type ReviewCoordinator,
+  type ReviewDisposition,
+  type ReviewOutcome,
+} from './index';
 import type { ReviewRunResult, ReviewRunner } from './review-run';
 import {
   sanitizeOperationalLogEvent,
@@ -40,6 +45,13 @@ export interface ReviewWorkflowDependencies {
   readonly runWithLease: ReviewRunner['runWithLease'];
   readonly completeReview: ReviewCoordinator['completeReview'];
   readonly markRunFailed: (input: { runId: string; occurredAt: string }) => Promise<void>;
+  readonly getRunOutcome?: (runId: string) => Promise<Pick<ReviewOutcome, 'status'> | undefined>;
+  readonly addReaction?: (input: {
+    repositoryId: number;
+    installationId: number;
+    commentId: number;
+    content: 'eyes' | 'confused' | '-1';
+  }) => Promise<void>;
   readonly log?: OperationalLog;
 }
 
@@ -74,6 +86,49 @@ const recordOperationalLog = async (
       catch: () => undefined,
     }).pipe(Effect.catch(() => Effect.succeed(undefined))),
   );
+};
+
+const recordManualReaction = async (
+  job: ReviewWorkflowInput['job'],
+  content: 'confused' | '-1',
+  dependencies: ReviewWorkflowDependencies,
+) => {
+  if (
+    job.trigger !== 'manual' ||
+    job.commentId === undefined ||
+    dependencies.addReaction === undefined
+  ) {
+    return;
+  }
+
+  try {
+    await dependencies.addReaction({
+      repositoryId: job.repositoryId,
+      installationId: job.installationId,
+      commentId: job.commentId,
+      content,
+    });
+  } catch {
+    // Feedback is replay-safe and must not change the run's terminal state.
+  }
+};
+
+const recordFailureReaction = async (
+  job: ReviewWorkflowInput['job'],
+  runId: string,
+  dependencies: ReviewWorkflowDependencies,
+) => {
+  let content: 'confused' | '-1' = '-1';
+  if (dependencies.getRunOutcome !== undefined) {
+    try {
+      if ((await dependencies.getRunOutcome(runId))?.status === 'superseded') {
+        content = 'confused';
+      }
+    } catch {
+      // The default failure feedback remains -1 when status is unavailable.
+    }
+  }
+  await recordManualReaction(job, content, dependencies);
 };
 
 export const runReviewWorkflow = async (
@@ -113,6 +168,7 @@ export const runReviewWorkflow = async (
           if (result.status !== 'succeeded') {
             failureReason = 'runner_failed';
             await markFailed(decoded.runId, dependencies);
+            await recordFailureReaction(decoded.job, decoded.runId, dependencies);
             return 'failed';
           }
 
@@ -120,10 +176,16 @@ export const runReviewWorkflow = async (
             runId: decoded.runId,
             output: result.output,
           });
-          if (publication === 'failed') failureReason = 'publication_failed';
+          if (publication === 'failed') {
+            failureReason = 'publication_failed';
+            await recordFailureReaction(decoded.job, decoded.runId, dependencies);
+          } else if (publication === 'ignored') {
+            await recordManualReaction(decoded.job, 'confused', dependencies);
+          }
           return publication;
         } catch {
           await markFailed(decoded.runId, dependencies);
+          await recordFailureReaction(decoded.job, decoded.runId, dependencies);
           return 'failed';
         }
       },
@@ -145,6 +207,7 @@ export const runReviewWorkflow = async (
     return disposition;
   } catch {
     await markFailed(decoded.runId, dependencies);
+    await recordFailureReaction(decoded.job, decoded.runId, dependencies);
     await recordOperationalLog(dependencies.log, {
       phase: 'workflow',
       outcome: 'failed',

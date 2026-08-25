@@ -49,6 +49,7 @@ export const ReviewJob = Schema.Struct({
   baseSha: GitHubSha,
   headSha: GitHubSha,
   trigger: Schema.Literals(['automatic', 'manual']),
+  commentId: Schema.optional(Schema.Int),
 });
 
 export type ReviewJob = typeof ReviewJob.Type;
@@ -141,6 +142,12 @@ export interface GitHubAdapter {
     installationId: number;
     commenterLogin: string;
   }): Promise<unknown>;
+  addReaction?(input: {
+    repositoryId: number;
+    installationId: number;
+    commentId: number;
+    content: 'eyes' | 'confused' | '-1';
+  }): Promise<void>;
   getRepositoryUrl?(input: { repositoryId: number; installationId: number }): Promise<unknown>;
   loadReviewTarget?(input: {
     repositoryId: number;
@@ -239,6 +246,7 @@ const jobForFacts = (
   baseSha: facts.baseSha,
   headSha: facts.headSha,
   trigger: 'manual',
+  commentId: event.commentId,
 });
 
 const currentIso = DateTime.now.pipe(Effect.map(DateTime.formatIso));
@@ -831,6 +839,24 @@ const loadPermissionWithRetry = (
     });
   }, CommenterPermission);
 
+const writeManualReaction = (
+  github: GitHubAdapter,
+  event: Extract<ReviewEvent, { event: 'issue_comment' }>,
+  content: 'eyes' | 'confused' | '-1',
+) =>
+  github.addReaction === undefined
+    ? Effect.succeed(undefined)
+    : Effect.tryPromise({
+        try: () =>
+          github.addReaction!({
+            repositoryId: event.repositoryId,
+            installationId: event.installationId,
+            commentId: event.commentId,
+            content,
+          }),
+        catch: () => new SchedulingFailed({ message: 'Manual review feedback failed' }),
+      });
+
 const createManualCoordinator = (
   github: GitHubAdapter,
   stateStore: ReviewStateStore,
@@ -893,10 +919,11 @@ const createManualCoordinator = (
         status: 'awaiting approval',
         occurredAt,
       });
+      yield* writeManualReaction(github, event, 'confused');
       return 'awaiting approval' as const;
     }
 
-    return yield* claimAndSchedule(
+    const disposition = yield* claimAndSchedule(
       stateStore,
       scheduler,
       event.deliveryId,
@@ -910,6 +937,10 @@ const createManualCoordinator = (
       },
       log,
     );
+
+    if (disposition === 'scheduled') yield* writeManualReaction(github, event, 'eyes');
+
+    return disposition;
   });
 
 const reviewEventEffect = (

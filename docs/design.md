@@ -59,6 +59,17 @@ A maintainer with `write`, `maintain`, or `admin` permission may comment
 `/ai-review`. Approval applies only to the head SHA observed when the command is
 handled. A later `synchronize` event requires a new command.
 
+The originating numeric `issue_comment` id is retained for manual-command
+feedback. A successfully authorized and scheduled manual command gets the
+GitHub `eyes` reaction. A conclusive denial, missing pull request, or draft
+gets `confused` and does not start a Workflow. An accepted run that ends in a
+failure gets `-1`; a run superseded by a newer head gets `confused`. A
+successful run adds no reaction beyond `eyes`, because its published
+`COMMENT` review is the completion signal. Automatic jobs have no command
+reaction. Feedback uses GitHub's issue-comment reaction endpoint; repeating a
+same-app, same-content write is the replay-idempotency mechanism and does not
+introduce feedback state.
+
 ### Review result
 
 The agent returns structured findings. The core publishes a `COMMENT` review
@@ -238,6 +249,9 @@ D1 stores only queryable product state:
 - PR number, base SHA, head SHA, trigger, status, and timestamps;
 - maintainer approval bound to repository, PR number, and head SHA; and
 - published finding fingerprints needed for idempotency.
+
+The originating manual comment id is carried in the immutable manual job
+input needed by the Workflow; it is not a separate feedback table.
 
 It does not store repository contents, complete diffs, credentials, or model
 transcripts.
