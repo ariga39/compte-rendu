@@ -211,6 +211,73 @@ describe('runWithLease', () => {
     expect(serialized).not.toContain(sha('2'));
   });
 
+  it('keeps review and cleanup successful when agent lifecycle logging fails', async () => {
+    let destroyed = false;
+    let leaseCleared = false;
+    const rawSandbox = {
+      writeFile: async () => undefined,
+      exec: async () => ({
+        success: true,
+        exitCode: 0,
+        stdout: `${sha('1')}\n${sha('2')}\n`,
+        stderr: '',
+      }),
+      destroy: async () => {
+        destroyed = true;
+      },
+    };
+    const log = {
+      record: async (_event: OperationalLogEvent) => {
+        throw new Error('lifecycle log unavailable');
+      },
+    };
+    const runner = createReviewRunner({
+      lease: {
+        register: async () => ({
+          clear: async () => {
+            leaseCleared = true;
+          },
+          rearm: async () => {},
+        }),
+      },
+      sandbox: {
+        getSandbox: async () =>
+          createReviewSandbox(
+            rawSandbox,
+            {
+              createOpencode: async () => ({
+                client: {
+                  session: {
+                    create: async () => ({ id: 'review-session' }),
+                    prompt: async () => ({
+                      info: {},
+                      parts: [
+                        {
+                          type: 'text',
+                          text: JSON.stringify({ findings: [], summary: 'No findings' }),
+                        },
+                      ],
+                    }),
+                    abort: async () => true,
+                  },
+                },
+                server: { close: async () => undefined },
+              }),
+            },
+            undefined,
+            { sandboxId: 'run-lease-1-attempt-1', log },
+          ),
+      },
+      log,
+    });
+
+    const result = await runner.runWithLease(makeSpec());
+
+    expect(result).toMatchObject({ status: 'succeeded', output: { summary: 'No findings' } });
+    expect(destroyed).toBe(true);
+    expect(leaseCleared).toBe(true);
+  });
+
   it('records a failed runner terminal event after an agent failure is cleaned up', async () => {
     const events: OperationalLogEvent[] = [];
     const runner = createReviewRunner({
@@ -673,6 +740,7 @@ describe('runWithLease', () => {
     let serverClosed = false;
     let destroyed = false;
     let leaseCleared = false;
+    const events: OperationalLogEvent[] = [];
     let leaseExpiresAt: string | undefined;
     const runStartedAt = Date.now();
     const rawSandbox = {
@@ -730,6 +798,14 @@ describe('runWithLease', () => {
               }),
             },
             deadline,
+            {
+              sandboxId: 'run-lease-1-attempt-1',
+              log: {
+                record: (event) => {
+                  events.push(event);
+                },
+              },
+            },
           ),
       },
     });
@@ -742,6 +818,13 @@ describe('runWithLease', () => {
     expect(serverClosed).toBe(true);
     expect(destroyed).toBe(true);
     expect(leaseCleared).toBe(true);
+    expect(events).toContainEqual({
+      phase: 'agent',
+      outcome: 'aborted',
+      stage: 'deadline',
+      reason: 'deadline',
+      sandboxId: 'run-lease-1-attempt-1',
+    });
     if (leaseExpiresAt === undefined) throw new Error('lease expiry was not registered');
     const leaseDuration = Date.parse(leaseExpiresAt) - runStartedAt;
     expect(leaseDuration).toBeGreaterThanOrEqual(12 * 60 * 1000 - 1_000);
