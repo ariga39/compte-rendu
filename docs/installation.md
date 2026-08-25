@@ -40,9 +40,10 @@ deployed before the Worker that declares the binding:
 
 The source of truth for names and bindings is
 [`apps/core/wrangler.jsonc`](../apps/core/wrangler.jsonc) and
-[`apps/ingress/wrangler.jsonc`](../apps/ingress/wrangler.jsonc). The source
-also deliberately keeps D1's `database_id` as
-`REPLACE_WITH_D1_DATABASE_ID`; this manual never invents that value.
+[`apps/ingress/wrangler.jsonc`](../apps/ingress/wrangler.jsonc). The committed
+core config deliberately keeps both `GITHUB_APP_ID` as
+`REPLACE_WITH_GITHUB_APP_ID` and D1's `database_id` as
+`REPLACE_WITH_D1_DATABASE_ID`; this manual never invents either value.
 
 ## Access and credentials
 
@@ -233,10 +234,23 @@ uses the temporary invocation described above.
    append a value to the command line, use `echo`, or redirect a secret from a
    shell command:
 
-   Before these `secret put` commands, create the GitHub App registration and
-   generate/download its private key. The webhook URL may remain unset or
-   inactive during installation; set `<INGRESS_URL>` and activate the webhook
-   after ingress has been deployed. Follow GitHub's
+   Before these `secret put` commands, create a dedicated Compte rendu
+   product GitHub App and generate/download its private key. Copy that App's
+   new, non-secret App ID into `GITHUB_APP_ID` in
+   `apps/core/wrangler.jsonc`, and verify that neither
+   `REPLACE_WITH_GITHUB_APP_ID` nor `REPLACE_WITH_D1_DATABASE_ID` remains.
+
+   ```sh
+   if grep -q 'REPLACE_WITH_' apps/core/wrangler.jsonc; then
+     printf '%s\n' 'error: replace all REPLACE_WITH_ placeholders in apps/core/wrangler.jsonc' >&2
+     exit 1
+   fi
+   ```
+
+   The local repository-operations App and private key are not the product
+   identity; do not reuse them. The webhook URL may remain unset or inactive
+   during installation; set `<INGRESS_URL>` and activate the webhook after
+   ingress has been deployed. Follow GitHub's
    [private-key guidance](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/managing-private-keys-for-github-apps)
    when generating and downloading the key.
 
@@ -289,8 +303,9 @@ The deployed variables-versus-secrets inventory is deliberately small:
 | `compte-rendu-core`    | `GITHUB_APP_ID` | `GITHUB_APP_PRIVATE_KEY`, `MODEL_API_KEY` | `REVIEW_DB`, `REVIEW_WORKFLOW`, `Sandbox`, `REVIEW_LEASE` |
 
 `GITHUB_APP_ID` is an application identifier, not a secret. Its value is
-already represented in the core Wrangler config; do not duplicate it in a
-secret or invent a replacement. Installation IDs, repository IDs, PR numbers,
+the dedicated product App ID copied into the core Wrangler config before
+secret put or deploy; do not leave its placeholder, duplicate it in a secret,
+or reuse the repository-operations App identity. Installation IDs, repository IDs, PR numbers,
 SHAs, `deliveryId`s, `runId`s, and `sandboxId`s are runtime data, not values to
 hard-code in the manual.
 
