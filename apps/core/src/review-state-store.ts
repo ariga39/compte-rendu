@@ -316,7 +316,7 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
   },
 
   markRunCompleted: async ({ runId, occurredAt }) => {
-    await database.batch([
+    const results = await database.batch([
       database
         .prepare(
           `UPDATE review_runs SET status = 'completed', updated_at = ?
@@ -332,6 +332,58 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
         )
         .bind(occurredAt, runId),
     ]);
+    return results.every((result) => result.meta.changes === 1);
+  },
+
+  markRunSuperseded: async ({ runId, occurredAt }) => {
+    const results = await database.batch([
+      database
+        .prepare(
+          `UPDATE review_runs SET status = 'superseded', updated_at = ?
+           WHERE run_id = ? AND status = 'scheduled'`,
+        )
+        .bind(occurredAt, runId),
+      database
+        .prepare(
+          `UPDATE deliveries SET status = 'superseded', updated_at = ?
+           WHERE delivery_id = (
+             SELECT delivery_id FROM review_runs WHERE run_id = ?
+           ) AND status = 'scheduled'`,
+        )
+        .bind(occurredAt, runId),
+    ]);
+    return results.every((result) => result.meta.changes === 1);
+  },
+
+  completeRunPublication: async ({ runId, occurredAt, fingerprints }) => {
+    const results = await database.batch([
+      ...fingerprints.map((fingerprint) =>
+        database
+          .prepare(
+            `INSERT OR IGNORE INTO finding_fingerprints
+              (repository_id, pull_request_number, head_sha, fingerprint, created_at)
+             SELECT repository_id, pull_request_number, head_sha, ?, ?
+             FROM review_runs WHERE run_id = ? AND status = 'scheduled'`,
+          )
+          .bind(fingerprint, occurredAt, runId),
+      ),
+      database
+        .prepare(
+          `UPDATE review_runs SET status = 'completed', updated_at = ?
+           WHERE run_id = ? AND status = 'scheduled'`,
+        )
+        .bind(occurredAt, runId),
+      database
+        .prepare(
+          `UPDATE deliveries SET status = 'completed', updated_at = ?
+           WHERE delivery_id = (
+             SELECT delivery_id FROM review_runs WHERE run_id = ?
+           ) AND status = 'scheduled'`,
+        )
+        .bind(occurredAt, runId),
+    ]);
+    const transitionResults = results.slice(-2);
+    return transitionResults.every((result) => result.meta.changes === 1);
   },
 
   getDeliveryOutcome: async (deliveryId) => {
