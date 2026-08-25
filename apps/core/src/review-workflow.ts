@@ -61,37 +61,46 @@ export const runReviewWorkflow = async (
   );
   if (decoded === undefined) return 'failed';
 
-  return step.do('review', { retries: { limit: 0, delay: 0 }, timeout: '15 minutes' }, async () => {
-    try {
-      const repositoryUrl = await Schema.decodeUnknownPromise(Schema.NonEmptyString)(
-        await dependencies.getRepositoryUrl({
-          repositoryId: decoded.job.repositoryId,
-          installationId: decoded.job.installationId,
-        }),
-      );
-      const checkoutToken = await dependencies.getInstallationToken(decoded.job.installationId);
-      const result: ReviewRunResult = await dependencies.runWithLease({
-        runId: decoded.runId,
-        repositoryUrl,
-        baseSha: decoded.job.baseSha,
-        headSha: decoded.job.headSha,
-        checkoutToken,
-        modelCredential: dependencies.modelCredential,
-        maxAttempts: 2,
-      });
+  try {
+    return await step.do(
+      'review',
+      { retries: { limit: 0, delay: 0 }, timeout: '15 minutes' },
+      async () => {
+        try {
+          const repositoryUrl = await Schema.decodeUnknownPromise(Schema.NonEmptyString)(
+            await dependencies.getRepositoryUrl({
+              repositoryId: decoded.job.repositoryId,
+              installationId: decoded.job.installationId,
+            }),
+          );
+          const checkoutToken = await dependencies.getInstallationToken(decoded.job.installationId);
+          const result: ReviewRunResult = await dependencies.runWithLease({
+            runId: decoded.runId,
+            repositoryUrl,
+            baseSha: decoded.job.baseSha,
+            headSha: decoded.job.headSha,
+            checkoutToken,
+            modelCredential: dependencies.modelCredential,
+            maxAttempts: 2,
+          });
 
-      if (result.status !== 'succeeded') {
-        await markFailed(decoded.runId, dependencies);
-        return 'failed';
-      }
+          if (result.status !== 'succeeded') {
+            await markFailed(decoded.runId, dependencies);
+            return 'failed';
+          }
 
-      return await dependencies.completeReview({
-        runId: decoded.runId,
-        output: result.output,
-      });
-    } catch {
-      await markFailed(decoded.runId, dependencies);
-      return 'failed';
-    }
-  });
+          return await dependencies.completeReview({
+            runId: decoded.runId,
+            output: result.output,
+          });
+        } catch {
+          await markFailed(decoded.runId, dependencies);
+          return 'failed';
+        }
+      },
+    );
+  } catch {
+    await markFailed(decoded.runId, dependencies);
+    return 'failed';
+  }
 };

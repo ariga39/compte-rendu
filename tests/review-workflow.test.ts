@@ -95,4 +95,41 @@ describe('Review workflow', () => {
     expect(failedRunId).toBe('run-workflow-failed');
     expect(publicationAttempted).toBe(false);
   });
+
+  it('records failure when the Workflow step rejects before its callback completes', async () => {
+    let failedRunId = '';
+    let publicationAttempted = false;
+    const dependencies: ReviewWorkflowDependencies = {
+      getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+      getInstallationToken: async () => 'installation-token',
+      modelCredential: 'model-token',
+      runWithLease: async () => ({
+        status: 'succeeded',
+        attempt: 1,
+        sandboxId: 'run-workflow-step-1-attempt-1',
+        output: { findings: [], summary: 'No findings' },
+      }),
+      completeReview: async () => {
+        publicationAttempted = true;
+        return 'completed';
+      },
+      markRunFailed: async ({ runId }) => {
+        failedRunId = runId;
+      },
+    };
+
+    const disposition = await runReviewWorkflow(
+      { runId: 'run-workflow-step-failed', job },
+      {
+        do: async () => {
+          throw new Error('Workflow step timed out');
+        },
+      },
+      dependencies,
+    );
+
+    expect(disposition).toBe('failed');
+    expect(failedRunId).toBe('run-workflow-step-failed');
+    expect(publicationAttempted).toBe(false);
+  });
 });
