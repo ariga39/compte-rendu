@@ -98,6 +98,69 @@ export interface OpenCodeIntegration {
   }>;
 }
 
+export interface ReviewAgentDiagnostics {
+  readonly sandboxId: string;
+  readonly log?: OperationalLog;
+}
+
+type AgentStage = 'server' | 'session' | 'prompt';
+
+type AgentEventWithoutSandbox =
+  | {
+      readonly phase: 'agent';
+      readonly outcome: 'progress';
+      readonly stage: AgentStage;
+    }
+  | {
+      readonly phase: 'agent';
+      readonly outcome: 'completed';
+      readonly stage: 'response';
+    }
+  | {
+      readonly phase: 'agent';
+      readonly outcome: 'failed';
+      readonly stage: AgentStage;
+      readonly reason: 'session_error' | 'transport_failure';
+    }
+  | {
+      readonly phase: 'agent';
+      readonly outcome: 'aborted';
+      readonly stage: 'deadline';
+      readonly reason: 'deadline';
+    };
+
+const recordAgentEvent = (
+  diagnostics: ReviewAgentDiagnostics | undefined,
+  event: AgentEventWithoutSandbox,
+) => {
+  const log = diagnostics?.log;
+  const sandboxId = diagnostics?.sandboxId;
+  if (log === undefined || sandboxId === undefined) return;
+  const record = (eventWithSandbox: OperationalLogEvent) => {
+    void Promise.resolve(log.record(sanitizeOperationalLogEvent(eventWithSandbox))).catch(
+      () => undefined,
+    );
+  };
+  try {
+    switch (event.outcome) {
+      case 'progress':
+        record({ ...event, sandboxId });
+        return;
+      case 'completed':
+        record({ ...event, sandboxId });
+        return;
+      case 'failed':
+        record({ ...event, sandboxId });
+        return;
+      case 'aborted':
+        record({ ...event, sandboxId });
+        return;
+    }
+  } catch {
+    // Operational logging cannot alter review or cleanup semantics.
+  }
+};
+
 const defaultOpenCodeIntegration: OpenCodeIntegration = {
   createOpencode: async (sandbox, options) => {
     const { createOpencode } = await import('@cloudflare/sandbox/opencode');
@@ -187,6 +250,7 @@ export const createReviewSandbox = (
   sandbox: ReviewSandboxRaw,
   openCodeIntegration: OpenCodeIntegration = defaultOpenCodeIntegration,
   deadline: ReviewDeadline = defaultReviewDeadline,
+  diagnostics?: ReviewAgentDiagnostics,
 ): ReviewSandbox => ({
   checkout: async (input): Promise<ReviewCheckoutResult> => {
     await sandbox.writeFile(ASKPASS_PATH, askpassScript);
@@ -210,29 +274,33 @@ export const createReviewSandbox = (
     }
   },
   runAgent: async (input): Promise<ReviewAgentResult> => {
-    await sandbox.writeFile(
-      OPENCODE_AUTH_PATH,
-      JSON.stringify({
-        'opencode-go': { type: 'api', key: input.modelCredential },
-      }),
-    );
     let server: { readonly close: () => Promise<void> } | undefined;
     let serverClosed = false;
     let cancelDeadline: (() => void) | undefined;
     let deadlineElapsed = false;
     let deadlineCleanup = Promise.resolve();
+    let stage: AgentStage = 'server';
     const closeServer = async () => {
       if (server === undefined || serverClosed) return;
       serverClosed = true;
       await server.close().catch(() => undefined);
     };
     try {
+      await sandbox.writeFile(
+        OPENCODE_AUTH_PATH,
+        JSON.stringify({
+          'opencode-go': { type: 'api', key: input.modelCredential },
+        }),
+      );
+      recordAgentEvent(diagnostics, { phase: 'agent', outcome: 'progress', stage: 'server' });
       const opencode = await openCodeIntegration.createOpencode(sandbox, {
         directory: REVIEW_DIRECTORY,
         config: trustedAgentConfig,
         env: agentEnvironment(),
       });
       server = opencode.server;
+      stage = 'session';
+      recordAgentEvent(diagnostics, { phase: 'agent', outcome: 'progress', stage: 'session' });
       const session = await opencode.client.session.create({ directory: REVIEW_DIRECTORY });
       const timeoutResult: ReviewAgentResult = {
         exitCode: 1,
@@ -243,6 +311,12 @@ export const createReviewSandbox = (
       const deadlineResult = new Promise<ReviewAgentResult>((resolve) => {
         cancelDeadline = deadline.schedule(REVIEW_DEADLINE_MILLIS, async () => {
           deadlineElapsed = true;
+          recordAgentEvent(diagnostics, {
+            phase: 'agent',
+            outcome: 'aborted',
+            stage: 'deadline',
+            reason: 'deadline',
+          });
           deadlineCleanup = (async () => {
             await opencode.client.session
               .abort({ sessionID: session.id, directory: REVIEW_DIRECTORY })
@@ -255,6 +329,8 @@ export const createReviewSandbox = (
       });
       const reviewResult = (async (): Promise<ReviewAgentResult> => {
         try {
+          stage = 'prompt';
+          recordAgentEvent(diagnostics, { phase: 'agent', outcome: 'progress', stage: 'prompt' });
           const response = await opencode.client.session.prompt({
             sessionID: session.id,
             directory: REVIEW_DIRECTORY,
@@ -267,8 +343,19 @@ export const createReviewSandbox = (
             return timeoutResult;
           }
           if (response.info.error !== undefined) {
+            recordAgentEvent(diagnostics, {
+              phase: 'agent',
+              outcome: 'failed',
+              stage: 'prompt',
+              reason: 'session_error',
+            });
             return { exitCode: 1, stdout: '', stderr: 'OpenCode failed' };
           }
+          recordAgentEvent(diagnostics, {
+            phase: 'agent',
+            outcome: 'completed',
+            stage: 'response',
+          });
           const textParts = response.parts.filter(
             (part) => part.type === 'text' && typeof part.text === 'string',
           );
@@ -287,6 +374,21 @@ export const createReviewSandbox = (
       })();
       return await Promise.race([reviewResult, deadlineResult]);
     } catch {
+      if (deadlineElapsed) {
+        await deadlineCleanup;
+        return {
+          exitCode: 1,
+          stdout: '',
+          stderr: 'OpenCode timed out',
+          timedOut: true,
+        };
+      }
+      recordAgentEvent(diagnostics, {
+        phase: 'agent',
+        outcome: 'failed',
+        stage,
+        reason: 'transport_failure',
+      });
       return { exitCode: 1, stdout: '', stderr: 'OpenCode failed' };
     } finally {
       cancelDeadline?.();
@@ -302,13 +404,14 @@ export interface CloudflareSandboxBindings {
 
 export const createCloudflareSandboxAdapter = (
   bindings: CloudflareSandboxBindings,
+  log?: OperationalLog,
 ): ReviewSandboxAdapter => ({
   getSandbox: async (sandboxId) => {
     const { getSandbox } = await import('@cloudflare/sandbox');
     const cloudflareSandbox = getSandbox(bindings.Sandbox, sandboxId, {
       enableDefaultSession: false,
     });
-    return createReviewSandbox(cloudflareSandbox);
+    return createReviewSandbox(cloudflareSandbox, undefined, undefined, { sandboxId, log });
   },
 });
 
