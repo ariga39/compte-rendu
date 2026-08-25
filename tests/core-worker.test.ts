@@ -150,6 +150,193 @@ describe('Core Worker', () => {
     }
   });
 
+  it('treats a production GitHub 404 for the manual PR as confirmed missing', async () => {
+    const database = new SqliteD1Database();
+    let workflowCreated = false;
+    const fetcher: typeof fetch = async (input) => {
+      const inputUrl =
+        typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      const url = new URL(inputUrl);
+      if (url.pathname === '/repositories/11') {
+        return new Response(JSON.stringify({ full_name: 'acme/reviewed' }));
+      }
+      if (url.pathname === '/repos/acme/reviewed/pulls/42') {
+        return new Response('{}', { status: 404 });
+      }
+      return new Response('{}', { status: 404 });
+    };
+    const worker = createCoreWorker(
+      {
+        REVIEW_DB: database,
+        REVIEW_WORKFLOW: {
+          create: async () => {
+            workflowCreated = true;
+          },
+        },
+        REVIEW_LEASE: {
+          idFromName: (name: string) => name,
+          get: () => ({ fetch: async () => new Response(null, { status: 204 }) }),
+        },
+        Sandbox: {},
+        GITHUB_APP_ID: '4528386',
+        GITHUB_APP_PRIVATE_KEY: 'test-private-key',
+        MODEL_API_KEY: 'test-model-key',
+      },
+      {
+        github: createGitHubPublicationAdapter({ token: 'installation-token', fetch: fetcher }),
+      },
+    );
+
+    try {
+      const response = await worker.fetch(
+        new Request('https://core.internal/review-events', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            deliveryId: 'delivery-core-worker-manual-missing',
+            event: 'issue_comment',
+            action: 'created',
+            repositoryId: 11,
+            pullRequestNumber: 42,
+            installationId: 7,
+            commenterLogin: 'alice',
+            command: '/ai-review',
+          }),
+        }),
+      );
+
+      expect(response.status).toBe(202);
+      expect(workflowCreated).toBe(false);
+    } finally {
+      database.close();
+    }
+  });
+
+  it('treats production collaborator permission none as confirmed denial', async () => {
+    const database = new SqliteD1Database();
+    let workflowCreated = false;
+    const fetcher: typeof fetch = async (input) => {
+      const inputUrl =
+        typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      const url = new URL(inputUrl);
+      if (url.pathname === '/repositories/11') {
+        return new Response(JSON.stringify({ full_name: 'acme/reviewed' }));
+      }
+      if (url.pathname === '/repos/acme/reviewed/pulls/42') {
+        return new Response(
+          JSON.stringify({
+            draft: false,
+            base: { sha: eligibleEvent.baseSha, repo: { id: 11, visibility: 'public' } },
+            head: { sha: eligibleEvent.headSha, repo: { id: 99 } },
+          }),
+        );
+      }
+      if (url.pathname === '/repos/acme/reviewed/collaborators/alice/permission') {
+        return new Response(JSON.stringify({ permission: 'none' }));
+      }
+      return new Response('{}', { status: 404 });
+    };
+    const worker = createCoreWorker(
+      {
+        REVIEW_DB: database,
+        REVIEW_WORKFLOW: {
+          create: async () => {
+            workflowCreated = true;
+          },
+        },
+        REVIEW_LEASE: {
+          idFromName: (name: string) => name,
+          get: () => ({ fetch: async () => new Response(null, { status: 204 }) }),
+        },
+        Sandbox: {},
+        GITHUB_APP_ID: '4528386',
+        GITHUB_APP_PRIVATE_KEY: 'test-private-key',
+        MODEL_API_KEY: 'test-model-key',
+      },
+      {
+        github: createGitHubPublicationAdapter({ token: 'installation-token', fetch: fetcher }),
+      },
+    );
+
+    try {
+      const response = await worker.fetch(
+        new Request('https://core.internal/review-events', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            deliveryId: 'delivery-core-worker-permission-none',
+            event: 'issue_comment',
+            action: 'created',
+            repositoryId: 11,
+            pullRequestNumber: 42,
+            installationId: 7,
+            commenterLogin: 'alice',
+            command: '/ai-review',
+          }),
+        }),
+      );
+
+      expect(response.status).toBe(202);
+      expect(workflowCreated).toBe(false);
+    } finally {
+      database.close();
+    }
+  });
+
+  it('returns 503 when manual GitHub facts remain uncertain', async () => {
+    const database = new SqliteD1Database();
+    let workflowCreated = false;
+    const worker = createCoreWorker(
+      {
+        REVIEW_DB: database,
+        REVIEW_WORKFLOW: {
+          create: async () => {
+            workflowCreated = true;
+          },
+        },
+        REVIEW_LEASE: {
+          idFromName: (name: string) => name,
+          get: () => ({ fetch: async () => new Response(null, { status: 204 }) }),
+        },
+        Sandbox: {},
+        GITHUB_APP_ID: '4528386',
+        GITHUB_APP_PRIVATE_KEY: 'test-private-key',
+        MODEL_API_KEY: 'test-model-key',
+      },
+      {
+        github: {
+          getPullRequest: async () => {
+            throw new Error('GitHub facts unavailable');
+          },
+        },
+      },
+    );
+
+    try {
+      const response = await worker.fetch(
+        new Request('https://core.internal/review-events', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            deliveryId: 'delivery-core-worker-manual-uncertain',
+            event: 'issue_comment',
+            action: 'created',
+            repositoryId: 11,
+            pullRequestNumber: 42,
+            installationId: 7,
+            commenterLogin: 'alice',
+            command: '/ai-review',
+          }),
+        }),
+      );
+
+      expect(response.status).toBe(503);
+      expect(workflowCreated).toBe(false);
+    } finally {
+      database.close();
+    }
+  });
+
   it('keeps Workflow creation failure fail-closed', async () => {
     const database = new SqliteD1Database();
     const worker = createCoreWorker({

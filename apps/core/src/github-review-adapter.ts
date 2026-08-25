@@ -32,7 +32,7 @@ const PullRequestDetails = Schema.Struct({
 });
 
 const PermissionResponse = Schema.Struct({
-  permission: Schema.Literals(['read', 'triage', 'write', 'maintain', 'admin']),
+  permission: Schema.Literals(['none', 'read', 'triage', 'write', 'maintain', 'admin']),
 });
 
 const PullRequestFile = Schema.Struct({
@@ -57,6 +57,7 @@ const CreatedReview = Schema.Struct({
 });
 
 class MarkerLookupFailed extends Error {}
+class GitHubNotFoundError extends Error {}
 
 type TokenProvider = string | ((installationId: number) => Promise<string>);
 
@@ -89,6 +90,7 @@ export const createGitHubPublicationAdapter = (
         'user-agent': 'compte-rendu-core',
       },
     });
+    if (response.status === 404) throw new GitHubNotFoundError('GitHub resource not found');
     if (!response.ok) throw new Error(`GitHub request failed with ${response.status}`);
     return response.json();
   };
@@ -178,26 +180,36 @@ export const createGitHubPublicationAdapter = (
 
   return {
     getPullRequest: async ({ repositoryId, pullRequestNumber, installationId }) => {
-      const value = await requestJson(
-        installationId,
-        await pullRequestPath(repositoryId, pullRequestNumber, installationId),
-      );
-      const pullRequest = await Schema.decodeUnknownPromise(PullRequestDetails)(value);
-      return {
-        repositoryVisibility: pullRequest.base.repo.visibility,
-        baseRepositoryId: pullRequest.base.repo.id,
-        headRepositoryId: pullRequest.head.repo.id,
-        draft: pullRequest.draft,
-        baseSha: pullRequest.base.sha,
-        headSha: pullRequest.head.sha,
-      };
+      try {
+        const value = await requestJson(
+          installationId,
+          await pullRequestPath(repositoryId, pullRequestNumber, installationId),
+        );
+        const pullRequest = await Schema.decodeUnknownPromise(PullRequestDetails)(value);
+        return {
+          repositoryVisibility: pullRequest.base.repo.visibility,
+          baseRepositoryId: pullRequest.base.repo.id,
+          headRepositoryId: pullRequest.head.repo.id,
+          draft: pullRequest.draft,
+          baseSha: pullRequest.base.sha,
+          headSha: pullRequest.head.sha,
+        };
+      } catch (error) {
+        if (error instanceof GitHubNotFoundError) return undefined;
+        throw error;
+      }
     },
     getCommenterPermission: async ({ repositoryId, installationId, commenterLogin }) => {
-      const value = await requestJson(
-        installationId,
-        `/repos/${await repositoryName(repositoryId, installationId)}/collaborators/${encodeURIComponent(commenterLogin)}/permission`,
-      );
-      return (await Schema.decodeUnknownPromise(PermissionResponse)(value)).permission;
+      try {
+        const value = await requestJson(
+          installationId,
+          `/repos/${await repositoryName(repositoryId, installationId)}/collaborators/${encodeURIComponent(commenterLogin)}/permission`,
+        );
+        return (await Schema.decodeUnknownPromise(PermissionResponse)(value)).permission;
+      } catch (error) {
+        if (error instanceof GitHubNotFoundError) return undefined;
+        throw error;
+      }
     },
     getRepositoryUrl: async ({ repositoryId, installationId }) => {
       const value = await requestJson(installationId, `/repositories/${repositoryId}`);
