@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "compte-rendu-tracer-ingress",
+  "main": "ingress-entry.ts",
+  "compatibility_date": "2026-08-22",
+  "vars": {
+    "WEBHOOK_SECRET": "runtime-test-webhook-secret",
+  },
+  "d1_databases": [
+    {
+      "binding": "REVIEW_DB",
+      "database_name": "compte-rendu-tracer-review-state",
+      "database_id": "compte-rendu-tracer-review-state",
+      "migrations_dir": "../../apps/core/migrations",
+    },
+  ],
+  "services": [
+    {
+      "binding": "CORE",
+      "service": "compte-rendu-tracer-core",
+    },
+  ],
+}

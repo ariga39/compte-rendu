@@ -3,10 +3,12 @@
   "private": true,
   "scripts": {
     "check": "vp check",
-    "test": "vp test",
+    "test": "vp test && corepack pnpm test:runtime",
+    "test:runtime": "vitest run --config tests/runtime/vitest.config.mjs",
     "build": "vp run --filter './apps/core' --filter './apps/ingress' --fail-if-no-match build"
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.22.0",
     "effect": "4.0.0-rc.111",
     "vite-plus": "0.3.0",
     "vitest": "4.1.11"

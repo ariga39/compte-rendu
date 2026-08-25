@@ -28,9 +28,84 @@ const eligiblePrivatePullRequest: ReviewEvent = {
 };
 
 describe('Review coordinator', () => {
+  it('records publication success after completeReview publishes', async () => {
+    const stateStore = createInMemoryReviewStateStore();
+    const events: unknown[] = [];
+    let runId = '';
+    const coordinator = createReviewCoordinator({
+      github: {
+        loadReviewTarget: async () => ({
+          headSha: eligiblePrivatePullRequest.headSha,
+          files: [],
+        }),
+        findReviewByMarker: async () => undefined,
+        createReview: async ({ payload }) => ({ kind: 'created', review: payload }),
+      },
+      stateStore,
+      scheduler: {
+        schedule: async (_job, scheduledRunId) => {
+          runId = scheduledRunId;
+        },
+      },
+      log: {
+        record: async (event) => {
+          events.push(event);
+        },
+      },
+    });
+
+    expect(await coordinator.handleReviewEvent(eligiblePrivatePullRequest)).toBe('scheduled');
+    expect(
+      await coordinator.completeReview({
+        runId,
+        output: { findings: [], summary: 'Published review' },
+      }),
+    ).toBe('completed');
+    expect(events).toContainEqual({
+      phase: 'publication',
+      outcome: 'published',
+      runId,
+    });
+  });
+
+  it('records invalid output when completeReview rejects the agent result', async () => {
+    const stateStore = createInMemoryReviewStateStore();
+    const events: unknown[] = [];
+    let runId = '';
+    const coordinator = createReviewCoordinator({
+      github: {},
+      stateStore,
+      scheduler: {
+        schedule: async (_job, scheduledRunId) => {
+          runId = scheduledRunId;
+        },
+      },
+      log: {
+        record: async (event) => {
+          events.push(event);
+        },
+      },
+    });
+
+    expect(await coordinator.handleReviewEvent(eligiblePrivatePullRequest)).toBe('scheduled');
+    expect(
+      await coordinator.completeReview({
+        runId,
+        output: { summary: 'missing findings' },
+      }),
+    ).toBe('failed');
+    expect(events).toContainEqual({
+      phase: 'publication',
+      outcome: 'failed',
+      runId,
+      reason: 'invalid_output',
+    });
+  });
+
   it('marks a review superseded when the head changes at the POST edge', async () => {
     const stateStore = createInMemoryReviewStateStore();
     const reviews: ReviewPublicationPayload[] = [];
+    const events: unknown[] = [];
     let runId = '';
     let headChanged = false;
     const coordinator = createReviewCoordinator({
@@ -60,6 +135,11 @@ describe('Review coordinator', () => {
           runId = scheduledRunId;
         },
       },
+      log: {
+        record: async (event) => {
+          events.push(event);
+        },
+      },
     });
 
     expect(await coordinator.handleReviewEvent(eligiblePrivatePullRequest)).toBe('scheduled');
@@ -72,6 +152,11 @@ describe('Review coordinator', () => {
     ).toBe('ignored');
     expect(reviews).toEqual([]);
     expect(await coordinator.handleReviewEvent(eligiblePrivatePullRequest)).toBe('ignored');
+    expect(events).toContainEqual({
+      phase: 'publication',
+      outcome: 'superseded',
+      runId,
+    });
   });
 
   it('retries one transient GitHub POST and exposes one completed review', async () => {
@@ -134,6 +219,7 @@ describe('Review coordinator', () => {
     const stateStore = createInMemoryReviewStateStore();
     let runId = '';
     const remoteReviews: string[] = [];
+    const events: unknown[] = [];
     const fetcher: typeof fetch = async (input, init) => {
       const inputUrl =
         typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
@@ -167,6 +253,11 @@ describe('Review coordinator', () => {
           runId = scheduledRunId;
         },
       },
+      log: {
+        record: async (event) => {
+          events.push(event);
+        },
+      },
     });
 
     expect(await coordinator.handleReviewEvent(eligiblePrivatePullRequest)).toBe('scheduled');
@@ -178,6 +269,12 @@ describe('Review coordinator', () => {
     ).toBe('failed');
     expect(remoteReviews).toHaveLength(1);
     expect(await coordinator.handleReviewEvent(eligiblePrivatePullRequest)).toBe('failed');
+    expect(events).toContainEqual({
+      phase: 'publication',
+      outcome: 'failed',
+      runId,
+      reason: 'marker_lookup_failed',
+    });
   });
 
   it('publishes the 101st changed file and recognizes the 101st existing marker', async () => {

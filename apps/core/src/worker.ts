@@ -13,6 +13,7 @@ import {
   type ReviewWorkflowEnvironment,
   type ReviewWorkflowStep,
 } from './review-workflow';
+import { createCloudflareOperationalLog } from './operational-log';
 
 export { Sandbox } from '@cloudflare/sandbox';
 export {
@@ -54,6 +55,7 @@ export class ReviewWorkflow extends WorkflowEntrypoint<
       github,
       stateStore,
       scheduler: { schedule: async () => {} },
+      log: createCloudflareOperationalLog(),
     });
     const runner = createCloudflareReviewRunner(this.env);
     const workflowStep: ReviewWorkflowStep = {
@@ -78,6 +80,7 @@ export class ReviewWorkflow extends WorkflowEntrypoint<
       runWithLease: (spec) => runner.runWithLease(spec),
       completeReview: (input) => coordinator.completeReview(input),
       markRunFailed: (input) => stateStore.markSchedulingFailed(input),
+      log: createCloudflareOperationalLog(),
     });
   }
 }

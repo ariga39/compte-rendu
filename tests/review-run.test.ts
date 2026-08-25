@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createReviewSandbox } from '../apps/core/src/cloudflare-review-adapter';
 import { createReviewRunner, type ReviewRunSpec } from '../apps/core/src/review-run';
+import type { OperationalLogEvent } from '../packages/contracts/src';
 
 const sha = (digit: string) => digit.repeat(40);
 
@@ -161,6 +162,99 @@ describe('runWithLease', () => {
     expect(destroyed).toBe(true);
   });
 
+  it('records a clean runner terminal event after Sandbox and lease cleanup', async () => {
+    const events: OperationalLogEvent[] = [];
+    const runner = createReviewRunner({
+      lease: {
+        register: async () => ({
+          clear: async () => {},
+          rearm: async () => {},
+        }),
+      },
+      sandbox: {
+        getSandbox: async () => ({
+          checkout: async ({ baseSha, headSha }) => ({ baseSha, headSha }),
+          removeCheckoutCredentials: async () => {},
+          runAgent: async () => ({ exitCode: 0, stdout: validAgentOutput, stderr: '' }),
+          destroy: async () => {},
+        }),
+      },
+      log: {
+        record: async (event) => {
+          events.push(event);
+          throw new Error('log sink unavailable');
+        },
+      },
+    });
+
+    const result = await runner.runWithLease(makeSpec());
+
+    expect(result).toMatchObject({ status: 'succeeded', attempt: 1 });
+    expect(events).toEqual([
+      {
+        phase: 'runner',
+        outcome: 'succeeded',
+        runId: 'run-lease-1',
+        attempt: 1,
+        sandboxId: 'run-lease-1-attempt-1',
+        cleanup: 'sandbox_destroyed_lease_cleared',
+      },
+    ]);
+    const serialized = JSON.stringify(events);
+    expect(serialized).not.toContain('https://github.com/acme/reviewed.git');
+    expect(serialized).not.toContain('checkout-token-for-test');
+    expect(serialized).not.toContain('model-token-for-test');
+    expect(serialized).not.toContain(sha('1'));
+    expect(serialized).not.toContain(sha('2'));
+  });
+
+  it('records a failed runner terminal event after an agent failure is cleaned up', async () => {
+    const events: OperationalLogEvent[] = [];
+    const runner = createReviewRunner({
+      lease: {
+        register: async () => ({
+          clear: async () => {},
+          rearm: async () => {},
+        }),
+      },
+      sandbox: {
+        getSandbox: async () => ({
+          checkout: async ({ baseSha, headSha }) => ({ baseSha, headSha }),
+          removeCheckoutCredentials: async () => {},
+          runAgent: async () => ({ exitCode: 1, stdout: 'agent output', stderr: 'agent error' }),
+          destroy: async () => {},
+        }),
+      },
+      log: {
+        record: async (event) => {
+          events.push(event);
+        },
+      },
+    });
+
+    const result = await runner.runWithLease(makeSpec());
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      reason: 'agent',
+      attempt: 1,
+      sandboxId: 'run-lease-1-attempt-1',
+      leaseRetained: false,
+    });
+    expect(events).toEqual([
+      {
+        phase: 'runner',
+        outcome: 'failed',
+        runId: 'run-lease-1',
+        attempt: 1,
+        sandboxId: 'run-lease-1-attempt-1',
+        reason: 'agent',
+        retryable: true,
+        leaseRetained: false,
+      },
+    ]);
+  });
+
   it('keeps cleanup failure terminal and does not lazy-start a replacement Sandbox', async () => {
     let rearmed = false;
     let firstSandbox = true;
@@ -168,6 +262,7 @@ describe('runWithLease', () => {
     let destroyed = false;
     let destroyAttempts = 0;
     let alarmDestroy: (() => Promise<void>) | undefined;
+    const events: OperationalLogEvent[] = [];
 
     const runner = createReviewRunner({
       lease: {
@@ -201,6 +296,11 @@ describe('runWithLease', () => {
           };
         },
       },
+      log: {
+        record: async (event) => {
+          events.push(event);
+        },
+      },
     });
 
     const result = await runner.runWithLease(makeSpec({ maxAttempts: 2 }));
@@ -214,6 +314,18 @@ describe('runWithLease', () => {
     expect(rearmed).toBe(true);
     expect(destroyed).toBe(true);
     expect(replacementStarted).toBe(false);
+    expect(events).toEqual([
+      {
+        phase: 'runner',
+        outcome: 'failed',
+        runId: 'run-lease-1',
+        attempt: 1,
+        sandboxId: 'run-lease-1-attempt-1',
+        reason: 'cleanup',
+        retryable: false,
+        leaseRetained: true,
+      },
+    ]);
   });
 
   it('uses a fresh Sandbox after retryable work failure and successful cleanup', async () => {

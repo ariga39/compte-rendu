@@ -3,6 +3,7 @@ import { defineConfig } from 'vite-plus';
 export default defineConfig({
   test: {
     include: ['tests/**/*.test.ts'],
+    exclude: ['tests/runtime/**'],
   },
   lint: {
     ignorePatterns: ['dist/**', 'node_modules/**'],

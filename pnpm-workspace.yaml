@@ -3,7 +3,9 @@ packages:
   - packages/*
 
 allowBuilds:
+  esbuild: true
   msgpackr-extract: false
+  workerd: true
 
 minimumReleaseAgeExclude:
   - '@voidzero-dev/vite-plus-core@0.3.0'

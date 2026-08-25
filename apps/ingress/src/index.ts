@@ -3,11 +3,18 @@ import {
   ReviewEvent,
   GitHubSha,
   type CoreServiceBinding,
+  type OperationalLog,
+  type OperationalLogEvent,
   type ReviewEvent as NormalizedReviewEvent,
   type WorkerEntrypoint,
+  sanitizeOperationalLogIdentifier,
+  sanitizeOperationalLogEvent,
 } from '@compte-rendu/contracts';
+import { createCloudflareOperationalLog } from './operational-log';
 
 export const MAX_WEBHOOK_BYTES = 256 * 1024;
+
+export { createCloudflareOperationalLog } from './operational-log';
 
 const supportedEvents = ['pull_request', 'issue_comment'] as const;
 const supportedPullRequestActions = [
@@ -60,6 +67,7 @@ export interface IngressDependencies {
   readonly secret: string;
   readonly crypto: Pick<Crypto, 'subtle'>;
   readonly core: CoreServiceBinding;
+  readonly log?: OperationalLog;
 }
 
 export interface IngressEnv {
@@ -67,15 +75,31 @@ export interface IngressEnv {
   readonly CORE: CoreServiceBinding;
 }
 
+const InvalidWebhookReason = Schema.Literals(['invalid_signature', 'invalid_webhook']);
+
 class InvalidWebhook extends Schema.TaggedError<InvalidWebhook>()('InvalidWebhook', {
   message: Schema.String,
+  reason: InvalidWebhookReason,
 }) {}
 
 class CoreUnavailable extends Schema.TaggedError<CoreUnavailable>()('CoreUnavailable', {
   message: Schema.String,
+  deliveryId: Schema.NonEmptyString,
+  event: Schema.Literals(['pull_request', 'issue_comment']),
 }) {}
 
-const invalidWebhook = (message: string) => new InvalidWebhook({ message });
+const invalidWebhook = (
+  message: string,
+  reason: typeof InvalidWebhookReason.Type = 'invalid_webhook',
+) => new InvalidWebhook({ message, reason });
+
+const recordOperationalLog = (log: OperationalLog, event: OperationalLogEvent) =>
+  Effect.tryPromise({
+    try: async () => {
+      await log.record(sanitizeOperationalLogEvent(event));
+    },
+    catch: () => undefined,
+  }).pipe(Effect.catch(() => Effect.succeed(undefined)));
 
 const readJson = (body: string) =>
   Effect.tryPromise({
@@ -113,11 +137,11 @@ const verifySignature = (body: string, signature: string, dependencies: IngressD
           new TextEncoder().encode(body),
         );
       },
-      catch: () => invalidWebhook('Webhook signature could not be verified'),
+      catch: () => invalidWebhook('Webhook signature could not be verified', 'invalid_signature'),
     });
 
     if (!validSignature) {
-      return yield* invalidWebhook('Webhook signature is invalid');
+      return yield* invalidWebhook('Webhook signature is invalid', 'invalid_signature');
     }
   });
 
@@ -172,7 +196,11 @@ const processWebhook = (request: Request, dependencies: IngressDependencies) =>
 
     const signature = yield* Schema.decodeUnknownEffect(Signature)(
       request.headers.get('x-hub-signature-256'),
-    ).pipe(Effect.mapError(() => invalidWebhook('Webhook signature is missing or malformed')));
+    ).pipe(
+      Effect.mapError(() =>
+        invalidWebhook('Webhook signature is missing or malformed', 'invalid_signature'),
+      ),
+    );
     yield* verifySignature(body, signature, dependencies);
 
     const decodedJson = yield* readJson(body);
@@ -185,6 +213,15 @@ const processWebhook = (request: Request, dependencies: IngressDependencies) =>
           action.action as (typeof supportedPullRequestActions)[number],
         )
       ) {
+        yield* recordOperationalLog(dependencies.log ?? createCloudflareOperationalLog(), {
+          phase: 'ingress',
+          outcome: 'ignored',
+          deliveryId: sanitizeOperationalLogIdentifier(
+            request.headers.get('x-github-delivery') ?? '',
+          ),
+          event: 'pull_request',
+          reason: 'unsupported_action',
+        });
         return 'ignored' as const;
       }
 
@@ -199,6 +236,15 @@ const processWebhook = (request: Request, dependencies: IngressDependencies) =>
 
     if (request.headers.get('x-github-event') === 'issue_comment') {
       if (action.action !== 'created') {
+        yield* recordOperationalLog(dependencies.log ?? createCloudflareOperationalLog(), {
+          phase: 'ingress',
+          outcome: 'ignored',
+          deliveryId: sanitizeOperationalLogIdentifier(
+            request.headers.get('x-github-delivery') ?? '',
+          ),
+          event: 'issue_comment',
+          reason: 'unsupported_action',
+        });
         return 'ignored' as const;
       }
 
@@ -209,9 +255,23 @@ const processWebhook = (request: Request, dependencies: IngressDependencies) =>
         Effect.mapError(() => invalidWebhook('Issue comment webhook is malformed')),
       );
       if (payload.issue.pull_request === undefined) {
+        yield* recordOperationalLog(dependencies.log ?? createCloudflareOperationalLog(), {
+          phase: 'ingress',
+          outcome: 'ignored',
+          deliveryId: sanitizeOperationalLogIdentifier(deliveryId),
+          event: 'issue_comment',
+          reason: 'non_pull_request_issue',
+        });
         return 'ignored' as const;
       }
       if (payload.comment.body !== '/ai-review') {
+        yield* recordOperationalLog(dependencies.log ?? createCloudflareOperationalLog(), {
+          phase: 'ingress',
+          outcome: 'ignored',
+          deliveryId: sanitizeOperationalLogIdentifier(deliveryId),
+          event: 'issue_comment',
+          reason: 'unsupported_action',
+        });
         return 'ignored' as const;
       }
 
@@ -240,14 +300,28 @@ const forwardEvent = (event: NormalizedReviewEvent, dependencies: IngressDepende
             }),
           ),
         ),
-      catch: () => new CoreUnavailable({ message: 'Core service failed' }),
+      catch: () =>
+        new CoreUnavailable({
+          message: 'Core service failed',
+          deliveryId: event.deliveryId,
+          event: event.event,
+        }),
     });
 
     if (!coreResponse.ok) {
       return yield* new CoreUnavailable({
         message: `Core service returned ${coreResponse.status}`,
+        deliveryId: event.deliveryId,
+        event: event.event,
       });
     }
+
+    yield* recordOperationalLog(dependencies.log ?? createCloudflareOperationalLog(), {
+      phase: 'ingress',
+      outcome: 'accepted',
+      deliveryId: sanitizeOperationalLogIdentifier(event.deliveryId) ?? 'redacted',
+      event: event.event,
+    });
 
     return 'accepted' as const;
   });
@@ -261,6 +335,16 @@ export function createIngressWorker(dependencies: IngressDependencies): WorkerEn
 
       const eventName = request.headers.get('x-github-event');
       if (!supportedEvents.includes(eventName as (typeof supportedEvents)[number])) {
+        await Effect.runPromise(
+          recordOperationalLog(dependencies.log ?? createCloudflareOperationalLog(), {
+            phase: 'ingress',
+            outcome: 'ignored',
+            deliveryId: sanitizeOperationalLogIdentifier(
+              request.headers.get('x-github-delivery') ?? '',
+            ),
+            reason: 'unsupported_event',
+          }),
+        );
         return new Response(null, { status: 204 });
       }
 
@@ -269,7 +353,26 @@ export function createIngressWorker(dependencies: IngressDependencies): WorkerEn
         return new Response(null, { status: result === 'ignored' ? 204 : 202 });
       } catch (error) {
         if (error instanceof InvalidWebhook) {
+          await Effect.runPromise(
+            recordOperationalLog(dependencies.log ?? createCloudflareOperationalLog(), {
+              phase: 'ingress',
+              outcome: 'rejected',
+              reason: error.reason,
+            }),
+          );
           return new Response(null, { status: 400 });
+        }
+
+        if (error instanceof CoreUnavailable) {
+          await Effect.runPromise(
+            recordOperationalLog(dependencies.log ?? createCloudflareOperationalLog(), {
+              phase: 'ingress',
+              outcome: 'retryable',
+              deliveryId: sanitizeOperationalLogIdentifier(error.deliveryId),
+              event: error.event,
+              reason: 'core_unavailable',
+            }),
+          );
         }
 
         return new Response(null, { status: 503 });
