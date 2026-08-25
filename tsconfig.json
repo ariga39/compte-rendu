@@ -8,5 +8,11 @@
     "noEmit": true,
     "skipLibCheck": true
   },
-  "include": ["apps/**/*.ts", "packages/**/*.ts", "tests/**/*.ts", "vite.config.ts"]
+  "include": [
+    "apps/**/*.ts",
+    "packages/**/*.ts",
+    "scripts/**/*.mts",
+    "tests/**/*.ts",
+    "vite.config.ts"
+  ]
 }

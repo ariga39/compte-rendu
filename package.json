@@ -5,6 +5,7 @@
     "check": "vp check",
     "test": "vp test && corepack pnpm test:runtime",
     "test:runtime": "vitest run --config tests/runtime/vitest.config.mjs",
+    "render:wrangler": "node --experimental-strip-types scripts/render-wrangler-config.mts",
     "build": "vp run --filter './apps/core' --filter './apps/ingress' --fail-if-no-match build"
   },
   "devDependencies": {
