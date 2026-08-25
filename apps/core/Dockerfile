@@ -1,4 +1,4 @@
-FROM docker.io/cloudflare/sandbox:0.12.8
+FROM docker.io/cloudflare/sandbox:0.13.0-next.751.1
 
 USER root
 

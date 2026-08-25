@@ -15,7 +15,7 @@ import {
 } from './review-workflow';
 import { createCloudflareOperationalLog } from './operational-log';
 
-export { Sandbox } from '@cloudflare/sandbox';
+export { ReviewSandboxContainer as Sandbox } from './sandbox-container';
 export {
   createCoreWorker,
   ReviewWorkflowInput,

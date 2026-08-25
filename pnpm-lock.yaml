@@ -28,8 +28,8 @@ importers:
   apps/core:
     dependencies:
       '@cloudflare/sandbox':
-        specifier: 0.12.8
-        version: 0.12.8(@opencode-ai/sdk@1.1.40)
+        specifier: 0.13.0-next.751.1
+        version: 0.13.0-next.751.1(@opencode-ai/sdk@1.1.40)
       '@compte-rendu/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
@@ -75,8 +75,8 @@ packages:
     resolution: {integrity: sha512-jxQYkj8dSIzc0cD6cMMNdOc1UVjqSqu8BZdor5s8cGjW2I8BjODt/kWPVdY+u9zj3ms75Q5qaZgnxUad83+eAg==}
     engines: {node: '>=22.0.0'}
 
-  '@cloudflare/sandbox@0.12.8':
-    resolution: {integrity: sha512-xrmVqqfCBN6jNIRthICs/AwF2uUL9eH4yavjXHr9cFWpKalcPFsZY85CGddAG58Anx5WcEWTKHcM9w7Imf1eKA==}
+  '@cloudflare/sandbox@0.13.0-next.751.1':
+    resolution: {integrity: sha512-CsL9BkXx8L7b+cfxNrIp6mTtR46mvLH5BCg2aFSKYDqv+zSEkHg/olbvi6PFDexhBf0doW6Q6x34QhtHLUZpXg==}
     peerDependencies:
       '@openai/agents': ^0.3.3
       '@opencode-ai/sdk': ^1.1.40
@@ -1568,14 +1568,14 @@ snapshots:
 
   '@cloudflare/kv-asset-handler@0.5.0': {}
 
-  '@cloudflare/sandbox@0.12.8':
+  '@cloudflare/sandbox@0.13.0-next.751.1':
     dependencies:
       '@cloudflare/containers': 0.3.7
       aws4fetch: 1.0.20
       capnweb: 0.8.0
       hono: 4.13.3
 
-  '@cloudflare/sandbox@0.12.8(@opencode-ai/sdk@1.1.40)':
+  '@cloudflare/sandbox@0.13.0-next.751.1(@opencode-ai/sdk@1.1.40)':
     dependencies:
       '@cloudflare/containers': 0.3.7
       aws4fetch: 1.0.20
