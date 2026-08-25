@@ -56,3 +56,168 @@ export const ReviewEvent = Schema.Union([PullRequestReviewEvent, IssueCommentRev
 
 export type ReviewEvent = typeof ReviewEvent.Type;
 export type PullRequestFacts = typeof PullRequestFacts.Type;
+
+export type OperationalLogEvent =
+  | {
+      readonly phase: 'ingress';
+      readonly outcome: 'accepted';
+      readonly deliveryId: string;
+      readonly event: 'pull_request' | 'issue_comment';
+    }
+  | {
+      readonly phase: 'ingress';
+      readonly outcome: 'rejected';
+      readonly reason: 'invalid_signature' | 'invalid_webhook';
+    }
+  | {
+      readonly phase: 'ingress';
+      readonly outcome: 'ignored';
+      readonly deliveryId?: string;
+      readonly event?: 'pull_request' | 'issue_comment';
+      readonly reason: 'unsupported_event' | 'unsupported_action' | 'non_pull_request_issue';
+    }
+  | {
+      readonly phase: 'ingress';
+      readonly outcome: 'retryable';
+      readonly deliveryId?: string;
+      readonly event?: 'pull_request' | 'issue_comment';
+      readonly reason: 'core_unavailable';
+    }
+  | {
+      readonly phase: 'core';
+      readonly outcome: 'scheduled';
+      readonly deliveryId: string;
+      readonly runId: string;
+    }
+  | {
+      readonly phase: 'core';
+      readonly outcome: 'retryable';
+      readonly deliveryId: string;
+      readonly reason:
+        | 'pull_request_facts_uncertain'
+        | 'commenter_permission_uncertain'
+        | 'state_failure'
+        | 'scheduling_failure';
+    }
+  | {
+      readonly phase: 'runner';
+      readonly outcome: 'succeeded';
+      readonly runId: string;
+      readonly attempt: number;
+      readonly sandboxId: string;
+      readonly cleanup: 'sandbox_destroyed_lease_cleared';
+    }
+  | {
+      readonly phase: 'runner';
+      readonly outcome: 'failed';
+      readonly runId: string;
+      readonly attempt: number;
+      readonly sandboxId?: string;
+      readonly reason: 'lease' | 'checkout' | 'agent' | 'timeout' | 'invalid-output' | 'cleanup';
+      readonly retryable: boolean;
+      readonly leaseRetained: boolean;
+    }
+  | {
+      readonly phase: 'workflow';
+      readonly outcome: 'completed';
+      readonly runId: string;
+    }
+  | {
+      readonly phase: 'workflow';
+      readonly outcome: 'failed';
+      readonly runId: string;
+      readonly reason: 'runner_failed' | 'publication_failed' | 'execution_failed' | 'step_failed';
+    }
+  | {
+      readonly phase: 'lease';
+      readonly outcome: 'destroyed';
+      readonly runId: string;
+      readonly attempt: number;
+      readonly sandboxId: string;
+    }
+  | {
+      readonly phase: 'lease';
+      readonly outcome: 'deferred';
+      readonly runId: string;
+      readonly attempt: number;
+      readonly sandboxId: string;
+      readonly reason: 'invalid' | 'not_due';
+    }
+  | {
+      readonly phase: 'lease';
+      readonly outcome: 'failed';
+      readonly runId: string;
+      readonly attempt: number;
+      readonly sandboxId: string;
+      readonly reason: 'cleanup_failed';
+    }
+  | {
+      readonly phase: 'publication';
+      readonly outcome: 'published';
+      readonly runId: string;
+    }
+  | {
+      readonly phase: 'publication';
+      readonly outcome: 'superseded';
+      readonly runId: string;
+    }
+  | {
+      readonly phase: 'publication';
+      readonly outcome: 'failed';
+      readonly runId: string;
+      readonly reason:
+        | 'invalid_output'
+        | 'marker_lookup_failed'
+        | 'publication_uncertain'
+        | 'completion_failed';
+    };
+
+export const sanitizeOperationalLogIdentifier = (value: string | undefined) => {
+  if (value === undefined) return undefined;
+  return value.length <= 128 && /^[A-Za-z0-9._:-]+$/.test(value) ? value : 'redacted';
+};
+
+export const sanitizeOperationalLogEvent = (event: OperationalLogEvent): OperationalLogEvent => {
+  if (event.phase === 'ingress') {
+    return 'deliveryId' in event && event.deliveryId !== undefined
+      ? { ...event, deliveryId: sanitizeOperationalLogIdentifier(event.deliveryId) ?? 'redacted' }
+      : event;
+  }
+
+  if (event.phase === 'core') {
+    return event.outcome === 'scheduled'
+      ? {
+          ...event,
+          deliveryId: sanitizeOperationalLogIdentifier(event.deliveryId) ?? 'redacted',
+          runId: sanitizeOperationalLogIdentifier(event.runId) ?? 'redacted',
+        }
+      : {
+          ...event,
+          deliveryId: sanitizeOperationalLogIdentifier(event.deliveryId) ?? 'redacted',
+        };
+  }
+
+  if (event.phase === 'runner') {
+    return {
+      ...event,
+      runId: sanitizeOperationalLogIdentifier(event.runId) ?? 'redacted',
+      ...(event.sandboxId === undefined
+        ? {}
+        : { sandboxId: sanitizeOperationalLogIdentifier(event.sandboxId) ?? 'redacted' }),
+    };
+  }
+
+  if (event.phase === 'workflow' || event.phase === 'publication') {
+    return { ...event, runId: sanitizeOperationalLogIdentifier(event.runId) ?? 'redacted' };
+  }
+
+  return {
+    ...event,
+    runId: sanitizeOperationalLogIdentifier(event.runId) ?? 'redacted',
+    sandboxId: sanitizeOperationalLogIdentifier(event.sandboxId) ?? 'redacted',
+  };
+};
+
+export interface OperationalLog {
+  readonly record: (event: OperationalLogEvent) => void | Promise<void>;
+}

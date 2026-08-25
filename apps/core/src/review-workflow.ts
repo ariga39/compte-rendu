@@ -1,6 +1,16 @@
 import { DateTime, Effect, Schema } from 'effect';
 import { ReviewJob, type ReviewCoordinator, type ReviewDisposition } from './index';
 import type { ReviewRunResult, ReviewRunner } from './review-run';
+import {
+  sanitizeOperationalLogEvent,
+  type OperationalLog,
+  type OperationalLogEvent,
+} from '@compte-rendu/contracts';
+
+type WorkflowFailureReason = Extract<
+  OperationalLogEvent,
+  { readonly phase: 'workflow'; readonly outcome: 'failed' }
+>['reason'];
 
 export const ReviewWorkflowInput = Schema.Struct({
   runId: Schema.NonEmptyString,
@@ -30,6 +40,7 @@ export interface ReviewWorkflowDependencies {
   readonly runWithLease: ReviewRunner['runWithLease'];
   readonly completeReview: ReviewCoordinator['completeReview'];
   readonly markRunFailed: (input: { runId: string; occurredAt: string }) => Promise<void>;
+  readonly log?: OperationalLog;
 }
 
 export interface ReviewWorkflowEnvironment {
@@ -51,6 +62,20 @@ const markFailed = async (runId: string, dependencies: ReviewWorkflowDependencie
   }
 };
 
+const recordOperationalLog = async (
+  log: OperationalLog | undefined,
+  event: OperationalLogEvent,
+) => {
+  await Effect.runPromise(
+    Effect.tryPromise({
+      try: async () => {
+        await log?.record(sanitizeOperationalLogEvent(event));
+      },
+      catch: () => undefined,
+    }).pipe(Effect.catch(() => Effect.succeed(undefined))),
+  );
+};
+
 export const runReviewWorkflow = async (
   input: unknown,
   step: ReviewWorkflowStep,
@@ -61,8 +86,9 @@ export const runReviewWorkflow = async (
   );
   if (decoded === undefined) return 'failed';
 
+  let failureReason: WorkflowFailureReason = 'execution_failed';
   try {
-    return await step.do(
+    const disposition = await step.do(
       'review',
       { retries: { limit: 0, delay: 0 }, timeout: '15 minutes' },
       async () => {
@@ -85,22 +111,46 @@ export const runReviewWorkflow = async (
           });
 
           if (result.status !== 'succeeded') {
+            failureReason = 'runner_failed';
             await markFailed(decoded.runId, dependencies);
             return 'failed';
           }
 
-          return await dependencies.completeReview({
+          const publication = await dependencies.completeReview({
             runId: decoded.runId,
             output: result.output,
           });
+          if (publication === 'failed') failureReason = 'publication_failed';
+          return publication;
         } catch {
           await markFailed(decoded.runId, dependencies);
           return 'failed';
         }
       },
     );
+    if (disposition === 'completed') {
+      await recordOperationalLog(dependencies.log, {
+        phase: 'workflow',
+        outcome: disposition,
+        runId: decoded.runId,
+      });
+    } else if (disposition === 'failed') {
+      await recordOperationalLog(dependencies.log, {
+        phase: 'workflow',
+        outcome: 'failed',
+        runId: decoded.runId,
+        reason: failureReason,
+      });
+    }
+    return disposition;
   } catch {
     await markFailed(decoded.runId, dependencies);
+    await recordOperationalLog(dependencies.log, {
+      phase: 'workflow',
+      outcome: 'failed',
+      runId: decoded.runId,
+      reason: 'step_failed',
+    });
     return 'failed';
   }
 };

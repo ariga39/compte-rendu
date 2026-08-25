@@ -4,6 +4,7 @@ import {
   createIngressWorker,
   type IngressDependencies,
 } from '../apps/ingress/src/index';
+import type { OperationalLogEvent } from '../packages/contracts/src';
 
 const secret = 'test-webhook-secret';
 
@@ -45,12 +46,26 @@ async function signedRequest(value: unknown = payload) {
   });
 }
 
+const collectingLog = () => {
+  const events: OperationalLogEvent[] = [];
+  return {
+    events,
+    log: {
+      record: async (event: OperationalLogEvent) => {
+        events.push(event);
+      },
+    },
+  };
+};
+
 describe('Webhook ingress', () => {
   it('forwards one normalized supported pull request event and acknowledges it', async () => {
     const forwarded: Request[] = [];
+    const { events, log } = collectingLog();
     const dependencies: IngressDependencies = {
       secret,
       crypto: globalThis.crypto,
+      log,
       core: {
         fetch: async (request) => {
           forwarded.push(request);
@@ -63,6 +78,14 @@ describe('Webhook ingress', () => {
     const response = await worker.fetch(await signedRequest());
 
     expect(response.status).toBe(202);
+    expect(events).toEqual([
+      {
+        phase: 'ingress',
+        outcome: 'accepted',
+        deliveryId: 'delivery-1',
+        event: 'pull_request',
+      },
+    ]);
     expect(forwarded).toHaveLength(1);
     expect(await forwarded[0].clone().json()).toEqual({
       deliveryId: 'delivery-1',
@@ -79,11 +102,36 @@ describe('Webhook ingress', () => {
       headSha: '2222222222222222222222222222222222222222',
     });
   });
-  it('rejects an invalid signature without contacting core', async () => {
-    const forwarded: Request[] = [];
+  it('keeps the accepted response when operational logging fails', async () => {
+    let forwarded = false;
     const worker = createIngressWorker({
       secret,
       crypto: globalThis.crypto,
+      log: {
+        record: () => {
+          throw new Error('log sink unavailable');
+        },
+      },
+      core: {
+        fetch: async () => {
+          forwarded = true;
+          return new Response(null, { status: 202 });
+        },
+      },
+    });
+
+    const response = await worker.fetch(await signedRequest());
+
+    expect(response.status).toBe(202);
+    expect(forwarded).toBe(true);
+  });
+  it('rejects an invalid signature without contacting core', async () => {
+    const forwarded: Request[] = [];
+    const { events, log } = collectingLog();
+    const worker = createIngressWorker({
+      secret,
+      crypto: globalThis.crypto,
+      log,
       core: {
         fetch: async (request) => {
           forwarded.push(request);
@@ -93,11 +141,18 @@ describe('Webhook ingress', () => {
     });
     const request = await signedRequest();
     request.headers.set('x-hub-signature-256', 'sha256=' + 'a'.repeat(64));
+    const rawBody = await request.clone().text();
 
     const response = await worker.fetch(request);
 
     expect(response.status).toBe(400);
     expect(forwarded).toHaveLength(0);
+    expect(events).toEqual([
+      { phase: 'ingress', outcome: 'rejected', reason: 'invalid_signature' },
+    ]);
+    expect(JSON.stringify(events)).not.toContain(secret);
+    expect(JSON.stringify(events)).not.toContain(request.headers.get('x-hub-signature-256'));
+    expect(JSON.stringify(events)).not.toContain(rawBody);
   });
   it('rejects a missing or empty delivery id without contacting core', async () => {
     const forwarded: Request[] = [];
@@ -173,9 +228,11 @@ describe('Webhook ingress', () => {
   });
   it('ignores an unsupported GitHub event without contacting core', async () => {
     const forwarded: Request[] = [];
+    const { events, log } = collectingLog();
     const worker = createIngressWorker({
       secret,
       crypto: globalThis.crypto,
+      log,
       core: {
         fetch: async (request) => {
           forwarded.push(request);
@@ -190,13 +247,23 @@ describe('Webhook ingress', () => {
 
     expect(response.status).toBe(204);
     expect(forwarded).toHaveLength(0);
+    expect(events).toEqual([
+      {
+        phase: 'ingress',
+        outcome: 'ignored',
+        deliveryId: 'delivery-1',
+        reason: 'unsupported_event',
+      },
+    ]);
   });
 
   it('ignores an unsupported pull request action without contacting core', async () => {
     const forwarded: Request[] = [];
+    const { events, log } = collectingLog();
     const worker = createIngressWorker({
       secret,
       crypto: globalThis.crypto,
+      log,
       core: {
         fetch: async (request) => {
           forwarded.push(request);
@@ -209,6 +276,15 @@ describe('Webhook ingress', () => {
 
     expect(response.status).toBe(204);
     expect(forwarded).toHaveLength(0);
+    expect(events).toEqual([
+      {
+        phase: 'ingress',
+        outcome: 'ignored',
+        deliveryId: 'delivery-1',
+        event: 'pull_request',
+        reason: 'unsupported_action',
+      },
+    ]);
   });
 
   it('ignores an unsupported pull request action even without a delivery id', async () => {
@@ -288,9 +364,11 @@ describe('Webhook ingress', () => {
   });
   it('returns 503 when core responds with a non-2xx status', async () => {
     let calls = 0;
+    const { events, log } = collectingLog();
     const worker = createIngressWorker({
       secret,
       crypto: globalThis.crypto,
+      log,
       core: {
         fetch: async () => {
           calls += 1;
@@ -303,6 +381,15 @@ describe('Webhook ingress', () => {
 
     expect(response.status).toBe(503);
     expect(calls).toBe(1);
+    expect(events).toEqual([
+      {
+        phase: 'ingress',
+        outcome: 'retryable',
+        deliveryId: 'delivery-1',
+        event: 'pull_request',
+        reason: 'core_unavailable',
+      },
+    ]);
   });
   it('does not acknowledge a core failure and asks GitHub to retry', async () => {
     let calls = 0;
@@ -366,12 +453,52 @@ describe('Webhook ingress', () => {
       command: '/ai-review',
     });
   });
-
-  it('ignores issue comments whose body is not exactly /ai-review', async () => {
-    const forwarded: Request[] = [];
+  it('ignores an issue comment action other than created', async () => {
+    const { events, log } = collectingLog();
     const worker = createIngressWorker({
       secret,
       crypto: globalThis.crypto,
+      log,
+      core: {
+        fetch: async () => new Response(null, { status: 202 }),
+      },
+    });
+    const request = await signedRequest({
+      action: 'edited',
+      installation: { id: 7 },
+      repository: { id: 11, visibility: 'private' },
+      issue: {
+        number: 42,
+        pull_request: { url: 'https://api.github.com/repos/example/repo/pulls/42' },
+      },
+      comment: {
+        body: '/ai-review',
+        user: { login: 'maintainer' },
+      },
+    });
+    request.headers.set('x-github-event', 'issue_comment');
+
+    const response = await worker.fetch(request);
+
+    expect(response.status).toBe(204);
+    expect(events).toEqual([
+      {
+        phase: 'ingress',
+        outcome: 'ignored',
+        deliveryId: 'delivery-1',
+        event: 'issue_comment',
+        reason: 'unsupported_action',
+      },
+    ]);
+  });
+
+  it('ignores issue comments whose body is not exactly /ai-review', async () => {
+    const forwarded: Request[] = [];
+    const { events, log } = collectingLog();
+    const worker = createIngressWorker({
+      secret,
+      crypto: globalThis.crypto,
+      log,
       core: {
         fetch: async (request) => {
           forwarded.push(request);
@@ -402,13 +529,38 @@ describe('Webhook ingress', () => {
     }
 
     expect(forwarded).toHaveLength(0);
+    expect(events).toEqual([
+      {
+        phase: 'ingress',
+        outcome: 'ignored',
+        deliveryId: 'delivery-1',
+        event: 'issue_comment',
+        reason: 'unsupported_action',
+      },
+      {
+        phase: 'ingress',
+        outcome: 'ignored',
+        deliveryId: 'delivery-1',
+        event: 'issue_comment',
+        reason: 'unsupported_action',
+      },
+      {
+        phase: 'ingress',
+        outcome: 'ignored',
+        deliveryId: 'delivery-1',
+        event: 'issue_comment',
+        reason: 'unsupported_action',
+      },
+    ]);
   });
 
   it('ignores a signed command on a non-PR issue without contacting core', async () => {
     const forwarded: Request[] = [];
+    const { events, log } = collectingLog();
     const worker = createIngressWorker({
       secret,
       crypto: globalThis.crypto,
+      log,
       core: {
         fetch: async (request) => {
           forwarded.push(request);
@@ -432,5 +584,14 @@ describe('Webhook ingress', () => {
 
     expect(response.status).toBe(204);
     expect(forwarded).toHaveLength(0);
+    expect(events).toEqual([
+      {
+        phase: 'ingress',
+        outcome: 'ignored',
+        deliveryId: 'delivery-1',
+        event: 'issue_comment',
+        reason: 'non_pull_request_issue',
+      },
+    ]);
   });
 });

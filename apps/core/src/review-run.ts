@@ -1,4 +1,9 @@
 import { DateTime, Effect, Option, Schema } from 'effect';
+import {
+  sanitizeOperationalLogEvent,
+  type OperationalLog,
+  type OperationalLogEvent,
+} from '@compte-rendu/contracts';
 
 export interface ReviewLeaseHandle {
   readonly clear: () => Promise<void>;
@@ -46,6 +51,7 @@ export interface ReviewSandboxAdapter {
 export interface ReviewRunAdapters {
   readonly lease: ReviewLeaseAdapter;
   readonly sandbox: ReviewSandboxAdapter;
+  readonly log?: OperationalLog;
 }
 
 export interface ReviewRunSpec {
@@ -115,6 +121,16 @@ const failure = (
   retryable: reason !== 'cleanup' && reason !== 'lease',
   ...extra,
 });
+
+const recordOperationalLog = (log: OperationalLog | undefined, event: OperationalLogEvent) =>
+  log === undefined
+    ? Effect.succeed(undefined)
+    : Effect.tryPromise({
+        try: async () => {
+          await log.record(sanitizeOperationalLogEvent(event));
+        },
+        catch: () => undefined,
+      }).pipe(Effect.catch(() => Effect.succeed(undefined)));
 
 const OpenCodeTextEvent = Schema.Struct({
   type: Schema.Literal('text'),
@@ -297,14 +313,37 @@ const runWithAdapters = async (
       Effect.gen(function* () {
         const attemptLimit = Math.max(1, Math.min(spec.maxAttempts ?? 1, 3));
         let result: ReviewRunResult = failure('lease', defaultAttempt);
+        const recordFailure = (failed: Extract<ReviewRunResult, { status: 'failed' }>) =>
+          recordOperationalLog(adapters.log, {
+            phase: 'runner',
+            outcome: 'failed',
+            runId: spec.runId,
+            attempt: failed.attempt,
+            ...(failed.sandboxId === undefined ? {} : { sandboxId: failed.sandboxId }),
+            reason: failed.reason,
+            retryable: failed.retryable,
+            leaseRetained: failed.leaseRetained,
+          });
 
         for (let attempt = 1; attempt <= attemptLimit; attempt += 1) {
           result = yield* run(spec, adapters, attempt);
+          if (result.status === 'succeeded') {
+            yield* recordOperationalLog(adapters.log, {
+              phase: 'runner',
+              outcome: 'succeeded',
+              runId: spec.runId,
+              attempt: result.attempt,
+              sandboxId: result.sandboxId,
+              cleanup: 'sandbox_destroyed_lease_cleared',
+            });
+          }
           if (result.status === 'succeeded' || !result.retryable) {
+            if (result.status === 'failed') yield* recordFailure(result);
             return result;
           }
         }
 
+        if (result.status === 'failed') yield* recordFailure(result);
         return result;
       }),
     );
