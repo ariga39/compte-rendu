@@ -56,6 +56,7 @@ const IssueCommentWebhook = Schema.Struct({
     pull_request: Schema.optional(Schema.Struct({})),
   }),
   comment: Schema.Struct({
+    id: Schema.Int,
     body: Schema.String,
     user: Schema.Struct({ login: Schema.NonEmptyString }),
   }),
@@ -173,6 +174,7 @@ const normalizeIssueComment = (
   repositoryId: payload.repository.id,
   pullRequestNumber: payload.issue.number,
   installationId: payload.installation.id,
+  commentId: payload.comment.id,
   commenterLogin: payload.comment.user.login,
   command: '/ai-review',
 });
