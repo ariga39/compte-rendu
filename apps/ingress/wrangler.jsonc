@@ -1,0 +1,16 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "compte-rendu-ingress",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-25",
+  "workers_dev": true,
+  "secrets": {
+    "required": ["WEBHOOK_SECRET"],
+  },
+  "services": [
+    {
+      "binding": "CORE",
+      "service": "compte-rendu-core",
+    },
+  ],
+}
