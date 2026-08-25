@@ -1,0 +1,106 @@
+import { DateTime, Effect, Schema } from 'effect';
+import { ReviewJob, type ReviewCoordinator, type ReviewDisposition } from './index';
+import type { ReviewRunResult, ReviewRunner } from './review-run';
+
+export const ReviewWorkflowInput = Schema.Struct({
+  runId: Schema.NonEmptyString,
+  job: ReviewJob,
+});
+
+export type ReviewWorkflowInput = typeof ReviewWorkflowInput.Type;
+
+export interface ReviewWorkflowStep {
+  readonly do: <A extends string>(
+    name: string,
+    options: {
+      readonly retries: { readonly limit: 0; readonly delay: 0 };
+      readonly timeout: '15 minutes';
+    },
+    operation: () => Promise<A>,
+  ) => Promise<A>;
+}
+
+export interface ReviewWorkflowDependencies {
+  readonly getRepositoryUrl: (input: {
+    repositoryId: number;
+    installationId: number;
+  }) => Promise<unknown>;
+  readonly getInstallationToken: (installationId: number) => Promise<string>;
+  readonly modelCredential: string;
+  readonly runWithLease: ReviewRunner['runWithLease'];
+  readonly completeReview: ReviewCoordinator['completeReview'];
+  readonly markRunFailed: (input: { runId: string; occurredAt: string }) => Promise<void>;
+}
+
+export interface ReviewWorkflowEnvironment {
+  readonly REVIEW_DB: import('./review-state-store').D1DatabaseLike;
+  readonly REVIEW_LEASE: import('./cloudflare-review-adapter').LeaseNamespaceLike;
+  readonly Sandbox: import('./cloudflare-review-adapter').CloudflareSandboxBindings['Sandbox'];
+  readonly GITHUB_APP_ID: string;
+  readonly GITHUB_APP_PRIVATE_KEY: string;
+  readonly MODEL_API_KEY: string;
+}
+
+const currentIso = () => Effect.runPromise(DateTime.now.pipe(Effect.map(DateTime.formatIso)));
+
+const markFailed = async (runId: string, dependencies: ReviewWorkflowDependencies) => {
+  try {
+    await dependencies.markRunFailed({ runId, occurredAt: await currentIso() });
+  } catch {
+    // The workflow result remains failed when durable failure recording is unavailable.
+  }
+};
+
+export const runReviewWorkflow = async (
+  input: unknown,
+  step: ReviewWorkflowStep,
+  dependencies: ReviewWorkflowDependencies,
+): Promise<ReviewDisposition> => {
+  const decoded = await Schema.decodeUnknownPromise(ReviewWorkflowInput)(input).catch(
+    () => undefined,
+  );
+  if (decoded === undefined) return 'failed';
+
+  try {
+    return await step.do(
+      'review',
+      { retries: { limit: 0, delay: 0 }, timeout: '15 minutes' },
+      async () => {
+        try {
+          const repositoryUrl = await Schema.decodeUnknownPromise(Schema.NonEmptyString)(
+            await dependencies.getRepositoryUrl({
+              repositoryId: decoded.job.repositoryId,
+              installationId: decoded.job.installationId,
+            }),
+          );
+          const checkoutToken = await dependencies.getInstallationToken(decoded.job.installationId);
+          const result: ReviewRunResult = await dependencies.runWithLease({
+            runId: decoded.runId,
+            repositoryUrl,
+            baseSha: decoded.job.baseSha,
+            headSha: decoded.job.headSha,
+            checkoutToken,
+            modelCredential: dependencies.modelCredential,
+            maxAttempts: 2,
+          });
+
+          if (result.status !== 'succeeded') {
+            await markFailed(decoded.runId, dependencies);
+            return 'failed';
+          }
+
+          return await dependencies.completeReview({
+            runId: decoded.runId,
+            output: result.output,
+          });
+        } catch {
+          await markFailed(decoded.runId, dependencies);
+          return 'failed';
+        }
+      },
+    );
+  } catch {
+    await markFailed(decoded.runId, dependencies);
+    return 'failed';
+  }
+};

@@ -132,6 +132,19 @@ limits, delivery identity, and retry response semantics. Success means the core
 accepted a normalized event. Invalid input is rejected without contacting the
 core; a core failure is retryable and is not acknowledged as accepted.
 
+### Core Worker wiring
+
+```ts
+createCoreWorker(env: CoreEnv): WorkerEntrypoint
+```
+
+The private core Worker accepts only normalized `POST /review-events` requests.
+It constructs the D1 state store, production GitHub App adapter, and Workflow
+scheduler, then returns `202` only after the event is durably classified.
+Malformed input returns `400`; storage, binding, or scheduling uncertainty
+returns `503`. Workflow input contains only `{ runId, job }`; credentials stay
+inside the Workflow execution.
+
 ### Review coordinator
 
 ```ts

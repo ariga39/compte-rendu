@@ -14,7 +14,8 @@ export const REVIEW_DIRECTORY = '/workspace/compte-rendu-review';
 
 const ASKPASS_PATH = '/tmp/compte-rendu-git-askpass';
 const OPENCODE_CONFIG_PATH = '/tmp/compte-rendu-opencode-config.json';
-const AGENT_TIMEOUT_MS = 10 * 60 * 1000;
+const CHECKOUT_TIMEOUT_MS = 60_000;
+const AGENT_TIMEOUT_MS = 5 * 60_000;
 
 const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
@@ -117,7 +118,7 @@ export const createReviewSandbox = (sandbox: ReviewSandboxRaw): ReviewSandbox =>
     const result = await sandbox.exec(checkoutCommand(input), {
       cwd: REVIEW_DIRECTORY,
       env: checkoutEnvironment(input.checkoutToken),
-      timeout: AGENT_TIMEOUT_MS,
+      timeout: CHECKOUT_TIMEOUT_MS,
     });
     if (!result.success || result.exitCode !== 0) {
       throw new Error('fixed checkout failed');
