@@ -432,6 +432,7 @@ describe('Webhook ingress', () => {
         pull_request: { url: 'https://api.github.com/repos/example/repo/pulls/42' },
       },
       comment: {
+        id: 987654,
         body: '/ai-review',
         user: { login: 'maintainer' },
       },
@@ -449,6 +450,7 @@ describe('Webhook ingress', () => {
       repositoryId: 11,
       pullRequestNumber: 42,
       installationId: 7,
+      commentId: 987654,
       commenterLogin: 'maintainer',
       command: '/ai-review',
     });
@@ -472,6 +474,7 @@ describe('Webhook ingress', () => {
         pull_request: { url: 'https://api.github.com/repos/example/repo/pulls/42' },
       },
       comment: {
+        id: 987655,
         body: '/ai-review',
         user: { login: 'maintainer' },
       },
@@ -517,6 +520,7 @@ describe('Webhook ingress', () => {
           pull_request: { url: 'https://api.github.com/repos/example/repo/pulls/42' },
         },
         comment: {
+          id: 987656,
           body,
           user: { login: 'maintainer' },
         },
@@ -574,6 +578,7 @@ describe('Webhook ingress', () => {
       repository: { id: 11, visibility: 'private' },
       issue: { number: 42 },
       comment: {
+        id: 987657,
         body: '/ai-review',
         user: { login: 'maintainer' },
       },

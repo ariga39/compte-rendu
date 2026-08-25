@@ -80,6 +80,8 @@ export class ReviewWorkflow extends WorkflowEntrypoint<
       runWithLease: (spec) => runner.runWithLease(spec),
       completeReview: (input) => coordinator.completeReview(input),
       markRunFailed: (input) => stateStore.markSchedulingFailed(input),
+      getRunOutcome: (runId) => stateStore.getRunOutcome(runId),
+      addReaction: github.addReaction ? (input) => github.addReaction!(input) : undefined,
       log: createCloudflareOperationalLog(),
     });
   }

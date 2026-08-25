@@ -211,6 +211,13 @@ export const createGitHubPublicationAdapter = (
         throw error;
       }
     },
+    addReaction: async ({ repositoryId, installationId, commentId, content }) => {
+      await requestJson(
+        installationId,
+        `/repos/${await repositoryName(repositoryId, installationId)}/issues/comments/${commentId}/reactions`,
+        { method: 'POST', body: JSON.stringify({ content }) },
+      );
+    },
     getRepositoryUrl: async ({ repositoryId, installationId }) => {
       const value = await requestJson(installationId, `/repositories/${repositoryId}`);
       return (await Schema.decodeUnknownPromise(RepositoryClone)(value)).clone_url;

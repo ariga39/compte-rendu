@@ -21,6 +21,7 @@ describe('Review workflow', () => {
   it('runs immutable review identity and completes the published result', async () => {
     let leaseSpec: ReviewRunSpec | undefined;
     let completedOutput: unknown;
+    const reactions: unknown[] = [];
     const events: OperationalLogEvent[] = [];
     const step: ReviewWorkflowStep = {
       do: async (_name, _options, operation) => operation(),
@@ -43,6 +44,9 @@ describe('Review workflow', () => {
         return 'completed';
       },
       markRunFailed: async () => {},
+      addReaction: async (input) => {
+        reactions.push(input);
+      },
       log: {
         record: async (event) => {
           events.push(event);
@@ -51,7 +55,7 @@ describe('Review workflow', () => {
     };
 
     const disposition = await runReviewWorkflow(
-      { runId: 'run-workflow-1', job },
+      { runId: 'run-workflow-1', job: { ...job, trigger: 'manual', commentId: 987656 } },
       step,
       dependencies,
     );
@@ -67,6 +71,7 @@ describe('Review workflow', () => {
       maxAttempts: 2,
     });
     expect(completedOutput).toEqual({ findings: [], summary: 'No findings' });
+    expect(reactions).toEqual([]);
     expect(events).toEqual([
       {
         phase: 'workflow',
@@ -79,6 +84,7 @@ describe('Review workflow', () => {
   it('records a terminal failure when the leased runner fails', async () => {
     let failedRunId = '';
     let publicationAttempted = false;
+    const reactions: unknown[] = [];
     const events: OperationalLogEvent[] = [];
     const dependencies: ReviewWorkflowDependencies = {
       getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
@@ -95,6 +101,12 @@ describe('Review workflow', () => {
         publicationAttempted = true;
         return 'completed';
       },
+      addReaction: async (input) => {
+        reactions.push(input);
+      },
+      getRunOutcome: async () => {
+        throw new Error('Run status unavailable');
+      },
       markRunFailed: async ({ runId }) => {
         failedRunId = runId;
       },
@@ -106,7 +118,10 @@ describe('Review workflow', () => {
     };
 
     const disposition = await runReviewWorkflow(
-      { runId: 'run-workflow-failed', job },
+      {
+        runId: 'run-workflow-failed',
+        job: { ...job, trigger: 'manual', commentId: 987654 },
+      },
       { do: async (_name, _options, operation) => operation() },
       dependencies,
     );
@@ -114,6 +129,14 @@ describe('Review workflow', () => {
     expect(disposition).toBe('failed');
     expect(failedRunId).toBe('run-workflow-failed');
     expect(publicationAttempted).toBe(false);
+    expect(reactions).toEqual([
+      {
+        repositoryId: 11,
+        installationId: 7,
+        commentId: 987654,
+        content: '-1',
+      },
+    ]);
     expect(events).toEqual([
       {
         phase: 'workflow',
@@ -122,6 +145,40 @@ describe('Review workflow', () => {
         reason: 'runner_failed',
       },
     ]);
+  });
+
+  it('does not emit a reaction when an automatic Workflow job fails', async () => {
+    let failedRunId = '';
+    const reactions: unknown[] = [];
+    const dependencies: ReviewWorkflowDependencies = {
+      getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+      getInstallationToken: async () => 'installation-token',
+      modelCredential: 'model-token',
+      runWithLease: async () => ({
+        status: 'failed',
+        reason: 'agent',
+        attempt: 1,
+        retryable: false,
+        leaseRetained: false,
+      }),
+      completeReview: async () => 'completed',
+      markRunFailed: async ({ runId }) => {
+        failedRunId = runId;
+      },
+      addReaction: async (input) => {
+        reactions.push(input);
+      },
+    };
+
+    const disposition = await runReviewWorkflow(
+      { runId: 'run-workflow-automatic-failed', job },
+      { do: async (_name, _options, operation) => operation() },
+      dependencies,
+    );
+
+    expect(disposition).toBe('failed');
+    expect(failedRunId).toBe('run-workflow-automatic-failed');
+    expect(reactions).toEqual([]);
   });
 
   it('records publication failure with a bounded workflow reason', async () => {
@@ -158,6 +215,86 @@ describe('Review workflow', () => {
         outcome: 'failed',
         runId: 'run-workflow-publication-failed',
         reason: 'publication_failed',
+      },
+    ]);
+  });
+
+  it('marks an accepted manual run superseded with a confused reaction', async () => {
+    const reactions: unknown[] = [];
+    const dependencies: ReviewWorkflowDependencies = {
+      getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+      getInstallationToken: async () => 'installation-token',
+      modelCredential: 'model-token',
+      runWithLease: async () => ({
+        status: 'succeeded',
+        attempt: 1,
+        sandboxId: 'run-workflow-superseded-attempt-1',
+        output: { findings: [], summary: 'No findings' },
+      }),
+      completeReview: async () => 'ignored',
+      markRunFailed: async () => {},
+      addReaction: async (input) => {
+        reactions.push(input);
+      },
+    };
+
+    const disposition = await runReviewWorkflow(
+      {
+        runId: 'run-workflow-superseded',
+        job: { ...job, trigger: 'manual', commentId: 987655 },
+      },
+      { do: async (_name, _options, operation) => operation() },
+      dependencies,
+    );
+
+    expect(disposition).toBe('ignored');
+    expect(reactions).toEqual([
+      {
+        repositoryId: 11,
+        installationId: 7,
+        commentId: 987655,
+        content: 'confused',
+      },
+    ]);
+  });
+
+  it('uses confused feedback when failed work is already superseded', async () => {
+    const reactions: unknown[] = [];
+    const dependencies: ReviewWorkflowDependencies = {
+      getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+      getInstallationToken: async () => 'installation-token',
+      modelCredential: 'model-token',
+      runWithLease: async () => ({
+        status: 'failed',
+        reason: 'agent',
+        attempt: 1,
+        retryable: false,
+        leaseRetained: false,
+      }),
+      completeReview: async () => 'failed',
+      markRunFailed: async () => {},
+      getRunOutcome: async () => ({ status: 'superseded' }),
+      addReaction: async (input) => {
+        reactions.push(input);
+      },
+    };
+
+    const disposition = await runReviewWorkflow(
+      {
+        runId: 'run-workflow-failed-superseded',
+        job: { ...job, trigger: 'manual', commentId: 987657 },
+      },
+      { do: async (_name, _options, operation) => operation() },
+      dependencies,
+    );
+
+    expect(disposition).toBe('failed');
+    expect(reactions).toEqual([
+      {
+        repositoryId: 11,
+        installationId: 7,
+        commentId: 987657,
+        content: 'confused',
       },
     ]);
   });

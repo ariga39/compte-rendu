@@ -916,6 +916,7 @@ describe('Review coordinator', () => {
 
   it('schedules the current PR revision when a maintainer issues /ai-review', async () => {
     const scheduled: ReviewJob[] = [];
+    const reactions: unknown[] = [];
     const coordinator = createReviewCoordinator({
       github: {
         getPullRequest: async () => ({
@@ -927,6 +928,9 @@ describe('Review coordinator', () => {
           headSha: '4444444444444444444444444444444444444444',
         }),
         getCommenterPermission: async () => 'maintain',
+        addReaction: async (input) => {
+          reactions.push(input);
+        },
       },
       stateStore: createInMemoryReviewStateStore(),
       scheduler: {
@@ -943,6 +947,7 @@ describe('Review coordinator', () => {
       repositoryId: 11,
       pullRequestNumber: 42,
       installationId: 7,
+      commentId: 987654,
       commenterLogin: 'maintainer',
       command: '/ai-review',
     });
@@ -953,9 +958,18 @@ describe('Review coordinator', () => {
         repositoryId: 11,
         pullRequestNumber: 42,
         installationId: 7,
+        commentId: 987654,
         baseSha: '3333333333333333333333333333333333333333',
         headSha: '4444444444444444444444444444444444444444',
         trigger: 'manual',
+      },
+    ]);
+    expect(reactions).toEqual([
+      {
+        repositoryId: 11,
+        installationId: 7,
+        commentId: 987654,
+        content: 'eyes',
       },
     ]);
   });
@@ -996,6 +1010,7 @@ describe('Review coordinator', () => {
       repositoryId: 11,
       pullRequestNumber: 42,
       installationId: 7,
+      commentId: 987658,
       commenterLogin: 'maintainer',
       command: '/ai-review',
     });
@@ -1006,6 +1021,93 @@ describe('Review coordinator', () => {
       baseSha: '3333333333333333333333333333333333333333',
       headSha: '4444444444444444444444444444444444444444',
       trigger: 'manual',
+    });
+  });
+
+  it('marks a conclusive missing manual PR with a confused reaction without scheduling', async () => {
+    const reactions: unknown[] = [];
+    const scheduled: ReviewJob[] = [];
+    const coordinator = createReviewCoordinator({
+      github: {
+        getPullRequest: async () => undefined,
+        addReaction: async (input) => {
+          reactions.push(input);
+        },
+      },
+      stateStore: createInMemoryReviewStateStore(),
+      scheduler: {
+        schedule: async (job) => {
+          scheduled.push(job);
+        },
+      },
+    });
+
+    const disposition = await coordinator.handleReviewEvent({
+      deliveryId: 'delivery-comment-missing',
+      event: 'issue_comment',
+      action: 'created',
+      repositoryId: 11,
+      pullRequestNumber: 42,
+      installationId: 7,
+      commentId: 987663,
+      commenterLogin: 'maintainer',
+      command: '/ai-review',
+    });
+
+    expect(disposition).toBe('awaiting approval');
+    expect(scheduled).toEqual([]);
+    expect(reactions).toEqual([
+      {
+        repositoryId: 11,
+        installationId: 7,
+        commentId: 987663,
+        content: 'confused',
+      },
+    ]);
+  });
+
+  it('keeps a scheduled manual run when its eyes reaction is temporarily unavailable', async () => {
+    const stateStore = createInMemoryReviewStateStore();
+    const scheduled: Array<{ job: ReviewJob; runId: string }> = [];
+    const coordinator = createReviewCoordinator({
+      github: {
+        getPullRequest: async () => ({
+          repositoryVisibility: 'public',
+          baseRepositoryId: 11,
+          headRepositoryId: 99,
+          draft: false,
+          baseSha: '3333333333333333333333333333333333333333',
+          headSha: '4444444444444444444444444444444444444444',
+        }),
+        getCommenterPermission: async () => 'write',
+        addReaction: async () => {
+          throw new Error('GitHub feedback unavailable');
+        },
+      },
+      stateStore,
+      scheduler: {
+        schedule: async (job, runId) => {
+          scheduled.push({ job, runId });
+        },
+      },
+    });
+
+    const disposition = await coordinator.handleReviewEvent({
+      deliveryId: 'delivery-comment-feedback-retry',
+      event: 'issue_comment',
+      action: 'created',
+      repositoryId: 11,
+      pullRequestNumber: 42,
+      installationId: 7,
+      commentId: 987664,
+      commenterLogin: 'maintainer',
+      command: '/ai-review',
+    });
+
+    expect(disposition).toBe('failed');
+    expect(scheduled).toHaveLength(1);
+    expect(await stateStore.getRunOutcome(scheduled[0].runId)).toMatchObject({
+      status: 'scheduled',
     });
   });
 
@@ -1049,6 +1151,7 @@ describe('Review coordinator', () => {
       repositoryId: 11,
       pullRequestNumber: 42,
       installationId: 7,
+      commentId: 987659,
       commenterLogin: 'maintainer',
       command: '/ai-review',
     });
@@ -1169,6 +1272,7 @@ describe('Review coordinator', () => {
         repositoryId: 11,
         pullRequestNumber: 42,
         installationId: 7,
+        commentId: 987660,
         commenterLogin: 'contributor',
         command: '/ai-review',
       });
@@ -1207,6 +1311,7 @@ describe('Review coordinator', () => {
       repositoryId: 11,
       pullRequestNumber: 42,
       installationId: 7,
+      commentId: 987661,
       commenterLogin: 'maintainer',
       command: '/ai-review',
     });
@@ -1280,6 +1385,7 @@ describe('Review coordinator', () => {
         repositoryId: 11,
         pullRequestNumber: 42,
         installationId: 7,
+        commentId: 987662,
         commenterLogin: 'maintainer',
         command: '/ai-review',
       });
