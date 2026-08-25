@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { createReviewSandbox } from '../apps/core/src/cloudflare-review-adapter';
+import {
+  createReviewSandbox,
+  type ReviewDeadline,
+} from '../apps/core/src/cloudflare-review-adapter';
 import { createReviewRunner, type ReviewRunSpec } from '../apps/core/src/review-run';
 import type { OperationalLogEvent } from '../packages/contracts/src';
 
@@ -480,6 +483,7 @@ describe('runWithLease', () => {
                       { type: 'text', text: JSON.stringify({ findings: [], summary: 'second' }) },
                     ],
                   }),
+                  abort: async () => true,
                 },
               },
               server: { close: async () => {} },
@@ -533,6 +537,7 @@ describe('runWithLease', () => {
                       },
                     ],
                   }),
+                  abort: async () => true,
                 },
               },
               server: {
@@ -661,6 +666,172 @@ describe('runWithLease', () => {
     const result = await runner.runWithLease(makeSpec());
 
     expect(result).toMatchObject({ status: 'failed', reason: 'timeout' });
+  });
+
+  it('aborts the managed review at its ten-minute deadline before scoped cleanup', async () => {
+    let aborted = false;
+    let serverClosed = false;
+    let destroyed = false;
+    let leaseCleared = false;
+    let leaseExpiresAt: string | undefined;
+    const runStartedAt = Date.now();
+    const rawSandbox = {
+      writeFile: async () => undefined,
+      exec: async () => ({
+        success: true,
+        exitCode: 0,
+        stdout: `${sha('1')}\n${sha('2')}\n`,
+        stderr: '',
+      }),
+      destroy: async () => {
+        destroyed = true;
+      },
+    };
+    const deadline: ReviewDeadline = {
+      schedule: (durationMillis, onElapsed) => {
+        expect(durationMillis).toBe(10 * 60 * 1000);
+        void onElapsed();
+        return () => {};
+      },
+    };
+    const runner = createReviewRunner({
+      lease: {
+        register: async (input) => {
+          leaseExpiresAt = input.expiresAt;
+          return {
+            clear: async () => {
+              leaseCleared = true;
+            },
+            rearm: async () => {},
+          };
+        },
+      },
+      sandbox: {
+        getSandbox: async () =>
+          createReviewSandbox(
+            rawSandbox,
+            {
+              createOpencode: async () => ({
+                client: {
+                  session: {
+                    create: async () => ({ id: 'review-session' }),
+                    prompt: async () => new Promise(() => {}),
+                    abort: async () => {
+                      aborted = true;
+                      return true;
+                    },
+                  },
+                },
+                server: {
+                  close: async () => {
+                    serverClosed = true;
+                  },
+                },
+              }),
+            },
+            deadline,
+          ),
+      },
+    });
+
+    const result = await runner.runWithLease(makeSpec());
+
+    expect(result).toMatchObject({ status: 'failed', reason: 'timeout' });
+    expect(result).not.toHaveProperty('output');
+    expect(aborted).toBe(true);
+    expect(serverClosed).toBe(true);
+    expect(destroyed).toBe(true);
+    expect(leaseCleared).toBe(true);
+    if (leaseExpiresAt === undefined) throw new Error('lease expiry was not registered');
+    const leaseDuration = Date.parse(leaseExpiresAt) - runStartedAt;
+    expect(leaseDuration).toBeGreaterThanOrEqual(12 * 60 * 1000 - 1_000);
+    expect(leaseDuration).toBeLessThan(12 * 60 * 1000 + 1_000);
+  });
+
+  it('keeps timeout terminal when abort settles a pending prompt after deadline begins', async () => {
+    let fireDeadline: (() => Promise<void>) | undefined;
+    let resolvePromptStarted: (() => void) | undefined;
+    let rejectPrompt: ((reason?: unknown) => void) | undefined;
+    let aborted = false;
+    let serverClosed = false;
+    let destroyed = false;
+    let leaseCleared = false;
+    const promptStarted = new Promise<void>((resolve) => {
+      resolvePromptStarted = resolve;
+    });
+    const rawSandbox = {
+      writeFile: async () => undefined,
+      exec: async () => ({
+        success: true,
+        exitCode: 0,
+        stdout: `${sha('1')}\n${sha('2')}\n`,
+        stderr: '',
+      }),
+      destroy: async () => {
+        destroyed = true;
+      },
+    };
+    const deadline: ReviewDeadline = {
+      schedule: (_durationMillis, onElapsed) => {
+        fireDeadline = onElapsed;
+        return () => {};
+      },
+    };
+    const runner = createReviewRunner({
+      lease: {
+        register: async () => ({
+          clear: async () => {
+            leaseCleared = true;
+          },
+          rearm: async () => {},
+        }),
+      },
+      sandbox: {
+        getSandbox: async () =>
+          createReviewSandbox(
+            rawSandbox,
+            {
+              createOpencode: async () => ({
+                client: {
+                  session: {
+                    create: async () => ({ id: 'review-session' }),
+                    prompt: async () => {
+                      resolvePromptStarted?.();
+                      return new Promise<never>((_resolve, reject) => {
+                        rejectPrompt = reject;
+                      });
+                    },
+                    abort: async () => {
+                      aborted = true;
+                      rejectPrompt?.(new Error('session aborted'));
+                      return true;
+                    },
+                  },
+                },
+                server: {
+                  close: async () => {
+                    serverClosed = true;
+                  },
+                },
+              }),
+            },
+            deadline,
+          ),
+      },
+    });
+
+    const runPromise = runner.runWithLease(makeSpec());
+    await promptStarted;
+    if (fireDeadline === undefined) throw new Error('deadline was not scheduled');
+    await fireDeadline();
+    const result = await runPromise;
+
+    expect(result).toMatchObject({ status: 'failed', reason: 'timeout' });
+    expect(result).not.toHaveProperty('output');
+    expect(aborted).toBe(true);
+    expect(serverClosed).toBe(true);
+    expect(destroyed).toBe(true);
+    expect(leaseCleared).toBe(true);
   });
 
   it('fails closed when agent output exceeds the application limit', async () => {

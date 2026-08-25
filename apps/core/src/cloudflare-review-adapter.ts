@@ -26,6 +26,7 @@ const ASKPASS_PATH = '/tmp/compte-rendu-git-askpass';
 const OPENCODE_DATA_HOME = '/tmp/compte-rendu-opencode-data';
 const OPENCODE_AUTH_PATH = `${OPENCODE_DATA_HOME}/opencode/auth.json`;
 const CHECKOUT_TIMEOUT_MS = 60_000;
+const REVIEW_DEADLINE_MILLIS = 10 * 60 * 1000;
 
 const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
@@ -69,7 +70,22 @@ type OpenCodeClient = {
       readonly info: { readonly error?: unknown };
       readonly parts: ReadonlyArray<{ readonly type: string; readonly text?: unknown }>;
     }>;
+    readonly abort: (parameters: {
+      readonly sessionID: string;
+      readonly directory: string;
+    }) => Promise<boolean>;
   };
+};
+
+export interface ReviewDeadline {
+  readonly schedule: (durationMillis: number, onElapsed: () => Promise<void>) => () => void;
+}
+
+const defaultReviewDeadline: ReviewDeadline = {
+  schedule: (durationMillis, onElapsed) => {
+    const handle = setTimeout(() => void onElapsed(), durationMillis);
+    return () => clearTimeout(handle);
+  },
 };
 
 export interface OpenCodeIntegration {
@@ -92,6 +108,8 @@ const defaultOpenCodeIntegration: OpenCodeIntegration = {
           (await result.client.session.create(parameters, { throwOnError: true })).data,
         prompt: async (parameters) =>
           (await result.client.session.prompt(parameters, { throwOnError: true })).data,
+        abort: async (parameters) =>
+          (await result.client.session.abort(parameters, { throwOnError: true })).data,
       },
     };
     const server: Pick<OpencodeServer, 'close'> = result.server;
@@ -168,6 +186,7 @@ const parseCheckoutResult = (stdout: string): ReviewCheckoutResult => {
 export const createReviewSandbox = (
   sandbox: ReviewSandboxRaw,
   openCodeIntegration: OpenCodeIntegration = defaultOpenCodeIntegration,
+  deadline: ReviewDeadline = defaultReviewDeadline,
 ): ReviewSandbox => ({
   checkout: async (input): Promise<ReviewCheckoutResult> => {
     await sandbox.writeFile(ASKPASS_PATH, askpassScript);
@@ -198,6 +217,15 @@ export const createReviewSandbox = (
       }),
     );
     let server: { readonly close: () => Promise<void> } | undefined;
+    let serverClosed = false;
+    let cancelDeadline: (() => void) | undefined;
+    let deadlineElapsed = false;
+    let deadlineCleanup = Promise.resolve();
+    const closeServer = async () => {
+      if (server === undefined || serverClosed) return;
+      serverClosed = true;
+      await server.close().catch(() => undefined);
+    };
     try {
       const opencode = await openCodeIntegration.createOpencode(sandbox, {
         directory: REVIEW_DIRECTORY,
@@ -206,28 +234,63 @@ export const createReviewSandbox = (
       });
       server = opencode.server;
       const session = await opencode.client.session.create({ directory: REVIEW_DIRECTORY });
-      const response = await opencode.client.session.prompt({
-        sessionID: session.id,
-        directory: REVIEW_DIRECTORY,
-        model: { providerID: OPENCODE_PROVIDER, modelID: OPENCODE_MODEL_ID },
-        agent: 'review',
-        parts: [{ type: 'text', text: reviewPrompt }],
-      });
-      if (response.info.error !== undefined) {
-        return { exitCode: 1, stdout: '', stderr: 'OpenCode failed' };
-      }
-      const textParts = response.parts.filter(
-        (part) => part.type === 'text' && typeof part.text === 'string',
-      );
-      return {
-        exitCode: 0,
-        stdout: textParts.map((part) => JSON.stringify({ type: 'text', part })).join('\n'),
-        stderr: '',
+      const timeoutResult: ReviewAgentResult = {
+        exitCode: 1,
+        stdout: '',
+        stderr: 'OpenCode timed out',
+        timedOut: true,
       };
+      const deadlineResult = new Promise<ReviewAgentResult>((resolve) => {
+        cancelDeadline = deadline.schedule(REVIEW_DEADLINE_MILLIS, async () => {
+          deadlineElapsed = true;
+          deadlineCleanup = (async () => {
+            await opencode.client.session
+              .abort({ sessionID: session.id, directory: REVIEW_DIRECTORY })
+              .catch(() => undefined);
+            await closeServer();
+          })();
+          await deadlineCleanup;
+          resolve(timeoutResult);
+        });
+      });
+      const reviewResult = (async (): Promise<ReviewAgentResult> => {
+        try {
+          const response = await opencode.client.session.prompt({
+            sessionID: session.id,
+            directory: REVIEW_DIRECTORY,
+            model: { providerID: OPENCODE_PROVIDER, modelID: OPENCODE_MODEL_ID },
+            agent: 'review',
+            parts: [{ type: 'text', text: reviewPrompt }],
+          });
+          if (deadlineElapsed) {
+            await deadlineCleanup;
+            return timeoutResult;
+          }
+          if (response.info.error !== undefined) {
+            return { exitCode: 1, stdout: '', stderr: 'OpenCode failed' };
+          }
+          const textParts = response.parts.filter(
+            (part) => part.type === 'text' && typeof part.text === 'string',
+          );
+          return {
+            exitCode: 0,
+            stdout: textParts.map((part) => JSON.stringify({ type: 'text', part })).join('\n'),
+            stderr: '',
+          };
+        } catch (error) {
+          if (deadlineElapsed) {
+            await deadlineCleanup;
+            return timeoutResult;
+          }
+          throw error;
+        }
+      })();
+      return await Promise.race([reviewResult, deadlineResult]);
     } catch {
       return { exitCode: 1, stdout: '', stderr: 'OpenCode failed' };
     } finally {
-      if (server !== undefined) await server.close().catch(() => undefined);
+      cancelDeadline?.();
+      await closeServer();
     }
   },
   destroy: () => sandbox.destroy(),
@@ -279,6 +342,7 @@ export interface ReviewLeaseDependencies {
 }
 
 const leaseKey = 'review-lease';
+const clearedLeaseKey = 'review-lease-cleared';
 const retryDelayMillis = 30_000;
 
 const currentEpochMillis = () =>
@@ -349,6 +413,7 @@ export class ReviewLeaseDurableObject {
           return new Response(null, { status: 204 });
         }
         try {
+          await this.state.storage.delete(clearedLeaseKey);
           await this.state.storage.put(leaseKey, registration);
           await this.state.storage.setAlarm(DateTime.toEpochMillis(expiresAt.value));
         } catch (error) {
@@ -364,7 +429,18 @@ export class ReviewLeaseDurableObject {
         );
         const current =
           await this.state.storage.get<Schema.Schema.Type<typeof LeaseRegistration>>(leaseKey);
-        if (current === undefined || !sameLeaseIdentity(current, requested)) {
+        if (current === undefined) {
+          const cleared =
+            await this.state.storage.get<Schema.Schema.Type<typeof LeaseRegistration>>(
+              clearedLeaseKey,
+            );
+          if (cleared === undefined || !sameLeaseIdentity(cleared, requested)) {
+            return new Response(null, { status: 409 });
+          }
+          await this.state.storage.deleteAlarm();
+          return new Response(null, { status: 204 });
+        }
+        if (!sameLeaseIdentity(current, requested)) {
           return new Response(null, { status: 409 });
         }
         await this.state.storage.delete(leaseKey);
@@ -450,6 +526,7 @@ export class ReviewLeaseDurableObject {
             })()
           : await this.dependencies.getSandbox(registration.sandboxId);
       await sandbox.destroy();
+      await this.state.storage.put(clearedLeaseKey, registration);
       await this.state.storage.delete(leaseKey);
       await this.state.storage.deleteAlarm();
       await recordOperationalLog(this.log, {

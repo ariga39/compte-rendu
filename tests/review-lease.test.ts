@@ -64,6 +64,67 @@ describe('Review lease alarm', () => {
     ]);
   });
 
+  it('accepts idempotent clear after the alarm destroyed the same lease', async () => {
+    const storage = new Map<string, unknown>([['review-lease', registration]]);
+    let destroyed = false;
+    const state: LeaseDurableObjectState = {
+      storage: {
+        get: async <A>(key: string) => storage.get(key) as A | undefined,
+        put: async (key, value) => {
+          storage.set(key, value);
+        },
+        delete: async (key) => storage.delete(key),
+        setAlarm: async () => {},
+        deleteAlarm: async () => {},
+      },
+    };
+    const lease = new ReviewLeaseDurableObject(
+      state,
+      { Sandbox: {} },
+      {
+        log: { record: async () => {} },
+        getSandbox: async () => ({
+          destroy: async () => {
+            destroyed = true;
+          },
+        }),
+      },
+    );
+
+    await lease.alarm();
+
+    const clearAfterAlarm = await lease.fetch(
+      new Request('https://lease.internal/clear', {
+        method: 'DELETE',
+        body: JSON.stringify(registration),
+      }),
+    );
+    expect(destroyed).toBe(true);
+    expect(clearAfterAlarm.status).toBe(204);
+
+    const replacement = {
+      ...registration,
+      generation: registration.generation + 1,
+      sandboxId: `${registration.runId}-attempt-3`,
+      expiresAt: '2099-01-01T00:00:00.000Z',
+    };
+    const registered = await lease.fetch(
+      new Request('https://lease.internal/register', {
+        method: 'POST',
+        body: JSON.stringify(replacement),
+      }),
+    );
+    const staleClear = await lease.fetch(
+      new Request('https://lease.internal/clear', {
+        method: 'DELETE',
+        body: JSON.stringify(registration),
+      }),
+    );
+
+    expect(registered.status).toBe(204);
+    expect(staleClear.status).toBe(409);
+  });
+
   it('defers invalid lease cleanup and records deferred without starting a Sandbox', async () => {
     const invalidRegistration = { ...registration, expiresAt: 'not-a-date' };
     let alarmScheduled = false;
