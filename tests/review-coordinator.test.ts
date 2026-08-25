@@ -531,6 +531,197 @@ describe('Review coordinator', () => {
     }
   });
 
+  it('claims a fresh manual run after a failed run for the same head', async () => {
+    const database = new SqliteD1Database();
+    const stateStore = createD1ReviewStateStore(database);
+    const job: ReviewJob = {
+      repositoryId: 11,
+      pullRequestNumber: 42,
+      installationId: 7,
+      baseSha: eligiblePrivatePullRequest.baseSha,
+      headSha: eligiblePrivatePullRequest.headSha,
+      trigger: 'manual',
+      commentId: 987654,
+    };
+
+    try {
+      const first = await stateStore.claimReview({
+        deliveryId: 'manual-delivery-failed',
+        job,
+        occurredAt: '2026-08-25T00:00:00.000Z',
+      });
+      expect(first.kind).toBe('claimed');
+      if (first.kind !== 'claimed') throw new Error('first claim was not scheduled');
+
+      await stateStore.markSchedulingFailed({
+        runId: first.runId,
+        occurredAt: '2026-08-25T00:01:00.000Z',
+      });
+
+      const second = await stateStore.claimReview({
+        deliveryId: 'manual-delivery-retry',
+        job: { ...job, commentId: 987655 },
+        occurredAt: '2026-08-25T00:02:00.000Z',
+      });
+      expect(second.kind).toBe('claimed');
+      if (second.kind !== 'claimed') throw new Error('manual retry was not scheduled');
+      expect(second.runId).not.toBe(first.runId);
+      expect(await stateStore.getRunOutcome(first.runId)).toMatchObject({
+        deliveryId: 'manual-delivery-failed',
+        repositoryId: 11,
+        pullRequestNumber: 42,
+        headSha: eligiblePrivatePullRequest.headSha,
+        status: 'failed',
+      });
+      expect(await stateStore.getRunOutcome(second.runId)).toMatchObject({
+        deliveryId: 'manual-delivery-retry',
+        headSha: eligiblePrivatePullRequest.headSha,
+        status: 'scheduled',
+      });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('deduplicates distinct deliveries while a same-head run is scheduled or completed', async () => {
+    const database = new SqliteD1Database();
+    const stateStore = createD1ReviewStateStore(database);
+    const job: ReviewJob = {
+      repositoryId: 11,
+      pullRequestNumber: 42,
+      installationId: 7,
+      baseSha: eligiblePrivatePullRequest.baseSha,
+      headSha: eligiblePrivatePullRequest.headSha,
+      trigger: 'manual',
+      commentId: 987654,
+    };
+
+    try {
+      const first = await stateStore.claimReview({
+        deliveryId: 'manual-delivery-scheduled',
+        job,
+        occurredAt: '2026-08-25T00:00:00.000Z',
+      });
+      expect(first).toMatchObject({ kind: 'claimed' });
+      if (first.kind !== 'claimed') throw new Error('first claim was not scheduled');
+
+      expect(
+        await stateStore.claimReview({
+          deliveryId: 'manual-delivery-scheduled-duplicate',
+          job: { ...job, commentId: 987655 },
+          occurredAt: '2026-08-25T00:01:00.000Z',
+        }),
+      ).toEqual({ kind: 'existing', disposition: 'scheduled' });
+
+      expect(
+        await stateStore.markRunCompleted({
+          runId: first.runId,
+          occurredAt: '2026-08-25T00:02:00.000Z',
+        }),
+      ).toBe(true);
+      expect(
+        await stateStore.claimReview({
+          deliveryId: 'manual-delivery-completed-duplicate',
+          job: { ...job, commentId: 987656 },
+          occurredAt: '2026-08-25T00:03:00.000Z',
+        }),
+      ).toEqual({ kind: 'existing', disposition: 'completed' });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('atomically admits only one concurrent same-head manual claim', async () => {
+    const database = new SqliteD1Database();
+    const stateStore = createD1ReviewStateStore(database);
+    const failedJob: ReviewJob = {
+      repositoryId: 11,
+      pullRequestNumber: 42,
+      installationId: 7,
+      baseSha: eligiblePrivatePullRequest.baseSha,
+      headSha: eligiblePrivatePullRequest.headSha,
+      trigger: 'manual',
+      commentId: 987654,
+    };
+
+    try {
+      const first = await stateStore.claimReview({
+        deliveryId: 'manual-delivery-concurrent-seed',
+        job: failedJob,
+        occurredAt: '2026-08-25T00:00:00.000Z',
+      });
+      if (first.kind !== 'claimed') throw new Error('seed claim was not scheduled');
+      await stateStore.markSchedulingFailed({
+        runId: first.runId,
+        occurredAt: '2026-08-25T00:01:00.000Z',
+      });
+
+      const results = await Promise.all([
+        stateStore.claimReview({
+          deliveryId: 'manual-delivery-concurrent-a',
+          job: { ...failedJob, commentId: 987655 },
+          occurredAt: '2026-08-25T00:02:00.000Z',
+        }),
+        stateStore.claimReview({
+          deliveryId: 'manual-delivery-concurrent-b',
+          job: { ...failedJob, commentId: 987656 },
+          occurredAt: '2026-08-25T00:02:00.000Z',
+        }),
+      ]);
+
+      expect(results.filter((result) => result.kind === 'claimed')).toHaveLength(1);
+      expect(results.filter((result) => result.kind === 'existing')).toEqual([
+        { kind: 'existing', disposition: 'scheduled' },
+      ]);
+    } finally {
+      database.close();
+    }
+  });
+
+  it('preserves failed run history when the retry migration is applied forward', async () => {
+    const database = new SqliteD1Database(['0001_review_state.sql']);
+    const stateStore = createD1ReviewStateStore(database);
+    const job: ReviewJob = {
+      repositoryId: 11,
+      pullRequestNumber: 42,
+      installationId: 7,
+      baseSha: eligiblePrivatePullRequest.baseSha,
+      headSha: eligiblePrivatePullRequest.headSha,
+      trigger: 'manual',
+      commentId: 987654,
+    };
+
+    try {
+      const first = await stateStore.claimReview({
+        deliveryId: 'manual-delivery-before-migration',
+        job,
+        occurredAt: '2026-08-25T00:00:00.000Z',
+      });
+      if (first.kind !== 'claimed') throw new Error('seed claim was not scheduled');
+      await stateStore.markSchedulingFailed({
+        runId: first.runId,
+        occurredAt: '2026-08-25T00:01:00.000Z',
+      });
+
+      database.applyMigrations(['0002_allow_manual_retry.sql']);
+
+      const retry = await createD1ReviewStateStore(database).claimReview({
+        deliveryId: 'manual-delivery-after-migration',
+        job: { ...job, commentId: 987655 },
+        occurredAt: '2026-08-25T00:02:00.000Z',
+      });
+      expect(retry.kind).toBe('claimed');
+      if (retry.kind !== 'claimed') throw new Error('migrated retry was not scheduled');
+      expect(retry.runId).not.toBe(first.runId);
+      expect(await createD1ReviewStateStore(database).getRunOutcome(first.runId)).toMatchObject({
+        deliveryId: 'manual-delivery-before-migration',
+        status: 'failed',
+      });
+    } finally {
+      database.close();
+    }
+  });
+
   it('supersedes without publishing when the current head has changed', async () => {
     const stateStore = createInMemoryReviewStateStore();
     const reviews: ReviewPublicationPayload[] = [];
@@ -972,6 +1163,73 @@ describe('Review coordinator', () => {
         content: 'eyes',
       },
     ]);
+  });
+
+  it('schedules a fresh manual delivery after its same-head run failed', async () => {
+    const stateStore = createInMemoryReviewStateStore();
+    const scheduled: Array<{ job: ReviewJob; runId: string }> = [];
+    let attempts = 0;
+    let failedRunId = '';
+    const coordinator = createReviewCoordinator({
+      github: {
+        getPullRequest: async () => ({
+          repositoryVisibility: 'public',
+          baseRepositoryId: 11,
+          headRepositoryId: 99,
+          draft: false,
+          baseSha: '3333333333333333333333333333333333333333',
+          headSha: '4444444444444444444444444444444444444444',
+        }),
+        getCommenterPermission: async () => 'maintain',
+      },
+      stateStore,
+      scheduler: {
+        schedule: async (job, runId) => {
+          attempts += 1;
+          if (attempts === 1) {
+            failedRunId = runId;
+            throw new Error('workflow unavailable');
+          }
+          scheduled.push({ job, runId });
+        },
+      },
+    });
+
+    const first = await coordinator.handleReviewEvent({
+      deliveryId: 'delivery-manual-failed',
+      event: 'issue_comment',
+      action: 'created',
+      repositoryId: 11,
+      pullRequestNumber: 42,
+      installationId: 7,
+      commentId: 987654,
+      commenterLogin: 'maintainer',
+      command: '/ai-review',
+    });
+    const second = await coordinator.handleReviewEvent({
+      deliveryId: 'delivery-manual-retry',
+      event: 'issue_comment',
+      action: 'created',
+      repositoryId: 11,
+      pullRequestNumber: 42,
+      installationId: 7,
+      commentId: 987655,
+      commenterLogin: 'maintainer',
+      command: '/ai-review',
+    });
+
+    expect(first).toBe('failed');
+    expect(second).toBe('scheduled');
+    expect(scheduled).toHaveLength(1);
+    expect(await stateStore.getDeliveryOutcome('delivery-manual-failed')).toMatchObject({
+      status: 'failed',
+      headSha: '4444444444444444444444444444444444444444',
+    });
+    expect(await stateStore.getDeliveryOutcome('delivery-manual-retry')).toMatchObject({
+      status: 'scheduled',
+      headSha: '4444444444444444444444444444444444444444',
+    });
+    expect(scheduled[0]?.runId).not.toBe(failedRunId);
   });
 
   it('schedules once when a transient manual facts read recovers', async () => {

@@ -186,8 +186,24 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
              AND NOT EXISTS (
                SELECT 1 FROM review_runs
                WHERE repository_id = ? AND pull_request_number = ? AND head_sha = ?
-           )
-           ON CONFLICT(repository_id, pull_request_number, head_sha) DO NOTHING`,
+                 AND status IN ('scheduled', 'completed')
+             )
+             AND (
+               NOT EXISTS (
+                 SELECT 1 FROM review_runs
+                 WHERE repository_id = ? AND pull_request_number = ? AND head_sha = ?
+               )
+               OR (
+                 ? = 'manual'
+                 AND EXISTS (
+                   SELECT 1 FROM review_runs
+                   WHERE repository_id = ? AND pull_request_number = ? AND head_sha = ?
+                     AND status = 'failed'
+                 )
+               )
+             )
+           ON CONFLICT(repository_id, pull_request_number, head_sha)
+             WHERE status IN ('scheduled', 'completed') DO NOTHING`,
         )
         .bind(
           runId,
@@ -201,6 +217,13 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
           occurredAt,
           occurredAt,
           deliveryId,
+          job.repositoryId,
+          job.pullRequestNumber,
+          job.headSha,
+          job.repositoryId,
+          job.pullRequestNumber,
+          job.headSha,
+          job.trigger,
           job.repositoryId,
           job.pullRequestNumber,
           job.headSha,
@@ -256,13 +279,21 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
              status = COALESCE(
                (SELECT status FROM review_runs WHERE delivery_id = ?),
                (SELECT status FROM review_runs
-                WHERE repository_id = ? AND pull_request_number = ? AND head_sha = ?),
+                WHERE repository_id = ? AND pull_request_number = ? AND head_sha = ?
+                  AND status IN ('scheduled', 'completed')
+                ORDER BY created_at DESC LIMIT 1),
+               (SELECT status FROM review_runs
+                WHERE repository_id = ? AND pull_request_number = ? AND head_sha = ?
+                ORDER BY created_at DESC LIMIT 1),
                'ignored'
              ), updated_at = ?
            WHERE delivery_id = ? AND status = 'claiming'`,
         )
         .bind(
           deliveryId,
+          job.repositoryId,
+          job.pullRequestNumber,
+          job.headSha,
           job.repositoryId,
           job.pullRequestNumber,
           job.headSha,
