@@ -198,7 +198,14 @@ class SchedulingFailed extends Schema.TaggedError<SchedulingFailed>()('Schedulin
   message: Schema.String,
 }) {}
 
-const MaintainerPermission = Schema.Literals(['write', 'maintain', 'admin']);
+const CommenterPermission = Schema.Literals([
+  'none',
+  'read',
+  'triage',
+  'write',
+  'maintain',
+  'admin',
+]);
 
 const isAutomaticEligible = (event: Extract<ReviewEvent, { event: 'pull_request' }>) =>
   !event.draft &&
@@ -585,52 +592,66 @@ const createAutomaticCoordinator = (stateStore: ReviewStateStore, scheduler: Rev
     );
   });
 
-const loadPullRequest = (
-  github: GitHubAdapter,
-  event: Extract<ReviewEvent, { event: 'issue_comment' }>,
-) =>
-  Effect.tryPromise({
-    try: async () =>
-      github.getPullRequest
-        ? github.getPullRequest({
-            repositoryId: event.repositoryId,
-            pullRequestNumber: event.pullRequestNumber,
-            installationId: event.installationId,
-          })
-        : undefined,
-    catch: () => undefined,
-  }).pipe(
-    Effect.flatMap((value) =>
-      value === undefined
-        ? Effect.succeed(undefined)
-        : Schema.decodeUnknownEffect(PullRequestFacts)(value),
-    ),
-    Effect.catch(() => Effect.succeed(undefined)),
-  );
+type ManualRead<T> =
+  | { readonly kind: 'value'; readonly value: T }
+  | { readonly kind: 'missing' }
+  | { readonly kind: 'uncertain' };
 
-const loadPermission = (
+const readManualPolicyWithRetry = async <T>(
+  read: () => Promise<unknown>,
+  schema: Schema.ConstraintDecoder<T>,
+): Promise<ManualRead<T>> => {
+  const readOnce = async (): Promise<ManualRead<T>> => {
+    let value: unknown;
+    try {
+      value = await read();
+    } catch {
+      return { kind: 'uncertain' };
+    }
+
+    if (value === undefined) return { kind: 'missing' };
+
+    try {
+      return { kind: 'value', value: await Schema.decodeUnknownPromise(schema)(value) };
+    } catch {
+      return { kind: 'uncertain' };
+    }
+  };
+
+  const first = await readOnce();
+  return first.kind === 'uncertain' ? readOnce() : first;
+};
+
+const loadPullRequestWithRetry = (
   github: GitHubAdapter,
   event: Extract<ReviewEvent, { event: 'issue_comment' }>,
 ) =>
-  Effect.tryPromise({
-    try: async () =>
-      github.getCommenterPermission
-        ? github.getCommenterPermission({
-            repositoryId: event.repositoryId,
-            pullRequestNumber: event.pullRequestNumber,
-            installationId: event.installationId,
-            commenterLogin: event.commenterLogin,
-          })
-        : undefined,
-    catch: () => undefined,
-  }).pipe(
-    Effect.flatMap((value) =>
-      value === undefined
-        ? Effect.succeed(undefined)
-        : Schema.decodeUnknownEffect(MaintainerPermission)(value),
-    ),
-    Effect.catch(() => Effect.succeed(undefined)),
-  );
+  readManualPolicyWithRetry(async () => {
+    if (github.getPullRequest === undefined) {
+      throw new Error('Pull request facts adapter is unavailable');
+    }
+    return github.getPullRequest({
+      repositoryId: event.repositoryId,
+      pullRequestNumber: event.pullRequestNumber,
+      installationId: event.installationId,
+    });
+  }, PullRequestFacts);
+
+const loadPermissionWithRetry = (
+  github: GitHubAdapter,
+  event: Extract<ReviewEvent, { event: 'issue_comment' }>,
+) =>
+  readManualPolicyWithRetry(async () => {
+    if (github.getCommenterPermission === undefined) {
+      throw new Error('Commenter permission adapter is unavailable');
+    }
+    return github.getCommenterPermission({
+      repositoryId: event.repositoryId,
+      pullRequestNumber: event.pullRequestNumber,
+      installationId: event.installationId,
+      commenterLogin: event.commenterLogin,
+    });
+  }, CommenterPermission);
 
 const createManualCoordinator = (
   github: GitHubAdapter,
@@ -640,10 +661,35 @@ const createManualCoordinator = (
   Effect.fn('handleManualReviewEvent')(function* (
     event: Extract<ReviewEvent, { event: 'issue_comment' }>,
   ) {
-    const facts = yield* loadPullRequest(github, event);
-    const permission = yield* loadPermission(github, event);
+    const factsRead = yield* Effect.tryPromise({
+      try: () => loadPullRequestWithRetry(github, event),
+      catch: () => new SchedulingFailed({ message: 'Pull request facts are uncertain' }),
+    });
+    if (factsRead.kind === 'uncertain') {
+      return yield* new SchedulingFailed({ message: 'Pull request facts are uncertain' });
+    }
 
-    if (facts === undefined || permission === undefined || facts.draft) {
+    const facts = factsRead.kind === 'value' ? factsRead.value : undefined;
+    let permission: typeof CommenterPermission.Type | undefined;
+    if (facts !== undefined && !facts.draft) {
+      const permissionRead = yield* Effect.tryPromise({
+        try: () => loadPermissionWithRetry(github, event),
+        catch: () => new SchedulingFailed({ message: 'Commenter permission is uncertain' }),
+      });
+      if (permissionRead.kind === 'uncertain') {
+        return yield* new SchedulingFailed({ message: 'Commenter permission is uncertain' });
+      }
+      permission = permissionRead.kind === 'value' ? permissionRead.value : undefined;
+    }
+
+    if (
+      facts === undefined ||
+      permission === undefined ||
+      permission === 'none' ||
+      permission === 'read' ||
+      permission === 'triage' ||
+      facts.draft
+    ) {
       const occurredAt = yield* currentIso;
       yield* recordDelivery(stateStore, {
         deliveryId: event.deliveryId,

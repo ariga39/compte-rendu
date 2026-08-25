@@ -863,6 +863,55 @@ describe('Review coordinator', () => {
     ]);
   });
 
+  it('schedules once when a transient manual facts read recovers', async () => {
+    const scheduled: ReviewJob[] = [];
+    let transient = true;
+    const coordinator = createReviewCoordinator({
+      github: {
+        getPullRequest: async () => {
+          if (transient) {
+            transient = false;
+            throw new Error('temporary GitHub read failure');
+          }
+          return {
+            repositoryVisibility: 'public',
+            baseRepositoryId: 11,
+            headRepositoryId: 99,
+            draft: false,
+            baseSha: '3333333333333333333333333333333333333333',
+            headSha: '4444444444444444444444444444444444444444',
+          };
+        },
+        getCommenterPermission: async () => 'maintain',
+      },
+      stateStore: createInMemoryReviewStateStore(),
+      scheduler: {
+        schedule: async (job) => {
+          scheduled.push(job);
+        },
+      },
+    });
+
+    const disposition = await coordinator.handleReviewEvent({
+      deliveryId: 'delivery-manual-transient-facts',
+      event: 'issue_comment',
+      action: 'created',
+      repositoryId: 11,
+      pullRequestNumber: 42,
+      installationId: 7,
+      commenterLogin: 'maintainer',
+      command: '/ai-review',
+    });
+
+    expect(disposition).toBe('scheduled');
+    expect(scheduled).toHaveLength(1);
+    expect(scheduled[0]).toMatchObject({
+      baseSha: '3333333333333333333333333333333333333333',
+      headSha: '4444444444444444444444444444444444444444',
+      trigger: 'manual',
+    });
+  });
+
   it('claims a manual review only with approval bound to the current head SHA', async () => {
     const scheduled: ReviewJob[] = [];
     const recordedDeliveries = new Map<string, string>();
@@ -1104,7 +1153,7 @@ describe('Review coordinator', () => {
     }
   });
 
-  it('does not schedule when current pull request facts contain an invalid SHA', async () => {
+  it('fails closed when current pull request facts contain an invalid SHA', async () => {
     for (const headSha of ['', 'not-a-github-sha']) {
       const scheduled: ReviewJob[] = [];
       const coordinator = createReviewCoordinator({
@@ -1138,7 +1187,7 @@ describe('Review coordinator', () => {
         command: '/ai-review',
       });
 
-      expect(disposition).toBe('awaiting approval');
+      expect(disposition).toBe('failed');
       expect(scheduled).toEqual([]);
     }
   });
