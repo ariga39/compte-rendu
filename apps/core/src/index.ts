@@ -12,7 +12,7 @@ import {
   type CloudflareSandboxBindings,
   type LeaseNamespaceLike,
 } from './cloudflare-review-adapter';
-import { createReviewRunner } from './review-run';
+import { createReviewRunner, ReviewRunOutput } from './review-run';
 
 export { ReviewLeaseDurableObject } from './cloudflare-review-adapter';
 export {
@@ -22,6 +22,8 @@ export {
   OPENCODE_VERSION,
   REVIEW_DIRECTORY,
 } from './cloudflare-review-adapter';
+export { createGitHubPublicationAdapter } from './github-review-adapter';
+export type { GitHubPublicationAdapterOptions } from './github-review-adapter';
 export * from './review-run';
 
 type GitHubShaValue = typeof GitHubSha.Type;
@@ -104,10 +106,18 @@ export interface ReviewStateStore {
 }
 
 export interface ReviewStateQueries {
-  markRunCompleted(input: { runId: string; occurredAt: string }): Promise<void>;
+  markRunCompleted(input: { runId: string; occurredAt: string }): Promise<boolean>;
+  markRunSuperseded(input: { runId: string; occurredAt: string }): Promise<boolean>;
+  completeRunPublication(input: {
+    runId: string;
+    occurredAt: string;
+    fingerprints: readonly string[];
+  }): Promise<boolean>;
   getDeliveryOutcome(deliveryId: string): Promise<ReviewOutcome | undefined>;
   getRunOutcome(runId: string): Promise<ReviewOutcome | undefined>;
 }
+
+export type ReviewPublicationStateStore = ReviewStateStore & ReviewStateQueries;
 
 export interface ReviewScheduler {
   schedule(job: ReviewJob, runId: string): Promise<void>;
@@ -125,10 +135,45 @@ export interface GitHubAdapter {
     installationId: number;
     commenterLogin: string;
   }): Promise<unknown>;
+  loadReviewTarget?(input: {
+    repositoryId: number;
+    pullRequestNumber: number;
+    installationId: number;
+  }): Promise<unknown>;
+  findReviewByMarker?(input: {
+    repositoryId: number;
+    pullRequestNumber: number;
+    installationId: number;
+    marker: string;
+  }): Promise<unknown>;
+  createReview?(input: {
+    repositoryId: number;
+    pullRequestNumber: number;
+    payload: ReviewPublicationPayload;
+  }): Promise<ReviewPublicationCreateResult>;
 }
+
+export interface ReviewPublicationPayload {
+  readonly event: 'COMMENT';
+  readonly commit_id: GitHubShaValue;
+  readonly body: string;
+  readonly comments: readonly ReviewPublicationComment[];
+}
+
+export interface ReviewPublicationComment {
+  readonly path: string;
+  readonly line: number;
+  readonly side: 'RIGHT';
+  readonly body: string;
+}
+
+export type ReviewPublicationCreateResult =
+  | { readonly kind: 'created'; readonly review: unknown }
+  | { readonly kind: 'stale'; readonly currentHeadSha: GitHubShaValue };
 
 export interface ReviewCoordinator {
   handleReviewEvent(event: unknown): Promise<ReviewDisposition>;
+  completeReview(input: { runId: string; output: unknown }): Promise<ReviewDisposition>;
 }
 
 export interface CoreEnv extends CloudflareSandboxBindings {
@@ -181,6 +226,258 @@ const jobForFacts = (
 });
 
 const currentIso = DateTime.now.pipe(Effect.map(DateTime.formatIso));
+
+const ReviewPublicationTarget = Schema.Struct({
+  headSha: GitHubSha,
+  files: Schema.Array(
+    Schema.Struct({
+      path: Schema.NonEmptyString,
+      patch: Schema.optional(Schema.NullOr(Schema.String)),
+    }),
+  ),
+});
+
+const ReviewPublicationCreateResult = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal('created'), review: Schema.Unknown }),
+  Schema.Struct({ kind: Schema.Literal('stale'), currentHeadSha: GitHubSha }),
+]);
+
+type ReviewPublicationTarget = typeof ReviewPublicationTarget.Type;
+
+const rightLinesForPatch = (patch: string): ReadonlySet<number> => {
+  const rightLines = new Set<number>();
+  let rightLine: number | undefined;
+
+  for (const line of patch.split(/\r?\n/)) {
+    const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+    if (hunk !== null) {
+      rightLine = Number(hunk[1]);
+      continue;
+    }
+
+    if (line.startsWith('+++') && rightLine === undefined) continue;
+    if (rightLine === undefined || line.startsWith('\\')) continue;
+    if (line.startsWith('+')) {
+      rightLines.add(rightLine);
+      rightLine += 1;
+    } else if (line.startsWith(' ')) {
+      rightLines.add(rightLine);
+      rightLine += 1;
+    } else if (line.startsWith('-')) {
+      continue;
+    }
+  }
+
+  return rightLines;
+};
+
+const publicationComments = (
+  output: typeof ReviewRunOutput.Type,
+  target: ReviewPublicationTarget,
+): readonly ReviewPublicationComment[] => {
+  const comments: ReviewPublicationComment[] = [];
+  const seen = new Set<string>();
+
+  for (const finding of output.findings) {
+    const file = target.files.find((candidate) => candidate.path === finding.path);
+    if (file === undefined || file.patch === undefined || file.patch === null) continue;
+    if (!rightLinesForPatch(file.patch).has(finding.line)) continue;
+
+    const fingerprint = `${finding.path}\u0000${finding.line}\u0000${finding.message}`;
+    if (seen.has(fingerprint)) continue;
+    seen.add(fingerprint);
+    comments.push({ path: finding.path, line: finding.line, side: 'RIGHT', body: finding.message });
+    if (comments.length === 5) break;
+  }
+
+  return comments;
+};
+
+type ReviewCompletionStateStore = ReviewStateStore & Partial<ReviewStateQueries>;
+
+const completeReviewEffect = Effect.fn('completeReview')(function* (
+  input: { runId: string; output: unknown },
+  github: GitHubAdapter,
+  stateStore: ReviewCompletionStateStore,
+) {
+  if (stateStore.getRunOutcome === undefined || stateStore.markRunCompleted === undefined) {
+    return 'failed' as const;
+  }
+
+  const occurredAt = yield* currentIso;
+  const getRunOutcome = stateStore.getRunOutcome;
+  const markRunCompleted = stateStore.markRunCompleted;
+  if (getRunOutcome === undefined || markRunCompleted === undefined) {
+    return 'failed' as const;
+  }
+  const completeRun = (fingerprints: readonly string[]) =>
+    Effect.tryPromise({
+      try: () =>
+        stateStore.completeRunPublication === undefined
+          ? markRunCompleted({ runId: input.runId, occurredAt })
+          : stateStore.completeRunPublication({
+              runId: input.runId,
+              occurredAt,
+              fingerprints,
+            }),
+      catch: () => undefined,
+    }).pipe(Effect.catch(() => Effect.succeed(false)));
+  const outcome = yield* Effect.tryPromise({
+    try: () => getRunOutcome(input.runId),
+    catch: () => undefined,
+  }).pipe(Effect.catch(() => Effect.succeed(undefined)));
+
+  if (outcome === undefined) return 'failed' as const;
+  if (outcome.status === 'completed') return 'completed' as const;
+  if (outcome.status === 'superseded') return 'ignored' as const;
+  if (outcome.status === 'failed') return 'failed' as const;
+  if (outcome.status !== 'scheduled') return 'failed' as const;
+
+  const decodedOutput = yield* Schema.decodeUnknownEffect(ReviewRunOutput)(input.output).pipe(
+    Effect.catch(() => Effect.succeed(undefined)),
+  );
+  if (decodedOutput === undefined) {
+    yield* Effect.tryPromise({
+      try: () => stateStore.markSchedulingFailed?.({ runId: input.runId, occurredAt }),
+      catch: () => undefined,
+    });
+    return 'failed' as const;
+  }
+
+  if (
+    github.loadReviewTarget === undefined ||
+    github.createReview === undefined ||
+    outcome.baseSha === null ||
+    outcome.headSha === null
+  ) {
+    yield* Effect.tryPromise({
+      try: () => stateStore.markSchedulingFailed?.({ runId: input.runId, occurredAt }),
+      catch: () => undefined,
+    });
+    return 'failed' as const;
+  }
+
+  const target = yield* Effect.tryPromise({
+    try: () =>
+      github.loadReviewTarget!({
+        repositoryId: outcome.repositoryId,
+        pullRequestNumber: outcome.pullRequestNumber,
+        installationId: outcome.installationId,
+      }),
+    catch: () => undefined,
+  }).pipe(
+    Effect.flatMap((value) =>
+      value === undefined
+        ? Effect.succeed(undefined)
+        : Schema.decodeUnknownEffect(ReviewPublicationTarget)(value).pipe(
+            Effect.catch(() => Effect.succeed(undefined)),
+          ),
+    ),
+    Effect.catch(() => Effect.succeed(undefined)),
+  );
+
+  if (target !== undefined && target.headSha !== outcome.headSha) {
+    if (stateStore.markRunSuperseded === undefined) return 'failed' as const;
+    const superseded = yield* Effect.tryPromise({
+      try: () => stateStore.markRunSuperseded!({ runId: input.runId, occurredAt }),
+      catch: () => undefined,
+    }).pipe(Effect.catch(() => Effect.succeed(false)));
+    return superseded ? ('ignored' as const) : ('failed' as const);
+  }
+
+  if (target === undefined) {
+    yield* Effect.tryPromise({
+      try: () => stateStore.markSchedulingFailed?.({ runId: input.runId, occurredAt }),
+      catch: () => undefined,
+    });
+    return 'failed' as const;
+  }
+
+  const marker = `<!-- compte-rendu:run:${input.runId} -->`;
+  const comments = publicationComments(decodedOutput, target);
+  const lookupMarker = () =>
+    github.findReviewByMarker === undefined
+      ? Effect.succeed({ ok: true as const, review: undefined })
+      : Effect.tryPromise({
+          try: () =>
+            github.findReviewByMarker!({
+              repositoryId: outcome.repositoryId,
+              pullRequestNumber: outcome.pullRequestNumber,
+              installationId: outcome.installationId,
+              marker,
+            }),
+          catch: () => undefined,
+        }).pipe(
+          Effect.map((review) => ({ ok: true as const, review })),
+          Effect.catch(() => Effect.succeed({ ok: false as const })),
+        );
+
+  const markerLookup = yield* lookupMarker();
+  if (!markerLookup.ok) {
+    yield* Effect.tryPromise({
+      try: () => stateStore.markSchedulingFailed?.({ runId: input.runId, occurredAt }),
+      catch: () => undefined,
+    });
+    return 'failed' as const;
+  }
+
+  if (markerLookup.review !== undefined) {
+    const completed = yield* completeRun(
+      comments.map((comment) => `${comment.path}\u0000${comment.line}\u0000${comment.body}`),
+    );
+    return completed ? ('completed' as const) : ('failed' as const);
+  }
+
+  const payload: ReviewPublicationPayload = {
+    event: 'COMMENT',
+    commit_id: outcome.headSha,
+    body: `${marker}\n${decodedOutput.summary}`,
+    comments,
+  };
+
+  const publication = yield* Effect.tryPromise({
+    try: () =>
+      github.createReview!({
+        repositoryId: outcome.repositoryId,
+        pullRequestNumber: outcome.pullRequestNumber,
+        payload,
+      }),
+    catch: () => undefined,
+  }).pipe(
+    Effect.flatMap((value) =>
+      Schema.decodeUnknownEffect(ReviewPublicationCreateResult)(value).pipe(
+        Effect.catch(() => Effect.succeed(undefined)),
+      ),
+    ),
+    Effect.catch(() => Effect.succeed(false)),
+  );
+  if (typeof publication === 'object' && publication !== null && publication.kind === 'stale') {
+    if (stateStore.markRunSuperseded === undefined) return 'failed' as const;
+    const superseded = yield* Effect.tryPromise({
+      try: () => stateStore.markRunSuperseded!({ runId: input.runId, occurredAt }),
+      catch: () => undefined,
+    }).pipe(Effect.catch(() => Effect.succeed(false)));
+    return superseded ? ('ignored' as const) : ('failed' as const);
+  }
+  if (publication === false || publication === undefined) {
+    const recoveredLookup = yield* lookupMarker();
+    if (recoveredLookup.ok && recoveredLookup.review !== undefined) {
+      const completed = yield* completeRun(
+        comments.map((comment) => `${comment.path}\u0000${comment.line}\u0000${comment.body}`),
+      );
+      return completed ? ('completed' as const) : ('failed' as const);
+    }
+    yield* Effect.tryPromise({
+      try: () => stateStore.markSchedulingFailed?.({ runId: input.runId, occurredAt }),
+      catch: () => undefined,
+    });
+    return 'failed' as const;
+  }
+  const completed = yield* completeRun(
+    comments.map((comment) => `${comment.path}\u0000${comment.line}\u0000${comment.body}`),
+  );
+  return completed ? ('completed' as const) : ('failed' as const);
+});
 
 const schedule = (scheduler: ReviewScheduler, job: ReviewJob, runId: string) =>
   Schema.decodeUnknownEffect(ReviewJob)(job).pipe(
@@ -390,21 +687,64 @@ const reviewEventEffect = (
     return yield* createManualCoordinator(github, stateStore, scheduler)(decoded);
   });
 
-export const createInMemoryReviewStateStore = (): ReviewStateStore => {
-  const deliveries = new Map<string, ReviewDisposition>();
-  const runs = new Map<string, { job: ReviewJob; status: ReviewRunStatus; deliveryId: string }>();
+export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore => {
+  const deliveries = new Map<string, ReviewOutcome>();
+  const runs = new Map<
+    string,
+    {
+      job: ReviewJob;
+      status: ReviewRunStatus;
+      deliveryId: string;
+      createdAt: string;
+      updatedAt: string;
+    }
+  >();
   let nextRunId = 1;
 
+  const dispositionForStatus = (status: ReviewStoredStatus): ReviewDisposition => {
+    switch (status) {
+      case 'failed':
+        return 'failed';
+      case 'completed':
+        return 'completed';
+      case 'scheduled':
+        return 'scheduled';
+      case 'awaiting approval':
+        return 'awaiting approval';
+      case 'superseded':
+      case 'claiming':
+      case 'ignored':
+      case 'rejected':
+        return 'ignored';
+    }
+  };
+
+  const setDeliveryStatus = (deliveryId: string, status: ReviewStoredStatus, updatedAt: string) => {
+    const delivery = deliveries.get(deliveryId);
+    if (delivery !== undefined) deliveries.set(deliveryId, { ...delivery, status, updatedAt });
+  };
+
   return {
-    recordDelivery: async ({ deliveryId, status }) => {
-      if (!deliveries.has(deliveryId)) {
-        deliveries.set(deliveryId, status);
+    recordDelivery: async (input) => {
+      if (!deliveries.has(input.deliveryId)) {
+        deliveries.set(input.deliveryId, {
+          deliveryId: input.deliveryId,
+          installationId: input.installationId,
+          repositoryId: input.repositoryId,
+          pullRequestNumber: input.pullRequestNumber,
+          baseSha: input.baseSha,
+          headSha: input.headSha,
+          trigger: input.trigger,
+          status: input.status,
+          createdAt: input.occurredAt,
+          updatedAt: input.occurredAt,
+        });
       }
     },
-    claimReview: async ({ deliveryId, job }) => {
+    claimReview: async ({ deliveryId, job, occurredAt }) => {
       const previous = deliveries.get(deliveryId);
       if (previous !== undefined) {
-        return { kind: 'replay', disposition: previous };
+        return { kind: 'replay', disposition: dispositionForStatus(previous.status) };
       }
 
       const existing = [...runs.values()].find(
@@ -414,15 +754,19 @@ export const createInMemoryReviewStateStore = (): ReviewStateStore => {
           run.job.headSha === job.headSha,
       );
       if (existing !== undefined) {
-        const disposition =
-          existing.status === 'failed'
-            ? 'failed'
-            : existing.status === 'completed'
-              ? 'completed'
-              : existing.status === 'superseded'
-                ? 'ignored'
-                : 'scheduled';
-        deliveries.set(deliveryId, disposition);
+        const disposition = dispositionForStatus(existing.status);
+        deliveries.set(deliveryId, {
+          deliveryId,
+          installationId: job.installationId,
+          repositoryId: job.repositoryId,
+          pullRequestNumber: job.pullRequestNumber,
+          baseSha: job.baseSha,
+          headSha: job.headSha,
+          trigger: job.trigger,
+          status: existing.status,
+          createdAt: occurredAt,
+          updatedAt: occurredAt,
+        });
         return { kind: 'existing', disposition };
       }
 
@@ -434,28 +778,86 @@ export const createInMemoryReviewStateStore = (): ReviewStateStore => {
           run.job.headSha !== job.headSha
         ) {
           run.status = 'superseded';
-          deliveries.set(run.deliveryId, 'ignored');
+          run.updatedAt = occurredAt;
+          setDeliveryStatus(run.deliveryId, 'superseded', occurredAt);
         }
       }
 
       const runId = `run-${nextRunId++}`;
-      runs.set(runId, { deliveryId, job, status: 'scheduled' });
-      deliveries.set(deliveryId, 'scheduled');
+      runs.set(runId, {
+        deliveryId,
+        job,
+        status: 'scheduled',
+        createdAt: occurredAt,
+        updatedAt: occurredAt,
+      });
+      deliveries.set(deliveryId, {
+        deliveryId,
+        installationId: job.installationId,
+        repositoryId: job.repositoryId,
+        pullRequestNumber: job.pullRequestNumber,
+        baseSha: job.baseSha,
+        headSha: job.headSha,
+        trigger: job.trigger,
+        status: 'scheduled',
+        createdAt: occurredAt,
+        updatedAt: occurredAt,
+      });
       return { kind: 'claimed', runId };
     },
-    markSchedulingFailed: async ({ runId }) => {
+    markSchedulingFailed: async ({ runId, occurredAt }) => {
       const run = runs.get(runId);
-      if (run !== undefined) {
+      if (run !== undefined && run.status === 'scheduled') {
         run.status = 'failed';
-        deliveries.set(run.deliveryId, 'failed');
+        run.updatedAt = occurredAt;
+        setDeliveryStatus(run.deliveryId, 'failed', occurredAt);
       }
+    },
+    markRunCompleted: async ({ runId, occurredAt }) => {
+      const run = runs.get(runId);
+      if (run !== undefined && run.status === 'scheduled') {
+        run.status = 'completed';
+        run.updatedAt = occurredAt;
+        setDeliveryStatus(run.deliveryId, 'completed', occurredAt);
+        return true;
+      }
+      return false;
+    },
+    markRunSuperseded: async ({ runId, occurredAt }) => {
+      const run = runs.get(runId);
+      if (run !== undefined && run.status === 'scheduled') {
+        run.status = 'superseded';
+        run.updatedAt = occurredAt;
+        setDeliveryStatus(run.deliveryId, 'superseded', occurredAt);
+        return true;
+      }
+      return false;
+    },
+    completeRunPublication: async ({ runId, occurredAt }) => {
+      const run = runs.get(runId);
+      if (run !== undefined && run.status === 'scheduled') {
+        run.status = 'completed';
+        run.updatedAt = occurredAt;
+        setDeliveryStatus(run.deliveryId, 'completed', occurredAt);
+        return true;
+      }
+      return false;
+    },
+    getDeliveryOutcome: async (deliveryId) => deliveries.get(deliveryId),
+    getRunOutcome: async (runId) => {
+      const run = runs.get(runId);
+      if (run === undefined) return undefined;
+      const delivery = deliveries.get(run.deliveryId);
+      return delivery === undefined
+        ? undefined
+        : { ...delivery, status: run.status, updatedAt: run.updatedAt };
     },
   };
 };
 
 export function createReviewCoordinator(dependencies: {
   github: GitHubAdapter;
-  stateStore: ReviewStateStore;
+  stateStore: ReviewCompletionStateStore;
   scheduler: ReviewScheduler;
 }): ReviewCoordinator {
   return {
@@ -474,6 +876,10 @@ export function createReviewCoordinator(dependencies: {
 
         return 'failed' as const;
       }),
+    completeReview: async (input) =>
+      Effect.runPromise(
+        completeReviewEffect(input, dependencies.github, dependencies.stateStore),
+      ).catch(() => 'failed' as const),
   };
 }
 
