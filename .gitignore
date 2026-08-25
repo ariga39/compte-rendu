@@ -5,6 +5,7 @@ node_modules/
 dist/
 .wrangler/
 .vite/
+tests/runtime/.generated/
 coverage/
 .env
 .env.*
