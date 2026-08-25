@@ -20,9 +20,11 @@ describe('Wrangler deployment wiring', () => {
     const ingress = readConfig('apps/ingress/wrangler.jsonc');
 
     expect(core).toContain('"workers_dev": false');
+    expect(core).toContain('"name": "petit-chiba-core"');
     expect(core).toContain('"binding": "REVIEW_DB"');
-    expect(core).toContain('"database_name": "compte-rendu-review-state"');
+    expect(core).toContain('"database_name": "petit-chiba-review-state"');
     expect(core).toContain('"binding": "REVIEW_WORKFLOW"');
+    expect(core).toContain('"name": "petit-chiba-review"');
     expect(core).toContain('"class_name": "ReviewWorkflow"');
     expect(core).toContain('"class_name": "Sandbox"');
     expect(core).toContain('"class_name": "ReviewLeaseDurableObject"');
@@ -34,8 +36,9 @@ describe('Wrangler deployment wiring', () => {
     expect(core).not.toMatch(/"database_id": "\d+"/);
 
     expect(ingress).toContain('"workers_dev": true');
+    expect(ingress).toContain('"name": "petit-chiba-ingress"');
     expect(ingress).toContain('"binding": "CORE"');
-    expect(ingress).toContain('"service": "compte-rendu-core"');
+    expect(ingress).toContain('"service": "petit-chiba-core"');
     expect(ingress).toContain('WEBHOOK_SECRET');
   });
 

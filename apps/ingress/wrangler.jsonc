@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "compte-rendu-ingress",
+  "name": "petit-chiba-ingress",
   "main": "src/index.ts",
   "compatibility_date": "2026-08-25",
   "workers_dev": true,
@@ -10,7 +10,7 @@
   "services": [
     {
       "binding": "CORE",
-      "service": "compte-rendu-core",
+      "service": "petit-chiba-core",
     },
   ],
 }

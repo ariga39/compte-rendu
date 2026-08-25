@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "compte-rendu-core",
+  "name": "petit-chiba-core",
   "main": "src/worker.ts",
   "compatibility_date": "2026-08-25",
   "workers_dev": false,
@@ -13,7 +13,7 @@
   "d1_databases": [
     {
       "binding": "REVIEW_DB",
-      "database_name": "compte-rendu-review-state",
+      "database_name": "petit-chiba-review-state",
       "database_id": "REPLACE_WITH_D1_DATABASE_ID",
       "migrations_dir": "migrations",
     },
@@ -21,7 +21,7 @@
   "workflows": [
     {
       "binding": "REVIEW_WORKFLOW",
-      "name": "compte-rendu-review",
+      "name": "petit-chiba-review",
       "class_name": "ReviewWorkflow",
     },
   ],
