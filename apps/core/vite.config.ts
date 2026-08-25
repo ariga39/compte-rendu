@@ -10,5 +10,8 @@ export default defineConfig({
     outDir: 'dist',
     emptyOutDir: true,
     sourcemap: true,
+    rollupOptions: {
+      external: ['@cloudflare/sandbox', 'cloudflare:workers'],
+    },
   },
 });

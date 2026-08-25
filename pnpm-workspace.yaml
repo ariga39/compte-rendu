@@ -16,6 +16,7 @@ minimumReleaseAgeExclude:
   - '@voidzero-dev/vite-plus-win32-arm64-msvc@0.3.0'
   - '@voidzero-dev/vite-plus-win32-x64-msvc@0.3.0'
   - vite-plus@0.3.0
+  - '@cloudflare/sandbox@0.12.8'
 
 overrides:
   vite: npm:@voidzero-dev/vite-plus-core@0.3.0

@@ -1,0 +1,383 @@
+import { DateTime, Effect, Option, Schema } from 'effect';
+import type {
+  ReviewAgentResult,
+  ReviewCheckoutResult,
+  ReviewLeaseAdapter,
+  ReviewLeaseHandle,
+  ReviewSandbox,
+  ReviewSandboxAdapter,
+} from './review-run';
+
+export const OPENCODE_VERSION = '1.18.22';
+export const OPENCODE_MODEL = 'openai/gpt-5';
+export const REVIEW_DIRECTORY = '/workspace/compte-rendu-review';
+
+const ASKPASS_PATH = '/tmp/compte-rendu-git-askpass';
+const OPENCODE_CONFIG_PATH = '/tmp/compte-rendu-opencode-config.json';
+const AGENT_TIMEOUT_MS = 10 * 60 * 1000;
+
+const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+
+const askpassScript =
+  '#!/bin/sh\ncase "$1" in *[Uu]sername*) printf \'%s\\n\' x-access-token ;; *) printf \'%s\\n\' "$CHECKOUT_TOKEN" ;; esac\n';
+
+export interface ReviewSandboxExecResult {
+  readonly success: boolean;
+  readonly exitCode: number;
+  readonly stdout: string;
+  readonly stderr: string;
+}
+
+export interface ReviewSandboxRaw {
+  readonly writeFile: (path: string, content: string) => Promise<unknown>;
+  readonly exec: (
+    command: string,
+    options?: {
+      readonly cwd?: string;
+      readonly env?: Readonly<Record<string, string | undefined>>;
+      readonly timeout?: number;
+    },
+  ) => Promise<ReviewSandboxExecResult>;
+  readonly destroy: () => Promise<void>;
+}
+
+const checkoutCommand = (input: {
+  readonly repositoryUrl: string;
+  readonly baseSha: string;
+  readonly headSha: string;
+}) =>
+  [
+    'set -eu',
+    `chmod 700 ${ASKPASS_PATH}`,
+    `git -c core.hooksPath=/dev/null -c submodule.recurse=false -c filter.lfs.smudge=: clone --quiet --no-checkout --no-recurse-submodules ${shellQuote(input.repositoryUrl)} ${REVIEW_DIRECTORY}`,
+    `git -C ${REVIEW_DIRECTORY} config --local core.hooksPath /dev/null`,
+    `GIT_LFS_SKIP_SMUDGE=1 git -C ${REVIEW_DIRECTORY} -c core.hooksPath=/dev/null -c submodule.recurse=false fetch --quiet --no-tags origin ${shellQuote(input.baseSha)} ${shellQuote(input.headSha)}`,
+    `git -C ${REVIEW_DIRECTORY} -c core.hooksPath=/dev/null -c submodule.recurse=false checkout --quiet --detach ${shellQuote(input.headSha)}`,
+    `git -C ${REVIEW_DIRECTORY} rev-parse ${shellQuote(`${input.baseSha}^{commit}`)} ${shellQuote('HEAD^{commit}')}`,
+  ].join(' && ');
+
+const credentialCleanupCommand = [
+  'set -eu',
+  `git -C ${REVIEW_DIRECTORY} remote remove origin`,
+  `git -C ${REVIEW_DIRECTORY} config --local --unset-all credential.helper || true`,
+  `git -C ${REVIEW_DIRECTORY} config --local --unset-all core.askPass || true`,
+  `rm -f ${ASKPASS_PATH}`,
+].join(' && ');
+
+const trustedAgentConfig = JSON.stringify({
+  agent: {
+    review: {
+      description: 'Read-only pull request reviewer',
+      mode: 'primary',
+      permission: {
+        bash: 'deny',
+        edit: 'deny',
+        external_directory: 'deny',
+        webfetch: 'deny',
+      },
+    },
+  },
+});
+
+const agentCommand =
+  `opencode --pure run --model ${OPENCODE_MODEL} --agent review --dir ${REVIEW_DIRECTORY} --format json ` +
+  shellQuote(
+    'Review the checked-out pull request. Return exactly one JSON object with this shape: ' +
+      '{"findings":[{"path":"string","line":0,"message":"string"}],"summary":"string"}. ' +
+      'Do not run repository build, test, hooks, plugins, MCP, or project configuration.',
+  );
+
+const checkoutEnvironment = (checkoutToken: string): Readonly<Record<string, string>> => ({
+  CHECKOUT_TOKEN: checkoutToken,
+  GIT_TERMINAL_PROMPT: '0',
+  GIT_ASKPASS: ASKPASS_PATH,
+  GIT_LFS_SKIP_SMUDGE: '1',
+  GIT_CONFIG_NOSYSTEM: '1',
+});
+
+const agentEnvironment = (modelCredential: string): Readonly<Record<string, string>> => ({
+  OPENAI_API_KEY: modelCredential,
+  OPENCODE_CONFIG: OPENCODE_CONFIG_PATH,
+  OPENCODE_DISABLE_PROJECT_CONFIG: '1',
+  HOME: '/tmp/compte-rendu-opencode-home',
+  XDG_CONFIG_HOME: '/tmp/compte-rendu-opencode-xdg',
+});
+
+const parseCheckoutResult = (stdout: string): ReviewCheckoutResult => {
+  const commits = stdout.trim().split(/\s+/);
+  if (commits.length !== 2 || commits.some((commit) => !/^[0-9a-f]{40}$/i.test(commit))) {
+    throw new Error('checkout did not report exactly two commit SHAs');
+  }
+  return { baseSha: commits[0], headSha: commits[1] };
+};
+
+export const createReviewSandbox = (sandbox: ReviewSandboxRaw): ReviewSandbox => ({
+  checkout: async (input): Promise<ReviewCheckoutResult> => {
+    await sandbox.writeFile(ASKPASS_PATH, askpassScript);
+    const result = await sandbox.exec(checkoutCommand(input), {
+      cwd: REVIEW_DIRECTORY,
+      env: checkoutEnvironment(input.checkoutToken),
+      timeout: AGENT_TIMEOUT_MS,
+    });
+    if (!result.success || result.exitCode !== 0) {
+      throw new Error('fixed checkout failed');
+    }
+    return parseCheckoutResult(result.stdout);
+  },
+  removeCheckoutCredentials: async () => {
+    const result = await sandbox.exec(credentialCleanupCommand, {
+      cwd: REVIEW_DIRECTORY,
+      timeout: 30_000,
+    });
+    if (!result.success || result.exitCode !== 0) {
+      throw new Error('checkout credentials could not be removed');
+    }
+  },
+  runAgent: async (input): Promise<ReviewAgentResult> => {
+    await sandbox.writeFile(OPENCODE_CONFIG_PATH, trustedAgentConfig);
+    try {
+      const result = await sandbox.exec(agentCommand, {
+        cwd: REVIEW_DIRECTORY,
+        env: agentEnvironment(input.modelCredential),
+        timeout: AGENT_TIMEOUT_MS,
+      });
+      return {
+        exitCode: result.exitCode,
+        stdout: result.stdout,
+        stderr: result.stderr,
+      };
+    } catch {
+      return { exitCode: 1, stdout: '', stderr: 'OpenCode timed out', timedOut: true };
+    }
+  },
+  destroy: () => sandbox.destroy(),
+});
+
+export interface CloudflareSandboxBindings {
+  readonly Sandbox: Parameters<typeof import('@cloudflare/sandbox').getSandbox>[0];
+}
+
+export const createCloudflareSandboxAdapter = (
+  bindings: CloudflareSandboxBindings,
+): ReviewSandboxAdapter => ({
+  getSandbox: async (sandboxId) => {
+    const { getSandbox } = await import('@cloudflare/sandbox');
+    return createReviewSandbox(
+      getSandbox(bindings.Sandbox, sandboxId, {
+        enableDefaultSession: false,
+      }),
+    );
+  },
+});
+
+const LeaseRegistration = Schema.Struct({
+  runId: Schema.NonEmptyString,
+  attempt: Schema.Int,
+  generation: Schema.Int,
+  sandboxId: Schema.NonEmptyString,
+  expiresAt: Schema.String,
+});
+
+export interface LeaseDurableObjectState {
+  readonly storage: {
+    readonly get: <A>(key: string) => Promise<A | undefined>;
+    readonly put: (key: string, value: unknown) => Promise<void>;
+    readonly delete: (key: string) => Promise<boolean>;
+    readonly setAlarm: (time: number | Date) => Promise<void>;
+    readonly deleteAlarm: () => Promise<void>;
+  };
+}
+
+export interface LeaseDurableObjectEnv extends CloudflareSandboxBindings {}
+
+const leaseKey = 'review-lease';
+const retryDelayMillis = 30_000;
+
+const currentEpochMillis = () =>
+  Effect.runPromise(DateTime.now.pipe(Effect.map(DateTime.toEpochMillis)));
+
+const sameLease = (
+  left: Schema.Schema.Type<typeof LeaseRegistration>,
+  right: Schema.Schema.Type<typeof LeaseRegistration>,
+) =>
+  left.runId === right.runId &&
+  left.attempt === right.attempt &&
+  left.generation === right.generation &&
+  left.sandboxId === right.sandboxId &&
+  left.expiresAt === right.expiresAt;
+
+const sameLeaseIdentity = (
+  left: Schema.Schema.Type<typeof LeaseRegistration>,
+  right: Schema.Schema.Type<typeof LeaseRegistration>,
+) =>
+  left.runId === right.runId &&
+  left.attempt === right.attempt &&
+  left.generation === right.generation &&
+  left.sandboxId === right.sandboxId;
+
+export class ReviewLeaseDurableObject {
+  constructor(
+    private readonly state: LeaseDurableObjectState,
+    private readonly env: LeaseDurableObjectEnv,
+  ) {}
+
+  async fetch(request: Request): Promise<Response> {
+    try {
+      if (request.method === 'POST' && new URL(request.url).pathname === '/register') {
+        const registration = await Schema.decodeUnknownPromise(LeaseRegistration)(
+          await request.json(),
+        );
+        const expiresAt = DateTime.make(registration.expiresAt);
+        if (Option.isNone(expiresAt)) {
+          return new Response(null, { status: 400 });
+        }
+        const current =
+          await this.state.storage.get<Schema.Schema.Type<typeof LeaseRegistration>>(leaseKey);
+        if (current !== undefined) {
+          if (!sameLeaseIdentity(current, registration)) {
+            return new Response(null, { status: 409 });
+          }
+          const currentExpiry = DateTime.make(current.expiresAt);
+          if (
+            Option.isNone(currentExpiry) ||
+            (await currentEpochMillis()) >= DateTime.toEpochMillis(currentExpiry.value)
+          ) {
+            return new Response(null, { status: 409 });
+          }
+          await this.state.storage.setAlarm(DateTime.toEpochMillis(currentExpiry.value));
+          return new Response(null, { status: 204 });
+        }
+        try {
+          await this.state.storage.put(leaseKey, registration);
+          await this.state.storage.setAlarm(DateTime.toEpochMillis(expiresAt.value));
+        } catch (error) {
+          await this.state.storage.delete(leaseKey);
+          throw error;
+        }
+        return new Response(null, { status: 204 });
+      }
+
+      if (request.method === 'DELETE' && new URL(request.url).pathname === '/clear') {
+        const requested = await Schema.decodeUnknownPromise(LeaseRegistration)(
+          await request.json(),
+        );
+        const current =
+          await this.state.storage.get<Schema.Schema.Type<typeof LeaseRegistration>>(leaseKey);
+        if (current === undefined || !sameLeaseIdentity(current, requested)) {
+          return new Response(null, { status: 409 });
+        }
+        await this.state.storage.delete(leaseKey);
+        await this.state.storage.deleteAlarm();
+        return new Response(null, { status: 204 });
+      }
+
+      if (request.method === 'POST' && new URL(request.url).pathname === '/rearm') {
+        const requested = await Schema.decodeUnknownPromise(LeaseRegistration)(
+          await request.json(),
+        );
+        const current =
+          await this.state.storage.get<Schema.Schema.Type<typeof LeaseRegistration>>(leaseKey);
+        if (current === undefined || !sameLeaseIdentity(current, requested)) {
+          return new Response(null, { status: 409 });
+        }
+        const cleanupDeadline = (await currentEpochMillis()) + retryDelayMillis;
+        const updated = {
+          ...current,
+          expiresAt: DateTime.formatIso(DateTime.makeUnsafe(cleanupDeadline)),
+        };
+        await this.state.storage.put(leaseKey, updated);
+        await this.state.storage.setAlarm(cleanupDeadline);
+        return new Response(null, { status: 204 });
+      }
+
+      return new Response(null, { status: 404 });
+    } catch {
+      return new Response(null, { status: 400 });
+    }
+  }
+
+  async alarm(): Promise<void> {
+    const registration =
+      await this.state.storage.get<Schema.Schema.Type<typeof LeaseRegistration>>(leaseKey);
+    if (registration === undefined) return;
+
+    const generation = registration.generation;
+    const expiresAt = DateTime.make(registration.expiresAt);
+    if (Option.isNone(expiresAt) || generation < 1) {
+      await this.state.storage.setAlarm((await currentEpochMillis()) + retryDelayMillis);
+      return;
+    }
+    if ((await currentEpochMillis()) < DateTime.toEpochMillis(expiresAt.value)) {
+      await this.state.storage.setAlarm(DateTime.toEpochMillis(expiresAt.value));
+      return;
+    }
+
+    const current =
+      await this.state.storage.get<Schema.Schema.Type<typeof LeaseRegistration>>(leaseKey);
+    if (
+      current === undefined ||
+      current.generation !== generation ||
+      !sameLease(current, registration)
+    ) {
+      return;
+    }
+
+    const { getSandbox } = await import('@cloudflare/sandbox');
+    const sandbox = getSandbox(this.env.Sandbox, registration.sandboxId, {
+      enableDefaultSession: false,
+    });
+    try {
+      await sandbox.destroy();
+      await this.state.storage.delete(leaseKey);
+      await this.state.storage.deleteAlarm();
+    } catch (error) {
+      await this.state.storage.setAlarm((await currentEpochMillis()) + retryDelayMillis);
+      throw error;
+    }
+  }
+}
+
+export interface LeaseNamespaceLike {
+  readonly idFromName: (name: string) => unknown;
+  readonly get: (id: unknown) => { fetch: (request: Request) => Promise<Response> };
+}
+
+const leaseRequest = (
+  namespace: LeaseNamespaceLike,
+  runId: string,
+  path: string,
+  init?: RequestInit,
+) =>
+  namespace
+    .get(namespace.idFromName(runId))
+    .fetch(new Request(`https://lease.internal${path}`, init));
+
+export const createDurableLeaseAdapter = (namespace: LeaseNamespaceLike): ReviewLeaseAdapter => ({
+  register: async (input): Promise<ReviewLeaseHandle> => {
+    const response = await leaseRequest(namespace, input.runId, '/register', {
+      method: 'POST',
+      body: JSON.stringify(input),
+      headers: { 'content-type': 'application/json' },
+    });
+    if (!response.ok) throw new Error('lease registration failed');
+
+    return {
+      clear: async () => {
+        const clearResponse = await leaseRequest(namespace, input.runId, '/clear', {
+          method: 'DELETE',
+          body: JSON.stringify(input),
+          headers: { 'content-type': 'application/json' },
+        });
+        if (!clearResponse.ok) throw new Error('lease clear failed');
+      },
+      rearm: async () => {
+        const rearmResponse = await leaseRequest(namespace, input.runId, '/rearm', {
+          method: 'POST',
+          body: JSON.stringify(input),
+          headers: { 'content-type': 'application/json' },
+        });
+        if (!rearmResponse.ok) throw new Error('lease rearm failed');
+      },
+    };
+  },
+});
