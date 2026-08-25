@@ -14,11 +14,11 @@ The repository deploys these resources:
 
 | Resource                | Configuration name                                                              | Purpose                                                                                                                       |
 | ----------------------- | ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| Public Worker           | `petit-chiba-ingress`                                                           | Receives GitHub webhooks. `workers_dev` is enabled.                                                                           |
-| Private Worker          | `petit-chiba-core`                                                              | Owns authorization, GitHub API calls, orchestration, and run state. `workers_dev` is disabled.                                |
-| Service binding         | `CORE` → `petit-chiba-core`                                                     | Lets ingress call core without a public core URL.                                                                             |
-| D1 database             | `petit-chiba-review-state`, binding `REVIEW_DB`                                 | Stores delivery, approval, run, and finding-fingerprint state.                                                                |
-| Workflow                | `petit-chiba-review`, binding `REVIEW_WORKFLOW`, class `ReviewWorkflow`         | Carries one review through checkout, agent execution, validation, and publication.                                            |
+| Public Worker           | `compte-rendu-ingress`                                                          | Receives GitHub webhooks. `workers_dev` is enabled.                                                                           |
+| Private Worker          | `compte-rendu-core`                                                             | Owns authorization, GitHub API calls, orchestration, and run state. `workers_dev` is disabled.                                |
+| Service binding         | `CORE` → `compte-rendu-core`                                                    | Lets ingress call core without a public core URL.                                                                             |
+| D1 database             | `compte-rendu-review-state`, binding `REVIEW_DB`                                | Stores delivery, approval, run, and finding-fingerprint state.                                                                |
+| Workflow                | `compte-rendu-review`, binding `REVIEW_WORKFLOW`, class `ReviewWorkflow`        | Carries one review through checkout, agent execution, validation, and publication.                                            |
 | Sandbox container class | `Sandbox`                                                                       | Runs the fixed checkout and read-only OpenCode review. The config requests the `lite` instance type and at most one instance. |
 | Durable Object classes  | `Sandbox` and `ReviewLeaseDurableObject`; binding `REVIEW_LEASE` for the latter | Provides Sandbox access and a per-run cleanup lease/alarm.                                                                    |
 
@@ -26,9 +26,9 @@ The request path is:
 
 ```text
 GitHub webhook
-    → petit-chiba-ingress (public, verifies WEBHOOK_SECRET)
+    → compte-rendu-ingress (public, verifies WEBHOOK_SECRET)
     → CORE service binding
-    → petit-chiba-core (private)
+    → compte-rendu-core (private)
        → REVIEW_DB / REVIEW_WORKFLOW / REVIEW_LEASE / Sandbox
        → GitHub App installation token for GitHub API operations
 ```
@@ -160,7 +160,7 @@ and `-1` means the accepted run ended failed. A successful run keeps only
 reviews do not react to a command. Reaction writes target the originating
 numeric comment id and may be replayed safely with the same app and content.
 
-At the final installation step, install the App on the owning account with **Only select repositories**, then
+Install the App on the owning account with **Only select repositories**, then
 select the target repository or repositories. Do not choose all repositories
 unless that is an explicit operator decision. GitHub describes this choice in
 [Installing your own GitHub App](https://docs.github.com/en/apps/using-github-apps/installing-your-own-github-app).
@@ -168,7 +168,7 @@ unless that is an explicit operator decision. GitHub describes this choice in
 Enable the App webhook with:
 
 - Webhook URL: `<INGRESS_URL>`, the public URL printed or shown for
-  `petit-chiba-ingress` after deployment. This repository does not establish a
+  `compte-rendu-ingress` after deployment. This repository does not establish a
   fixed hostname.
 - Webhook secret: one high-entropy value, entered into both GitHub and the
   ingress `WEBHOOK_SECRET` Worker secret.
@@ -206,7 +206,7 @@ uses the temporary invocation described above.
 2. Create the D1 database with the configured name:
 
    ```sh
-   corepack pnpm dlx wrangler@latest d1 create petit-chiba-review-state
+   corepack pnpm dlx wrangler@latest d1 create compte-rendu-review-state
    ```
 
    Copy only the returned `database_id` into
@@ -248,9 +248,9 @@ uses the temporary invocation described above.
    ```
 
    The local repository-operations App and private key are not the product
-   identity; do not reuse them. Do not install or approve the App yet; configure
-   its final webhook settings only after both Workers have been deployed, as
-   described in step 7. Follow GitHub's
+   identity; do not reuse them. The webhook URL may remain unset or inactive
+   during installation; set `<INGRESS_URL>` and activate the webhook after
+   ingress has been deployed. Follow GitHub's
    [private-key guidance](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/managing-private-keys-for-github-apps)
    when generating and downloading the key.
 
@@ -259,7 +259,7 @@ uses the temporary invocation described above.
    corepack pnpm dlx wrangler@latest secret put MODEL_API_KEY --config apps/core/wrangler.jsonc
    ```
 
-   The private key and model credential belong only to `petit-chiba-core`.
+   The private key and model credential belong only to `compte-rendu-core`.
    Cloudflare's `secret put` creates and deploys a new Worker version
    immediately, so complete the D1 migration before these commands. Worker
    secrets are encrypted bindings and are intentionally separate from
@@ -289,22 +289,18 @@ uses the temporary invocation described above.
    `WEBHOOK_SECRET` value must match the GitHub App webhook secret exactly.
    Record the resulting public ingress URL as the operator's
    `<INGRESS_URL>`. The `CORE` binding points to the already deployed
-   `petit-chiba-core`; deploying in the opposite order can fail because the
+   `compte-rendu-core`; deploying in the opposite order can fail because the
    target service does not exist yet.
 
-7. After both Workers are deployed, configure the GitHub App's final webhook
-   URL as `<INGRESS_URL>`, set its webhook secret to the same value stored in
-   ingress, select the permissions and event subscriptions described above,
-   and confirm those settings. Only then perform the one final GitHub App
-   installation or approval for the selected repositories. Activate webhook
-   delivery after installation and send a test delivery only after activation.
+7. Configure and install the GitHub App as described above, then activate its
+   webhook with `<INGRESS_URL>`. Send a test delivery only after activation.
 
 The deployed variables-versus-secrets inventory is deliberately small:
 
-| Worker                | Plain variable  | Secrets                                   | Non-secret bindings                                       |
-| --------------------- | --------------- | ----------------------------------------- | --------------------------------------------------------- |
-| `petit-chiba-ingress` | None            | `WEBHOOK_SECRET`                          | `CORE` → `petit-chiba-core`                               |
-| `petit-chiba-core`    | `GITHUB_APP_ID` | `GITHUB_APP_PRIVATE_KEY`, `MODEL_API_KEY` | `REVIEW_DB`, `REVIEW_WORKFLOW`, `Sandbox`, `REVIEW_LEASE` |
+| Worker                 | Plain variable  | Secrets                                   | Non-secret bindings                                       |
+| ---------------------- | --------------- | ----------------------------------------- | --------------------------------------------------------- |
+| `compte-rendu-ingress` | None            | `WEBHOOK_SECRET`                          | `CORE` → `compte-rendu-core`                              |
+| `compte-rendu-core`    | `GITHUB_APP_ID` | `GITHUB_APP_PRIVATE_KEY`, `MODEL_API_KEY` | `REVIEW_DB`, `REVIEW_WORKFLOW`, `Sandbox`, `REVIEW_LEASE` |
 
 `GITHUB_APP_ID` is an application identifier, not a secret. Its value is
 the dedicated product App ID copied into the core Wrangler config before
@@ -385,8 +381,8 @@ repository contents, diffs, model output, credentials, or session transcripts.
 Use the Cloudflare Worker logs or `wrangler tail` only to correlate identifiers:
 
 ```sh
-corepack pnpm dlx wrangler@latest tail petit-chiba-ingress
-corepack pnpm dlx wrangler@latest tail petit-chiba-core
+corepack pnpm dlx wrangler@latest tail compte-rendu-ingress
+corepack pnpm dlx wrangler@latest tail compte-rendu-core
 ```
 
 Use the GitHub delivery page for `deliveryId` and then search logs for the
@@ -420,8 +416,8 @@ For a normal compatible release:
    `corepack pnpm build` against the immutable checkout being released.
 2. If there is a new migration, review it and apply it remotely with the D1
    migration command above. Prefer additive, backward-compatible changes.
-3. Deploy `petit-chiba-core`.
-4. Deploy `petit-chiba-ingress`.
+3. Deploy `compte-rendu-core`.
+4. Deploy `compte-rendu-ingress`.
 5. Redeliver one controlled GitHub event and inspect the identifier chain.
 
 The core-before-ingress order preserves the service-binding contract. For an
@@ -444,8 +440,8 @@ that no review is in flight before proceeding.
 2. Uninstall the GitHub App from every selected repository. Confirm no new
    deliveries arrive, then delete the App registration if it is no longer
    needed and revoke its private key.
-3. Delete the public `petit-chiba-ingress` Worker, then the private
-   `petit-chiba-core` Worker, in that order. Do not use `--force`. Verify the
+3. Delete the public `compte-rendu-ingress` Worker, then the private
+   `compte-rendu-core` Worker, in that order. Do not use `--force`. Verify the
    Workflow, `Sandbox`, Durable Object classes, and service binding are no
    longer deployed with the Workers.
 
@@ -455,11 +451,11 @@ that no review is in flight before proceeding.
    ```
 
 4. Retain or export only the minimal D1 state required by the owner. If it is
-   no longer needed, delete `petit-chiba-review-state` only after the Workers
+   no longer needed, delete `compte-rendu-review-state` only after the Workers
    are gone and the retention decision is recorded:
 
    ```sh
-   corepack pnpm dlx wrangler@latest d1 delete petit-chiba-review-state
+   corepack pnpm dlx wrangler@latest d1 delete compte-rendu-review-state
    ```
 
    D1 deletion is irreversible for this deployment's live state; stop and
