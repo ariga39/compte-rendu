@@ -13,6 +13,8 @@ import {
 import type { D1DatabaseLike } from './review-state-store';
 import type { WorkerEntrypoint } from '@compte-rendu/contracts';
 import { ReviewWorkflowInput } from './review-workflow';
+import { createCloudflareOperationalLog } from './operational-log';
+import type { OperationalLog } from '@compte-rendu/contracts';
 export { ReviewWorkflowInput } from './review-workflow';
 
 export interface ReviewWorkflowBinding {
@@ -33,6 +35,7 @@ export interface CoreWorkerEnv extends CoreEnv {
 export interface CoreWorkerDependencies {
   readonly github?: GitHubAdapter;
   readonly stateStore?: ReviewPublicationStateStore;
+  readonly log?: OperationalLog;
 }
 
 const reviewEventsPath = '/review-events';
@@ -67,6 +70,7 @@ export const createCoreWorker = (
     github,
     stateStore,
     scheduler: createWorkflowScheduler(env.REVIEW_WORKFLOW),
+    log: dependencies.log ?? createCloudflareOperationalLog(),
   });
 
   return {

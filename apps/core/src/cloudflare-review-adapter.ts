@@ -1,4 +1,9 @@
 import { DateTime, Effect, Option, Schema } from 'effect';
+import {
+  sanitizeOperationalLogEvent,
+  type OperationalLog,
+  type OperationalLogEvent,
+} from '@compte-rendu/contracts';
 import type {
   ReviewAgentResult,
   ReviewCheckoutResult,
@@ -7,6 +12,7 @@ import type {
   ReviewSandbox,
   ReviewSandboxAdapter,
 } from './review-run';
+import { createCloudflareOperationalLog } from './operational-log';
 
 export const OPENCODE_VERSION = '1.18.22';
 export const OPENCODE_MODEL = 'openai/gpt-5';
@@ -191,11 +197,28 @@ export interface LeaseDurableObjectState {
 
 export interface LeaseDurableObjectEnv extends CloudflareSandboxBindings {}
 
+export interface ReviewLeaseSandbox {
+  readonly destroy: () => Promise<void>;
+}
+
+export interface ReviewLeaseDependencies {
+  readonly log?: OperationalLog;
+  readonly getSandbox?: (sandboxId: string) => Promise<ReviewLeaseSandbox>;
+}
+
 const leaseKey = 'review-lease';
 const retryDelayMillis = 30_000;
 
 const currentEpochMillis = () =>
   Effect.runPromise(DateTime.now.pipe(Effect.map(DateTime.toEpochMillis)));
+
+const recordOperationalLog = async (log: OperationalLog, event: OperationalLogEvent) => {
+  try {
+    await log.record(sanitizeOperationalLogEvent(event));
+  } catch {
+    // Operational logging cannot alter lease cleanup semantics.
+  }
+};
 
 const sameLease = (
   left: Schema.Schema.Type<typeof LeaseRegistration>,
@@ -217,10 +240,15 @@ const sameLeaseIdentity = (
   left.sandboxId === right.sandboxId;
 
 export class ReviewLeaseDurableObject {
+  private readonly log: OperationalLog;
+
   constructor(
     private readonly state: LeaseDurableObjectState,
     private readonly env: LeaseDurableObjectEnv,
-  ) {}
+    private readonly dependencies: ReviewLeaseDependencies = {},
+  ) {
+    this.log = dependencies.log ?? createCloudflareOperationalLog();
+  }
 
   async fetch(request: Request): Promise<Response> {
     try {
@@ -306,10 +334,26 @@ export class ReviewLeaseDurableObject {
     const expiresAt = DateTime.make(registration.expiresAt);
     if (Option.isNone(expiresAt) || generation < 1) {
       await this.state.storage.setAlarm((await currentEpochMillis()) + retryDelayMillis);
+      await recordOperationalLog(this.log, {
+        phase: 'lease',
+        outcome: 'deferred',
+        runId: registration.runId,
+        attempt: registration.attempt,
+        sandboxId: registration.sandboxId,
+        reason: 'invalid',
+      });
       return;
     }
     if ((await currentEpochMillis()) < DateTime.toEpochMillis(expiresAt.value)) {
       await this.state.storage.setAlarm(DateTime.toEpochMillis(expiresAt.value));
+      await recordOperationalLog(this.log, {
+        phase: 'lease',
+        outcome: 'deferred',
+        runId: registration.runId,
+        attempt: registration.attempt,
+        sandboxId: registration.sandboxId,
+        reason: 'not_due',
+      });
       return;
     }
 
@@ -323,16 +367,36 @@ export class ReviewLeaseDurableObject {
       return;
     }
 
-    const { getSandbox } = await import('@cloudflare/sandbox');
-    const sandbox = getSandbox(this.env.Sandbox, registration.sandboxId, {
-      enableDefaultSession: false,
-    });
     try {
+      const sandbox =
+        this.dependencies.getSandbox === undefined
+          ? await (async () => {
+              const { getSandbox } = await import('@cloudflare/sandbox');
+              return getSandbox(this.env.Sandbox, registration.sandboxId, {
+                enableDefaultSession: false,
+              });
+            })()
+          : await this.dependencies.getSandbox(registration.sandboxId);
       await sandbox.destroy();
       await this.state.storage.delete(leaseKey);
       await this.state.storage.deleteAlarm();
+      await recordOperationalLog(this.log, {
+        phase: 'lease',
+        outcome: 'destroyed',
+        runId: registration.runId,
+        attempt: registration.attempt,
+        sandboxId: registration.sandboxId,
+      });
     } catch (error) {
       await this.state.storage.setAlarm((await currentEpochMillis()) + retryDelayMillis);
+      await recordOperationalLog(this.log, {
+        phase: 'lease',
+        outcome: 'failed',
+        runId: registration.runId,
+        attempt: registration.attempt,
+        sandboxId: registration.sandboxId,
+        reason: 'cleanup_failed',
+      });
       throw error;
     }
   }

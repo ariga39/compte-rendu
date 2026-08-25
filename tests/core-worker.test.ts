@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { createCoreWorker } from '../apps/core/src/core-worker';
+import { createInMemoryReviewStateStore } from '../apps/core/src/index';
 import { createGitHubPublicationAdapter } from '../apps/core/src/github-review-adapter';
 import type { ReviewEvent } from '../packages/contracts/src';
+import type { OperationalLogEvent } from '../packages/contracts/src';
 import { SqliteD1Database } from './support/d1-database';
 
 const eligibleEvent: ReviewEvent = {
@@ -23,23 +25,33 @@ describe('Core Worker', () => {
   it('accepts an eligible event and schedules only immutable workflow identity', async () => {
     const database = new SqliteD1Database();
     const workflowInputs: unknown[] = [];
-    const worker = createCoreWorker({
-      REVIEW_DB: database,
-      REVIEW_WORKFLOW: {
-        create: async (input: unknown) => {
-          workflowInputs.push(input);
-          return undefined;
+    const events: OperationalLogEvent[] = [];
+    const worker = createCoreWorker(
+      {
+        REVIEW_DB: database,
+        REVIEW_WORKFLOW: {
+          create: async (input: unknown) => {
+            workflowInputs.push(input);
+            return undefined;
+          },
+        },
+        REVIEW_LEASE: {
+          idFromName: (name: string) => name,
+          get: () => ({ fetch: async () => new Response(null, { status: 204 }) }),
+        },
+        Sandbox: {},
+        GITHUB_APP_ID: '4528386',
+        GITHUB_APP_PRIVATE_KEY: 'test-private-key',
+        MODEL_API_KEY: 'test-model-key',
+      },
+      {
+        log: {
+          record: async (event) => {
+            events.push(event);
+          },
         },
       },
-      REVIEW_LEASE: {
-        idFromName: (name: string) => name,
-        get: () => ({ fetch: async () => new Response(null, { status: 204 }) }),
-      },
-      Sandbox: {},
-      GITHUB_APP_ID: '4528386',
-      GITHUB_APP_PRIVATE_KEY: 'test-private-key',
-      MODEL_API_KEY: 'test-model-key',
-    });
+    );
 
     try {
       const response = await worker.fetch(
@@ -51,6 +63,14 @@ describe('Core Worker', () => {
       );
 
       expect(response.status).toBe(202);
+      expect(events).toEqual([
+        {
+          phase: 'core',
+          outcome: 'scheduled',
+          deliveryId: eligibleEvent.deliveryId,
+          runId: expect.any(String),
+        },
+      ]);
       expect(workflowInputs).toHaveLength(1);
       expect(workflowInputs[0]).toEqual({
         id: expect.any(String),
@@ -66,6 +86,100 @@ describe('Core Worker', () => {
           },
         },
       });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('keeps an eligible schedule when core operational logging fails', async () => {
+    const database = new SqliteD1Database();
+    const workflowInputs: unknown[] = [];
+    const worker = createCoreWorker(
+      {
+        REVIEW_DB: database,
+        REVIEW_WORKFLOW: {
+          create: async (input: unknown) => {
+            workflowInputs.push(input);
+          },
+        },
+        REVIEW_LEASE: {
+          idFromName: (name: string) => name,
+          get: () => ({ fetch: async () => new Response(null, { status: 204 }) }),
+        },
+        Sandbox: {},
+        GITHUB_APP_ID: '4528386',
+        GITHUB_APP_PRIVATE_KEY: 'test-private-key',
+        MODEL_API_KEY: 'test-model-key',
+      },
+      {
+        log: {
+          record: () => {
+            throw new Error('log sink unavailable');
+          },
+        },
+      },
+    );
+
+    try {
+      const response = await worker.fetch(
+        new Request('https://core.internal/review-events', {
+          method: 'POST',
+          body: JSON.stringify(eligibleEvent),
+        }),
+      );
+
+      expect(response.status).toBe(202);
+      expect(workflowInputs).toHaveLength(1);
+    } finally {
+      database.close();
+    }
+  });
+
+  it('redacts unsafe delivery identifiers in core operational logs', async () => {
+    const database = new SqliteD1Database();
+    const events: OperationalLogEvent[] = [];
+    const worker = createCoreWorker(
+      {
+        REVIEW_DB: database,
+        REVIEW_WORKFLOW: {
+          create: async () => undefined,
+        },
+        REVIEW_LEASE: {
+          idFromName: (name: string) => name,
+          get: () => ({ fetch: async () => new Response(null, { status: 204 }) }),
+        },
+        Sandbox: {},
+        GITHUB_APP_ID: '4528386',
+        GITHUB_APP_PRIVATE_KEY: 'test-private-key',
+        MODEL_API_KEY: 'test-model-key',
+      },
+      {
+        log: {
+          record: async (event) => {
+            events.push(event);
+          },
+        },
+      },
+    );
+
+    try {
+      const response = await worker.fetch(
+        new Request('https://core.internal/review-events', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ ...eligibleEvent, deliveryId: 'delivery\nunsafe' }),
+        }),
+      );
+
+      expect(response.status).toBe(202);
+      expect(events).toEqual([
+        {
+          phase: 'core',
+          outcome: 'scheduled',
+          deliveryId: 'redacted',
+          runId: expect.any(String),
+        },
+      ]);
     } finally {
       database.close();
     }
@@ -286,6 +400,7 @@ describe('Core Worker', () => {
   it('returns 503 when manual GitHub facts remain uncertain', async () => {
     const database = new SqliteD1Database();
     let workflowCreated = false;
+    const events: OperationalLogEvent[] = [];
     const worker = createCoreWorker(
       {
         REVIEW_DB: database,
@@ -304,6 +419,11 @@ describe('Core Worker', () => {
         MODEL_API_KEY: 'test-model-key',
       },
       {
+        log: {
+          record: async (event) => {
+            events.push(event);
+          },
+        },
         github: {
           getPullRequest: async () => {
             throw new Error('GitHub facts unavailable');
@@ -332,6 +452,89 @@ describe('Core Worker', () => {
 
       expect(response.status).toBe(503);
       expect(workflowCreated).toBe(false);
+      expect(events).toEqual([
+        {
+          phase: 'core',
+          outcome: 'retryable',
+          deliveryId: 'delivery-core-worker-manual-uncertain',
+          reason: 'pull_request_facts_uncertain',
+        },
+      ]);
+    } finally {
+      database.close();
+    }
+  });
+
+  it('returns 503 when manual commenter permission remains uncertain', async () => {
+    const database = new SqliteD1Database();
+    let workflowCreated = false;
+    const events: OperationalLogEvent[] = [];
+    const worker = createCoreWorker(
+      {
+        REVIEW_DB: database,
+        REVIEW_WORKFLOW: {
+          create: async () => {
+            workflowCreated = true;
+          },
+        },
+        REVIEW_LEASE: {
+          idFromName: (name: string) => name,
+          get: () => ({ fetch: async () => new Response(null, { status: 204 }) }),
+        },
+        Sandbox: {},
+        GITHUB_APP_ID: '4528386',
+        GITHUB_APP_PRIVATE_KEY: 'test-private-key',
+        MODEL_API_KEY: 'test-model-key',
+      },
+      {
+        log: {
+          record: async (event) => {
+            events.push(event);
+          },
+        },
+        github: {
+          getPullRequest: async () => ({
+            repositoryVisibility: 'public',
+            baseRepositoryId: 11,
+            headRepositoryId: 99,
+            draft: false,
+            baseSha: eligibleEvent.baseSha,
+            headSha: eligibleEvent.headSha,
+          }),
+          getCommenterPermission: async () => {
+            throw new Error('GitHub permission unavailable');
+          },
+        },
+      },
+    );
+
+    try {
+      const response = await worker.fetch(
+        new Request('https://core.internal/review-events', {
+          method: 'POST',
+          body: JSON.stringify({
+            deliveryId: 'delivery-core-worker-permission-uncertain',
+            event: 'issue_comment',
+            action: 'created',
+            repositoryId: 11,
+            pullRequestNumber: 42,
+            installationId: 7,
+            commenterLogin: 'alice',
+            command: '/ai-review',
+          }),
+        }),
+      );
+
+      expect(response.status).toBe(503);
+      expect(workflowCreated).toBe(false);
+      expect(events).toEqual([
+        {
+          phase: 'core',
+          outcome: 'retryable',
+          deliveryId: 'delivery-core-worker-permission-uncertain',
+          reason: 'commenter_permission_uncertain',
+        },
+      ]);
     } finally {
       database.close();
     }
@@ -339,22 +542,32 @@ describe('Core Worker', () => {
 
   it('keeps Workflow creation failure fail-closed', async () => {
     const database = new SqliteD1Database();
-    const worker = createCoreWorker({
-      REVIEW_DB: database,
-      REVIEW_WORKFLOW: {
-        create: async () => {
-          throw new Error('workflow creation failed');
+    const events: OperationalLogEvent[] = [];
+    const worker = createCoreWorker(
+      {
+        REVIEW_DB: database,
+        REVIEW_WORKFLOW: {
+          create: async () => {
+            throw new Error('workflow creation failed');
+          },
+        },
+        REVIEW_LEASE: {
+          idFromName: (name: string) => name,
+          get: () => ({ fetch: async () => new Response(null, { status: 204 }) }),
+        },
+        Sandbox: {},
+        GITHUB_APP_ID: '4528386',
+        GITHUB_APP_PRIVATE_KEY: 'test-private-key',
+        MODEL_API_KEY: 'test-model-key',
+      },
+      {
+        log: {
+          record: async (event) => {
+            events.push(event);
+          },
         },
       },
-      REVIEW_LEASE: {
-        idFromName: (name: string) => name,
-        get: () => ({ fetch: async () => new Response(null, { status: 204 }) }),
-      },
-      Sandbox: {},
-      GITHUB_APP_ID: '4528386',
-      GITHUB_APP_PRIVATE_KEY: 'test-private-key',
-      MODEL_API_KEY: 'test-model-key',
-    });
+    );
 
     try {
       const response = await worker.fetch(
@@ -368,6 +581,71 @@ describe('Core Worker', () => {
       );
 
       expect(response.status).toBe(503);
+      expect(events).toEqual([
+        {
+          phase: 'core',
+          outcome: 'retryable',
+          deliveryId: 'delivery-core-worker-schedule-failed',
+          reason: 'scheduling_failure',
+        },
+      ]);
+    } finally {
+      database.close();
+    }
+  });
+
+  it('returns 503 and records a retryable state failure when claiming fails', async () => {
+    const database = new SqliteD1Database();
+    const events: OperationalLogEvent[] = [];
+    const baseStateStore = createInMemoryReviewStateStore();
+    const stateStore = {
+      ...baseStateStore,
+      claimReview: async () => {
+        throw new Error('state unavailable');
+      },
+    };
+    const worker = createCoreWorker(
+      {
+        REVIEW_DB: database,
+        REVIEW_WORKFLOW: {
+          create: async () => undefined,
+        },
+        REVIEW_LEASE: {
+          idFromName: (name: string) => name,
+          get: () => ({ fetch: async () => new Response(null, { status: 204 }) }),
+        },
+        Sandbox: {},
+        GITHUB_APP_ID: '4528386',
+        GITHUB_APP_PRIVATE_KEY: 'test-private-key',
+        MODEL_API_KEY: 'test-model-key',
+      },
+      {
+        stateStore,
+        log: {
+          record: async (event) => {
+            events.push(event);
+          },
+        },
+      },
+    );
+
+    try {
+      const response = await worker.fetch(
+        new Request('https://core.internal/review-events', {
+          method: 'POST',
+          body: JSON.stringify(eligibleEvent),
+        }),
+      );
+
+      expect(response.status).toBe(503);
+      expect(events).toEqual([
+        {
+          phase: 'core',
+          outcome: 'retryable',
+          deliveryId: eligibleEvent.deliveryId,
+          reason: 'state_failure',
+        },
+      ]);
     } finally {
       database.close();
     }
