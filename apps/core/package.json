@@ -6,6 +6,7 @@
     "build": "vp build"
   },
   "dependencies": {
+    "@cloudflare/sandbox": "0.12.8",
     "@compte-rendu/contracts": "workspace:*",
     "effect": "4.0.0-rc.111"
   }
