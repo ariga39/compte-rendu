@@ -5,7 +5,7 @@
   "compatibility_date": "2026-08-25",
   "workers_dev": false,
   "vars": {
-    "GITHUB_APP_ID": "4528386",
+    "GITHUB_APP_ID": "REPLACE_WITH_GITHUB_APP_ID",
   },
   "secrets": {
     "required": ["GITHUB_APP_PRIVATE_KEY", "MODEL_API_KEY"],

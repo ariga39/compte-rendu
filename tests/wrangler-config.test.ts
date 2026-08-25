@@ -28,7 +28,10 @@ describe('Wrangler deployment wiring', () => {
     expect(core).toContain('"class_name": "ReviewLeaseDurableObject"');
     expect(core).toContain('GITHUB_APP_PRIVATE_KEY');
     expect(core).toContain('MODEL_API_KEY');
-    expect(core).toContain('"GITHUB_APP_ID": "4528386"');
+    expect(core).toContain('"GITHUB_APP_ID": "REPLACE_WITH_GITHUB_APP_ID"');
+    expect(core).not.toMatch(/"GITHUB_APP_ID": "\d+"/);
+    expect(core).toContain('"database_id": "REPLACE_WITH_D1_DATABASE_ID"');
+    expect(core).not.toMatch(/"database_id": "\d+"/);
 
     expect(ingress).toContain('"workers_dev": true');
     expect(ingress).toContain('"binding": "CORE"');
