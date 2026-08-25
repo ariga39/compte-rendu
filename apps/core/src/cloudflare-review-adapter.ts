@@ -15,11 +15,13 @@ import type {
 import { createCloudflareOperationalLog } from './operational-log';
 
 export const OPENCODE_VERSION = '1.18.22';
-export const OPENCODE_MODEL = 'openai/gpt-5';
+export const OPENCODE_MODEL = 'opencode-go/deepseek-v4-flash';
 export const REVIEW_DIRECTORY = '/workspace/compte-rendu-review';
 
 const ASKPASS_PATH = '/tmp/compte-rendu-git-askpass';
 const OPENCODE_CONFIG_PATH = '/tmp/compte-rendu-opencode-config.json';
+const OPENCODE_DATA_HOME = '/tmp/compte-rendu-opencode-data';
+const OPENCODE_AUTH_PATH = `${OPENCODE_DATA_HOME}/opencode/auth.json`;
 const CHECKOUT_TIMEOUT_MS = 60_000;
 const AGENT_TIMEOUT_MS = 5 * 60_000;
 
@@ -102,12 +104,12 @@ const checkoutEnvironment = (checkoutToken: string): Readonly<Record<string, str
   GIT_CONFIG_NOSYSTEM: '1',
 });
 
-const agentEnvironment = (modelCredential: string): Readonly<Record<string, string>> => ({
-  OPENAI_API_KEY: modelCredential,
+const agentEnvironment = (): Readonly<Record<string, string>> => ({
   OPENCODE_CONFIG: OPENCODE_CONFIG_PATH,
   OPENCODE_DISABLE_PROJECT_CONFIG: '1',
   HOME: '/tmp/compte-rendu-opencode-home',
   XDG_CONFIG_HOME: '/tmp/compte-rendu-opencode-xdg',
+  XDG_DATA_HOME: OPENCODE_DATA_HOME,
 });
 
 const parseCheckoutResult = (stdout: string): ReviewCheckoutResult => {
@@ -142,10 +144,16 @@ export const createReviewSandbox = (sandbox: ReviewSandboxRaw): ReviewSandbox =>
   },
   runAgent: async (input): Promise<ReviewAgentResult> => {
     await sandbox.writeFile(OPENCODE_CONFIG_PATH, trustedAgentConfig);
+    await sandbox.writeFile(
+      OPENCODE_AUTH_PATH,
+      JSON.stringify({
+        'opencode-go': { type: 'api', key: input.modelCredential },
+      }),
+    );
     try {
       const result = await sandbox.exec(agentCommand, {
         cwd: REVIEW_DIRECTORY,
-        env: agentEnvironment(input.modelCredential),
+        env: agentEnvironment(),
         timeout: AGENT_TIMEOUT_MS,
       });
       return {
