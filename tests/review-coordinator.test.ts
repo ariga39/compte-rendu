@@ -2,8 +2,11 @@ import { describe, expect, it } from 'vitest';
 import {
   createReviewCoordinator,
   createD1ReviewStateStore,
+  createGitHubPublicationAdapter,
   createInMemoryReviewStateStore,
   type ReviewJob,
+  type ReviewPublicationCreateResult,
+  type ReviewPublicationPayload,
   type ReviewStateStore,
 } from '../apps/core/src/index';
 import type { ReviewEvent } from '../packages/contracts/src';
@@ -25,6 +28,530 @@ const eligiblePrivatePullRequest: ReviewEvent = {
 };
 
 describe('Review coordinator', () => {
+  it('marks a review superseded when the head changes at the POST edge', async () => {
+    const stateStore = createInMemoryReviewStateStore();
+    const reviews: ReviewPublicationPayload[] = [];
+    let runId = '';
+    let headChanged = false;
+    const coordinator = createReviewCoordinator({
+      github: {
+        loadReviewTarget: async () => ({
+          headSha: eligiblePrivatePullRequest.headSha,
+          files: [],
+        }),
+        findReviewByMarker: async () => {
+          headChanged = true;
+          return undefined;
+        },
+        createReview: async ({ payload }): Promise<ReviewPublicationCreateResult> => {
+          if (headChanged) {
+            return {
+              kind: 'stale',
+              currentHeadSha: '3333333333333333333333333333333333333333',
+            };
+          }
+          reviews.push(payload);
+          return { kind: 'created', review: payload };
+        },
+      },
+      stateStore,
+      scheduler: {
+        schedule: async (_job, scheduledRunId) => {
+          runId = scheduledRunId;
+        },
+      },
+    });
+
+    expect(await coordinator.handleReviewEvent(eligiblePrivatePullRequest)).toBe('scheduled');
+
+    expect(
+      await coordinator.completeReview({
+        runId,
+        output: { findings: [], summary: 'TOCTOU review' },
+      }),
+    ).toBe('ignored');
+    expect(reviews).toEqual([]);
+    expect(await coordinator.handleReviewEvent(eligiblePrivatePullRequest)).toBe('ignored');
+  });
+
+  it('retries one transient GitHub POST and exposes one completed review', async () => {
+    const stateStore = createInMemoryReviewStateStore();
+    const postedReviews: unknown[] = [];
+    let transientFailure = true;
+    let runId = '';
+    const fetcher: typeof fetch = async (input, init) => {
+      const inputUrl =
+        typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      const url = new URL(inputUrl);
+      const method = init?.method ?? 'GET';
+      if (new Headers(init?.headers).get('user-agent') !== 'compte-rendu-core') {
+        return new Response('{}', { status: 403 });
+      }
+      if (url.pathname === '/repositories/11') {
+        return new Response(JSON.stringify({ full_name: 'acme/reviewed' }));
+      }
+      if (url.pathname === '/repos/acme/reviewed/pulls/42') {
+        return new Response(JSON.stringify({ head: { sha: eligiblePrivatePullRequest.headSha } }));
+      }
+      if (url.pathname === '/repos/acme/reviewed/pulls/42/files') {
+        return new Response(JSON.stringify([]));
+      }
+      if (url.pathname === '/repos/acme/reviewed/pulls/42/reviews' && method === 'GET') {
+        return new Response(JSON.stringify([]));
+      }
+      if (url.pathname === '/repos/acme/reviewed/pulls/42/reviews' && method === 'POST') {
+        if (transientFailure) {
+          transientFailure = false;
+          return new Response('{}', { status: 503 });
+        }
+        postedReviews.push(init?.body ?? null);
+        return new Response(JSON.stringify({ id: 1, body: '<!-- compte-rendu:run:run-1 -->' }));
+      }
+      return new Response('{}', { status: 404 });
+    };
+    const coordinator = createReviewCoordinator({
+      github: createGitHubPublicationAdapter({ token: 'installation-token', fetch: fetcher }),
+      stateStore,
+      scheduler: {
+        schedule: async (_job, scheduledRunId) => {
+          runId = scheduledRunId;
+        },
+      },
+    });
+
+    expect(await coordinator.handleReviewEvent(eligiblePrivatePullRequest)).toBe('scheduled');
+    expect(
+      await coordinator.completeReview({
+        runId,
+        output: { findings: [], summary: 'Retryable publication' },
+      }),
+    ).toBe('completed');
+    expect(postedReviews).toHaveLength(1);
+    expect(await coordinator.handleReviewEvent(eligiblePrivatePullRequest)).toBe('completed');
+  });
+
+  it('fails closed when marker recovery is exhausted after an uncertain POST', async () => {
+    const stateStore = createInMemoryReviewStateStore();
+    let runId = '';
+    const remoteReviews: string[] = [];
+    const fetcher: typeof fetch = async (input, init) => {
+      const inputUrl =
+        typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      const url = new URL(inputUrl);
+      const method = init?.method ?? 'GET';
+      if (url.pathname === '/repositories/11') {
+        return new Response(JSON.stringify({ full_name: 'acme/reviewed' }));
+      }
+      if (url.pathname === '/repos/acme/reviewed/pulls/42') {
+        return new Response(JSON.stringify({ head: { sha: eligiblePrivatePullRequest.headSha } }));
+      }
+      if (url.pathname === '/repos/acme/reviewed/pulls/42/files') {
+        return new Response(JSON.stringify([]));
+      }
+      if (url.pathname === '/repos/acme/reviewed/pulls/42/reviews' && method === 'GET') {
+        return remoteReviews.length === 0
+          ? new Response(JSON.stringify([]))
+          : new Response('{}', { status: 503 });
+      }
+      if (url.pathname === '/repos/acme/reviewed/pulls/42/reviews' && method === 'POST') {
+        if (typeof init?.body === 'string') remoteReviews.push(init.body);
+        return new Response('{}', { status: 503 });
+      }
+      return new Response('{}', { status: 404 });
+    };
+    const coordinator = createReviewCoordinator({
+      github: createGitHubPublicationAdapter({ token: 'installation-token', fetch: fetcher }),
+      stateStore,
+      scheduler: {
+        schedule: async (_job, scheduledRunId) => {
+          runId = scheduledRunId;
+        },
+      },
+    });
+
+    expect(await coordinator.handleReviewEvent(eligiblePrivatePullRequest)).toBe('scheduled');
+    expect(
+      await coordinator.completeReview({
+        runId,
+        output: { findings: [], summary: 'Uncertain publication' },
+      }),
+    ).toBe('failed');
+    expect(remoteReviews).toHaveLength(1);
+    expect(await coordinator.handleReviewEvent(eligiblePrivatePullRequest)).toBe('failed');
+  });
+
+  it('publishes the 101st changed file and recognizes the 101st existing marker', async () => {
+    const stateStore = createInMemoryReviewStateStore();
+    const postedPayloads: string[] = [];
+    const pageOneFiles = Array.from({ length: 100 }, (_, index) => ({
+      filename: `src/unchanged-${index}.ts`,
+      patch: '@@ -1,1 +1,1 @@\n context\n',
+    }));
+    const pageOneReviews = Array.from({ length: 100 }, (_, index) => ({
+      id: index + 1,
+      body: null,
+    }));
+    let firstRunId = '';
+    let secondRunId = '';
+    const fetcher: typeof fetch = async (input, init) => {
+      const inputUrl =
+        typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      const url = new URL(inputUrl);
+      const method = init?.method ?? 'GET';
+      const pullRequestMatch = /^\/repos\/acme\/reviewed\/pulls\/(\d+)(?:\/|$)/.exec(url.pathname);
+      const pullRequestNumber = pullRequestMatch?.[1];
+
+      if (url.pathname === '/repositories/11') {
+        return new Response(JSON.stringify({ full_name: 'acme/reviewed' }));
+      }
+      if (pullRequestNumber !== undefined && url.pathname.endsWith(`/pulls/${pullRequestNumber}`)) {
+        return new Response(JSON.stringify({ head: { sha: eligiblePrivatePullRequest.headSha } }));
+      }
+      if (pullRequestNumber !== undefined && url.pathname.endsWith('/files')) {
+        const page = url.searchParams.get('page');
+        if (pullRequestNumber === '42' && page === '1') {
+          return new Response(JSON.stringify(pageOneFiles));
+        }
+        if (pullRequestNumber === '42' && page === '2') {
+          return new Response(
+            JSON.stringify([
+              {
+                filename: 'src/target.ts',
+                patch: '@@ -1,0 +2,1 @@\n+target\n',
+              },
+            ]),
+          );
+        }
+        return new Response(JSON.stringify([]));
+      }
+      if (
+        pullRequestNumber !== undefined &&
+        url.pathname.endsWith('/reviews') &&
+        method === 'GET'
+      ) {
+        if (pullRequestNumber === '43' && url.searchParams.get('page') === '2') {
+          return new Response(
+            JSON.stringify([{ id: 101, body: `<!-- compte-rendu:run:${secondRunId} -->` }]),
+          );
+        }
+        if (pullRequestNumber === '42' && url.searchParams.get('page') === '2') {
+          return new Response(JSON.stringify([]));
+        }
+        return new Response(JSON.stringify(pageOneReviews));
+      }
+      if (
+        pullRequestNumber !== undefined &&
+        url.pathname.endsWith('/reviews') &&
+        method === 'POST'
+      ) {
+        if (typeof init?.body === 'string') postedPayloads.push(init.body);
+        return new Response(JSON.stringify({ id: 200, body: '<!-- published -->' }));
+      }
+      return new Response('{}', { status: 404 });
+    };
+    const coordinator = createReviewCoordinator({
+      github: createGitHubPublicationAdapter({ token: 'installation-token', fetch: fetcher }),
+      stateStore,
+      scheduler: {
+        schedule: async (_job, scheduledRunId) => {
+          if (firstRunId === '') firstRunId = scheduledRunId;
+          else secondRunId = scheduledRunId;
+        },
+      },
+    });
+
+    expect(await coordinator.handleReviewEvent(eligiblePrivatePullRequest)).toBe('scheduled');
+    expect(
+      await coordinator.completeReview({
+        runId: firstRunId,
+        output: {
+          findings: [{ path: 'src/target.ts', line: 2, message: '101st file finding' }],
+          summary: 'Paged file review',
+        },
+      }),
+    ).toBe('completed');
+    expect(postedPayloads).toHaveLength(1);
+    expect(JSON.parse(postedPayloads[0])).toMatchObject({
+      comments: [{ path: 'src/target.ts', line: 2, side: 'RIGHT' }],
+    });
+
+    const secondEvent = {
+      ...eligiblePrivatePullRequest,
+      deliveryId: 'delivery-page-marker',
+      pullRequestNumber: 43,
+    };
+    expect(await coordinator.handleReviewEvent(secondEvent)).toBe('scheduled');
+    expect(
+      await coordinator.completeReview({
+        runId: secondRunId,
+        output: { findings: [], summary: 'Existing marker review' },
+      }),
+    ).toBe('completed');
+    expect(postedPayloads).toHaveLength(1);
+    expect(await coordinator.handleReviewEvent(secondEvent)).toBe('completed');
+  });
+
+  it('publishes capped valid right-side findings for the current head and completes the run', async () => {
+    const stateStore = createInMemoryReviewStateStore();
+    const reviews: ReviewPublicationPayload[] = [];
+    let runId = '';
+    const coordinator = createReviewCoordinator({
+      github: {
+        loadReviewTarget: async () => ({
+          headSha: eligiblePrivatePullRequest.headSha,
+          files: [
+            {
+              path: 'src/review.ts',
+              patch: '@@ -1,0 +2,6 @@\n+one\n+two\n+three\n+four\n+five\n+six\n',
+            },
+          ],
+        }),
+        findReviewByMarker: async () => undefined,
+        createReview: async ({ payload }): Promise<ReviewPublicationCreateResult> => {
+          reviews.push(payload);
+          return { kind: 'created', review: payload };
+        },
+      },
+      stateStore,
+      scheduler: {
+        schedule: async (_job, scheduledRunId) => {
+          runId = scheduledRunId;
+        },
+      },
+    });
+
+    expect(await coordinator.handleReviewEvent(eligiblePrivatePullRequest)).toBe('scheduled');
+
+    const disposition = await coordinator.completeReview({
+      runId,
+      output: {
+        findings: [
+          { path: 'src/review.ts', line: 2, message: 'one finding' },
+          { path: 'README.md', line: 2, message: 'wrong path' },
+          { path: 'src/review.ts', line: 3, message: 'two finding' },
+          { path: 'src/review.ts', line: 1, message: 'left side' },
+          { path: 'src/review.ts', line: 4, message: 'three finding' },
+          { path: 'src/review.ts', line: 5, message: 'four finding' },
+          { path: 'src/review.ts', line: 6, message: 'five finding' },
+          { path: 'src/review.ts', line: 7, message: 'six finding' },
+          { path: 'src/review.ts', line: 2, message: 'one finding' },
+        ],
+        summary: 'Review summary',
+      },
+    });
+
+    expect(disposition).toBe('completed');
+    expect(reviews).toHaveLength(1);
+    expect(reviews[0]).toMatchObject({
+      event: 'COMMENT',
+      commit_id: eligiblePrivatePullRequest.headSha,
+      body: expect.stringContaining('Review summary'),
+      comments: [
+        { path: 'src/review.ts', line: 2, side: 'RIGHT', body: 'one finding' },
+        { path: 'src/review.ts', line: 3, side: 'RIGHT', body: 'two finding' },
+        { path: 'src/review.ts', line: 4, side: 'RIGHT', body: 'three finding' },
+        { path: 'src/review.ts', line: 5, side: 'RIGHT', body: 'four finding' },
+        { path: 'src/review.ts', line: 6, side: 'RIGHT', body: 'five finding' },
+      ],
+    });
+    expect(await coordinator.handleReviewEvent(eligiblePrivatePullRequest)).toBe('completed');
+  });
+
+  it('treats added content beginning with plus signs as a right-side line', async () => {
+    const stateStore = createInMemoryReviewStateStore();
+    const reviews: ReviewPublicationPayload[] = [];
+    let runId = '';
+    const coordinator = createReviewCoordinator({
+      github: {
+        loadReviewTarget: async () => ({
+          headSha: eligiblePrivatePullRequest.headSha,
+          files: [{ path: 'src/plus.ts', patch: '@@ -1,0 +2,1 @@\n+++added\n' }],
+        }),
+        findReviewByMarker: async () => undefined,
+        createReview: async ({ payload }): Promise<ReviewPublicationCreateResult> => {
+          reviews.push(payload);
+          return { kind: 'created', review: payload };
+        },
+      },
+      stateStore,
+      scheduler: {
+        schedule: async (_job, scheduledRunId) => {
+          runId = scheduledRunId;
+        },
+      },
+    });
+
+    expect(await coordinator.handleReviewEvent(eligiblePrivatePullRequest)).toBe('scheduled');
+    expect(
+      await coordinator.completeReview({
+        runId,
+        output: {
+          findings: [{ path: 'src/plus.ts', line: 2, message: 'plus content' }],
+          summary: 'Plus',
+        },
+      }),
+    ).toBe('completed');
+    expect(reviews[0]?.comments).toEqual([
+      { path: 'src/plus.ts', line: 2, side: 'RIGHT', body: 'plus content' },
+    ]);
+  });
+
+  it('persists completion in D1 so the coordinator replay is terminal', async () => {
+    const database = new SqliteD1Database();
+    const stateStore = createD1ReviewStateStore(database);
+    let runId = '';
+    const event = { ...eligiblePrivatePullRequest, deliveryId: 'delivery-sqlite-complete' };
+    const coordinator = createReviewCoordinator({
+      github: {
+        loadReviewTarget: async () => ({
+          headSha: event.headSha,
+          files: [],
+        }),
+        createReview: async ({ payload }): Promise<ReviewPublicationCreateResult> => ({
+          kind: 'created',
+          review: payload,
+        }),
+      },
+      stateStore,
+      scheduler: {
+        schedule: async (_job, scheduledRunId) => {
+          runId = scheduledRunId;
+        },
+      },
+    });
+
+    try {
+      expect(await coordinator.handleReviewEvent(event)).toBe('scheduled');
+      expect(
+        await coordinator.completeReview({
+          runId,
+          output: { findings: [], summary: 'D1 completion' },
+        }),
+      ).toBe('completed');
+      expect(await coordinator.handleReviewEvent(event)).toBe('completed');
+    } finally {
+      database.close();
+    }
+  });
+
+  it('supersedes without publishing when the current head has changed', async () => {
+    const stateStore = createInMemoryReviewStateStore();
+    const reviews: ReviewPublicationPayload[] = [];
+    let runId = '';
+    const coordinator = createReviewCoordinator({
+      github: {
+        loadReviewTarget: async () => ({
+          headSha: '3333333333333333333333333333333333333333',
+          files: [],
+        }),
+        createReview: async ({ payload }): Promise<ReviewPublicationCreateResult> => {
+          reviews.push(payload);
+          return { kind: 'created', review: payload };
+        },
+      },
+      stateStore,
+      scheduler: {
+        schedule: async (_job, scheduledRunId) => {
+          runId = scheduledRunId;
+        },
+      },
+    });
+
+    expect(await coordinator.handleReviewEvent(eligiblePrivatePullRequest)).toBe('scheduled');
+
+    const disposition = await coordinator.completeReview({
+      runId,
+      output: { findings: [], summary: 'Stale review' },
+    });
+
+    expect(disposition).toBe('ignored');
+    expect(reviews).toEqual([]);
+    expect(await coordinator.handleReviewEvent(eligiblePrivatePullRequest)).toBe('ignored');
+  });
+
+  it('converges an uncertain publication and repeated completion to one review', async () => {
+    const stateStore = createInMemoryReviewStateStore();
+    const reviews: ReviewPublicationPayload[] = [];
+    let existingReview: ReviewPublicationPayload | undefined;
+    let runId = '';
+    let uncertain = true;
+    const coordinator = createReviewCoordinator({
+      github: {
+        loadReviewTarget: async () => ({
+          headSha: eligiblePrivatePullRequest.headSha,
+          files: [],
+        }),
+        findReviewByMarker: async () => existingReview,
+        createReview: async ({ payload }): Promise<ReviewPublicationCreateResult> => {
+          reviews.push(payload);
+          existingReview = payload;
+          if (uncertain) {
+            uncertain = false;
+            throw new Error('network result uncertain');
+          }
+          return { kind: 'created', review: payload };
+        },
+      },
+      stateStore,
+      scheduler: {
+        schedule: async (_job, scheduledRunId) => {
+          runId = scheduledRunId;
+        },
+      },
+    });
+
+    expect(await coordinator.handleReviewEvent(eligiblePrivatePullRequest)).toBe('scheduled');
+
+    const output = { findings: [], summary: 'Repeatable summary' };
+    expect(await coordinator.completeReview({ runId, output })).toBe('completed');
+    expect(await coordinator.completeReview({ runId, output })).toBe('completed');
+    expect(reviews).toHaveLength(1);
+    expect(await coordinator.handleReviewEvent(eligiblePrivatePullRequest)).toBe('completed');
+  });
+
+  it('publishes a summary-only COMMENT when no finding is valid for the diff', async () => {
+    const stateStore = createInMemoryReviewStateStore();
+    const reviews: ReviewPublicationPayload[] = [];
+    let runId = '';
+    const coordinator = createReviewCoordinator({
+      github: {
+        loadReviewTarget: async () => ({
+          headSha: eligiblePrivatePullRequest.headSha,
+          files: [{ path: 'src/review.ts', patch: '@@ -1,0 +2,1 @@\n+changed\n' }],
+        }),
+        createReview: async ({ payload }): Promise<ReviewPublicationCreateResult> => {
+          reviews.push(payload);
+          return { kind: 'created', review: payload };
+        },
+      },
+      stateStore,
+      scheduler: {
+        schedule: async (_job, scheduledRunId) => {
+          runId = scheduledRunId;
+        },
+      },
+    });
+
+    expect(await coordinator.handleReviewEvent(eligiblePrivatePullRequest)).toBe('scheduled');
+
+    expect(
+      await coordinator.completeReview({
+        runId,
+        output: {
+          findings: [{ path: 'src/review.ts', line: 100, message: 'not in patch' }],
+          summary: 'No actionable findings',
+        },
+      }),
+    ).toBe('completed');
+
+    expect(reviews).toHaveLength(1);
+    expect(reviews[0]).toMatchObject({
+      event: 'COMMENT',
+      body: expect.stringContaining('No actionable findings'),
+      comments: [],
+    });
+  });
+
   it('passes the claimed run id to the scheduler through the public seam', async () => {
     const scheduled: Array<{ job: ReviewJob; runId: string }> = [];
     const coordinator = createReviewCoordinator({

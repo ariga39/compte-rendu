@@ -136,12 +136,15 @@ core; a core failure is retryable and is not acknowledged as accepted.
 
 ```ts
 handleReviewEvent(event: ReviewEvent): Promise<ReviewDisposition>
+completeReview(input: { runId: string; output: unknown }): Promise<ReviewDisposition>
 ```
 
 This is the main deep module. Behind the interface it deduplicates deliveries,
 loads repository facts, applies policy, records approvals, starts or supersedes
 runs, invokes the review Workflow, verifies the current head SHA, and publishes
-validated output. GitHub, D1, Workflow, and clock adapters sit at internal
+validated output. `completeReview` accepts only the run identity and untrusted
+agent output; repository, pull request, installation, and target SHA are loaded
+from durable state. GitHub, D1, Workflow, and clock adapters sit at internal
 seams.
 
 Observable dispositions are deliberately few: rejected, ignored, awaiting
