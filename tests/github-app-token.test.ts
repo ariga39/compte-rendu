@@ -9,6 +9,33 @@ const pemFromDer = (value: ArrayBuffer) => {
   return `-----BEGIN PRIVATE KEY-----\n${lines}\n-----END PRIVATE KEY-----`;
 };
 
+const derElement = (bytes: Uint8Array, offset: number) => {
+  const lengthByte = bytes[offset + 1];
+  const lengthSize = lengthByte < 0x80 ? 0 : lengthByte & 0x7f;
+  let length = lengthByte < 0x80 ? lengthByte : 0;
+  for (let index = 0; index < lengthSize; index += 1) {
+    length = length * 256 + bytes[offset + 2 + index];
+  }
+  const valueStart = offset + 2 + lengthSize;
+  return {
+    next: valueStart + length,
+    valueStart,
+    valueEnd: valueStart + length,
+  };
+};
+
+const pkcs1PemFromPkcs8 = (value: ArrayBuffer) => {
+  const bytes = new Uint8Array(value);
+  const privateKeyInfo = derElement(bytes, 0);
+  let offset = privateKeyInfo.valueStart;
+  offset = derElement(bytes, offset).next;
+  offset = derElement(bytes, offset).next;
+  const privateKey = derElement(bytes, offset);
+  return pemFromDer(bytes.slice(privateKey.valueStart, privateKey.valueEnd).buffer)
+    .replace('BEGIN PRIVATE KEY', 'BEGIN RSA PRIVATE KEY')
+    .replace('END PRIVATE KEY', 'END RSA PRIVATE KEY');
+};
+
 const decodeBase64UrlJson = (value: string) => {
   const padding = '='.repeat((4 - (value.length % 4)) % 4);
   const padded = value.replaceAll('-', '+').replaceAll('_', '/') + padding;
@@ -53,6 +80,30 @@ describe('GitHub App token provider', () => {
     const claims = decodeBase64UrlJson(authorization?.split('.')[1] ?? '');
     expect(claims.iss).toBe(1234567);
     expect(claims.exp - claims.iat).toBe(660);
+  });
+
+  it('exchanges a signed app JWT when GitHub provides a PKCS#1 private key', async () => {
+    const keyPair = await globalThis.crypto.subtle.generateKey(
+      {
+        name: 'RSASSA-PKCS1-v1_5',
+        modulusLength: 2048,
+        publicExponent: new Uint8Array([1, 0, 1]),
+        hash: 'SHA-256',
+      },
+      true,
+      ['sign', 'verify'],
+    );
+    const privateKey = pkcs1PemFromPkcs8(
+      await globalThis.crypto.subtle.exportKey('pkcs8', keyPair.privateKey),
+    );
+    const provider = createGitHubAppTokenProvider({
+      appId: '1234567',
+      privateKey,
+      crypto: globalThis.crypto,
+      fetch: async () => new Response(JSON.stringify({ token: 'installation-token-from-github' })),
+    });
+
+    await expect(provider.getInstallationToken(7)).resolves.toBe('installation-token-from-github');
   });
 
   it('rejects malformed credentials without exposing their material', async () => {

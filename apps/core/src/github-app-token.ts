@@ -12,20 +12,69 @@ const base64Url = (bytes: Uint8Array): string => {
 
 const encodedJson = (value: unknown) => base64Url(new TextEncoder().encode(JSON.stringify(value)));
 
+const concatBytes = (...parts: ReadonlyArray<Uint8Array>): Uint8Array => {
+  const result = new Uint8Array(parts.reduce((length, part) => length + part.length, 0));
+  let offset = 0;
+  for (const part of parts) {
+    result.set(part, offset);
+    offset += part.length;
+  }
+  return result;
+};
+
+const derLength = (length: number): Uint8Array => {
+  if (length < 0x80) return Uint8Array.of(length);
+  const bytes: number[] = [];
+  for (let remaining = length; remaining > 0; remaining = Math.floor(remaining / 256)) {
+    bytes.unshift(remaining & 0xff);
+  }
+  return Uint8Array.of(0x80 | bytes.length, ...bytes);
+};
+
+const derElement = (tag: number, value: Uint8Array): Uint8Array =>
+  concatBytes(Uint8Array.of(tag), derLength(value.length), value);
+
+const pkcs1ToPkcs8 = (privateKey: ArrayBuffer): ArrayBuffer => {
+  const algorithmIdentifier = Uint8Array.of(
+    0x30,
+    0x0d,
+    0x06,
+    0x09,
+    0x2a,
+    0x86,
+    0x48,
+    0x86,
+    0xf7,
+    0x0d,
+    0x01,
+    0x01,
+    0x01,
+    0x05,
+    0x00,
+  );
+  const body = concatBytes(
+    Uint8Array.of(0x02, 0x01, 0x00),
+    algorithmIdentifier,
+    derElement(0x04, new Uint8Array(privateKey)),
+  );
+  return derElement(0x30, body).buffer as ArrayBuffer;
+};
+
 const pemBytes = (privateKey: string): ArrayBuffer => {
-  const match = /^-----BEGIN PRIVATE KEY-----([\s\S]+)-----END PRIVATE KEY-----$/.exec(
+  const match = /^-----BEGIN (PRIVATE KEY|RSA PRIVATE KEY)-----([\s\S]+)-----END \1-----$/.exec(
     privateKey.trim(),
   );
   if (match === null) throw new Error('GitHub App private key is invalid');
 
-  const encoded = match[1].replace(/\s/g, '');
+  const encoded = match[2].replace(/\s/g, '');
   let binary: string;
   try {
     binary = globalThis.atob(encoded);
   } catch {
     throw new Error('GitHub App private key is invalid');
   }
-  return Uint8Array.from(binary, (character) => character.charCodeAt(0)).buffer;
+  const der = Uint8Array.from(binary, (character) => character.charCodeAt(0)).buffer;
+  return match[1] === 'RSA PRIVATE KEY' ? pkcs1ToPkcs8(der) : der;
 };
 
 export interface GitHubAppTokenProviderOptions {
