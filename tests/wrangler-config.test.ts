@@ -1,52 +1,133 @@
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { join, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
 
 const repositoryRoot = fileURLToPath(new URL('..', import.meta.url));
-const readConfig = (path: string) =>
-  readFileSync(fileURLToPath(new URL(path, `file://${repositoryRoot}/`)), 'utf8');
+const cliPath = resolve(repositoryRoot, 'scripts/render-wrangler-config.mts');
+const githubAppId = '4715786';
+const d1DatabaseId = '01234567-89ab-4cde-8123-456789abcdef';
+
+type WranglerConfig = {
+  workers_dev?: boolean;
+  vars?: { GITHUB_APP_ID?: string };
+  secrets?: { required?: readonly string[] };
+  d1_databases?: readonly { database_id?: string }[];
+};
+
+const readConfig = (path: string) => readFileSync(resolve(repositoryRoot, path), 'utf8');
 const parseConfig = (path: string) =>
   JSON.parse(
     readConfig(path)
       .replace(/^\s*\/\/.*$/gm, '')
       .replace(/,\s*([}\]])/g, '$1'),
-  ) as {
-    secrets?: { required?: readonly string[] };
+  ) as WranglerConfig;
+
+type DeploymentFixture = {
+  run: (instanceName: string) => string;
+  outputs: (instanceName: string) => { core: string; ingress: string };
+  read: (instanceName: string) => { core: string; ingress: string };
+};
+
+const withDeploymentFixture = <T>(callback: (fixture: DeploymentFixture) => T): T => {
+  const root = mkdtempSync(join(tmpdir(), 'compte-rendu-render-'));
+  const coreDirectory = join(root, 'apps/core');
+  const ingressDirectory = join(root, 'apps/ingress');
+  mkdirSync(coreDirectory, { recursive: true });
+  mkdirSync(ingressDirectory, { recursive: true });
+  copyFileSync(
+    resolve(repositoryRoot, 'apps/core/wrangler.jsonc'),
+    join(coreDirectory, 'wrangler.jsonc'),
+  );
+  copyFileSync(
+    resolve(repositoryRoot, 'apps/ingress/wrangler.jsonc'),
+    join(ingressDirectory, 'wrangler.jsonc'),
+  );
+
+  const outputs = (instanceName: string) => ({
+    core: join(coreDirectory, `wrangler.${instanceName}.jsonc`),
+    ingress: join(ingressDirectory, `wrangler.${instanceName}.jsonc`),
+  });
+  const run = (instanceName: string) =>
+    execFileSync(
+      process.execPath,
+      ['--experimental-strip-types', cliPath, instanceName, githubAppId, d1DatabaseId],
+      { cwd: root, encoding: 'utf8', stdio: 'pipe' },
+    );
+  const read = (instanceName: string) => {
+    const paths = outputs(instanceName);
+    return {
+      core: readFileSync(paths.core, 'utf8'),
+      ingress: readFileSync(paths.ingress, 'utf8'),
+    };
   };
 
-describe('Wrangler deployment wiring', () => {
-  it('declares the private core resources and public ingress service binding', () => {
-    const core = readConfig('apps/core/wrangler.jsonc');
-    const ingress = readConfig('apps/ingress/wrangler.jsonc');
+  try {
+    return callback({ run, outputs, read });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+};
 
-    expect(core).toContain('"workers_dev": false');
-    expect(core).toContain('"binding": "REVIEW_DB"');
-    expect(core).toContain('"database_name": "compte-rendu-review-state"');
-    expect(core).toContain('"binding": "REVIEW_WORKFLOW"');
-    expect(core).toContain('"class_name": "ReviewWorkflow"');
-    expect(core).toContain('"class_name": "Sandbox"');
-    expect(core).toContain('"class_name": "ReviewLeaseDurableObject"');
-    expect(core).toContain('GITHUB_APP_PRIVATE_KEY');
-    expect(core).toContain('MODEL_API_KEY');
-    expect(core).toContain('"GITHUB_APP_ID": "REPLACE_WITH_GITHUB_APP_ID"');
-    expect(core).not.toMatch(/"GITHUB_APP_ID": "\d+"/);
-    expect(core).toContain('"database_id": "REPLACE_WITH_D1_DATABASE_ID"');
-    expect(core).not.toMatch(/"database_id": "\d+"/);
+describe('Wrangler deployment tooling', () => {
+  it('renders independent named deployments through the real CLI', () => {
+    withDeploymentFixture(({ run, read }) => {
+      run('petit-chiba');
+      run('second-instance');
+      const first = read('petit-chiba');
+      const second = read('second-instance');
 
-    expect(ingress).toContain('"workers_dev": true');
-    expect(ingress).toContain('"binding": "CORE"');
-    expect(ingress).toContain('"service": "compte-rendu-core"');
-    expect(ingress).toContain('WEBHOOK_SECRET');
+      expect(first.core).toContain('"name": "petit-chiba-core"');
+      expect(first.core).toContain('"database_name": "petit-chiba-review-state"');
+      expect(first.core).toContain('"name": "petit-chiba-review"');
+      expect(first.core).toContain('"main": "src/worker.ts"');
+      expect(first.core).toContain('"migrations_dir": "migrations"');
+      expect(first.core).toContain('"image": "./Dockerfile"');
+      expect(first.core).toContain(`"GITHUB_APP_ID": "${githubAppId}"`);
+      expect(first.core).toContain(`"database_id": "${d1DatabaseId}"`);
+      expect(first.ingress).toContain('"name": "petit-chiba-ingress"');
+      expect(first.ingress).toContain('"service": "petit-chiba-core"');
+
+      expect(second.core).toContain('"name": "second-instance-core"');
+      expect(second.core).toContain('"database_name": "second-instance-review-state"');
+      expect(second.ingress).toContain('"service": "second-instance-core"');
+      expect(first.core).not.toContain('second-instance');
+      expect(second.core).not.toContain('petit-chiba');
+    });
   });
 
-  it('declares deployment-required secrets as Wrangler configuration', () => {
-    const coreSecrets = parseConfig('apps/core/wrangler.jsonc').secrets?.required;
-    const ingressSecrets = parseConfig('apps/ingress/wrangler.jsonc').secrets?.required;
+  it('rejects empty, unsafe, or overlong instances before creating output', () => {
+    withDeploymentFixture(({ run, outputs }) => {
+      for (const instanceName of ['', 'unsafe/name', 'a'.repeat(51)]) {
+        expect(() => run(instanceName)).toThrow();
+        const paths = outputs(instanceName);
+        expect(existsSync(paths.core)).toBe(false);
+        expect(existsSync(paths.ingress)).toBe(false);
+      }
+    });
+  });
 
-    expect(coreSecrets).toHaveLength(2);
-    expect(coreSecrets).toEqual(
-      expect.arrayContaining(['GITHUB_APP_PRIVATE_KEY', 'MODEL_API_KEY']),
-    );
-    expect(ingressSecrets).toEqual(['WEBHOOK_SECRET']);
+  it('does not overwrite existing generated configs', () => {
+    withDeploymentFixture(({ run, read }) => {
+      run('petit-chiba');
+      const original = read('petit-chiba');
+
+      expect(() => run('petit-chiba')).toThrow();
+      expect(read('petit-chiba')).toEqual(original);
+    });
+  });
+
+  it('keeps tracked templates neutral and free of real deployment IDs', () => {
+    const core = parseConfig('apps/core/wrangler.jsonc');
+    const ingress = parseConfig('apps/ingress/wrangler.jsonc');
+
+    expect(core.workers_dev).toBe(false);
+    expect(ingress.workers_dev).toBe(true);
+    expect(core.secrets?.required).toEqual(['GITHUB_APP_PRIVATE_KEY', 'MODEL_API_KEY']);
+    expect(ingress.secrets?.required).toEqual(['WEBHOOK_SECRET']);
+    expect(core.vars?.GITHUB_APP_ID).toBe('REPLACE_WITH_GITHUB_APP_ID');
+    expect(core.d1_databases?.[0]?.database_id).toBe('REPLACE_WITH_D1_DATABASE_ID');
   });
 });
