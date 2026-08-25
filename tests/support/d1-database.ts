@@ -32,13 +32,23 @@ class SqlitePreparedStatement implements D1PreparedStatementLike {
 
 export class SqliteD1Database implements D1DatabaseLike {
   readonly database = new DatabaseSync(':memory:');
+  private batchTail: Promise<void> = Promise.resolve();
 
-  constructor() {
-    const migration = readFileSync(
-      fileURLToPath(new URL('../../apps/core/migrations/0001_review_state.sql', import.meta.url)),
-      'utf8',
-    );
-    this.database.exec(migration);
+  constructor(
+    migrationNames: readonly string[] = ['0001_review_state.sql', '0002_allow_manual_retry.sql'],
+  ) {
+    this.applyMigrations(migrationNames);
+  }
+
+  applyMigrations(migrationNames: readonly string[]) {
+    for (const migrationName of migrationNames) {
+      this.database.exec(
+        readFileSync(
+          fileURLToPath(new URL(`../../apps/core/migrations/${migrationName}`, import.meta.url)),
+          'utf8',
+        ),
+      );
+    }
   }
 
   prepare(query: string): D1PreparedStatementLike {
@@ -46,18 +56,25 @@ export class SqliteD1Database implements D1DatabaseLike {
   }
 
   async batch(statements: readonly D1PreparedStatementLike[]): Promise<readonly D1ResultLike[]> {
-    this.database.exec('BEGIN');
-    try {
-      const results = [];
-      for (const statement of statements) {
-        results.push(await statement.run());
+    const batch = this.batchTail.then(async () => {
+      this.database.exec('BEGIN');
+      try {
+        const results = [];
+        for (const statement of statements) {
+          results.push(await statement.run());
+        }
+        this.database.exec('COMMIT');
+        return results;
+      } catch (error) {
+        this.database.exec('ROLLBACK');
+        throw error;
       }
-      this.database.exec('COMMIT');
-      return results;
-    } catch (error) {
-      this.database.exec('ROLLBACK');
-      throw error;
-    }
+    });
+    this.batchTail = batch.then(
+      () => undefined,
+      () => undefined,
+    );
+    return batch;
   }
 
   close() {
