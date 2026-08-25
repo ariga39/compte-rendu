@@ -6,6 +6,23 @@ import {
   type PullRequestFacts as PullRequestFactsType,
   type WorkerEntrypoint,
 } from '@compte-rendu/contracts';
+import {
+  createCloudflareSandboxAdapter,
+  createDurableLeaseAdapter,
+  type CloudflareSandboxBindings,
+  type LeaseNamespaceLike,
+} from './cloudflare-review-adapter';
+import { createReviewRunner } from './review-run';
+
+export { ReviewLeaseDurableObject } from './cloudflare-review-adapter';
+export {
+  createCloudflareSandboxAdapter,
+  createDurableLeaseAdapter,
+  OPENCODE_MODEL,
+  OPENCODE_VERSION,
+  REVIEW_DIRECTORY,
+} from './cloudflare-review-adapter';
+export * from './review-run';
 
 type GitHubShaValue = typeof GitHubSha.Type;
 
@@ -113,6 +130,16 @@ export interface GitHubAdapter {
 export interface ReviewCoordinator {
   handleReviewEvent(event: unknown): Promise<ReviewDisposition>;
 }
+
+export interface CoreEnv extends CloudflareSandboxBindings {
+  readonly REVIEW_LEASE: LeaseNamespaceLike;
+}
+
+export const createCloudflareReviewRunner = (env: CoreEnv) =>
+  createReviewRunner({
+    lease: createDurableLeaseAdapter(env.REVIEW_LEASE),
+    sandbox: createCloudflareSandboxAdapter(env),
+  });
 
 class InvalidReviewEvent extends Schema.TaggedError<InvalidReviewEvent>()('InvalidReviewEvent', {
   message: Schema.String,
