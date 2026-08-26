@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Option, Schema } from 'effect';
@@ -9,6 +9,7 @@ import {
   RunnerJobInput,
   type RunnerJobResponse as RunnerJobResponseValue,
 } from '@compte-rendu/contracts';
+import prReviewSkill from '../skills/pr-review/SKILL.md?raw';
 
 const MODEL = 'opencode-go/deepseek-v4-flash';
 const MODEL_ENV = 'OPENCODE_API_KEY';
@@ -30,24 +31,29 @@ const trustedOpenCodeConfig = JSON.stringify({
       description: 'Read-only pull request reviewer',
       mode: 'primary',
       permission: {
-        bash: 'deny',
+        bash: {
+          '*': 'deny',
+          'git diff*': 'allow',
+          'git show*': 'allow',
+          'git grep*': 'allow',
+          'grep*': 'allow',
+          'rg*': 'allow',
+        },
         edit: 'deny',
         external_directory: 'deny',
+        skill: { '*': 'deny', 'pr-review': 'allow' },
         webfetch: 'deny',
       },
     },
   },
 });
 
-const trustedOpenCodeEnvironment = [
-  `OPENCODE_CONFIG_CONTENT=${trustedOpenCodeConfig}`,
-  'OPENCODE_DISABLE_PROJECT_CONFIG=1',
-];
-
-const reviewPrompt =
-  'Review the checked-out pull request. Return exactly one JSON object with this shape: ' +
-  '{"findings":[{"path":"string","line":0,"message":"string"}],"summary":"string"}. ' +
-  'Do not run repository build, test, hooks, plugins, MCP, or project configuration.';
+const reviewPrompt = (baseSha: string, headSha: string) =>
+  `First load the pr-review skill with the skill tool. Review only the exact caller-supplied ` +
+  `pull request diff from base ${baseSha} to head ${headSha}; use ` +
+  `git diff --find-renames ${baseSha} ${headSha} as the starting point. ` +
+  'Return exactly one bare JSON object with this shape: ' +
+  '{"findings":[{"path":"string","line":0,"message":"string"}],"summary":"string"}.';
 
 const OpenCodeTextEvent = Schema.Struct({
   type: Schema.Literal('text'),
@@ -170,6 +176,7 @@ type RunnerJob = {
   sandboxAttempted: boolean;
   secretPlaceholder?: string;
   checkoutRoot?: string;
+  configRoot?: string;
   deadlineAt: number;
 };
 
@@ -384,6 +391,13 @@ export const createRunner = (options: RunnerOptions = {}) => {
           clean = false;
         }
       }
+      if (job.configRoot !== undefined) {
+        try {
+          await rm(job.configRoot, { recursive: true, force: true });
+        } catch {
+          clean = false;
+        }
+      }
       update(job, { sandbox: { cleanup: clean ? 'destroyed' : 'failed' } });
       return clean;
     }
@@ -427,6 +441,13 @@ export const createRunner = (options: RunnerOptions = {}) => {
         clean = false;
       }
     }
+    if (job.configRoot !== undefined) {
+      try {
+        await rm(job.configRoot, { recursive: true, force: true });
+      } catch {
+        clean = false;
+      }
+    }
     update(job, { sandbox: { cleanup: clean ? 'destroyed' : 'failed' } });
     return clean;
   };
@@ -448,6 +469,15 @@ export const createRunner = (options: RunnerOptions = {}) => {
       }
       job.input.checkoutToken = '';
       if (job.abortRequested) return;
+
+      const configRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-opencode-config-'));
+      job.configRoot = configRoot;
+      await mkdir(join(configRoot, 'opencode', 'skills', 'pr-review'), { recursive: true });
+      await writeFile(
+        join(configRoot, 'opencode', 'skills', 'pr-review', 'SKILL.md'),
+        prReviewSkill,
+        'utf8',
+      );
 
       const placeholder = `cr-${job.id}`;
       job.secretPlaceholder = placeholder;
@@ -480,9 +510,15 @@ export const createRunner = (options: RunnerOptions = {}) => {
         '4',
         '--memory',
         '8g',
-        ...trustedOpenCodeEnvironment.flatMap((value) => ['--env', value]),
+        '--env',
+        `OPENCODE_CONFIG_CONTENT=${trustedOpenCodeConfig}`,
+        '--env',
+        'OPENCODE_DISABLE_PROJECT_CONFIG=1',
+        '--env',
+        `XDG_CONFIG_HOME=${configRoot}`,
         'opencode',
         join(checkoutRoot, 'checkout'),
+        configRoot,
       ]);
       if (create.exitCode !== 0 || create.timedOut) {
         failure = { reason: 'agent' };
@@ -516,7 +552,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
           MODEL,
           '--agent',
           'review',
-          reviewPrompt,
+          reviewPrompt(job.input.baseSha, job.input.headSha),
         ],
         {
           captureStdout: true,
