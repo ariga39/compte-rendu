@@ -1,6 +1,4 @@
 import { DateTime, Effect, Option, Schema } from 'effect';
-import type { OpenCodeOptions } from '@cloudflare/sandbox/opencode';
-import type { OpenCodeHandle } from '@cloudflare/sandbox/opencode';
 import type { Config } from '@opencode-ai/sdk/v2';
 import {
   sanitizeOperationalLogEvent,
@@ -30,7 +28,7 @@ const OPENCODE_DATA_HOME = '/tmp/compte-rendu-opencode-data';
 const OPENCODE_AUTH_PATH = `${OPENCODE_DATA_HOME}/opencode/auth.json`;
 const CHECKOUT_TIMEOUT_MS = 60_000;
 const REVIEW_DEADLINE_MILLIS = 10 * 60 * 1000;
-const OPENCODE_PORT = 4096;
+const MAX_AGENT_OUTPUT_BYTES = 256 * 1024;
 
 const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
@@ -52,31 +50,6 @@ export interface ReviewSandboxProcess {
   }) => Promise<ReviewSandboxProcessOutput>;
 }
 
-export interface ReviewSandboxProcessStatus {
-  readonly id: string;
-  readonly command: ReadonlyArray<string>;
-  readonly cwd?: string;
-  readonly state: 'running' | 'exited' | 'error';
-}
-
-export interface ReviewOpenCodeProcess {
-  readonly id: string;
-  readonly kill: (signal?: number) => Promise<void>;
-  readonly waitForExit: () => Promise<unknown>;
-  readonly status?: () => Promise<unknown>;
-  readonly logs?: (options?: {
-    readonly replay?: boolean;
-    readonly follow?: boolean;
-  }) => Promise<ReviewProcessLogStream>;
-}
-
-interface ReviewProcessLogStream {
-  readonly getReader: () => {
-    readonly read: () => Promise<{ readonly done: boolean; readonly value?: unknown }>;
-    readonly cancel: () => Promise<void>;
-  };
-}
-
 export interface ReviewSandboxRaw {
   readonly writeFile: (path: string, content: string) => Promise<unknown>;
   readonly exec: (
@@ -87,60 +60,7 @@ export interface ReviewSandboxRaw {
       readonly timeout?: number;
     },
   ) => Promise<ReviewSandboxProcess>;
-  readonly getProcess?: (id: string) => Promise<ReviewOpenCodeProcess | null>;
-  readonly listProcesses?: () => Promise<ReadonlyArray<ReviewSandboxProcessStatus>>;
-  readonly openCode?: OpenCodeHandle;
   readonly destroy: () => Promise<void>;
-}
-
-type OpenCodePromptInput = {
-  readonly sessionID: string;
-  readonly directory: string;
-  readonly model: { readonly providerID: string; readonly modelID: string };
-  readonly agent: string;
-  readonly parts: Array<{ readonly type: 'text'; readonly text: string }>;
-};
-
-type OpenCodeClient = {
-  readonly session: {
-    readonly create: (parameters: {
-      readonly directory?: string;
-    }) => Promise<{ readonly id: string }>;
-    readonly prompt: (parameters: OpenCodePromptInput) => Promise<{
-      readonly info: { readonly error?: unknown };
-      readonly parts: ReadonlyArray<{ readonly type: string; readonly text?: unknown }>;
-    }>;
-    readonly abort: (parameters: {
-      readonly sessionID: string;
-      readonly directory: string;
-    }) => Promise<boolean>;
-  };
-  readonly event?: {
-    readonly subscribe: (parameters: {
-      readonly directory: string;
-    }) => Promise<AsyncIterable<unknown>>;
-  };
-};
-
-export interface ReviewDeadline {
-  readonly schedule: (durationMillis: number, onElapsed: () => Promise<void>) => () => void;
-}
-
-const defaultReviewDeadline: ReviewDeadline = {
-  schedule: (durationMillis, onElapsed) => {
-    const handle = setTimeout(() => void onElapsed(), durationMillis);
-    return () => clearTimeout(handle);
-  },
-};
-
-export interface OpenCodeIntegration {
-  readonly createClient: (
-    sandbox: ReviewSandboxRaw,
-    options: OpenCodeOptions,
-  ) => Promise<{
-    readonly client: OpenCodeClient;
-    readonly process: ReviewOpenCodeProcess;
-  }>;
 }
 
 export interface ReviewAgentDiagnostics {
@@ -229,172 +149,6 @@ const recordAgentEvent = (
   }
 };
 
-const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
-  typeof value === 'object' && value !== null;
-
-const processState = (value: unknown): 'running' | 'exited' | 'error' | undefined => {
-  if (!isRecord(value)) return undefined;
-  const state = value.state;
-  return state === 'running' || state === 'exited' || state === 'error' ? state : undefined;
-};
-
-const sessionState = (value: unknown): 'busy' | 'idle' | 'retry' | 'error' | undefined => {
-  if (!isRecord(value)) return undefined;
-  const state = value.type;
-  return state === 'busy' || state === 'idle' || state === 'retry' || state === 'error'
-    ? state
-    : undefined;
-};
-
-const observeAgentActivity = (
-  diagnostics: ReviewAgentDiagnostics | undefined,
-  process: ReviewOpenCodeProcess,
-  client: OpenCodeClient,
-) => {
-  const recordProcessStatus = (state: 'running' | 'exited' | 'error') =>
-    recordAgentEvent(diagnostics, {
-      phase: 'agent',
-      outcome: 'status',
-      stage: 'process',
-      state,
-    });
-  const recordSessionStatus = (state: 'busy' | 'idle' | 'retry' | 'error') =>
-    recordAgentEvent(diagnostics, {
-      phase: 'agent',
-      outcome: 'status',
-      stage: 'session',
-      state,
-    });
-
-  const statusPromise = process.status?.();
-  if (statusPromise !== undefined) {
-    void statusPromise
-      .then((status) => {
-        const state = processState(status);
-        if (state !== undefined) recordProcessStatus(state);
-      })
-      .catch(() => undefined);
-  }
-
-  const processLogs = process.logs;
-  if (processLogs !== undefined) {
-    void (async () => {
-      const stream = await processLogs.call(process, { replay: true, follow: true });
-      const reader = stream.getReader();
-      try {
-        while (true) {
-          const item = await reader.read();
-          if (item.done) break;
-          if (!isRecord(item.value)) continue;
-          if (item.value.type === 'stdout' || item.value.type === 'stderr') {
-            recordAgentEvent(diagnostics, {
-              phase: 'agent',
-              outcome: 'activity',
-              stage: 'process',
-            });
-            continue;
-          }
-          if (item.value.type === 'terminal') {
-            const state = processState(item.value);
-            if (state !== undefined) recordProcessStatus(state);
-          }
-        }
-      } finally {
-        await reader.cancel().catch(() => undefined);
-      }
-    })().catch(() => undefined);
-  }
-
-  if (client.event !== undefined) {
-    void (async () => {
-      const stream = await client.event?.subscribe({ directory: REVIEW_DIRECTORY });
-      if (stream === undefined) return;
-      for await (const event of stream) {
-        if (!isRecord(event)) continue;
-        if (event.type === 'session.status' && isRecord(event.properties)) {
-          const status = sessionState(event.properties.status);
-          if (status !== undefined) {
-            recordSessionStatus(status);
-            recordAgentEvent(diagnostics, {
-              phase: 'agent',
-              outcome: 'activity',
-              stage: 'session',
-            });
-          }
-        } else if (event.type === 'session.idle' || event.type === 'session.error') {
-          recordSessionStatus(event.type === 'session.idle' ? 'idle' : 'error');
-        }
-      }
-    })().catch(() => undefined);
-  }
-};
-
-const isOpenCodeCommand = (command: ReadonlyArray<string>) => {
-  if (command[0] !== 'opencode' || command[1] !== 'serve') return false;
-  const ports: string[] = [];
-  for (let index = 2; index < command.length; index += 1) {
-    const argument = command[index];
-    if (argument === '--port') {
-      const port = command[index + 1];
-      if (port === undefined) return false;
-      ports.push(port);
-      index += 1;
-    } else if (argument.startsWith('--port=')) {
-      ports.push(argument.slice('--port='.length));
-    }
-  }
-  return ports.length === 1 && ports[0] === String(OPENCODE_PORT);
-};
-
-export const resolveOpenCodeProcessId = (
-  processes: ReadonlyArray<ReviewSandboxProcessStatus>,
-  directory: string,
-): string | undefined => {
-  const matches = processes.filter(
-    (candidate) =>
-      candidate.state === 'running' &&
-      candidate.cwd === directory &&
-      isOpenCodeCommand(candidate.command),
-  );
-  return matches.length === 1 ? matches[0]?.id : undefined;
-};
-
-const defaultOpenCodeIntegration: OpenCodeIntegration = {
-  createClient: async (sandbox, options) => {
-    if (sandbox.openCode === undefined || sandbox.listProcesses === undefined) {
-      throw new Error('OpenCode extension is unavailable');
-    }
-    const { createOpenCodeClient } = await import('@cloudflare/sandbox/opencode');
-    const client = await createOpenCodeClient(sandbox.openCode, options);
-    const directory = options.directory ?? REVIEW_DIRECTORY;
-    const runningProcessId = resolveOpenCodeProcessId(await sandbox.listProcesses(), directory);
-    if (runningProcessId === undefined || sandbox.getProcess === undefined) {
-      throw new Error('OpenCode server process is unavailable');
-    }
-    const process = await sandbox.getProcess(runningProcessId);
-    if (process === null) throw new Error('OpenCode server process is unavailable');
-
-    return {
-      client: {
-        session: {
-          create: async (parameters) =>
-            (await client.session.create(parameters, { throwOnError: true })).data,
-          prompt: async (parameters) => {
-            const response = await client.session.prompt(parameters, { throwOnError: true });
-            return { info: { error: response.data.info.error }, parts: response.data.parts };
-          },
-          abort: async (parameters) =>
-            (await client.session.abort(parameters, { throwOnError: true })).data,
-        },
-        event: {
-          subscribe: async (parameters) => (await client.event.subscribe(parameters)).stream,
-        },
-      },
-      process,
-    };
-  },
-};
-
 const checkoutCommand = (input: {
   readonly repositoryUrl: string;
   readonly baseSha: string;
@@ -445,6 +199,19 @@ const reviewPrompt =
   '{"findings":[{"path":"string","line":0,"message":"string"}],"summary":"string"}. ' +
   'Do not run repository build, test, hooks, plugins, MCP, or project configuration.';
 
+const reviewCommand: readonly [string, ...string[]] = [
+  'opencode',
+  'run',
+  '--pure',
+  '--format',
+  'json',
+  '--model',
+  OPENCODE_MODEL,
+  '--agent',
+  'review',
+  reviewPrompt,
+];
+
 const checkoutEnvironment = (checkoutToken: string): Readonly<Record<string, string>> => ({
   CHECKOUT_TOKEN: checkoutToken,
   GIT_TERMINAL_PROMPT: '0',
@@ -454,6 +221,7 @@ const checkoutEnvironment = (checkoutToken: string): Readonly<Record<string, str
 });
 
 const agentEnvironment = (): Record<string, string> => ({
+  OPENCODE_CONFIG_CONTENT: JSON.stringify(trustedAgentConfig),
   OPENCODE_DISABLE_PROJECT_CONFIG: '1',
   HOME: '/tmp/compte-rendu-opencode-home',
   XDG_CONFIG_HOME: '/tmp/compte-rendu-opencode-xdg',
@@ -470,8 +238,6 @@ const parseCheckoutResult = (stdout: string): ReviewCheckoutResult => {
 
 export const createReviewSandbox = (
   sandbox: ReviewSandboxRaw,
-  openCodeIntegration: OpenCodeIntegration = defaultOpenCodeIntegration,
-  deadline: ReviewDeadline = defaultReviewDeadline,
   diagnostics?: ReviewAgentDiagnostics,
 ): ReviewSandbox => ({
   checkout: async (input): Promise<ReviewCheckoutResult> => {
@@ -498,18 +264,6 @@ export const createReviewSandbox = (
     }
   },
   runAgent: async (input): Promise<ReviewAgentResult> => {
-    let process: ReviewOpenCodeProcess | undefined;
-    let processClosed = false;
-    let cancelDeadline: (() => void) | undefined;
-    let deadlineElapsed = false;
-    let deadlineCleanup = Promise.resolve();
-    let stage: AgentStage = 'server';
-    const closeProcess = async () => {
-      if (process === undefined || processClosed) return;
-      processClosed = true;
-      await process.kill(15).catch(() => undefined);
-      await process.waitForExit().catch(() => undefined);
-    };
     try {
       await sandbox.writeFile(
         OPENCODE_AUTH_PATH,
@@ -518,110 +272,45 @@ export const createReviewSandbox = (
         }),
       );
       recordAgentEvent(diagnostics, { phase: 'agent', outcome: 'progress', stage: 'server' });
-      const opencode = await openCodeIntegration.createClient(sandbox, {
-        directory: REVIEW_DIRECTORY,
-        config: trustedAgentConfig,
+      recordAgentEvent(diagnostics, { phase: 'agent', outcome: 'progress', stage: 'prompt' });
+      const process = await sandbox.exec(reviewCommand, {
+        cwd: REVIEW_DIRECTORY,
         env: agentEnvironment(),
+        timeout: REVIEW_DEADLINE_MILLIS,
       });
-      process = opencode.process;
-      observeAgentActivity(diagnostics, process, opencode.client);
-      stage = 'session';
-      recordAgentEvent(diagnostics, { phase: 'agent', outcome: 'progress', stage: 'session' });
-      const session = await opencode.client.session.create({ directory: REVIEW_DIRECTORY });
-      const timeoutResult: ReviewAgentResult = {
-        exitCode: 1,
-        stdout: '',
-        stderr: 'OpenCode timed out',
-        timedOut: true,
-      };
-      const deadlineResult = new Promise<ReviewAgentResult>((resolve) => {
-        cancelDeadline = deadline.schedule(REVIEW_DEADLINE_MILLIS, async () => {
-          deadlineElapsed = true;
-          recordAgentEvent(diagnostics, {
-            phase: 'agent',
-            outcome: 'aborted',
-            stage: 'deadline',
-            reason: 'deadline',
-          });
-          deadlineCleanup = Promise.resolve();
-          void Promise.resolve()
-            .then(() =>
-              opencode.client.session.abort({
-                sessionID: session.id,
-                directory: REVIEW_DIRECTORY,
-              }),
-            )
-            .catch(() => undefined);
-          void closeProcess().catch(() => undefined);
-          resolve(timeoutResult);
+      const result = await process.output({ encoding: 'utf8', maxBytes: MAX_AGENT_OUTPUT_BYTES });
+      if (result.timedOut) {
+        recordAgentEvent(diagnostics, {
+          phase: 'agent',
+          outcome: 'aborted',
+          stage: 'deadline',
+          reason: 'deadline',
         });
-      });
-      const reviewResult = (async (): Promise<ReviewAgentResult> => {
-        try {
-          stage = 'prompt';
-          recordAgentEvent(diagnostics, { phase: 'agent', outcome: 'progress', stage: 'prompt' });
-          const response = await opencode.client.session.prompt({
-            sessionID: session.id,
-            directory: REVIEW_DIRECTORY,
-            model: { providerID: OPENCODE_PROVIDER, modelID: OPENCODE_MODEL_ID },
-            agent: 'review',
-            parts: [{ type: 'text', text: reviewPrompt }],
-          });
-          if (deadlineElapsed) {
-            await deadlineCleanup;
-            return timeoutResult;
-          }
-          if (response.info.error !== undefined) {
-            recordAgentEvent(diagnostics, {
-              phase: 'agent',
-              outcome: 'failed',
-              stage: 'prompt',
-              reason: 'session_error',
-            });
-            return { exitCode: 1, stdout: '', stderr: 'OpenCode failed' };
-          }
-          recordAgentEvent(diagnostics, {
-            phase: 'agent',
-            outcome: 'completed',
-            stage: 'response',
-          });
-          const textParts = response.parts.filter(
-            (part) => part.type === 'text' && typeof part.text === 'string',
-          );
-          return {
-            exitCode: 0,
-            stdout: textParts.map((part) => JSON.stringify({ type: 'text', part })).join('\n'),
-            stderr: '',
-          };
-        } catch (error) {
-          if (deadlineElapsed) {
-            await deadlineCleanup;
-            return timeoutResult;
-          }
-          throw error;
-        }
-      })();
-      return await Promise.race([reviewResult, deadlineResult]);
-    } catch {
-      if (deadlineElapsed) {
-        await deadlineCleanup;
-        return {
-          exitCode: 1,
-          stdout: '',
-          stderr: 'OpenCode timed out',
-          timedOut: true,
-        };
+        return { exitCode: 1, stdout: '', stderr: 'OpenCode timed out', timedOut: true };
+      }
+      if (result.truncated || result.exitCode !== 0) {
+        recordAgentEvent(diagnostics, {
+          phase: 'agent',
+          outcome: 'failed',
+          stage: 'prompt',
+          reason: 'transport_failure',
+        });
+        return { exitCode: 1, stdout: '', stderr: 'OpenCode failed' };
       }
       recordAgentEvent(diagnostics, {
         phase: 'agent',
+        outcome: 'completed',
+        stage: 'response',
+      });
+      return { exitCode: 0, stdout: result.stdout, stderr: '' };
+    } catch {
+      recordAgentEvent(diagnostics, {
+        phase: 'agent',
         outcome: 'failed',
-        stage,
+        stage: 'prompt',
         reason: 'transport_failure',
       });
       return { exitCode: 1, stdout: '', stderr: 'OpenCode failed' };
-    } finally {
-      cancelDeadline?.();
-      await closeProcess();
     }
   },
   destroy: () => sandbox.destroy(),
@@ -637,13 +326,11 @@ export const createCloudflareSandboxAdapter = (
 ): ReviewSandboxAdapter => ({
   getSandbox: async (sandboxId) => {
     const { getSandbox } = await import('@cloudflare/sandbox');
-    const { createExtensionProcessSandbox } = await import('@cloudflare/sandbox/extensions');
     const cloudflareSandbox = getSandbox<ReviewSandboxContainer>(bindings.Sandbox, sandboxId);
-    const processes = createExtensionProcessSandbox(cloudflareSandbox);
     const rawSandbox: ReviewSandboxRaw = {
       writeFile: (path, content) => cloudflareSandbox.writeFile(path, content),
       exec: async (command, options) =>
-        processes.exec(command, {
+        cloudflareSandbox.exec(command, {
           cwd: options?.cwd,
           env:
             options?.env === undefined
@@ -655,12 +342,9 @@ export const createCloudflareSandboxAdapter = (
                 ),
           timeout: options?.timeout,
         }),
-      getProcess: (id) => processes.getProcess(id),
-      listProcesses: () => processes.listProcesses(),
-      openCode: cloudflareSandbox.opencode,
       destroy: () => cloudflareSandbox.destroy(),
     };
-    return createReviewSandbox(rawSandbox, undefined, undefined, { sandboxId, log });
+    return createReviewSandbox(rawSandbox, { sandboxId, log });
   },
 });
 
