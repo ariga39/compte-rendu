@@ -27,15 +27,18 @@ importers:
 
   apps/core:
     dependencies:
-      '@cloudflare/sandbox':
-        specifier: 0.13.0-next.751.1
-        version: 0.13.0-next.751.1(@opencode-ai/sdk@1.1.40)
       '@compte-rendu/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
-      '@opencode-ai/sdk':
-        specifier: 1.1.40
-        version: 1.1.40
+      effect:
+        specifier: 4.0.0-rc.111
+        version: 4.0.0-rc.111
+
+  apps/runner:
+    dependencies:
+      '@compte-rendu/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
       effect:
         specifier: 4.0.0-rc.111
         version: 4.0.0-rc.111
@@ -68,26 +71,9 @@ packages:
   '@blazediff/core@1.9.1':
     resolution: {integrity: sha512-ehg3jIkYKulZh+8om/O25vkvSsXXwC+skXmyA87FFx6A/45eqOkZsBltMw/TVteb0mloiGT8oGRTcjRAz66zaA==}
 
-  '@cloudflare/containers@0.3.7':
-    resolution: {integrity: sha512-DM9dm3FnIBSyiSJ1FLavKwl/lk3oAmTaynCzZQ9pZR0ncRPquSxkxd8Nu2MFILxmDDsPkxKsSNEh9mHHMty4Fw==}
-
   '@cloudflare/kv-asset-handler@0.5.0':
     resolution: {integrity: sha512-jxQYkj8dSIzc0cD6cMMNdOc1UVjqSqu8BZdor5s8cGjW2I8BjODt/kWPVdY+u9zj3ms75Q5qaZgnxUad83+eAg==}
     engines: {node: '>=22.0.0'}
-
-  '@cloudflare/sandbox@0.13.0-next.751.1':
-    resolution: {integrity: sha512-CsL9BkXx8L7b+cfxNrIp6mTtR46mvLH5BCg2aFSKYDqv+zSEkHg/olbvi6PFDexhBf0doW6Q6x34QhtHLUZpXg==}
-    peerDependencies:
-      '@openai/agents': ^0.3.3
-      '@opencode-ai/sdk': ^1.1.40
-      '@xterm/xterm': '>=5.0.0'
-    peerDependenciesMeta:
-      '@openai/agents':
-        optional: true
-      '@opencode-ai/sdk':
-        optional: true
-      '@xterm/xterm':
-        optional: true
 
   '@cloudflare/unenv-preset@2.16.1':
     resolution: {integrity: sha512-ECxObrMfyTl5bhQf/lZCXwo5G6xX9IAUo+nDMKK4SZ8m4Jvvxp52vilxyySSWh2YTZz8+HQ07qGH/2rEom1vDw==}
@@ -499,9 +485,6 @@ packages:
     resolution: {integrity: sha512-CmCXPQrkbwExx3j946/PtHWHbYJiCRBRDl4BlkRQcJB/YOwQxJRTpoo7aTsortjgoJ1x7opzTSxn7C+ASSLVjQ==}
     cpu: [x64]
     os: [win32]
-
-  '@opencode-ai/sdk@1.1.40':
-    resolution: {integrity: sha512-WBSe7FXsUyAjYiQQQTDjQi/vG3yrfGQTQoJbHd/vQiwsNwEB8uAZ07eviez61QxPaf43cAJR+I2pJQid5aepEQ==}
 
   '@oxc-project/runtime@0.146.0':
     resolution: {integrity: sha512-lbXHIpZ1MmK6zuw5txlMdIZ2waLVUIU5Gnm3sEuwJOiqDfQfbtjeHscatmeBoxbv8+If9LFM6PGh/3DcDWYIYw==}
@@ -1564,25 +1547,7 @@ snapshots:
 
   '@blazediff/core@1.9.1': {}
 
-  '@cloudflare/containers@0.3.7': {}
-
   '@cloudflare/kv-asset-handler@0.5.0': {}
-
-  '@cloudflare/sandbox@0.13.0-next.751.1':
-    dependencies:
-      '@cloudflare/containers': 0.3.7
-      aws4fetch: 1.0.20
-      capnweb: 0.8.0
-      hono: 4.13.3
-
-  '@cloudflare/sandbox@0.13.0-next.751.1(@opencode-ai/sdk@1.1.40)':
-    dependencies:
-      '@cloudflare/containers': 0.3.7
-      aws4fetch: 1.0.20
-      capnweb: 0.8.0
-      hono: 4.13.3
-    optionalDependencies:
-      '@opencode-ai/sdk': 1.1.40
 
   '@cloudflare/unenv-preset@2.16.1(unenv@2.0.0-rc.24)(workerd@1.20260815.1)':
     dependencies:
@@ -1839,8 +1804,6 @@ snapshots:
 
   '@msgpackr-extract/msgpackr-extract-win32-x64@3.0.4':
     optional: true
-
-  '@opencode-ai/sdk@1.1.40': {}
 
   '@oxc-project/runtime@0.146.0': {}
 

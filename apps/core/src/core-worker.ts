@@ -24,12 +24,12 @@ export interface ReviewWorkflowBinding {
   }) => Promise<unknown>;
 }
 
-export interface CoreWorkerEnv extends CoreEnv {
+export interface CoreWorkerEnv extends Partial<CoreEnv> {
   readonly REVIEW_DB: D1DatabaseLike;
   readonly REVIEW_WORKFLOW: ReviewWorkflowBinding;
   readonly GITHUB_APP_ID: string;
   readonly GITHUB_APP_PRIVATE_KEY: string;
-  readonly MODEL_API_KEY: string;
+  readonly [key: string]: unknown;
 }
 
 export interface CoreWorkerDependencies {
