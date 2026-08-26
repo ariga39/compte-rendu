@@ -19,7 +19,7 @@ await build({
     outDir: coreBundleDirectory,
     emptyOutDir: true,
     rollupOptions: {
-      external: ['@cloudflare/sandbox', 'cloudflare:workers'],
+      external: ['cloudflare:workers'],
     },
   },
 });
@@ -46,7 +46,6 @@ const workerPoolOptions = {
         bindings: {
           GITHUB_APP_ID: 'test-app-id',
           GITHUB_APP_PRIVATE_KEY: 'test-private-key',
-          MODEL_API_KEY: 'test-model-key',
         },
         serviceBindings: { WORKFLOW_CAPTURE: 'compte-rendu-tracer-workflow-capture' },
       },

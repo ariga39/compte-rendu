@@ -8,7 +8,7 @@
     "GITHUB_APP_ID": "REPLACE_WITH_GITHUB_APP_ID",
   },
   "secrets": {
-    "required": ["GITHUB_APP_PRIVATE_KEY", "MODEL_API_KEY"],
+    "required": ["GITHUB_APP_PRIVATE_KEY", "RUNNER_AUTH_TOKEN"],
   },
   "d1_databases": [
     {
@@ -25,24 +25,11 @@
       "class_name": "ReviewWorkflow",
     },
   ],
-  "containers": [
+  "vpc_services": [
     {
-      "class_name": "Sandbox",
-      "image": "./Dockerfile",
-      "instance_type": "lite",
-      "max_instances": 1,
-    },
-  ],
-  "durable_objects": {
-    "bindings": [
-      { "name": "Sandbox", "class_name": "Sandbox" },
-      { "name": "REVIEW_LEASE", "class_name": "ReviewLeaseDurableObject" },
-    ],
-  },
-  "migrations": [
-    {
-      "tag": "v1",
-      "new_sqlite_classes": ["Sandbox", "ReviewLeaseDurableObject"],
+      "binding": "RUNNER",
+      "service_id": "REPLACE_WITH_RUNNER_VPC_SERVICE_ID",
+      "remote": true,
     },
   ],
 }

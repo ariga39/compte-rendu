@@ -35,14 +35,8 @@ describe('Core Worker', () => {
             return undefined;
           },
         },
-        REVIEW_LEASE: {
-          idFromName: (name: string) => name,
-          get: () => ({ fetch: async () => new Response(null, { status: 204 }) }),
-        },
-        Sandbox: {},
         GITHUB_APP_ID: '1234567',
         GITHUB_APP_PRIVATE_KEY: 'test-private-key',
-        MODEL_API_KEY: 'test-model-key',
       },
       {
         log: {
@@ -102,14 +96,8 @@ describe('Core Worker', () => {
             workflowInputs.push(input);
           },
         },
-        REVIEW_LEASE: {
-          idFromName: (name: string) => name,
-          get: () => ({ fetch: async () => new Response(null, { status: 204 }) }),
-        },
-        Sandbox: {},
         GITHUB_APP_ID: '1234567',
         GITHUB_APP_PRIVATE_KEY: 'test-private-key',
-        MODEL_API_KEY: 'test-model-key',
       },
       {
         log: {
@@ -144,14 +132,8 @@ describe('Core Worker', () => {
         REVIEW_WORKFLOW: {
           create: async () => undefined,
         },
-        REVIEW_LEASE: {
-          idFromName: (name: string) => name,
-          get: () => ({ fetch: async () => new Response(null, { status: 204 }) }),
-        },
-        Sandbox: {},
         GITHUB_APP_ID: '1234567',
         GITHUB_APP_PRIVATE_KEY: 'test-private-key',
-        MODEL_API_KEY: 'test-model-key',
       },
       {
         log: {
@@ -228,14 +210,8 @@ describe('Core Worker', () => {
             return undefined;
           },
         },
-        REVIEW_LEASE: {
-          idFromName: (name: string) => name,
-          get: () => ({ fetch: async () => new Response(null, { status: 204 }) }),
-        },
-        Sandbox: {},
         GITHUB_APP_ID: '1234567',
         GITHUB_APP_PRIVATE_KEY: 'test-private-key',
-        MODEL_API_KEY: 'test-model-key',
       },
       {
         github: createGitHubPublicationAdapter({ token: 'installation-token', fetch: fetcher }),
@@ -297,14 +273,8 @@ describe('Core Worker', () => {
             workflowCreated = true;
           },
         },
-        REVIEW_LEASE: {
-          idFromName: (name: string) => name,
-          get: () => ({ fetch: async () => new Response(null, { status: 204 }) }),
-        },
-        Sandbox: {},
         GITHUB_APP_ID: '1234567',
         GITHUB_APP_PRIVATE_KEY: 'test-private-key',
-        MODEL_API_KEY: 'test-model-key',
       },
       {
         github: createGitHubPublicationAdapter({ token: 'installation-token', fetch: fetcher }),
@@ -372,14 +342,8 @@ describe('Core Worker', () => {
             workflowCreated = true;
           },
         },
-        REVIEW_LEASE: {
-          idFromName: (name: string) => name,
-          get: () => ({ fetch: async () => new Response(null, { status: 204 }) }),
-        },
-        Sandbox: {},
         GITHUB_APP_ID: '1234567',
         GITHUB_APP_PRIVATE_KEY: 'test-private-key',
-        MODEL_API_KEY: 'test-model-key',
       },
       {
         github: createGitHubPublicationAdapter({ token: 'installation-token', fetch: fetcher }),
@@ -424,14 +388,8 @@ describe('Core Worker', () => {
             workflowCreated = true;
           },
         },
-        REVIEW_LEASE: {
-          idFromName: (name: string) => name,
-          get: () => ({ fetch: async () => new Response(null, { status: 204 }) }),
-        },
-        Sandbox: {},
         GITHUB_APP_ID: '1234567',
         GITHUB_APP_PRIVATE_KEY: 'test-private-key',
-        MODEL_API_KEY: 'test-model-key',
       },
       {
         log: {
@@ -493,14 +451,8 @@ describe('Core Worker', () => {
             workflowCreated = true;
           },
         },
-        REVIEW_LEASE: {
-          idFromName: (name: string) => name,
-          get: () => ({ fetch: async () => new Response(null, { status: 204 }) }),
-        },
-        Sandbox: {},
         GITHUB_APP_ID: '1234567',
         GITHUB_APP_PRIVATE_KEY: 'test-private-key',
-        MODEL_API_KEY: 'test-model-key',
       },
       {
         log: {
@@ -568,14 +520,8 @@ describe('Core Worker', () => {
             throw new Error('workflow creation failed');
           },
         },
-        REVIEW_LEASE: {
-          idFromName: (name: string) => name,
-          get: () => ({ fetch: async () => new Response(null, { status: 204 }) }),
-        },
-        Sandbox: {},
         GITHUB_APP_ID: '1234567',
         GITHUB_APP_PRIVATE_KEY: 'test-private-key',
-        MODEL_API_KEY: 'test-model-key',
       },
       {
         log: {
@@ -627,14 +573,8 @@ describe('Core Worker', () => {
         REVIEW_WORKFLOW: {
           create: async () => undefined,
         },
-        REVIEW_LEASE: {
-          idFromName: (name: string) => name,
-          get: () => ({ fetch: async () => new Response(null, { status: 204 }) }),
-        },
-        Sandbox: {},
         GITHUB_APP_ID: '1234567',
         GITHUB_APP_PRIVATE_KEY: 'test-private-key',
-        MODEL_API_KEY: 'test-model-key',
       },
       {
         stateStore,

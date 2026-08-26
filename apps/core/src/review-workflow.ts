@@ -41,8 +41,7 @@ export interface ReviewWorkflowDependencies {
     installationId: number;
   }) => Promise<unknown>;
   readonly getInstallationToken: (installationId: number) => Promise<string>;
-  readonly modelCredential: string;
-  readonly runWithLease: ReviewRunner['runWithLease'];
+  readonly runJob: ReviewRunner['runJob'];
   readonly completeReview: ReviewCoordinator['completeReview'];
   readonly markRunFailed: (input: { runId: string; occurredAt: string }) => Promise<void>;
   readonly getRunOutcome?: (runId: string) => Promise<Pick<ReviewOutcome, 'status'> | undefined>;
@@ -57,11 +56,10 @@ export interface ReviewWorkflowDependencies {
 
 export interface ReviewWorkflowEnvironment {
   readonly REVIEW_DB: import('./review-state-store').D1DatabaseLike;
-  readonly REVIEW_LEASE: import('./cloudflare-review-adapter').LeaseNamespaceLike;
-  readonly Sandbox: import('./cloudflare-review-adapter').CloudflareSandboxBindings['Sandbox'];
   readonly GITHUB_APP_ID: string;
   readonly GITHUB_APP_PRIVATE_KEY: string;
-  readonly MODEL_API_KEY: string;
+  readonly RUNNER: import('./runner-job-client').RunnerJobBinding;
+  readonly RUNNER_AUTH_TOKEN: string;
 }
 
 const currentIso = () => Effect.runPromise(DateTime.now.pipe(Effect.map(DateTime.formatIso)));
@@ -155,14 +153,18 @@ export const runReviewWorkflow = async (
             }),
           );
           const checkoutToken = await dependencies.getInstallationToken(decoded.job.installationId);
-          const result: ReviewRunResult = await dependencies.runWithLease({
+          const result: ReviewRunResult = await dependencies.runJob({
             runId: decoded.runId,
             repositoryUrl,
             baseSha: decoded.job.baseSha,
             headSha: decoded.job.headSha,
             checkoutToken,
-            modelCredential: dependencies.modelCredential,
             maxAttempts: 2,
+            shouldAbort:
+              dependencies.getRunOutcome === undefined
+                ? undefined
+                : async () =>
+                    (await dependencies.getRunOutcome!(decoded.runId))?.status === 'superseded',
           });
 
           if (result.status !== 'succeeded') {

@@ -12,15 +12,14 @@ from another installation.
 
 The repository deploys these resources:
 
-| Resource                | Configuration name                                                              | Purpose                                                                                                                       |
-| ----------------------- | ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| Public Worker           | `<INSTANCE_NAME>-ingress`                                                       | Receives GitHub webhooks. `workers_dev` is enabled.                                                                           |
-| Private Worker          | `<INSTANCE_NAME>-core`                                                          | Owns authorization, GitHub API calls, orchestration, and run state. `workers_dev` is disabled.                                |
-| Service binding         | `CORE` → `<INSTANCE_NAME>-core`                                                 | Lets ingress call core without a public core URL.                                                                             |
-| D1 database             | `<INSTANCE_NAME>-review-state`, binding `REVIEW_DB`                             | Stores delivery, approval, run, and finding-fingerprint state.                                                                |
-| Workflow                | `<INSTANCE_NAME>-review`, binding `REVIEW_WORKFLOW`, class `ReviewWorkflow`     | Carries one review through checkout, agent execution, validation, and publication.                                            |
-| Sandbox container class | `Sandbox`                                                                       | Runs the fixed checkout and read-only OpenCode review. The config requests the `lite` instance type and at most one instance. |
-| Durable Object classes  | `Sandbox` and `ReviewLeaseDurableObject`; binding `REVIEW_LEASE` for the latter | Provides Sandbox access and a per-run cleanup lease/alarm.                                                                    |
+| Resource           | Configuration name                                                          | Purpose                                                                                        |
+| ------------------ | --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| Public Worker      | `<INSTANCE_NAME>-ingress`                                                   | Receives GitHub webhooks. `workers_dev` is enabled.                                            |
+| Private Worker     | `<INSTANCE_NAME>-core`                                                      | Owns authorization, GitHub API calls, orchestration, and run state. `workers_dev` is disabled. |
+| Service binding    | `CORE` → `<INSTANCE_NAME>-core`                                             | Lets ingress call core without a public core URL.                                              |
+| D1 database        | `<INSTANCE_NAME>-review-state`, binding `REVIEW_DB`                         | Stores delivery, approval, run, and finding-fingerprint state.                                 |
+| Workflow           | `<INSTANCE_NAME>-review`, binding `REVIEW_WORKFLOW`, class `ReviewWorkflow` | Carries one review through checkout, agent execution, validation, and publication.             |
+| Runner Job service | Self-hosted runner reached through the core `RUNNER` VPC Service binding    | Owns one authenticated asynchronous review attempt and fresh Docker Sandbox cleanup.           |
 
 The request path is:
 
@@ -29,7 +28,7 @@ GitHub webhook
     → <INSTANCE_NAME>-ingress (public, verifies WEBHOOK_SECRET)
     → CORE service binding
     → <INSTANCE_NAME>-core (private)
-       → REVIEW_DB / REVIEW_WORKFLOW / REVIEW_LEASE / Sandbox
+       → REVIEW_DB / REVIEW_WORKFLOW / RUNNER VPC Service
        → GitHub App installation token for GitHub API operations
 ```
 
@@ -45,7 +44,7 @@ templates. From the repository root, render deployment-only sibling configs
 for the chosen instance:
 
 ```sh
-corepack pnpm render:wrangler -- <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID>
+corepack pnpm render:wrangler -- <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID>
 ```
 
 For example, instance `petit-chiba` produces
@@ -94,11 +93,11 @@ For unattended use, create a custom Cloudflare API token scoped to the one
 deployment account. The least account-level write groups needed by this
 repository's create/migrate/deploy sequence are:
 
-| Account permission    | Why it is needed                                                                                                          |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| Workers Scripts: Edit | Deploy both Workers and their configured service binding, Workflow, Durable Object, secret versions, and Worker triggers. |
-| D1: Edit              | Create the D1 database and apply its migrations.                                                                          |
-| Containers: Edit      | Deploy the configured `Sandbox` container class.                                                                          |
+| Account permission           | Why it is needed                                                                                                               |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| Workers Scripts: Edit        | Deploy both Workers and their configured service binding, Workflow, VPC Service binding, secret versions, and Worker triggers. |
+| D1: Edit                     | Create the D1 database and apply its migrations.                                                                               |
+| Connectivity Directory: Bind | Bind the pre-created private Runner VPC Service.                                                                               |
 
 Select the single Cloudflare account as the token resource. No zone resource
 or zone permission is needed: ingress uses `workers_dev`, not a zone route.
@@ -199,15 +198,56 @@ path in this repository or in an issue/comment.
 
 ## First installation
 
-Before starting, enable a `workers.dev` subdomain for the Cloudflare account;
-this deployment uses it for the public ingress URL. Deploying the `Sandbox`
-Container requires the current Workers Paid plan; see Cloudflare's
-[workers.dev setup](https://developers.cloudflare.com/workers/configuration/routing/workers-dev/)
-and [Containers pricing](https://developers.cloudflare.com/containers/pricing/).
-Before choosing a Container size or validating the model route, read the
-recorded [Sandbox/OpenCode remote PoC](sandbox-opencode-poc.md). It separates
-the proven minimum route from the still-unproven full-review capacity and lists
-the rollout, instance, SSH, and safe-session verification gates.
+Before starting, install Docker Sandboxes with `sbx` 0.39.0, complete Docker
+login, and initialize the host policy once:
+
+```sh
+sbx policy init deny-all
+```
+
+Install the repository dependencies and build the runner. The resolver command
+must not contain a model secret; `MODEL_SECRET_COMMAND` is never sent to the
+Worker:
+
+```sh
+corepack pnpm install --frozen-lockfile
+corepack pnpm --filter @compte-rendu/runner build
+```
+
+The runner listens only on IPv4 loopback port `8080`. Start it on the host that
+also runs the remotely managed Tunnel connector:
+
+```sh
+MODEL_SECRET_COMMAND='<host-secret-resolver-command>' \
+RUNNER_AUTH_TOKEN='<runner-application-token>' \
+corepack pnpm --filter @compte-rendu/runner start
+```
+
+Create the remotely managed Tunnel in Cloudflare, install its connector on
+this host, and start the connector with the token shown by Cloudflare:
+
+```sh
+cloudflared tunnel run --token '<TUNNEL_CONNECTOR_TOKEN>'
+```
+
+Register the runner's fixed HTTP target through the Tunnel and retain only the
+returned VPC Service UUID for the renderer:
+
+```sh
+corepack pnpm dlx wrangler@latest vpc service create <RUNNER_SERVICE_NAME> \
+  --type http \
+  --tunnel-id <TUNNEL_ID> \
+  --ipv4 127.0.0.1 \
+  --http-port 8080
+```
+
+Pass that UUID to `render:wrangler` as `<RUNNER_VPC_SERVICE_ID>`. Set the same
+bearer value in `RUNNER_AUTH_TOKEN` on the runner host and the core Worker
+secret; the model resolver command and token stay on the runner host.
+
+The VPC Service UUID is deployment data and does not belong in the tracked
+template. Also enable a `workers.dev` subdomain for the public ingress URL; see
+[workers.dev setup](https://developers.cloudflare.com/workers/configuration/routing/workers-dev/).
 
 Run these commands from the repository root. Every `wrangler` command below
 uses the temporary invocation described above.
@@ -234,7 +274,7 @@ uses the temporary invocation described above.
 3. Render deployment-only configs from the repository root:
 
    ```sh
-   corepack pnpm render:wrangler -- <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID>
+   corepack pnpm render:wrangler -- <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID>
    ```
 
    This writes `apps/core/wrangler.<INSTANCE_NAME>.jsonc` and
@@ -272,10 +312,11 @@ uses the temporary invocation described above.
 
    ```sh
    corepack pnpm dlx wrangler@latest secret put GITHUB_APP_PRIVATE_KEY --config apps/core/wrangler.<INSTANCE_NAME>.jsonc
-   corepack pnpm dlx wrangler@latest secret put MODEL_API_KEY --config apps/core/wrangler.<INSTANCE_NAME>.jsonc
+   corepack pnpm dlx wrangler@latest secret put RUNNER_AUTH_TOKEN --config apps/core/wrangler.<INSTANCE_NAME>.jsonc
    ```
 
-   The private key and model credential belong only to `<INSTANCE_NAME>-core`.
+   The private key and Runner authentication credential belong only to
+   `<INSTANCE_NAME>-core`; the model credential remains on the runner host.
    Cloudflare's `secret put` creates and deploys a new Worker version
    immediately, so complete the D1 migration before these commands. Worker
    secrets are encrypted bindings and are intentionally separate from
@@ -288,8 +329,8 @@ uses the temporary invocation described above.
    corepack pnpm dlx wrangler@latest deploy --config apps/core/wrangler.<INSTANCE_NAME>.jsonc
    ```
 
-   Confirm the deployment reports the configured Workflow, `Sandbox`,
-   `REVIEW_LEASE`, and `REVIEW_DB` bindings without a missing-secret or
+   Confirm the deployment reports the configured Workflow, `RUNNER` VPC Service,
+   and `REVIEW_DB` bindings without a missing-secret or
    missing-D1 error.
 
 7. Enter the ingress webhook secret only after core is deployed, then deploy
@@ -328,10 +369,10 @@ uses the temporary invocation described above.
 
 The deployed variables-versus-secrets inventory is deliberately small:
 
-| Worker                    | Plain variable  | Secrets                                   | Non-secret bindings                                       |
-| ------------------------- | --------------- | ----------------------------------------- | --------------------------------------------------------- |
-| `<INSTANCE_NAME>-ingress` | None            | `WEBHOOK_SECRET`                          | `CORE` → `<INSTANCE_NAME>-core`                           |
-| `<INSTANCE_NAME>-core`    | `GITHUB_APP_ID` | `GITHUB_APP_PRIVATE_KEY`, `MODEL_API_KEY` | `REVIEW_DB`, `REVIEW_WORKFLOW`, `Sandbox`, `REVIEW_LEASE` |
+| Worker                    | Plain variable  | Secrets                                       | Non-secret bindings                                  |
+| ------------------------- | --------------- | --------------------------------------------- | ---------------------------------------------------- |
+| `<INSTANCE_NAME>-ingress` | None            | `WEBHOOK_SECRET`                              | `CORE` → `<INSTANCE_NAME>-core`                      |
+| `<INSTANCE_NAME>-core`    | `GITHUB_APP_ID` | `GITHUB_APP_PRIVATE_KEY`, `RUNNER_AUTH_TOKEN` | `REVIEW_DB`, `REVIEW_WORKFLOW`, `RUNNER` VPC Service |
 
 `GITHUB_APP_ID` is an application identifier, not a secret. Its value is
 the dedicated product App ID copied into the core Wrangler config before
@@ -358,7 +399,7 @@ eligible webhook crosses the named `CORE` binding, applies the D1 migration,
 records a scheduled delivery/run, and captures the immutable Workflow input.
 It also proves an invalid signature returns HTTP `400`, produces no Workflow
 capture, and leaves no D1 delivery or run. It does **not** prove real
-Cloudflare Workflow retry/deadline behavior, Container/Sandbox lifecycle,
+Cloudflare Workflow retry/deadline behavior, Runner Job/Sandbox lifecycle,
 GitHub delivery, or real model/agent behavior;
 the limits are recorded in [`docs/local-runtime-tracer.md`](local-runtime-tracer.md).
 
@@ -403,7 +444,7 @@ do not paste repository contents or model output into tickets.
 
 Do not treat a successful local tracer run as evidence for the Sandbox/model
 case in item 1. The deployed test is the only one of these checks that
-exercises the real GitHub App, Workflow, Container/Sandbox, and model path.
+exercises the real GitHub App, Workflow, Runner Job/Sandbox, and model path.
 
 ## Operations and troubleshooting
 
@@ -417,11 +458,11 @@ corepack pnpm dlx wrangler@latest tail <INSTANCE_NAME>-core
 ```
 
 Use the GitHub delivery page for `deliveryId` and then search logs for the
-same value. A scheduled core event adds `runId`; runner and lease events add
+same value. A scheduled core event adds `runId`; Runner Job events add
 `sandboxId`. The useful chain is:
 
 ```text
-deliveryId → core scheduled → runId → runner/lease sandboxId → workflow/publication outcome
+deliveryId → core scheduled → runId → Runner Job sandboxId → workflow/publication outcome
 ```
 
 Identifier values are sanitized by the application before logging. Do not
@@ -435,7 +476,7 @@ artifacts.
 | Ingress is `503` / `core_unavailable` | Core deployment name, `CORE` service binding, and core availability                    | Deploy or update core first, then ingress. Redeliver the GitHub event.                                                          |
 | Core is `503` / scheduling failure    | D1 migration, required core secrets, Workflow binding, and the GitHub App installation | Correct the missing binding/credential or installation permission, then redeliver. Do not create a second database.             |
 | Run fails at checkout                 | `runId`, `sandboxId`, and runner reason `checkout`                                     | Check Contents read access and installation scope. Never put the installation token in a log or retry an old Sandbox manually.  |
-| Run fails at agent or cleanup         | Runner/workflow/lease records for the same IDs                                         | Preserve the lease path and allow cleanup retry. Treat a cleanup failure as a failed run until the lease reports destruction.   |
+| Run fails at agent or cleanup         | Runner/workflow records for the same IDs                                               | Treat a cleanup failure as a failed run until forced Sandbox cleanup succeeds.                                                  |
 | No review is published                | Publication reason, current PR head SHA, and Pull requests write permission            | If the head changed, issue a new review command. If publication is uncertain, check the existing review marker before retrying. |
 | Public fork PR does nothing           | Comment body and commenter permission                                                  | Use the exact `/ai-review` command from a maintainer with `write`, `maintain`, or `admin`; a new head needs a new command.      |
 
@@ -448,7 +489,7 @@ For a normal compatible release:
 2. If there is a new migration, review it and apply it remotely with the D1
    migration command above. Prefer additive, backward-compatible changes.
 3. Render deployment-only configs again with the same
-   `corepack pnpm render:wrangler -- <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID>`
+   `corepack pnpm render:wrangler -- <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID>`
    inputs, then deploy using `apps/core/wrangler.<INSTANCE_NAME>.jsonc` and
    `apps/ingress/wrangler.<INSTANCE_NAME>.jsonc`.
 4. Redeliver one controlled GitHub event and inspect the identifier chain.
@@ -474,10 +515,10 @@ that no review is in flight before proceeding.
    deliveries arrive, then delete the App registration if it is no longer
    needed and revoke its private key.
 3. Render deployment-only configs again with the same
-   `corepack pnpm render:wrangler -- <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID>`
+   `corepack pnpm render:wrangler -- <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID>`
    inputs. Delete the public `<INSTANCE_NAME>-ingress` Worker, then the private
    `<INSTANCE_NAME>-core` Worker, in that order. Do not use `--force`. Verify the
-   Workflow, `Sandbox`, Durable Object classes, and service binding are no
+   Workflow, `RUNNER` VPC Service, and service binding are no
    longer deployed with the Workers.
 
    ```sh

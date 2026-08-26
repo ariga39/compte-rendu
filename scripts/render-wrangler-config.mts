@@ -18,6 +18,7 @@ const renderDeploymentConfigs = (
   instanceName: string,
   githubAppId: number,
   d1DatabaseId: string,
+  runnerVpcServiceId: string,
 ) => {
   if (
     !instanceNamePattern.test(instanceName) ||
@@ -30,6 +31,9 @@ const renderDeploymentConfigs = (
   }
   if (!uuidPattern.test(d1DatabaseId)) {
     throw new Error('D1 database ID must be a UUID');
+  }
+  if (!uuidPattern.test(runnerVpcServiceId)) {
+    throw new Error('Runner VPC Service ID must be a UUID');
   }
 
   const coreDirectory = join(process.cwd(), 'apps/core');
@@ -46,6 +50,11 @@ const renderDeploymentConfigs = (
     core,
     '"database_name": "compte-rendu-review-state"',
     `"database_name": "${instanceName}${longestDerivedSuffix}"`,
+  );
+  core = replaceRequired(
+    core,
+    '"service_id": "REPLACE_WITH_RUNNER_VPC_SERVICE_ID"',
+    `"service_id": "${runnerVpcServiceId}"`,
   );
   core = replaceRequired(core, '"name": "compte-rendu-review"', `"name": "${instanceName}-review"`);
   core = replaceRequired(
@@ -86,10 +95,12 @@ const renderDeploymentConfigs = (
 };
 
 const main = (args: readonly string[]) => {
-  if (args.length !== 3) {
-    throw new Error('usage: render-wrangler-config <instance-name> <github-app-id> <d1-uuid>');
+  if (args.length !== 4) {
+    throw new Error(
+      'usage: render-wrangler-config <instance-name> <github-app-id> <d1-uuid> <runner-vpc-service-uuid>',
+    );
   }
-  renderDeploymentConfigs(args[0], Number(args[1]), args[2]);
+  renderDeploymentConfigs(args[0], Number(args[1]), args[2], args[3]);
 };
 
 if (fileURLToPath(import.meta.url) === resolve(process.argv[1] ?? '')) {

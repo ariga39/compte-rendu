@@ -1,9 +1,10 @@
 {
-  "name": "@compte-rendu/core",
+  "name": "@compte-rendu/runner",
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "vp build"
+    "build": "vp build",
+    "start": "node dist/runner.js"
   },
   "dependencies": {
     "@compte-rendu/contracts": "workspace:*",

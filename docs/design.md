@@ -7,7 +7,7 @@ Actions. Its first release proves one complete product path:
 
 1. receive a GitHub pull-request event;
 2. decide whether that exact PR revision may be reviewed;
-3. run a read-only review agent in a Cloudflare Sandbox;
+3. submit an authenticated Runner Job to the self-hosted review runner;
 4. publish high-confidence findings to the same revision; and
 5. terminate the run and reclaim the Sandbox.
 
@@ -26,10 +26,10 @@ Included:
   current head SHA;
 - `issue_comment.created` events containing the manual review command;
 - `opened`, `reopened`, `synchronize`, and `ready_for_review` PR events;
-- one generic OpenCode CLI review adapter;
+- one self-hosted Runner Job/OpenCode execution path;
 - one review summary with at most five high-confidence findings;
 - D1 run history and delivery deduplication; and
-- a Lease Durable Object that guarantees eventual Sandbox cleanup.
+- runner-owned Sandbox cleanup for each attempt.
 
 Deferred:
 
@@ -85,7 +85,8 @@ core may publish a short no-findings summary. It never publishes `APPROVE` or
 
 ## Deployment shape
 
-The pnpm monorepo contains two Cloudflare Worker services:
+The pnpm monorepo contains two Cloudflare Worker services and one self-hosted
+Runner Job process:
 
 ```text
 GitHub
@@ -98,15 +99,15 @@ review-ingress (public route; webhook secret only)
 review-core (no public route)
   |- Review Workflow
   |- D1
-  |- ReviewLease Durable Object
-  `- Cloudflare Sandbox
+  `- private Workers VPC Runner binding
+         `- self-hosted runner → fresh Docker Sandbox/OpenCode
 ```
 
 `review-ingress` verifies the webhook and converts it to a small internal
 event. `review-core` owns policy, GitHub App authentication, orchestration,
 review publication, and run records. A Workflow carries one review run through
-checkout, review, validation, and publication. A per-run Lease Durable Object
-owns the cleanup deadline.
+Runner Job submission, polling, validation, and publication. The self-hosted
+runner owns the Sandbox deadline and forced cleanup.
 
 The repository layout is intentionally small:
 
@@ -114,6 +115,7 @@ The repository layout is intentionally small:
 apps/
   ingress/
   core/
+  runner/
 packages/
   contracts/
 docs/
@@ -174,34 +176,37 @@ seams.
 Observable dispositions are deliberately few: rejected, ignored, awaiting
 approval, scheduled, completed, or failed.
 
-### Sandbox lease
+### Runner Job
 
 ```ts
-runWithLease(spec: ReviewRunSpec): Promise<ReviewRunResult>
+runJob(spec: ReviewRunSpec): Promise<ReviewRunResult>
 ```
 
-The interface promises that a Sandbox is registered before work begins and is
-eventually destroyed after success, failure, or deadline expiry. Sandbox SDK
-and clock/alarm adapters sit at internal seams. Callers do not manage lease
-renewal or cleanup ordering.
+The Worker-side implementation uses the authenticated private Runner Job HTTP
+interface (`POST /jobs`, `GET /jobs/:id`, and `DELETE /jobs/:id`). A job is one
+immutable review attempt; success is accepted only after the runner reports
+validated output and Docker Sandbox cleanup. Callers do not manage Docker lifecycle.
+The runner gives each attempt one bounded budget covering checkout, agent work,
+and cleanup. The client deadline is shorter than the Workflow step deadline,
+with enough margin for the runner to finish forced cleanup before the client
+aborts.
 
 ## Fail-closed rules
 
 Fail-closed is limited to decisions that could create an unauthorized review,
 publish against the wrong revision, expose credentials, or leak a running
-Container:
+Sandbox:
 
 - bad or unverifiable webhook: reject;
 - unknown event or incomplete repository identity: ignore without a run;
 - uncertain contributor policy or maintainer permission: do not run;
 - duplicate delivery or already completed head SHA: do not create another run;
-- lease registration failure: do not create a Sandbox;
+- runner admission or authentication failure: do not publish a result;
 - checkout SHA mismatch: stop before invoking the agent;
 - invalid agent output: do not publish that output;
 - current GitHub head SHA differs at publication time: mark superseded and do
   not publish;
-- cleanup failure: leave the Lease alarm armed and mark the run failed until
-  cleanup succeeds.
+- cleanup failure: mark the job failed until forced Sandbox cleanup succeeds.
 
 Ordinary transient failures are retried by the Workflow within a small bounded
 attempt count. They are not turned into elaborate recovery protocols.
@@ -214,15 +219,15 @@ Every run reaches one terminal product state:
 completed | failed | superseded | denied
 ```
 
-The Sandbox lifecycle is independent of whether status persistence or review
+The Runner Job lifecycle is independent of whether status persistence or review
 publication succeeds:
 
-1. create the Lease record and deadline;
+1. admit the authenticated Runner Job and deadline;
 2. create the Sandbox;
 3. perform fixed checkout and remove the installation token;
 4. run the read-only agent;
 5. destroy the Sandbox in the normal completion path; and
-6. let the Lease alarm retry destruction if the normal path is interrupted.
+6. let the runner force destruction if the normal path is interrupted.
 
 No run resumes inside an old Sandbox. A retry starts from the exact base/head
 SHA pair in a fresh Sandbox. A new PR head supersedes, rather than mutates, an
@@ -236,7 +241,8 @@ older run.
 - A short-lived installation token is exposed only to a fixed checkout step.
   Checkout disables submodules, hooks, and LFS smudge; it then removes the
   credential and authenticated remote before the agent starts.
-- The agent receives only the model credential required for review.
+- The model credential is resolved on the trusted runner host through Docker's
+  custom-secret proxy and never enters the Worker request.
 - Repository-provided agent configuration, hooks, plugins, and MCP settings are
   not loaded in v1.
 
@@ -289,7 +295,7 @@ Work is split into small ordered issues and PRs:
 2. deliver signed webhook ingress through the core service binding;
 3. deliver eligibility policy and SHA-bound manual approval;
 4. deliver D1 idempotency and run state;
-5. deliver leased Sandbox execution with fixed checkout and OpenCode output;
+5. deliver Runner Job execution with fixed checkout and OpenCode output;
 6. deliver current-SHA validation and GitHub review publication; and
 7. deploy one repository and verify the complete path.
 

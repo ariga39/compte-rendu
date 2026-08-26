@@ -10,6 +10,48 @@ export interface CoreServiceBinding {
 
 export const GitHubSha = Schema.String.check(Schema.isPattern(/^[0-9a-f]{40}$/i));
 
+export const ReviewResult = Schema.Struct({
+  findings: Schema.Array(
+    Schema.Struct({
+      path: Schema.String,
+      line: Schema.Int,
+      message: Schema.String,
+    }),
+  ),
+  summary: Schema.String,
+});
+
+export type ReviewResult = typeof ReviewResult.Type;
+
+export const RunnerJobInput = Schema.Struct({
+  runId: Schema.NonEmptyString,
+  attempt: Schema.Int,
+  repositoryUrl: Schema.NonEmptyString,
+  baseSha: GitHubSha,
+  headSha: GitHubSha,
+  checkoutToken: Schema.NonEmptyString,
+});
+
+export const RunnerJobResponse = Schema.Struct({
+  id: Schema.NonEmptyString,
+  runId: Schema.NonEmptyString,
+  attempt: Schema.Int,
+  status: Schema.Literals(['queued', 'running', 'succeeded', 'failed', 'aborted']),
+  stage: Schema.Literals(['admission', 'checkout', 'sandbox', 'agent', 'cleanup']),
+  sandbox: Schema.Struct({
+    cleanup: Schema.Literals(['pending', 'destroyed', 'failed']),
+  }),
+  result: Schema.optional(ReviewResult),
+  failure: Schema.optional(
+    Schema.Struct({
+      reason: Schema.Literals(['checkout', 'agent', 'timeout', 'invalid-output', 'cleanup']),
+    }),
+  ),
+});
+
+export type RunnerJobInput = typeof RunnerJobInput.Type;
+export type RunnerJobResponse = typeof RunnerJobResponse.Type;
+
 const PullRequestAction = Schema.Literals([
   'opened',
   'reopened',
@@ -101,70 +143,6 @@ export type OperationalLogEvent =
         | 'scheduling_failure';
     }
   | {
-      readonly phase: 'runner';
-      readonly outcome: 'succeeded';
-      readonly runId: string;
-      readonly attempt: number;
-      readonly sandboxId: string;
-      readonly cleanup: 'sandbox_destroyed_lease_cleared';
-    }
-  | {
-      readonly phase: 'runner';
-      readonly outcome: 'failed';
-      readonly runId: string;
-      readonly attempt: number;
-      readonly sandboxId?: string;
-      readonly reason: 'lease' | 'checkout' | 'agent' | 'timeout' | 'invalid-output' | 'cleanup';
-      readonly retryable: boolean;
-      readonly leaseRetained: boolean;
-    }
-  | {
-      readonly phase: 'agent';
-      readonly outcome: 'progress';
-      readonly stage: 'server' | 'session' | 'prompt';
-      readonly sandboxId: string;
-    }
-  | {
-      readonly phase: 'agent';
-      readonly outcome: 'completed';
-      readonly stage: 'response';
-      readonly sandboxId: string;
-    }
-  | {
-      readonly phase: 'agent';
-      readonly outcome: 'failed';
-      readonly stage: 'server' | 'session' | 'prompt';
-      readonly reason: 'session_error' | 'transport_failure';
-      readonly sandboxId: string;
-    }
-  | {
-      readonly phase: 'agent';
-      readonly outcome: 'aborted';
-      readonly stage: 'deadline';
-      readonly reason: 'deadline';
-      readonly sandboxId: string;
-    }
-  | {
-      readonly phase: 'agent';
-      readonly outcome: 'status';
-      readonly stage: 'process';
-      readonly state: 'running' | 'exited' | 'error';
-      readonly sandboxId: string;
-    }
-  | {
-      readonly phase: 'agent';
-      readonly outcome: 'status';
-      readonly stage: 'session';
-      readonly state: 'busy' | 'idle' | 'retry' | 'error';
-      readonly sandboxId: string;
-    }
-  | {
-      readonly phase: 'agent';
-      readonly outcome: 'activity';
-      readonly stage: 'process' | 'session';
-      readonly sandboxId: string;
-    }
-  | {
       readonly phase: 'workflow';
       readonly outcome: 'completed';
       readonly runId: string;
@@ -174,29 +152,6 @@ export type OperationalLogEvent =
       readonly outcome: 'failed';
       readonly runId: string;
       readonly reason: 'runner_failed' | 'publication_failed' | 'execution_failed' | 'step_failed';
-    }
-  | {
-      readonly phase: 'lease';
-      readonly outcome: 'destroyed';
-      readonly runId: string;
-      readonly attempt: number;
-      readonly sandboxId: string;
-    }
-  | {
-      readonly phase: 'lease';
-      readonly outcome: 'deferred';
-      readonly runId: string;
-      readonly attempt: number;
-      readonly sandboxId: string;
-      readonly reason: 'invalid' | 'not_due';
-    }
-  | {
-      readonly phase: 'lease';
-      readonly outcome: 'failed';
-      readonly runId: string;
-      readonly attempt: number;
-      readonly sandboxId: string;
-      readonly reason: 'cleanup_failed';
     }
   | {
       readonly phase: 'publication';
@@ -244,54 +199,11 @@ export const sanitizeOperationalLogEvent = (event: OperationalLogEvent): Operati
         };
   }
 
-  if (event.phase === 'runner') {
-    return {
-      ...event,
-      runId: sanitizeOperationalLogIdentifier(event.runId) ?? 'redacted',
-      ...(event.sandboxId === undefined
-        ? {}
-        : { sandboxId: sanitizeOperationalLogIdentifier(event.sandboxId) ?? 'redacted' }),
-    };
-  }
-
-  if (event.phase === 'agent') {
-    const sandboxId = sanitizeOperationalLogIdentifier(event.sandboxId) ?? 'redacted';
-    if (event.outcome === 'progress') {
-      return { phase: 'agent', outcome: 'progress', stage: event.stage, sandboxId };
-    }
-    if (event.outcome === 'completed') {
-      return { phase: 'agent', outcome: 'completed', stage: 'response', sandboxId };
-    }
-    if (event.outcome === 'failed') {
-      return {
-        phase: 'agent',
-        outcome: 'failed',
-        stage: event.stage,
-        reason: event.reason,
-        sandboxId,
-      };
-    }
-    if (event.outcome === 'aborted') {
-      return {
-        phase: 'agent',
-        outcome: 'aborted',
-        stage: 'deadline',
-        reason: 'deadline',
-        sandboxId,
-      };
-    }
-    return { ...event, sandboxId };
-  }
-
   if (event.phase === 'workflow' || event.phase === 'publication') {
     return { ...event, runId: sanitizeOperationalLogIdentifier(event.runId) ?? 'redacted' };
   }
 
-  return {
-    ...event,
-    runId: sanitizeOperationalLogIdentifier(event.runId) ?? 'redacted',
-    sandboxId: sanitizeOperationalLogIdentifier(event.sandboxId) ?? 'redacted',
-  };
+  return event;
 };
 
 export interface OperationalLog {
