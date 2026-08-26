@@ -9,23 +9,10 @@ import {
   type WorkerEntrypoint,
   sanitizeOperationalLogEvent,
 } from '@compte-rendu/contracts';
-import {
-  createCloudflareSandboxAdapter,
-  createDurableLeaseAdapter,
-  type CloudflareSandboxBindings,
-  type LeaseNamespaceLike,
-} from './cloudflare-review-adapter';
-import { createReviewRunner, ReviewRunOutput } from './review-run';
-import { createCloudflareOperationalLog } from './operational-log';
+import type { RunnerJobBinding } from './runner-job-client';
+import { ReviewRunOutput } from './review-run';
 
-export { ReviewLeaseDurableObject } from './cloudflare-review-adapter';
-export {
-  createCloudflareSandboxAdapter,
-  createDurableLeaseAdapter,
-  OPENCODE_MODEL,
-  OPENCODE_VERSION,
-  REVIEW_DIRECTORY,
-} from './cloudflare-review-adapter';
+export { createRunnerJobClient, type RunnerJobBinding } from './runner-job-client';
 export { createGitHubPublicationAdapter } from './github-review-adapter';
 export type { GitHubPublicationAdapterOptions } from './github-review-adapter';
 export { createGitHubAppTokenProvider } from './github-app-token';
@@ -191,18 +178,10 @@ export interface ReviewCoordinator {
   completeReview(input: { runId: string; output: unknown }): Promise<ReviewDisposition>;
 }
 
-export interface CoreEnv extends CloudflareSandboxBindings {
-  readonly REVIEW_LEASE: LeaseNamespaceLike;
+export interface CoreEnv {
+  readonly RUNNER: RunnerJobBinding;
+  readonly RUNNER_AUTH_TOKEN: string;
 }
-
-export const createCloudflareReviewRunner = (env: CoreEnv) => {
-  const log = createCloudflareOperationalLog();
-  return createReviewRunner({
-    lease: createDurableLeaseAdapter(env.REVIEW_LEASE),
-    sandbox: createCloudflareSandboxAdapter(env, log),
-    log,
-  });
-};
 
 class InvalidReviewEvent extends Schema.TaggedError<InvalidReviewEvent>()('InvalidReviewEvent', {
   message: Schema.String,

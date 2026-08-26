@@ -1,10 +1,10 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloudflare:workers';
 import {
-  createCloudflareReviewRunner,
   createD1ReviewStateStore,
   createGitHubAppTokenProvider,
   createGitHubPublicationAdapter,
   createReviewCoordinator,
+  createRunnerJobClient,
   type ReviewDisposition,
 } from './index';
 import {
@@ -14,7 +14,6 @@ import {
   type ReviewWorkflowStep,
 } from './review-workflow';
 import { createCloudflareOperationalLog } from './operational-log';
-export { ReviewSandboxContainer as Sandbox } from './sandbox-container';
 export {
   createCoreWorker,
   ReviewWorkflowInput,
@@ -28,7 +27,6 @@ export {
   type ReviewWorkflowEnvironment,
   type ReviewWorkflowStep,
 } from './review-workflow';
-export { ReviewLeaseDurableObject } from './cloudflare-review-adapter';
 export * from './index';
 
 import { createCoreWorker, type CoreWorkerEnv } from './core-worker';
@@ -56,7 +54,10 @@ export class ReviewWorkflow extends WorkflowEntrypoint<
       scheduler: { schedule: async () => {} },
       log: createCloudflareOperationalLog(),
     });
-    const runner = createCloudflareReviewRunner(this.env);
+    const runner = createRunnerJobClient({
+      binding: this.env.RUNNER,
+      authToken: this.env.RUNNER_AUTH_TOKEN,
+    });
     const workflowStep: ReviewWorkflowStep = {
       do: (name, options, operation) =>
         step.do(
@@ -75,8 +76,7 @@ export class ReviewWorkflow extends WorkflowEntrypoint<
         return github.getRepositoryUrl(input);
       },
       getInstallationToken: tokenProvider.getInstallationToken,
-      modelCredential: this.env.MODEL_API_KEY,
-      runWithLease: (spec) => runner.runWithLease(spec),
+      runJob: (spec) => runner.runJob(spec),
       completeReview: (input) => coordinator.completeReview(input),
       markRunFailed: (input) => stateStore.markSchedulingFailed(input),
       getRunOutcome: (runId) => stateStore.getRunOutcome(runId),

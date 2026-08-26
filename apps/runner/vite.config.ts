@@ -3,15 +3,15 @@ import { defineConfig } from 'vite-plus';
 export default defineConfig({
   build: {
     lib: {
-      entry: 'src/index.ts',
+      entry: 'src/server.ts',
       formats: ['es'],
-      fileName: 'index',
+      fileName: 'runner',
     },
     outDir: 'dist',
     emptyOutDir: true,
     sourcemap: true,
     rollupOptions: {
-      external: ['cloudflare:workers'],
+      external: [/^node:/],
     },
   },
 });

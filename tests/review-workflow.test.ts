@@ -19,7 +19,7 @@ const job: ReviewJob = {
 
 describe('Review workflow', () => {
   it('runs immutable review identity and completes the published result', async () => {
-    let leaseSpec: ReviewRunSpec | undefined;
+    let jobSpec: ReviewRunSpec | undefined;
     let completedOutput: unknown;
     const reactions: unknown[] = [];
     const events: OperationalLogEvent[] = [];
@@ -29,9 +29,9 @@ describe('Review workflow', () => {
     const dependencies: ReviewWorkflowDependencies = {
       getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
       getInstallationToken: async () => 'installation-token',
-      modelCredential: 'model-token',
-      runWithLease: async (spec) => {
-        leaseSpec = spec;
+      runJob: async (spec) => {
+        jobSpec = spec;
+        await expect(spec.shouldAbort?.()).resolves.toBe(false);
         return {
           status: 'succeeded',
           attempt: 1,
@@ -44,6 +44,7 @@ describe('Review workflow', () => {
         return 'completed';
       },
       markRunFailed: async () => {},
+      getRunOutcome: async () => ({ status: 'scheduled' }),
       addReaction: async (input) => {
         reactions.push(input);
       },
@@ -61,13 +62,12 @@ describe('Review workflow', () => {
     );
 
     expect(disposition).toBe('completed');
-    expect(leaseSpec).toMatchObject({
+    expect(jobSpec).toMatchObject({
       runId: 'run-workflow-1',
       repositoryUrl: 'https://github.com/acme/reviewed.git',
       baseSha: job.baseSha,
       headSha: job.headSha,
       checkoutToken: 'installation-token',
-      modelCredential: 'model-token',
       maxAttempts: 2,
     });
     expect(completedOutput).toEqual({ findings: [], summary: 'No findings' });
@@ -81,7 +81,7 @@ describe('Review workflow', () => {
     ]);
   });
 
-  it('records a terminal failure when the leased runner fails', async () => {
+  it('records a terminal failure when the Runner Job fails', async () => {
     let failedRunId = '';
     let publicationAttempted = false;
     const reactions: unknown[] = [];
@@ -89,13 +89,11 @@ describe('Review workflow', () => {
     const dependencies: ReviewWorkflowDependencies = {
       getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
       getInstallationToken: async () => 'installation-token',
-      modelCredential: 'model-token',
-      runWithLease: async () => ({
+      runJob: async () => ({
         status: 'failed',
         reason: 'agent',
         attempt: 1,
         retryable: false,
-        leaseRetained: false,
       }),
       completeReview: async () => {
         publicationAttempted = true;
@@ -153,13 +151,11 @@ describe('Review workflow', () => {
     const dependencies: ReviewWorkflowDependencies = {
       getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
       getInstallationToken: async () => 'installation-token',
-      modelCredential: 'model-token',
-      runWithLease: async () => ({
+      runJob: async () => ({
         status: 'failed',
         reason: 'agent',
         attempt: 1,
         retryable: false,
-        leaseRetained: false,
       }),
       completeReview: async () => 'completed',
       markRunFailed: async ({ runId }) => {
@@ -186,8 +182,7 @@ describe('Review workflow', () => {
     const dependencies: ReviewWorkflowDependencies = {
       getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
       getInstallationToken: async () => 'installation-token',
-      modelCredential: 'model-token',
-      runWithLease: async () => ({
+      runJob: async () => ({
         status: 'succeeded',
         attempt: 1,
         sandboxId: 'run-workflow-publication-failed-attempt-1',
@@ -224,8 +219,7 @@ describe('Review workflow', () => {
     const dependencies: ReviewWorkflowDependencies = {
       getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
       getInstallationToken: async () => 'installation-token',
-      modelCredential: 'model-token',
-      runWithLease: async () => ({
+      runJob: async () => ({
         status: 'succeeded',
         attempt: 1,
         sandboxId: 'run-workflow-superseded-attempt-1',
@@ -263,13 +257,11 @@ describe('Review workflow', () => {
     const dependencies: ReviewWorkflowDependencies = {
       getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
       getInstallationToken: async () => 'installation-token',
-      modelCredential: 'model-token',
-      runWithLease: async () => ({
+      runJob: async () => ({
         status: 'failed',
         reason: 'agent',
         attempt: 1,
         retryable: false,
-        leaseRetained: false,
       }),
       completeReview: async () => 'failed',
       markRunFailed: async () => {},
@@ -306,8 +298,7 @@ describe('Review workflow', () => {
     const dependencies: ReviewWorkflowDependencies = {
       getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
       getInstallationToken: async () => 'installation-token',
-      modelCredential: 'model-token',
-      runWithLease: async () => ({
+      runJob: async () => ({
         status: 'succeeded',
         attempt: 1,
         sandboxId: 'run-workflow-step-1-attempt-1',
