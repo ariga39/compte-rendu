@@ -34,10 +34,10 @@ Use static inspection only. You may use `git diff`, `git show`, `git grep`,
 managers. Do not run builds, tests, hooks, plugins, MCP tools, or repository
 programs. Do not edit files, commit, push, or use the web.
 
-Return exactly one bare JSON object matching this schema. Emit the JSON object
-itself, with no Markdown fence, preamble, recap, or pleasantry:
+The final response must be exactly one bare JSON object with no Markdown fence,
+prose, or other text:
 
-{ "findings": [{ "path": "string", "line": 0, "message": "string" }], "summary": "string" }
+`{"findings":[{"path":"string","line":0,"message":"string"}],"summary":"string"}`
 
 The summary must be short, accurate, and limited to the reviewed diff. Findings
 must use paths and head-side changed lines from that diff.

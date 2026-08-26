@@ -105,7 +105,15 @@ describe('Runner Job HTTP interface', () => {
       agent: {
         review: {
           permission: {
-            bash: { '*': 'deny', 'git diff*': 'allow', 'rg*': 'allow' },
+            bash: {
+              '*': 'deny',
+              'git diff*': 'allow',
+              'git show*': 'allow',
+              'git grep*': 'allow',
+              'git diff*--output*': 'deny',
+              'git show*--output*': 'deny',
+              'git diff*--no-index*': 'deny',
+            },
             edit: 'deny',
             external_directory: 'deny',
             skill: { '*': 'deny', 'pr-review': 'allow' },
@@ -116,7 +124,15 @@ describe('Runner Job HTTP interface', () => {
     });
     const bashRules = Object.keys(config.agent.review.permission.bash);
     expect(bashRules.indexOf('*')).toBeLessThan(bashRules.indexOf('git diff*'));
-    expect(bashRules.indexOf('*')).toBeLessThan(bashRules.indexOf('rg*'));
+    expect(bashRules.indexOf('*')).toBeLessThan(bashRules.indexOf('git show*'));
+    expect(bashRules.indexOf('*')).toBeLessThan(bashRules.indexOf('git grep*'));
+    expect(bashRules).not.toContain('grep*');
+    expect(bashRules).not.toContain('rg*');
+    expect(bashRules.indexOf('git diff*--output*')).toBeGreaterThan(bashRules.indexOf('git diff*'));
+    expect(bashRules.indexOf('git show*--output*')).toBeGreaterThan(bashRules.indexOf('git show*'));
+    expect(bashRules.indexOf('git diff*--no-index*')).toBeGreaterThan(
+      bashRules.indexOf('git diff*'),
+    );
     expect(agentArgs?.join(' ')).toContain(baseSha);
     expect(agentArgs?.join(' ')).toContain(headSha);
     await expect(

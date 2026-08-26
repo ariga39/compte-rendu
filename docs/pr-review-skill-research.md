@@ -64,3 +64,7 @@ The dedicated reviewer skill should say, in substance:
 3. Return zero to five findings ordered by severity; each is anchored to a head-side changed line and says only the concrete risk, decisive evidence, and smallest practical fix.
 4. Do not modify or execute the repository, install dependencies, run package managers/builds/tests/hooks/plugins/MCP, or use the web.
 5. Emit exactly one bare schema-valid JSON object. Keep its summary and finding messages direct, concise, free of preamble, tangents, recap, and pleasantries.
+
+## Real E2E correction
+
+A real E2E against head `ca436a414763995924cd79412752d63f9f514477` returned a preamble and Markdown-fenced JSON, so the Runner correctly failed it as `invalid-output`; durable local-only evidence was retained outside the repository. It also showed that `git diff/show --output` can write and `git diff --no-index` can read outside the checkout. The correction keeps only `git diff`, `git show`, and `git grep` bash allows, places later-match denies for `git diff*--output*`, `git show*--output*`, and `git diff*--no-index*`, and removes bash `grep`/`rg` allows because native OpenCode grep/read/glob remain available.
