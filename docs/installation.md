@@ -204,6 +204,10 @@ this deployment uses it for the public ingress URL. Deploying the `Sandbox`
 Container requires the current Workers Paid plan; see Cloudflare's
 [workers.dev setup](https://developers.cloudflare.com/workers/configuration/routing/workers-dev/)
 and [Containers pricing](https://developers.cloudflare.com/containers/pricing/).
+Before choosing a Container size or validating the model route, read the
+recorded [Sandbox/OpenCode remote PoC](sandbox-opencode-poc.md). It separates
+the proven minimum route from the still-unproven full-review capacity and lists
+the rollout, instance, SSH, and safe-session verification gates.
 
 Run these commands from the repository root. Every `wrangler` command below
 uses the temporary invocation described above.

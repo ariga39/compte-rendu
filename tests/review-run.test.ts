@@ -1,8 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  createReviewSandbox,
-  type ReviewDeadline,
-} from '../apps/core/src/cloudflare-review-adapter';
+import { createReviewSandbox } from '../apps/core/src/cloudflare-review-adapter';
 import { createReviewRunner, type ReviewRunSpec } from '../apps/core/src/review-run';
 import type { OperationalLogEvent } from '../packages/contracts/src';
 
@@ -238,9 +235,15 @@ describe('runWithLease', () => {
   it('keeps review and cleanup successful when agent lifecycle logging fails', async () => {
     let destroyed = false;
     let leaseCleared = false;
+    let commandCount = 0;
     const rawSandbox = {
       writeFile: async () => undefined,
-      exec: async () => processOutput(`${sha('1')}\n${sha('2')}\n`),
+      exec: async () => {
+        commandCount += 1;
+        return commandCount === 1
+          ? processOutput(`${sha('1')}\n${sha('2')}\n`)
+          : processOutput(validAgentOutput);
+      },
       destroy: async () => {
         destroyed = true;
       },
@@ -261,35 +264,7 @@ describe('runWithLease', () => {
       },
       sandbox: {
         getSandbox: async () =>
-          createReviewSandbox(
-            rawSandbox,
-            {
-              createClient: async () => ({
-                client: {
-                  session: {
-                    create: async () => ({ id: 'review-session' }),
-                    prompt: async () => ({
-                      info: {},
-                      parts: [
-                        {
-                          type: 'text',
-                          text: JSON.stringify({ findings: [], summary: 'No findings' }),
-                        },
-                      ],
-                    }),
-                    abort: async () => true,
-                  },
-                },
-                process: {
-                  id: 'review-process',
-                  kill: async () => undefined,
-                  waitForExit: async () => undefined,
-                },
-              }),
-            },
-            undefined,
-            { sandboxId: 'run-lease-1-attempt-1', log },
-          ),
+          createReviewSandbox(rawSandbox, { sandboxId: 'run-lease-1-attempt-1', log }),
       },
       log,
     });
@@ -541,10 +516,34 @@ describe('runWithLease', () => {
     });
   });
 
-  it('rejects an ambiguous review returned by the managed OpenCode client', async () => {
+  it('rejects ambiguous JSONL returned by the direct OpenCode CLI', async () => {
+    let commandCount = 0;
+    const ambiguousOutput = [
+      JSON.stringify({
+        type: 'text',
+        part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'first' }) },
+      }),
+      JSON.stringify({
+        type: 'text',
+        part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'second' }) },
+      }),
+    ].join('\n');
     const rawSandbox = {
       writeFile: async () => undefined,
-      exec: async () => processOutput(`${sha('1')}\n${sha('2')}\n`),
+      exec: async () => {
+        commandCount += 1;
+        return commandCount === 1
+          ? processOutput(`${sha('1')}\n${sha('2')}\n`)
+          : {
+              output: async () => ({
+                stdout: ambiguousOutput,
+                stderr: '',
+                exitCode: 0,
+                timedOut: false,
+                truncated: false,
+              }),
+            };
+      },
       destroy: async () => undefined,
     };
     const runner = createReviewRunner({
@@ -555,29 +554,7 @@ describe('runWithLease', () => {
         }),
       },
       sandbox: {
-        getSandbox: async () =>
-          createReviewSandbox(rawSandbox, {
-            createClient: async () => ({
-              client: {
-                session: {
-                  create: async () => ({ id: 'review-session' }),
-                  prompt: async () => ({
-                    info: {},
-                    parts: [
-                      { type: 'text', text: JSON.stringify({ findings: [], summary: 'first' }) },
-                      { type: 'text', text: JSON.stringify({ findings: [], summary: 'second' }) },
-                    ],
-                  }),
-                  abort: async () => true,
-                },
-              },
-              process: {
-                id: 'review-process',
-                kill: async () => {},
-                waitForExit: async () => undefined,
-              },
-            }),
-          }),
+        getSandbox: async () => createReviewSandbox(rawSandbox),
       },
     });
 
@@ -586,12 +563,18 @@ describe('runWithLease', () => {
     expect(result).toMatchObject({ status: 'failed', reason: 'invalid-output' });
   });
 
-  it('keeps a valid review when managed OpenCode close fails', async () => {
+  it('destroys the Sandbox and clears the lease after a successful direct CLI review', async () => {
     let destroyed = false;
     let leaseCleared = false;
+    let commandCount = 0;
     const rawSandbox = {
       writeFile: async () => undefined,
-      exec: async () => processOutput(`${sha('1')}\n${sha('2')}\n`),
+      exec: async () => {
+        commandCount += 1;
+        return commandCount === 1
+          ? processOutput(`${sha('1')}\n${sha('2')}\n`)
+          : processOutput(validAgentOutput);
+      },
       destroy: async () => {
         destroyed = true;
       },
@@ -606,33 +589,7 @@ describe('runWithLease', () => {
         }),
       },
       sandbox: {
-        getSandbox: async () =>
-          createReviewSandbox(rawSandbox, {
-            createClient: async () => ({
-              client: {
-                session: {
-                  create: async () => ({ id: 'review-session' }),
-                  prompt: async () => ({
-                    info: {},
-                    parts: [
-                      {
-                        type: 'text',
-                        text: JSON.stringify({ findings: [], summary: 'No findings' }),
-                      },
-                    ],
-                  }),
-                  abort: async () => true,
-                },
-              },
-              process: {
-                id: 'review-process',
-                kill: async () => {
-                  throw new Error('managed close failed');
-                },
-                waitForExit: async () => undefined,
-              },
-            }),
-          }),
+        getSandbox: async () => createReviewSandbox(rawSandbox),
       },
     });
 
@@ -759,26 +716,32 @@ describe('runWithLease', () => {
     expect(sandboxIds).toEqual(['run-lease-1-attempt-1']);
   });
 
-  it('aborts the managed review at its ten-minute deadline before scoped cleanup', async () => {
-    let aborted = false;
-    let serverClosed = false;
+  it('destroys the Sandbox and clears its lease after a direct CLI timeout', async () => {
     let destroyed = false;
     let leaseCleared = false;
-    const events: OperationalLogEvent[] = [];
     let leaseExpiresAt: string | undefined;
     const runStartedAt = Date.now();
     const rawSandbox = {
       writeFile: async () => undefined,
-      exec: async () => processOutput(`${sha('1')}\n${sha('2')}\n`),
+      exec: async (command: readonly [string, ...string[]]) => {
+        if (command[0] === '/bin/sh' && command[2]?.includes('rev-parse')) {
+          return processOutput(`${sha('1')}\n${sha('2')}\n`);
+        }
+        if (command[0] === '/bin/sh' && command[2]?.includes('remote remove origin')) {
+          return processOutput('');
+        }
+        return {
+          output: async () => ({
+            stdout: 'raw repository contents',
+            stderr: 'raw provider response',
+            exitCode: 1,
+            timedOut: true,
+            truncated: false,
+          }),
+        };
+      },
       destroy: async () => {
         destroyed = true;
-      },
-    };
-    const deadline: ReviewDeadline = {
-      schedule: (durationMillis, onElapsed) => {
-        expect(durationMillis).toBe(10 * 60 * 1000);
-        void onElapsed();
-        return () => {};
       },
     };
     const runner = createReviewRunner({
@@ -794,214 +757,20 @@ describe('runWithLease', () => {
         },
       },
       sandbox: {
-        getSandbox: async () =>
-          createReviewSandbox(
-            rawSandbox,
-            {
-              createClient: async () => ({
-                client: {
-                  session: {
-                    create: async () => ({ id: 'review-session' }),
-                    prompt: async () => new Promise(() => {}),
-                    abort: async () => {
-                      aborted = true;
-                      return true;
-                    },
-                  },
-                },
-                process: {
-                  id: 'review-process',
-                  kill: async () => {
-                    serverClosed = true;
-                  },
-                  waitForExit: async () => undefined,
-                },
-              }),
-            },
-            deadline,
-            {
-              sandboxId: 'run-lease-1-attempt-1',
-              log: {
-                record: (event) => {
-                  events.push(event);
-                },
-              },
-            },
-          ),
+        getSandbox: async () => createReviewSandbox(rawSandbox),
       },
     });
 
     const result = await runner.runWithLease(makeSpec());
 
     expect(result).toMatchObject({ status: 'failed', reason: 'timeout' });
-    expect(result).not.toHaveProperty('output');
-    expect(aborted).toBe(true);
-    expect(serverClosed).toBe(true);
     expect(destroyed).toBe(true);
     expect(leaseCleared).toBe(true);
-    expect(events).toContainEqual({
-      phase: 'agent',
-      outcome: 'aborted',
-      stage: 'deadline',
-      reason: 'deadline',
-      sandboxId: 'run-lease-1-attempt-1',
-    });
     if (leaseExpiresAt === undefined) throw new Error('lease expiry was not registered');
     const leaseDuration = Date.parse(leaseExpiresAt) - runStartedAt;
     expect(leaseDuration).toBeGreaterThanOrEqual(12 * 60 * 1000 - 1_000);
     expect(leaseDuration).toBeLessThan(12 * 60 * 1000 + 1_000);
-  });
-
-  it('keeps timeout terminal when abort settles a pending prompt after deadline begins', async () => {
-    let fireDeadline: (() => Promise<void>) | undefined;
-    let resolvePromptStarted: (() => void) | undefined;
-    let rejectPrompt: ((reason?: unknown) => void) | undefined;
-    let aborted = false;
-    let serverClosed = false;
-    let destroyed = false;
-    let leaseCleared = false;
-    const promptStarted = new Promise<void>((resolve) => {
-      resolvePromptStarted = resolve;
-    });
-    const rawSandbox = {
-      writeFile: async () => undefined,
-      exec: async () => processOutput(`${sha('1')}\n${sha('2')}\n`),
-      destroy: async () => {
-        destroyed = true;
-      },
-    };
-    const deadline: ReviewDeadline = {
-      schedule: (_durationMillis, onElapsed) => {
-        fireDeadline = onElapsed;
-        return () => {};
-      },
-    };
-    const runner = createReviewRunner({
-      lease: {
-        register: async () => ({
-          clear: async () => {
-            leaseCleared = true;
-          },
-          rearm: async () => {},
-        }),
-      },
-      sandbox: {
-        getSandbox: async () =>
-          createReviewSandbox(
-            rawSandbox,
-            {
-              createClient: async () => ({
-                client: {
-                  session: {
-                    create: async () => ({ id: 'review-session' }),
-                    prompt: async () => {
-                      resolvePromptStarted?.();
-                      return new Promise<never>((_resolve, reject) => {
-                        rejectPrompt = reject;
-                      });
-                    },
-                    abort: async () => {
-                      aborted = true;
-                      rejectPrompt?.(new Error('session aborted'));
-                      return true;
-                    },
-                  },
-                },
-                process: {
-                  id: 'review-process',
-                  kill: async () => {
-                    serverClosed = true;
-                  },
-                  waitForExit: async () => undefined,
-                },
-              }),
-            },
-            deadline,
-          ),
-      },
-    });
-
-    const runPromise = runner.runWithLease(makeSpec());
-    await promptStarted;
-    if (fireDeadline === undefined) throw new Error('deadline was not scheduled');
-    await fireDeadline();
-    const result = await runPromise;
-
-    expect(result).toMatchObject({ status: 'failed', reason: 'timeout' });
-    expect(result).not.toHaveProperty('output');
-    expect(aborted).toBe(true);
-    expect(serverClosed).toBe(true);
-    expect(destroyed).toBe(true);
-    expect(leaseCleared).toBe(true);
-  });
-
-  it('returns timeout and kills the OpenCode process while session abort is still pending', async () => {
-    let fireDeadline: (() => Promise<void>) | undefined;
-    let releaseAbort: (() => void) | undefined;
-    let processKilled = false;
-    const abortPending = new Promise<boolean>((resolve) => {
-      releaseAbort = () => resolve(true);
-    });
-    const rawSandbox = {
-      writeFile: async () => undefined,
-      exec: async () => processOutput(`${sha('1')}\n${sha('2')}\n`),
-      destroy: async () => undefined,
-    };
-    const deadline: ReviewDeadline = {
-      schedule: (_durationMillis, onElapsed) => {
-        fireDeadline = onElapsed;
-        return () => {};
-      },
-    };
-    const runner = createReviewRunner({
-      lease: {
-        register: async () => ({
-          clear: async () => {},
-          rearm: async () => {},
-        }),
-      },
-      sandbox: {
-        getSandbox: async () =>
-          createReviewSandbox(
-            rawSandbox,
-            {
-              createClient: async () => ({
-                client: {
-                  session: {
-                    create: async () => ({ id: 'review-session' }),
-                    prompt: async () => new Promise<never>(() => {}),
-                    abort: async () => abortPending,
-                  },
-                },
-                process: {
-                  id: 'review-process',
-                  kill: async () => {
-                    processKilled = true;
-                  },
-                  waitForExit: async () => undefined,
-                },
-              }),
-            },
-            deadline,
-          ),
-      },
-    });
-
-    const runPromise = runner.runWithLease(makeSpec());
-    if (fireDeadline === undefined) {
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    }
-    if (fireDeadline === undefined) throw new Error('deadline was not scheduled');
-    void fireDeadline();
-    const result = await Promise.race([
-      runPromise,
-      new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 25)),
-    ]);
-
-    expect(result).toMatchObject({ status: 'failed', reason: 'timeout' });
-    expect(processKilled).toBe(true);
-    releaseAbort?.();
-    await runPromise;
+    expect(leaseDuration).toBeGreaterThan(10 * 60 * 1000);
   });
 
   it('fails closed when agent output exceeds the application limit', async () => {
