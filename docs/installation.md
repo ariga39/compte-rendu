@@ -308,6 +308,13 @@ uses the temporary invocation described above.
    versioned and applied in order; see
    [D1 migrations](https://developers.cloudflare.com/d1/reference/migrations/).
 
+   The generated core config also retains the legacy Durable Object migration
+   history: `v1` provisions `Sandbox` and `ReviewLeaseDurableObject`, then `v2`
+   deletes both classes. Do not remove, rename, or reorder these migration
+   entries. Applying `v2` permanently deletes any stored objects for those
+   retired classes; export anything the owner must retain before deploying the
+   core Worker. Existing environments receive only the unapplied `v2` step.
+
 5. Enter the two core secrets. Each command prompts for the value; do not
    append a value to the command line, use `echo`, or redirect a secret from a
    shell command:

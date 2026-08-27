@@ -18,6 +18,16 @@
       "migrations_dir": "migrations",
     },
   ],
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["Sandbox", "ReviewLeaseDurableObject"],
+    },
+    {
+      "tag": "v2",
+      "deleted_classes": ["Sandbox", "ReviewLeaseDurableObject"],
+    },
+  ],
   "workflows": [
     {
       "binding": "REVIEW_WORKFLOW",

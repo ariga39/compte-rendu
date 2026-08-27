@@ -17,15 +17,19 @@ type WranglerConfig = {
   vars?: { GITHUB_APP_ID?: string };
   secrets?: { required?: readonly string[] };
   d1_databases?: readonly { database_id?: string }[];
+  migrations?: readonly {
+    tag?: string;
+    new_sqlite_classes?: readonly string[];
+    deleted_classes?: readonly string[];
+  }[];
+  containers?: unknown;
+  durable_objects?: unknown;
 };
 
 const readConfig = (path: string) => readFileSync(resolve(repositoryRoot, path), 'utf8');
-const parseConfig = (path: string) =>
-  JSON.parse(
-    readConfig(path)
-      .replace(/^\s*\/\/.*$/gm, '')
-      .replace(/,\s*([}\]])/g, '$1'),
-  ) as WranglerConfig;
+const parseConfigText = (source: string) =>
+  JSON.parse(source.replace(/^\s*\/\/.*$/gm, '').replace(/,\s*([}\]])/g, '$1')) as WranglerConfig;
+const parseConfig = (path: string) => parseConfigText(readConfig(path));
 
 type DeploymentFixture = {
   run: (instanceName: string) => string;
@@ -174,5 +178,31 @@ describe('Wrangler deployment tooling', () => {
     expect(ingress.secrets?.required).toEqual(['WEBHOOK_SECRET']);
     expect(core.vars?.GITHUB_APP_ID).toBe('REPLACE_WITH_GITHUB_APP_ID');
     expect(core.d1_databases?.[0]?.database_id).toBe('REPLACE_WITH_D1_DATABASE_ID');
+  });
+
+  it('retains ordered Durable Object retirement migrations in tracked and rendered config', () => {
+    const expectedMigrations = [
+      {
+        tag: 'v1',
+        new_sqlite_classes: ['Sandbox', 'ReviewLeaseDurableObject'],
+      },
+      {
+        tag: 'v2',
+        deleted_classes: ['Sandbox', 'ReviewLeaseDurableObject'],
+      },
+    ];
+    const tracked = parseConfig('apps/core/wrangler.jsonc');
+    expect(tracked.migrations).toEqual(expectedMigrations);
+    expect(tracked.containers).toBeUndefined();
+    expect(tracked.durable_objects).toBeUndefined();
+
+    withDeploymentFixture(({ run, read }) => {
+      run('retired-objects');
+      const rendered = parseConfigText(read('retired-objects').core);
+
+      expect(rendered.migrations).toEqual(expectedMigrations);
+      expect(rendered.containers).toBeUndefined();
+      expect(rendered.durable_objects).toBeUndefined();
+    });
   });
 });
