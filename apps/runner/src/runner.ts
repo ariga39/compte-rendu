@@ -90,6 +90,7 @@ export type RunnerProcessResult = {
 export type RunnerProcessOptions = {
   readonly captureStdout?: boolean;
   readonly captureStderr?: boolean;
+  readonly stderrRedactions?: readonly string[];
   readonly maxBytes?: number;
   readonly timeoutMs?: number;
   readonly env?: NodeJS.ProcessEnv;
@@ -114,8 +115,10 @@ const runProcess: RunnerProcess = (command, args, options = {}) =>
   new Promise<RunnerProcessResult>((resolve) => {
     const chunks: Buffer[] = [];
     const stderrChunks: Buffer[] = [];
+    let stderrPending = '';
     const captureStdout = options.captureStdout === true;
     const captureStderr = options.captureStderr === true;
+    const stderrRedactions = (options.stderrRedactions ?? []).filter((value) => value.length > 0);
     const maxBytes = options.maxBytes ?? 0;
     let bytes = 0;
     let stderrBytes = 0;
@@ -127,11 +130,40 @@ const runProcess: RunnerProcess = (command, args, options = {}) =>
     let killTimeout: ReturnType<typeof setTimeout> | undefined;
     let child: ChildProcess;
 
+    const appendStderr = (value: string) => {
+      if (stderrTruncated || value.length === 0) return;
+      const buffer = new TextEncoder().encode(value);
+      if (stderrBytes + buffer.length > maxBytes) {
+        stderrChunks.push(Buffer.from(buffer.subarray(0, Math.max(0, maxBytes - stderrBytes))));
+        stderrBytes = maxBytes;
+        stderrTruncated = true;
+        return;
+      }
+      stderrChunks.push(Buffer.from(buffer));
+      stderrBytes += buffer.length;
+    };
+
+    const flushStderr = (value: string, final: boolean) => {
+      stderrPending += value;
+      const keep = final
+        ? 0
+        : Math.max(0, ...stderrRedactions.map((redaction) => redaction.length));
+      if (stderrPending.length <= keep) return;
+      const processable = stderrPending.slice(0, stderrPending.length - keep);
+      stderrPending = stderrPending.slice(stderrPending.length - keep);
+      let redacted = processable;
+      for (const valueToRedact of stderrRedactions) {
+        redacted = redacted.replaceAll(valueToRedact, '[redacted]');
+      }
+      appendStderr(redacted);
+    };
+
     const finish = (exitCode: number | null) => {
       if (settled) return;
       settled = true;
       if (timeout !== undefined) clearTimeout(timeout);
       if (killTimeout !== undefined) clearTimeout(killTimeout);
+      flushStderr('', true);
       resolve({
         exitCode: exitCode ?? 1,
         stdout: Buffer.concat(chunks).toString('utf8'),
@@ -168,16 +200,8 @@ const runProcess: RunnerProcess = (command, args, options = {}) =>
 
     if (captureStderr && child.stderr !== null) {
       child.stderr.on('data', (chunk: Buffer | string) => {
-        if (stderrBytes >= maxBytes) return;
         const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-        if (stderrBytes + buffer.length > maxBytes) {
-          stderrChunks.push(buffer.subarray(0, maxBytes - stderrBytes));
-          stderrBytes = maxBytes;
-          stderrTruncated = true;
-          return;
-        }
-        stderrChunks.push(buffer);
-        stderrBytes += buffer.length;
+        flushStderr(new TextDecoder().decode(buffer), false);
       });
     }
 
@@ -330,9 +354,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       timedOut: result.timedOut,
       ...(diagnostic.includeStderr === true
         ? (() => {
-            const stderr = result.stderrTruncated
-              ? undefined
-              : boundedDiagnostic(job, result.stderr);
+            const stderr = boundedDiagnostic(job, result.stderr);
             return stderr === undefined ? {} : { stderr };
           })()
         : {}),
@@ -358,6 +380,12 @@ export const createRunner = (options: RunnerOptions = {}) => {
       result = await executeProcess(command, args, {
         ...processOptions,
         captureStderr: diagnostic !== undefined,
+        stderrRedactions:
+          diagnostic === undefined
+            ? processOptions.stderrRedactions
+            : [job.diagnosticCheckoutToken, modelSecretCommand, job.input.repositoryUrl].filter(
+                (value): value is string => value !== undefined && value.length > 0,
+              ),
         maxBytes:
           diagnostic === undefined
             ? processOptions.maxBytes
@@ -522,6 +550,11 @@ export const createRunner = (options: RunnerOptions = {}) => {
       try {
         result = await executeProcess(sbxPath, args, {
           captureStderr: true,
+          stderrRedactions: [
+            job.diagnosticCheckoutToken,
+            modelSecretCommand,
+            job.input.repositoryUrl,
+          ].filter((value): value is string => value !== undefined && value.length > 0),
           maxBytes: MAX_DIAGNOSTIC_STDERR_BYTES,
           timeoutMs: CLEANUP_COMMAND_TIMEOUT_MS,
         });

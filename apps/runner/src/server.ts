@@ -5,7 +5,7 @@ const MAX_REQUEST_BYTES = 64 * 1024;
 const runner = createRunner({
   log: {
     record: (event) => {
-      console.log(JSON.stringify(event));
+      console.error(JSON.stringify(event));
     },
   },
 });

@@ -109,6 +109,78 @@ describe('Runner Job HTTP interface', () => {
     expect(JSON.stringify(events)).not.toContain(resolverCommand);
   });
 
+  it('redacts sensitive stderr before applying the diagnostic byte bound', async () => {
+    const events: Array<Record<string, unknown>> = [];
+    const baseSha = '1111111111111111111111111111111111111111';
+    const headSha = '2222222222222222222222222222222222222222';
+    const checkoutToken = 'secret-checkout-token';
+    const overflowingStderr = `${'x'.repeat(4080)}${checkoutToken}${'y'.repeat(100)}`;
+    const runner = createRunner({
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      log: {
+        record: async (event) => {
+          events.push(event as unknown as Record<string, unknown>);
+        },
+      },
+      process: async (_command, args) => {
+        if (args[0] === 'create') {
+          return {
+            exitCode: 1,
+            stderr: overflowingStderr,
+            stderrTruncated: true,
+            stdout: '',
+            timedOut: false,
+            truncated: false,
+          };
+        }
+        return {
+          exitCode: 0,
+          stdout: args.includes('rev-parse') ? `${baseSha}\n${headSha}\n` : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
+    });
+
+    const submitted = await runner.handle(
+      new Request('http://runner/jobs', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer runner-test-token',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          runId: 'run-72-redaction-bound',
+          attempt: 1,
+          repositoryUrl: 'https://github.com/acme/reviewed.git',
+          baseSha,
+          headSha,
+          checkoutToken,
+        }),
+      }),
+    );
+    const { id } = (await submitted.json()) as { id: string };
+
+    await expect(waitForTerminal(runner, id)).resolves.toMatchObject({
+      status: 'failed',
+      failure: { reason: 'agent' },
+    });
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        phase: 'runner',
+        outcome: 'command',
+        runId: 'run-72-redaction-bound',
+        stage: 'sandbox',
+        command: 'create',
+        exitCode: 1,
+        timedOut: false,
+        stderr: `${'x'.repeat(4080)}[redacted]${'y'.repeat(6)}`,
+      }),
+    );
+    expect(JSON.stringify(events)).not.toContain(checkoutToken);
+  });
+
   it('loads the packaged review skill and exact revision through the OpenCode sandbox boundary', async () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
