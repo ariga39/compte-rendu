@@ -16,6 +16,7 @@ declare module 'node:fs' {
 declare module 'node:child_process' {
   export interface ChildProcess {
     readonly stdout: { on(event: 'data', listener: (chunk: Buffer | string) => void): void } | null;
+    readonly stderr: { on(event: 'data', listener: (chunk: Buffer | string) => void): void } | null;
     kill(signal?: string): boolean;
     once(event: 'error', listener: () => void): void;
     once(event: 'close', listener: (exitCode: number | null) => void): void;

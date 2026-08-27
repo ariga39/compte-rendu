@@ -199,7 +199,20 @@ path in this repository or in an issue/comment.
 ## First installation
 
 Before starting, install Docker Sandboxes with `sbx` 0.39.0, complete Docker
-login, and initialize the host policy once:
+login, ensure the service environment exposes both the Sandboxes daemon and
+`mkfs.ext4`, and initialize the host policy once. An auto-started `sandboxd`
+inherits the service's `PATH`; on Debian, `mkfs.ext4` is normally in
+`/usr/sbin`, so include the system sbin directories in the PATH used to start
+the Runner:
+
+```sh
+PATH="<SBX_BIN_DIR>:/usr/local/sbin:/usr/sbin:/sbin:$PATH"
+command -v sandboxd
+command -v mkfs.ext4
+```
+
+The two `command -v` checks must succeed in the same service environment that
+starts the Runner. Then initialize the host policy once:
 
 ```sh
 sbx policy init deny-all

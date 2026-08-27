@@ -2,7 +2,13 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { createRunner } from './runner';
 
 const MAX_REQUEST_BYTES = 64 * 1024;
-const runner = createRunner();
+const runner = createRunner({
+  log: {
+    record: (event) => {
+      console.log(JSON.stringify(event));
+    },
+  },
+});
 
 const requestFor = async (request: IncomingMessage): Promise<Request | undefined> => {
   const chunks: Buffer[] = [];

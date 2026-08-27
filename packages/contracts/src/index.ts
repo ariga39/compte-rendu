@@ -174,6 +174,16 @@ export type OperationalLogEvent =
         | 'marker_lookup_failed'
         | 'publication_uncertain'
         | 'completion_failed';
+    }
+  | {
+      readonly phase: 'runner';
+      readonly outcome: 'command';
+      readonly runId: string;
+      readonly stage: 'checkout' | 'sandbox' | 'cleanup';
+      readonly command: string;
+      readonly exitCode: number;
+      readonly timedOut: boolean;
+      readonly stderr?: string;
     };
 
 export const sanitizeOperationalLogIdentifier = (value: string | undefined) => {
@@ -202,6 +212,10 @@ export const sanitizeOperationalLogEvent = (event: OperationalLogEvent): Operati
   }
 
   if (event.phase === 'workflow' || event.phase === 'publication') {
+    return { ...event, runId: sanitizeOperationalLogIdentifier(event.runId) ?? 'redacted' };
+  }
+
+  if (event.phase === 'runner') {
     return { ...event, runId: sanitizeOperationalLogIdentifier(event.runId) ?? 'redacted' };
   }
 

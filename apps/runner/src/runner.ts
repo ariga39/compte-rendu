@@ -8,6 +8,9 @@ import {
   REVIEW_ATTEMPT_BUDGET_MS,
   ReviewResult,
   RunnerJobInput,
+  sanitizeOperationalLogEvent,
+  type OperationalLog,
+  type OperationalLogEvent,
   type RunnerJobResponse as RunnerJobResponseValue,
 } from '@compte-rendu/contracts';
 import prReviewSkill from '../skills/pr-review/SKILL.md?raw';
@@ -19,6 +22,7 @@ const MODEL_RESOURCE = `${MODEL_HOST}:443`;
 const SETUP_TIMEOUT_MS = 2 * 60 * 1000;
 const CLEANUP_RESERVE_MS = 60 * 1000;
 const CLEANUP_COMMAND_TIMEOUT_MS = 30 * 1000;
+const MAX_DIAGNOSTIC_STDERR_BYTES = 4 * 1024;
 const MAX_AGENT_OUTPUT_BYTES = 8 * 1024 * 1024;
 const MAX_REQUEST_BYTES = 64 * 1024;
 
@@ -77,12 +81,15 @@ const OpenCodeErrorEvent = Schema.Struct({ type: Schema.Literal('error') });
 export type RunnerProcessResult = {
   readonly exitCode: number;
   readonly stdout: string;
+  readonly stderr?: string;
+  readonly stderrTruncated?: boolean;
   readonly timedOut: boolean;
   readonly truncated: boolean;
 };
 
 export type RunnerProcessOptions = {
   readonly captureStdout?: boolean;
+  readonly captureStderr?: boolean;
   readonly maxBytes?: number;
   readonly timeoutMs?: number;
   readonly env?: NodeJS.ProcessEnv;
@@ -106,9 +113,13 @@ const stop = (child: ChildProcess, signal: NodeJS.Signals = 'SIGTERM') => {
 const runProcess: RunnerProcess = (command, args, options = {}) =>
   new Promise<RunnerProcessResult>((resolve) => {
     const chunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
     const captureStdout = options.captureStdout === true;
+    const captureStderr = options.captureStderr === true;
     const maxBytes = options.maxBytes ?? 0;
     let bytes = 0;
+    let stderrBytes = 0;
+    let stderrTruncated = false;
     let truncated = false;
     let timedOut = false;
     let settled = false;
@@ -124,6 +135,8 @@ const runProcess: RunnerProcess = (command, args, options = {}) =>
       resolve({
         exitCode: exitCode ?? 1,
         stdout: Buffer.concat(chunks).toString('utf8'),
+        stderr: captureStderr ? Buffer.concat(stderrChunks).toString('utf8') : undefined,
+        stderrTruncated: captureStderr ? stderrTruncated : undefined,
         timedOut,
         truncated,
       });
@@ -132,7 +145,7 @@ const runProcess: RunnerProcess = (command, args, options = {}) =>
     try {
       child = spawn(command, args, {
         env: options.env ?? process.env,
-        stdio: captureStdout ? ['ignore', 'pipe', 'ignore'] : ['ignore', 'ignore', 'ignore'],
+        stdio: ['ignore', captureStdout ? 'pipe' : 'ignore', captureStderr ? 'pipe' : 'ignore'],
       });
       options.onChild?.(child);
     } catch {
@@ -150,6 +163,21 @@ const runProcess: RunnerProcess = (command, args, options = {}) =>
         }
         chunks.push(buffer);
         bytes += buffer.length;
+      });
+    }
+
+    if (captureStderr && child.stderr !== null) {
+      child.stderr.on('data', (chunk: Buffer | string) => {
+        if (stderrBytes >= maxBytes) return;
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        if (stderrBytes + buffer.length > maxBytes) {
+          stderrChunks.push(buffer.subarray(0, maxBytes - stderrBytes));
+          stderrBytes = maxBytes;
+          stderrTruncated = true;
+          return;
+        }
+        stderrChunks.push(buffer);
+        stderrBytes += buffer.length;
       });
     }
 
@@ -183,6 +211,7 @@ type RunnerJob = {
   child?: ChildProcess;
   abortRequested: boolean;
   sandboxAttempted: boolean;
+  diagnosticCheckoutToken: string;
   secretPlaceholder?: string;
   checkoutRoot?: string;
   configRoot?: string;
@@ -194,7 +223,14 @@ export interface RunnerOptions {
   readonly authToken?: string;
   readonly modelSecretCommand?: string;
   readonly process?: RunnerProcess;
+  readonly log?: OperationalLog;
 }
+
+type RunnerDiagnostic = {
+  readonly stage: 'checkout' | 'sandbox' | 'cleanup';
+  readonly command: string;
+  readonly includeStderr?: boolean;
+};
 
 const authorized = (request: Request, token: string | undefined) => {
   if (token === undefined) return false;
@@ -250,6 +286,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
   const authToken = options.authToken ?? process.env.RUNNER_AUTH_TOKEN;
   const modelSecretCommand = options.modelSecretCommand ?? process.env.MODEL_SECRET_COMMAND;
   const executeProcess = options.process ?? runProcess;
+  const log = options.log;
   const jobs = new Map<string, RunnerJob>();
   const jobsByRun = new Map<string, RunnerJob>();
 
@@ -257,24 +294,86 @@ export const createRunner = (options: RunnerOptions = {}) => {
     Object.assign(job.state, state);
   };
 
+  const boundedDiagnostic = (job: RunnerJob, value: string | undefined) => {
+    if (value === undefined || value.length === 0) return undefined;
+    let sanitized = value;
+    for (const secret of [job.diagnosticCheckoutToken, modelSecretCommand]) {
+      if (secret !== undefined && secret.length > 0)
+        sanitized = sanitized.replaceAll(secret, '[redacted]');
+    }
+    sanitized = sanitized.replaceAll(job.input.repositoryUrl, '[repository]');
+    sanitized = Array.from(sanitized, (character) => {
+      const code = character.charCodeAt(0);
+      return code === 9 || code === 10 || code === 13 || (code >= 32 && code <= 126)
+        ? character
+        : '?';
+    }).join('');
+    const bytes = new TextEncoder().encode(sanitized);
+    return bytes.length <= MAX_DIAGNOSTIC_STDERR_BYTES
+      ? sanitized
+      : new TextDecoder().decode(bytes.subarray(0, MAX_DIAGNOSTIC_STDERR_BYTES));
+  };
+
+  const recordCommand = async (
+    job: RunnerJob,
+    diagnostic: RunnerDiagnostic,
+    result: RunnerProcessResult,
+  ) => {
+    if (log === undefined) return;
+    const event: OperationalLogEvent = {
+      phase: 'runner',
+      outcome: 'command',
+      runId: job.input.runId,
+      stage: diagnostic.stage,
+      command: diagnostic.command,
+      exitCode: result.exitCode,
+      timedOut: result.timedOut,
+      ...(diagnostic.includeStderr === true
+        ? (() => {
+            const stderr = result.stderrTruncated
+              ? undefined
+              : boundedDiagnostic(job, result.stderr);
+            return stderr === undefined ? {} : { stderr };
+          })()
+        : {}),
+    };
+    try {
+      await log.record(sanitizeOperationalLogEvent(event));
+    } catch {
+      // Diagnostics must not change the Runner Job outcome.
+    }
+  };
+
   const runTracked = async (
     job: RunnerJob,
     command: string,
     args: readonly string[],
     processOptions: RunnerProcessOptions = {},
+    diagnostic?: RunnerDiagnostic,
   ) => {
     const requestedTimeout = processOptions.timeoutMs ?? SETUP_TIMEOUT_MS;
     const remaining = job.deadlineAt - Date.now() - CLEANUP_RESERVE_MS;
-    const result = await executeProcess(command, args, {
-      ...processOptions,
-      timeoutMs: Math.max(1, Math.min(requestedTimeout, remaining)),
-      onChild: (child) => {
-        job.child = child;
-        processOptions.onChild?.(child);
-        if (job.abortRequested) stop(child);
-      },
-    });
+    let result: RunnerProcessResult;
+    try {
+      result = await executeProcess(command, args, {
+        ...processOptions,
+        captureStderr: diagnostic !== undefined,
+        maxBytes:
+          diagnostic === undefined
+            ? processOptions.maxBytes
+            : (processOptions.maxBytes ?? MAX_DIAGNOSTIC_STDERR_BYTES),
+        timeoutMs: Math.max(1, Math.min(requestedTimeout, remaining)),
+        onChild: (child) => {
+          job.child = child;
+          processOptions.onChild?.(child);
+          if (job.abortRequested) stop(child);
+        },
+      });
+    } catch {
+      result = { exitCode: 1, stdout: '', timedOut: false, truncated: false };
+    }
     job.child = undefined;
+    if (diagnostic !== undefined) await recordCommand(job, diagnostic, result);
     return result;
   };
 
@@ -309,6 +408,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         checkoutPath,
       ],
       { env },
+      { stage: 'checkout', command: 'clone' },
     );
     if (clone.exitCode !== 0 || clone.timedOut) return false;
     const fetch = await runTracked(
@@ -329,6 +429,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         job.input.headSha,
       ],
       { env },
+      { stage: 'checkout', command: 'fetch' },
     );
     if (fetch.exitCode !== 0 || fetch.timedOut) return false;
     const checkout = await runTracked(
@@ -347,6 +448,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         job.input.headSha,
       ],
       { env },
+      { stage: 'checkout', command: 'detach' },
     );
     if (checkout.exitCode !== 0 || checkout.timedOut) return false;
     const commits = await runTracked(
@@ -354,6 +456,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       'git',
       ['-C', checkoutPath, 'rev-parse', `${job.input.baseSha}^{commit}`, 'HEAD^{commit}'],
       { captureStdout: true, maxBytes: 4 * 1024, env },
+      { stage: 'checkout', command: 'verify-revision' },
     );
     if (commits.exitCode !== 0 || commits.timedOut) return false;
     const reported = commits.stdout.trim().split(/\s+/);
@@ -369,6 +472,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       'git',
       ['-C', checkoutPath, 'remote', 'remove', 'origin'],
       { env },
+      { stage: 'checkout', command: 'remove-remote' },
     );
     if (removeRemote.exitCode !== 0) return false;
     const removeAskpass = await runTracked(
@@ -376,6 +480,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       'git',
       ['-C', checkoutPath, 'config', '--local', '--unset-all', 'credential.helper'],
       { env },
+      { stage: 'checkout', command: 'remove-credential' },
     );
     if (removeAskpass.exitCode !== 0 && removeAskpass.exitCode !== 5) return false;
     const removeHook = await runTracked(
@@ -383,6 +488,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       'git',
       ['-C', checkoutPath, 'config', '--local', '--unset-all', 'core.askPass'],
       { env },
+      { stage: 'checkout', command: 'remove-askpass' },
     );
     if (removeHook.exitCode !== 0 && removeHook.exitCode !== 5) return false;
     job.input.checkoutToken = '';
@@ -411,38 +517,46 @@ export const createRunner = (options: RunnerOptions = {}) => {
       return clean;
     }
     update(job, { stage: 'cleanup' });
-    const cleanupProcess = async (args: readonly string[]) => {
+    const cleanupProcess = async (args: readonly string[], diagnostic: RunnerDiagnostic) => {
+      let result: RunnerProcessResult;
       try {
-        return await executeProcess(sbxPath, args, { timeoutMs: CLEANUP_COMMAND_TIMEOUT_MS });
+        result = await executeProcess(sbxPath, args, {
+          captureStderr: true,
+          maxBytes: MAX_DIAGNOSTIC_STDERR_BYTES,
+          timeoutMs: CLEANUP_COMMAND_TIMEOUT_MS,
+        });
       } catch {
-        return undefined;
+        result = { exitCode: 1, stdout: '', timedOut: false, truncated: false };
       }
+      await recordCommand(job, diagnostic, result);
+      return result;
     };
-    const removed = await cleanupProcess(['rm', '--force', job.sandboxName]);
-    if (removed === undefined || removed.exitCode !== 0 || removed.timedOut) clean = false;
+    const removed = await cleanupProcess(['rm', '--force', job.sandboxName], {
+      stage: 'cleanup',
+      command: 'remove-sandbox',
+      includeStderr: true,
+    });
+    if (removed.exitCode !== 0 || removed.timedOut) clean = false;
     if (job.secretPlaceholder !== undefined) {
-      const secret = await cleanupProcess([
-        'secret',
-        'rm',
-        '--placeholder',
-        job.secretPlaceholder,
-        '--sandbox',
-        job.sandboxName,
-        '--force',
-      ]);
-      if (secret === undefined || secret.exitCode !== 0 || secret.timedOut) clean = false;
+      const secret = await cleanupProcess(
+        [
+          'secret',
+          'rm',
+          '--placeholder',
+          job.secretPlaceholder,
+          '--sandbox',
+          job.sandboxName,
+          '--force',
+        ],
+        { stage: 'cleanup', command: 'remove-secret', includeStderr: true },
+      );
+      if (secret.exitCode !== 0 || secret.timedOut) clean = false;
     }
-    const policy = await cleanupProcess([
-      'policy',
-      'rm',
-      'network',
-      '--sandbox',
-      job.sandboxName,
-      '--resource',
-      MODEL_RESOURCE,
-    ]);
-    if (policy === undefined || (policy.exitCode !== 0 && policy.exitCode !== 1)) clean = false;
-    if (policy?.timedOut) clean = false;
+    const policy = await cleanupProcess(
+      ['policy', 'rm', 'network', '--sandbox', job.sandboxName, '--resource', MODEL_RESOURCE],
+      { stage: 'cleanup', command: 'remove-network-policy', includeStderr: true },
+    );
+    if ((policy.exitCode !== 0 && policy.exitCode !== 1) || policy.timedOut) clean = false;
     if (job.checkoutRoot !== undefined) {
       try {
         await rm(job.checkoutRoot, { recursive: true, force: true });
@@ -491,57 +605,68 @@ export const createRunner = (options: RunnerOptions = {}) => {
       const placeholder = `cr-${job.id}`;
       job.secretPlaceholder = placeholder;
       job.sandboxAttempted = true;
-      const secret = await runTracked(job, sbxPath, [
-        'secret',
-        'set-custom',
-        '--sandbox',
-        job.sandboxName,
-        '--host',
-        MODEL_HOST,
-        '--env',
-        MODEL_ENV,
-        '--placeholder',
-        placeholder,
-        '--command',
-        modelSecretCommand,
-      ]);
+      const secret = await runTracked(
+        job,
+        sbxPath,
+        [
+          'secret',
+          'set-custom',
+          '--sandbox',
+          job.sandboxName,
+          '--host',
+          MODEL_HOST,
+          '--env',
+          MODEL_ENV,
+          '--placeholder',
+          placeholder,
+          '--command',
+          modelSecretCommand,
+        ],
+        {},
+        { stage: 'sandbox', command: 'set-secret' },
+      );
       if (secret.exitCode !== 0 || secret.timedOut) {
         failure = { reason: 'agent' };
         return;
       }
-      const create = await runTracked(job, sbxPath, [
-        'create',
-        '--clone',
-        '--no-share-skills',
-        '--name',
-        job.sandboxName,
-        '--cpus',
-        '4',
-        '--memory',
-        '8g',
-        '--env',
-        `OPENCODE_CONFIG_CONTENT=${trustedOpenCodeConfig}`,
-        '--env',
-        'OPENCODE_DISABLE_PROJECT_CONFIG=1',
-        '--env',
-        `XDG_CONFIG_HOME=${configRoot}`,
-        'opencode',
-        join(checkoutRoot, 'checkout'),
-        configRoot,
-      ]);
+      const create = await runTracked(
+        job,
+        sbxPath,
+        [
+          'create',
+          '--clone',
+          '--no-share-skills',
+          '--name',
+          job.sandboxName,
+          '--cpus',
+          '4',
+          '--memory',
+          '8g',
+          '--env',
+          `OPENCODE_CONFIG_CONTENT=${trustedOpenCodeConfig}`,
+          '--env',
+          'OPENCODE_DISABLE_PROJECT_CONFIG=1',
+          '--env',
+          `XDG_CONFIG_HOME=${configRoot}`,
+          'opencode',
+          join(checkoutRoot, 'checkout'),
+          configRoot,
+        ],
+        {},
+        { stage: 'sandbox', command: 'create', includeStderr: true },
+      );
       if (create.exitCode !== 0 || create.timedOut) {
         failure = { reason: 'agent' };
         return;
       }
       if (job.abortRequested) return;
-      const network = await runTracked(job, sbxPath, [
-        'policy',
-        'allow',
-        'network',
-        '--sandbox',
-        job.sandboxName,
-        MODEL_RESOURCE,
-      ]);
+      const network = await runTracked(
+        job,
+        sbxPath,
+        ['policy', 'allow', 'network', '--sandbox', job.sandboxName, MODEL_RESOURCE],
+        {},
+        { stage: 'sandbox', command: 'allow-network', includeStderr: true },
+      );
       if (network.exitCode !== 0 || network.timedOut) {
         failure = { reason: 'agent' };
         return;
@@ -590,6 +715,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         cleaned = false;
       }
       if (!cleaned) failure = { reason: 'cleanup' };
+      job.diagnosticCheckoutToken = '';
       if (job.abortRequested && cleaned) {
         update(job, { status: 'aborted' });
       } else if (failure !== undefined) {
@@ -637,6 +763,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         resolveDone,
         abortRequested: false,
         sandboxAttempted: false,
+        diagnosticCheckoutToken: input.checkoutToken,
         deadlineAt: Date.now() + REVIEW_ATTEMPT_BUDGET_MS,
       };
       jobs.set(id, job);
