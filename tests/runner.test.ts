@@ -19,6 +19,96 @@ const waitForTerminal = async (runner: ReturnType<typeof createRunner>, jobId: s
 };
 
 describe('Runner Job HTTP interface', () => {
+  it('keeps sanitized setup diagnostics when cleanup is also unconfirmed', async () => {
+    const events: unknown[] = [];
+    const baseSha = '1111111111111111111111111111111111111111';
+    const headSha = '2222222222222222222222222222222222222222';
+    const checkoutToken = 'checkout-token-must-not-appear';
+    const resolverCommand = 'secret-resolver --token resolver-secret';
+    const runner = createRunner({
+      authToken: 'runner-test-token',
+      modelSecretCommand: resolverCommand,
+      log: {
+        record: async (event) => {
+          events.push(event);
+        },
+      },
+      process: async (_command, args) => {
+        if (args[0] === 'create') {
+          return {
+            exitCode: 1,
+            stderr: `mkfs.ext4: command not found ${checkoutToken} ${resolverCommand}`,
+            stdout: '',
+            timedOut: false,
+            truncated: false,
+          };
+        }
+        if (args[0] === 'rm') {
+          return {
+            exitCode: 1,
+            stderr: 'sandbox not found',
+            stdout: '',
+            timedOut: false,
+            truncated: false,
+          };
+        }
+        return {
+          exitCode: 0,
+          stdout: args.includes('rev-parse') ? `${baseSha}\n${headSha}\n` : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
+    });
+
+    const submitted = await runner.handle(
+      new Request('http://runner/jobs', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer runner-test-token',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          runId: 'run-72-setup-diagnostics',
+          attempt: 1,
+          repositoryUrl: 'https://github.com/acme/reviewed.git',
+          baseSha,
+          headSha,
+          checkoutToken,
+        }),
+      }),
+    );
+    const { id } = (await submitted.json()) as { id: string };
+
+    await expect(waitForTerminal(runner, id)).resolves.toMatchObject({
+      status: 'failed',
+      failure: { reason: 'cleanup' },
+      sandbox: { cleanup: 'failed' },
+    });
+    expect(events).toContainEqual({
+      phase: 'runner',
+      outcome: 'command',
+      runId: 'run-72-setup-diagnostics',
+      stage: 'sandbox',
+      command: 'create',
+      exitCode: 1,
+      timedOut: false,
+      stderr: 'mkfs.ext4: command not found [redacted] [redacted]',
+    });
+    expect(events).toContainEqual({
+      phase: 'runner',
+      outcome: 'command',
+      runId: 'run-72-setup-diagnostics',
+      stage: 'cleanup',
+      command: 'remove-sandbox',
+      exitCode: 1,
+      timedOut: false,
+      stderr: 'sandbox not found',
+    });
+    expect(JSON.stringify(events)).not.toContain(checkoutToken);
+    expect(JSON.stringify(events)).not.toContain(resolverCommand);
+  });
+
   it('loads the packaged review skill and exact revision through the OpenCode sandbox boundary', async () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
