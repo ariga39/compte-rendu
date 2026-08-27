@@ -1,5 +1,7 @@
 import { Schema } from 'effect';
 
+export const REVIEW_ATTEMPT_BUDGET_MS = 13 * 60 * 1000;
+
 export interface WorkerEntrypoint<Env = unknown> {
   fetch(request: Request, env?: Env): Response | Promise<Response>;
 }

@@ -2,6 +2,7 @@ import { Schema } from 'effect';
 import {
   RunnerJobInput,
   RunnerJobResponse,
+  REVIEW_ATTEMPT_BUDGET_MS,
   type RunnerJobResponse as RunnerJobResponseValue,
 } from '@compte-rendu/contracts';
 import type {
@@ -221,7 +222,13 @@ export const createRunnerJobClient = ({
       }
 
       lastFailure = failed(failureReason(state), attempt, state.id);
-      if (retryAfterLostGet && attempt < maxAttempts && Date.now() < deadline) continue;
+      if (
+        retryAfterLostGet &&
+        attempt < maxAttempts &&
+        Date.now() + REVIEW_ATTEMPT_BUDGET_MS + MAX_POLL_INTERVAL_MS < deadline
+      ) {
+        continue;
+      }
       if (!lastFailure.retryable) break;
     }
 
