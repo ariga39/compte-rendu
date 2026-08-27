@@ -10,6 +10,7 @@ const cliPath = resolve(repositoryRoot, 'scripts/render-wrangler-config.mts');
 const githubAppId = '4715786';
 const d1DatabaseId = '01234567-89ab-4cde-8123-456789abcdef';
 const runnerVpcServiceId = '11234567-89ab-4cde-8123-456789abcdef';
+const canonicalRunnerVpcServiceId = '01a04174-56d3-7160-ab77-fc3de2b68c57';
 
 type WranglerConfig = {
   workers_dev?: boolean;
@@ -28,6 +29,7 @@ const parseConfig = (path: string) =>
 
 type DeploymentFixture = {
   run: (instanceName: string) => string;
+  runWithRunnerId: (instanceName: string, runnerId: string) => string;
   runWithoutRunnerId: (instanceName: string) => string;
   outputs: (instanceName: string) => { core: string; ingress: string };
   read: (instanceName: string) => { core: string; ingress: string };
@@ -76,6 +78,7 @@ const withDeploymentFixture = <T>(callback: (fixture: DeploymentFixture) => T): 
   try {
     return callback({
       run: (instanceName) => invoke(instanceName, runnerVpcServiceId),
+      runWithRunnerId: (instanceName, runnerId) => invoke(instanceName, runnerId),
       runWithoutRunnerId: (instanceName) => invoke(instanceName),
       outputs,
       read,
@@ -128,6 +131,26 @@ describe('Wrangler deployment tooling', () => {
       expect(() => run('missing-runner-vpc')).toThrow();
       expect(existsSync(outputs('missing-runner-vpc').core)).toBe(false);
       expect(existsSync(outputs('missing-runner-vpc').ingress)).toBe(false);
+    });
+  });
+
+  it('accepts the canonical Cloudflare UUIDv7 Runner VPC Service ID at the real renderer CLI seam', () => {
+    withDeploymentFixture(({ runWithRunnerId: run, read }) => {
+      run('canonical-vpc', canonicalRunnerVpcServiceId);
+
+      expect(read('canonical-vpc').core).toContain(
+        `"service_id": "${canonicalRunnerVpcServiceId}"`,
+      );
+    });
+  });
+
+  it('rejects a canonical-shape UUIDv6 Runner VPC Service ID before creating output', () => {
+    const unsupportedRunnerVpcServiceId = '01a04174-56d3-6160-ab77-fc3de2b68c57';
+    withDeploymentFixture(({ runWithRunnerId: run, outputs }) => {
+      expect(() => run('unsupported-v6', unsupportedRunnerVpcServiceId)).toThrow();
+
+      expect(existsSync(outputs('unsupported-v6').core)).toBe(false);
+      expect(existsSync(outputs('unsupported-v6').ingress)).toBe(false);
     });
   });
 
