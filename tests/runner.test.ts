@@ -1,5 +1,6 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createRunner, type RunnerProcessResult } from '../apps/runner/src/runner';
 
@@ -18,6 +19,145 @@ const waitForTerminal = async (runner: ReturnType<typeof createRunner>, jobId: s
 };
 
 describe('Runner Job HTTP interface', () => {
+  it('loads the packaged review skill and exact revision through the OpenCode sandbox boundary', async () => {
+    const baseSha = '1111111111111111111111111111111111111111';
+    const headSha = '2222222222222222222222222222222222222222';
+    const resultLine = JSON.stringify({
+      type: 'text',
+      part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'No findings' }) },
+    });
+    let createArgs: readonly string[] | undefined;
+    let agentArgs: readonly string[] | undefined;
+    let configRootAtSandboxBoundary: string | undefined;
+    let skillAtSandboxBoundary: string | undefined;
+    const process = async (
+      _command: string,
+      args: readonly string[],
+      options: { readonly captureStdout?: boolean } = {},
+    ): Promise<RunnerProcessResult> => {
+      if (args[0] === 'create') {
+        createArgs = args;
+        const config = args.find((value) => value.startsWith('XDG_CONFIG_HOME='));
+        if (config !== undefined) {
+          const configRoot = config.slice('XDG_CONFIG_HOME='.length);
+          configRootAtSandboxBoundary = configRoot;
+          skillAtSandboxBoundary = await readFile(
+            join(configRoot, 'opencode/skills/pr-review/SKILL.md'),
+            'utf8',
+          );
+        }
+      }
+      if (args[0] === 'exec') agentArgs = args;
+      return {
+        exitCode: 0,
+        stdout: args.includes('rev-parse')
+          ? `${baseSha}\n${headSha}\n`
+          : options.captureStdout === true
+            ? `${resultLine}\n`
+            : '',
+        timedOut: false,
+        truncated: false,
+      };
+    };
+    const runner = createRunner({
+      process,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+    });
+
+    const submitted = await runner.handle(
+      new Request('http://runner/jobs', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer runner-test-token',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          runId: 'run-67-skill',
+          attempt: 1,
+          repositoryUrl: 'https://github.com/acme/reviewed.git',
+          baseSha,
+          headSha,
+          checkoutToken: 'checkout-token-for-test',
+        }),
+      }),
+    );
+    const { id } = (await submitted.json()) as { id: string };
+
+    await expect(waitForTerminal(runner, id)).resolves.toMatchObject({
+      status: 'succeeded',
+      result: { findings: [], summary: 'No findings' },
+      sandbox: { cleanup: 'destroyed' },
+    });
+    expect(createArgs).toEqual(expect.arrayContaining(['--clone', '--no-share-skills']));
+    expect(createArgs).toContain(configRootAtSandboxBoundary);
+    expect(createArgs).not.toContain(`${configRootAtSandboxBoundary}:ro`);
+    expect(createArgs?.some((value) => value.startsWith('XDG_CONFIG_HOME='))).toBe(true);
+    expect(skillAtSandboxBoundary).toContain('name: pr-review');
+    expect(skillAtSandboxBoundary).toContain('description:');
+    expect(skillAtSandboxBoundary).not.toContain('```');
+    const configContent = createArgs?.find((value) => value.startsWith('OPENCODE_CONFIG_CONTENT='));
+    expect(configContent).toBeDefined();
+    const config = JSON.parse(configContent!.slice('OPENCODE_CONFIG_CONTENT='.length)) as {
+      agent: { review: { permission: { bash: Record<string, string> } } };
+    };
+    expect(config).toMatchObject({
+      agent: {
+        review: {
+          permission: {
+            bash: {
+              '*': 'deny',
+              'git diff': 'allow',
+              'git diff *': 'allow',
+              'git show': 'allow',
+              'git show *': 'allow',
+              'git grep': 'allow',
+              'git grep *': 'allow',
+              'git diff *--output*': 'deny',
+              'git show *--output*': 'deny',
+              'git diff *--no-index*': 'deny',
+              'git diff *>*': 'deny',
+              'git show *>*': 'deny',
+              'git grep *>*': 'deny',
+              'git grep *--open-files-in-pager*': 'deny',
+              'git grep *-O*': 'deny',
+            },
+            edit: 'deny',
+            external_directory: 'deny',
+            skill: { '*': 'deny', 'pr-review': 'allow' },
+            webfetch: 'deny',
+          },
+        },
+      },
+    });
+    const bashRules = Object.keys(config.agent.review.permission.bash);
+    expect(bashRules).toEqual([
+      '*',
+      'git diff',
+      'git diff *',
+      'git show',
+      'git show *',
+      'git grep',
+      'git grep *',
+      'git diff *--output*',
+      'git show *--output*',
+      'git diff *--no-index*',
+      'git diff *>*',
+      'git show *>*',
+      'git grep *>*',
+      'git grep *--open-files-in-pager*',
+      'git grep *-O*',
+    ]);
+    expect(bashRules).not.toContain('git diff*');
+    expect(bashRules).not.toContain('git show*');
+    expect(bashRules).not.toContain('git grep*');
+    expect(agentArgs?.join(' ')).toContain(baseSha);
+    expect(agentArgs?.join(' ')).toContain(headSha);
+    await expect(
+      readFile(join(configRootAtSandboxBoundary!, 'opencode/skills/pr-review/SKILL.md'), 'utf8'),
+    ).rejects.toThrow();
+  });
+
   it('runs one authenticated immutable review attempt to a cleaned terminal result', async () => {
     const root = await mkdtemp(`${tmpdir()}/compte-rendu-runner-`);
     try {
