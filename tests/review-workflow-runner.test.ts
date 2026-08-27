@@ -184,4 +184,96 @@ describe('review Workflow runner tracer', () => {
       { runId: 'run-workflow-runner-get-loss', attempt: 2, baseSha, headSha },
     ]);
   });
+
+  it('does not retry a lost GET after confirmed cleanup crosses the client deadline', async () => {
+    const agentOutput = JSON.stringify({
+      type: 'text',
+      part: {
+        type: 'text',
+        text: JSON.stringify({ findings: [], summary: 'Unused' }),
+      },
+    });
+    let agentRuns = 0;
+    let agentStarted!: () => void;
+    const firstAgentReady = new Promise<void>((resolve) => {
+      agentStarted = resolve;
+    });
+    let releaseFirstAgent: (() => void) | undefined;
+    const runner = createRunner({
+      authToken: 'runner-tracer-token',
+      modelSecretCommand: 'test-secret-resolver',
+      process: async (_command, args, options = {}) => {
+        if (args[0] === 'exec') {
+          agentRuns += 1;
+          if (agentRuns === 1) {
+            agentStarted();
+            return new Promise<RunnerProcessResult>((resolve) => {
+              releaseFirstAgent = () =>
+                resolve({ exitCode: 1, stdout: '', timedOut: false, truncated: false });
+              options.onChild?.({
+                stdout: null,
+                kill: () => {
+                  releaseFirstAgent?.();
+                  return true;
+                },
+                once: () => {},
+              } as never);
+            });
+          }
+          return { exitCode: 0, stdout: `${agentOutput}\n`, timedOut: false, truncated: false };
+        }
+        return {
+          exitCode: 0,
+          stdout: args.includes('rev-parse') ? `${baseSha}\n${headSha}\n` : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
+    });
+    const postedAttempts: number[] = [];
+    let lostGet = true;
+    let deletedState: unknown;
+    const client = createRunnerJobClient({
+      authToken: 'runner-tracer-token',
+      pollIntervalMs: 0,
+      deadlineMs: 100,
+      binding: {
+        fetch: async (request) => {
+          if (request.method === 'POST') {
+            const body = (await request.clone().json()) as { attempt: number };
+            postedAttempts.push(body.attempt);
+          }
+          const response = await runner.handle(request);
+          if (request.method === 'GET' && lostGet) {
+            lostGet = false;
+            await firstAgentReady;
+            throw new Error('GET response lost');
+          }
+          if (request.method === 'DELETE') {
+            deletedState = await response.clone().json();
+            await new Promise((resolve) => setTimeout(resolve, 150));
+          }
+          return response;
+        },
+      },
+    });
+
+    const result = await client.runJob({
+      runId: 'run-workflow-runner-get-loss-deadline',
+      repositoryUrl: 'https://github.com/acme/reviewed.git',
+      baseSha,
+      headSha,
+      checkoutToken: 'checkout-token',
+      maxAttempts: 2,
+    });
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      reason: 'timeout',
+      attempt: 1,
+      retryable: false,
+    });
+    expect(deletedState).toMatchObject({ status: 'aborted', sandbox: { cleanup: 'destroyed' } });
+    expect(postedAttempts).toEqual([1]);
+  });
 });

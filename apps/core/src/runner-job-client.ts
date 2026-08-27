@@ -221,7 +221,7 @@ export const createRunnerJobClient = ({
       }
 
       lastFailure = failed(failureReason(state), attempt, state.id);
-      if (retryAfterLostGet && attempt < maxAttempts) continue;
+      if (retryAfterLostGet && attempt < maxAttempts && Date.now() < deadline) continue;
       if (!lastFailure.retryable) break;
     }
 
