@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { REVIEW_ATTEMPT_BUDGET_MS } from '../packages/contracts/src';
 import { createRunnerJobClient } from '../apps/core/src/runner-job-client';
 import { runReviewWorkflow, type ReviewWorkflowStep } from '../apps/core/src/review-workflow';
 import { createRunner, type RunnerProcessResult } from '../apps/runner/src/runner';
@@ -185,7 +186,7 @@ describe('review Workflow runner tracer', () => {
     ]);
   });
 
-  it('does not retry a lost GET after confirmed cleanup crosses the client deadline', async () => {
+  it('does not retry a lost GET when less than a full attempt budget remains', async () => {
     const agentOutput = JSON.stringify({
       type: 'text',
       part: {
@@ -194,6 +195,9 @@ describe('review Workflow runner tracer', () => {
       },
     });
     let agentRuns = 0;
+    const initialTime = Date.now();
+    let currentTime = initialTime;
+    const dateNow = vi.spyOn(Date, 'now').mockImplementation(() => currentTime);
     let agentStarted!: () => void;
     const firstAgentReady = new Promise<void>((resolve) => {
       agentStarted = resolve;
@@ -236,7 +240,7 @@ describe('review Workflow runner tracer', () => {
     const client = createRunnerJobClient({
       authToken: 'runner-tracer-token',
       pollIntervalMs: 0,
-      deadlineMs: 100,
+      deadlineMs: REVIEW_ATTEMPT_BUDGET_MS + 100,
       binding: {
         fetch: async (request) => {
           if (request.method === 'POST') {
@@ -246,6 +250,7 @@ describe('review Workflow runner tracer', () => {
           const response = await runner.handle(request);
           if (request.method === 'GET' && lostGet) {
             lostGet = false;
+            currentTime = initialTime + 200;
             await firstAgentReady;
             throw new Error('GET response lost');
           }
@@ -258,14 +263,117 @@ describe('review Workflow runner tracer', () => {
       },
     });
 
-    const result = await client.runJob({
-      runId: 'run-workflow-runner-get-loss-deadline',
-      repositoryUrl: 'https://github.com/acme/reviewed.git',
-      baseSha,
-      headSha,
-      checkoutToken: 'checkout-token',
-      maxAttempts: 2,
+    let result: Awaited<ReturnType<typeof client.runJob>>;
+    try {
+      result = await client.runJob({
+        runId: 'run-workflow-runner-get-loss-deadline',
+        repositoryUrl: 'https://github.com/acme/reviewed.git',
+        baseSha,
+        headSha,
+        checkoutToken: 'checkout-token',
+        maxAttempts: 2,
+      });
+    } finally {
+      dateNow.mockRestore();
+    }
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      reason: 'timeout',
+      attempt: 1,
+      retryable: false,
     });
+    expect(deletedState).toMatchObject({ status: 'aborted', sandbox: { cleanup: 'destroyed' } });
+    expect(postedAttempts).toEqual([1]);
+  });
+
+  it('does not retry a lost GET at the attempt budget boundary without poll margin', async () => {
+    const agentOutput = JSON.stringify({
+      type: 'text',
+      part: {
+        type: 'text',
+        text: JSON.stringify({ findings: [], summary: 'Unused' }),
+      },
+    });
+    let agentRuns = 0;
+    const initialTime = Date.now();
+    let currentTime = initialTime;
+    const dateNow = vi.spyOn(Date, 'now').mockImplementation(() => currentTime);
+    let agentStarted!: () => void;
+    const firstAgentReady = new Promise<void>((resolve) => {
+      agentStarted = resolve;
+    });
+    let releaseFirstAgent: (() => void) | undefined;
+    const runner = createRunner({
+      authToken: 'runner-tracer-token',
+      modelSecretCommand: 'test-secret-resolver',
+      process: async (_command, args, options = {}) => {
+        if (args[0] === 'exec') {
+          agentRuns += 1;
+          if (agentRuns === 1) {
+            agentStarted();
+            return new Promise<RunnerProcessResult>((resolve) => {
+              releaseFirstAgent = () =>
+                resolve({ exitCode: 1, stdout: '', timedOut: false, truncated: false });
+              options.onChild?.({
+                stdout: null,
+                kill: () => {
+                  releaseFirstAgent?.();
+                  return true;
+                },
+                once: () => {},
+              } as never);
+            });
+          }
+          return { exitCode: 0, stdout: `${agentOutput}\n`, timedOut: false, truncated: false };
+        }
+        return {
+          exitCode: 0,
+          stdout: args.includes('rev-parse') ? `${baseSha}\n${headSha}\n` : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
+    });
+    const postedAttempts: number[] = [];
+    let lostGet = true;
+    let deletedState: unknown;
+    const client = createRunnerJobClient({
+      authToken: 'runner-tracer-token',
+      pollIntervalMs: 0,
+      deadlineMs: REVIEW_ATTEMPT_BUDGET_MS + 5_000,
+      binding: {
+        fetch: async (request) => {
+          if (request.method === 'POST') {
+            const body = (await request.clone().json()) as { attempt: number };
+            postedAttempts.push(body.attempt);
+          }
+          const response = await runner.handle(request);
+          if (request.method === 'GET' && lostGet) {
+            lostGet = false;
+            currentTime = initialTime + 5_000;
+            await firstAgentReady;
+            throw new Error('GET response lost');
+          }
+          if (request.method === 'DELETE') deletedState = await response.clone().json();
+          return response;
+        },
+      },
+    });
+
+    let result: Awaited<ReturnType<typeof client.runJob>>;
+    try {
+      result = await client.runJob({
+        runId: 'run-workflow-runner-get-loss-budget-boundary',
+        repositoryUrl: 'https://github.com/acme/reviewed.git',
+        baseSha,
+        headSha,
+        checkoutToken: 'checkout-token',
+        maxAttempts: 2,
+      });
+    } finally {
+      dateNow.mockRestore();
+    }
 
     expect(result).toMatchObject({
       status: 'failed',

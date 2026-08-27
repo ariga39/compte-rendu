@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Option, Schema } from 'effect';
 import {
+  REVIEW_ATTEMPT_BUDGET_MS,
   ReviewResult,
   RunnerJobInput,
   type RunnerJobResponse as RunnerJobResponseValue,
@@ -15,7 +16,6 @@ const MODEL = 'opencode-go/deepseek-v4-flash';
 const MODEL_ENV = 'OPENCODE_API_KEY';
 const MODEL_HOST = 'opencode.ai';
 const MODEL_RESOURCE = `${MODEL_HOST}:443`;
-const RUNNER_BUDGET_MS = 13 * 60 * 1000;
 const SETUP_TIMEOUT_MS = 2 * 60 * 1000;
 const CLEANUP_RESERVE_MS = 60 * 1000;
 const CLEANUP_COMMAND_TIMEOUT_MS = 30 * 1000;
@@ -566,7 +566,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         {
           captureStdout: true,
           maxBytes: MAX_AGENT_OUTPUT_BYTES,
-          timeoutMs: RUNNER_BUDGET_MS,
+          timeoutMs: REVIEW_ATTEMPT_BUDGET_MS,
         },
       );
       if (agent.timedOut) {
@@ -637,7 +637,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         resolveDone,
         abortRequested: false,
         sandboxAttempted: false,
-        deadlineAt: Date.now() + RUNNER_BUDGET_MS,
+        deadlineAt: Date.now() + REVIEW_ATTEMPT_BUDGET_MS,
       };
       jobs.set(id, job);
       jobsByRun.set(`${input.runId}:${input.attempt}`, job);
