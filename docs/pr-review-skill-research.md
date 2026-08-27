@@ -68,3 +68,5 @@ The dedicated reviewer skill should say, in substance:
 ## Real E2E correction
 
 A real E2E against head `ca436a414763995924cd79412752d63f9f514477` returned a preamble and Markdown-fenced JSON, so the Runner correctly failed it as `invalid-output`; durable local-only evidence was retained outside the repository. It also showed that `git diff/show --output` can write and `git diff --no-index` can read outside the checkout. The correction keeps only `git diff`, `git show`, and `git grep` bash allows, places later-match denies for `git diff*--output*`, `git show*--output*`, and `git diff*--no-index*`, and removes bash `grep`/`rg` allows because native OpenCode grep/read/glob remain available.
+
+A corrected E2E at head `cbe60f1` succeeded with one bare JSON result. Independent OpenCode source validation accepted only the command-boundary/redirect finding and rejected the compound-operator and writable-XDG conclusions.

@@ -107,12 +107,20 @@ describe('Runner Job HTTP interface', () => {
           permission: {
             bash: {
               '*': 'deny',
-              'git diff*': 'allow',
-              'git show*': 'allow',
-              'git grep*': 'allow',
-              'git diff*--output*': 'deny',
-              'git show*--output*': 'deny',
-              'git diff*--no-index*': 'deny',
+              'git diff': 'allow',
+              'git diff *': 'allow',
+              'git show': 'allow',
+              'git show *': 'allow',
+              'git grep': 'allow',
+              'git grep *': 'allow',
+              'git diff *--output*': 'deny',
+              'git show *--output*': 'deny',
+              'git diff *--no-index*': 'deny',
+              'git diff *>*': 'deny',
+              'git show *>*': 'deny',
+              'git grep *>*': 'deny',
+              'git grep *--open-files-in-pager*': 'deny',
+              'git grep *-O*': 'deny',
             },
             edit: 'deny',
             external_directory: 'deny',
@@ -123,16 +131,26 @@ describe('Runner Job HTTP interface', () => {
       },
     });
     const bashRules = Object.keys(config.agent.review.permission.bash);
-    expect(bashRules.indexOf('*')).toBeLessThan(bashRules.indexOf('git diff*'));
-    expect(bashRules.indexOf('*')).toBeLessThan(bashRules.indexOf('git show*'));
-    expect(bashRules.indexOf('*')).toBeLessThan(bashRules.indexOf('git grep*'));
-    expect(bashRules).not.toContain('grep*');
-    expect(bashRules).not.toContain('rg*');
-    expect(bashRules.indexOf('git diff*--output*')).toBeGreaterThan(bashRules.indexOf('git diff*'));
-    expect(bashRules.indexOf('git show*--output*')).toBeGreaterThan(bashRules.indexOf('git show*'));
-    expect(bashRules.indexOf('git diff*--no-index*')).toBeGreaterThan(
-      bashRules.indexOf('git diff*'),
-    );
+    expect(bashRules).toEqual([
+      '*',
+      'git diff',
+      'git diff *',
+      'git show',
+      'git show *',
+      'git grep',
+      'git grep *',
+      'git diff *--output*',
+      'git show *--output*',
+      'git diff *--no-index*',
+      'git diff *>*',
+      'git show *>*',
+      'git grep *>*',
+      'git grep *--open-files-in-pager*',
+      'git grep *-O*',
+    ]);
+    expect(bashRules).not.toContain('git diff*');
+    expect(bashRules).not.toContain('git show*');
+    expect(bashRules).not.toContain('git grep*');
     expect(agentArgs?.join(' ')).toContain(baseSha);
     expect(agentArgs?.join(' ')).toContain(headSha);
     await expect(
