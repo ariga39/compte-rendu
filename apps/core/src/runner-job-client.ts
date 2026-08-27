@@ -122,6 +122,7 @@ export const createRunnerJobClient = ({
       }
 
       let state = initial;
+      let retryAfterLostGet = false;
       const deleteJob = async (requireAborted: boolean) => {
         try {
           const response = await binding.fetch(
@@ -194,6 +195,7 @@ export const createRunnerJobClient = ({
           const deleted = await deleteJob(false);
           if (deleted === undefined) return failed('cleanup', attempt, state.id);
           state = deleted;
+          retryAfterLostGet = state.status === 'aborted';
           break;
         }
         state = next;
@@ -219,6 +221,7 @@ export const createRunnerJobClient = ({
       }
 
       lastFailure = failed(failureReason(state), attempt, state.id);
+      if (retryAfterLostGet && attempt < maxAttempts) continue;
       if (!lastFailure.retryable) break;
     }
 
