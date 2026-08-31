@@ -11,10 +11,11 @@ const githubAppId = '4715786';
 const d1DatabaseId = '01234567-89ab-4cde-8123-456789abcdef';
 const runnerVpcServiceId = '11234567-89ab-4cde-8123-456789abcdef';
 const canonicalRunnerVpcServiceId = '01a04174-56d3-7160-ab77-fc3de2b68c57';
+const allowedInstallationIds = '[7]';
 
 type WranglerConfig = {
   workers_dev?: boolean;
-  vars?: { GITHUB_APP_ID?: string };
+  vars?: { GITHUB_APP_ID?: string; ALLOWED_INSTALLATION_IDS?: string };
   secrets?: { required?: readonly string[] };
   d1_databases?: readonly { database_id?: string }[];
   migrations?: readonly {
@@ -35,6 +36,8 @@ type DeploymentFixture = {
   run: (instanceName: string) => string;
   runWithRunnerId: (instanceName: string, runnerId: string) => string;
   runWithoutRunnerId: (instanceName: string) => string;
+  runWithoutInstallationIds: (instanceName: string) => string;
+  runWithInstallationIds: (instanceName: string, installationIds: string) => string;
   outputs: (instanceName: string) => { core: string; ingress: string };
   read: (instanceName: string) => { core: string; ingress: string };
 };
@@ -58,7 +61,11 @@ const withDeploymentFixture = <T>(callback: (fixture: DeploymentFixture) => T): 
     core: join(coreDirectory, `wrangler.${instanceName}.jsonc`),
     ingress: join(ingressDirectory, `wrangler.${instanceName}.jsonc`),
   });
-  const invoke = (instanceName: string, runnerId?: string) =>
+  const invoke = (
+    instanceName: string,
+    runnerId?: string,
+    configuredInstallationIds: string | null = allowedInstallationIds,
+  ) =>
     execFileSync(
       process.execPath,
       [
@@ -68,6 +75,7 @@ const withDeploymentFixture = <T>(callback: (fixture: DeploymentFixture) => T): 
         githubAppId,
         d1DatabaseId,
         ...(runnerId === undefined ? [] : [runnerId]),
+        ...(configuredInstallationIds === null ? [] : [configuredInstallationIds]),
       ],
       { cwd: root, encoding: 'utf8', stdio: 'pipe' },
     );
@@ -84,6 +92,9 @@ const withDeploymentFixture = <T>(callback: (fixture: DeploymentFixture) => T): 
       run: (instanceName) => invoke(instanceName, runnerVpcServiceId),
       runWithRunnerId: (instanceName, runnerId) => invoke(instanceName, runnerId),
       runWithoutRunnerId: (instanceName) => invoke(instanceName),
+      runWithoutInstallationIds: (instanceName) => invoke(instanceName, runnerVpcServiceId, null),
+      runWithInstallationIds: (instanceName, installationIds) =>
+        invoke(instanceName, runnerVpcServiceId, installationIds),
       outputs,
       read,
     });
@@ -110,6 +121,7 @@ describe('Wrangler deployment tooling', () => {
       expect(first.core).toContain(`"database_id": "${d1DatabaseId}"`);
       expect(first.ingress).toContain('"name": "petit-chiba-ingress"');
       expect(first.ingress).toContain('"service": "petit-chiba-core"');
+      expect(first.ingress).toContain(`"ALLOWED_INSTALLATION_IDS": "${allowedInstallationIds}"`);
 
       expect(second.core).toContain('"name": "second-instance-core"');
       expect(second.core).toContain('"database_name": "second-instance-review-state"');
@@ -135,6 +147,22 @@ describe('Wrangler deployment tooling', () => {
       expect(() => run('missing-runner-vpc')).toThrow();
       expect(existsSync(outputs('missing-runner-vpc').core)).toBe(false);
       expect(existsSync(outputs('missing-runner-vpc').ingress)).toBe(false);
+    });
+  });
+
+  it('requires an installation allowlist at the real renderer CLI seam', () => {
+    withDeploymentFixture(({ runWithoutInstallationIds: run, outputs }) => {
+      expect(() => run('missing-installation-allowlist')).toThrow();
+      expect(existsSync(outputs('missing-installation-allowlist').core)).toBe(false);
+      expect(existsSync(outputs('missing-installation-allowlist').ingress)).toBe(false);
+    });
+  });
+
+  it('rejects malformed installation IDs before creating output', () => {
+    withDeploymentFixture(({ runWithInstallationIds: run, outputs }) => {
+      expect(() => run('malformed-installation-allowlist', 'not-json')).toThrow();
+      expect(existsSync(outputs('malformed-installation-allowlist').core)).toBe(false);
+      expect(existsSync(outputs('malformed-installation-allowlist').ingress)).toBe(false);
     });
   });
 
@@ -174,6 +202,7 @@ describe('Wrangler deployment tooling', () => {
 
     expect(core.workers_dev).toBe(false);
     expect(ingress.workers_dev).toBe(true);
+    expect(ingress.vars?.ALLOWED_INSTALLATION_IDS).toBe('REPLACE_WITH_GITHUB_INSTALLATION_IDS');
     expect(core.secrets?.required).toEqual(['GITHUB_APP_PRIVATE_KEY', 'RUNNER_AUTH_TOKEN']);
     expect(ingress.secrets?.required).toEqual(['WEBHOOK_SECRET']);
     expect(core.vars?.GITHUB_APP_ID).toBe('REPLACE_WITH_GITHUB_APP_ID');

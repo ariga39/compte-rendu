@@ -4,6 +4,9 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-08-25",
   "workers_dev": true,
+  "vars": {
+    "ALLOWED_INSTALLATION_IDS": "REPLACE_WITH_GITHUB_INSTALLATION_IDS",
+  },
   "secrets": {
     "required": ["WEBHOOK_SECRET"],
   },

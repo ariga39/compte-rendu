@@ -5,6 +5,7 @@
   "compatibility_date": "2026-08-22",
   "vars": {
     "WEBHOOK_SECRET": "runtime-test-webhook-secret",
+    "ALLOWED_INSTALLATION_IDS": "[7]",
   },
   "d1_databases": [
     {

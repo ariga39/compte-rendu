@@ -1,12 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import {
   MAX_WEBHOOK_BYTES,
-  createIngressWorker,
+  createIngressWorker as createIngressWorkerWithConfig,
   type IngressDependencies,
 } from '../apps/ingress/src/index';
 import type { OperationalLogEvent } from '../packages/contracts/src';
 
 const secret = 'test-webhook-secret';
+
+type TestIngressDependencies = Omit<IngressDependencies, 'allowedInstallationIds'> &
+  Partial<Pick<IngressDependencies, 'allowedInstallationIds'>>;
+
+const createIngressWorker = (dependencies: TestIngressDependencies) =>
+  createIngressWorkerWithConfig({ allowedInstallationIds: '[7]', ...dependencies });
 
 const payload = {
   action: 'opened',
@@ -59,12 +65,72 @@ const collectingLog = () => {
 };
 
 describe('Webhook ingress', () => {
+  it('ignores eligible webhooks from an unapproved installation before reaching core', async () => {
+    const forwarded: Request[] = [];
+    const worker = createIngressWorker({
+      secret,
+      crypto: globalThis.crypto,
+      allowedInstallationIds: '[7]',
+      core: {
+        fetch: async (request) => {
+          forwarded.push(request);
+          return new Response(null, { status: 202 });
+        },
+      },
+    });
+    const requests = [
+      await signedRequest({ ...payload, installation: { id: 99 } }),
+      await signedRequest({
+        action: 'created',
+        installation: { id: 99 },
+        repository: { id: 11 },
+        issue: {
+          number: 42,
+          pull_request: { url: 'https://api.github.com/repos/example/repo/pulls/42' },
+        },
+        comment: {
+          id: 987654,
+          body: '/ai-review',
+          user: { login: 'maintainer' },
+        },
+      }),
+    ];
+    requests[1].headers.set('x-github-event', 'issue_comment');
+
+    expect((await worker.fetch(requests[0])).status).toBe(204);
+    expect((await worker.fetch(requests[1])).status).toBe(204);
+    expect(forwarded).toHaveLength(0);
+  });
+
+  it('fails closed without forwarding when the installation allowlist is missing or malformed', async () => {
+    for (const allowedInstallationIds of [undefined, 'not-json', '[]', '[0]']) {
+      const forwarded: Request[] = [];
+      const worker = createIngressWorkerWithConfig({
+        secret,
+        crypto: globalThis.crypto,
+        allowedInstallationIds,
+        core: {
+          fetch: async (request) => {
+            forwarded.push(request);
+            return new Response(null, { status: 202 });
+          },
+        },
+      });
+
+      const response = await worker.fetch(await signedRequest());
+
+      expect(response.status).toBe(503);
+      expect(forwarded).toHaveLength(0);
+    }
+  });
+
   it('forwards one normalized supported pull request event and acknowledges it', async () => {
     const forwarded: Request[] = [];
     const { events, log } = collectingLog();
     const dependencies: IngressDependencies = {
       secret,
       crypto: globalThis.crypto,
+      allowedInstallationIds: '[7]',
       log,
       core: {
         fetch: async (request) => {

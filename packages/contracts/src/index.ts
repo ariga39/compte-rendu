@@ -119,7 +119,11 @@ export type OperationalLogEvent =
       readonly outcome: 'ignored';
       readonly deliveryId?: string;
       readonly event?: 'pull_request' | 'issue_comment';
-      readonly reason: 'unsupported_event' | 'unsupported_action' | 'non_pull_request_issue';
+      readonly reason:
+        | 'unsupported_event'
+        | 'unsupported_action'
+        | 'non_pull_request_issue'
+        | 'unapproved_installation';
     }
   | {
       readonly phase: 'ingress';
