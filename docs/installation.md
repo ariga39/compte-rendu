@@ -1,7 +1,7 @@
 # Installation and operations
 
 This is the short operator manual for the two-Worker Compte rendu deployment.
-It assumes one Cloudflare account, one GitHub App installation, and the
+It assumes one Cloudflare account, one or more explicitly allowlisted GitHub App installations, and the
 repository checkout that contains this file. It does not create resources or
 credentials by itself.
 
@@ -44,7 +44,7 @@ templates. From the repository root, render deployment-only sibling configs
 for the chosen instance:
 
 ```sh
-corepack pnpm render:wrangler -- <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID>
+corepack pnpm render:wrangler -- <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>'
 ```
 
 For example, instance `petit-chiba` produces
@@ -54,6 +54,13 @@ For example, instance `petit-chiba` produces
 `petit-chiba-review`. Instance names never require editing the repository or
 the tracked templates. The renderer keeps the tracked placeholders unchanged
 and refuses to overwrite an existing generated config.
+
+`<GITHUB_INSTALLATION_IDS_JSON>` must be a non-empty JSON array of positive
+numeric GitHub App installation IDs, for example `[123456789]`. It is written
+only to the generated ingress config as `ALLOWED_INSTALLATION_IDS`; the tracked
+template remains a placeholder. Ingress fails closed with HTTP `503` when the
+value is missing or malformed, and ignores signed events from installations outside the
+allowlist before contacting `CORE`.
 
 Independent deployed instances require distinct product GitHub Apps because
 each App has one webhook URL and secret; this does not require a router.
@@ -178,6 +185,11 @@ select the target repository or repositories. Do not choose all repositories
 unless that is an explicit operator decision. GitHub describes this choice in
 [Installing your own GitHub App](https://docs.github.com/en/apps/using-github-apps/installing-your-own-github-app).
 
+Pass the numeric installation ID for each enabled App installation in the
+renderer allowlist. The allowlist is deployment configuration, not a repository
+or owner-name lookup, and it must include every installation whose webhook this
+Worker is intended to accept.
+
 Enable the App webhook with:
 
 - Webhook URL: `<INGRESS_URL>`, the public URL printed or shown for
@@ -287,7 +299,7 @@ uses the temporary invocation described above.
 3. Render deployment-only configs from the repository root:
 
    ```sh
-   corepack pnpm render:wrangler -- <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID>
+   corepack pnpm render:wrangler -- <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>'
    ```
 
    This writes `apps/core/wrangler.<INSTANCE_NAME>.jsonc` and
@@ -389,15 +401,16 @@ uses the temporary invocation described above.
 
 The deployed variables-versus-secrets inventory is deliberately small:
 
-| Worker                    | Plain variable  | Secrets                                       | Non-secret bindings                                  |
-| ------------------------- | --------------- | --------------------------------------------- | ---------------------------------------------------- |
-| `<INSTANCE_NAME>-ingress` | None            | `WEBHOOK_SECRET`                              | `CORE` → `<INSTANCE_NAME>-core`                      |
-| `<INSTANCE_NAME>-core`    | `GITHUB_APP_ID` | `GITHUB_APP_PRIVATE_KEY`, `RUNNER_AUTH_TOKEN` | `REVIEW_DB`, `REVIEW_WORKFLOW`, `RUNNER` VPC Service |
+| Worker                    | Plain variable             | Secrets                                       | Non-secret bindings                                  |
+| ------------------------- | -------------------------- | --------------------------------------------- | ---------------------------------------------------- |
+| `<INSTANCE_NAME>-ingress` | `ALLOWED_INSTALLATION_IDS` | `WEBHOOK_SECRET`                              | `CORE` → `<INSTANCE_NAME>-core`                      |
+| `<INSTANCE_NAME>-core`    | `GITHUB_APP_ID`            | `GITHUB_APP_PRIVATE_KEY`, `RUNNER_AUTH_TOKEN` | `REVIEW_DB`, `REVIEW_WORKFLOW`, `RUNNER` VPC Service |
 
-`GITHUB_APP_ID` is an application identifier, not a secret. Its value is
-the dedicated product App ID copied into the core Wrangler config before
-secret put or deploy; do not leave its placeholder, duplicate it in a secret,
-or reuse the repository-operations App identity. Installation IDs, repository IDs, PR numbers,
+`GITHUB_APP_ID` and `ALLOWED_INSTALLATION_IDS` are deployment configuration, not
+secrets. Supply them only through the renderer: copy the dedicated product App
+ID into its core argument and pass the numeric installation IDs in its ingress
+argument. Do not leave either placeholder, duplicate either value in a secret,
+or reuse the repository-operations App identity. Repository IDs, PR numbers,
 SHAs, `deliveryId`s, `runId`s, and `sandboxId`s are runtime data, not values to
 hard-code in the manual.
 
@@ -509,7 +522,7 @@ For a normal compatible release:
 2. If there is a new migration, review it and apply it remotely with the D1
    migration command above. Prefer additive, backward-compatible changes.
 3. Render deployment-only configs again with the same
-   `corepack pnpm render:wrangler -- <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID>`
+   `corepack pnpm render:wrangler -- <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>'`
    inputs, then deploy using `apps/core/wrangler.<INSTANCE_NAME>.jsonc` and
    `apps/ingress/wrangler.<INSTANCE_NAME>.jsonc`.
 4. Redeliver one controlled GitHub event and inspect the identifier chain.
@@ -535,7 +548,7 @@ that no review is in flight before proceeding.
    deliveries arrive, then delete the App registration if it is no longer
    needed and revoke its private key.
 3. Render deployment-only configs again with the same
-   `corepack pnpm render:wrangler -- <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID>`
+   `corepack pnpm render:wrangler -- <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>'`
    inputs. Delete the public `<INSTANCE_NAME>-ingress` Worker, then the private
    `<INSTANCE_NAME>-core` Worker, in that order. Do not use `--force`. Verify the
    Workflow, `RUNNER` VPC Service, and service binding are no

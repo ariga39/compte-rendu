@@ -25,6 +25,9 @@ const supportedPullRequestActions = [
 ] as const;
 const PullRequestAction = Schema.Literals(supportedPullRequestActions);
 const WebhookAction = Schema.Struct({ action: Schema.String });
+const InstallationId = Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0)));
+const InstallationIds = Schema.Array(InstallationId).pipe(Schema.check(Schema.isMinLength(1)));
+const InstallationIdsConfig = Schema.fromJsonString(InstallationIds);
 
 const PullRequestWebhook = Schema.Struct({
   action: PullRequestAction,
@@ -67,12 +70,14 @@ const Signature = Schema.String.check(Schema.isPattern(new RegExp('^sha256=[0-9a
 export interface IngressDependencies {
   readonly secret: string;
   readonly crypto: Pick<Crypto, 'subtle'>;
+  readonly allowedInstallationIds: unknown;
   readonly core: CoreServiceBinding;
   readonly log?: OperationalLog;
 }
 
 export interface IngressEnv {
   readonly WEBHOOK_SECRET: string;
+  readonly ALLOWED_INSTALLATION_IDS: string;
   readonly CORE: CoreServiceBinding;
 }
 
@@ -89,10 +94,18 @@ class CoreUnavailable extends Schema.TaggedError<CoreUnavailable>()('CoreUnavail
   event: Schema.Literals(['pull_request', 'issue_comment']),
 }) {}
 
+class InvalidAdmissionConfiguration extends Schema.TaggedError<InvalidAdmissionConfiguration>()(
+  'InvalidAdmissionConfiguration',
+  { message: Schema.String },
+) {}
+
 const invalidWebhook = (
   message: string,
   reason: typeof InvalidWebhookReason.Type = 'invalid_webhook',
 ) => new InvalidWebhook({ message, reason });
+
+const invalidAdmissionConfiguration = (message: string) =>
+  new InvalidAdmissionConfiguration({ message });
 
 const recordOperationalLog = (log: OperationalLog, event: OperationalLogEvent) =>
   Effect.tryPromise({
@@ -179,6 +192,32 @@ const normalizeIssueComment = (
   command: '/ai-review',
 });
 
+const checkInstallation = (
+  deliveryId: string,
+  event: 'pull_request' | 'issue_comment',
+  installationId: number,
+  dependencies: IngressDependencies,
+) =>
+  Effect.gen(function* () {
+    const allowedInstallationIds = yield* Schema.decodeUnknownEffect(InstallationIdsConfig)(
+      dependencies.allowedInstallationIds,
+    ).pipe(
+      Effect.mapError(() =>
+        invalidAdmissionConfiguration('Installation allowlist is missing or malformed'),
+      ),
+    );
+    if (allowedInstallationIds.includes(installationId)) return true;
+
+    yield* recordOperationalLog(dependencies.log ?? createCloudflareOperationalLog(), {
+      phase: 'ingress',
+      outcome: 'ignored',
+      deliveryId: sanitizeOperationalLogIdentifier(deliveryId),
+      event,
+      reason: 'unapproved_installation',
+    });
+    return false;
+  });
+
 const processWebhook = (request: Request, dependencies: IngressDependencies) =>
   Effect.gen(function* () {
     const contentLength = request.headers.get('content-length');
@@ -233,6 +272,16 @@ const processWebhook = (request: Request, dependencies: IngressDependencies) =>
       const payload = yield* Schema.decodeUnknownEffect(PullRequestWebhook)(decodedJson).pipe(
         Effect.mapError(() => invalidWebhook('Pull request webhook is malformed')),
       );
+      if (
+        !(yield* checkInstallation(
+          deliveryId,
+          'pull_request',
+          payload.installation.id,
+          dependencies,
+        ))
+      ) {
+        return 'ignored' as const;
+      }
       return yield* forwardEvent(normalizePullRequest(deliveryId, payload), dependencies);
     }
 
@@ -256,6 +305,16 @@ const processWebhook = (request: Request, dependencies: IngressDependencies) =>
       const payload = yield* Schema.decodeUnknownEffect(IssueCommentWebhook)(decodedJson).pipe(
         Effect.mapError(() => invalidWebhook('Issue comment webhook is malformed')),
       );
+      if (
+        !(yield* checkInstallation(
+          deliveryId,
+          'issue_comment',
+          payload.installation.id,
+          dependencies,
+        ))
+      ) {
+        return 'ignored' as const;
+      }
       if (payload.issue.pull_request === undefined) {
         yield* recordOperationalLog(dependencies.log ?? createCloudflareOperationalLog(), {
           phase: 'ingress',
@@ -377,6 +436,10 @@ export function createIngressWorker(dependencies: IngressDependencies): WorkerEn
           );
         }
 
+        if (error instanceof InvalidAdmissionConfiguration) {
+          return new Response(null, { status: 503 });
+        }
+
         return new Response(null, { status: 503 });
       }
     },
@@ -392,6 +455,7 @@ const ingress: WorkerEntrypoint<IngressEnv> = {
     return createIngressWorker({
       secret: env.WEBHOOK_SECRET,
       crypto: globalThis.crypto,
+      allowedInstallationIds: env.ALLOWED_INSTALLATION_IDS,
       core: env.CORE,
     }).fetch(request);
   },

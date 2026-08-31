@@ -1,11 +1,14 @@
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join, resolve } from 'node:path';
+import { Schema } from 'effect';
 
 const instanceNamePattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-57][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const maxCloudflareNameLength = 63;
 const longestDerivedSuffix = '-review-state';
+const InstallationId = Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0)));
+const InstallationIds = Schema.Array(InstallationId).pipe(Schema.check(Schema.isMinLength(1)));
 
 const replaceRequired = (template: string, marker: string, value: string) => {
   if (!template.includes(marker)) {
@@ -19,6 +22,7 @@ const renderDeploymentConfigs = (
   githubAppId: number,
   d1DatabaseId: string,
   runnerVpcServiceId: string,
+  allowedInstallationIds: string,
 ) => {
   if (
     !instanceNamePattern.test(instanceName) ||
@@ -34,6 +38,14 @@ const renderDeploymentConfigs = (
   }
   if (!uuidPattern.test(runnerVpcServiceId)) {
     throw new Error('Runner VPC Service ID must be a UUID');
+  }
+  let parsedInstallationIds: readonly number[];
+  try {
+    parsedInstallationIds = Schema.decodeUnknownSync(Schema.fromJsonString(InstallationIds))(
+      allowedInstallationIds,
+    );
+  } catch {
+    throw new Error('GitHub installation IDs must be a non-empty JSON array of positive integers');
   }
 
   const coreDirectory = join(process.cwd(), 'apps/core');
@@ -79,6 +91,11 @@ const renderDeploymentConfigs = (
     '"service": "compte-rendu-core"',
     `"service": "${instanceName}-core"`,
   );
+  ingress = replaceRequired(
+    ingress,
+    '"ALLOWED_INSTALLATION_IDS": "REPLACE_WITH_GITHUB_INSTALLATION_IDS"',
+    `"ALLOWED_INSTALLATION_IDS": ${JSON.stringify(JSON.stringify(parsedInstallationIds))}`,
+  );
 
   let coreCreated = false;
   try {
@@ -95,12 +112,12 @@ const renderDeploymentConfigs = (
 };
 
 const main = (args: readonly string[]) => {
-  if (args.length !== 4) {
+  if (args.length !== 5) {
     throw new Error(
-      'usage: render-wrangler-config <instance-name> <github-app-id> <d1-uuid> <runner-vpc-service-uuid>',
+      'usage: render-wrangler-config <instance-name> <github-app-id> <d1-uuid> <runner-vpc-service-uuid> <github-installation-ids-json>',
     );
   }
-  renderDeploymentConfigs(args[0], Number(args[1]), args[2], args[3]);
+  renderDeploymentConfigs(args[0], Number(args[1]), args[2], args[3], args[4]);
 };
 
 if (fileURLToPath(import.meta.url) === resolve(process.argv[1] ?? '')) {
