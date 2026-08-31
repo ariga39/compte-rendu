@@ -5,6 +5,70 @@ const baseSha = '1111111111111111111111111111111111111111';
 const headSha = '2222222222222222222222222222222222222222';
 
 describe('Runner Job client', () => {
+  it('uses the HTTP VPC Service scheme for every Runner Job request', async () => {
+    const requests: string[] = [];
+    const runner = createRunnerJobClient({
+      authToken: 'runner-auth-token',
+      pollIntervalMs: 0,
+      binding: {
+        fetch: async (request) => {
+          const url = new URL(request.url);
+          requests.push(`${request.method} ${url.href}`);
+          if (url.protocol !== 'http:') throw new Error('HTTP-only VPC Service rejected HTTPS');
+
+          if (request.method === 'POST') {
+            return Response.json(
+              {
+                id: 'job-http-scheme',
+                runId: 'run-http-scheme',
+                attempt: 1,
+                status: 'queued',
+                stage: 'admission',
+                sandbox: { cleanup: 'pending' },
+              },
+              { status: 202 },
+            );
+          }
+          if (request.method === 'GET') {
+            return Response.json({
+              id: 'job-http-scheme',
+              runId: 'run-http-scheme',
+              attempt: 1,
+              status: 'failed',
+              stage: 'cleanup',
+              failure: { reason: 'agent' },
+              sandbox: { cleanup: 'pending' },
+            });
+          }
+          return Response.json({
+            id: 'job-http-scheme',
+            runId: 'run-http-scheme',
+            attempt: 1,
+            status: 'failed',
+            stage: 'cleanup',
+            failure: { reason: 'agent' },
+            sandbox: { cleanup: 'destroyed' },
+          });
+        },
+      },
+    });
+
+    await expect(
+      runner.runJob({
+        runId: 'run-http-scheme',
+        repositoryUrl: 'https://github.com/acme/reviewed.git',
+        baseSha,
+        headSha,
+        checkoutToken: 'short-lived-checkout-token',
+      }),
+    ).resolves.toMatchObject({ status: 'failed', reason: 'agent', retryable: true });
+    expect(requests).toEqual([
+      'POST http://runner.internal/jobs',
+      'GET http://runner.internal/jobs/job-http-scheme',
+      'DELETE http://runner.internal/jobs/job-http-scheme',
+    ]);
+  });
+
   it('retries a lost POST response with the same attempt instead of advancing', async () => {
     const attempts: number[] = [];
     let postCount = 0;
