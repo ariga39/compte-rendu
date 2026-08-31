@@ -353,6 +353,8 @@ describe('Runner Job HTTP interface', () => {
     const events: unknown[] = [];
     let resolvedGithubToken: string | undefined;
     let createArgs: readonly string[] | undefined;
+    let cleanupEnvironment: NodeJS.ProcessEnv | undefined;
+    let checkoutEnvironment: NodeJS.ProcessEnv | undefined;
     const runner = createRunner({
       authToken: 'runner-test-token',
       modelSecretCommand: 'model-secret-resolver',
@@ -364,6 +366,8 @@ describe('Runner Job HTTP interface', () => {
       process: async (_command, args, options = {}) => {
         commands.push([...args]);
         if (args[0] === 'create') createArgs = args;
+        if (args[0] === 'rm' && args[1] === '--force') cleanupEnvironment = options.env;
+        if (_command === 'git' && args.includes('clone')) checkoutEnvironment = options.env;
         if (args[0] === 'secret' && args[1] === 'set-custom' && args.includes('api.github.com')) {
           const command = args[args.indexOf('--command') + 1];
           if (command?.startsWith('cat '))
@@ -423,6 +427,13 @@ describe('Runner Job HTTP interface', () => {
     expect(githubSecretCommand).not.toBe('');
     expect(githubSecretCommand).toContain('github-read-token');
     expect(resolvedGithubToken).toBe(repositoryReadToken);
+    expect(cleanupEnvironment).toBeDefined();
+    expect(cleanupEnvironment?.SSH_AUTH_SOCK).toBeUndefined();
+    expect(cleanupEnvironment?.SSH_AGENT_PID).toBeUndefined();
+    expect(cleanupEnvironment?.GH_TOKEN).toBeUndefined();
+    expect(cleanupEnvironment?.GITHUB_TOKEN).toBeUndefined();
+    expect(checkoutEnvironment?.CHECKOUT_TOKEN).toBe(repositoryReadToken);
+    expect(checkoutEnvironment?.GIT_TERMINAL_PROMPT).toBe('0');
     expect(createArgs).toBeDefined();
     const configRootMount = createArgs
       ?.find((value) => value.startsWith('XDG_CONFIG_HOME='))
