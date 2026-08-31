@@ -114,10 +114,14 @@ describe('Review workflow', () => {
   it('runs immutable review identity and completes the published result', async () => {
     let jobSpec: ReviewRunSpec | undefined;
     let completedOutput: unknown;
+    let workflowTimeout: string | undefined;
     const reactions: unknown[] = [];
     const events: OperationalLogEvent[] = [];
     const step: ReviewWorkflowStep = {
-      do: async (_name, _options, operation) => operation(),
+      do: async (_name, options, operation) => {
+        workflowTimeout = options.timeout;
+        return operation();
+      },
     };
     const dependencies: ReviewWorkflowDependencies = {
       getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
@@ -155,6 +159,7 @@ describe('Review workflow', () => {
     );
 
     expect(disposition).toBe('completed');
+    expect(workflowTimeout).toBe('240 minutes');
     expect(jobSpec).toMatchObject({
       runId: 'run-workflow-1',
       repositoryUrl: 'https://github.com/acme/reviewed.git',

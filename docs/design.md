@@ -187,8 +187,8 @@ interface (`POST /jobs`, `GET /jobs/:id`, and `DELETE /jobs/:id`). A job is one
 immutable review attempt; success is accepted only after the runner reports
 validated output and Docker Sandbox cleanup. Callers do not manage Docker lifecycle.
 The shared review policy gives each Runner attempt a 30-minute agent timeout and
-allows at most three attempts (two retries). Core polls for at most 100 minutes,
-and the enclosing Workflow step timeout is 120 minutes. These are deliberately
+allows at most three attempts (two retries). Core polls for at most 180 minutes,
+and the enclosing Workflow step timeout is 240 minutes. These are deliberately
 simple finite ceilings for real reviews and hang prevention; retryable terminal
 agent, invalid-output, and confirmed GET-loss cleanup failures retry until the
 three-attempt cap without remaining-budget prediction or admission algebra.

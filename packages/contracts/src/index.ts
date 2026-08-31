@@ -2,8 +2,8 @@ import { Schema } from 'effect';
 
 export const REVIEW_ATTEMPT_BUDGET_MS = 30 * 60 * 1000;
 export const REVIEW_MAX_ATTEMPTS = 3;
-export const REVIEW_CORE_DEADLINE_MS = 100 * 60 * 1000;
-export const REVIEW_WORKFLOW_TIMEOUT = '120 minutes' as const;
+export const REVIEW_CORE_DEADLINE_MS = 180 * 60 * 1000;
+export const REVIEW_WORKFLOW_TIMEOUT = '240 minutes' as const;
 
 export interface WorkerEntrypoint<Env = unknown> {
   fetch(request: Request, env?: Env): Response | Promise<Response>;
