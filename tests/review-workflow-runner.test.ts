@@ -5,7 +5,10 @@ import { afterAll, describe, expect, it, vi } from 'vitest';
 import { REVIEW_ATTEMPT_BUDGET_MS } from '../packages/contracts/src';
 import { createRunnerJobClient } from '../apps/core/src/runner-job-client';
 import { runReviewWorkflow, type ReviewWorkflowStep } from '../apps/core/src/review-workflow';
-import { createRunner, type RunnerProcessResult } from '../apps/runner/src/runner';
+import {
+  createRunner as createProductionRunner,
+  type RunnerProcessResult,
+} from '../apps/runner/src/runner';
 
 const baseSha = '1111111111111111111111111111111111111111';
 const headSha = '2222222222222222222222222222222222222222';
@@ -49,6 +52,52 @@ const writeEvidenceFixture = async (
     await writeFile(join(destination, 'opencode.db-shm'), 'shm', { mode: 0o600 });
     await writeFile(join(destination, 'review.log'), 'log', { mode: 0o600 });
   }
+};
+
+const createRunner = (options: Parameters<typeof createProductionRunner>[0] = {}) => {
+  const originalProcess = options.process;
+  if (originalProcess === undefined) return createProductionRunner(options);
+  const rules: Array<Record<string, unknown>> = [
+    {
+      id: 'default-deny-all',
+      resources: ['**'],
+      editable: false,
+      origin: 'local',
+      layer: 'local',
+    },
+  ];
+  return createProductionRunner({
+    ...options,
+    process: async (command, args, processOptions) => {
+      if (args[0] === 'policy' && args[1] === 'ls') {
+        return {
+          exitCode: 0,
+          stdout: processOptions?.captureStdout === true ? JSON.stringify({ rules }) + '\n' : '',
+          timedOut: false,
+          truncated: false,
+        };
+      }
+      const result = await originalProcess(command, args, processOptions);
+      if (args[0] === 'policy' && args[1] === 'allow' && result.exitCode === 0) {
+        const sandbox = args[args.indexOf('--sandbox') + 1];
+        const resource = args[args.length - 1];
+        rules.push({
+          id: `${sandbox}-${resource}`,
+          resources: [resource],
+          sandbox_id: sandbox,
+          editable: true,
+          origin: 'local',
+          layer: 'local',
+        });
+      }
+      if (args[0] === 'policy' && args[1] === 'rm' && result.exitCode === 0) {
+        const ruleId = args[args.indexOf('--id') + 1];
+        const index = rules.findIndex((rule) => rule.id === ruleId);
+        if (index >= 0) rules.splice(index, 1);
+      }
+      return result;
+    },
+  });
 };
 
 afterAll(async () => {
