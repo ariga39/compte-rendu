@@ -28,6 +28,7 @@ const CLEANUP_COMMAND_TIMEOUT_MS = 30 * 1000;
 const ARCHIVE_COMMAND_TIMEOUT_MS = 30 * 1000;
 const ARCHIVE_PHASE_TIMEOUT_MS = 2 * 60 * 1000;
 const MAX_DIAGNOSTIC_STDERR_BYTES = 4 * 1024;
+const MAX_POLICY_JSON_BYTES = 256 * 1024;
 const MAX_AGENT_OUTPUT_BYTES = 8 * 1024 * 1024;
 const MAX_REQUEST_BYTES = 64 * 1024;
 const SANDBOX_EVIDENCE_ROOT = '/tmp/petit-chiba-opencode-evidence';
@@ -80,6 +81,13 @@ const OpenCodeSessionList = Schema.Union([
   Schema.Array(OpenCodeSession),
   Schema.Struct({ sessions: Schema.Array(OpenCodeSession) }),
 ]);
+const NetworkPolicyRule = Schema.Struct({
+  id: Schema.NonEmptyString,
+  resources: Schema.Array(Schema.NonEmptyString),
+  sandbox_id: Schema.optional(Schema.Union([Schema.String, Schema.Null])),
+  editable: Schema.Boolean,
+});
+const NetworkPolicyList = Schema.Struct({ rules: Schema.Array(NetworkPolicyRule) });
 
 export type RunnerProcessResult = {
   readonly exitCode: number;
@@ -285,6 +293,7 @@ type RunnerJob = {
   sandboxAttempted: boolean;
   sandboxCreated: boolean;
   sessionIds: string[];
+  networkRules: Array<{ readonly resource: string; id?: string }>;
   diagnosticCheckoutToken: string;
   secretPlaceholder?: string;
   githubSecretPlaceholder?: string;
@@ -363,6 +372,17 @@ const sessionIdsFrom = (stdout: string): string[] | undefined => {
       ? decoded.value
       : (decoded.value as { readonly sessions: ReadonlyArray<{ readonly id: string }> }).sessions;
     return sessions.map((session) => session.id);
+  } catch {
+    return undefined;
+  }
+};
+
+const networkPolicyRulesFrom = (
+  stdout: string,
+): Schema.Schema.Type<typeof NetworkPolicyList>['rules'] | undefined => {
+  try {
+    return Option.getOrUndefined(Schema.decodeUnknownOption(NetworkPolicyList)(JSON.parse(stdout)))
+      ?.rules;
   } catch {
     return undefined;
   }
@@ -823,11 +843,17 @@ export const createRunner = (options: RunnerOptions = {}) => {
       return clean;
     }
     update(job, { stage: 'cleanup' });
-    const cleanupProcess = async (args: readonly string[], diagnostic: RunnerDiagnostic) => {
+    const cleanupProcess = async (
+      args: readonly string[],
+      diagnostic: RunnerDiagnostic,
+      processOptions: RunnerProcessOptions = {},
+    ) => {
       let result: RunnerProcessResult;
       try {
         result = await executeProcess(sbxPath, args, {
+          ...processOptions,
           env: strippedSandboxEnvironment,
+          captureStdout: processOptions.captureStdout ?? false,
           captureStderr: true,
           stderrRedactions: [
             job.diagnosticCheckoutToken,
@@ -835,7 +861,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
             job.input.repositoryUrl,
             job.input.repositoryReadToken,
           ].filter((value): value is string => value !== undefined && value.length > 0),
-          maxBytes: MAX_DIAGNOSTIC_STDERR_BYTES,
+          maxBytes: processOptions.maxBytes ?? MAX_DIAGNOSTIC_STDERR_BYTES,
           timeoutMs: CLEANUP_COMMAND_TIMEOUT_MS,
         });
       } catch {
@@ -844,12 +870,72 @@ export const createRunner = (options: RunnerOptions = {}) => {
       await recordCommand(job, diagnostic, result);
       return result;
     };
+    const listPolicies = async (includeSource: boolean) => {
+      const listed = await cleanupProcess(
+        [
+          'policy',
+          'ls',
+          job.sandboxName,
+          '--json',
+          ...(includeSource ? ['--source', 'local'] : []),
+          ...(!includeSource ? ['--include-inactive'] : []),
+          '--type',
+          'network',
+        ],
+        { stage: 'cleanup', command: 'inspect-network-policy', includeStderr: true },
+        { captureStdout: true, maxBytes: MAX_POLICY_JSON_BYTES },
+      );
+      if (listed.exitCode !== 0 || listed.timedOut || listed.truncated) return undefined;
+      return networkPolicyRulesFrom(listed.stdout);
+    };
+    for (const expected of job.networkRules) {
+      let matching: Schema.Schema.Type<typeof NetworkPolicyList>['rules'][number] | undefined;
+      for (let attempt = 0; attempt < 2 && matching === undefined; attempt += 1) {
+        const rules = await listPolicies(true);
+        if (rules === undefined) continue;
+        const exact = rules.find(
+          (rule) =>
+            expected.id !== undefined &&
+            rule.id === expected.id &&
+            rule.sandbox_id === job.sandboxName,
+        );
+        if (exact !== undefined) {
+          matching = exact;
+          break;
+        }
+        if (expected.id === undefined) {
+          const candidates = rules.filter(
+            (rule) =>
+              rule.editable &&
+              rule.sandbox_id === job.sandboxName &&
+              rule.resources.includes(expected.resource),
+          );
+          if (candidates.length === 1) matching = candidates[0];
+        }
+      }
+      if (matching === undefined) {
+        clean = false;
+        continue;
+      }
+      const removedRule = await cleanupProcess(
+        ['policy', 'rm', 'network', '--id', matching.id, '--sandbox', job.sandboxName],
+        { stage: 'cleanup', command: 'remove-network-policy', includeStderr: true },
+      );
+      if (removedRule.exitCode !== 0 || removedRule.timedOut) clean = false;
+    }
     const removed = await cleanupProcess(['rm', '--force', job.sandboxName], {
       stage: 'cleanup',
       command: 'remove-sandbox',
       includeStderr: true,
     });
     if (removed.exitCode !== 0 || removed.timedOut) clean = false;
+    const remainingPolicies = await listPolicies(false);
+    if (
+      remainingPolicies === undefined ||
+      remainingPolicies.some((rule) => rule.sandbox_id === job.sandboxName)
+    ) {
+      clean = false;
+    }
     if (job.secretPlaceholder !== undefined) {
       const secret = await cleanupProcess(
         [
@@ -879,28 +965,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
         { stage: 'cleanup', command: 'remove-github-secret', includeStderr: true },
       );
       if (secret.exitCode !== 0 || secret.timedOut) clean = false;
-    }
-    const policy = await cleanupProcess(
-      ['policy', 'rm', 'network', '--sandbox', job.sandboxName, '--resource', MODEL_RESOURCE],
-      { stage: 'cleanup', command: 'remove-network-policy', includeStderr: true },
-    );
-    if ((policy.exitCode !== 0 && policy.exitCode !== 1) || policy.timedOut) clean = false;
-    if (job.githubSecretPlaceholder !== undefined) {
-      const githubPolicy = await cleanupProcess(
-        [
-          'policy',
-          'rm',
-          'network',
-          '--sandbox',
-          job.sandboxName,
-          '--resource',
-          'api.github.com:443',
-        ],
-        { stage: 'cleanup', command: 'remove-github-network-policy', includeStderr: true },
-      );
-      if ((githubPolicy.exitCode !== 0 && githubPolicy.exitCode !== 1) || githubPolicy.timedOut) {
-        clean = false;
-      }
     }
     if (job.checkoutRoot !== undefined) {
       try {
@@ -1083,6 +1147,33 @@ export const createRunner = (options: RunnerOptions = {}) => {
         failure = { reason: 'agent' };
         return;
       }
+      const modelNetworkRule: { readonly resource: string; id?: string } = {
+        resource: MODEL_RESOURCE,
+      };
+      job.networkRules.push(modelNetworkRule);
+      const modelPolicies = await runTracked(
+        job,
+        sbxPath,
+        ['policy', 'ls', job.sandboxName, '--json', '--source', 'local', '--type', 'network'],
+        { captureStdout: true, maxBytes: MAX_POLICY_JSON_BYTES },
+        { stage: 'sandbox', command: 'inspect-network-policy', includeStderr: true },
+      );
+      const modelPolicyRules =
+        modelPolicies.exitCode === 0 && !modelPolicies.timedOut && !modelPolicies.truncated
+          ? networkPolicyRulesFrom(modelPolicies.stdout)
+          : undefined;
+      const modelMatches =
+        modelPolicyRules?.filter(
+          (rule) =>
+            rule.editable &&
+            rule.sandbox_id === job.sandboxName &&
+            rule.resources.includes(MODEL_RESOURCE),
+        ) ?? [];
+      if (modelMatches.length !== 1) {
+        failure = { reason: 'agent' };
+        return;
+      }
+      modelNetworkRule.id = modelMatches[0].id;
       const githubNetwork = await runTracked(
         job,
         sbxPath,
@@ -1094,6 +1185,33 @@ export const createRunner = (options: RunnerOptions = {}) => {
         failure = { reason: 'agent' };
         return;
       }
+      const githubNetworkRule: { readonly resource: string; id?: string } = {
+        resource: 'api.github.com:443',
+      };
+      job.networkRules.push(githubNetworkRule);
+      const githubPolicies = await runTracked(
+        job,
+        sbxPath,
+        ['policy', 'ls', job.sandboxName, '--json', '--source', 'local', '--type', 'network'],
+        { captureStdout: true, maxBytes: MAX_POLICY_JSON_BYTES },
+        { stage: 'sandbox', command: 'inspect-github-network-policy', includeStderr: true },
+      );
+      const githubPolicyRules =
+        githubPolicies.exitCode === 0 && !githubPolicies.timedOut && !githubPolicies.truncated
+          ? networkPolicyRulesFrom(githubPolicies.stdout)
+          : undefined;
+      const githubMatches =
+        githubPolicyRules?.filter(
+          (rule) =>
+            rule.editable &&
+            rule.sandbox_id === job.sandboxName &&
+            rule.resources.includes('api.github.com:443'),
+        ) ?? [];
+      if (githubMatches.length !== 1) {
+        failure = { reason: 'agent' };
+        return;
+      }
+      githubNetworkRule.id = githubMatches[0].id;
       update(job, { stage: 'agent' });
       agent = await runTracked(
         job,
@@ -1304,6 +1422,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         sandboxAttempted: false,
         sandboxCreated: false,
         sessionIds: [],
+        networkRules: [],
         diagnosticCheckoutToken: input.repositoryReadToken,
         deadlineAt: Date.now() + REVIEW_ATTEMPT_BUDGET_MS,
       };

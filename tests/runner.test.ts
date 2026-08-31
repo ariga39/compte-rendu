@@ -2,7 +2,10 @@ import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { createRunner, type RunnerProcessResult } from '../apps/runner/src/runner';
+import {
+  createRunner as createProductionRunner,
+  type RunnerProcessResult,
+} from '../apps/runner/src/runner';
 
 const runnerJobFields = {
   repositoryName: 'acme/reviewed',
@@ -37,6 +40,52 @@ const writeEvidenceFixture = async (
   }
 };
 
+const createRunner = (options: Parameters<typeof createProductionRunner>[0] = {}) => {
+  const originalProcess = options.process;
+  if (originalProcess === undefined) return createProductionRunner(options);
+  const rules: Array<Record<string, unknown>> = [
+    {
+      id: 'default-deny-all',
+      resources: ['**'],
+      editable: false,
+      origin: 'local',
+      layer: 'local',
+    },
+  ];
+  return createProductionRunner({
+    ...options,
+    process: async (command, args, processOptions) => {
+      if (args[0] === 'policy' && args[1] === 'ls') {
+        return {
+          exitCode: 0,
+          stdout: processOptions?.captureStdout === true ? JSON.stringify({ rules }) + '\n' : '',
+          timedOut: false,
+          truncated: false,
+        };
+      }
+      const result = await originalProcess(command, args, processOptions);
+      if (args[0] === 'policy' && args[1] === 'allow' && result.exitCode === 0) {
+        const sandbox = args[args.indexOf('--sandbox') + 1];
+        const resource = args[args.length - 1];
+        rules.push({
+          id: `${sandbox}-${resource}`,
+          resources: [resource],
+          sandbox_id: sandbox,
+          editable: true,
+          origin: 'local',
+          layer: 'local',
+        });
+      }
+      if (args[0] === 'policy' && args[1] === 'rm' && result.exitCode === 0) {
+        const ruleId = args[args.indexOf('--id') + 1];
+        const index = rules.findIndex((rule) => rule.id === ruleId);
+        if (index >= 0) rules.splice(index, 1);
+      }
+      return result;
+    },
+  });
+};
+
 afterAll(async () => {
   await rm(sharedEvidenceRoot, { recursive: true, force: true });
 });
@@ -60,6 +109,611 @@ const waitForTerminal = async (runner: ReturnType<typeof createRunner>, jobId: s
 };
 
 describe('Runner Job HTTP interface', () => {
+  it('removes only each job-owned network rules for jobs sharing resources', async () => {
+    const baseSha = '1111111111111111111111111111111111111111';
+    const headSha = '2222222222222222222222222222222222222222';
+    const resultLine = JSON.stringify({
+      type: 'text',
+      part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'No findings' }) },
+    });
+    type PolicyRule = {
+      id: string;
+      resources: string[];
+      sandbox_id?: string;
+      editable: boolean;
+      origin: string;
+      layer: string;
+    };
+    const rules: PolicyRule[] = [
+      {
+        id: 'default-deny-all',
+        resources: ['**'],
+        editable: false,
+        origin: 'local',
+        layer: 'local',
+      },
+      {
+        id: 'other-sandbox-model',
+        resources: ['opencode.ai:443'],
+        sandbox_id: 'other-sandbox',
+        editable: true,
+        origin: 'local',
+        layer: 'local',
+      },
+    ];
+    const runner = createProductionRunner({
+      evidenceRoot: sharedEvidenceRoot,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      process: async (_command, args, options = {}) => {
+        if (args[0] === 'create') {
+          return {
+            exitCode: 0,
+            stdout: '',
+            timedOut: false,
+            truncated: false,
+          };
+        }
+        if (args[0] === 'policy' && args[1] === 'allow') {
+          const sandbox = args[args.indexOf('--sandbox') + 1];
+          const resource = args[args.length - 1];
+          rules.push({
+            id: `${sandbox}-${resource}`,
+            resources: [resource],
+            sandbox_id: sandbox,
+            editable: true,
+            origin: 'local',
+            layer: 'local',
+          });
+          return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+        }
+        if (args[0] === 'policy' && args[1] === 'ls') {
+          return {
+            exitCode: 0,
+            stdout: options.captureStdout === true ? JSON.stringify({ rules }) + '\n' : '',
+            timedOut: false,
+            truncated: false,
+          };
+        }
+        if (args[0] === 'policy' && args[1] === 'rm') {
+          const ruleId = args[args.indexOf('--id') + 1];
+          if (ruleId !== undefined) {
+            const index = rules.findIndex((rule) => rule.id === ruleId);
+            if (index >= 0) rules.splice(index, 1);
+            return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+          }
+          return { exitCode: 1, stdout: '', timedOut: false, truncated: false };
+        }
+        if (args[0] === 'rm' && args[1] === '--force') {
+          return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+        }
+        await writeEvidenceFixture(args, options, resultLine);
+        return {
+          exitCode: 0,
+          stdout: args.includes('rev-parse')
+            ? `${baseSha}\n${headSha}\n`
+            : args.includes('session')
+              ? '[{"id":"policy-session"}]\n'
+              : args.includes('export')
+                ? '{"session":"policy-session","full":true}\n'
+                : options.captureStdout === true
+                  ? `${resultLine}\n`
+                  : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
+    });
+
+    const submit = async (runId: string) => {
+      const response = await runner.handle(
+        new Request('http://runner/jobs', {
+          method: 'POST',
+          headers: {
+            authorization: 'Bearer runner-test-token',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            ...runnerJobFields,
+            runId,
+            attempt: 1,
+            repositoryUrl: 'https://github.com/acme/reviewed.git',
+            baseSha,
+            headSha,
+          }),
+        }),
+      );
+      return (await response.json()) as { id: string };
+    };
+
+    const first = await submit('run-93-policy-first');
+    const firstTerminal = await waitForTerminal(runner, first.id);
+    const second = await submit('run-93-policy-second');
+    const secondTerminal = await waitForTerminal(runner, second.id);
+
+    expect(firstTerminal).toMatchObject({
+      status: 'succeeded',
+      sandbox: { cleanup: 'destroyed' },
+    });
+    expect(secondTerminal).toMatchObject({
+      status: 'succeeded',
+      sandbox: { cleanup: 'destroyed' },
+    });
+    expect(rules).toEqual([
+      {
+        id: 'default-deny-all',
+        resources: ['**'],
+        editable: false,
+        origin: 'local',
+        layer: 'local',
+      },
+      {
+        id: 'other-sandbox-model',
+        resources: ['opencode.ai:443'],
+        sandbox_id: 'other-sandbox',
+        editable: true,
+        origin: 'local',
+        layer: 'local',
+      },
+    ]);
+  });
+
+  it('fails cleanup on exact policy removal failure while continuing Sandbox cleanup', async () => {
+    const baseSha = '1111111111111111111111111111111111111111';
+    const headSha = '2222222222222222222222222222222222222222';
+    const resultLine = JSON.stringify({
+      type: 'text',
+      part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'No findings' }) },
+    });
+    const rules: Array<Record<string, unknown>> = [
+      {
+        id: 'default-deny-all',
+        resources: ['**'],
+        editable: false,
+        origin: 'local',
+        layer: 'local',
+      },
+    ];
+    let sandboxRemoved = false;
+    let secretRemoved = false;
+    const runner = createProductionRunner({
+      evidenceRoot: sharedEvidenceRoot,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      process: async (_command, args, options = {}) => {
+        if (args[0] === 'create')
+          return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+        if (args[0] === 'policy' && args[1] === 'allow') {
+          const sandbox = args[args.indexOf('--sandbox') + 1];
+          const resource = args[args.length - 1];
+          rules.push({
+            id: `${sandbox}-${resource}`,
+            resources: [resource],
+            sandbox_id: sandbox,
+            editable: true,
+            origin: 'local',
+            layer: 'local',
+          });
+          return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+        }
+        if (args[0] === 'policy' && args[1] === 'ls') {
+          return {
+            exitCode: 0,
+            stdout: options.captureStdout === true ? JSON.stringify({ rules }) + '\n' : '',
+            timedOut: false,
+            truncated: false,
+          };
+        }
+        if (args[0] === 'policy' && args[1] === 'rm') {
+          return { exitCode: 1, stdout: '', timedOut: false, truncated: false };
+        }
+        if (args[0] === 'rm' && args[1] === '--force') {
+          sandboxRemoved = true;
+          return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+        }
+        if (args[0] === 'secret' && args[1] === 'rm') {
+          secretRemoved = true;
+          return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+        }
+        await writeEvidenceFixture(args, options, resultLine);
+        return {
+          exitCode: 0,
+          stdout: args.includes('rev-parse')
+            ? `${baseSha}\n${headSha}\n`
+            : args.includes('session')
+              ? '[{"id":"cleanup-failure-session"}]\n'
+              : args.includes('export')
+                ? '{"session":"cleanup-failure-session","full":true}\n'
+                : options.captureStdout === true
+                  ? `${resultLine}\n`
+                  : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
+    });
+    const submitted = await runner.handle(
+      new Request('http://runner/jobs', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer runner-test-token',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          ...runnerJobFields,
+          runId: 'run-93-policy-removal-failure',
+          attempt: 1,
+          repositoryUrl: 'https://github.com/acme/reviewed.git',
+          baseSha,
+          headSha,
+        }),
+      }),
+    );
+    const { id } = (await submitted.json()) as { id: string };
+    await expect(waitForTerminal(runner, id)).resolves.toMatchObject({
+      status: 'failed',
+      failure: { reason: 'cleanup' },
+      sandbox: { cleanup: 'failed' },
+    });
+    expect(sandboxRemoved).toBe(true);
+    expect(secretRemoved).toBe(true);
+  });
+
+  it('fails cleanup when a read-only policy rule remains attached after Sandbox removal', async () => {
+    const baseSha = '1111111111111111111111111111111111111111';
+    const headSha = '2222222222222222222222222222222222222222';
+    const resultLine = JSON.stringify({
+      type: 'text',
+      part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'No findings' }) },
+    });
+    const rules: Array<Record<string, unknown>> = [
+      {
+        id: 'default-deny-all',
+        resources: ['**'],
+        editable: false,
+        origin: 'local',
+        layer: 'local',
+      },
+    ];
+    let postDestroyIncludedInactive = false;
+    const runner = createProductionRunner({
+      evidenceRoot: sharedEvidenceRoot,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      process: async (_command, args, options = {}) => {
+        if (args[0] === 'create')
+          return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+        if (args[0] === 'policy' && args[1] === 'allow') {
+          const sandbox = args[args.indexOf('--sandbox') + 1];
+          const resource = args[args.length - 1];
+          rules.push({
+            id: `${sandbox}-${resource}`,
+            resources: [resource],
+            sandbox_id: sandbox,
+            editable: true,
+            origin: 'local',
+            layer: 'local',
+          });
+          return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+        }
+        if (args[0] === 'policy' && args[1] === 'ls') {
+          if (!args.includes('--source'))
+            postDestroyIncludedInactive = args.includes('--include-inactive');
+          const visibleRules = args.includes('--include-inactive')
+            ? rules
+            : rules.filter((rule) => rule.id !== 'kit-after-rm');
+          return {
+            exitCode: 0,
+            stdout:
+              options.captureStdout === true ? JSON.stringify({ rules: visibleRules }) + '\n' : '',
+            timedOut: false,
+            truncated: false,
+          };
+        }
+        if (args[0] === 'policy' && args[1] === 'rm') {
+          const ruleId = args[args.indexOf('--id') + 1];
+          const index = rules.findIndex((rule) => rule.id === ruleId);
+          if (index >= 0) rules.splice(index, 1);
+          return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+        }
+        if (args[0] === 'rm' && args[1] === '--force') {
+          const sandbox = args[2];
+          rules.push({
+            id: 'kit-after-rm',
+            resources: ['**'],
+            sandbox_id: sandbox,
+            editable: false,
+            origin: 'kit',
+            layer: 'kit',
+          });
+          return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+        }
+        await writeEvidenceFixture(args, options, resultLine);
+        return {
+          exitCode: 0,
+          stdout: args.includes('rev-parse')
+            ? `${baseSha}\n${headSha}\n`
+            : args.includes('session')
+              ? '[{"id":"orphan-session"}]\n'
+              : args.includes('export')
+                ? '{"session":"orphan-session","full":true}\n'
+                : options.captureStdout === true
+                  ? `${resultLine}\n`
+                  : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
+    });
+    const submitted = await runner.handle(
+      new Request('http://runner/jobs', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer runner-test-token',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          ...runnerJobFields,
+          runId: 'run-93-policy-orphan',
+          attempt: 1,
+          repositoryUrl: 'https://github.com/acme/reviewed.git',
+          baseSha,
+          headSha,
+        }),
+      }),
+    );
+    const { id } = (await submitted.json()) as { id: string };
+    const terminal = await waitForTerminal(runner, id);
+    expect(terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'cleanup' },
+      sandbox: { cleanup: 'failed' },
+    });
+    expect(rules).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'kit-after-rm',
+          sandbox_id: expect.stringContaining('compte-rendu-'),
+        }),
+      ]),
+    );
+    expect(postDestroyIncludedInactive).toBe(true);
+  });
+
+  it('removes a rule recorded before an initial policy lookup failure', async () => {
+    const baseSha = '1111111111111111111111111111111111111111';
+    const headSha = '2222222222222222222222222222222222222222';
+    const resultLine = JSON.stringify({
+      type: 'text',
+      part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'unused' }) },
+    });
+    const rules: Array<Record<string, unknown>> = [
+      {
+        id: 'default-deny-all',
+        resources: ['**'],
+        editable: false,
+        origin: 'local',
+        layer: 'local',
+      },
+    ];
+    let policyLists = 0;
+    const runner = createProductionRunner({
+      evidenceRoot: sharedEvidenceRoot,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      process: async (_command, args, options = {}) => {
+        if (args[0] === 'policy' && args[1] === 'allow') {
+          const sandbox = args[args.indexOf('--sandbox') + 1];
+          const resource = args[args.length - 1];
+          rules.push({
+            id: `${sandbox}-${resource}`,
+            resources: [resource],
+            sandbox_id: sandbox,
+            editable: true,
+            origin: 'local',
+            layer: 'local',
+          });
+          return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+        }
+        if (args[0] === 'policy' && args[1] === 'ls') {
+          if (options.captureStdout !== true) {
+            return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+          }
+          policyLists += 1;
+          if (policyLists === 1) {
+            return { exitCode: 1, stdout: '', timedOut: false, truncated: false };
+          }
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({ rules }) + '\n',
+            timedOut: false,
+            truncated: false,
+          };
+        }
+        if (args[0] === 'policy' && args[1] === 'rm') {
+          const ruleId = args[args.indexOf('--id') + 1];
+          const index = rules.findIndex((rule) => rule.id === ruleId);
+          if (index >= 0) rules.splice(index, 1);
+          return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+        }
+        await writeEvidenceFixture(args, options, resultLine);
+        return {
+          exitCode: 0,
+          stdout: args.includes('rev-parse')
+            ? `${baseSha}\n${headSha}\n`
+            : args.includes('session')
+              ? '[{"id":"lookup-failure-session"}]\n'
+              : args.includes('export')
+                ? '{"session":"lookup-failure-session","full":true}\n'
+                : options.captureStdout === true
+                  ? `${resultLine}\n`
+                  : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
+    });
+    const submitted = await runner.handle(
+      new Request('http://runner/jobs', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer runner-test-token',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          ...runnerJobFields,
+          runId: 'run-93-policy-lookup-failure',
+          attempt: 1,
+          repositoryUrl: 'https://github.com/acme/reviewed.git',
+          baseSha,
+          headSha,
+        }),
+      }),
+    );
+    const { id } = (await submitted.json()) as { id: string };
+    await expect(waitForTerminal(runner, id)).resolves.toMatchObject({
+      status: 'failed',
+      failure: { reason: 'agent' },
+      sandbox: { cleanup: 'destroyed' },
+    });
+    expect(rules).toEqual([
+      {
+        id: 'default-deny-all',
+        resources: ['**'],
+        editable: false,
+        origin: 'local',
+        layer: 'local',
+      },
+    ]);
+  });
+
+  it('does not remove a replacement rule when a recorded policy ID disappears', async () => {
+    const baseSha = '1111111111111111111111111111111111111111';
+    const headSha = '2222222222222222222222222222222222222222';
+    const resultLine = JSON.stringify({
+      type: 'text',
+      part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'No findings' }) },
+    });
+    const sandboxRules: Array<Record<string, unknown>> = [
+      {
+        id: 'default-deny-all',
+        resources: ['**'],
+        editable: false,
+        origin: 'local',
+        layer: 'local',
+      },
+    ];
+    let setupLookups = 0;
+    let replacementRemoved = false;
+    let sandboxRemoved = false;
+    let secretRemoved = false;
+    const runner = createProductionRunner({
+      evidenceRoot: sharedEvidenceRoot,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      process: async (_command, args, options = {}) => {
+        if (args[0] === 'create')
+          return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+        if (args[0] === 'policy' && args[1] === 'allow') {
+          const sandbox = args[args.indexOf('--sandbox') + 1];
+          const resource = args[args.length - 1];
+          sandboxRules.push({
+            id: `${sandbox}-${resource}`,
+            resources: [resource],
+            sandbox_id: sandbox,
+            editable: true,
+            origin: 'local',
+            layer: 'local',
+          });
+          return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+        }
+        if (args[0] === 'policy' && args[1] === 'ls') {
+          if (options.captureStdout !== true) {
+            return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+          }
+          if (setupLookups < 2) {
+            setupLookups += 1;
+          } else if (!sandboxRules.some((rule) => rule.id === 'replacement-model')) {
+            const modelIndex = sandboxRules.findIndex((rule) =>
+              String(rule.id).endsWith('-opencode.ai:443'),
+            );
+            const modelRule = sandboxRules[modelIndex];
+            sandboxRules.splice(modelIndex, 1);
+            sandboxRules.push({
+              ...modelRule,
+              id: 'replacement-model',
+            });
+          }
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({ rules: sandboxRules }) + '\n',
+            timedOut: false,
+            truncated: false,
+          };
+        }
+        if (args[0] === 'policy' && args[1] === 'rm') {
+          const ruleId = args[args.indexOf('--id') + 1];
+          if (ruleId === 'replacement-model') replacementRemoved = true;
+          const index = sandboxRules.findIndex((rule) => rule.id === ruleId);
+          if (index >= 0) sandboxRules.splice(index, 1);
+          return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+        }
+        if (args[0] === 'rm' && args[1] === '--force') {
+          sandboxRemoved = true;
+          return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+        }
+        if (args[0] === 'secret' && args[1] === 'rm') {
+          secretRemoved = true;
+          return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+        }
+        await writeEvidenceFixture(args, options, resultLine);
+        return {
+          exitCode: 0,
+          stdout: args.includes('rev-parse')
+            ? `${baseSha}\n${headSha}\n`
+            : args.includes('session')
+              ? '[{"id":"replacement-session"}]\n'
+              : args.includes('export')
+                ? '{"session":"replacement-session","full":true}\n'
+                : options.captureStdout === true
+                  ? `${resultLine}\n`
+                  : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
+    });
+    const submitted = await runner.handle(
+      new Request('http://runner/jobs', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer runner-test-token',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          ...runnerJobFields,
+          runId: 'run-93-policy-replacement',
+          attempt: 1,
+          repositoryUrl: 'https://github.com/acme/reviewed.git',
+          baseSha,
+          headSha,
+        }),
+      }),
+    );
+    const { id } = (await submitted.json()) as { id: string };
+    await expect(waitForTerminal(runner, id)).resolves.toMatchObject({
+      status: 'failed',
+      failure: { reason: 'cleanup' },
+      sandbox: { cleanup: 'failed' },
+    });
+    expect(replacementRemoved).toBe(false);
+    expect(sandboxRemoved).toBe(true);
+    expect(secretRemoved).toBe(true);
+    expect(sandboxRules).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: 'replacement-model' })]),
+    );
+  });
+
   it('returns a durable evidence archive before destroying a successful Sandbox', async () => {
     const evidenceRoot = await mkdtemp(`${tmpdir()}/compte-rendu-evidence-`);
     const baseSha = '1111111111111111111111111111111111111111';
