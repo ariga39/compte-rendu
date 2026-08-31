@@ -108,7 +108,329 @@ const waitForTerminal = async (runner: ReturnType<typeof createRunner>, jobId: s
   throw new Error('Runner Job did not reach a terminal state');
 };
 
+const runAgentScenario = async (scenario: {
+  runId: string;
+  output: string;
+  exitCode?: number;
+  timedOut?: boolean;
+  truncated?: boolean;
+  stderrTruncated?: boolean;
+  cleanupFailure?: boolean;
+}) => {
+  const baseSha = '1111111111111111111111111111111111111111';
+  const headSha = '2222222222222222222222222222222222222222';
+  const runner = createRunner({
+    evidenceRoot: sharedEvidenceRoot,
+    authToken: 'runner-test-token',
+    modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+    process: async (_command, args, options = {}) => {
+      await writeEvidenceFixture(args, options, scenario.output);
+      const isAgent = args[0] === 'exec' && args.includes('--agent');
+      return {
+        exitCode: isAgent
+          ? (scenario.exitCode ?? 0)
+          : scenario.cleanupFailure && args[0] === 'policy' && args[1] === 'rm'
+            ? 1
+            : 0,
+        stdout: args.includes('rev-parse')
+          ? `${baseSha}\n${headSha}\n`
+          : args.includes('session')
+            ? '[{"id":"scenario-session"}]\n'
+            : args.includes('export')
+              ? ''
+              : options.captureStdout === true
+                ? `${scenario.output}\n`
+                : '',
+        stderrTruncated: isAgent ? scenario.stderrTruncated : undefined,
+        timedOut: isAgent ? (scenario.timedOut ?? false) : false,
+        truncated: isAgent ? (scenario.truncated ?? false) : false,
+      };
+    },
+  });
+  const submitted = await runner.handle(
+    new Request('http://runner/jobs', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer runner-test-token',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        ...runnerJobFields,
+        runId: scenario.runId,
+        attempt: 1,
+        repositoryUrl: 'https://github.com/acme/reviewed.git',
+        baseSha,
+        headSha,
+      }),
+    }),
+  );
+  const { id } = (await submitted.json()) as { id: string };
+  const terminal = await waitForTerminal(runner, id);
+  const manifest = JSON.parse(
+    await readFile(
+      join(sharedEvidenceRoot, terminal.evidenceId as string, 'manifest.json'),
+      'utf8',
+    ),
+  );
+  return { terminal, manifest };
+};
+
 describe('Runner Job HTTP interface', () => {
+  it('reports a process-exit cause without exposing agent content', async () => {
+    const baseSha = '1111111111111111111111111111111111111111';
+    const headSha = '2222222222222222222222222222222222222222';
+    const resultLine = JSON.stringify({
+      type: 'text',
+      part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'unused' }) },
+    });
+    const runner = createRunner({
+      evidenceRoot: sharedEvidenceRoot,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      process: async (_command, args, options = {}) => {
+        await writeEvidenceFixture(args, options, resultLine);
+        return {
+          exitCode: args[0] === 'exec' && args.includes('--agent') ? 7 : 0,
+          stdout: args.includes('rev-parse')
+            ? `${baseSha}\n${headSha}\n`
+            : args.includes('session')
+              ? '[{"id":"process-exit-session"}]\n'
+              : args.includes('export')
+                ? '{"session":"process-exit-session","full":true}\n'
+                : options.captureStdout === true
+                  ? `${resultLine}\n`
+                  : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
+    });
+    const submitted = await runner.handle(
+      new Request('http://runner/jobs', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer runner-test-token',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          ...runnerJobFields,
+          runId: 'run-90-process-exit',
+          attempt: 1,
+          repositoryUrl: 'https://github.com/acme/reviewed.git',
+          baseSha,
+          headSha,
+        }),
+      }),
+    );
+    const { id } = (await submitted.json()) as { id: string };
+    const terminal = await waitForTerminal(runner, id);
+
+    expect(terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'invalid-output', cause: 'process-exit' },
+      evidence: { status: 'complete' },
+    });
+    const manifest = JSON.parse(
+      await readFile(
+        join(sharedEvidenceRoot, terminal.evidenceId as string, 'manifest.json'),
+        'utf8',
+      ),
+    );
+    expect(manifest).toMatchObject({
+      execution: { status: 'failed', reason: 'invalid-output', cause: 'process-exit' },
+      terminal: { status: 'failed', reason: 'invalid-output', cause: 'process-exit' },
+    });
+    expect(JSON.stringify(terminal)).not.toContain(resultLine);
+  });
+
+  it('reports a timeout cause while preserving the timeout reason', async () => {
+    const { terminal, manifest } = await runAgentScenario({
+      runId: 'run-90-timeout',
+      output: JSON.stringify({
+        type: 'text',
+        part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'unused' }) },
+      }),
+      exitCode: 1,
+      timedOut: true,
+    });
+
+    expect(terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'timeout', cause: 'timeout' },
+      evidence: { status: 'complete' },
+    });
+    expect(manifest).toMatchObject({
+      execution: { status: 'failed', reason: 'timeout', cause: 'timeout' },
+      terminal: { status: 'failed', reason: 'timeout', cause: 'timeout' },
+    });
+  });
+
+  it('reports an output-truncated cause for capture overflow', async () => {
+    const { terminal, manifest } = await runAgentScenario({
+      runId: 'run-90-output-truncated',
+      output: JSON.stringify({
+        type: 'text',
+        part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'unused' }) },
+      }),
+      truncated: true,
+    });
+
+    expect(terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'invalid-output', cause: 'output-truncated' },
+    });
+    expect(manifest).toMatchObject({
+      execution: { status: 'failed', reason: 'invalid-output', cause: 'output-truncated' },
+      terminal: { status: 'failed', reason: 'invalid-output', cause: 'output-truncated' },
+    });
+  });
+
+  it('reports output-truncated when the parser rejects oversized stdout', async () => {
+    const { terminal, manifest } = await runAgentScenario({
+      runId: 'run-90-oversized-stdout',
+      output: 'x'.repeat(8 * 1024 * 1024 + 1),
+    });
+
+    expect(terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'invalid-output', cause: 'output-truncated' },
+    });
+    expect(manifest).toMatchObject({
+      execution: { status: 'failed', reason: 'invalid-output', cause: 'output-truncated' },
+      terminal: { status: 'failed', reason: 'invalid-output', cause: 'output-truncated' },
+    });
+  });
+
+  it('does not treat stderr capture truncation alone as invalid output', async () => {
+    const { terminal, manifest } = await runAgentScenario({
+      runId: 'run-90-stderr-truncated-only',
+      output: JSON.stringify({
+        type: 'text',
+        part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'No findings' }) },
+      }),
+      stderrTruncated: true,
+    });
+
+    expect(terminal).toMatchObject({
+      status: 'succeeded',
+      evidence: { status: 'complete' },
+    });
+    expect(terminal).not.toHaveProperty('failure');
+    expect(manifest).toMatchObject({
+      execution: { status: 'succeeded', validation: 'valid-review-result' },
+      terminal: { status: 'succeeded' },
+    });
+    expect(manifest.terminal).not.toHaveProperty('cause');
+  });
+
+  it('reports a malformed-jsonl cause for invalid agent event lines', async () => {
+    const { terminal, manifest } = await runAgentScenario({
+      runId: 'run-90-malformed-jsonl',
+      output: 'not-jsonl',
+    });
+
+    expect(terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'invalid-output', cause: 'malformed-jsonl' },
+    });
+    expect(manifest).toMatchObject({
+      execution: { status: 'failed', reason: 'invalid-output', cause: 'malformed-jsonl' },
+      terminal: { status: 'failed', reason: 'invalid-output', cause: 'malformed-jsonl' },
+    });
+  });
+
+  it('reports an agent-error cause for an explicit agent error event', async () => {
+    const { terminal, manifest } = await runAgentScenario({
+      runId: 'run-90-agent-error',
+      output: JSON.stringify({ type: 'error' }),
+    });
+
+    expect(terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'invalid-output', cause: 'agent-error' },
+    });
+    expect(manifest).toMatchObject({
+      execution: { status: 'failed', reason: 'invalid-output', cause: 'agent-error' },
+      terminal: { status: 'failed', reason: 'invalid-output', cause: 'agent-error' },
+    });
+  });
+
+  it('reports zero-results when no event contains a schema-valid result', async () => {
+    const { terminal, manifest } = await runAgentScenario({
+      runId: 'run-90-zero-results',
+      output: JSON.stringify({ type: 'step-start' }),
+    });
+
+    expect(terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'invalid-output', cause: 'zero-results' },
+    });
+    expect(manifest).toMatchObject({
+      execution: { status: 'failed', reason: 'invalid-output', cause: 'zero-results' },
+      terminal: { status: 'failed', reason: 'invalid-output', cause: 'zero-results' },
+    });
+  });
+
+  it('reports multiple-results when more than one event contains a schema-valid result', async () => {
+    const resultEvent = JSON.stringify({
+      type: 'text',
+      part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'No findings' }) },
+    });
+    const { terminal, manifest } = await runAgentScenario({
+      runId: 'run-90-multiple-results',
+      output: `${resultEvent}\n${resultEvent}`,
+    });
+
+    expect(terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'invalid-output', cause: 'multiple-results' },
+    });
+    expect(manifest).toMatchObject({
+      execution: { status: 'failed', reason: 'invalid-output', cause: 'multiple-results' },
+      terminal: { status: 'failed', reason: 'invalid-output', cause: 'multiple-results' },
+    });
+  });
+
+  it('reports result-schema-failure when a result event fails the output schema', async () => {
+    const { terminal, manifest } = await runAgentScenario({
+      runId: 'run-90-result-schema-failure',
+      output: JSON.stringify({
+        type: 'text',
+        part: {
+          type: 'text',
+          text: JSON.stringify({ findings: [], summary: 42 }),
+        },
+      }),
+    });
+
+    expect(terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'invalid-output', cause: 'result-schema-failure' },
+    });
+    expect(manifest).toMatchObject({
+      execution: { status: 'failed', reason: 'invalid-output', cause: 'result-schema-failure' },
+      terminal: { status: 'failed', reason: 'invalid-output', cause: 'result-schema-failure' },
+    });
+  });
+
+  it('preserves the execution cause when cleanup also fails', async () => {
+    const { terminal, manifest } = await runAgentScenario({
+      runId: 'run-90-cause-through-cleanup',
+      output: 'not-jsonl',
+      cleanupFailure: true,
+    });
+
+    expect(terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'cleanup', cause: 'malformed-jsonl' },
+      sandbox: { cleanup: 'failed' },
+    });
+    expect(manifest).toMatchObject({
+      execution: { status: 'failed', reason: 'cleanup', cause: 'malformed-jsonl' },
+      terminal: { status: 'failed', reason: 'cleanup', cause: 'malformed-jsonl' },
+    });
+  });
+
   it('removes only each job-owned network rules for jobs sharing resources', async () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
@@ -2080,11 +2402,13 @@ describe('Runner Job HTTP interface', () => {
     await expect(
       readFile(join(archive, 'opencode-export-delete-session.json'), 'utf8'),
     ).resolves.toContain('delete-session');
-    expect(JSON.parse(await readFile(join(archive, 'manifest.json'), 'utf8'))).toMatchObject({
+    const manifest = JSON.parse(await readFile(join(archive, 'manifest.json'), 'utf8'));
+    expect(manifest).toMatchObject({
       complete: true,
       execution: { status: 'aborted' },
       cleanup: { status: 'destroyed' },
     });
+    expect(manifest.terminal).not.toHaveProperty('cause');
   });
 
   it('rejects error events, multiple valid candidates, and oversized output', async () => {
