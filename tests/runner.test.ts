@@ -4,6 +4,12 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createRunner, type RunnerProcessResult } from '../apps/runner/src/runner';
 
+const runnerJobFields = {
+  repositoryName: 'acme/reviewed',
+  pullRequestNumber: 42,
+  repositoryReadToken: 'github-read-token',
+};
+
 const waitForTerminal = async (runner: ReturnType<typeof createRunner>, jobId: string) => {
   for (let attempt = 0; attempt < 50; attempt += 1) {
     const response = await runner.handle(
@@ -23,7 +29,7 @@ describe('Runner Job HTTP interface', () => {
     const events: unknown[] = [];
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
-    const checkoutToken = 'checkout-token-must-not-appear';
+    const repositoryReadToken = 'checkout-token-must-not-appear';
     const resolverCommand = 'secret-resolver --token resolver-secret';
     const runner = createRunner({
       authToken: 'runner-test-token',
@@ -37,7 +43,7 @@ describe('Runner Job HTTP interface', () => {
         if (args[0] === 'create') {
           return {
             exitCode: 1,
-            stderr: `mkfs.ext4: command not found ${checkoutToken} ${resolverCommand}`,
+            stderr: `mkfs.ext4: command not found ${repositoryReadToken} ${resolverCommand}`,
             stdout: '',
             timedOut: false,
             truncated: false,
@@ -69,12 +75,13 @@ describe('Runner Job HTTP interface', () => {
           'content-type': 'application/json',
         },
         body: JSON.stringify({
+          ...runnerJobFields,
           runId: 'run-72-setup-diagnostics',
           attempt: 1,
           repositoryUrl: 'https://github.com/acme/reviewed.git',
           baseSha,
           headSha,
-          checkoutToken,
+          repositoryReadToken,
         }),
       }),
     );
@@ -105,7 +112,7 @@ describe('Runner Job HTTP interface', () => {
       timedOut: false,
       stderr: 'sandbox not found',
     });
-    expect(JSON.stringify(events)).not.toContain(checkoutToken);
+    expect(JSON.stringify(events)).not.toContain(repositoryReadToken);
     expect(JSON.stringify(events)).not.toContain(resolverCommand);
   });
 
@@ -113,8 +120,8 @@ describe('Runner Job HTTP interface', () => {
     const events: Array<Record<string, unknown>> = [];
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
-    const checkoutToken = 'secret-checkout-token';
-    const overflowingStderr = `${'x'.repeat(4080)}${checkoutToken}${'y'.repeat(100)}`;
+    const repositoryReadToken = 'secret-checkout-token';
+    const overflowingStderr = `${'x'.repeat(4080)}${repositoryReadToken}${'y'.repeat(100)}`;
     const runner = createRunner({
       authToken: 'runner-test-token',
       modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
@@ -151,12 +158,13 @@ describe('Runner Job HTTP interface', () => {
           'content-type': 'application/json',
         },
         body: JSON.stringify({
+          ...runnerJobFields,
           runId: 'run-72-redaction-bound',
           attempt: 1,
           repositoryUrl: 'https://github.com/acme/reviewed.git',
           baseSha,
           headSha,
-          checkoutToken,
+          repositoryReadToken,
         }),
       }),
     );
@@ -178,7 +186,7 @@ describe('Runner Job HTTP interface', () => {
         stderr: `${'x'.repeat(4080)}[redacted]${'y'.repeat(6)}`,
       }),
     );
-    expect(JSON.stringify(events)).not.toContain(checkoutToken);
+    expect(JSON.stringify(events)).not.toContain(repositoryReadToken);
   });
 
   it('loads the packaged review skill and exact revision through the OpenCode sandbox boundary', async () => {
@@ -189,14 +197,17 @@ describe('Runner Job HTTP interface', () => {
       part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'No findings' }) },
     });
     let createArgs: readonly string[] | undefined;
+    let fetchArgs: readonly string[] | undefined;
     let agentArgs: readonly string[] | undefined;
     let configRootAtSandboxBoundary: string | undefined;
     let skillAtSandboxBoundary: string | undefined;
+    let sandboxEnvironment: NodeJS.ProcessEnv | undefined;
     const process = async (
       _command: string,
       args: readonly string[],
-      options: { readonly captureStdout?: boolean } = {},
+      options: { readonly captureStdout?: boolean; readonly env?: NodeJS.ProcessEnv } = {},
     ): Promise<RunnerProcessResult> => {
+      if (args[0] === 'create') sandboxEnvironment = options.env;
       if (args[0] === 'create') {
         createArgs = args;
         const config = args.find((value) => value.startsWith('XDG_CONFIG_HOME='));
@@ -209,6 +220,7 @@ describe('Runner Job HTTP interface', () => {
           );
         }
       }
+      if (args.includes('fetch')) fetchArgs = args;
       if (args[0] === 'exec') agentArgs = args;
       return {
         exitCode: 0,
@@ -235,12 +247,13 @@ describe('Runner Job HTTP interface', () => {
           'content-type': 'application/json',
         },
         body: JSON.stringify({
+          ...runnerJobFields,
           runId: 'run-67-skill',
           attempt: 1,
           repositoryUrl: 'https://github.com/acme/reviewed.git',
           baseSha,
           headSha,
-          checkoutToken: 'checkout-token-for-test',
+          repositoryReadToken: 'checkout-token-for-test',
         }),
       }),
     );
@@ -252,72 +265,150 @@ describe('Runner Job HTTP interface', () => {
       sandbox: { cleanup: 'destroyed' },
     });
     expect(createArgs).toEqual(expect.arrayContaining(['--clone', '--no-share-skills']));
+    expect(fetchArgs).toEqual(
+      expect.arrayContaining([
+        `+${baseSha}:refs/remotes/origin/review-base`,
+        `+refs/pull/42/head:refs/remotes/origin/review-head`,
+      ]),
+    );
     expect(createArgs).toContain(configRootAtSandboxBoundary);
     expect(createArgs).not.toContain(`${configRootAtSandboxBoundary}:ro`);
     expect(createArgs?.some((value) => value.startsWith('XDG_CONFIG_HOME='))).toBe(true);
     expect(skillAtSandboxBoundary).toContain('name: pr-review');
     expect(skillAtSandboxBoundary).toContain('description:');
+    expect(skillAtSandboxBoundary).toContain('official GitHub CLI');
+    expect(skillAtSandboxBoundary).toContain('current title, body, all commits, issue comments');
+    expect(skillAtSandboxBoundary).toContain(
+      'every review thread plus independently paginated reply',
+    );
+    expect(skillAtSandboxBoundary).toContain('resolved');
+    expect(skillAtSandboxBoundary).toContain('outdated');
+    expect(skillAtSandboxBoundary).toContain('older related issues');
     expect(skillAtSandboxBoundary).not.toContain('```');
     const configContent = createArgs?.find((value) => value.startsWith('OPENCODE_CONFIG_CONTENT='));
     expect(configContent).toBeDefined();
     const config = JSON.parse(configContent!.slice('OPENCODE_CONFIG_CONTENT='.length)) as {
-      agent: { review: { permission: { bash: Record<string, string> } } };
+      agent: { review: { permission: Record<string, unknown> } };
     };
     expect(config).toMatchObject({
       agent: {
         review: {
+          description: 'Pull request reviewer',
           permission: {
-            bash: {
-              '*': 'deny',
-              'git diff': 'allow',
-              'git diff *': 'allow',
-              'git show': 'allow',
-              'git show *': 'allow',
-              'git grep': 'allow',
-              'git grep *': 'allow',
-              'git diff *--output*': 'deny',
-              'git show *--output*': 'deny',
-              'git diff *--no-index*': 'deny',
-              'git diff *>*': 'deny',
-              'git show *>*': 'deny',
-              'git grep *>*': 'deny',
-              'git grep *--open-files-in-pager*': 'deny',
-              'git grep *-O*': 'deny',
-            },
-            edit: 'deny',
-            external_directory: 'deny',
-            skill: { '*': 'deny', 'pr-review': 'allow' },
-            webfetch: 'deny',
+            '*': 'allow',
+            bash: 'allow',
+            edit: 'allow',
+            external_directory: 'allow',
+            skill: 'allow',
+            webfetch: 'allow',
           },
         },
       },
     });
-    const bashRules = Object.keys(config.agent.review.permission.bash);
-    expect(bashRules).toEqual([
-      '*',
-      'git diff',
-      'git diff *',
-      'git show',
-      'git show *',
-      'git grep',
-      'git grep *',
-      'git diff *--output*',
-      'git show *--output*',
-      'git diff *--no-index*',
-      'git diff *>*',
-      'git show *>*',
-      'git grep *>*',
-      'git grep *--open-files-in-pager*',
-      'git grep *-O*',
-    ]);
-    expect(bashRules).not.toContain('git diff*');
-    expect(bashRules).not.toContain('git show*');
-    expect(bashRules).not.toContain('git grep*');
+    expect(sandboxEnvironment?.SSH_AUTH_SOCK).toBeUndefined();
+    expect(sandboxEnvironment?.SSH_AGENT_PID).toBeUndefined();
+    expect(sandboxEnvironment?.GH_TOKEN).toBeUndefined();
+    expect(sandboxEnvironment?.GITHUB_TOKEN).toBeUndefined();
+    expect(agentArgs?.join(' ')).toContain('acme/reviewed');
+    expect(agentArgs?.join(' ')).toContain('pull request #42');
+    expect(agentArgs?.join(' ')).toContain('GH_TOKEN');
     expect(agentArgs?.join(' ')).toContain(baseSha);
     expect(agentArgs?.join(' ')).toContain(headSha);
     await expect(
       readFile(join(configRootAtSandboxBoundary!, 'opencode/skills/pr-review/SKILL.md'), 'utf8'),
     ).rejects.toThrow();
+  });
+
+  it('exposes the per-run GitHub read token only through a scoped Sandbox secret', async () => {
+    const repositoryReadToken = 'github-read-token-must-not-be-an-argument';
+    const baseSha = '1111111111111111111111111111111111111111';
+    const headSha = '2222222222222222222222222222222222222222';
+    const resultLine = JSON.stringify({
+      type: 'text',
+      part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'No findings' }) },
+    });
+    const commands: string[][] = [];
+    const events: unknown[] = [];
+    let resolvedGithubToken: string | undefined;
+    let createArgs: readonly string[] | undefined;
+    const runner = createRunner({
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'model-secret-resolver',
+      log: {
+        record: async (event) => {
+          events.push(event);
+        },
+      },
+      process: async (_command, args, options = {}) => {
+        commands.push([...args]);
+        if (args[0] === 'create') createArgs = args;
+        if (args[0] === 'secret' && args[1] === 'set-custom' && args.includes('api.github.com')) {
+          const command = args[args.indexOf('--command') + 1];
+          if (command?.startsWith('cat '))
+            resolvedGithubToken = await readFile(command.slice(4), 'utf8');
+        }
+        return {
+          exitCode: 0,
+          stdout: args.includes('rev-parse')
+            ? `${baseSha}\n${headSha}\n`
+            : options.captureStdout === true
+              ? `${resultLine}\n`
+              : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
+    });
+
+    const submitted = await runner.handle(
+      new Request('http://runner/jobs', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer runner-test-token',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          repositoryName: 'acme/reviewed',
+          pullRequestNumber: 42,
+          runId: 'run-github-read-secret',
+          attempt: 1,
+          repositoryUrl: 'https://github.com/acme/reviewed.git',
+          baseSha,
+          headSha,
+          repositoryReadToken,
+        }),
+      }),
+    );
+    const { id } = (await submitted.json()) as { id: string };
+
+    await expect(waitForTerminal(runner, id)).resolves.toMatchObject({
+      status: 'succeeded',
+      sandbox: { cleanup: 'destroyed' },
+    });
+    const secret = commands.find(
+      (args) => args[0] === 'secret' && args[1] === 'set-custom' && args.includes('api.github.com'),
+    );
+    expect(secret).toEqual(
+      expect.arrayContaining(['--host', 'api.github.com', '--env', 'GH_TOKEN', '--placeholder']),
+    );
+    expect(
+      commands.some((args) => args[0] === 'policy' && args.includes('api.github.com:443')),
+    ).toBe(true);
+    const githubSecret = commands.find(
+      (args) => args[0] === 'secret' && args[1] === 'set-custom' && args.includes('api.github.com'),
+    );
+    const githubSecretCommand = githubSecret?.[githubSecret.indexOf('--command') + 1] ?? '';
+    expect(githubSecretCommand).not.toBe('');
+    expect(githubSecretCommand).toContain('github-read-token');
+    expect(resolvedGithubToken).toBe(repositoryReadToken);
+    expect(createArgs).toBeDefined();
+    const configRootMount = createArgs
+      ?.find((value) => value.startsWith('XDG_CONFIG_HOME='))
+      ?.slice('XDG_CONFIG_HOME='.length);
+    expect(configRootMount).toBeDefined();
+    expect(githubSecretCommand.replace(/^cat /, '').startsWith(`${configRootMount}/`)).toBe(false);
+    expect(commands.flat().join(' ')).not.toContain(repositoryReadToken);
+    expect(JSON.stringify(events)).not.toContain(repositoryReadToken);
   });
 
   it('runs one authenticated immutable review attempt to a cleaned terminal result', async () => {
@@ -359,12 +450,13 @@ describe('Runner Job HTTP interface', () => {
             'content-type': 'application/json',
           },
           body: JSON.stringify({
+            ...runnerJobFields,
             runId: 'run-64-test',
             attempt: 1,
             repositoryUrl: 'https://github.com/acme/reviewed.git',
             baseSha,
             headSha,
-            checkoutToken: 'checkout-token-for-test',
+            repositoryReadToken: 'checkout-token-for-test',
           }),
         }),
       );
@@ -427,12 +519,13 @@ describe('Runner Job HTTP interface', () => {
           'content-type': 'application/json',
         },
         body: JSON.stringify({
+          ...runnerJobFields,
           runId: 'run-64-invalid-output',
           attempt: 1,
           repositoryUrl: 'https://github.com/acme/reviewed.git',
           baseSha,
           headSha,
-          checkoutToken: 'checkout-token-for-test',
+          repositoryReadToken: 'checkout-token-for-test',
         }),
       }),
     );
@@ -468,12 +561,13 @@ describe('Runner Job HTTP interface', () => {
           'content-type': 'application/json',
         },
         body: JSON.stringify({
+          ...runnerJobFields,
           runId: 'run-64-timeout',
           attempt: 1,
           repositoryUrl: 'https://github.com/acme/reviewed.git',
           baseSha,
           headSha,
-          checkoutToken: 'checkout-token-for-test',
+          repositoryReadToken: 'checkout-token-for-test',
         }),
       }),
     );
@@ -517,12 +611,13 @@ describe('Runner Job HTTP interface', () => {
           'content-type': 'application/json',
         },
         body: JSON.stringify({
+          ...runnerJobFields,
           runId: 'run-64-secret-cleanup-failure',
           attempt: 1,
           repositoryUrl: 'https://github.com/acme/reviewed.git',
           baseSha,
           headSha,
-          checkoutToken: 'checkout-token-for-test',
+          repositoryReadToken: 'checkout-token-for-test',
         }),
       }),
     );
@@ -556,12 +651,13 @@ describe('Runner Job HTTP interface', () => {
           'content-type': 'application/json',
         },
         body: JSON.stringify({
+          ...runnerJobFields,
           runId: 'run-64-idempotency',
           attempt,
           repositoryUrl: 'https://github.com/acme/reviewed.git',
           baseSha: '1111111111111111111111111111111111111111',
           headSha: '2222222222222222222222222222222222222222',
-          checkoutToken: 'checkout-token-for-test',
+          repositoryReadToken: 'checkout-token-for-test',
         }),
       });
 
@@ -603,12 +699,13 @@ describe('Runner Job HTTP interface', () => {
           'content-type': 'application/json',
         },
         body: JSON.stringify({
+          ...runnerJobFields,
           runId: 'run-64-sha-mismatch',
           attempt: 1,
           repositoryUrl: 'https://github.com/acme/reviewed.git',
           baseSha: '1111111111111111111111111111111111111111',
           headSha: '2222222222222222222222222222222222222222',
-          checkoutToken: 'checkout-token-for-test',
+          repositoryReadToken: 'checkout-token-for-test',
         }),
       }),
     );
@@ -644,12 +741,13 @@ describe('Runner Job HTTP interface', () => {
           'content-type': 'application/json',
         },
         body: JSON.stringify({
+          ...runnerJobFields,
           runId: 'run-64-credential-cleanup',
           attempt: 1,
           repositoryUrl: 'https://github.com/acme/reviewed.git',
           baseSha: '1111111111111111111111111111111111111111',
           headSha: '2222222222222222222222222222222222222222',
-          checkoutToken: 'checkout-token-for-test',
+          repositoryReadToken: 'checkout-token-for-test',
         }),
       }),
     );
@@ -700,12 +798,13 @@ describe('Runner Job HTTP interface', () => {
           'content-type': 'application/json',
         },
         body: JSON.stringify({
+          ...runnerJobFields,
           runId: 'run-64-delete-cleanup',
           attempt: 1,
           repositoryUrl: 'https://github.com/acme/reviewed.git',
           baseSha,
           headSha,
-          checkoutToken: 'checkout-token-for-test',
+          repositoryReadToken: 'checkout-token-for-test',
         }),
       }),
     );
@@ -780,12 +879,13 @@ describe('Runner Job HTTP interface', () => {
           'content-type': 'application/json',
         },
         body: JSON.stringify({
+          ...runnerJobFields,
           runId: 'run-64-delete-aborted',
           attempt: 1,
           repositoryUrl: 'https://github.com/acme/reviewed.git',
           baseSha,
           headSha,
-          checkoutToken: 'checkout-token-for-test',
+          repositoryReadToken: 'checkout-token-for-test',
         }),
       }),
     );
@@ -842,12 +942,13 @@ describe('Runner Job HTTP interface', () => {
             'content-type': 'application/json',
           },
           body: JSON.stringify({
+            ...runnerJobFields,
             runId: `run-64-invalid-agent-${index}`,
             attempt: 1,
             repositoryUrl: 'https://github.com/acme/reviewed.git',
             baseSha,
             headSha,
-            checkoutToken: 'checkout-token-for-test',
+            repositoryReadToken: 'checkout-token-for-test',
           }),
         }),
       );

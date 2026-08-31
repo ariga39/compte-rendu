@@ -43,6 +43,60 @@ const decodeBase64UrlJson = (value: string) => {
 };
 
 describe('GitHub App token provider', () => {
+  it('mints a target-repository read token and validates its effective grant', async () => {
+    const keyPair = await globalThis.crypto.subtle.generateKey(
+      {
+        name: 'RSASSA-PKCS1-v1_5',
+        modulusLength: 2048,
+        publicExponent: new Uint8Array([1, 0, 1]),
+        hash: 'SHA-256',
+      },
+      true,
+      ['sign', 'verify'],
+    );
+    const privateKey = pemFromDer(
+      await globalThis.crypto.subtle.exportKey('pkcs8', keyPair.privateKey),
+    );
+    let requestBody: unknown;
+    const expiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+    const provider = createGitHubAppTokenProvider({
+      appId: '1234567',
+      privateKey,
+      crypto: globalThis.crypto,
+      fetch: async (_input, init) => {
+        if (typeof init?.body !== 'string') throw new Error('expected JSON request body');
+        requestBody = JSON.parse(init.body);
+        return new Response(
+          JSON.stringify({
+            token: 'read-token',
+            expires_at: expiresAt,
+            repositories: [{ id: 11, full_name: 'acme/reviewed' }],
+            permissions: {
+              contents: 'read',
+              issues: 'read',
+              pull_requests: 'read',
+              metadata: 'read',
+            },
+          }),
+        );
+      },
+    });
+
+    await expect(provider.getReadInstallationToken(7, 11)).resolves.toEqual({
+      token: 'read-token',
+      expiresAt,
+    });
+    expect(requestBody).toEqual({
+      repository_ids: [11],
+      permissions: {
+        contents: 'read',
+        issues: 'read',
+        pull_requests: 'read',
+        metadata: 'read',
+      },
+    });
+  });
+
   it('exchanges a signed app JWT for an installation token', async () => {
     const keyPair = await globalThis.crypto.subtle.generateKey(
       {

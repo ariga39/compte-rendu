@@ -99,9 +99,11 @@ export const createRunnerJobClient = ({
                 runId: spec.runId,
                 attempt,
                 repositoryUrl: spec.repositoryUrl,
+                repositoryName: spec.repositoryName,
+                pullRequestNumber: spec.pullRequestNumber,
                 baseSha: spec.baseSha,
                 headSha: spec.headSha,
-                checkoutToken: spec.checkoutToken,
+                repositoryReadToken: spec.repositoryReadToken,
               }),
             }),
           );

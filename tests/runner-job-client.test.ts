@@ -4,6 +4,12 @@ import { createRunnerJobClient } from '../apps/core/src/runner-job-client';
 const baseSha = '1111111111111111111111111111111111111111';
 const headSha = '2222222222222222222222222222222222222222';
 
+const runnerSpecFields = {
+  repositoryName: 'acme/reviewed',
+  pullRequestNumber: 42,
+  repositoryReadToken: 'github-read-token',
+};
+
 describe('Runner Job client', () => {
   it('uses the HTTP VPC Service scheme for every Runner Job request', async () => {
     const requests: string[] = [];
@@ -55,11 +61,12 @@ describe('Runner Job client', () => {
 
     await expect(
       runner.runJob({
+        ...runnerSpecFields,
         runId: 'run-http-scheme',
         repositoryUrl: 'https://github.com/acme/reviewed.git',
         baseSha,
         headSha,
-        checkoutToken: 'short-lived-checkout-token',
+        repositoryReadToken: 'short-lived-checkout-token',
       }),
     ).resolves.toMatchObject({ status: 'failed', reason: 'agent', retryable: true });
     expect(requests).toEqual([
@@ -113,11 +120,12 @@ describe('Runner Job client', () => {
 
     await expect(
       runner.runJob({
+        ...runnerSpecFields,
         runId: 'run-lost-post',
         repositoryUrl: 'https://github.com/acme/reviewed.git',
         baseSha,
         headSha,
-        checkoutToken: 'short-lived-checkout-token',
+        repositoryReadToken: 'short-lived-checkout-token',
         maxAttempts: 2,
       }),
     ).resolves.toMatchObject({ status: 'succeeded', attempt: 1 });
@@ -173,11 +181,12 @@ describe('Runner Job client', () => {
     });
 
     const result = await runner.runJob({
+      ...runnerSpecFields,
       runId: 'run-client-1',
       repositoryUrl: 'https://github.com/acme/reviewed.git',
       baseSha,
       headSha,
-      checkoutToken: 'short-lived-checkout-token',
+      repositoryReadToken: 'short-lived-checkout-token',
     });
 
     expect(result).toEqual({
@@ -256,11 +265,12 @@ describe('Runner Job client', () => {
 
     await expect(
       runner.runJob({
+        ...runnerSpecFields,
         runId: 'run-get-lost',
         repositoryUrl: 'https://github.com/acme/reviewed.git',
         baseSha,
         headSha,
-        checkoutToken: 'short-lived-checkout-token',
+        repositoryReadToken: 'short-lived-checkout-token',
         maxAttempts: 2,
       }),
     ).resolves.toMatchObject({ status: 'succeeded', attempt: 2, sandboxId: 'job-fresh' });
@@ -305,11 +315,12 @@ describe('Runner Job client', () => {
 
     await expect(
       runner.runJob({
+        ...runnerSpecFields,
         runId: 'run-delete-loss',
         repositoryUrl: 'https://github.com/acme/reviewed.git',
         baseSha,
         headSha,
-        checkoutToken: 'short-lived-checkout-token',
+        repositoryReadToken: 'short-lived-checkout-token',
         maxAttempts: 2,
       }),
     ).resolves.toMatchObject({ status: 'failed', reason: 'cleanup', retryable: false });
@@ -363,11 +374,12 @@ describe('Runner Job client', () => {
 
     await expect(
       runner.runJob({
+        ...runnerSpecFields,
         runId: 'run-superseded',
         repositoryUrl: 'https://github.com/acme/reviewed.git',
         baseSha,
         headSha,
-        checkoutToken: 'short-lived-checkout-token',
+        repositoryReadToken: 'short-lived-checkout-token',
         shouldAbort: async () => true,
         maxAttempts: 2,
       }),
@@ -423,11 +435,12 @@ describe('Runner Job client', () => {
 
     await expect(
       runner.runJob({
+        ...runnerSpecFields,
         runId: 'run-deadline',
         repositoryUrl: 'https://github.com/acme/reviewed.git',
         baseSha,
         headSha,
-        checkoutToken: 'short-lived-checkout-token',
+        repositoryReadToken: 'short-lived-checkout-token',
       }),
     ).resolves.toMatchObject({ status: 'failed', reason: 'timeout', retryable: false });
     expect(deletes).toBe(1);

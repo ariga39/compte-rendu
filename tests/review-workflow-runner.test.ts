@@ -7,6 +7,20 @@ import { createRunner, type RunnerProcessResult } from '../apps/runner/src/runne
 const baseSha = '1111111111111111111111111111111111111111';
 const headSha = '2222222222222222222222222222222222222222';
 
+const readTokenServices = {
+  getReadInstallationToken: async () => ({
+    token: 'read-token',
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+  }),
+  revokeInstallationToken: async (_token: string) => {},
+};
+
+const runnerSpecFields = {
+  repositoryName: 'acme/reviewed',
+  pullRequestNumber: 42,
+  repositoryReadToken: 'github-read-token',
+};
+
 describe('review Workflow runner tracer', () => {
   it('completes through the real client and Runner HTTP handler before publication', async () => {
     const agentOutput = JSON.stringify({
@@ -55,7 +69,7 @@ describe('review Workflow runner tracer', () => {
       step,
       {
         getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
-        getInstallationToken: async () => 'checkout-token',
+        ...readTokenServices,
         runJob: client.runJob,
         completeReview: async ({ output }) => {
           published = output;
@@ -167,7 +181,7 @@ describe('review Workflow runner tracer', () => {
       step,
       {
         getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
-        getInstallationToken: async () => 'checkout-token',
+        ...readTokenServices,
         runJob: client.runJob,
         completeReview: async ({ output }) => {
           published = output;
@@ -266,11 +280,12 @@ describe('review Workflow runner tracer', () => {
     let result: Awaited<ReturnType<typeof client.runJob>>;
     try {
       result = await client.runJob({
+        ...runnerSpecFields,
         runId: 'run-workflow-runner-get-loss-deadline',
         repositoryUrl: 'https://github.com/acme/reviewed.git',
         baseSha,
         headSha,
-        checkoutToken: 'checkout-token',
+        repositoryReadToken: 'checkout-token',
         maxAttempts: 2,
       });
     } finally {
@@ -364,11 +379,12 @@ describe('review Workflow runner tracer', () => {
     let result: Awaited<ReturnType<typeof client.runJob>>;
     try {
       result = await client.runJob({
+        ...runnerSpecFields,
         runId: 'run-workflow-runner-get-loss-budget-boundary',
         repositoryUrl: 'https://github.com/acme/reviewed.git',
         baseSha,
         headSha,
-        checkoutToken: 'checkout-token',
+        repositoryReadToken: 'checkout-token',
         maxAttempts: 2,
       });
     } finally {

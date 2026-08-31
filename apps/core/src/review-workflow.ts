@@ -40,7 +40,11 @@ export interface ReviewWorkflowDependencies {
     repositoryId: number;
     installationId: number;
   }) => Promise<unknown>;
-  readonly getInstallationToken: (installationId: number) => Promise<string>;
+  readonly getReadInstallationToken: (input: {
+    installationId: number;
+    repositoryId: number;
+  }) => Promise<{ readonly token: string; readonly expiresAt: string }>;
+  readonly revokeInstallationToken: (token: string) => Promise<void>;
   readonly runJob: ReviewRunner['runJob'];
   readonly completeReview: ReviewCoordinator['completeReview'];
   readonly markRunFailed: (input: { runId: string; occurredAt: string }) => Promise<void>;
@@ -140,6 +144,7 @@ export const runReviewWorkflow = async (
   if (decoded === undefined) return 'failed';
 
   let failureReason: WorkflowFailureReason = 'execution_failed';
+  let readToken: string | undefined;
   try {
     const disposition = await step.do(
       'review',
@@ -152,13 +157,25 @@ export const runReviewWorkflow = async (
               installationId: decoded.job.installationId,
             }),
           );
-          const checkoutToken = await dependencies.getInstallationToken(decoded.job.installationId);
+          const repositoryName = new URL(repositoryUrl).pathname
+            .replace(/^\//, '')
+            .replace(/\.git$/, '');
+          if (!/^[^/]+\/[^/]+$/.test(repositoryName)) {
+            throw new Error('Repository identity is invalid');
+          }
+          const readGrant = await dependencies.getReadInstallationToken({
+            installationId: decoded.job.installationId,
+            repositoryId: decoded.job.repositoryId,
+          });
+          readToken = readGrant?.token;
           const result: ReviewRunResult = await dependencies.runJob({
             runId: decoded.runId,
             repositoryUrl,
+            repositoryName,
+            pullRequestNumber: decoded.job.pullRequestNumber,
             baseSha: decoded.job.baseSha,
             headSha: decoded.job.headSha,
-            checkoutToken,
+            repositoryReadToken: readGrant.token,
             maxAttempts: 2,
             shouldAbort:
               dependencies.getRunOutcome === undefined
@@ -189,6 +206,15 @@ export const runReviewWorkflow = async (
           await markFailed(decoded.runId, dependencies);
           await recordFailureReaction(decoded.job, decoded.runId, dependencies);
           return 'failed';
+        } finally {
+          if (readToken !== undefined) {
+            try {
+              await dependencies.revokeInstallationToken(readToken);
+            } catch {
+              // GitHub's one-hour token expiry remains the final fallback.
+            }
+            readToken = undefined;
+          }
         }
       },
     );

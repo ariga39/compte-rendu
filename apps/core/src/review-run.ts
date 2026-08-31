@@ -5,9 +5,11 @@ export { ReviewResult as ReviewRunOutput } from '@compte-rendu/contracts';
 export interface ReviewRunSpec {
   readonly runId: string;
   readonly repositoryUrl: string;
+  readonly repositoryName: string;
+  readonly pullRequestNumber: number;
   readonly baseSha: string;
   readonly headSha: string;
-  readonly checkoutToken: string;
+  readonly repositoryReadToken: string;
   readonly maxAttempts?: number;
   readonly shouldAbort?: () => Promise<boolean>;
 }
