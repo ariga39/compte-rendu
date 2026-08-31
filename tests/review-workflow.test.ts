@@ -161,7 +161,7 @@ describe('Review workflow', () => {
       baseSha: job.baseSha,
       headSha: job.headSha,
       repositoryReadToken: 'read-token',
-      maxAttempts: 2,
+      maxAttempts: 3,
     });
     expect(completedOutput).toEqual({ findings: [], summary: 'No findings' });
     expect(reactions).toEqual([]);

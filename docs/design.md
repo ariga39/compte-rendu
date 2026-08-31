@@ -186,10 +186,12 @@ The Worker-side implementation uses the authenticated private Runner Job HTTP
 interface (`POST /jobs`, `GET /jobs/:id`, and `DELETE /jobs/:id`). A job is one
 immutable review attempt; success is accepted only after the runner reports
 validated output and Docker Sandbox cleanup. Callers do not manage Docker lifecycle.
-The runner gives each attempt one bounded budget covering checkout, agent work,
-and cleanup. The client deadline is shorter than the Workflow step deadline,
-with enough margin for the runner to finish forced cleanup before the client
-aborts.
+The shared review policy gives each Runner attempt a 30-minute agent timeout and
+allows at most three attempts (two retries). Core polls for at most 100 minutes,
+and the enclosing Workflow step timeout is 120 minutes. These are deliberately
+simple finite ceilings for real reviews and hang prevention; retryable terminal
+agent, invalid-output, and confirmed GET-loss cleanup failures retry until the
+three-attempt cap without remaining-budget prediction or admission algebra.
 
 The review Sandbox runs OpenCode fully YOLO inside the microVM: all OpenCode
 tools are allowed without an OpenCode approval prompt or command/tool

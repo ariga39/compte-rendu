@@ -553,7 +553,9 @@ export const createRunner = (options: RunnerOptions = {}) => {
           diagnostic === undefined
             ? processOptions.maxBytes
             : (processOptions.maxBytes ?? MAX_DIAGNOSTIC_STDERR_BYTES),
-        timeoutMs: Math.max(1, Math.min(requestedTimeout, remaining)),
+        timeoutMs: args.includes('--agent')
+          ? requestedTimeout
+          : Math.max(1, Math.min(requestedTimeout, remaining)),
         onChild: (child) => {
           job.child = child;
           processOptions.onChild?.(child);

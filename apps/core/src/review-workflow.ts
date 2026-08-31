@@ -7,6 +7,8 @@ import {
 } from './index';
 import type { ReviewRunResult, ReviewRunner } from './review-run';
 import {
+  REVIEW_MAX_ATTEMPTS,
+  REVIEW_WORKFLOW_TIMEOUT,
   sanitizeOperationalLogEvent,
   type OperationalLog,
   type OperationalLogEvent,
@@ -29,7 +31,7 @@ export interface ReviewWorkflowStep {
     name: string,
     options: {
       readonly retries: { readonly limit: 0; readonly delay: 0 };
-      readonly timeout: '15 minutes';
+      readonly timeout: typeof REVIEW_WORKFLOW_TIMEOUT;
     },
     operation: () => Promise<A>,
   ) => Promise<A>;
@@ -148,7 +150,7 @@ export const runReviewWorkflow = async (
   try {
     const disposition = await step.do(
       'review',
-      { retries: { limit: 0, delay: 0 }, timeout: '15 minutes' },
+      { retries: { limit: 0, delay: 0 }, timeout: REVIEW_WORKFLOW_TIMEOUT },
       async () => {
         try {
           const repositoryUrl = await Schema.decodeUnknownPromise(Schema.NonEmptyString)(
@@ -176,7 +178,7 @@ export const runReviewWorkflow = async (
             baseSha: decoded.job.baseSha,
             headSha: decoded.job.headSha,
             repositoryReadToken: readGrant.token,
-            maxAttempts: 2,
+            maxAttempts: REVIEW_MAX_ATTEMPTS,
             shouldAbort:
               dependencies.getRunOutcome === undefined
                 ? undefined
