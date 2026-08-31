@@ -1651,6 +1651,7 @@ describe('Runner Job HTTP interface', () => {
     expect(skillAtSandboxBoundary).toContain('completion (`pageInfo.hasNextPage` false)');
     expect(skillAtSandboxBoundary).toContain('Re-read the pull request base and');
     expect(skillAtSandboxBoundary).toContain('head OIDs after pagination');
+    expect(skillAtSandboxBoundary).not.toContain('web or repository inspection');
     expect(skillAtSandboxBoundary).not.toContain('```');
     const configContent = createArgs?.find((value) => value.startsWith('OPENCODE_CONFIG_CONTENT='));
     expect(configContent).toBeDefined();
@@ -1685,6 +1686,22 @@ describe('Runner Job HTTP interface', () => {
               'git grep *>*': 'deny',
               'git grep *--open-files-in-pager*': 'deny',
               'git grep *-O*': 'deny',
+              'gh *&*': 'deny',
+              'gh *;*': 'deny',
+              'gh *|*': 'deny',
+              'gh *>*': 'deny',
+              'gh *<*': 'deny',
+              'gh *$(*': 'deny',
+              'gh *`*': 'deny',
+              'gh *\n*': 'deny',
+              'git *&*': 'deny',
+              'git *;*': 'deny',
+              'git *|*': 'deny',
+              'git *>*': 'deny',
+              'git *<*': 'deny',
+              'git *$(*': 'deny',
+              'git *`*': 'deny',
+              'git *\n*': 'deny',
               'npm *': 'deny',
               'pnpm *': 'deny',
               'python *': 'deny',
