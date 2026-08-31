@@ -2,7 +2,7 @@ import { Schema } from 'effect';
 import {
   RunnerJobInput,
   RunnerJobResponse,
-  REVIEW_ATTEMPT_BUDGET_MS,
+  REVIEW_CORE_DEADLINE_MS,
   type RunnerJobResponse as RunnerJobResponseValue,
 } from '@compte-rendu/contracts';
 import type {
@@ -23,7 +23,6 @@ export interface RunnerJobClientOptions {
   readonly deadlineMs?: number;
 }
 
-const CLIENT_BUDGET_MS = 14 * 60 * 1000;
 const MAX_POLL_INTERVAL_MS = 5_000;
 const MAX_POST_RETRIES = 3;
 
@@ -80,7 +79,7 @@ export const createRunnerJobClient = ({
   binding,
   authToken,
   pollIntervalMs = 1_000,
-  deadlineMs = CLIENT_BUDGET_MS,
+  deadlineMs = REVIEW_CORE_DEADLINE_MS,
 }: RunnerJobClientOptions): ReviewRunner => ({
   runJob: async (spec: ReviewRunSpec) => {
     const maxAttempts = Math.max(1, Math.min(spec.maxAttempts ?? 1, 3));
@@ -224,11 +223,7 @@ export const createRunnerJobClient = ({
       }
 
       lastFailure = failed(failureReason(state), attempt, state.id);
-      if (
-        retryAfterLostGet &&
-        attempt < maxAttempts &&
-        Date.now() + REVIEW_ATTEMPT_BUDGET_MS + MAX_POLL_INTERVAL_MS < deadline
-      ) {
+      if ((retryAfterLostGet || lastFailure.retryable) && attempt < maxAttempts) {
         continue;
       }
       if (!lastFailure.retryable) break;

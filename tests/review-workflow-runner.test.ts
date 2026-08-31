@@ -1,7 +1,7 @@
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 import { REVIEW_ATTEMPT_BUDGET_MS } from '../packages/contracts/src';
 import { createRunnerJobClient } from '../apps/core/src/runner-job-client';
 import { runReviewWorkflow, type ReviewWorkflowStep } from '../apps/core/src/review-workflow';
@@ -21,11 +21,6 @@ const readTokenServices = {
   revokeInstallationToken: async (_token: string) => {},
 };
 
-const runnerSpecFields = {
-  repositoryName: 'acme/reviewed',
-  pullRequestNumber: 42,
-  repositoryReadToken: 'github-read-token',
-};
 const evidenceRoot = join(tmpdir(), 'compte-rendu-review-workflow-evidence');
 
 const writeEvidenceFixture = async (
@@ -174,6 +169,94 @@ describe('review Workflow runner tracer', () => {
     expect(published).toEqual({ findings: [], summary: 'No findings' });
   });
 
+  it('reaches a third attempt after two retryable failures with a full attempt budget', async () => {
+    const agentOutput = JSON.stringify({
+      type: 'text',
+      part: {
+        type: 'text',
+        text: JSON.stringify({ findings: [], summary: 'Third attempt succeeds' }),
+      },
+    });
+    let agentRuns = 0;
+    const agentTimeouts: number[] = [];
+    const runner = createRunner({
+      evidenceRoot,
+      authToken: 'runner-tracer-token',
+      modelSecretCommand: 'test-secret-resolver',
+      process: async (_command, args, options = {}) => {
+        await writeEvidenceFixture(args, options, agentOutput);
+        const isAgent = args[0] === 'exec' && args.includes('--agent');
+        if (isAgent) {
+          agentRuns += 1;
+          agentTimeouts.push(options.timeoutMs ?? 0);
+        }
+        return {
+          exitCode: isAgent && agentRuns < 3 ? 1 : 0,
+          stdout: args.includes('rev-parse')
+            ? `${baseSha}\n${headSha}\n`
+            : args.includes('session')
+              ? '[{"id":"third-attempt-session"}]\n'
+              : args.includes('export')
+                ? ''
+                : options.captureStdout === true
+                  ? `${agentOutput}\n`
+                  : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
+    });
+    const posted: number[] = [];
+    const client = createRunnerJobClient({
+      authToken: 'runner-tracer-token',
+      pollIntervalMs: 0,
+      binding: {
+        fetch: async (request) => {
+          if (request.method === 'POST') {
+            posted.push(((await request.clone().json()) as { attempt: number }).attempt);
+          }
+          return runner.handle(request);
+        },
+      },
+    });
+    let published: unknown;
+
+    const disposition = await runReviewWorkflow(
+      {
+        runId: 'run-workflow-runner-third-attempt',
+        job: {
+          repositoryId: 11,
+          pullRequestNumber: 42,
+          installationId: 7,
+          baseSha,
+          headSha,
+          trigger: 'automatic',
+        },
+      },
+      { do: async (_name, _options, operation) => operation() },
+      {
+        getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+        ...readTokenServices,
+        runJob: client.runJob,
+        completeReview: async ({ output }) => {
+          published = output;
+          return 'completed';
+        },
+        markRunFailed: async () => {},
+      },
+    );
+
+    expect(disposition).toBe('completed');
+    expect(published).toEqual({ findings: [], summary: 'Third attempt succeeds' });
+    expect(posted).toEqual([1, 2, 3]);
+    expect(agentRuns).toBe(3);
+    expect(agentTimeouts).toEqual([
+      REVIEW_ATTEMPT_BUDGET_MS,
+      REVIEW_ATTEMPT_BUDGET_MS,
+      REVIEW_ATTEMPT_BUDGET_MS,
+    ]);
+  });
+
   it('retries after a lost GET when the real Runner confirms aborted cleanup', async () => {
     const agentOutput = JSON.stringify({
       type: 'text',
@@ -295,218 +378,5 @@ describe('review Workflow runner tracer', () => {
       { runId: 'run-workflow-runner-get-loss', attempt: 1, baseSha, headSha },
       { runId: 'run-workflow-runner-get-loss', attempt: 2, baseSha, headSha },
     ]);
-  });
-
-  it('does not retry a lost GET when less than a full attempt budget remains', async () => {
-    const agentOutput = JSON.stringify({
-      type: 'text',
-      part: {
-        type: 'text',
-        text: JSON.stringify({ findings: [], summary: 'Unused' }),
-      },
-    });
-    let agentRuns = 0;
-    const initialTime = Date.now();
-    let currentTime = initialTime;
-    const dateNow = vi.spyOn(Date, 'now').mockImplementation(() => currentTime);
-    let agentStarted!: () => void;
-    const firstAgentReady = new Promise<void>((resolve) => {
-      agentStarted = resolve;
-    });
-    let releaseFirstAgent: (() => void) | undefined;
-    const runner = createRunner({
-      evidenceRoot,
-      authToken: 'runner-tracer-token',
-      modelSecretCommand: 'test-secret-resolver',
-      process: async (_command, args, options = {}) => {
-        await writeEvidenceFixture(args, options, agentOutput);
-        if (args[0] === 'exec' && args.includes('--agent')) {
-          agentRuns += 1;
-          if (agentRuns === 1) {
-            agentStarted();
-            return new Promise<RunnerProcessResult>((resolve) => {
-              releaseFirstAgent = () =>
-                resolve({ exitCode: 1, stdout: '', timedOut: false, truncated: false });
-              options.onChild?.({
-                stdout: null,
-                kill: () => {
-                  releaseFirstAgent?.();
-                  return true;
-                },
-                once: () => {},
-              } as never);
-            });
-          }
-          return { exitCode: 0, stdout: `${agentOutput}\n`, timedOut: false, truncated: false };
-        }
-        return {
-          exitCode: 0,
-          stdout: args.includes('rev-parse')
-            ? `${baseSha}\n${headSha}\n`
-            : args.includes('session')
-              ? '[{"id":"workflow-session"}]\n'
-              : '',
-          timedOut: false,
-          truncated: false,
-        };
-      },
-    });
-    const postedAttempts: number[] = [];
-    let lostGet = true;
-    let deletedState: unknown;
-    const client = createRunnerJobClient({
-      authToken: 'runner-tracer-token',
-      pollIntervalMs: 0,
-      deadlineMs: REVIEW_ATTEMPT_BUDGET_MS + 100,
-      binding: {
-        fetch: async (request) => {
-          if (request.method === 'POST') {
-            const body = (await request.clone().json()) as { attempt: number };
-            postedAttempts.push(body.attempt);
-          }
-          const response = await runner.handle(request);
-          if (request.method === 'GET' && lostGet) {
-            lostGet = false;
-            currentTime = initialTime + 200;
-            await firstAgentReady;
-            throw new Error('GET response lost');
-          }
-          if (request.method === 'DELETE') {
-            deletedState = await response.clone().json();
-            await new Promise((resolve) => setTimeout(resolve, 150));
-          }
-          return response;
-        },
-      },
-    });
-
-    let result: Awaited<ReturnType<typeof client.runJob>>;
-    try {
-      result = await client.runJob({
-        ...runnerSpecFields,
-        runId: 'run-workflow-runner-get-loss-deadline',
-        repositoryUrl: 'https://github.com/acme/reviewed.git',
-        baseSha,
-        headSha,
-        repositoryReadToken: 'checkout-token',
-        maxAttempts: 2,
-      });
-    } finally {
-      dateNow.mockRestore();
-    }
-
-    expect(result).toMatchObject({
-      status: 'failed',
-      reason: 'timeout',
-      attempt: 1,
-      retryable: false,
-    });
-    expect(deletedState).toMatchObject({ status: 'aborted', sandbox: { cleanup: 'destroyed' } });
-    expect(postedAttempts).toEqual([1]);
-  });
-
-  it('does not retry a lost GET at the attempt budget boundary without poll margin', async () => {
-    const agentOutput = JSON.stringify({
-      type: 'text',
-      part: {
-        type: 'text',
-        text: JSON.stringify({ findings: [], summary: 'Unused' }),
-      },
-    });
-    let agentRuns = 0;
-    const initialTime = Date.now();
-    let currentTime = initialTime;
-    const dateNow = vi.spyOn(Date, 'now').mockImplementation(() => currentTime);
-    let agentStarted!: () => void;
-    const firstAgentReady = new Promise<void>((resolve) => {
-      agentStarted = resolve;
-    });
-    let releaseFirstAgent: (() => void) | undefined;
-    const runner = createRunner({
-      evidenceRoot,
-      authToken: 'runner-tracer-token',
-      modelSecretCommand: 'test-secret-resolver',
-      process: async (_command, args, options = {}) => {
-        await writeEvidenceFixture(args, options, agentOutput);
-        if (args[0] === 'exec' && args.includes('--agent')) {
-          agentRuns += 1;
-          if (agentRuns === 1) {
-            agentStarted();
-            return new Promise<RunnerProcessResult>((resolve) => {
-              releaseFirstAgent = () =>
-                resolve({ exitCode: 1, stdout: '', timedOut: false, truncated: false });
-              options.onChild?.({
-                stdout: null,
-                kill: () => {
-                  releaseFirstAgent?.();
-                  return true;
-                },
-                once: () => {},
-              } as never);
-            });
-          }
-          return { exitCode: 0, stdout: `${agentOutput}\n`, timedOut: false, truncated: false };
-        }
-        return {
-          exitCode: 0,
-          stdout: args.includes('rev-parse')
-            ? `${baseSha}\n${headSha}\n`
-            : args.includes('session')
-              ? '[{"id":"workflow-session"}]\n'
-              : '',
-          timedOut: false,
-          truncated: false,
-        };
-      },
-    });
-    const postedAttempts: number[] = [];
-    let lostGet = true;
-    let deletedState: unknown;
-    const client = createRunnerJobClient({
-      authToken: 'runner-tracer-token',
-      pollIntervalMs: 0,
-      deadlineMs: REVIEW_ATTEMPT_BUDGET_MS + 5_000,
-      binding: {
-        fetch: async (request) => {
-          if (request.method === 'POST') {
-            const body = (await request.clone().json()) as { attempt: number };
-            postedAttempts.push(body.attempt);
-          }
-          const response = await runner.handle(request);
-          if (request.method === 'GET' && lostGet) {
-            lostGet = false;
-            currentTime = initialTime + 5_000;
-            await firstAgentReady;
-            throw new Error('GET response lost');
-          }
-          if (request.method === 'DELETE') deletedState = await response.clone().json();
-          return response;
-        },
-      },
-    });
-
-    let result: Awaited<ReturnType<typeof client.runJob>>;
-    try {
-      result = await client.runJob({
-        ...runnerSpecFields,
-        runId: 'run-workflow-runner-get-loss-budget-boundary',
-        repositoryUrl: 'https://github.com/acme/reviewed.git',
-        baseSha,
-        headSha,
-        repositoryReadToken: 'checkout-token',
-        maxAttempts: 2,
-      });
-    } finally {
-      dateNow.mockRestore();
-    }
-
-    expect(result).toMatchObject({
-      status: 'failed',
-      reason: 'timeout',
-      attempt: 1,
-      retryable: false,
-    });
-    expect(deletedState).toMatchObject({ status: 'aborted', sandbox: { cleanup: 'destroyed' } });
-    expect(postedAttempts).toEqual([1]);
   });
 });
