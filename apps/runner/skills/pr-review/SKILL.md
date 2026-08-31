@@ -12,11 +12,10 @@ with the proxy-provided `GH_TOKEN` to query that pull request on
 submitted reviews, and every review thread plus independently paginated reply.
 Record each thread's resolved and outdated state and each reply's author and
 association.
-Use `gh pr view PR_NUMBER --repo REPOSITORY --json title,body,author,commits,comments,reviews`
-only for the overview. Require `gh api graphql` for `baseRefOid`, `headRefOid`,
-and every independently cursor-paginated connection and its complete pages;
-do not request those OID fields from `gh pr view`, and do not assume one page
-is complete.
+Use `gh pr view PR_NUMBER --repo REPOSITORY --json title,body,author,baseRefOid,headRefOid,commits,comments,reviews`
+for the overview. Require `gh api graphql` as the authoritative source for
+`baseRefOid`, `headRefOid`, and every independently cursor-paginated connection
+and its complete pages. Do not assume one page is complete.
 Independently cursor-paginate the commits connection, issue comments connection,
 submitted reviews connection, review threads connection, and every thread's
 replies connection. Count the nodes and require every connection to report
