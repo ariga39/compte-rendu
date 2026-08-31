@@ -19,6 +19,7 @@ const MODEL = 'opencode-go/deepseek-v4-flash';
 const MODEL_ENV = 'OPENCODE_API_KEY';
 const MODEL_HOST = 'opencode.ai';
 const MODEL_RESOURCE = `${MODEL_HOST}:443`;
+const SANDBOX_TEMPLATE = 'ghcr.io/ariga39/petit-chiba-opencode:1.18.25-gh2.98.0';
 const SETUP_TIMEOUT_MS = 2 * 60 * 1000;
 const CLEANUP_RESERVE_MS = 60 * 1000;
 const CLEANUP_COMMAND_TIMEOUT_MS = 30 * 1000;
@@ -761,6 +762,8 @@ export const createRunner = (options: RunnerOptions = {}) => {
           'create',
           '--clone',
           '--no-share-skills',
+          '--template',
+          SANDBOX_TEMPLATE,
           '--name',
           job.sandboxName,
           '--cpus',

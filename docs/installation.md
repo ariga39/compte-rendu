@@ -322,6 +322,52 @@ corepack pnpm install --frozen-lockfile
 corepack pnpm --filter @compte-rendu/runner build
 ```
 
+### Offline Sandbox template deployment
+
+The Runner uses the versioned custom template
+`ghcr.io/ariga39/petit-chiba-opencode:1.18.25-gh2.98.0`. When the NUC should
+not pull from a registry, build and transfer the ordinary OCI image from a
+trusted build host, then load it into the NUC's separate Sandbox image store.
+Do not run these commands inside a review Sandbox or as a Runner Job, and do
+not put credentials in the image:
+
+```sh
+docker buildx build \
+  --platform linux/amd64 \
+  --load \
+  --tag ghcr.io/ariga39/petit-chiba-opencode:1.18.25-gh2.98.0 \
+  apps/runner/sandbox-template
+
+docker image save \
+  ghcr.io/ariga39/petit-chiba-opencode:1.18.25-gh2.98.0 \
+  -o petit-chiba-opencode.tar
+```
+
+Transfer `petit-chiba-opencode.tar` to the NUC using the operator's approved
+offline transfer method. On the NUC, load and probe the image before starting
+the Runner:
+
+```sh
+sbx template load /path/to/petit-chiba-opencode.tar
+sbx create \
+  --name petit-chiba-template-probe \
+  --template ghcr.io/ariga39/petit-chiba-opencode:1.18.25-gh2.98.0 \
+  --cpus 4 \
+  --memory 8g \
+  opencode /path/to/non-sensitive-probe-workspace
+sbx exec petit-chiba-template-probe opencode --version
+sbx exec petit-chiba-template-probe gh version
+sbx rm --force petit-chiba-template-probe
+rm /path/to/petit-chiba-opencode.tar
+```
+
+The version probes must report OpenCode `1.18.25` and GitHub CLI `2.98.0`.
+Keep the loaded template for the Runner. A later registry deployment may
+replace the local tag with a fully qualified registry reference plus its
+recorded digest, but registry access and a digest are optional for this
+offline path. Continue with the Runner start below only after the probe and
+cleanup succeed.
+
 The runner listens only on IPv4 loopback port `8080`. Start it on the host that
 also runs the remotely managed Tunnel connector:
 

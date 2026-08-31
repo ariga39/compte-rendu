@@ -265,6 +265,11 @@ describe('Runner Job HTTP interface', () => {
       sandbox: { cleanup: 'destroyed' },
     });
     expect(createArgs).toEqual(expect.arrayContaining(['--clone', '--no-share-skills']));
+    const template = 'ghcr.io/ariga39/petit-chiba-opencode:1.18.25-gh2.98.0';
+    const templateIndex = createArgs?.indexOf(template) ?? -1;
+    const agentIndex = createArgs?.lastIndexOf('opencode') ?? -1;
+    expect(templateIndex).toBeGreaterThanOrEqual(0);
+    expect(templateIndex).toBeLessThan(agentIndex);
     expect(fetchArgs).toEqual(
       expect.arrayContaining([
         `+${baseSha}:refs/remotes/origin/review-base`,
@@ -280,10 +285,12 @@ describe('Runner Job HTTP interface', () => {
     expect(skillAtSandboxBoundary).toContain('current title, body, all commits, issue comments');
     const overviewCommand = skillAtSandboxBoundary?.match(/`gh pr view[^`]+`/)?.[0];
     expect(overviewCommand).toBe(
-      '`gh pr view PR_NUMBER --repo REPOSITORY --json title,body,author,commits,comments,reviews`',
+      '`gh pr view PR_NUMBER --repo REPOSITORY --json title,body,author,baseRefOid,headRefOid,commits,comments,reviews`',
     );
-    expect(overviewCommand).not.toContain('baseRefOid');
-    expect(overviewCommand).not.toContain('headRefOid');
+    expect(skillAtSandboxBoundary).toContain(
+      'Require `gh api graphql` as the authoritative source for',
+    );
+    expect(skillAtSandboxBoundary).toContain('baseRefOid`, `headRefOid`');
     expect(skillAtSandboxBoundary).toContain(
       'every review thread plus independently paginated reply',
     );
