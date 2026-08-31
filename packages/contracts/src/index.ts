@@ -25,6 +25,17 @@ export const ReviewResult = Schema.Struct({
 
 export type ReviewResult = typeof ReviewResult.Type;
 
+export const RunnerFailureCause = Schema.Literals([
+  'process-exit',
+  'timeout',
+  'output-truncated',
+  'malformed-jsonl',
+  'agent-error',
+  'zero-results',
+  'multiple-results',
+  'result-schema-failure',
+]);
+
 export const RunnerJobInput = Schema.Struct({
   runId: Schema.NonEmptyString,
   attempt: Schema.Int,
@@ -61,6 +72,7 @@ export const RunnerJobResponse = Schema.Struct({
         'evidence',
         'cleanup',
       ]),
+      cause: Schema.optional(RunnerFailureCause),
     }),
   ),
 });

@@ -8,6 +8,7 @@ import { DateTime, Effect, Option, Schema } from 'effect';
 import {
   REVIEW_ATTEMPT_BUDGET_MS,
   ReviewResult,
+  RunnerFailureCause,
   RunnerJobInput,
   sanitizeOperationalLogEvent,
   type OperationalLog,
@@ -269,6 +270,7 @@ const runProcess: RunnerProcess = (command, args, options = {}) =>
   });
 
 type RunnerJobState = RunnerJobResponseValue;
+type RunnerFailureCauseValue = typeof RunnerFailureCause.Type;
 
 type RunnerJobInputState = {
   runId: string;
@@ -339,20 +341,31 @@ const readJson = async (request: Request) => {
   }
 };
 
-const parseResult = (stdout: string): Schema.Schema.Type<typeof ReviewResult> | undefined => {
-  if (new TextEncoder().encode(stdout).byteLength > MAX_AGENT_OUTPUT_BYTES) return undefined;
+type ParsedAgentResult = {
+  readonly result?: Schema.Schema.Type<typeof ReviewResult>;
+  readonly cause?: RunnerFailureCauseValue;
+};
+
+const parseResult = (stdout: string): ParsedAgentResult => {
+  if (new TextEncoder().encode(stdout).byteLength > MAX_AGENT_OUTPUT_BYTES) {
+    return { cause: 'output-truncated' };
+  }
   let candidate: Schema.Schema.Type<typeof ReviewResult> | undefined;
   let count = 0;
+  let sawTextEvent = false;
   for (const line of stdout.split(/\r?\n/).filter((value) => value.length > 0)) {
     let event: unknown;
     try {
       event = JSON.parse(line);
     } catch {
-      return undefined;
+      return { cause: 'malformed-jsonl' };
     }
-    if (Option.isSome(Schema.decodeUnknownOption(OpenCodeErrorEvent)(event))) return undefined;
+    if (Option.isSome(Schema.decodeUnknownOption(OpenCodeErrorEvent)(event))) {
+      return { cause: 'agent-error' };
+    }
     const textEvent = Schema.decodeUnknownOption(OpenCodeTextEvent)(event);
     if (Option.isNone(textEvent)) continue;
+    sawTextEvent = true;
     const decoded = Schema.decodeUnknownOption(Schema.fromJsonString(ReviewResult))(
       textEvent.value.part.text,
     );
@@ -361,7 +374,9 @@ const parseResult = (stdout: string): Schema.Schema.Type<typeof ReviewResult> | 
       count += 1;
     }
   }
-  return count === 1 ? candidate : undefined;
+  if (count === 1 && candidate !== undefined) return { result: candidate };
+  if (count > 1) return { cause: 'multiple-results' };
+  return count === 0 ? { cause: sawTextEvent ? 'result-schema-failure' : 'zero-results' } : {};
 };
 
 const sessionIdsFrom = (stdout: string): string[] | undefined => {
@@ -993,6 +1008,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
 
   const execute = async (job: RunnerJob) => {
     let failure: RunnerJobState['failure'];
+    let executionCause: RunnerFailureCauseValue | undefined;
     let result: RunnerJobState['result'];
     let agent: RunnerProcessResult | undefined;
     const evidenceId = job.state.evidenceId ?? job.id;
@@ -1271,14 +1287,25 @@ export const createRunner = (options: RunnerOptions = {}) => {
       }
       if (agent !== undefined && failure === undefined) {
         if (agent.timedOut) {
-          failure = { reason: 'timeout' };
-        } else if (agent.exitCode !== 0 || agent.truncated) {
-          failure = { reason: 'invalid-output' };
+          executionCause = 'timeout';
+          failure = { reason: 'timeout', cause: executionCause };
+        } else if (agent.exitCode !== 0) {
+          executionCause = 'process-exit';
+          failure = { reason: 'invalid-output', cause: executionCause };
+        } else if (agent.truncated) {
+          executionCause = 'output-truncated';
+          failure = { reason: 'invalid-output', cause: executionCause };
         } else {
-          result = parseResult(agent.stdout);
-          if (result === undefined) {
+          const parsed = parseResult(agent.stdout);
+          if (parsed.cause !== undefined) {
+            executionCause = parsed.cause;
+            failure = { reason: 'invalid-output', cause: executionCause };
+          } else if (parsed.result === undefined) {
             failure = { reason: 'invalid-output' };
-          } else if (evidenceReady) {
+          } else {
+            result = parsed.result;
+          }
+          if (result !== undefined && evidenceReady) {
             try {
               await writeFile(
                 join(evidencePath, 'validated-review-result.json'),
@@ -1302,7 +1329,12 @@ export const createRunner = (options: RunnerOptions = {}) => {
       } catch {
         cleaned = false;
       }
-      if (!cleaned) failure = { reason: 'cleanup' };
+      if (!cleaned) {
+        failure = {
+          reason: 'cleanup',
+          ...(executionCause === undefined ? {} : { cause: executionCause }),
+        };
+      }
       let finalStatus: RunnerJobState['status'] =
         job.abortRequested && cleaned ? 'aborted' : failure !== undefined ? 'failed' : 'succeeded';
       let finalFailure = finalStatus === 'failed' ? failure : undefined;
@@ -1342,11 +1374,16 @@ export const createRunner = (options: RunnerOptions = {}) => {
               finalStatus === 'aborted'
                 ? { status: 'aborted', validation: 'not-run' }
                 : finalFailure !== undefined
-                  ? { status: 'failed', reason: finalFailure.reason }
+                  ? {
+                      status: 'failed',
+                      reason: finalFailure.reason,
+                      ...(finalFailure.cause === undefined ? {} : { cause: finalFailure.cause }),
+                    }
                   : { status: 'succeeded', validation: 'valid-review-result' },
             terminal: {
               status: finalStatus,
               ...(finalFailure === undefined ? {} : { reason: finalFailure.reason }),
+              ...(finalFailure?.cause === undefined ? {} : { cause: finalFailure.cause }),
             },
             evidence: { id: evidenceId, status: evidenceStatus },
             complete: evidenceComplete && evidenceFailure === undefined,
