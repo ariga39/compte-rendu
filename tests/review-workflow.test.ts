@@ -17,7 +17,66 @@ const job: ReviewJob = {
   trigger: 'automatic',
 };
 
+const readTokenServices = {
+  getReadInstallationToken: async () => ({
+    token: 'read-token',
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+  }),
+  revokeInstallationToken: async (_token: string) => {},
+};
+
 describe('Review workflow', () => {
+  it('passes a separately minted read token to the Runner and revokes it after terminal cleanup', async () => {
+    let jobSpec: ReviewRunSpec | undefined;
+    const revoked: string[] = [];
+    let fullAuthorityTokenCalls = 0;
+    const legacyTokenDependency = {
+      getInstallationToken: async () => {
+        fullAuthorityTokenCalls += 1;
+        return 'publication-token';
+      },
+    };
+    const dependencies: ReviewWorkflowDependencies = {
+      getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+      ...legacyTokenDependency,
+      getReadInstallationToken: async () => ({
+        token: 'read-token',
+        expiresAt: new Date(Date.now() + 60000).toISOString(),
+      }),
+      revokeInstallationToken: async (token) => {
+        revoked.push(token);
+      },
+      runJob: async (spec) => {
+        jobSpec = spec;
+        return {
+          status: 'succeeded',
+          attempt: 1,
+          sandboxId: 'read-token-run',
+          output: { findings: [], summary: 'No findings' },
+        };
+      },
+      completeReview: async () => 'completed',
+      markRunFailed: async () => {},
+    };
+
+    await expect(
+      runReviewWorkflow(
+        { runId: 'run-read-token', job },
+        { do: async (_name, _options, operation) => operation() },
+        dependencies,
+      ),
+    ).resolves.toBe('completed');
+    expect(jobSpec).toMatchObject({
+      repositoryName: 'acme/reviewed',
+      pullRequestNumber: 42,
+      baseSha: job.baseSha,
+      headSha: job.headSha,
+      repositoryReadToken: 'read-token',
+    });
+    expect(fullAuthorityTokenCalls).toBe(0);
+    expect(revoked).toEqual(['read-token']);
+  });
+
   it('runs immutable review identity and completes the published result', async () => {
     let jobSpec: ReviewRunSpec | undefined;
     let completedOutput: unknown;
@@ -28,7 +87,7 @@ describe('Review workflow', () => {
     };
     const dependencies: ReviewWorkflowDependencies = {
       getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
-      getInstallationToken: async () => 'installation-token',
+      ...readTokenServices,
       runJob: async (spec) => {
         jobSpec = spec;
         await expect(spec.shouldAbort?.()).resolves.toBe(false);
@@ -67,7 +126,7 @@ describe('Review workflow', () => {
       repositoryUrl: 'https://github.com/acme/reviewed.git',
       baseSha: job.baseSha,
       headSha: job.headSha,
-      checkoutToken: 'installation-token',
+      repositoryReadToken: 'read-token',
       maxAttempts: 2,
     });
     expect(completedOutput).toEqual({ findings: [], summary: 'No findings' });
@@ -88,7 +147,7 @@ describe('Review workflow', () => {
     const events: OperationalLogEvent[] = [];
     const dependencies: ReviewWorkflowDependencies = {
       getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
-      getInstallationToken: async () => 'installation-token',
+      ...readTokenServices,
       runJob: async () => ({
         status: 'failed',
         reason: 'agent',
@@ -150,7 +209,7 @@ describe('Review workflow', () => {
     const reactions: unknown[] = [];
     const dependencies: ReviewWorkflowDependencies = {
       getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
-      getInstallationToken: async () => 'installation-token',
+      ...readTokenServices,
       runJob: async () => ({
         status: 'failed',
         reason: 'agent',
@@ -181,7 +240,7 @@ describe('Review workflow', () => {
     const events: OperationalLogEvent[] = [];
     const dependencies: ReviewWorkflowDependencies = {
       getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
-      getInstallationToken: async () => 'installation-token',
+      ...readTokenServices,
       runJob: async () => ({
         status: 'succeeded',
         attempt: 1,
@@ -218,7 +277,7 @@ describe('Review workflow', () => {
     const reactions: unknown[] = [];
     const dependencies: ReviewWorkflowDependencies = {
       getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
-      getInstallationToken: async () => 'installation-token',
+      ...readTokenServices,
       runJob: async () => ({
         status: 'succeeded',
         attempt: 1,
@@ -256,7 +315,7 @@ describe('Review workflow', () => {
     const reactions: unknown[] = [];
     const dependencies: ReviewWorkflowDependencies = {
       getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
-      getInstallationToken: async () => 'installation-token',
+      ...readTokenServices,
       runJob: async () => ({
         status: 'failed',
         reason: 'agent',
@@ -297,7 +356,7 @@ describe('Review workflow', () => {
     const events: OperationalLogEvent[] = [];
     const dependencies: ReviewWorkflowDependencies = {
       getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
-      getInstallationToken: async () => 'installation-token',
+      ...readTokenServices,
       runJob: async () => ({
         status: 'succeeded',
         attempt: 1,

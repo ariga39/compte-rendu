@@ -75,7 +75,9 @@ export class ReviewWorkflow extends WorkflowEntrypoint<
         if (github.getRepositoryUrl === undefined) throw new Error('Repository lookup unavailable');
         return github.getRepositoryUrl(input);
       },
-      getInstallationToken: tokenProvider.getInstallationToken,
+      getReadInstallationToken: ({ installationId, repositoryId }) =>
+        tokenProvider.getReadInstallationToken(installationId, repositoryId),
+      revokeInstallationToken: tokenProvider.revokeInstallationToken,
       runJob: (spec) => runner.runJob(spec),
       completeReview: (input) => coordinator.completeReview(input),
       markRunFailed: (input) => stateStore.markSchedulingFailed(input),

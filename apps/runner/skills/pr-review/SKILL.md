@@ -5,11 +5,25 @@ description: Review an exact pull request diff for high-confidence, actionable d
 
 # Pull request review
 
-Review only the exact base/head revision pair supplied by the caller. Start with
-`git diff --find-renames BASE_SHA HEAD_SHA` and use the head revision as the
-source of truth. Every finding must point to a changed line on the head side.
-Read only the changed code and the call sites, types, configuration, or tests
-needed to establish reachability and impact.
+Review only the exact repository, pull request number, and base/head revision
+pair supplied by the caller. Before inspecting the diff, use the official GitHub CLI
+with the proxy-provided `GH_TOKEN` to query that pull request on
+`api.github.com`: read its current title, body, all commits, issue comments,
+submitted reviews, and every review thread plus independently paginated reply.
+Record each thread's resolved and outdated state and each reply's author and
+association.
+For example, use `gh pr view PR_NUMBER --repo REPOSITORY --json title,body,author,baseRefOid,headRefOid,commits,comments,reviews`
+and `gh api graphql` for the complete review-thread connection and each thread's
+reply pages. Do not assume one page is complete.
+Verify the current base and head OIDs still equal the caller's values. The
+token is a capability, never review evidence: do not print, echo, log, or put
+it in a command argument. You may follow older related issues, pull requests,
+and repository history when useful, but do not change the target revision.
+
+Start with `git diff --find-renames BASE_SHA HEAD_SHA` and use the head revision
+as the source of truth. Every finding must point to a changed line on the head
+side. Read only the changed code and the call sites, types, configuration, or
+tests needed to establish reachability and impact.
 
 Inspect adversarially for concrete correctness, security, permission,
 reliability, CI, performance, and maintainability defects. Keep a candidate
@@ -29,10 +43,10 @@ maintenance failure. Do not report tangents.
 Each finding message must be concise and contain the concrete risk, decisive
 changed-line or changed-behavior evidence, and the smallest practical fix.
 
-Use static inspection only. You may use `git diff`, `git show`, `git grep`,
-`grep`, `rg`, and read files. Do not install dependencies or invoke package
-managers. Do not run builds, tests, hooks, plugins, MCP tools, or repository
-programs. Do not edit files, commit, push, or use the web.
+Use the tools that materially improve the review, including ordinary file
+reads, Git history, GitHub queries, and web or repository inspection when
+useful. Keep the bounded run focused on the target and avoid wasting time or
+changing the checkout; do not publish, commit, or push.
 
 The final response must be exactly one bare JSON object with no Markdown fence,
 prose, or other text:

@@ -29,9 +29,11 @@ export const RunnerJobInput = Schema.Struct({
   runId: Schema.NonEmptyString,
   attempt: Schema.Int,
   repositoryUrl: Schema.NonEmptyString,
+  repositoryName: Schema.NonEmptyString,
+  pullRequestNumber: Schema.Int,
   baseSha: GitHubSha,
   headSha: GitHubSha,
-  checkoutToken: Schema.NonEmptyString,
+  repositoryReadToken: Schema.NonEmptyString,
 });
 
 export const RunnerJobResponse = Schema.Struct({

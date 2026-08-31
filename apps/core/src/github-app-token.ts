@@ -4,6 +4,15 @@ const InstallationTokenResponse = Schema.Struct({
   token: Schema.NonEmptyString,
 });
 
+const ReadInstallationTokenResponse = Schema.Struct({
+  token: Schema.NonEmptyString,
+  expires_at: Schema.NonEmptyString,
+  repositories: Schema.Array(Schema.Struct({ id: Schema.Int })),
+  permissions: Schema.Record(Schema.String, Schema.String),
+});
+
+const readPermissions = ['contents', 'issues', 'pull_requests', 'metadata'] as const;
+
 const base64Url = (bytes: Uint8Array): string => {
   let binary = '';
   for (const byte of bytes) binary += String.fromCharCode(byte);
@@ -87,6 +96,11 @@ export interface GitHubAppTokenProviderOptions {
 
 export interface GitHubAppTokenProvider {
   readonly getInstallationToken: (installationId: number) => Promise<string>;
+  readonly getReadInstallationToken: (
+    installationId: number,
+    repositoryId: number,
+  ) => Promise<{ readonly token: string; readonly expiresAt: string }>;
+  readonly revokeInstallationToken: (token: string) => Promise<void>;
 }
 
 export const createGitHubAppTokenProvider = (
@@ -112,59 +126,110 @@ export const createGitHubAppTokenProvider = (
     }
   };
 
+  const exchange = async (installationId: number, body?: unknown) => {
+    const appId = Number(options.appId);
+    if (!Number.isSafeInteger(appId) || appId < 1) {
+      throw new Error('GitHub App ID is invalid');
+    }
+    const nowSeconds = Math.floor(
+      (await Effect.runPromise(DateTime.now.pipe(Effect.map(DateTime.toEpochMillis)))) / 1000,
+    );
+    const header = encodedJson({ alg: 'RS256', typ: 'JWT' });
+    const payload = encodedJson({
+      iss: appId,
+      iat: nowSeconds - 60,
+      exp: nowSeconds + 600,
+    });
+    const signingInput = `${header}.${payload}`;
+    let signature: ArrayBuffer;
+    try {
+      signature = await options.crypto.subtle.sign(
+        'RSASSA-PKCS1-v1_5',
+        await getKey(),
+        new TextEncoder().encode(signingInput),
+      );
+    } catch {
+      throw new Error('GitHub App token could not be signed');
+    }
+
+    let response: Response;
+    try {
+      response = await fetcher(`${apiBaseUrl}/app/installations/${installationId}/access_tokens`, {
+        method: 'POST',
+        headers: {
+          accept: 'application/vnd.github+json',
+          authorization: `Bearer ${signingInput}.${base64Url(new Uint8Array(signature))}`,
+          'content-type': 'application/json',
+          'user-agent': 'compte-rendu-core',
+          'x-github-api-version': '2022-11-28',
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+    } catch {
+      throw new Error('GitHub App token exchange failed');
+    }
+    if (!response.ok) throw new Error('GitHub App token exchange failed');
+
+    return response.json();
+  };
+
   return {
     getInstallationToken: async (installationId) => {
-      const appId = Number(options.appId);
-      if (!Number.isSafeInteger(appId) || appId < 1) {
-        throw new Error('GitHub App ID is invalid');
-      }
-      const nowSeconds = Math.floor(
-        (await Effect.runPromise(DateTime.now.pipe(Effect.map(DateTime.toEpochMillis)))) / 1000,
-      );
-      const header = encodedJson({ alg: 'RS256', typ: 'JWT' });
-      const payload = encodedJson({
-        iss: appId,
-        iat: nowSeconds - 60,
-        exp: nowSeconds + 600,
-      });
-      const signingInput = `${header}.${payload}`;
-      let signature: ArrayBuffer;
+      const value = await exchange(installationId);
       try {
-        signature = await options.crypto.subtle.sign(
-          'RSASSA-PKCS1-v1_5',
-          await getKey(),
-          new TextEncoder().encode(signingInput),
-        );
-      } catch {
-        throw new Error('GitHub App token could not be signed');
-      }
-
-      let response: Response;
-      try {
-        response = await fetcher(
-          `${apiBaseUrl}/app/installations/${installationId}/access_tokens`,
-          {
-            method: 'POST',
-            headers: {
-              accept: 'application/vnd.github+json',
-              authorization: `Bearer ${signingInput}.${base64Url(new Uint8Array(signature))}`,
-              'content-type': 'application/json',
-              'user-agent': 'compte-rendu-core',
-              'x-github-api-version': '2022-11-28',
-            },
-          },
-        );
-      } catch {
-        throw new Error('GitHub App token exchange failed');
-      }
-      if (!response.ok) throw new Error('GitHub App token exchange failed');
-
-      try {
-        const value = await response.json();
         return (await Schema.decodeUnknownPromise(InstallationTokenResponse)(value)).token;
       } catch {
         throw new Error('GitHub App token response is invalid');
       }
+    },
+    getReadInstallationToken: async (installationId, repositoryId) => {
+      if (!Number.isSafeInteger(repositoryId) || repositoryId < 1) {
+        throw new Error('GitHub repository ID is invalid');
+      }
+      const value = await exchange(installationId, {
+        repository_ids: [repositoryId],
+        permissions: Object.fromEntries(readPermissions.map((permission) => [permission, 'read'])),
+      });
+      let decoded: typeof ReadInstallationTokenResponse.Type;
+      try {
+        decoded = await Schema.decodeUnknownPromise(ReadInstallationTokenResponse)(value);
+      } catch {
+        throw new Error('GitHub read token response is invalid');
+      }
+      const expiry = Date.parse(decoded.expires_at);
+      const permissions = Object.keys(decoded.permissions);
+      if (
+        !Number.isFinite(expiry) ||
+        expiry <= Date.now() ||
+        decoded.repositories.length !== 1 ||
+        decoded.repositories[0]?.id !== repositoryId ||
+        permissions.length !== readPermissions.length ||
+        readPermissions.some(
+          (permission) =>
+            decoded.permissions[permission] !== 'read' || !permissions.includes(permission),
+        )
+      ) {
+        throw new Error('GitHub read token grant is invalid');
+      }
+      return { token: decoded.token, expiresAt: decoded.expires_at };
+    },
+    revokeInstallationToken: async (token) => {
+      if (token.length === 0) throw new Error('GitHub installation token is invalid');
+      let response: Response;
+      try {
+        response = await fetcher(`${apiBaseUrl}/installation/token`, {
+          method: 'DELETE',
+          headers: {
+            accept: 'application/vnd.github+json',
+            authorization: `Bearer ${token}`,
+            'user-agent': 'compte-rendu-core',
+            'x-github-api-version': '2022-11-28',
+          },
+        });
+      } catch {
+        throw new Error('GitHub installation token revocation failed');
+      }
+      if (!response.ok) throw new Error('GitHub installation token revocation failed');
     },
   };
 };
