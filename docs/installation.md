@@ -44,7 +44,7 @@ templates. From the repository root, render deployment-only sibling configs
 for the chosen instance:
 
 ```sh
-corepack pnpm render:wrangler -- <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>'
+corepack pnpm render:wrangler <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>'
 ```
 
 For example, instance `petit-chiba` produces
@@ -299,7 +299,7 @@ uses the temporary invocation described above.
 3. Render deployment-only configs from the repository root:
 
    ```sh
-   corepack pnpm render:wrangler -- <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>'
+   corepack pnpm render:wrangler <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>'
    ```
 
    This writes `apps/core/wrangler.<INSTANCE_NAME>.jsonc` and
@@ -522,7 +522,7 @@ For a normal compatible release:
 2. If there is a new migration, review it and apply it remotely with the D1
    migration command above. Prefer additive, backward-compatible changes.
 3. Render deployment-only configs again with the same
-   `corepack pnpm render:wrangler -- <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>'`
+   `corepack pnpm render:wrangler <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>'`
    inputs, then deploy using `apps/core/wrangler.<INSTANCE_NAME>.jsonc` and
    `apps/ingress/wrangler.<INSTANCE_NAME>.jsonc`.
 4. Redeliver one controlled GitHub event and inspect the identifier chain.
@@ -548,7 +548,7 @@ that no review is in flight before proceeding.
    deliveries arrive, then delete the App registration if it is no longer
    needed and revoke its private key.
 3. Render deployment-only configs again with the same
-   `corepack pnpm render:wrangler -- <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>'`
+   `corepack pnpm render:wrangler <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>'`
    inputs. Delete the public `<INSTANCE_NAME>-ingress` Worker, then the private
    `<INSTANCE_NAME>-core` Worker, in that order. Do not use `--force`. Verify the
    Workflow, `RUNNER` VPC Service, and service binding are no

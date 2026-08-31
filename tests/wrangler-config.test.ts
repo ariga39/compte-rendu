@@ -104,6 +104,64 @@ const withDeploymentFixture = <T>(callback: (fixture: DeploymentFixture) => T): 
 };
 
 describe('Wrangler deployment tooling', () => {
+  it('renders gitignored configs through the documented root pnpm command', () => {
+    const instanceName = 'package-script-invocation';
+    const outputPaths = {
+      core: resolve(repositoryRoot, 'apps/core', `wrangler.${instanceName}.jsonc`),
+      ingress: resolve(repositoryRoot, 'apps/ingress', `wrangler.${instanceName}.jsonc`),
+    };
+    const documentedCommand = readFileSync(
+      resolve(repositoryRoot, 'docs/installation.md'),
+      'utf8',
+    ).match(/^corepack pnpm render:wrangler.*$/m)?.[0];
+
+    expect(documentedCommand).toBeDefined();
+    expect(existsSync(outputPaths.core)).toBe(false);
+    expect(existsSync(outputPaths.ingress)).toBe(false);
+
+    const rendererArguments = documentedCommand!
+      .replace('corepack pnpm ', '')
+      .replaceAll('<INSTANCE_NAME>', instanceName)
+      .replaceAll('<GITHUB_APP_ID>', githubAppId)
+      .replaceAll('<D1_DATABASE_ID>', d1DatabaseId)
+      .replaceAll('<RUNNER_VPC_SERVICE_ID>', runnerVpcServiceId)
+      .replaceAll('<GITHUB_INSTALLATION_IDS_JSON>', allowedInstallationIds)
+      .split(/\s+/)
+      .map((argument) => argument.replace(/^'(.*)'$/, '$1'));
+
+    try {
+      execFileSync('corepack', ['pnpm', ...rendererArguments], {
+        cwd: repositoryRoot,
+        encoding: 'utf8',
+        stdio: 'pipe',
+      });
+
+      expect(
+        execFileSync(
+          'git',
+          [
+            'check-ignore',
+            '--no-index',
+            `apps/core/wrangler.${instanceName}.jsonc`,
+            `apps/ingress/wrangler.${instanceName}.jsonc`,
+          ],
+          {
+            cwd: repositoryRoot,
+            encoding: 'utf8',
+            stdio: 'pipe',
+          },
+        ),
+      ).toContain(`wrangler.${instanceName}.jsonc`);
+      expect(readFileSync(outputPaths.core, 'utf8')).toContain(`"name": "${instanceName}-core"`);
+      expect(readFileSync(outputPaths.ingress, 'utf8')).toContain(
+        `"ALLOWED_INSTALLATION_IDS": "${allowedInstallationIds}"`,
+      );
+    } finally {
+      rmSync(outputPaths.core, { force: true });
+      rmSync(outputPaths.ingress, { force: true });
+    }
+  });
+
   it('renders independent named deployments through the real CLI', () => {
     withDeploymentFixture(({ run, read }) => {
       run('petit-chiba');
