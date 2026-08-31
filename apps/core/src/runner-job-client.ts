@@ -92,7 +92,7 @@ export const createRunnerJobClient = ({
       for (let retry = 0; retry < MAX_POST_RETRIES && Date.now() < deadline; retry += 1) {
         try {
           const response = await binding.fetch(
-            authorizedRequest('https://runner.internal/jobs', authToken, {
+            authorizedRequest('http://runner.internal/jobs', authToken, {
               method: 'POST',
               headers: { 'content-type': 'application/json' },
               body: JSON.stringify({
@@ -128,7 +128,7 @@ export const createRunnerJobClient = ({
         try {
           const response = await binding.fetch(
             authorizedRequest(
-              `https://runner.internal/jobs/${encodeURIComponent(state.id)}`,
+              `http://runner.internal/jobs/${encodeURIComponent(state.id)}`,
               authToken,
               { method: 'DELETE' },
             ),
@@ -177,7 +177,7 @@ export const createRunnerJobClient = ({
         try {
           const response = await binding.fetch(
             authorizedRequest(
-              `https://runner.internal/jobs/${encodeURIComponent(state.id)}`,
+              `http://runner.internal/jobs/${encodeURIComponent(state.id)}`,
               authToken,
             ),
           );
