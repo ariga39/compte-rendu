@@ -74,50 +74,58 @@ package invocation below; it is the package-run form documented by Cloudflare
 and keeps the repository dependency set unchanged.
 
 ```sh
-corepack pnpm dlx wrangler@latest --version
+corepack pnpm dlx wrangler@4.124.0 --version
 ```
 
-Record and verify the version printed by that command before an installation
-or update. For a repeatable operation, replace `@latest` in the commands
-below with the exact version that was verified. Do not use
+Verify that command reports `4.124.0` before an installation or update. Every
+Wrangler example in this manual uses that exact version. Do not use
 `pnpm exec wrangler`: there is no local Wrangler binary in this repository.
 
 For an interactive operator session, use Wrangler OAuth:
 
 ```sh
-corepack pnpm dlx wrangler@latest login
-corepack pnpm dlx wrangler@latest whoami
+corepack pnpm dlx wrangler@4.124.0 login
+corepack pnpm dlx wrangler@4.124.0 whoami
 ```
 
-`wrangler login` opens an OAuth authorization flow. It is not a custom API
-token permission editor, so there is no hand-selected API-token permission
-list to record for this path. Grant access only to the Cloudflare account
-that owns this deployment, and revoke the local OAuth authorization with
-`wrangler logout` when the operator session should end. See
-[Wrangler commands](https://developers.cloudflare.com/workers/wrangler/commands/).
+`wrangler login` opens an OAuth authorization flow. It uses OAuth scopes, not
+custom API-token permissions. The
+following are separate authorization layers:
 
-For unattended use, create a custom Cloudflare API token scoped to the one
-deployment account. The least account-level write groups needed by this
-repository's create/migrate/deploy sequence are:
+| Operation                                             | Cloudflare account member role                             | Wrangler OAuth scope    | Custom API-token permission                                                                                                                          |
+| ----------------------------------------------------- | ---------------------------------------------------------- | ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Bind an existing VPC Service while deploying a Worker | `Connectivity Directory Bind` (or `Admin`)                 | `connectivity:admin`    | There is no `Connectivity Directory: Bind` token permission. The token must be issued by a member with the role and include `Workers Scripts Write`. |
+| Provision, update, or delete a VPC Service            | `Connectivity Directory Admin`                             | `connectivity:admin`    | There is no `Connectivity Directory: Admin` token permission; a custom token must be issued by a member with the Admin role.                         |
+| Deploy Workers, bindings, secrets, and triggers       | The issuing member must also be authorized for the account | `workers_scripts:write` | `Workers Scripts Write`; add `D1 Edit` for D1 create/migrate operations.                                                                             |
+| Tail Worker logs                                      | Account access for the issuing member                      | `workers_tail:read`     | Optional `Workers Tail Read`; not needed for installation or deployment.                                                                             |
 
-| Account permission           | Why it is needed                                                                                                               |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| Workers Scripts: Edit        | Deploy both Workers and their configured service binding, Workflow, VPC Service binding, secret versions, and Worker triggers. |
-| D1: Edit                     | Create the D1 database and apply its migrations.                                                                               |
-| Connectivity Directory: Bind | Bind the pre-created private Runner VPC Service.                                                                               |
+Wrangler 4.124.0's normal/default OAuth grant currently includes
+`connectivity:admin`. That is an OAuth scope in the Wrangler grant, not the
+Cloudflare account member role and not a custom API-token permission; the
+member-role and token rules above still apply independently.
 
-Select the single Cloudflare account as the token resource. No zone resource
-or zone permission is needed: ingress uses `workers_dev`, not a zone route.
-Do not add KV, R2, Pages, DNS, Workers Routes, or administrative permissions
-for this repository. `Workers Tail: Read` is an optional addition only when
-the operator chooses to use the troubleshooting `wrangler tail` command; it
-is not needed to create, migrate, or deploy this product. The permission names
-and account/zone scope
-model are maintained in Cloudflare's
-[API token permission catalog](https://developers.cloudflare.com/fundamentals/api/reference/permissions/).
-Cloudflare's
-[GitHub Actions authentication guidance](https://developers.cloudflare.com/workers/ci-cd/external-cicd/github-actions/)
-also shows the account-scoped custom-token pattern for Workers deployment.
+The member role `Connectivity Directory Bind` is sufficient for attaching an
+existing VPC Service; Admin is required for VPC Service provisioning and
+deletion. Wrangler OAuth uses the broader `connectivity:admin` scope for both
+operations. Do not describe either member role as a custom token permission.
+Select the single deployment account as the
+token resource; no zone, DNS, Access, KV, R2, Pages, or Workers Routes
+permission is needed for this product. See Cloudflare's
+[VPC Service roles](https://developers.cloudflare.com/workers-vpc/configuration/vpc-services/#required-roles),
+[OAuth scopes](https://github.com/cloudflare/workers-sdk/blob/wrangler%404.124.0/packages/workers-auth/src/core/scopes.ts),
+and [API-token permission catalog](https://developers.cloudflare.com/fundamentals/api/reference/permissions/).
+
+Tunnel administration is a separate operation. Wrangler 4.124.0 requires a
+separate Tunnel-capable custom API token for Tunnel administration; do not rely
+on the deployment OAuth session. Use the account-level **Cloudflare Tunnel >
+Edit** token permission for Wrangler's Tunnel commands. Direct documented API
+calls may instead use one of the documented `Cloudflare One Connectors Write`,
+`Cloudflare One Connector: cloudflared Write`, or `Cloudflare Tunnel Write`
+permissions. Keep this token out of the repository and Wrangler configuration.
+Expose this separate Tunnel-capable API token only while running the pinned Tunnel
+commands or the documented token-retrieval API in the section below. Unset it
+before returning to deployment OAuth or the deployment custom token for VPC
+Service, D1, Worker, secret, or log operations.
 
 API-token lifetime is an operator choice, not a repository setting. Choose a
 finite TTL, store the token only in the operator's protected credential
@@ -136,12 +144,87 @@ read -rsp 'Cloudflare API token: ' CR_CLOUDFLARE_API_TOKEN
 printf '\n'
 export CLOUDFLARE_API_TOKEN="$CR_CLOUDFLARE_API_TOKEN"
 unset CR_CLOUDFLARE_API_TOKEN
-corepack pnpm dlx wrangler@latest whoami
+corepack pnpm dlx wrangler@4.124.0 whoami
 unset CLOUDFLARE_API_TOKEN
 ```
 
 Do not print the variable, commit it, put it in a repository `.env` file, or
 leave it in a shared shell transcript.
+
+### Workers VPC Tunnel and service lifecycle
+
+Wrangler's Tunnel command group is experimental in 4.124.0. With the
+separate Tunnel-capable API token available to Wrangler, create and inspect
+the remotely managed Tunnel with these exact commands:
+
+```sh
+corepack pnpm dlx wrangler@4.124.0 tunnel create <TUNNEL_NAME>
+corepack pnpm dlx wrangler@4.124.0 tunnel list
+corepack pnpm dlx wrangler@4.124.0 tunnel info <TUNNEL_ID>
+corepack pnpm dlx wrangler@4.124.0 tunnel delete <TUNNEL_ID>
+```
+
+There is no `wrangler tunnel token` command. Retrieve the connector token
+from the Dashboard's **Add a replica** action, or use Cloudflare's documented
+API from a protected operator shell:
+
+```sh
+curl --request GET \
+  "https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/cfd_tunnel/<TUNNEL_ID>/token" \
+  --header "Authorization: Bearer <TUNNEL_API_TOKEN>"
+```
+
+The connector token is a secret: anyone who obtains it can run another
+replica of the Tunnel. Store it only in protected host secret management and
+rotate it if exposed. Do not put it in this repository, a Wrangler config, or
+an issue/comment.
+
+Install `cloudflared` 2025.7.0 or later (latest is recommended). The
+connector uses QUIC; leave its protocol at `auto` or set it to `quic`, and
+allow outbound UDP port 7844 from the connector host. Install it as a
+persistent service rather than relying on an interactive shell:
+
+```sh
+cloudflared --version
+sudo cloudflared service install '<TUNNEL_CONNECTOR_TOKEN>'
+sudo systemctl enable --now cloudflared
+sudo systemctl is-active cloudflared
+```
+
+Before creating the VPC Service or deploying a Worker binding, require both
+`systemctl is-active cloudflared` and a **Healthy/Connected** connector status
+in the Cloudflare Dashboard for `<TUNNEL_ID>`. Workers VPC uses persistent
+outbound connections and creates no public hostname, DNS record, Access
+application, or inbound-firewall dependency. Do not add public Tunnel ingress
+for this private Runner path.
+
+Create, inspect, list, and delete the fixed plaintext HTTP VPC Service with
+the exact commands below. Create it only after the Tunnel and healthy
+connector exist:
+
+```sh
+corepack pnpm dlx wrangler@4.124.0 vpc service create <RUNNER_SERVICE_NAME> \
+  --type http \
+  --tunnel-id <TUNNEL_ID> \
+  --ipv4 127.0.0.1 \
+  --http-port 8080
+corepack pnpm dlx wrangler@4.124.0 vpc service get <VPC_SERVICE_ID>
+corepack pnpm dlx wrangler@4.124.0 vpc service list
+corepack pnpm dlx wrangler@4.124.0 vpc service delete <VPC_SERVICE_ID>
+```
+
+The create response supplies `<VPC_SERVICE_ID>` for the generated core
+Worker's `vpc_services[].service_id` binding. The target is the Runner's
+plaintext loopback listener at `127.0.0.1:8080`. Core must call
+`http://runner.internal/jobs/...`: `https` selects TLS on the final origin hop,
+which this plaintext Runner does not provide. The `runner.internal` host is a
+binding host, not public DNS, and the configured VPC Service port remains 8080.
+
+Keep the resource order explicit: `Tunnel → connector → VPC Service → Worker
+binding`. Cleanup reverses it: `Worker deletion/unbind → VPC Service deletion
+→ connector stop/uninstall → Tunnel deletion`. A VPC Service must not point at
+a deleted Tunnel, and a deployed Worker must not retain a binding to a deleted
+VPC Service.
 
 ### GitHub App permissions and installation
 
@@ -248,30 +331,38 @@ RUNNER_AUTH_TOKEN='<runner-application-token>' \
 corepack pnpm --filter @compte-rendu/runner start
 ```
 
-Create the remotely managed Tunnel in Cloudflare, install its connector on
-this host, and start the connector with the token shown by Cloudflare:
+Create the remotely managed Tunnel first with the pinned `tunnel create`
+command above, and retain its returned `<TUNNEL_ID>`. Retrieve its connector
+token from the Dashboard's **Add a replica** action or the documented API
+above. Install the connector persistently on this host:
 
 ```sh
-cloudflared tunnel run --token '<TUNNEL_CONNECTOR_TOKEN>'
+cloudflared --version
+sudo cloudflared service install '<TUNNEL_CONNECTOR_TOKEN>'
+sudo systemctl enable --now cloudflared
+sudo systemctl is-active cloudflared
 ```
 
-Register the runner's fixed HTTP target through the Tunnel and retain only the
-returned VPC Service UUID for the renderer:
+Use `cloudflared` 2025.7.0 or later, with protocol `auto` or `quic`, and allow
+outbound UDP port 7844. Before continuing, require the local service to be
+active and the Dashboard to show a **Healthy/Connected** connector for the
+exact `<TUNNEL_ID>`. Only then register the Runner's fixed HTTP target and
+retain the returned VPC Service UUID for the renderer:
 
 ```sh
-corepack pnpm dlx wrangler@latest vpc service create <RUNNER_SERVICE_NAME> \
+corepack pnpm dlx wrangler@4.124.0 vpc service create <RUNNER_SERVICE_NAME> \
   --type http \
   --tunnel-id <TUNNEL_ID> \
   --ipv4 127.0.0.1 \
   --http-port 8080
 ```
 
-Pass that UUID to `render:wrangler` as `<RUNNER_VPC_SERVICE_ID>`. Set the same
-bearer value in `RUNNER_AUTH_TOKEN` on the runner host and the core Worker
-secret; the model resolver command and token stay on the runner host.
+Pass that UUID to `render:wrangler` as `<RUNNER_VPC_SERVICE_ID>`. Set the
+same bearer value in `RUNNER_AUTH_TOKEN` on the runner host and the core
+Worker secret; the model resolver command and token stay on the runner host.
 
 The VPC Service UUID is deployment data and does not belong in the tracked
-template. Also enable a `workers.dev` subdomain for the public ingress URL; see
+template. Also enable a `workers.dev` subdomain for the public ingress URL. See
 [workers.dev setup](https://developers.cloudflare.com/workers/configuration/routing/workers-dev/).
 
 Run these commands from the repository root. Every `wrangler` command below
@@ -289,7 +380,7 @@ uses the temporary invocation described above.
 2. Choose an instance name and create the D1 database with its derived name:
 
    ```sh
-   corepack pnpm dlx wrangler@latest d1 create <INSTANCE_NAME>-review-state
+   corepack pnpm dlx wrangler@4.124.0 d1 create <INSTANCE_NAME>-review-state
    ```
 
    Copy only the returned `database_id` into the renderer command below. Do
@@ -310,14 +401,18 @@ uses the temporary invocation described above.
    generated config, not a guessed database identifier:
 
    ```sh
-   corepack pnpm dlx wrangler@latest d1 migrations list REVIEW_DB --remote --config apps/core/wrangler.<INSTANCE_NAME>.jsonc
-   corepack pnpm dlx wrangler@latest d1 migrations apply REVIEW_DB --remote --config apps/core/wrangler.<INSTANCE_NAME>.jsonc
+   corepack pnpm dlx wrangler@4.124.0 d1 migrations list REVIEW_DB --remote --config apps/core/wrangler.<INSTANCE_NAME>.jsonc
+   corepack pnpm dlx wrangler@4.124.0 d1 migrations apply REVIEW_DB --remote --config apps/core/wrangler.<INSTANCE_NAME>.jsonc
    ```
 
-   The current migration is
-   `apps/core/migrations/0001_review_state.sql`. It creates delivery,
-   approval, run, and finding-fingerprint tables. D1 migration files are
-   versioned and applied in order; see
+   Apply both tracked migrations in order:
+   `apps/core/migrations/0001_review_state.sql` creates the deliveries,
+   approvals, review-runs, and finding-fingerprints tables plus the active-PR
+   index. `apps/core/migrations/0002_allow_manual_retry.sql` rebuilds
+   `review_runs` while preserving its rows, then permits another run for a
+   head after a failed or superseded run by making uniqueness apply only to
+   `scheduled` and `completed` rows; it retains the active-PR index. D1
+   migration files are versioned and applied in order; see
    [D1 migrations](https://developers.cloudflare.com/d1/reference/migrations/).
 
    The generated core config also retains the legacy Durable Object migration
@@ -343,8 +438,8 @@ uses the temporary invocation described above.
    when generating and downloading the key.
 
    ```sh
-   corepack pnpm dlx wrangler@latest secret put GITHUB_APP_PRIVATE_KEY --config apps/core/wrangler.<INSTANCE_NAME>.jsonc
-   corepack pnpm dlx wrangler@latest secret put RUNNER_AUTH_TOKEN --config apps/core/wrangler.<INSTANCE_NAME>.jsonc
+   corepack pnpm dlx wrangler@4.124.0 secret put GITHUB_APP_PRIVATE_KEY --config apps/core/wrangler.<INSTANCE_NAME>.jsonc
+   corepack pnpm dlx wrangler@4.124.0 secret put RUNNER_AUTH_TOKEN --config apps/core/wrangler.<INSTANCE_NAME>.jsonc
    ```
 
    The private key and Runner authentication credential belong only to
@@ -358,7 +453,7 @@ uses the temporary invocation described above.
 6. Deploy the private core Worker first:
 
    ```sh
-   corepack pnpm dlx wrangler@latest deploy --config apps/core/wrangler.<INSTANCE_NAME>.jsonc
+   corepack pnpm dlx wrangler@4.124.0 deploy --config apps/core/wrangler.<INSTANCE_NAME>.jsonc
    ```
 
    Confirm the deployment reports the configured Workflow, `RUNNER` VPC Service,
@@ -369,8 +464,8 @@ uses the temporary invocation described above.
    public ingress second:
 
    ```sh
-   corepack pnpm dlx wrangler@latest secret put WEBHOOK_SECRET --config apps/ingress/wrangler.<INSTANCE_NAME>.jsonc
-   corepack pnpm dlx wrangler@latest deploy --config apps/ingress/wrangler.<INSTANCE_NAME>.jsonc
+   corepack pnpm dlx wrangler@4.124.0 secret put WEBHOOK_SECRET --config apps/ingress/wrangler.<INSTANCE_NAME>.jsonc
+   corepack pnpm dlx wrangler@4.124.0 deploy --config apps/ingress/wrangler.<INSTANCE_NAME>.jsonc
    ```
 
    The `secret put` command itself creates an ingress version; the explicit
@@ -416,9 +511,9 @@ hard-code in the manual.
 
 ## Verification
 
-### Local verification
+### Local checks
 
-The proportionate repository checks are:
+Run the proportionate repository checks against the immutable checkout:
 
 ```sh
 corepack pnpm check
@@ -427,57 +522,56 @@ corepack pnpm build
 git diff --check
 ```
 
-`corepack pnpm test` includes the local workerd tracer. It proves the signed
-eligible webhook crosses the named `CORE` binding, applies the D1 migration,
-records a scheduled delivery/run, and captures the immutable Workflow input.
-It also proves an invalid signature returns HTTP `400`, produces no Workflow
-capture, and leaves no D1 delivery or run. It does **not** prove real
-Cloudflare Workflow retry/deadline behavior, Runner Job/Sandbox lifecycle,
-GitHub delivery, or real model/agent behavior;
-the limits are recorded in [`docs/local-runtime-tracer.md`](local-runtime-tracer.md).
+These checks can prove local behavior such as a signed webhook reaching CORE,
+D1 state changes, Workflow capture, and the relevant public behavior. They do
+not prove real Cloudflare Workflow retry/deadline behavior, the deployed
+Runner service, Docker Sandbox lifecycle, GitHub publication, or model
+usefulness. Green local mechanics alone do not prove that a review is useful;
+use the deployed acceptance gate below for that. See
+[`docs/local-runtime-tracer.md`](local-runtime-tracer.md) for the tracer's
+limits.
 
-### Small deployed E2E set
+### First-deployment acceptance gate
 
-Perform these with a disposable or intentionally chosen installed repository;
-do not paste repository contents or model output into tickets.
+Use exactly one explicitly allowlisted GitHub App installation and one
+intentionally selected real, low-risk pull request in a repository that it
+can access. Do not add a manufactured rejected-installation probe. Before
+triggering the review, record the repository, PR number, exact base SHA, exact
+head SHA, and the single installation ID in the generated config.
 
-1. **Eligible automatic review.** Open a non-draft PR in a private repository,
-   or a same-repository public PR. Confirm the GitHub delivery succeeds, one
-   review is published on the exact head SHA, and the run reaches a terminal
-   state with Sandbox cleanup.
-2. **Signature rejection.** Send a synthetic request directly to
-   `<INGRESS_URL>`; do not use a real GitHub repository payload:
-
-   ```sh
-   curl -i -X POST '<INGRESS_URL>' \
-     -H 'Content-Type: application/json' \
-     -H 'X-GitHub-Event: pull_request' \
-     -H 'X-GitHub-Delivery: <UNIQUE_DELIVERY_ID>' \
-     -H 'X-Hub-Signature-256: sha256=0000000000000000000000000000000000000000000000000000000000000000' \
-     --data '{}'
-   ```
-
-   The body is intentionally minimal and synthetic. Confirm HTTP `400`, then
-   run this read-only D1 query with the same unique ID:
+1. Trigger one eligible review through the real GitHub webhook. Confirm the
+   delivery is accepted and record its `<DELIVERY_ID>` and the resulting
+   `<RUN_ID>`.
+2. Confirm GitHub shows one visible review for that PR and exact `<HEAD_SHA>`
+   with event type `COMMENT`. It must contain useful review content (actionable
+   findings or a clear no-findings summary), and its URL must be retained as
+   `<PR_URL>#pullrequestreview-<REVIEW_ID>`.
+3. Query the deployed D1 binding and require the delivery and run to be
+   terminal and to retain the exact recorded base/head SHAs:
 
    ```sh
-   corepack pnpm dlx wrangler@latest d1 execute REVIEW_DB --remote --config apps/core/wrangler.<INSTANCE_NAME>.jsonc --command "SELECT delivery_id FROM deliveries WHERE delivery_id = '<UNIQUE_DELIVERY_ID>'; SELECT run_id FROM review_runs WHERE delivery_id = '<UNIQUE_DELIVERY_ID>';"
+   corepack pnpm dlx wrangler@4.124.0 d1 execute REVIEW_DB --remote --config apps/core/wrangler.<INSTANCE_NAME>.jsonc --command "SELECT delivery_id, status, base_sha, head_sha FROM deliveries WHERE delivery_id = '<DELIVERY_ID>'; SELECT run_id, status, base_sha, head_sha FROM review_runs WHERE delivery_id = '<DELIVERY_ID>';"
    ```
 
-   Both result sets should be empty: there must be no matching delivery row
-   and no matching `review_runs` row (and therefore no corresponding run). Do
-   not substitute a real webhook payload, repository contents, credentials, or
-   model/session data for this test.
+   The expected terminal state for this successful gate is `completed` for
+   both rows, with the recorded `<BASE_SHA>` and `<HEAD_SHA>` unchanged.
 
-3. **Public fork approval and freshness.** Open/update a public fork PR and
-   confirm it does not run automatically. A maintainer with `write`,
-   `maintain`, or `admin` permission comments exactly `/ai-review`; confirm
-   only that observed head SHA is scheduled. Push a new head and confirm the
-   old run cannot publish against it; a new manual command is required.
+4. Perform a fresh current-head check and require the GitHub PR head to still
+   equal the recorded SHA:
 
-Do not treat a successful local tracer run as evidence for the Sandbox/model
-case in item 1. The deployed test is the only one of these checks that
-exercises the real GitHub App, Workflow, Runner Job/Sandbox, and model path.
+   ```sh
+   gh api repos/<OWNER>/<REPO>/pulls/<PR_NUMBER> --jq '{base: .base.sha, head: .head.sha, url: .html_url}'
+   ```
+
+   Finally, confirm the Runner log reports the Sandbox cleanup as `destroyed`
+   for `<RUN_ID>` and that no Sandbox remains on the host:
+
+   ```sh
+   sbx ls
+   ```
+
+   `sbx ls` must be empty. Do not treat a successful local tracer or a
+   successful HTTP request as evidence that the published review is useful.
 
 ## Operations and troubleshooting
 
@@ -486,8 +580,8 @@ repository contents, diffs, model output, credentials, or session transcripts.
 Use the Cloudflare Worker logs or `wrangler tail` only to correlate identifiers:
 
 ```sh
-corepack pnpm dlx wrangler@latest tail <INSTANCE_NAME>-ingress
-corepack pnpm dlx wrangler@latest tail <INSTANCE_NAME>-core
+corepack pnpm dlx wrangler@4.124.0 tail <INSTANCE_NAME>-ingress
+corepack pnpm dlx wrangler@4.124.0 tail <INSTANCE_NAME>-core
 ```
 
 Use the GitHub delivery page for `deliveryId` and then search logs for the
@@ -550,29 +644,58 @@ that no review is in flight before proceeding.
 3. Render deployment-only configs again with the same
    `corepack pnpm render:wrangler <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>'`
    inputs. Delete the public `<INSTANCE_NAME>-ingress` Worker, then the private
-   `<INSTANCE_NAME>-core` Worker, in that order. Do not use `--force`. Verify the
-   Workflow, `RUNNER` VPC Service, and service binding are no
-   longer deployed with the Workers.
+   `<INSTANCE_NAME>-core` Worker, in that order. Deleting the Workers removes
+   their service and VPC bindings. Do not use `--force`.
 
    ```sh
-   corepack pnpm dlx wrangler@latest delete --config apps/ingress/wrangler.<INSTANCE_NAME>.jsonc
-   corepack pnpm dlx wrangler@latest delete --config apps/core/wrangler.<INSTANCE_NAME>.jsonc
+   corepack pnpm dlx wrangler@4.124.0 delete --config apps/ingress/wrangler.<INSTANCE_NAME>.jsonc
+   corepack pnpm dlx wrangler@4.124.0 delete --config apps/core/wrangler.<INSTANCE_NAME>.jsonc
    ```
 
-4. Retain or export only the minimal D1 state required by the owner. If it is
-   no longer needed, delete `<INSTANCE_NAME>-review-state` only after the Workers
-   are gone and the retention decision is recorded:
+4. Verify the exact VPC Service ID, delete it, and verify that exact ID is
+   absent from both `get` and `list`:
 
    ```sh
-   corepack pnpm dlx wrangler@latest d1 delete <INSTANCE_NAME>-review-state
+   corepack pnpm dlx wrangler@4.124.0 vpc service get <VPC_SERVICE_ID>
+   corepack pnpm dlx wrangler@4.124.0 vpc service list
+   corepack pnpm dlx wrangler@4.124.0 vpc service delete <VPC_SERVICE_ID>
+   corepack pnpm dlx wrangler@4.124.0 vpc service list
+   corepack pnpm dlx wrangler@4.124.0 vpc service get <VPC_SERVICE_ID>  # expect not found
+   ```
+
+5. Stop and uninstall the persistent connector only after the VPC Service is
+   gone:
+
+   ```sh
+   sudo systemctl disable --now cloudflared
+   sudo cloudflared service uninstall
+   ```
+
+6. Verify the exact Tunnel ID, delete it, and verify that exact ID is absent
+   from both `info` and `list`:
+
+   ```sh
+   corepack pnpm dlx wrangler@4.124.0 tunnel info <TUNNEL_ID>
+   corepack pnpm dlx wrangler@4.124.0 tunnel list
+   corepack pnpm dlx wrangler@4.124.0 tunnel delete <TUNNEL_ID>
+   corepack pnpm dlx wrangler@4.124.0 tunnel list
+   corepack pnpm dlx wrangler@4.124.0 tunnel info <TUNNEL_ID>  # expect not found
+   ```
+
+7. Retain or export only the minimal D1 state required by the owner. If it is
+   no longer needed, delete `<INSTANCE_NAME>-review-state` only after the
+   Workers are gone and the retention decision is recorded:
+
+   ```sh
+   corepack pnpm dlx wrangler@4.124.0 d1 delete <INSTANCE_NAME>-review-state
    ```
 
    D1 deletion is irreversible for this deployment's live state; stop and
    confirm the database name at the prompt. Do not delete a different
    database, and never use a broad wildcard or guessed identifier.
 
-5. Revoke the Cloudflare automation token. For interactive access, run
-   `corepack pnpm dlx wrangler@latest logout`.
+8. Revoke the Cloudflare automation token. For interactive access, run
+   `corepack pnpm dlx wrangler@4.124.0 logout`.
 
 GitHub's installation operation and Cloudflare's Wrangler/D1 commands are the
 authoritative references for these external destructive actions:
@@ -588,6 +711,10 @@ and [D1 migrations](https://developers.cloudflare.com/d1/reference/migrations/).
 - [Cloudflare Worker secrets](https://developers.cloudflare.com/workers/configuration/secrets/)
 - [Cloudflare D1 migrations](https://developers.cloudflare.com/d1/reference/migrations/)
 - [Cloudflare Service bindings](https://developers.cloudflare.com/workers/runtime-apis/bindings/service-bindings/)
+- [Workers VPC getting started](https://developers.cloudflare.com/workers-vpc/get-started/)
+- [Workers VPC Service configuration](https://developers.cloudflare.com/workers-vpc/configuration/vpc-services/)
+- [Workers VPC Wrangler commands](https://developers.cloudflare.com/workers-vpc/reference/wrangler-commands/)
+- [Workers VPC Tunnel requirements](https://developers.cloudflare.com/workers-vpc/configuration/tunnel/#create-and-run-tunnel-cloudflared)
 - [GitHub App permission selection](https://docs.github.com/en/apps/creating-github-apps/setting-up-a-github-app/choosing-permissions-for-a-github-app)
 - [GitHub permission-to-endpoint reference](https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps)
 - [GitHub webhook validation](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries)
