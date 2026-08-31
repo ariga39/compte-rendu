@@ -306,6 +306,13 @@ export const createRunner = (options: RunnerOptions = {}) => {
   const modelSecretCommand = options.modelSecretCommand ?? process.env.MODEL_SECRET_COMMAND;
   const executeProcess = options.process ?? runProcess;
   const log = options.log;
+  const strippedSandboxEnvironment = {
+    ...process.env,
+    SSH_AUTH_SOCK: undefined,
+    SSH_AGENT_PID: undefined,
+    GH_TOKEN: undefined,
+    GITHUB_TOKEN: undefined,
+  };
   const jobs = new Map<string, RunnerJob>();
   const jobsByRun = new Map<string, RunnerJob>();
 
@@ -373,15 +380,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
     let result: RunnerProcessResult;
     try {
       const sandboxEnvironment =
-        command === sbxPath
-          ? {
-              ...process.env,
-              SSH_AUTH_SOCK: undefined,
-              SSH_AGENT_PID: undefined,
-              GH_TOKEN: undefined,
-              GITHUB_TOKEN: undefined,
-            }
-          : processOptions.env;
+        command === sbxPath ? strippedSandboxEnvironment : processOptions.env;
       result = await executeProcess(command, args, {
         ...processOptions,
         env: sandboxEnvironment,
@@ -571,6 +570,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       let result: RunnerProcessResult;
       try {
         result = await executeProcess(sbxPath, args, {
+          env: strippedSandboxEnvironment,
           captureStderr: true,
           stderrRedactions: [
             job.diagnosticCheckoutToken,
