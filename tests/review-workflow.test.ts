@@ -159,14 +159,14 @@ describe('Review workflow', () => {
     );
 
     expect(disposition).toBe('completed');
-    expect(workflowTimeout).toBe('240 minutes');
+    expect(workflowTimeout).toBe('40 minutes');
     expect(jobSpec).toMatchObject({
       runId: 'run-workflow-1',
       repositoryUrl: 'https://github.com/acme/reviewed.git',
       baseSha: job.baseSha,
       headSha: job.headSha,
       repositoryReadToken: 'read-token',
-      maxAttempts: 3,
+      maxAttempts: 1,
     });
     expect(completedOutput).toEqual({ findings: [], summary: 'No findings' });
     expect(reactions).toEqual([]);
