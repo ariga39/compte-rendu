@@ -191,6 +191,11 @@ export const runReviewWorkflow = async (
             return 'failed';
           }
 
+          if (readToken !== undefined) {
+            await dependencies.revokeInstallationToken(readToken);
+            readToken = undefined;
+          }
+
           const publication = await dependencies.completeReview({
             runId: decoded.runId,
             output: result.output,

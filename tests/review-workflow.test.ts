@@ -77,6 +77,40 @@ describe('Review workflow', () => {
     expect(revoked).toEqual(['read-token']);
   });
 
+  it('does not publish when read-token revocation fails after Runner success', async () => {
+    let publicationAttempted = false;
+    let revokeAttempts = 0;
+    const dependencies: ReviewWorkflowDependencies = {
+      getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+      ...readTokenServices,
+      revokeInstallationToken: async () => {
+        revokeAttempts += 1;
+        throw new Error('revocation unavailable');
+      },
+      runJob: async () => ({
+        status: 'succeeded',
+        attempt: 1,
+        sandboxId: 'run-revocation-failure',
+        output: { findings: [], summary: 'No findings' },
+      }),
+      completeReview: async () => {
+        publicationAttempted = true;
+        return 'completed';
+      },
+      markRunFailed: async () => {},
+    };
+
+    await expect(
+      runReviewWorkflow(
+        { runId: 'run-revocation-failure', job },
+        { do: async (_name, _options, operation) => operation() },
+        dependencies,
+      ),
+    ).resolves.toBe('failed');
+    expect(publicationAttempted).toBe(false);
+    expect(revokeAttempts).toBeGreaterThan(0);
+  });
+
   it('runs immutable review identity and completes the published result', async () => {
     let jobSpec: ReviewRunSpec | undefined;
     let completedOutput: unknown;

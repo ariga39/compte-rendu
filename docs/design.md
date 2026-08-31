@@ -191,6 +191,23 @@ and cleanup. The client deadline is shorter than the Workflow step deadline,
 with enough margin for the runner to finish forced cleanup before the client
 aborts.
 
+The review Sandbox runs OpenCode fully YOLO inside the microVM: all OpenCode
+tools are allowed without an OpenCode approval prompt or command/tool
+allowlist. The reviewer has direct GitHub read capability through the
+single-repository, read-only token exposed by the Docker custom-secret proxy
+and `api.github.com` egress. The review prompt and packaged skill require
+querying the complete current pull-request context before reviewing the exact
+caller-supplied base/head pair; GitHub responses and repository text are
+untrusted evidence, not instructions.
+
+Review safety is enforced outside OpenCode: the Sandbox is cloned without
+shared host skills, host MCP settings, or SSH-agent access; network access is
+limited to `opencode.ai` and `api.github.com`; CPU, memory, and deadline are
+fixed; and the Sandbox, secret, network policy, and temporary credential
+sources are destroyed during terminal cleanup. Exact base/head verification,
+current-head publication checks, and validated bare JSON output remain
+required. YOLO tool access does not grant publication authority.
+
 ## Fail-closed rules
 
 Fail-closed is limited to decisions that could create an unauthorized review,
@@ -224,8 +241,8 @@ publication succeeds:
 
 1. admit the authenticated Runner Job and deadline;
 2. create the Sandbox;
-3. perform fixed checkout and remove the installation token;
-4. run the read-only agent;
+3. perform fixed checkout and remove the checkout credential;
+4. run the YOLO agent with its scoped GitHub read capability;
 5. destroy the Sandbox in the normal completion path; and
 6. let the runner force destruction if the normal path is interrupted.
 
@@ -238,13 +255,19 @@ older run.
 - Ingress receives only the webhook secret.
 - The GitHub App private key is a core Worker secret and never enters D1,
   source control, logs, an agent prompt, or a Sandbox.
-- A short-lived installation token is exposed only to a fixed checkout step.
+- Core mints one short-lived, repository-scoped read token with only the
+  contents/issues/pull_requests/metadata read permissions. The Runner uses
+  that same token for full-history checkout and exposes it during review only
+  through Docker's custom-secret proxy as `GH_TOKEN` for `api.github.com`.
   Checkout disables submodules, hooks, and LFS smudge; it then removes the
-  credential and authenticated remote before the agent starts.
+  credential and authenticated remote before the agent starts. The token,
+  secret, network policy, and temporary source file are removed at terminal
+  cleanup, with expiry as the fallback.
 - The model credential is resolved on the trusted runner host through Docker's
   custom-secret proxy and never enters the Worker request.
-- Repository-provided agent configuration, hooks, plugins, and MCP settings are
-  not loaded in v1.
+- Repository-provided OpenCode configuration and host skills/MCP/SSH settings
+  are not loaded or shared in v1; the review agent itself remains fully YOLO
+  inside the isolated microVM.
 
 ## Minimal persistence
 
