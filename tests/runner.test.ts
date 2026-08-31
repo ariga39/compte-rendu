@@ -278,12 +278,32 @@ describe('Runner Job HTTP interface', () => {
     expect(skillAtSandboxBoundary).toContain('description:');
     expect(skillAtSandboxBoundary).toContain('official GitHub CLI');
     expect(skillAtSandboxBoundary).toContain('current title, body, all commits, issue comments');
+    const overviewCommand = skillAtSandboxBoundary?.match(/`gh pr view[^`]+`/)?.[0];
+    expect(overviewCommand).toBe(
+      '`gh pr view PR_NUMBER --repo REPOSITORY --json title,body,author,commits,comments,reviews`',
+    );
+    expect(overviewCommand).not.toContain('baseRefOid');
+    expect(overviewCommand).not.toContain('headRefOid');
     expect(skillAtSandboxBoundary).toContain(
       'every review thread plus independently paginated reply',
     );
     expect(skillAtSandboxBoundary).toContain('resolved');
     expect(skillAtSandboxBoundary).toContain('outdated');
     expect(skillAtSandboxBoundary).toContain('older related issues');
+    expect(skillAtSandboxBoundary).toContain(
+      'Independently cursor-paginate the commits connection',
+    );
+    expect(skillAtSandboxBoundary).toContain('issue comments connection');
+    expect(skillAtSandboxBoundary).toContain('submitted reviews connection');
+    expect(skillAtSandboxBoundary).toContain('review threads connection');
+    expect(skillAtSandboxBoundary).toContain("every thread's");
+    expect(skillAtSandboxBoundary).toContain('replies connection');
+    expect(skillAtSandboxBoundary).toContain(
+      'Count the nodes and require every connection to report',
+    );
+    expect(skillAtSandboxBoundary).toContain('completion (`pageInfo.hasNextPage` false)');
+    expect(skillAtSandboxBoundary).toContain('Re-read the pull request base and');
+    expect(skillAtSandboxBoundary).toContain('head OIDs after pagination');
     expect(skillAtSandboxBoundary).not.toContain('```');
     const configContent = createArgs?.find((value) => value.startsWith('OPENCODE_CONFIG_CONTENT='));
     expect(configContent).toBeDefined();
@@ -312,6 +332,8 @@ describe('Runner Job HTTP interface', () => {
     expect(agentArgs?.join(' ')).toContain('acme/reviewed');
     expect(agentArgs?.join(' ')).toContain('pull request #42');
     expect(agentArgs?.join(' ')).toContain('GH_TOKEN');
+    expect(agentArgs?.join(' ')).toContain('independently cursor-paginate');
+    expect(agentArgs?.join(' ')).toContain('after pagination');
     expect(agentArgs?.join(' ')).toContain(baseSha);
     expect(agentArgs?.join(' ')).toContain(headSha);
     await expect(

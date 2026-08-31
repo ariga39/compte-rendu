@@ -23,13 +23,21 @@ The surrounding workflow also skips draft PRs, checks that the triggering actor 
 
 The [pinned OpenCode permissions guidance](https://github.com/anomalyco/opencode/blob/0a5bed2bc2549d988ba969765ec6722615c56e01/packages/web/src/content/docs/permissions.mdx#L68-L91) states: “Granular rules are last-match-wins, so catch-all must precede specific allows.”
 
-### Adaptation recommendations
+### Adaptation recommendations (superseded by issue #86)
+
+The following recommendations record the earlier static-only adaptation. They
+remain source-history facts, but are no longer the product contract: issue #86
+chooses a fully YOLO OpenCode reviewer in an isolated Docker microVM with a
+scoped GitHub read capability.
 
 - Keep the source's adversarial categories as a search checklist, not as output headings; output only defects that survive its confidence gate.
 - Strengthen “caused by this PR” into an exact target contract: inspect only the caller-supplied `baseSha..headSha`, and anchor every finding to a head-side changed line. Necessary call sites, types, configuration, and tests may be read only to validate reachability.
 - Preserve “at most five, severity ordered,” but do not force a finding for every category or invent severity labels unless the product schema supports them.
 - Make every message compact and complete: **risk → evidence/reachability → smallest fix**. Do not emit analysis narration.
-- Keep repository mutation prohibited. For this project's static Sandbox reviewer, also prohibit dependency installation, package-manager use, builds, tests, hooks, plugins, MCP, repository programs, and web access; these extra restrictions are project adaptations, not requirements from `poi`.
+- [Superseded] Keep repository mutation prohibited. The earlier static Sandbox
+  adaptation also prohibited dependency installation, package-manager use,
+  builds, tests, hooks, plugins, MCP, repository programs, and web access;
+  these were project adaptations, not requirements from `poi`.
 - Retain the project's existing bare, schema-valid JSON output contract. The `poi` source specifies finding content but does not require JSON, a particular schema, or head-side line anchoring.
 
 ## Source 2: i-have-adhd skill
@@ -55,17 +63,42 @@ The source also defines session persistence, numbered user task plans, repeated 
 - Do not add interactive next-step prompts, time estimates, progress narration, motivational language, or “ADHD mode” persistence to an autonomous review result.
 - Preserve uncertainty only where evidence is incomplete; otherwise use direct cause/effect wording. If a concern cannot be made concrete and actionable in a short finding, omit it.
 
-## Combined contract for this project
+## Combined contract for this project (historical static-only adaptation; superseded by issue #86)
 
 The dedicated reviewer skill should say, in substance:
 
 1. Load the exact caller-supplied base/head diff and statically inspect changed code plus only the context needed to prove reachability.
 2. Search adversarially, then discard anything not introduced by the diff, not materially reachable, already covered, subjective, duplicate, speculative, or too weak to request a change.
 3. Return zero to five findings ordered by severity; each is anchored to a head-side changed line and says only the concrete risk, decisive evidence, and smallest practical fix.
-4. Do not modify or execute the repository, install dependencies, run package managers/builds/tests/hooks/plugins/MCP, or use the web.
+4. [Superseded] Do not modify or execute the repository, install dependencies,
+   run package managers/builds/tests/hooks/plugins/MCP, or use the web. The
+   current #86 contract permits the YOLO reviewer to use whatever tools
+   materially help inside the isolated microVM.
 5. Emit exactly one bare schema-valid JSON object. Keep its summary and finding messages direct, concise, free of preamble, tangents, recap, and pleasantries.
 
+## Current issue #86 decision
+
+The current product contract runs OpenCode fully YOLO in the isolated Docker
+microVM: there is no OpenCode tool allowlist or approval prompt. The reviewer
+has direct GitHub read capability through the single-repository, read-only
+token available to the Sandbox, and the prompt/skill require complete current
+pull-request context before reviewing the exact base/head pair. Agent output,
+GitHub responses, and repository text are untrusted evidence. Exact SHA
+verification, current-head publication checks, and validated bare JSON output
+remain required.
+
+Security is provided by external boundaries: no sensitive host mounts or host
+skills/MCP/SSH-agent sharing, the scoped token and `api.github.com` network
+policy, the `opencode.ai` network policy, fixed CPU/memory/deadline limits, and
+terminal Sandbox, secret, temporary-source, and network-policy cleanup. YOLO
+tool access does not grant publication authority.
+
 ## Real E2E correction
+
+This section preserves the historical static-only E2E findings. Its
+static-only permission adaptation is superseded by issue #86; the current
+security boundary is the external Sandbox, scoped token, network policy,
+resource/deadline, and cleanup contract.
 
 A real E2E against head `ca436a414763995924cd79412752d63f9f514477` returned a preamble and Markdown-fenced JSON, so the Runner correctly failed it as `invalid-output`; durable local-only evidence was retained outside the repository. It also showed that `git diff/show --output` can write and `git diff --no-index` can read outside the checkout. The correction keeps only `git diff`, `git show`, and `git grep` bash allows, places later-match denies for `git diff*--output*`, `git show*--output*`, and `git diff*--no-index*`, and removes bash `grep`/`rg` allows because native OpenCode grep/read/glob remain available.
 
