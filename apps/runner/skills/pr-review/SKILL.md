@@ -57,9 +57,9 @@ Each finding message must be concise and contain the concrete risk, decisive
 changed-line or changed-behavior evidence, and the smallest practical fix.
 
 Use the tools that materially improve the review, including ordinary file
-reads, Git history, GitHub queries, and web or repository inspection when
-useful. Keep the bounded run focused on the target and avoid wasting time or
-changing the checkout; do not publish, commit, or push.
+reads, Git history, GitHub queries, and repository inspection when useful. Keep
+the bounded run focused on the target and avoid wasting time or changing the
+checkout; do not publish, commit, or push.
 
 The final response must be exactly one bare JSON object with no Markdown fence,
 prose, or other text:
