@@ -27,6 +27,12 @@ token is a capability, never review evidence: do not print, echo, log, or put
 it in a command argument. You may follow older related issues, pull requests,
 and repository history when useful, but do not change the target revision.
 
+This is a static review. Do not execute repository code or modify files. Do not
+install dependencies or invoke package managers, builds, tests, hooks, or other
+repository programs. You may inspect already-present dependency source. Use
+the GitHub CLI for current context, read-only Git history and diff inspection,
+and the native read, grep, and glob tools.
+
 Start with `git diff --find-renames BASE_SHA HEAD_SHA` and use the head revision
 as the source of truth. Every finding must point to a changed line on the head
 side. Read only the changed code and the call sites, types, configuration, or

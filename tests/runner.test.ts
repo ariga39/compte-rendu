@@ -1618,6 +1618,9 @@ describe('Runner Job HTTP interface', () => {
     expect(createArgs?.some((value) => value.startsWith('XDG_CONFIG_HOME='))).toBe(true);
     expect(skillAtSandboxBoundary).toContain('name: pr-review');
     expect(skillAtSandboxBoundary).toContain('description:');
+    expect(skillAtSandboxBoundary).toContain('This is a static review');
+    expect(skillAtSandboxBoundary).toContain('install dependencies');
+    expect(skillAtSandboxBoundary).toContain('Do not execute repository code');
     expect(skillAtSandboxBoundary).toContain('official GitHub CLI');
     expect(skillAtSandboxBoundary).toContain('current title, body, all commits, issue comments');
     const overviewCommand = skillAtSandboxBoundary?.match(/`gh pr view[^`]+`/)?.[0];
@@ -1659,12 +1662,31 @@ describe('Runner Job HTTP interface', () => {
         review: {
           description: 'Pull request reviewer',
           permission: {
-            '*': 'allow',
-            bash: 'allow',
-            edit: 'allow',
+            '*': 'deny',
+            bash: {
+              '*': 'deny',
+              'gh *': 'deny',
+              'gh api graphql *': 'allow',
+              'gh pr view *': 'allow',
+              'git diff*': 'allow',
+              'git grep*': 'allow',
+              'git log*': 'allow',
+              'git show*': 'allow',
+              'git diff*--no-index*': 'deny',
+              'git diff*--output*': 'deny',
+              'git show*--output*': 'deny',
+              'npm *': 'deny',
+              'pnpm *': 'deny',
+              'python *': 'deny',
+              './*': 'deny',
+            },
+            edit: 'deny',
             external_directory: 'allow',
+            glob: 'allow',
+            grep: 'allow',
+            read: 'allow',
             skill: 'allow',
-            webfetch: 'allow',
+            webfetch: 'deny',
           },
         },
       },
