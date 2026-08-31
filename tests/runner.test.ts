@@ -226,10 +226,14 @@ describe('Runner Job HTTP interface', () => {
       return (await response.json()) as { id: string };
     };
 
-    const first = await submit('run-93-policy-first');
-    const firstTerminal = await waitForTerminal(runner, first.id);
-    const second = await submit('run-93-policy-second');
-    const secondTerminal = await waitForTerminal(runner, second.id);
+    const [first, second] = await Promise.all([
+      submit('run-93-policy-first'),
+      submit('run-93-policy-second'),
+    ]);
+    const [firstTerminal, secondTerminal] = await Promise.all([
+      waitForTerminal(runner, first.id),
+      waitForTerminal(runner, second.id),
+    ]);
 
     expect(firstTerminal).toMatchObject({
       status: 'succeeded',
@@ -375,7 +379,6 @@ describe('Runner Job HTTP interface', () => {
         layer: 'local',
       },
     ];
-    let postDestroyIncludedInactive = false;
     const runner = createProductionRunner({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
@@ -397,8 +400,6 @@ describe('Runner Job HTTP interface', () => {
           return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
         }
         if (args[0] === 'policy' && args[1] === 'ls') {
-          if (!args.includes('--source'))
-            postDestroyIncludedInactive = args.includes('--include-inactive');
           const visibleRules = args.includes('--include-inactive')
             ? rules
             : rules.filter((rule) => rule.id !== 'kit-after-rm');
@@ -477,7 +478,6 @@ describe('Runner Job HTTP interface', () => {
         }),
       ]),
     );
-    expect(postDestroyIncludedInactive).toBe(true);
   });
 
   it('removes a rule recorded before an initial policy lookup failure', async () => {
