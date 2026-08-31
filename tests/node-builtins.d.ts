@@ -1,4 +1,13 @@
 declare module 'node:fs' {
+  export interface WriteStream {
+    write(chunk: string | Uint8Array): boolean;
+    end(callback?: () => void): void;
+    on(event: 'error', listener: () => void): this;
+  }
+  export function createWriteStream(
+    path: string,
+    options?: { flags?: string; mode?: number },
+  ): WriteStream;
   export function copyFileSync(source: string, destination: string): void;
   export function existsSync(path: string): boolean;
   export function mkdirSync(path: string, options?: { recursive?: boolean }): string | undefined;
@@ -65,12 +74,22 @@ declare module 'node:crypto' {
 }
 
 declare module 'node:fs/promises' {
+  export interface Dirent {
+    readonly name: string;
+    isDirectory(): boolean;
+    isSymbolicLink(): boolean;
+  }
+  export function chmod(path: string, mode: number): Promise<void>;
   export function mkdir(
     path: string,
-    options?: { recursive?: boolean },
+    options?: { recursive?: boolean; mode?: number },
   ): Promise<string | undefined>;
   export function mkdtemp(prefix: string): Promise<string>;
+  export function readdir(path: string, options: { withFileTypes: true }): Promise<Dirent[]>;
   export function readFile(path: string, encoding: 'utf8'): Promise<string>;
+  export function readFile(path: string): Promise<Buffer>;
+  export function rename(oldPath: string, newPath: string): Promise<void>;
+  export function stat(path: string): Promise<{ readonly mode: number; readonly size: number }>;
   export function rm(
     path: string,
     options?: { force?: boolean; recursive?: boolean },
@@ -83,6 +102,7 @@ declare module 'node:fs/promises' {
 }
 
 declare module 'node:os' {
+  export function homedir(): string;
   export function tmpdir(): string;
 }
 
