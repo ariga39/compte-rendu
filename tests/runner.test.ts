@@ -1,7 +1,7 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 import { createRunner, type RunnerProcessResult } from '../apps/runner/src/runner';
 
 const runnerJobFields = {
@@ -9,6 +9,37 @@ const runnerJobFields = {
   pullRequestNumber: 42,
   repositoryReadToken: 'github-read-token',
 };
+const sharedEvidenceRoot = join(tmpdir(), 'compte-rendu-runner-evidence');
+
+const writeEvidenceFixture = async (
+  args: readonly string[],
+  options: { readonly stdoutFilePath?: string; readonly stderrFilePath?: string },
+  resultLine: string,
+) => {
+  if (args[0] === 'exec' && args.includes('--agent')) {
+    await writeFile(options.stdoutFilePath!, `${resultLine}\n`, { mode: 0o600 });
+    await writeFile(options.stderrFilePath!, 'agent stderr\n', { mode: 0o600 });
+  }
+  if (args[0] === 'exec' && args.includes('export')) {
+    await writeFile(
+      options.stdoutFilePath!,
+      `{"session":"${args[args.indexOf('export') + 1]}","full":true}\n`,
+      { mode: 0o600 },
+    );
+  }
+  if (args[0] === 'cp') {
+    const destination = args[2];
+    await mkdir(destination, { recursive: true, mode: 0o700 });
+    await writeFile(join(destination, 'opencode.db'), 'db', { mode: 0o600 });
+    await writeFile(join(destination, 'opencode.db-wal'), 'wal', { mode: 0o600 });
+    await writeFile(join(destination, 'opencode.db-shm'), 'shm', { mode: 0o600 });
+    await writeFile(join(destination, 'review.log'), 'log', { mode: 0o600 });
+  }
+};
+
+afterAll(async () => {
+  await rm(sharedEvidenceRoot, { recursive: true, force: true });
+});
 
 const waitForTerminal = async (runner: ReturnType<typeof createRunner>, jobId: string) => {
   for (let attempt = 0; attempt < 50; attempt += 1) {
@@ -17,7 +48,11 @@ const waitForTerminal = async (runner: ReturnType<typeof createRunner>, jobId: s
         headers: { authorization: 'Bearer runner-test-token' },
       }),
     );
-    const state = (await response.json()) as { status: string };
+    const state = (await response.json()) as {
+      status: string;
+      evidenceId?: string;
+      evidence?: { id: string; status: string };
+    };
     if (state.status === 'succeeded' || state.status === 'failed') return state;
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
@@ -25,6 +60,193 @@ const waitForTerminal = async (runner: ReturnType<typeof createRunner>, jobId: s
 };
 
 describe('Runner Job HTTP interface', () => {
+  it('returns a durable evidence archive before destroying a successful Sandbox', async () => {
+    const evidenceRoot = await mkdtemp(`${tmpdir()}/compte-rendu-evidence-`);
+    const baseSha = '1111111111111111111111111111111111111111';
+    const headSha = '2222222222222222222222222222222222222222';
+    const agentJsonl = JSON.stringify({
+      type: 'text',
+      part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'No findings' }) },
+    });
+    try {
+      const runner = createRunner({
+        authToken: 'runner-test-token',
+        evidenceRoot,
+        modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+        process: async (command, args, options = {}) => {
+          if (args[0] === 'exec' && args.includes('--agent')) {
+            await writeFile(options.stdoutFilePath!, `${agentJsonl}\n`, { mode: 0o600 });
+            await writeFile(options.stderrFilePath!, '', { mode: 0o600 });
+          }
+          if (args[0] === 'exec' && args.includes('export')) {
+            await writeFile(
+              options.stdoutFilePath!,
+              `{"session":"${args[args.indexOf('export') + 1]}","full":true}\n`,
+              { mode: 0o600 },
+            );
+          }
+          if (command === 'sbx' && args[0] === 'cp') {
+            const destination = args[2];
+            await mkdir(destination, { recursive: true, mode: 0o700 });
+            await writeFile(join(destination, 'opencode.db'), 'db', { mode: 0o600 });
+            await writeFile(join(destination, 'opencode.db-wal'), 'wal', { mode: 0o600 });
+            await writeFile(join(destination, 'opencode.db-shm'), 'shm', { mode: 0o600 });
+            await writeFile(join(destination, 'review.log'), 'log', { mode: 0o600 });
+          }
+          return {
+            exitCode: 0,
+            stdout: args.includes('rev-parse')
+              ? `${baseSha}\n${headSha}\n`
+              : args.includes('session')
+                ? '[{"id":"session-89"},{"id":"session-child"}]\n'
+                : args.includes('export')
+                  ? `{"session":"${args[args.indexOf('export') + 1]}","full":true}\n`
+                  : options.captureStdout === true
+                    ? `${agentJsonl}\n`
+                    : '',
+            stderr: args[0] === 'exec' && args.includes('--format') ? 'agent stderr\n' : '',
+            timedOut: false,
+            truncated: false,
+          };
+        },
+      });
+      const submitted = await runner.handle(
+        new Request('http://runner/jobs', {
+          method: 'POST',
+          headers: {
+            authorization: 'Bearer runner-test-token',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            ...runnerJobFields,
+            runId: 'run-89-evidence',
+            attempt: 1,
+            repositoryUrl: 'https://github.com/acme/reviewed.git',
+            baseSha,
+            headSha,
+          }),
+        }),
+      );
+      const { id } = (await submitted.json()) as { id: string };
+      const terminal = await waitForTerminal(runner, id);
+
+      expect(terminal.status).toBe('succeeded');
+      expect(terminal.evidenceId).toEqual(expect.any(String));
+      expect(terminal.evidence).toEqual({ id: terminal.evidenceId, status: 'complete' });
+      const archive = join(evidenceRoot, terminal.evidenceId as string);
+      expect(await readFile(join(archive, 'opencode.jsonl'), 'utf8')).toBe(`${agentJsonl}\n`);
+      expect(await readFile(join(archive, 'opencode.stderr'), 'utf8')).toBe('');
+      expect(await readFile(join(archive, 'manifest.json'), 'utf8')).toContain('run-89-evidence');
+      await expect(
+        readFile(join(archive, 'opencode-export-session-89.json'), 'utf8'),
+      ).resolves.toContain('session-89');
+      await expect(
+        readFile(join(archive, 'opencode-export-session-child.json'), 'utf8'),
+      ).resolves.toContain('session-child');
+      await expect(readFile(join(archive, 'opencode-data', 'opencode.db'), 'utf8')).resolves.toBe(
+        'db',
+      );
+      await expect(
+        readFile(join(archive, 'opencode-data', 'opencode.db-wal'), 'utf8'),
+      ).resolves.toBe('wal');
+      await expect(
+        readFile(join(archive, 'opencode-data', 'opencode.db-shm'), 'utf8'),
+      ).resolves.toBe('shm');
+      await expect(readFile(join(archive, 'opencode-data', 'review.log'), 'utf8')).resolves.toBe(
+        'log',
+      );
+      await expect(
+        readFile(join(archive, 'validated-review-result.json'), 'utf8'),
+      ).resolves.toContain('No findings');
+      expect(JSON.parse(await readFile(join(archive, 'manifest.json'), 'utf8'))).toMatchObject({
+        jobId: expect.any(String),
+        sandboxName: expect.any(String),
+        sandboxId: expect.any(String),
+        sessionIds: ['session-89', 'session-child'],
+        model: 'opencode-go/deepseek-v4-flash',
+        image: 'ghcr.io/ariga39/petit-chiba-opencode:1.18.25-gh2.98.0',
+        openCodeVersion: '1.18.25',
+        agent: {
+          exitCode: 0,
+          timedOut: false,
+          truncated: false,
+          stderrTruncated: false,
+          streamError: false,
+        },
+        validation: { status: 'valid' },
+        terminal: { status: 'succeeded' },
+        complete: true,
+        cleanup: { status: 'destroyed' },
+      });
+      expect((await stat(archive)).mode & 0o777).toBe(0o700);
+      const archiveFiles = await readdir(archive, { withFileTypes: true });
+      for (const entry of archiveFiles) {
+        expect((await stat(join(archive, entry.name))).mode & 0o777).toBe(
+          entry.isDirectory() ? 0o700 : 0o600,
+        );
+      }
+    } finally {
+      await rm(evidenceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('reports incomplete evidence as its own failure when archiving fails', async () => {
+    const baseSha = '1111111111111111111111111111111111111111';
+    const headSha = '2222222222222222222222222222222222222222';
+    const resultLine = JSON.stringify({
+      type: 'text',
+      part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'No findings' }) },
+    });
+    const runner = createRunner({
+      evidenceRoot: sharedEvidenceRoot,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      process: async (_command, args, options = {}) => {
+        await writeEvidenceFixture(args, options, resultLine);
+        return {
+          exitCode: args[0] === 'cp' ? 1 : 0,
+          stdout: args.includes('rev-parse')
+            ? `${baseSha}\n${headSha}\n`
+            : args.includes('session')
+              ? '[{"id":"archive-failure-session"}]\n'
+              : args.includes('export')
+                ? ''
+                : options.captureStdout === true
+                  ? `${resultLine}\n`
+                  : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
+    });
+    const submitted = await runner.handle(
+      new Request('http://runner/jobs', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer runner-test-token',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          ...runnerJobFields,
+          runId: 'run-89-archive-failure',
+          attempt: 1,
+          repositoryUrl: 'https://github.com/acme/reviewed.git',
+          baseSha,
+          headSha,
+        }),
+      }),
+    );
+    const { id } = (await submitted.json()) as { id: string };
+
+    const terminal = await waitForTerminal(runner, id);
+    expect(terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'evidence' },
+      evidence: { status: 'incomplete' },
+      sandbox: { cleanup: 'destroyed' },
+    });
+  });
+
   it('keeps sanitized setup diagnostics when cleanup is also unconfirmed', async () => {
     const events: unknown[] = [];
     const baseSha = '1111111111111111111111111111111111111111';
@@ -32,6 +254,7 @@ describe('Runner Job HTTP interface', () => {
     const repositoryReadToken = 'checkout-token-must-not-appear';
     const resolverCommand = 'secret-resolver --token resolver-secret';
     const runner = createRunner({
+      evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
       modelSecretCommand: resolverCommand,
       log: {
@@ -116,6 +339,132 @@ describe('Runner Job HTTP interface', () => {
     expect(JSON.stringify(events)).not.toContain(resolverCommand);
   });
 
+  it('finalizes incomplete evidence for a terminal checkout failure', async () => {
+    const evidenceRoot = await mkdtemp(`${tmpdir()}/compte-rendu-evidence-failure-`);
+    const baseSha = '1111111111111111111111111111111111111111';
+    const headSha = '2222222222222222222222222222222222222222';
+    try {
+      const runner = createRunner({
+        authToken: 'runner-test-token',
+        evidenceRoot,
+        modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+        process: async (_command, args) => ({
+          exitCode: args.includes('clone') ? 1 : 0,
+          stdout: '',
+          timedOut: false,
+          truncated: false,
+        }),
+      });
+      const submitted = await runner.handle(
+        new Request('http://runner/jobs', {
+          method: 'POST',
+          headers: {
+            authorization: 'Bearer runner-test-token',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            ...runnerJobFields,
+            runId: 'run-89-checkout-failure',
+            attempt: 1,
+            repositoryUrl: 'https://github.com/acme/reviewed.git',
+            baseSha,
+            headSha,
+          }),
+        }),
+      );
+      const { id } = (await submitted.json()) as { id: string };
+      const terminal = await waitForTerminal(runner, id);
+      expect(terminal).toMatchObject({
+        status: 'failed',
+        failure: { reason: 'checkout' },
+        sandbox: { cleanup: 'destroyed' },
+      });
+      const manifest = JSON.parse(
+        await readFile(join(evidenceRoot, terminal.evidenceId as string, 'manifest.json'), 'utf8'),
+      );
+      expect(manifest).toMatchObject({
+        complete: false,
+        execution: { status: 'failed', reason: 'checkout' },
+        cleanup: { status: 'destroyed' },
+      });
+      expect(manifest.startedAt).toEqual(expect.any(String));
+      expect(manifest.finishedAt).toEqual(expect.any(String));
+    } finally {
+      await rm(evidenceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('archives available Sandbox evidence when network setup fails before the agent', async () => {
+    const baseSha = '1111111111111111111111111111111111111111';
+    const headSha = '2222222222222222222222222222222222222222';
+    const resultLine = JSON.stringify({
+      type: 'text',
+      part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'unused' }) },
+    });
+    const runner = createRunner({
+      evidenceRoot: sharedEvidenceRoot,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      process: async (_command, args, options = {}) => {
+        await writeEvidenceFixture(args, options, resultLine);
+        return {
+          exitCode: args[0] === 'policy' && args[1] === 'allow' ? 1 : 0,
+          stdout: args.includes('rev-parse')
+            ? `${baseSha}\n${headSha}\n`
+            : args.includes('session')
+              ? '[{"id":"network-failure-session"}]\n'
+              : args.includes('export')
+                ? ''
+                : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
+    });
+    const submitted = await runner.handle(
+      new Request('http://runner/jobs', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer runner-test-token',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          ...runnerJobFields,
+          runId: 'run-89-network-setup-failure',
+          attempt: 1,
+          repositoryUrl: 'https://github.com/acme/reviewed.git',
+          baseSha,
+          headSha,
+        }),
+      }),
+    );
+    const { id } = (await submitted.json()) as { id: string };
+
+    const terminal = await waitForTerminal(runner, id);
+    expect(terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'agent' },
+      evidence: { status: 'incomplete' },
+      sandbox: { cleanup: 'destroyed' },
+    });
+    const archive = join(sharedEvidenceRoot, terminal.evidenceId as string);
+    await expect(readFile(join(archive, 'opencode-session-list.json'), 'utf8')).resolves.toContain(
+      'network-failure-session',
+    );
+    await expect(readFile(join(archive, 'opencode-data', 'opencode.db'), 'utf8')).resolves.toBe(
+      'db',
+    );
+    await expect(readFile(join(archive, 'opencode-data', 'opencode.db-wal'), 'utf8')).resolves.toBe(
+      'wal',
+    );
+    await expect(readFile(join(archive, 'opencode-data', 'opencode.db-shm'), 'utf8')).resolves.toBe(
+      'shm',
+    );
+    await expect(readFile(join(archive, 'opencode-data', 'review.log'), 'utf8')).resolves.toBe(
+      'log',
+    );
+  });
+
   it('redacts sensitive stderr before applying the diagnostic byte bound', async () => {
     const events: Array<Record<string, unknown>> = [];
     const baseSha = '1111111111111111111111111111111111111111';
@@ -123,6 +472,7 @@ describe('Runner Job HTTP interface', () => {
     const repositoryReadToken = 'secret-checkout-token';
     const overflowingStderr = `${'x'.repeat(4080)}${repositoryReadToken}${'y'.repeat(100)}`;
     const runner = createRunner({
+      evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
       modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       log: {
@@ -205,8 +555,14 @@ describe('Runner Job HTTP interface', () => {
     const process = async (
       _command: string,
       args: readonly string[],
-      options: { readonly captureStdout?: boolean; readonly env?: NodeJS.ProcessEnv } = {},
+      options: {
+        readonly captureStdout?: boolean;
+        readonly env?: NodeJS.ProcessEnv;
+        readonly stdoutFilePath?: string;
+        readonly stderrFilePath?: string;
+      } = {},
     ): Promise<RunnerProcessResult> => {
+      await writeEvidenceFixture(args, options, resultLine);
       if (args[0] === 'create') sandboxEnvironment = options.env;
       if (args[0] === 'create') {
         createArgs = args;
@@ -221,19 +577,24 @@ describe('Runner Job HTTP interface', () => {
         }
       }
       if (args.includes('fetch')) fetchArgs = args;
-      if (args[0] === 'exec') agentArgs = args;
+      if (args[0] === 'exec' && args.includes('--agent')) agentArgs = args;
       return {
         exitCode: 0,
         stdout: args.includes('rev-parse')
           ? `${baseSha}\n${headSha}\n`
-          : options.captureStdout === true
-            ? `${resultLine}\n`
-            : '',
+          : args.includes('session')
+            ? '[{"id":"fixture-session"}]\n'
+            : args.includes('export')
+              ? ''
+              : options.captureStdout === true
+                ? `${resultLine}\n`
+                : '',
         timedOut: false,
         truncated: false,
       };
     };
     const runner = createRunner({
+      evidenceRoot: sharedEvidenceRoot,
       process,
       authToken: 'runner-test-token',
       modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
@@ -363,6 +724,7 @@ describe('Runner Job HTTP interface', () => {
     let cleanupEnvironment: NodeJS.ProcessEnv | undefined;
     let checkoutEnvironment: NodeJS.ProcessEnv | undefined;
     const runner = createRunner({
+      evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
       modelSecretCommand: 'model-secret-resolver',
       log: {
@@ -372,6 +734,7 @@ describe('Runner Job HTTP interface', () => {
       },
       process: async (_command, args, options = {}) => {
         commands.push([...args]);
+        await writeEvidenceFixture(args, options, resultLine);
         if (args[0] === 'create') createArgs = args;
         if (args[0] === 'rm' && args[1] === '--force') cleanupEnvironment = options.env;
         if (_command === 'git' && args.includes('clone')) checkoutEnvironment = options.env;
@@ -384,9 +747,13 @@ describe('Runner Job HTTP interface', () => {
           exitCode: 0,
           stdout: args.includes('rev-parse')
             ? `${baseSha}\n${headSha}\n`
-            : options.captureStdout === true
-              ? `${resultLine}\n`
-              : '',
+            : args.includes('session')
+              ? '[{"id":"fixture-session"}]\n'
+              : args.includes('export')
+                ? ''
+                : options.captureStdout === true
+                  ? `${resultLine}\n`
+                  : '',
           timedOut: false,
           truncated: false,
         };
@@ -466,18 +833,30 @@ describe('Runner Job HTTP interface', () => {
       const successfulProcess = async (
         _command: string,
         args: readonly string[],
-        options: { readonly captureStdout?: boolean } = {},
-      ): Promise<RunnerProcessResult> => ({
-        exitCode: 0,
-        stdout: args.includes('rev-parse')
-          ? `${baseSha}\n${headSha}\n`
-          : options.captureStdout === true
-            ? `${resultLine}\n`
-            : '',
-        timedOut: false,
-        truncated: false,
-      });
+        options: {
+          readonly captureStdout?: boolean;
+          readonly stdoutFilePath?: string;
+          readonly stderrFilePath?: string;
+        } = {},
+      ): Promise<RunnerProcessResult> => {
+        await writeEvidenceFixture(args, options, resultLine);
+        return {
+          exitCode: 0,
+          stdout: args.includes('rev-parse')
+            ? `${baseSha}\n${headSha}\n`
+            : args.includes('session')
+              ? '[{"id":"fixture-session"}]\n'
+              : args.includes('export')
+                ? ''
+                : options.captureStdout === true
+                  ? `${resultLine}\n`
+                  : '',
+          timedOut: false,
+          truncated: false,
+        };
+      };
       const runner = createRunner({
+        evidenceRoot: sharedEvidenceRoot,
         process: successfulProcess,
         authToken: 'runner-test-token',
         modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
@@ -517,6 +896,7 @@ describe('Runner Job HTTP interface', () => {
 
   it('rejects unauthenticated job requests without starting work', async () => {
     const runner = createRunner({
+      evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
       modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       process: async () => ({
@@ -538,18 +918,24 @@ describe('Runner Job HTTP interface', () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
     const runner = createRunner({
+      evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
       modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-      process: async (_command, args, options = {}) => ({
-        exitCode: 0,
-        stdout: args.includes('rev-parse')
-          ? `${baseSha}\n${headSha}\n`
-          : options.captureStdout === true
-            ? '{not-json}\n'
-            : '',
-        timedOut: false,
-        truncated: false,
-      }),
+      process: async (_command, args, options = {}) => {
+        await writeEvidenceFixture(args, options, '{not-json}');
+        return {
+          exitCode: 0,
+          stdout: args.includes('rev-parse')
+            ? `${baseSha}\n${headSha}\n`
+            : args.includes('session')
+              ? '[{"id":"fixture-session"}]\n'
+              : options.captureStdout === true
+                ? '{not-json}\n'
+                : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
     });
     const submitted = await runner.handle(
       new Request('http://runner/jobs', {
@@ -576,22 +962,50 @@ describe('Runner Job HTTP interface', () => {
     expect(terminal).toMatchObject({
       status: 'failed',
       failure: { reason: 'invalid-output' },
+      evidence: { status: 'complete' },
       sandbox: { cleanup: 'destroyed' },
     });
+    const archive = join(sharedEvidenceRoot, terminal.evidenceId as string);
+    await expect(readFile(join(archive, 'opencode-data', 'opencode.db'), 'utf8')).resolves.toBe(
+      'db',
+    );
+    await expect(readFile(join(archive, 'opencode-data', 'opencode.db-wal'), 'utf8')).resolves.toBe(
+      'wal',
+    );
+    await expect(readFile(join(archive, 'opencode-data', 'opencode.db-shm'), 'utf8')).resolves.toBe(
+      'shm',
+    );
+    await expect(readFile(join(archive, 'opencode-data', 'review.log'), 'utf8')).resolves.toBe(
+      'log',
+    );
   });
 
   it('maps an agent deadline to a failed terminal job after cleanup', async () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
     const runner = createRunner({
+      evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
       modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-      process: async (_command, args) => ({
-        exitCode: 0,
-        stdout: args.includes('rev-parse') ? `${baseSha}\n${headSha}\n` : '',
-        timedOut: args[0] === 'exec',
-        truncated: false,
-      }),
+      process: async (_command, args, options = {}) => {
+        await writeEvidenceFixture(
+          args,
+          options,
+          '{"type":"text","part":{"type":"text","text":"{\\"findings\\":[],\\"summary\\":\\"timeout\\"}"}}',
+        );
+        return {
+          exitCode: 0,
+          stdout: args.includes('rev-parse')
+            ? `${baseSha}\n${headSha}\n`
+            : args.includes('session')
+              ? '[{"id":"fixture-session"}]\n'
+              : args.includes('export')
+                ? ''
+                : '',
+          timedOut: args[0] === 'exec' && args.includes('--agent'),
+          truncated: false,
+        };
+      },
     });
     const submitted = await runner.handle(
       new Request('http://runner/jobs', {
@@ -630,18 +1044,26 @@ describe('Runner Job HTTP interface', () => {
       part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'No findings' }) },
     });
     const runner = createRunner({
+      evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
       modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-      process: async (_command, args, options = {}) => ({
-        exitCode: args[0] === 'secret' && args[1] === 'rm' ? 1 : 0,
-        stdout: args.includes('rev-parse')
-          ? `${baseSha}\n${headSha}\n`
-          : options.captureStdout === true
-            ? `${resultLine}\n`
-            : '',
-        timedOut: false,
-        truncated: false,
-      }),
+      process: async (_command, args, options = {}) => {
+        await writeEvidenceFixture(args, options, resultLine);
+        return {
+          exitCode: args[0] === 'secret' && args[1] === 'rm' ? 1 : 0,
+          stdout: args.includes('rev-parse')
+            ? `${baseSha}\n${headSha}\n`
+            : args.includes('session')
+              ? '[{"id":"fixture-session"}]\n'
+              : args.includes('export')
+                ? ''
+                : options.captureStdout === true
+                  ? `${resultLine}\n`
+                  : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
     });
     const submitted = await runner.handle(
       new Request('http://runner/jobs', {
@@ -674,6 +1096,7 @@ describe('Runner Job HTTP interface', () => {
 
   it('is idempotent for the same run and attempt but creates a fresh job for a new attempt', async () => {
     const runner = createRunner({
+      evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
       modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       process: async () => ({
@@ -718,6 +1141,7 @@ describe('Runner Job HTTP interface', () => {
 
   it('fails before the agent when checkout reports the wrong immutable head SHA', async () => {
     const runner = createRunner({
+      evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
       modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       process: async (_command, args, options = {}) => ({
@@ -751,7 +1175,8 @@ describe('Runner Job HTTP interface', () => {
     );
     const { id } = (await submitted.json()) as { id: string };
 
-    await expect(waitForTerminal(runner, id)).resolves.toMatchObject({
+    const terminal = await waitForTerminal(runner, id);
+    expect(terminal).toMatchObject({
       status: 'failed',
       failure: { reason: 'checkout' },
       sandbox: { cleanup: 'destroyed' },
@@ -760,18 +1185,21 @@ describe('Runner Job HTTP interface', () => {
 
   it('fails closed when checkout credential cleanup fails', async () => {
     const runner = createRunner({
+      evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
       modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-      process: async (_command, args, options = {}) => ({
-        exitCode: args.includes('credential.helper') ? 1 : 0,
-        stdout: args.includes('rev-parse')
-          ? '1111111111111111111111111111111111111111\n2222222222222222222222222222222222222222\n'
-          : options.captureStdout === true
-            ? ''
-            : '',
-        timedOut: false,
-        truncated: false,
-      }),
+      process: async (_command, args, options = {}) => {
+        return {
+          exitCode: args.includes('credential.helper') ? 1 : 0,
+          stdout: args.includes('rev-parse')
+            ? '1111111111111111111111111111111111111111\n2222222222222222222222222222222222222222\n'
+            : options.captureStdout === true
+              ? ''
+              : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
     });
     const submitted = await runner.handle(
       new Request('http://runner/jobs', {
@@ -803,21 +1231,44 @@ describe('Runner Job HTTP interface', () => {
   it('waits for cleanup on DELETE and reports cleanup failure instead of aborted', async () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
+    const agentJsonl = JSON.stringify({
+      type: 'text',
+      part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'aborted' }) },
+    });
     let releaseAgent: (() => void) | undefined;
     let agentStarted!: () => void;
     const agentReady = new Promise<void>((resolve) => {
       agentStarted = resolve;
     });
     const runner = createRunner({
+      evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
       modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-      process: async (_command, args) => {
-        if (args[0] === 'exec') {
+      process: async (_command, args, options = {}) => {
+        if (args[0] === 'exec' && args.includes('--agent')) {
           agentStarted();
+          await writeEvidenceFixture(args, options, agentJsonl);
           return new Promise<RunnerProcessResult>((resolve) => {
             releaseAgent = () =>
               resolve({ exitCode: 1, stdout: '', timedOut: false, truncated: false });
           });
+        }
+        if (args[0] === 'exec' && args.includes('session')) {
+          if (options.onChild !== undefined) return new Promise<RunnerProcessResult>(() => {});
+          return {
+            exitCode: 0,
+            stdout: '[{"id":"delete-session"}]\n',
+            timedOut: false,
+            truncated: false,
+          };
+        }
+        if (args[0] === 'exec' && args.includes('export')) {
+          await writeEvidenceFixture(args, options, 'unused');
+          return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+        }
+        if (args[0] === 'cp') {
+          await writeEvidenceFixture(args, options, 'unused');
+          return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
         }
         if (args[0] === 'secret' && args[1] === 'rm') {
           return { exitCode: 1, stdout: '', timedOut: false, truncated: false };
@@ -879,17 +1330,23 @@ describe('Runner Job HTTP interface', () => {
   it('returns aborted after DELETE stops the agent when all cleanup succeeds', async () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
+    const agentJsonl = JSON.stringify({
+      type: 'text',
+      part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'aborted' }) },
+    });
     let releaseAgent: (() => void) | undefined;
     let agentStarted!: () => void;
     const agentReady = new Promise<void>((resolve) => {
       agentStarted = resolve;
     });
     const runner = createRunner({
+      evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
       modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       process: async (_command, args, options = {}) => {
-        if (args[0] === 'exec') {
+        if (args[0] === 'exec' && args.includes('--agent')) {
           agentStarted();
+          await writeEvidenceFixture(args, options, agentJsonl);
           return new Promise<RunnerProcessResult>((resolve) => {
             releaseAgent = () =>
               resolve({ exitCode: 1, stdout: '', timedOut: false, truncated: false });
@@ -902,6 +1359,23 @@ describe('Runner Job HTTP interface', () => {
               once: () => {},
             } as never);
           });
+        }
+        if (args[0] === 'exec' && args.includes('session')) {
+          if (options.onChild !== undefined) return new Promise<RunnerProcessResult>(() => {});
+          return {
+            exitCode: 0,
+            stdout: '[{"id":"delete-session"}]\n',
+            timedOut: false,
+            truncated: false,
+          };
+        }
+        if (args[0] === 'exec' && args.includes('export')) {
+          await writeEvidenceFixture(args, options, 'unused');
+          return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+        }
+        if (args[0] === 'cp') {
+          await writeEvidenceFixture(args, options, 'unused');
+          return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
         }
         return {
           exitCode: 0,
@@ -940,9 +1414,22 @@ describe('Runner Job HTTP interface', () => {
     );
 
     expect(deleted.status).toBe(200);
-    await expect(deleted.json()).resolves.toMatchObject({
+    const deletedState = (await deleted.json()) as { status: string; evidenceId?: string };
+    expect(deletedState).toMatchObject({
       status: 'aborted',
       sandbox: { cleanup: 'destroyed' },
+    });
+    const archive = join(sharedEvidenceRoot, deletedState.evidenceId as string);
+    await expect(readFile(join(archive, 'opencode-session-list.json'), 'utf8')).resolves.toContain(
+      'delete-session',
+    );
+    await expect(
+      readFile(join(archive, 'opencode-export-delete-session.json'), 'utf8'),
+    ).resolves.toContain('delete-session');
+    expect(JSON.parse(await readFile(join(archive, 'manifest.json'), 'utf8'))).toMatchObject({
+      complete: true,
+      execution: { status: 'aborted' },
+      cleanup: { status: 'destroyed' },
     });
   });
 
@@ -961,18 +1448,26 @@ describe('Runner Job HTTP interface', () => {
 
     for (const [index, agentOutput] of outputs.entries()) {
       const runner = createRunner({
+        evidenceRoot: sharedEvidenceRoot,
         authToken: 'runner-test-token',
         modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-        process: async (_command, args, options = {}) => ({
-          exitCode: 0,
-          stdout: args.includes('rev-parse')
-            ? `${baseSha}\n${headSha}\n`
-            : args[0] === 'exec' && options.captureStdout === true
-              ? agentOutput
-              : '',
-          timedOut: false,
-          truncated: false,
-        }),
+        process: async (_command, args, options = {}) => {
+          await writeEvidenceFixture(args, options, agentOutput);
+          return {
+            exitCode: 0,
+            stdout: args.includes('rev-parse')
+              ? `${baseSha}\n${headSha}\n`
+              : args.includes('session')
+                ? '[{"id":"fixture-session"}]\n'
+                : args.includes('export')
+                  ? ''
+                  : args[0] === 'exec' && options.captureStdout === true
+                    ? agentOutput
+                    : '',
+            timedOut: false,
+            truncated: false,
+          };
+        },
       });
       const submitted = await runner.handle(
         new Request('http://runner/jobs', {

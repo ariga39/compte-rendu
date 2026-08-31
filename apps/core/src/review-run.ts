@@ -19,6 +19,7 @@ export type ReviewRunFailureReason =
   | 'checkout'
   | 'timeout'
   | 'invalid-output'
+  | 'evidence'
   | 'cleanup'
   | 'superseded';
 

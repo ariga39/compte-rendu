@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { createWriteStream, type WriteStream } from 'node:fs';
+import { chmod, mkdir, mkdtemp, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Option, Schema } from 'effect';
+import { DateTime, Effect, Option, Schema } from 'effect';
 import {
   REVIEW_ATTEMPT_BUDGET_MS,
   ReviewResult,
@@ -19,13 +20,17 @@ const MODEL = 'opencode-go/deepseek-v4-flash';
 const MODEL_ENV = 'OPENCODE_API_KEY';
 const MODEL_HOST = 'opencode.ai';
 const MODEL_RESOURCE = `${MODEL_HOST}:443`;
-const SANDBOX_TEMPLATE = 'ghcr.io/ariga39/petit-chiba-opencode:1.18.25-gh2.98.0';
+const OPENCODE_VERSION = '1.18.25';
+const SANDBOX_TEMPLATE = `ghcr.io/ariga39/petit-chiba-opencode:${OPENCODE_VERSION}-gh2.98.0`;
 const SETUP_TIMEOUT_MS = 2 * 60 * 1000;
 const CLEANUP_RESERVE_MS = 60 * 1000;
 const CLEANUP_COMMAND_TIMEOUT_MS = 30 * 1000;
+const ARCHIVE_COMMAND_TIMEOUT_MS = 30 * 1000;
+const ARCHIVE_PHASE_TIMEOUT_MS = 2 * 60 * 1000;
 const MAX_DIAGNOSTIC_STDERR_BYTES = 4 * 1024;
 const MAX_AGENT_OUTPUT_BYTES = 8 * 1024 * 1024;
 const MAX_REQUEST_BYTES = 64 * 1024;
+const SANDBOX_EVIDENCE_ROOT = '/tmp/petit-chiba-opencode-evidence';
 
 const trustedOpenCodeConfig = JSON.stringify({
   share: 'disabled',
@@ -69,12 +74,19 @@ const OpenCodeTextEvent = Schema.Struct({
 });
 
 const OpenCodeErrorEvent = Schema.Struct({ type: Schema.Literal('error') });
+const OpenCodeSessionId = Schema.NonEmptyString.check(Schema.isPattern(/^[A-Za-z0-9._:-]+$/));
+const OpenCodeSession = Schema.Struct({ id: OpenCodeSessionId });
+const OpenCodeSessionList = Schema.Union([
+  Schema.Array(OpenCodeSession),
+  Schema.Struct({ sessions: Schema.Array(OpenCodeSession) }),
+]);
 
 export type RunnerProcessResult = {
   readonly exitCode: number;
   readonly stdout: string;
   readonly stderr?: string;
   readonly stderrTruncated?: boolean;
+  readonly streamError?: boolean;
   readonly timedOut: boolean;
   readonly truncated: boolean;
 };
@@ -86,6 +98,8 @@ export type RunnerProcessOptions = {
   readonly maxBytes?: number;
   readonly timeoutMs?: number;
   readonly env?: NodeJS.ProcessEnv;
+  readonly stdoutFilePath?: string;
+  readonly stderrFilePath?: string;
   readonly onChild?: (child: ChildProcess) => void;
 };
 
@@ -108,23 +122,45 @@ const runProcess: RunnerProcess = (command, args, options = {}) =>
     const chunks: Buffer[] = [];
     const stderrChunks: Buffer[] = [];
     let stderrPending = '';
-    const captureStdout = options.captureStdout === true;
-    const captureStderr = options.captureStderr === true;
+    const captureStdout = options.captureStdout === true || options.stdoutFilePath !== undefined;
+    const captureStderr = options.captureStderr === true || options.stderrFilePath !== undefined;
     const stderrRedactions = (options.stderrRedactions ?? []).filter((value) => value.length > 0);
     const maxBytes = options.maxBytes ?? 0;
     let bytes = 0;
     let stderrBytes = 0;
     let stderrTruncated = false;
+    let streamError = false;
     let truncated = false;
     let timedOut = false;
     let settled = false;
     let timeout: ReturnType<typeof setTimeout> | undefined;
     let killTimeout: ReturnType<typeof setTimeout> | undefined;
     let child: ChildProcess;
+    let stdoutHandle: WriteStream | undefined;
+    let stderrHandle: WriteStream | undefined;
+
+    try {
+      if (options.stdoutFilePath !== undefined) {
+        stdoutHandle = createWriteStream(options.stdoutFilePath, { flags: 'w', mode: 0o600 });
+      }
+      if (options.stderrFilePath !== undefined) {
+        stderrHandle = createWriteStream(options.stderrFilePath, { flags: 'w', mode: 0o600 });
+      }
+    } catch {
+      // Evidence finalization fails closed if a stream cannot be created.
+      streamError = true;
+    }
+    stdoutHandle?.on('error', () => {
+      streamError = true;
+    });
+    stderrHandle?.on('error', () => {
+      streamError = true;
+    });
 
     const appendStderr = (value: string) => {
-      if (stderrTruncated || value.length === 0) return;
+      if (value.length === 0) return;
       const buffer = new TextEncoder().encode(value);
+      if (stderrTruncated) return;
       if (stderrBytes + buffer.length > maxBytes) {
         stderrChunks.push(Buffer.from(buffer.subarray(0, Math.max(0, maxBytes - stderrBytes))));
         stderrBytes = maxBytes;
@@ -156,14 +192,30 @@ const runProcess: RunnerProcess = (command, args, options = {}) =>
       if (timeout !== undefined) clearTimeout(timeout);
       if (killTimeout !== undefined) clearTimeout(killTimeout);
       flushStderr('', true);
-      resolve({
-        exitCode: exitCode ?? 1,
-        stdout: Buffer.concat(chunks).toString('utf8'),
-        stderr: captureStderr ? Buffer.concat(stderrChunks).toString('utf8') : undefined,
-        stderrTruncated: captureStderr ? stderrTruncated : undefined,
-        timedOut,
-        truncated,
-      });
+      const finishStreams = () =>
+        resolve({
+          exitCode: exitCode ?? 1,
+          stdout: Buffer.concat(chunks).toString('utf8'),
+          stderr: captureStderr ? Buffer.concat(stderrChunks).toString('utf8') : undefined,
+          stderrTruncated: captureStderr ? stderrTruncated : undefined,
+          streamError,
+          timedOut,
+          truncated,
+        });
+      let streams = 0;
+      const streamFinished = () => {
+        streams -= 1;
+        if (streams === 0) finishStreams();
+      };
+      if (stdoutHandle !== undefined) {
+        streams += 1;
+        stdoutHandle.end(streamFinished);
+      }
+      if (stderrHandle !== undefined) {
+        streams += 1;
+        stderrHandle.end(streamFinished);
+      }
+      if (streams === 0) finishStreams();
     };
 
     try {
@@ -179,8 +231,9 @@ const runProcess: RunnerProcess = (command, args, options = {}) =>
 
     if (captureStdout && child.stdout !== null) {
       child.stdout.on('data', (chunk: Buffer | string) => {
-        if (truncated) return;
         const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        stdoutHandle?.write(buffer);
+        if (truncated) return;
         if (bytes + buffer.length > maxBytes) {
           truncated = true;
           return;
@@ -193,6 +246,7 @@ const runProcess: RunnerProcess = (command, args, options = {}) =>
     if (captureStderr && child.stderr !== null) {
       child.stderr.on('data', (chunk: Buffer | string) => {
         const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        stderrHandle?.write(buffer);
         flushStderr(new TextDecoder().decode(buffer), false);
       });
     }
@@ -229,6 +283,8 @@ type RunnerJob = {
   child?: ChildProcess;
   abortRequested: boolean;
   sandboxAttempted: boolean;
+  sandboxCreated: boolean;
+  sessionIds: string[];
   diagnosticCheckoutToken: string;
   secretPlaceholder?: string;
   githubSecretPlaceholder?: string;
@@ -242,6 +298,7 @@ export interface RunnerOptions {
   readonly sbxPath?: string;
   readonly authToken?: string;
   readonly modelSecretCommand?: string;
+  readonly evidenceRoot?: string;
   readonly process?: RunnerProcess;
   readonly log?: OperationalLog;
 }
@@ -298,13 +355,75 @@ const parseResult = (stdout: string): Schema.Schema.Type<typeof ReviewResult> | 
   return count === 1 ? candidate : undefined;
 };
 
+const sessionIdsFrom = (stdout: string): string[] | undefined => {
+  try {
+    const decoded = Schema.decodeUnknownOption(OpenCodeSessionList)(JSON.parse(stdout));
+    if (Option.isNone(decoded)) return undefined;
+    const sessions = Array.isArray(decoded.value)
+      ? decoded.value
+      : (decoded.value as { readonly sessions: ReadonlyArray<{ readonly id: string }> }).sessions;
+    return sessions.map((session) => session.id);
+  } catch {
+    return undefined;
+  }
+};
+
+const secureEvidenceTree = async (root: string): Promise<void> => {
+  await chmod(root, 0o700);
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    const path = join(root, entry.name);
+    if (entry.isSymbolicLink()) {
+      await rm(path, { force: true });
+      continue;
+    }
+    if (entry.name === 'auth.json') {
+      await rm(path, { force: true });
+      continue;
+    }
+    if (entry.isDirectory()) {
+      await secureEvidenceTree(path);
+    } else {
+      await chmod(path, 0o600);
+    }
+  }
+};
+
+const writeManifestAtomically = async (path: string, value: unknown) => {
+  const temporaryPath = `${path}.tmp`;
+  await writeFile(temporaryPath, JSON.stringify(value, null, 2) + '\n', { mode: 0o600 });
+  await chmod(temporaryPath, 0o600);
+  await rename(temporaryPath, path);
+};
+
+const evidenceFiles = async (root: string, prefix = ''): Promise<string[]> => {
+  const files: string[] = [];
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    const relative = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
+    if (entry.isDirectory()) files.push(...(await evidenceFiles(join(root, entry.name), relative)));
+    else files.push(relative);
+  }
+  return files.sort();
+};
+
 const askpassScript =
   '#!/bin/sh\ncase "$1" in *[Uu]sername*) printf %s x-access-token ;; *) printf %s "$CHECKOUT_TOKEN" ;; esac\n';
+
+const currentIso = () => Effect.runPromise(DateTime.now.pipe(Effect.map(DateTime.formatIso)));
+const currentEpochMillis = () =>
+  Effect.runPromise(DateTime.now.pipe(Effect.map(DateTime.toEpochMillis)));
 
 export const createRunner = (options: RunnerOptions = {}) => {
   const sbxPath = options.sbxPath ?? process.env.SBX_BIN ?? 'sbx';
   const authToken = options.authToken ?? process.env.RUNNER_AUTH_TOKEN;
   const modelSecretCommand = options.modelSecretCommand ?? process.env.MODEL_SECRET_COMMAND;
+  const evidenceRoot =
+    options.evidenceRoot ??
+    process.env.RUNNER_EVIDENCE_ROOT ??
+    join(
+      process.env.XDG_STATE_HOME ?? join(homedir(), '.local', 'state'),
+      'compte-rendu',
+      'reviews',
+    );
   const executeProcess = options.process ?? runProcess;
   const log = options.log;
   const strippedSandboxEnvironment = {
@@ -385,7 +504,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       result = await executeProcess(command, args, {
         ...processOptions,
         env: sandboxEnvironment,
-        captureStderr: diagnostic !== undefined,
+        captureStderr: processOptions.captureStderr ?? diagnostic !== undefined,
         stderrRedactions:
           diagnostic === undefined
             ? processOptions.stderrRedactions
@@ -412,6 +531,143 @@ export const createRunner = (options: RunnerOptions = {}) => {
     job.child = undefined;
     if (diagnostic !== undefined) await recordCommand(job, diagnostic, result);
     return result;
+  };
+
+  const runArchive = async (
+    job: RunnerJob,
+    command: string,
+    args: readonly string[],
+    deadlineAt: number,
+    processOptions: RunnerProcessOptions = {},
+    diagnostic?: RunnerDiagnostic,
+  ) => {
+    let remaining: number;
+    try {
+      remaining = deadlineAt - (await currentEpochMillis());
+    } catch {
+      return { exitCode: 1, stdout: '', timedOut: true, truncated: false };
+    }
+    if (remaining <= 0) {
+      return { exitCode: 1, stdout: '', timedOut: true, truncated: false };
+    }
+    let result: RunnerProcessResult;
+    try {
+      result = await executeProcess(command, args, {
+        ...processOptions,
+        env: command === sbxPath ? strippedSandboxEnvironment : processOptions.env,
+        captureStderr: processOptions.captureStderr ?? diagnostic !== undefined,
+        timeoutMs: Math.max(
+          1,
+          Math.min(processOptions.timeoutMs ?? ARCHIVE_COMMAND_TIMEOUT_MS, remaining),
+        ),
+      });
+    } catch {
+      result = { exitCode: 1, stdout: '', timedOut: false, truncated: false };
+    }
+    if (diagnostic !== undefined) await recordCommand(job, diagnostic, result);
+    return result;
+  };
+
+  const archiveEvidence = async (
+    job: RunnerJob,
+    evidencePath: string,
+    agent: RunnerProcessResult | undefined,
+    deadlineAt: number,
+  ) => {
+    let complete = agent?.streamError !== true;
+    const fileExists = async (path: string) => {
+      try {
+        await stat(path);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const nonemptyFile = async (path: string) => {
+      try {
+        return (await stat(path)).size > 0;
+      } catch {
+        return false;
+      }
+    };
+    if (!(await nonemptyFile(join(evidencePath, 'opencode.jsonl')))) complete = false;
+    if (!(await fileExists(join(evidencePath, 'opencode.stderr')))) complete = false;
+
+    const sessions = await runArchive(
+      job,
+      sbxPath,
+      ['exec', job.sandboxName, 'opencode', 'session', 'list', '--format', 'json'],
+      deadlineAt,
+      { captureStdout: true, maxBytes: MAX_AGENT_OUTPUT_BYTES },
+    );
+    if (
+      sessions.exitCode !== 0 ||
+      sessions.timedOut ||
+      sessions.truncated ||
+      sessions.stdout.length === 0
+    ) {
+      complete = false;
+    } else {
+      await writeFile(join(evidencePath, 'opencode-session-list.json'), sessions.stdout, {
+        mode: 0o600,
+      });
+      const sessionIds = sessionIdsFrom(sessions.stdout);
+      if (sessionIds === undefined || sessionIds.length === 0) {
+        complete = false;
+      } else {
+        job.sessionIds = sessionIds;
+        for (const sessionId of sessionIds) {
+          const exportPath = join(evidencePath, `opencode-export-${sessionId}.json`);
+          const exported = await runArchive(
+            job,
+            sbxPath,
+            ['exec', job.sandboxName, 'opencode', 'export', sessionId],
+            deadlineAt,
+            { stdoutFilePath: exportPath },
+          );
+          if (
+            exported.exitCode !== 0 ||
+            exported.timedOut ||
+            exported.streamError === true ||
+            !(await nonemptyFile(exportPath))
+          ) {
+            complete = false;
+          }
+        }
+      }
+    }
+
+    for (const tree of ['data', 'state']) {
+      const destination = join(evidencePath, `opencode-${tree}`);
+      const copied = await runArchive(
+        job,
+        sbxPath,
+        ['cp', `${job.sandboxName}:${SANDBOX_EVIDENCE_ROOT}/${tree}`, destination],
+        deadlineAt,
+        {},
+        { stage: 'sandbox', command: `archive-opencode-${tree}`, includeStderr: true },
+      );
+      if (copied.exitCode !== 0 || copied.timedOut) complete = false;
+    }
+
+    await secureEvidenceTree(evidencePath);
+    const files = await evidenceFiles(evidencePath);
+    const hasNonemptyFile = async (predicate: (file: string) => boolean) => {
+      for (const file of files) {
+        if (predicate(file) && (await nonemptyFile(join(evidencePath, file)))) return true;
+      }
+      return false;
+    };
+    if (
+      !(await hasNonemptyFile((file) => file.endsWith('/opencode.db') || file === 'opencode.db'))
+    ) {
+      complete = false;
+    }
+    if (!(await hasNonemptyFile((file) => file.endsWith('.log')))) complete = false;
+    if (job.sessionIds.some((sessionId) => !files.includes(`opencode-export-${sessionId}.json`))) {
+      complete = false;
+    }
+    return complete;
   };
 
   const prepareCheckout = async (job: RunnerJob, root: string) => {
@@ -674,11 +930,34 @@ export const createRunner = (options: RunnerOptions = {}) => {
   const execute = async (job: RunnerJob) => {
     let failure: RunnerJobState['failure'];
     let result: RunnerJobState['result'];
+    let agent: RunnerProcessResult | undefined;
+    const evidenceId = job.state.evidenceId ?? job.id;
+    const evidencePath = join(evidenceRoot, evidenceId);
+    let evidenceStartedAt: string | undefined;
+    let evidenceReady = false;
+    let evidenceComplete = false;
+    let evidenceFailure: string | undefined;
     try {
+      evidenceStartedAt = await currentIso();
       if (modelSecretCommand === undefined || modelSecretCommand.length === 0) {
         failure = { reason: 'agent' };
         return;
       }
+      await mkdir(evidencePath, { recursive: true, mode: 0o700 });
+      await chmod(evidencePath, 0o700);
+      evidenceReady = true;
+      await writeManifestAtomically(join(evidencePath, 'manifest.json'), {
+        evidenceId,
+        runId: job.input.runId,
+        attempt: job.input.attempt,
+        repositoryName: job.input.repositoryName,
+        pullRequestNumber: job.input.pullRequestNumber,
+        baseSha: job.input.baseSha,
+        headSha: job.input.headSha,
+        startedAt: evidenceStartedAt,
+        complete: false,
+        cleanup: { status: 'pending' },
+      });
       update(job, { status: 'running', stage: 'checkout' });
       const checkoutRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-review-'));
       job.checkoutRoot = checkoutRoot;
@@ -776,6 +1055,10 @@ export const createRunner = (options: RunnerOptions = {}) => {
           'OPENCODE_DISABLE_PROJECT_CONFIG=1',
           '--env',
           `XDG_CONFIG_HOME=${configRoot}`,
+          '--env',
+          `XDG_DATA_HOME=${SANDBOX_EVIDENCE_ROOT}/data`,
+          '--env',
+          `XDG_STATE_HOME=${SANDBOX_EVIDENCE_ROOT}/state`,
           'opencode',
           join(checkoutRoot, 'checkout'),
           configRoot,
@@ -787,6 +1070,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         failure = { reason: 'agent' };
         return;
       }
+      job.sandboxCreated = true;
       if (job.abortRequested) return;
       const network = await runTracked(
         job,
@@ -811,7 +1095,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         return;
       }
       update(job, { stage: 'agent' });
-      const agent = await runTracked(
+      agent = await runTracked(
         job,
         sbxPath,
         [
@@ -834,23 +1118,65 @@ export const createRunner = (options: RunnerOptions = {}) => {
         ],
         {
           captureStdout: true,
+          captureStderr: true,
           maxBytes: MAX_AGENT_OUTPUT_BYTES,
           timeoutMs: REVIEW_ATTEMPT_BUDGET_MS,
+          stdoutFilePath: join(evidencePath, 'opencode.jsonl'),
+          stderrFilePath: join(evidencePath, 'opencode.stderr'),
         },
       );
-      if (agent.timedOut) {
-        failure = { reason: 'timeout' };
-        return;
-      }
-      if (agent.exitCode !== 0 || agent.truncated) {
-        failure = { reason: 'invalid-output' };
-        return;
-      }
-      result = parseResult(agent.stdout);
-      if (result === undefined) failure = { reason: 'invalid-output' };
     } catch {
       failure = { reason: 'agent' };
     } finally {
+      if (evidenceReady && job.sandboxCreated) {
+        try {
+          evidenceComplete = await archiveEvidence(
+            job,
+            evidencePath,
+            agent,
+            await Effect.runPromise(
+              DateTime.now.pipe(
+                Effect.map((now) =>
+                  DateTime.toEpochMillis(
+                    DateTime.add(now, { milliseconds: ARCHIVE_PHASE_TIMEOUT_MS }),
+                  ),
+                ),
+              ),
+            ),
+          );
+          if (!evidenceComplete) evidenceFailure = 'archive-incomplete';
+        } catch {
+          evidenceFailure = 'archive-incomplete';
+        }
+      } else {
+        evidenceFailure = 'sandbox-not-created';
+      }
+      if (agent !== undefined && failure === undefined) {
+        if (agent.timedOut) {
+          failure = { reason: 'timeout' };
+        } else if (agent.exitCode !== 0 || agent.truncated) {
+          failure = { reason: 'invalid-output' };
+        } else {
+          result = parseResult(agent.stdout);
+          if (result === undefined) {
+            failure = { reason: 'invalid-output' };
+          } else if (evidenceReady) {
+            try {
+              await writeFile(
+                join(evidencePath, 'validated-review-result.json'),
+                JSON.stringify(result, null, 2) + '\n',
+                { mode: 0o600 },
+              );
+            } catch {
+              evidenceComplete = false;
+              evidenceFailure = 'archive-incomplete';
+            }
+          }
+        }
+      }
+      if (failure === undefined && result !== undefined && !evidenceComplete) {
+        failure = { reason: 'evidence' };
+      }
       job.input.repositoryReadToken = '';
       let cleaned = false;
       try {
@@ -859,14 +1185,80 @@ export const createRunner = (options: RunnerOptions = {}) => {
         cleaned = false;
       }
       if (!cleaned) failure = { reason: 'cleanup' };
-      job.diagnosticCheckoutToken = '';
-      if (job.abortRequested && cleaned) {
-        update(job, { status: 'aborted' });
-      } else if (failure !== undefined) {
-        update(job, { status: 'failed', failure });
-      } else {
-        update(job, { status: 'succeeded', result });
+      let finalStatus: RunnerJobState['status'] =
+        job.abortRequested && cleaned ? 'aborted' : failure !== undefined ? 'failed' : 'succeeded';
+      let finalFailure = finalStatus === 'failed' ? failure : undefined;
+      let manifestFinalized = !evidenceReady;
+      if (evidenceReady) {
+        try {
+          await secureEvidenceTree(evidencePath);
+          const evidenceStatus = evidenceComplete ? 'complete' : 'incomplete';
+          await writeManifestAtomically(join(evidencePath, 'manifest.json'), {
+            jobId: job.id,
+            sandboxName: job.sandboxName,
+            sandboxId: job.sandboxName,
+            evidenceId,
+            runId: job.input.runId,
+            attempt: job.input.attempt,
+            repositoryName: job.input.repositoryName,
+            pullRequestNumber: job.input.pullRequestNumber,
+            baseSha: job.input.baseSha,
+            headSha: job.input.headSha,
+            startedAt: evidenceStartedAt,
+            finishedAt: await currentIso(),
+            model: MODEL,
+            image: SANDBOX_TEMPLATE,
+            openCodeVersion: OPENCODE_VERSION,
+            agent: {
+              exitCode: agent?.exitCode ?? null,
+              timedOut: agent?.timedOut ?? false,
+              truncated: agent?.truncated ?? false,
+              stderrTruncated: agent?.stderrTruncated ?? false,
+              streamError: agent?.streamError ?? false,
+            },
+            sessionIds: job.sessionIds,
+            validation: {
+              status: agent === undefined ? 'not-run' : result === undefined ? 'invalid' : 'valid',
+            },
+            execution:
+              finalStatus === 'aborted'
+                ? { status: 'aborted', validation: 'not-run' }
+                : finalFailure !== undefined
+                  ? { status: 'failed', reason: finalFailure.reason }
+                  : { status: 'succeeded', validation: 'valid-review-result' },
+            terminal: {
+              status: finalStatus,
+              ...(finalFailure === undefined ? {} : { reason: finalFailure.reason }),
+            },
+            evidence: { id: evidenceId, status: evidenceStatus },
+            complete: evidenceComplete && evidenceFailure === undefined,
+            evidenceFailure,
+            cleanup: { status: cleaned ? 'destroyed' : 'failed' },
+            files: await evidenceFiles(evidencePath),
+          });
+          manifestFinalized = true;
+        } catch {
+          evidenceFailure = 'manifest-finalization-failed';
+          evidenceComplete = false;
+        }
       }
+      if (!manifestFinalized && finalStatus === 'succeeded') {
+        failure = { reason: 'evidence' };
+        finalStatus = 'failed';
+        finalFailure = failure;
+      }
+      update(job, {
+        evidence: { id: evidenceId, status: evidenceComplete ? 'complete' : 'incomplete' },
+      });
+      update(
+        job,
+        finalStatus === 'aborted'
+          ? { status: 'aborted', failure: undefined, result: undefined }
+          : finalStatus === 'failed'
+            ? { status: 'failed', failure: finalFailure, result: undefined }
+            : { status: 'succeeded', result, failure: undefined },
+      );
+      job.diagnosticCheckoutToken = '';
       job.resolveDone();
     }
   };
@@ -891,11 +1283,14 @@ export const createRunner = (options: RunnerOptions = {}) => {
         resolveDone = resolve;
       });
       const id = randomUUID();
+      const evidenceId = randomUUID();
       const job: RunnerJob = {
         state: {
           id,
           runId: input.runId,
           attempt: input.attempt,
+          evidenceId,
+          evidence: { id: evidenceId, status: 'pending' },
           status: 'queued',
           stage: 'admission',
           sandbox: { cleanup: 'pending' },
@@ -907,6 +1302,8 @@ export const createRunner = (options: RunnerOptions = {}) => {
         resolveDone,
         abortRequested: false,
         sandboxAttempted: false,
+        sandboxCreated: false,
+        sessionIds: [],
         diagnosticCheckoutToken: input.repositoryReadToken,
         deadlineAt: Date.now() + REVIEW_ATTEMPT_BUDGET_MS,
       };

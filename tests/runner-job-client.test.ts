@@ -10,6 +10,26 @@ const runnerSpecFields = {
   repositoryReadToken: 'github-read-token',
 };
 
+const runnerResponse = (
+  value: { readonly id: string; readonly status: string; readonly [key: string]: unknown },
+  init?: ResponseInit,
+) =>
+  Response.json(
+    {
+      evidence: {
+        id: value.id,
+        status:
+          value.status === 'succeeded'
+            ? 'complete'
+            : value.status === 'queued' || value.status === 'running'
+              ? 'pending'
+              : 'incomplete',
+      },
+      ...value,
+    },
+    init,
+  );
+
 describe('Runner Job client', () => {
   it('uses the HTTP VPC Service scheme for every Runner Job request', async () => {
     const requests: string[] = [];
@@ -23,7 +43,7 @@ describe('Runner Job client', () => {
           if (url.protocol !== 'http:') throw new Error('HTTP-only VPC Service rejected HTTPS');
 
           if (request.method === 'POST') {
-            return Response.json(
+            return runnerResponse(
               {
                 id: 'job-http-scheme',
                 runId: 'run-http-scheme',
@@ -36,7 +56,7 @@ describe('Runner Job client', () => {
             );
           }
           if (request.method === 'GET') {
-            return Response.json({
+            return runnerResponse({
               id: 'job-http-scheme',
               runId: 'run-http-scheme',
               attempt: 1,
@@ -46,7 +66,7 @@ describe('Runner Job client', () => {
               sandbox: { cleanup: 'pending' },
             });
           }
-          return Response.json({
+          return runnerResponse({
             id: 'job-http-scheme',
             runId: 'run-http-scheme',
             attempt: 1,
@@ -90,7 +110,7 @@ describe('Runner Job client', () => {
             attempts.push(body.attempt);
             postCount += 1;
             if (postCount === 1) throw new Error('response lost after admission');
-            return Response.json(
+            return runnerResponse(
               {
                 id: 'job-lost-post',
                 runId: 'run-lost-post',
@@ -103,7 +123,7 @@ describe('Runner Job client', () => {
             );
           }
           if (request.method === 'GET' && url.pathname === '/jobs/job-lost-post') {
-            return Response.json({
+            return runnerResponse({
               id: 'job-lost-post',
               runId: 'run-lost-post',
               attempt: 1,
@@ -142,7 +162,7 @@ describe('Runner Job client', () => {
           expect(request.headers.get('authorization')).toBe('Bearer runner-auth-token');
           const url = new URL(request.url);
           if (request.method === 'POST' && url.pathname === '/jobs') {
-            return Response.json(
+            return runnerResponse(
               {
                 id: 'job-1',
                 runId: 'run-client-1',
@@ -157,7 +177,7 @@ describe('Runner Job client', () => {
           if (request.method === 'GET' && url.pathname === '/jobs/job-1') {
             statusReads += 1;
             return statusReads === 1
-              ? Response.json({
+              ? runnerResponse({
                   id: 'job-1',
                   runId: 'run-client-1',
                   attempt: 1,
@@ -165,7 +185,7 @@ describe('Runner Job client', () => {
                   stage: 'agent',
                   sandbox: { cleanup: 'pending' },
                 })
-              : Response.json({
+              : runnerResponse({
                   id: 'job-1',
                   runId: 'run-client-1',
                   status: 'succeeded',
@@ -210,7 +230,7 @@ describe('Runner Job client', () => {
             const body = (await request.json()) as { runId: string; attempt: number };
             postedAttempts.push(body.attempt);
             const id = body.attempt === 1 ? 'job-get-lost' : 'job-fresh';
-            return Response.json(
+            return runnerResponse(
               {
                 id,
                 runId: body.runId,
@@ -227,7 +247,7 @@ describe('Runner Job client', () => {
               getLost = false;
               throw new Error('GET response lost');
             }
-            return Response.json({
+            return runnerResponse({
               id: 'job-get-lost',
               runId: 'run-get-lost',
               attempt: 1,
@@ -237,7 +257,7 @@ describe('Runner Job client', () => {
             });
           }
           if (request.method === 'DELETE' && url.pathname === '/jobs/job-get-lost') {
-            return Response.json({
+            return runnerResponse({
               id: 'job-get-lost',
               runId: 'run-get-lost',
               attempt: 1,
@@ -248,7 +268,7 @@ describe('Runner Job client', () => {
             });
           }
           if (request.method === 'GET' && url.pathname === '/jobs/job-fresh') {
-            return Response.json({
+            return runnerResponse({
               id: 'job-fresh',
               runId: 'run-get-lost',
               attempt: 2,
@@ -289,7 +309,7 @@ describe('Runner Job client', () => {
           const url = new URL(request.url);
           if (request.method === 'POST') {
             posts += 1;
-            return Response.json(
+            return runnerResponse(
               {
                 id: 'job-delete-loss',
                 runId: 'run-delete-loss',
@@ -337,7 +357,7 @@ describe('Runner Job client', () => {
         fetch: async (request) => {
           const url = new URL(request.url);
           if (request.method === 'POST') {
-            return Response.json(
+            return runnerResponse(
               {
                 id: 'job-superseded',
                 runId: 'run-superseded',
@@ -351,7 +371,7 @@ describe('Runner Job client', () => {
           }
           if (request.method === 'DELETE' && url.pathname === '/jobs/job-superseded') {
             deletes += 1;
-            return Response.json({
+            return runnerResponse({
               id: 'job-superseded',
               runId: 'run-superseded',
               attempt: 1,
@@ -360,7 +380,7 @@ describe('Runner Job client', () => {
               sandbox: { cleanup: 'destroyed' },
             });
           }
-          return Response.json({
+          return runnerResponse({
             id: 'job-superseded',
             runId: 'run-superseded',
             attempt: 1,
@@ -398,7 +418,7 @@ describe('Runner Job client', () => {
           const url = new URL(request.url);
           if (request.method === 'POST') {
             await new Promise((resolve) => setTimeout(resolve, 5));
-            return Response.json(
+            return runnerResponse(
               {
                 id: 'job-deadline',
                 runId: 'run-deadline',
@@ -412,7 +432,7 @@ describe('Runner Job client', () => {
           }
           if (request.method === 'DELETE' && url.pathname === '/jobs/job-deadline') {
             deletes += 1;
-            return Response.json({
+            return runnerResponse({
               id: 'job-deadline',
               runId: 'run-deadline',
               attempt: 1,
@@ -421,7 +441,7 @@ describe('Runner Job client', () => {
               sandbox: { cleanup: 'destroyed' },
             });
           }
-          return Response.json({
+          return runnerResponse({
             id: 'job-deadline',
             runId: 'run-deadline',
             attempt: 1,

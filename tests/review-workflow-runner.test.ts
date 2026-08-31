@@ -1,4 +1,7 @@
-import { describe, expect, it, vi } from 'vitest';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import { REVIEW_ATTEMPT_BUDGET_MS } from '../packages/contracts/src';
 import { createRunnerJobClient } from '../apps/core/src/runner-job-client';
 import { runReviewWorkflow, type ReviewWorkflowStep } from '../apps/core/src/review-workflow';
@@ -20,6 +23,37 @@ const runnerSpecFields = {
   pullRequestNumber: 42,
   repositoryReadToken: 'github-read-token',
 };
+const evidenceRoot = join(tmpdir(), 'compte-rendu-review-workflow-evidence');
+
+const writeEvidenceFixture = async (
+  args: readonly string[],
+  options: { readonly stdoutFilePath?: string; readonly stderrFilePath?: string },
+  resultLine: string,
+) => {
+  if (args[0] === 'exec' && args.includes('--agent')) {
+    await writeFile(options.stdoutFilePath!, `${resultLine}\n`, { mode: 0o600 });
+    await writeFile(options.stderrFilePath!, 'agent stderr\n', { mode: 0o600 });
+  }
+  if (args[0] === 'exec' && args.includes('export')) {
+    await writeFile(
+      options.stdoutFilePath!,
+      `{"session":"${args[args.indexOf('export') + 1]}"}\n`,
+      { mode: 0o600 },
+    );
+  }
+  if (args[0] === 'cp') {
+    const destination = args[2];
+    await mkdir(destination, { recursive: true, mode: 0o700 });
+    await writeFile(join(destination, 'opencode.db'), 'db', { mode: 0o600 });
+    await writeFile(join(destination, 'opencode.db-wal'), 'wal', { mode: 0o600 });
+    await writeFile(join(destination, 'opencode.db-shm'), 'shm', { mode: 0o600 });
+    await writeFile(join(destination, 'review.log'), 'log', { mode: 0o600 });
+  }
+};
+
+afterAll(async () => {
+  await rm(evidenceRoot, { recursive: true, force: true });
+});
 
 describe('review Workflow runner tracer', () => {
   it('completes through the real client and Runner HTTP handler before publication', async () => {
@@ -31,18 +65,26 @@ describe('review Workflow runner tracer', () => {
       },
     });
     const runner = createRunner({
+      evidenceRoot,
       authToken: 'runner-tracer-token',
       modelSecretCommand: 'test-secret-resolver',
-      process: async (_command, args, options = {}) => ({
-        exitCode: 0,
-        stdout: args.includes('rev-parse')
-          ? `${baseSha}\n${headSha}\n`
-          : options.captureStdout === true
-            ? `${agentOutput}\n`
-            : '',
-        timedOut: false,
-        truncated: false,
-      }),
+      process: async (_command, args, options = {}) => {
+        await writeEvidenceFixture(args, options, agentOutput);
+        return {
+          exitCode: 0,
+          stdout: args.includes('rev-parse')
+            ? `${baseSha}\n${headSha}\n`
+            : args.includes('session')
+              ? '[{"id":"workflow-session"}]\n'
+              : args.includes('export')
+                ? ''
+                : options.captureStdout === true
+                  ? `${agentOutput}\n`
+                  : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
     });
     const client = createRunnerJobClient({
       authToken: 'runner-tracer-token',
@@ -98,10 +140,12 @@ describe('review Workflow runner tracer', () => {
     });
     let releaseFirstAgent: (() => void) | undefined;
     const runner = createRunner({
+      evidenceRoot,
       authToken: 'runner-tracer-token',
       modelSecretCommand: 'test-secret-resolver',
       process: async (_command, args, options = {}) => {
-        if (args[0] === 'exec') {
+        await writeEvidenceFixture(args, options, agentOutput);
+        if (args[0] === 'exec' && args.includes('--agent')) {
           agentRuns += 1;
           if (agentRuns === 1) {
             agentStarted();
@@ -122,7 +166,11 @@ describe('review Workflow runner tracer', () => {
         }
         return {
           exitCode: 0,
-          stdout: args.includes('rev-parse') ? `${baseSha}\n${headSha}\n` : '',
+          stdout: args.includes('rev-parse')
+            ? `${baseSha}\n${headSha}\n`
+            : args.includes('session')
+              ? '[{"id":"workflow-session"}]\n'
+              : '',
           timedOut: false,
           truncated: false,
         };
@@ -218,10 +266,12 @@ describe('review Workflow runner tracer', () => {
     });
     let releaseFirstAgent: (() => void) | undefined;
     const runner = createRunner({
+      evidenceRoot,
       authToken: 'runner-tracer-token',
       modelSecretCommand: 'test-secret-resolver',
       process: async (_command, args, options = {}) => {
-        if (args[0] === 'exec') {
+        await writeEvidenceFixture(args, options, agentOutput);
+        if (args[0] === 'exec' && args.includes('--agent')) {
           agentRuns += 1;
           if (agentRuns === 1) {
             agentStarted();
@@ -242,7 +292,11 @@ describe('review Workflow runner tracer', () => {
         }
         return {
           exitCode: 0,
-          stdout: args.includes('rev-parse') ? `${baseSha}\n${headSha}\n` : '',
+          stdout: args.includes('rev-parse')
+            ? `${baseSha}\n${headSha}\n`
+            : args.includes('session')
+              ? '[{"id":"workflow-session"}]\n'
+              : '',
           timedOut: false,
           truncated: false,
         };
@@ -320,10 +374,12 @@ describe('review Workflow runner tracer', () => {
     });
     let releaseFirstAgent: (() => void) | undefined;
     const runner = createRunner({
+      evidenceRoot,
       authToken: 'runner-tracer-token',
       modelSecretCommand: 'test-secret-resolver',
       process: async (_command, args, options = {}) => {
-        if (args[0] === 'exec') {
+        await writeEvidenceFixture(args, options, agentOutput);
+        if (args[0] === 'exec' && args.includes('--agent')) {
           agentRuns += 1;
           if (agentRuns === 1) {
             agentStarted();
@@ -344,7 +400,11 @@ describe('review Workflow runner tracer', () => {
         }
         return {
           exitCode: 0,
-          stdout: args.includes('rev-parse') ? `${baseSha}\n${headSha}\n` : '',
+          stdout: args.includes('rev-parse')
+            ? `${baseSha}\n${headSha}\n`
+            : args.includes('session')
+              ? '[{"id":"workflow-session"}]\n'
+              : '',
           timedOut: false,
           truncated: false,
         };

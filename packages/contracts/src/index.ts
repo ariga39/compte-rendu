@@ -40,6 +40,11 @@ export const RunnerJobResponse = Schema.Struct({
   id: Schema.NonEmptyString,
   runId: Schema.NonEmptyString,
   attempt: Schema.Int,
+  evidenceId: Schema.optional(Schema.NonEmptyString),
+  evidence: Schema.Struct({
+    id: Schema.NonEmptyString,
+    status: Schema.Literals(['pending', 'complete', 'incomplete']),
+  }),
   status: Schema.Literals(['queued', 'running', 'succeeded', 'failed', 'aborted']),
   stage: Schema.Literals(['admission', 'checkout', 'sandbox', 'agent', 'cleanup']),
   sandbox: Schema.Struct({
@@ -48,7 +53,14 @@ export const RunnerJobResponse = Schema.Struct({
   result: Schema.optional(ReviewResult),
   failure: Schema.optional(
     Schema.Struct({
-      reason: Schema.Literals(['checkout', 'agent', 'timeout', 'invalid-output', 'cleanup']),
+      reason: Schema.Literals([
+        'checkout',
+        'agent',
+        'timeout',
+        'invalid-output',
+        'evidence',
+        'cleanup',
+      ]),
     }),
   ),
 });
