@@ -2,7 +2,6 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { REVIEW_ATTEMPT_BUDGET_MS } from '../packages/contracts/src';
 import { createRunnerJobClient } from '../apps/core/src/runner-job-client';
 import { runReviewWorkflow, type ReviewWorkflowStep } from '../apps/core/src/review-workflow';
 import {
@@ -169,37 +168,26 @@ describe('review Workflow runner tracer', () => {
     expect(published).toEqual({ findings: [], summary: 'No findings' });
   });
 
-  it('reaches a third attempt after two retryable failures with a full attempt budget', async () => {
-    const agentOutput = JSON.stringify({
-      type: 'text',
-      part: {
-        type: 'text',
-        text: JSON.stringify({ findings: [], summary: 'Third attempt succeeds' }),
-      },
-    });
+  it('fails after one retryable invalid-output attempt without creating another Runner Job', async () => {
     let agentRuns = 0;
-    const agentTimeouts: number[] = [];
     const runner = createRunner({
       evidenceRoot,
       authToken: 'runner-tracer-token',
       modelSecretCommand: 'test-secret-resolver',
       process: async (_command, args, options = {}) => {
-        await writeEvidenceFixture(args, options, agentOutput);
+        await writeEvidenceFixture(args, options, 'not-jsonl');
         const isAgent = args[0] === 'exec' && args.includes('--agent');
-        if (isAgent) {
-          agentRuns += 1;
-          agentTimeouts.push(options.timeoutMs ?? 0);
-        }
+        if (isAgent) agentRuns += 1;
         return {
-          exitCode: isAgent && agentRuns < 3 ? 1 : 0,
+          exitCode: 0,
           stdout: args.includes('rev-parse')
             ? `${baseSha}\n${headSha}\n`
             : args.includes('session')
-              ? '[{"id":"third-attempt-session"}]\n'
+              ? '[{"id":"one-attempt-session"}]\n'
               : args.includes('export')
                 ? ''
                 : options.captureStdout === true
-                  ? `${agentOutput}\n`
+                  ? 'not-jsonl\n'
                   : '',
           timedOut: false,
           truncated: false,
@@ -223,7 +211,7 @@ describe('review Workflow runner tracer', () => {
 
     const disposition = await runReviewWorkflow(
       {
-        runId: 'run-workflow-runner-third-attempt',
+        runId: 'run-workflow-runner-one-attempt',
         job: {
           repositoryId: 11,
           pullRequestNumber: 42,
@@ -246,18 +234,13 @@ describe('review Workflow runner tracer', () => {
       },
     );
 
-    expect(disposition).toBe('completed');
-    expect(published).toEqual({ findings: [], summary: 'Third attempt succeeds' });
-    expect(posted).toEqual([1, 2, 3]);
-    expect(agentRuns).toBe(3);
-    expect(agentTimeouts).toEqual([
-      REVIEW_ATTEMPT_BUDGET_MS,
-      REVIEW_ATTEMPT_BUDGET_MS,
-      REVIEW_ATTEMPT_BUDGET_MS,
-    ]);
+    expect(disposition).toBe('failed');
+    expect(published).toBeUndefined();
+    expect(posted).toEqual([1]);
+    expect(agentRuns).toBe(1);
   });
 
-  it('retries after a lost GET when the real Runner confirms aborted cleanup', async () => {
+  it('returns terminal failure after a lost GET once the known job is cleaned up', async () => {
     const agentOutput = JSON.stringify({
       type: 'text',
       part: {
@@ -371,12 +354,12 @@ describe('review Workflow runner tracer', () => {
       },
     );
 
-    expect(disposition).toBe('completed');
-    expect(published).toEqual({ findings: [], summary: 'Fresh attempt' });
+    expect(disposition).toBe('failed');
+    expect(published).toBeUndefined();
     expect(deletedState).toMatchObject({ status: 'aborted', sandbox: { cleanup: 'destroyed' } });
     expect(posted).toEqual([
       { runId: 'run-workflow-runner-get-loss', attempt: 1, baseSha, headSha },
-      { runId: 'run-workflow-runner-get-loss', attempt: 2, baseSha, headSha },
     ]);
+    expect(agentRuns).toBe(1);
   });
 });

@@ -146,7 +146,7 @@ describe('Runner Job client', () => {
         baseSha,
         headSha,
         repositoryReadToken: 'short-lived-checkout-token',
-        maxAttempts: 2,
+        maxAttempts: 1,
       }),
     ).resolves.toMatchObject({ status: 'succeeded', attempt: 1 });
     expect(attempts).toEqual([1, 1]);
@@ -229,10 +229,9 @@ describe('Runner Job client', () => {
           if (request.method === 'POST') {
             const body = (await request.json()) as { runId: string; attempt: number };
             postedAttempts.push(body.attempt);
-            const id = body.attempt === 1 ? 'job-get-lost' : 'job-fresh';
             return runnerResponse(
               {
-                id,
+                id: 'job-get-lost',
                 runId: body.runId,
                 attempt: body.attempt,
                 status: 'queued',
@@ -267,17 +266,6 @@ describe('Runner Job client', () => {
               sandbox: { cleanup: 'destroyed' },
             });
           }
-          if (request.method === 'GET' && url.pathname === '/jobs/job-fresh') {
-            return runnerResponse({
-              id: 'job-fresh',
-              runId: 'run-get-lost',
-              attempt: 2,
-              status: 'succeeded',
-              stage: 'cleanup',
-              result: { findings: [], summary: 'fresh' },
-              sandbox: { cleanup: 'destroyed' },
-            });
-          }
           return new Response(null, { status: 404 });
         },
       },
@@ -291,10 +279,10 @@ describe('Runner Job client', () => {
         baseSha,
         headSha,
         repositoryReadToken: 'short-lived-checkout-token',
-        maxAttempts: 2,
+        maxAttempts: 1,
       }),
-    ).resolves.toMatchObject({ status: 'succeeded', attempt: 2, sandboxId: 'job-fresh' });
-    expect(postedAttempts).toEqual([1, 2]);
+    ).resolves.toMatchObject({ status: 'failed', reason: 'agent', attempt: 1, retryable: true });
+    expect(postedAttempts).toEqual([1]);
   });
 
   it('fails closed after DELETE transport loss without starting another attempt', async () => {
@@ -341,7 +329,7 @@ describe('Runner Job client', () => {
         baseSha,
         headSha,
         repositoryReadToken: 'short-lived-checkout-token',
-        maxAttempts: 2,
+        maxAttempts: 1,
       }),
     ).resolves.toMatchObject({ status: 'failed', reason: 'cleanup', retryable: false });
     expect(posts).toBe(1);
@@ -401,7 +389,7 @@ describe('Runner Job client', () => {
         headSha,
         repositoryReadToken: 'short-lived-checkout-token',
         shouldAbort: async () => true,
-        maxAttempts: 2,
+        maxAttempts: 1,
       }),
     ).resolves.toMatchObject({ status: 'failed', reason: 'superseded', retryable: false });
     expect(deletes).toBe(1);

@@ -3,6 +3,7 @@ import {
   RunnerJobInput,
   RunnerJobResponse,
   REVIEW_CORE_DEADLINE_MS,
+  REVIEW_MAX_ATTEMPTS,
   type RunnerJobResponse as RunnerJobResponseValue,
 } from '@compte-rendu/contracts';
 import type {
@@ -82,7 +83,7 @@ export const createRunnerJobClient = ({
   deadlineMs = REVIEW_CORE_DEADLINE_MS,
 }: RunnerJobClientOptions): ReviewRunner => ({
   runJob: async (spec: ReviewRunSpec) => {
-    const maxAttempts = Math.max(1, Math.min(spec.maxAttempts ?? 1, 3));
+    const maxAttempts = Math.max(1, Math.min(spec.maxAttempts ?? 1, REVIEW_MAX_ATTEMPTS));
     const deadline = Date.now() + deadlineMs;
     let lastFailure = failed('agent', 1);
 
