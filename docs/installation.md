@@ -811,13 +811,33 @@ that no review is in flight before proceeding.
    confirm the database name at the prompt. Do not delete a different
    database, and never use a broad wildcard or guessed identifier.
 
-8. Revoke the Cloudflare automation token. For interactive access, run
+8. Decide separately whether to retain the private
+   `<INSTANCE_NAME>-review-evidence` R2 bucket. Leaving it in place is valid:
+   the deployment's 90-day `reviews/` lifecycle rule continues expiring
+   retained objects after the Workers are gone, so ordinary uninstall does
+   not require bucket deletion.
+
+   If the owner needs a longer-lived archive, export the required objects
+   before their lifecycle expiry. Delete the bucket only when the owner has
+   explicitly decided that no retained review evidence is needed, using the
+   exact derived bucket name and confirming the destructive prompt:
+
+   ```sh
+   corepack pnpm dlx wrangler@4.124.0 r2 bucket delete <INSTANCE_NAME>-review-evidence
+   ```
+
+   Do not remove or shorten the lifecycle merely because the application was
+   uninstalled, and never delete a bucket selected by wildcard or guessed
+   name.
+
+9. Revoke the Cloudflare automation token. For interactive access, run
    `corepack pnpm dlx wrangler@4.124.0 logout`.
 
 GitHub's installation operation and Cloudflare's Wrangler/D1 commands are the
 authoritative references for these external destructive actions:
 [GitHub App installation](https://docs.github.com/en/apps/using-github-apps/installing-your-own-github-app),
 [Wrangler commands](https://developers.cloudflare.com/workers/wrangler/commands/),
+[R2 bucket operations](https://developers.cloudflare.com/r2/buckets/create-buckets/),
 and [D1 migrations](https://developers.cloudflare.com/d1/reference/migrations/).
 
 ## Official references
