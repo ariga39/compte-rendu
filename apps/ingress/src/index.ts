@@ -41,6 +41,7 @@ const PullRequestWebhook = Schema.Struct({
   }),
   pull_request: Schema.Struct({
     draft: Schema.Boolean,
+    user: Schema.Struct({ type: Schema.String }),
     base: Schema.Struct({
       sha: GitHubSha,
       repo: Schema.Struct({ id: Schema.Int }),
@@ -284,6 +285,16 @@ const processWebhook = (request: Request, dependencies: IngressDependencies) =>
           dependencies,
         ))
       ) {
+        return 'ignored' as const;
+      }
+      if (payload.pull_request.user.type === 'Bot') {
+        yield* recordOperationalLog(dependencies.log ?? createCloudflareOperationalLog(), {
+          phase: 'ingress',
+          outcome: 'ignored',
+          deliveryId: sanitizeOperationalLogIdentifier(deliveryId),
+          event: 'pull_request',
+          reason: 'bot_pull_request',
+        });
         return 'ignored' as const;
       }
       return yield* forwardEvent(normalizePullRequest(deliveryId, payload), dependencies);

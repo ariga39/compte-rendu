@@ -13,6 +13,7 @@ const payload = {
   repository: { id: 11, visibility: 'private' },
   pull_request: {
     draft: false,
+    user: { login: 'maintainer', type: 'User' },
     base: {
       sha: '1111111111111111111111111111111111111111',
       repo: { id: 11 },

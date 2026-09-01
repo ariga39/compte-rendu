@@ -22,6 +22,7 @@ const payload = {
   repository: { id: 11, visibility: 'private' },
   pull_request: {
     draft: false,
+    user: { login: 'maintainer', type: 'User' },
     base: { sha: '1111111111111111111111111111111111111111', repo: { id: 11 } },
     head: { sha: '2222222222222222222222222222222222222222', repo: { id: 99 } },
   },
@@ -282,6 +283,43 @@ describe('Webhook ingress', () => {
       baseSha: '1111111111111111111111111111111111111111',
       headSha: '2222222222222222222222222222222222222222',
     });
+  });
+  it('ignores an automatic pull request authored by a GitHub Bot', async () => {
+    const forwarded: Request[] = [];
+    const { events, log } = collectingLog();
+    const worker = createIngressWorker({
+      secret,
+      crypto: globalThis.crypto,
+      log,
+      core: {
+        fetch: async (request) => {
+          forwarded.push(request);
+          return new Response(null, { status: 202 });
+        },
+      },
+    });
+
+    const response = await worker.fetch(
+      await signedRequest({
+        ...payload,
+        pull_request: {
+          ...payload.pull_request,
+          user: { login: 'dependabot[bot]', type: 'Bot' },
+        },
+      }),
+    );
+
+    expect(response.status).toBe(204);
+    expect(forwarded).toHaveLength(0);
+    expect(events).toEqual([
+      {
+        phase: 'ingress',
+        outcome: 'ignored',
+        deliveryId: 'delivery-1',
+        event: 'pull_request',
+        reason: 'bot_pull_request',
+      },
+    ]);
   });
   it('keeps the accepted response when operational logging fails', async () => {
     let forwarded = false;

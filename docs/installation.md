@@ -276,7 +276,8 @@ when GitHub changes an endpoint. The general rule to request the minimum is in
 Subscribe the App to:
 
 - `Pull requests`: `opened`, `reopened`, `synchronize`, and
-  `ready_for_review` (all four are accepted by `apps/ingress/src/index.ts`).
+  `ready_for_review` (all four are accepted by `apps/ingress/src/index.ts` for
+  non-Bot authors; Bot-authored automatic events are ignored).
 - `Issue comment`: `created`. The product path is only a comment on a pull
   request with the exact body `/ai-review`.
 
@@ -723,6 +724,7 @@ artifacts.
 | Run fails at agent or cleanup         | Runner records for the same IDs                                                          | Treat a cleanup failure as a failed run until forced Sandbox cleanup succeeds.                                                  |
 | No review is published                | Publication reason, current PR head SHA, and Pull requests write permission              | If the head changed, issue a new review command. If publication is uncertain, check the existing review marker before retrying. |
 | Public fork PR does nothing           | Comment body and commenter permission                                                    | Use the exact `/ai-review` command from a maintainer with `write`, `maintain`, or `admin`; a new head needs a new command.      |
+| Bot-authored PR does nothing          | Pull request author type and comment body                                                | Automatic Bot PRs are intentionally ignored; use exact `/ai-review` from a maintainer when a review is useful.                  |
 
 ## Update and rollback
 
