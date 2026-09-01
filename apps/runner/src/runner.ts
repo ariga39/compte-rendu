@@ -48,6 +48,7 @@ const MAX_AGENT_OUTPUT_BYTES = MAX_REVIEW_RESULT_BYTES;
 const MAX_REQUEST_BYTES = 64 * 1024;
 const CALLBACK_REQUEST_TIMEOUT_MS = 30 * 1000;
 const SANDBOX_EVIDENCE_ROOT = '/tmp/petit-chiba-opencode-evidence';
+const EMPTY_EVIDENCE_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 
 const trustedOpenCodeConfig = JSON.stringify({
   share: 'disabled',
@@ -354,6 +355,7 @@ type RunnerJobState = RunnerJobResponseValue;
 type RunnerFailureCauseValue = typeof RunnerFailureCause.Type;
 
 type RunnerJobInputState = {
+  id: string;
   runId: string;
   attempt: number;
   repositoryUrl: string;
@@ -1138,12 +1140,31 @@ export const createRunner = (options: RunnerOptions = {}) => {
     return clean;
   };
 
-  const callbackEvidence = async (evidencePath: string, job: RunnerJob) => {
+  const callbackEvidence = async (
+    evidencePath: string,
+    job: RunnerJob,
+    includeValidatedReview: boolean,
+  ) => {
     const encoded = async (name: string) => {
       try {
-        return Buffer.from(await readFile(join(evidencePath, name))).toString('base64');
+        const bytes = await readFile(join(evidencePath, name));
+        const hash = await globalThis.crypto.subtle.digest('SHA-256', bytes);
+        return {
+          content: bytes.toString('base64'),
+          size: bytes.byteLength,
+          sha256: Array.from(new Uint8Array(hash), (byte) =>
+            byte.toString(16).padStart(2, '0'),
+          ).join(''),
+        };
       } catch {
-        return '';
+        const hash = await globalThis.crypto.subtle.digest('SHA-256', new Uint8Array());
+        return {
+          content: '',
+          size: 0,
+          sha256: Array.from(new Uint8Array(hash), (byte) =>
+            byte.toString(16).padStart(2, '0'),
+          ).join(''),
+        };
       }
     };
     const sessionId = job.sessionIds[0];
@@ -1153,7 +1174,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       manifest: await encoded('manifest.json'),
       opencodeJsonl: await encoded('opencode.jsonl'),
       opencodeStderr: await encoded('opencode.stderr'),
-      ...(job.state.result === undefined
+      ...(includeValidatedReview === false
         ? {}
         : { validatedReview: await encoded('validated-review.md') }),
       opencodeSessionList: await encoded('opencode-session-list.json'),
@@ -1173,9 +1194,10 @@ export const createRunner = (options: RunnerOptions = {}) => {
     evidencePath: string,
     status: RunnerJobState['status'],
     failure: RunnerJobState['failure'],
-  ) => {
-    if (callbackUrl === undefined || callbackToken === undefined) return;
-    if (status !== 'succeeded' && status !== 'failed' && status !== 'aborted') return;
+    result: RunnerJobState['result'],
+  ): Promise<boolean> => {
+    if (callbackUrl === undefined || callbackToken === undefined) return false;
+    if (status !== 'succeeded' && status !== 'failed' && status !== 'aborted') return false;
     const callback = {
       id: job.id,
       runId: job.input.runId,
@@ -1183,7 +1205,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       status,
       stage: job.state.stage,
       sandbox: job.state.sandbox,
-      evidence: await callbackEvidence(evidencePath, job),
+      evidence: await callbackEvidence(evidencePath, job, result !== undefined),
       timestamps: {
         ...(job.executionStartedAt === undefined
           ? {}
@@ -1195,33 +1217,55 @@ export const createRunner = (options: RunnerOptions = {}) => {
           ? {}
           : { cleanupCompletedAt: job.cleanupCompletedAt }),
       },
-      ...(job.state.result === undefined ? {} : { result: job.state.result }),
+      ...(result === undefined ? {} : { result }),
       ...(failure === undefined ? {} : { failure }),
     };
     const decoded = await Schema.decodeUnknownPromise(RunnerResultCallback)(callback);
     const completeBody = JSON.stringify(decoded);
-    const body =
-      new TextEncoder().encode(completeBody).byteLength > MAX_RUNNER_CALLBACK_BYTES
-        ? JSON.stringify(
-            await Schema.decodeUnknownPromise(RunnerResultCallback)({
-              id: callback.id,
-              runId: callback.runId,
-              attempt: callback.attempt,
-              status: 'failed',
-              stage: callback.stage,
-              sandbox: callback.sandbox,
-              evidence: {
-                id: callback.evidence.id,
-                status: 'incomplete',
-                manifest: '',
-                opencodeJsonl: '',
-                opencodeStderr: '',
-              },
-              timestamps: callback.timestamps,
-              failure: { reason: 'evidence' },
-            }),
-          )
-        : completeBody;
+    const callbackTooLarge =
+      new TextEncoder().encode(completeBody).byteLength > MAX_RUNNER_CALLBACK_BYTES;
+    if (callbackTooLarge) {
+      update(job, {
+        status: 'failed',
+        failure: { reason: 'evidence' },
+        result: undefined,
+        evidence: { id: callback.evidence.id, status: 'incomplete' },
+      });
+      try {
+        const manifest = JSON.parse(
+          await readFile(join(evidencePath, 'manifest.json'), 'utf8'),
+        ) as Record<string, unknown>;
+        manifest.execution = { status: 'failed', reason: 'evidence' };
+        manifest.terminal = { status: 'failed', reason: 'evidence' };
+        manifest.evidence = { id: callback.evidence.id, status: 'incomplete' };
+        manifest.complete = false;
+        manifest.evidenceFailure = 'callback-too-large';
+        await writeManifestAtomically(join(evidencePath, 'manifest.json'), manifest);
+      } catch {
+        // The original local evidence remains available if reconciliation fails.
+      }
+    }
+    const body = callbackTooLarge
+      ? JSON.stringify(
+          await Schema.decodeUnknownPromise(RunnerResultCallback)({
+            id: callback.id,
+            runId: callback.runId,
+            attempt: callback.attempt,
+            status: 'failed',
+            stage: callback.stage,
+            sandbox: callback.sandbox,
+            evidence: {
+              id: callback.evidence.id,
+              status: 'incomplete',
+              manifest: { content: '', size: 0, sha256: EMPTY_EVIDENCE_SHA256 },
+              opencodeJsonl: { content: '', size: 0, sha256: EMPTY_EVIDENCE_SHA256 },
+              opencodeStderr: { content: '', size: 0, sha256: EMPTY_EVIDENCE_SHA256 },
+            },
+            timestamps: callback.timestamps,
+            failure: { reason: 'evidence' },
+          }),
+        )
+      : completeBody;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const controller = new AbortController();
       let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -1243,7 +1287,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
             }, callbackTimeoutMs);
           }),
         ]);
-        if (response.ok) return;
+        if (response.ok) return callbackTooLarge;
       } catch {
         // The local evidence remains the recovery copy when callback delivery is lost.
       } finally {
@@ -1253,6 +1297,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         await new Promise<void>((resolve) => setTimeout(resolve, 0));
       }
     }
+    return callbackTooLarge;
   };
 
   const execute = async (job: RunnerJob) => {
@@ -1668,6 +1713,17 @@ export const createRunner = (options: RunnerOptions = {}) => {
       update(job, {
         evidence: { id: evidenceId, status: evidenceComplete ? 'complete' : 'incomplete' },
       });
+      let callbackTooLarge = false;
+      try {
+        callbackTooLarge = await sendCallback(job, evidencePath, finalStatus, finalFailure, result);
+      } catch {
+        // Callback serialization or transport failure must not discard local evidence.
+      }
+      if (callbackTooLarge) {
+        finalStatus = 'failed';
+        finalFailure = { reason: 'evidence' };
+        evidenceComplete = false;
+      }
       update(
         job,
         finalStatus === 'aborted'
@@ -1676,11 +1732,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
             ? { status: 'failed', failure: finalFailure, result: undefined }
             : { status: 'succeeded', result, failure: undefined },
       );
-      try {
-        await sendCallback(job, evidencePath, finalStatus, finalFailure);
-      } catch {
-        // Callback serialization or transport failure must not discard local evidence.
-      }
       job.diagnosticCheckoutToken = '';
       job.resolveDone();
     }
@@ -1692,6 +1743,14 @@ export const createRunner = (options: RunnerOptions = {}) => {
     if (!authorized(request, authToken)) return jsonResponse(401, { error: 'unauthorized' });
     const path = new URL(request.url).pathname;
     if (request.method === 'POST' && path === '/jobs') {
+      if (
+        callbackUrl === undefined ||
+        callbackUrl.length === 0 ||
+        callbackToken === undefined ||
+        callbackToken.length === 0
+      ) {
+        return jsonResponse(503, { error: 'callback unavailable' });
+      }
       if (modelSecretCommand === undefined || modelSecretCommand.length === 0) {
         return jsonResponse(503, { error: 'runner unavailable' });
       }
@@ -1699,13 +1758,27 @@ export const createRunner = (options: RunnerOptions = {}) => {
         await readJson(request),
       ).catch(() => undefined);
       if (input === undefined) return jsonResponse(400, { error: 'invalid job' });
+      const sameInput = (job: RunnerJob) =>
+        job.input.id === input.id &&
+        job.input.runId === input.runId &&
+        job.input.attempt === input.attempt &&
+        job.input.repositoryUrl === input.repositoryUrl &&
+        job.input.repositoryName === input.repositoryName &&
+        job.input.pullRequestNumber === input.pullRequestNumber &&
+        job.input.baseSha === input.baseSha &&
+        job.input.headSha === input.headSha &&
+        job.input.repositoryReadToken === input.repositoryReadToken;
+      const existingById = jobs.get(input.id);
+      if (existingById !== undefined) {
+        return jsonResponse(sameInput(existingById) ? 202 : 409, publicState(existingById));
+      }
       const existing = jobsByRun.get(`${input.runId}:${input.attempt}`);
-      if (existing !== undefined) return jsonResponse(202, publicState(existing));
+      if (existing !== undefined) return jsonResponse(409, publicState(existing));
       let resolveDone = () => {};
       const done = new Promise<void>((resolve) => {
         resolveDone = resolve;
       });
-      const id = randomUUID();
+      const id = input.id;
       const evidenceId = randomUUID();
       const job: RunnerJob = {
         state: {

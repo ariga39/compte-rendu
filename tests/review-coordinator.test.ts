@@ -138,6 +138,77 @@ describe('Review coordinator', () => {
     });
   });
 
+  it('gives a manual failed completion the existing negative feedback', async () => {
+    const stateStore = createInMemoryReviewStateStore();
+    const reactions: string[] = [];
+    const claimed = await stateStore.claimReview({
+      deliveryId: 'manual-completion-failed',
+      job: {
+        repositoryId: 11,
+        pullRequestNumber: 42,
+        installationId: 7,
+        baseSha: eligiblePrivatePullRequest.baseSha,
+        headSha: eligiblePrivatePullRequest.headSha,
+        trigger: 'manual',
+        commentId: 987654,
+      },
+      occurredAt: '2026-08-25T00:00:00.000Z',
+    });
+    if (claimed.kind !== 'claimed') throw new Error('manual completion was not claimed');
+    const coordinator = createReviewCoordinator({
+      github: {
+        addReaction: async ({ content }) => {
+          reactions.push(content);
+        },
+      },
+      stateStore,
+      scheduler: { schedule: async () => {} },
+    });
+
+    expect(await coordinator.completeReview({ runId: claimed.runId, output: '' })).toBe('failed');
+    expect(reactions).toEqual(['-1']);
+  });
+
+  it('gives a manual superseded completion confused feedback', async () => {
+    const stateStore = createInMemoryReviewStateStore();
+    const reactions: string[] = [];
+    const claimed = await stateStore.claimReview({
+      deliveryId: 'manual-completion-superseded',
+      job: {
+        repositoryId: 11,
+        pullRequestNumber: 42,
+        installationId: 7,
+        baseSha: eligiblePrivatePullRequest.baseSha,
+        headSha: eligiblePrivatePullRequest.headSha,
+        trigger: 'manual',
+        commentId: 987654,
+      },
+      occurredAt: '2026-08-25T00:00:00.000Z',
+    });
+    if (claimed.kind !== 'claimed') throw new Error('manual superseded run was not claimed');
+    await stateStore.markRunSuperseded({
+      runId: claimed.runId,
+      occurredAt: '2026-08-25T00:01:00.000Z',
+    });
+    const coordinator = createReviewCoordinator({
+      github: {
+        addReaction: async ({ content }) => {
+          reactions.push(content);
+        },
+      },
+      stateStore,
+      scheduler: { schedule: async () => {} },
+    });
+
+    expect(
+      await coordinator.completeReview({
+        runId: claimed.runId,
+        output: '## Review:\n\nSuperseded.',
+      }),
+    ).toBe('ignored');
+    expect(reactions).toEqual(['confused']);
+  });
+
   it('marks a review superseded when the head changes at the POST edge', async () => {
     const stateStore = createInMemoryReviewStateStore();
     const reviews: ReviewPublicationPayload[] = [];

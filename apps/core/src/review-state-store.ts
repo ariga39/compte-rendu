@@ -430,6 +430,17 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
     return result.meta.changes === 1;
   },
 
+  claimRunPublication: async ({ runId, occurredAt }) => {
+    const result = await database
+      .prepare(
+        `UPDATE review_runs SET publication_claimed_at = ?
+         WHERE run_id = ? AND status = 'scheduled' AND publication_claimed_at IS NULL`,
+      )
+      .bind(occurredAt, runId)
+      .run();
+    return result.meta.changes === 1;
+  },
+
   markRunCompleted: async ({ runId, occurredAt }) => {
     const results = await database.batch([
       database

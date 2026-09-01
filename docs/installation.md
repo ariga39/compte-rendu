@@ -479,8 +479,10 @@ uses the temporary invocation described above.
    `scheduled` and `completed` rows; it retains the active-PR index. D1
    `0003_runner_evidence.sql` adds only evidence object metadata and execution
    timestamps, while `0004_runner_admission.sql` adds the admitted Runner Job
-   identity, attempt, and originating manual comment id. D1 migration files
-   are versioned and applied in order; see
+   identity, attempt, and originating manual comment id.
+   `0005_publication_claim.sql` adds the atomic publication claim used to keep
+   concurrent duplicate callbacks from creating duplicate reviews. D1 migration
+   files are versioned and applied in order; see
    [D1 migrations](https://developers.cloudflare.com/d1/reference/migrations/).
 
    The generated core config also retains the legacy Durable Object migration
@@ -622,11 +624,26 @@ head SHA, and the single installation ID in the generated config.
    terminal and to retain the exact recorded base/head SHAs:
 
    ```sh
-   corepack pnpm dlx wrangler@4.124.0 d1 execute REVIEW_DB --remote --config apps/core/wrangler.<INSTANCE_NAME>.jsonc --command "SELECT delivery_id, status, base_sha, head_sha FROM deliveries WHERE delivery_id = '<DELIVERY_ID>'; SELECT run_id, status, base_sha, head_sha FROM review_runs WHERE delivery_id = '<DELIVERY_ID>';"
+   corepack pnpm dlx wrangler@4.124.0 d1 execute REVIEW_DB --remote --config apps/core/wrangler.<INSTANCE_NAME>.jsonc --command "SELECT delivery_id, status, base_sha, head_sha FROM deliveries WHERE delivery_id = '<DELIVERY_ID>'; SELECT run_id, status, base_sha, head_sha, runner_job_id, runner_attempt, evidence_key, evidence_status, evidence_size, evidence_sha256, execution_started_at, submission_completed_at, cleanup_completed_at FROM review_runs WHERE delivery_id = '<DELIVERY_ID>';"
    ```
 
    The expected terminal state for this successful gate is `completed` for
-   both rows, with the recorded `<BASE_SHA>` and `<HEAD_SHA>` unchanged.
+   both rows, with the recorded `<BASE_SHA>` and `<HEAD_SHA>` unchanged. The
+   run must also report `evidence_status = complete`, all three execution
+   timestamps, and the admitted Runner Job identity.
+
+   Fetch that exact private R2 object without Runner SSH, writing it to an
+   operator-chosen local file with mode `0600`:
+
+   ```sh
+   corepack pnpm dlx wrangler@4.124.0 r2 object get <INSTANCE_NAME>-review-evidence/<EVIDENCE_KEY> --remote --file <EVIDENCE_FILE>
+   ```
+
+   Require the downloaded byte size and SHA-256 to match `evidence_size` and
+   `evidence_sha256` from D1. The JSON object must contain the same run, Job,
+   and evidence identities plus the named manifest, JSONL, stderr, validated
+   review, session-list, and matching session-export fields. Do not publish
+   the private object or its session content.
 
 4. Perform a fresh current-head check and require the GitHub PR head to still
    equal the recorded SHA:

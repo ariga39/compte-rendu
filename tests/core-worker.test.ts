@@ -25,10 +25,10 @@ const runnerResponse = (request: Request) =>
   request
     .clone()
     .json()
-    .then((input: { runId: string }) =>
+    .then((input: { runId: string; id?: string }) =>
       Response.json(
         {
-          id: 'runner-job-1',
+          id: input.id ?? 'runner-job-1',
           runId: input.runId,
           attempt: 1,
           evidence: { id: 'evidence-1', status: 'pending' },
@@ -48,7 +48,37 @@ const coreEnv = (database: SqliteD1Database, runnerFetch = runnerResponse) => ({
   GITHUB_APP_PRIVATE_KEY: 'test-private-key',
 });
 
-const successfulCallback = (runId: string, id = 'runner-job-1', attempt = 1) =>
+const evidenceField = async (content: string) => {
+  const decoded = globalThis.atob(content);
+  const bytes = Uint8Array.from(decoded, (character) => character.charCodeAt(0));
+  const hash = await globalThis.crypto.subtle.digest('SHA-256', bytes);
+  return {
+    content,
+    size: bytes.byteLength,
+    sha256: Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, '0')).join(''),
+  };
+};
+
+const jsonlArtifact = 'e30=';
+const sessionListArtifact = 'W3siaWQiOiJzZXNzaW9uLTEifV0=';
+const exportArtifact = 'eyJpbmZvIjp7ImlkIjoic2Vzc2lvbi0xIn0sIm1lc3NhZ2VzIjpbXX0=';
+const reviewArtifact = 'IyMgUmV2aWV3OgoKTm8gZGVmZWN0cyBmb3VuZC4K';
+const manifestArtifact = (runId: string, id: string, attempt: number) =>
+  Buffer.from(
+    JSON.stringify({
+      jobId: id,
+      runId,
+      attempt,
+      evidenceId: 'evidence-1',
+      sessionIds: ['session-1'],
+      terminal: { status: 'succeeded' },
+      evidence: { id: 'evidence-1', status: 'complete' },
+      complete: true,
+      cleanup: { status: 'destroyed' },
+    }),
+  ).toString('base64');
+
+const successfulCallback = async (runId: string, id = 'runner-job-1', attempt = 1) =>
   JSON.stringify({
     id,
     runId,
@@ -59,15 +89,38 @@ const successfulCallback = (runId: string, id = 'runner-job-1', attempt = 1) =>
     evidence: {
       id: 'evidence-1',
       status: 'complete',
-      manifest: 'e30=',
-      opencodeJsonl: 'e30=',
-      opencodeStderr: '',
-      validatedReview: 'IyMgUmV2aWV3OgoKTm8gZGVmZWN0cyBmb3VuZC4K',
-      opencodeSessionList: 'W10=',
-      opencodeExport: { sessionId: 'session-1', content: 'e30=' },
+      manifest: await evidenceField(manifestArtifact(runId, id, attempt)),
+      opencodeJsonl: await evidenceField(jsonlArtifact),
+      opencodeStderr: await evidenceField(''),
+      validatedReview: await evidenceField(reviewArtifact),
+      opencodeSessionList: await evidenceField(sessionListArtifact),
+      opencodeExport: { sessionId: 'session-1', content: await evidenceField(exportArtifact) },
+    },
+    timestamps: {
+      executionStartedAt: '2026-09-01T00:00:01.000Z',
+      submissionCompletedAt: '2026-09-01T00:00:02.000Z',
+      cleanupCompletedAt: '2026-09-01T00:00:03.000Z',
+    },
+    result: '## Review:\n\nNo defects found.\n',
+  });
+
+const failedCallback = async (runId: string, id = 'runner-job-1', attempt = 1) =>
+  JSON.stringify({
+    id,
+    runId,
+    attempt,
+    status: 'failed',
+    stage: 'agent',
+    sandbox: { cleanup: 'destroyed' },
+    evidence: {
+      id: 'evidence-1',
+      status: 'incomplete',
+      manifest: await evidenceField(''),
+      opencodeJsonl: await evidenceField(''),
+      opencodeStderr: await evidenceField(''),
     },
     timestamps: {},
-    result: '## Review:\n\nNo defects found.\n',
+    failure: { reason: 'agent' },
   });
 
 describe('Core Worker', () => {
@@ -110,6 +163,7 @@ describe('Core Worker', () => {
       expect(runnerRequests[0]?.headers.get('authorization')).toBe('Bearer runner-auth-token');
       expect(await runnerRequests[0]?.json()).toMatchObject({
         runId: expect.any(String),
+        id: expect.stringMatching(/^[0-9a-f-]{36}$/),
         attempt: 1,
         repositoryUrl: 'https://github.com/acme/reviewed.git',
         repositoryName: 'acme/reviewed',
@@ -118,6 +172,53 @@ describe('Core Worker', () => {
         headSha: eligibleEvent.headSha,
         repositoryReadToken: 'repository-read-token',
       });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('retries a lost Runner admission with the same immutable Job input', async () => {
+    const database = new SqliteD1Database();
+    const runnerRequests: Request[] = [];
+    let admissions = 0;
+    const worker = createCoreWorker(
+      {
+        REVIEW_DB: database,
+        RUNNER: {
+          fetch: async (request) => {
+            runnerRequests.push(request.clone());
+            admissions += 1;
+            if (admissions === 1) throw new Error('Runner response was lost');
+            return runnerResponse(request);
+          },
+        },
+        RUNNER_AUTH_TOKEN: 'runner-auth-token',
+        GITHUB_APP_ID: '1234567',
+        GITHUB_APP_PRIVATE_KEY: 'test-private-key',
+      },
+      {
+        github: { getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git' },
+        getReadInstallationToken: async () => ({
+          token: 'repository-read-token',
+          expiresAt: '2026-09-01T01:00:00.000Z',
+        }),
+      },
+    );
+
+    try {
+      const response = await worker.fetch(
+        new Request('https://core.internal/review-events', {
+          method: 'POST',
+          body: JSON.stringify({ ...eligibleEvent, deliveryId: 'delivery-admission-retry' }),
+        }),
+      );
+
+      expect(response.status).toBe(202);
+      expect(runnerRequests).toHaveLength(2);
+      const firstInput = await runnerRequests[0]?.json();
+      const secondInput = await runnerRequests[1]?.json();
+      expect(secondInput).toEqual(firstInput);
+      expect(firstInput).toMatchObject({ id: expect.any(String), attempt: 1 });
     } finally {
       database.close();
     }
@@ -183,12 +284,12 @@ describe('Core Worker', () => {
         evidence: {
           id: 'evidence-1',
           status: 'complete',
-          manifest: 'e30=',
-          opencodeJsonl: 'e30=',
-          opencodeStderr: '',
-          validatedReview: 'IyMgUmV2aWV3OgoKTm8gZGVmZWN0cyBmb3VuZC4K',
-          opencodeSessionList: 'W10=',
-          opencodeExport: { sessionId: 'session-1', content: 'e30=' },
+          manifest: await evidenceField(manifestArtifact(claimed.runId, 'runner-job-1', 1)),
+          opencodeJsonl: await evidenceField(jsonlArtifact),
+          opencodeStderr: await evidenceField(''),
+          validatedReview: await evidenceField(reviewArtifact),
+          opencodeSessionList: await evidenceField(sessionListArtifact),
+          opencodeExport: { sessionId: 'session-1', content: await evidenceField(exportArtifact) },
         },
         timestamps: {
           executionStartedAt: '2026-09-01T00:00:01.000Z',
@@ -197,20 +298,21 @@ describe('Core Worker', () => {
         },
         result: '## Review:\n\nNo defects found.\n',
       });
-      const divergentEvidenceResponse = await worker.fetch(
+      const missingDecisiveTimestamp = JSON.parse(callbackBody) as {
+        timestamps: Record<string, string>;
+      };
+      delete missingDecisiveTimestamp.timestamps.cleanupCompletedAt;
+      const incompleteResponse = await worker.fetch(
         new Request('https://core.internal/runner-results', {
           method: 'POST',
           headers: {
             'content-type': 'application/json',
             'x-compte-rendu-runner-callback': 'verified',
           },
-          body: callbackBody.replace(
-            'IyMgUmV2aWV3OgoKTm8gZGVmZWN0cyBmb3VuZC4K',
-            'IyMgUmV2aWV3OgoKTm90IHRoZSBwdWJsaXNoZWQgcmV2aWV3Lgo=',
-          ),
+          body: JSON.stringify(missingDecisiveTimestamp),
         }),
       );
-      expect(divergentEvidenceResponse.status).toBe(409);
+      expect(incompleteResponse.status).toBe(400);
       expect(stored).toHaveLength(0);
       expect(reviews).toHaveLength(0);
       const wrongIdResponse = await worker.fetch(
@@ -255,12 +357,12 @@ describe('Core Worker', () => {
       expect(evidenceObject.evidence).toEqual({
         id: 'evidence-1',
         status: 'complete',
-        manifest: 'e30=',
-        opencodeJsonl: 'e30=',
-        opencodeStderr: '',
-        validatedReview: 'IyMgUmV2aWV3OgoKTm8gZGVmZWN0cyBmb3VuZC4K',
-        opencodeSessionList: 'W10=',
-        opencodeExport: { sessionId: 'session-1', content: 'e30=' },
+        manifest: await evidenceField(manifestArtifact(claimed.runId, 'runner-job-1', 1)),
+        opencodeJsonl: await evidenceField(jsonlArtifact),
+        opencodeStderr: await evidenceField(''),
+        validatedReview: await evidenceField(reviewArtifact),
+        opencodeSessionList: await evidenceField(sessionListArtifact),
+        opencodeExport: { sessionId: 'session-1', content: await evidenceField(exportArtifact) },
       });
       expect(evidenceObject.evidence).not.toHaveProperty('files');
       expect(reviews).toEqual([
@@ -376,21 +478,95 @@ describe('Core Worker', () => {
         },
       },
     );
-    const callback = (runId: string, id = 'runner-job-1') =>
+    const callback = async (runId: string, id = 'runner-job-1') =>
       new Request('https://core.internal/runner-results', {
         method: 'POST',
         headers: {
           'x-compte-rendu-runner-callback': 'verified',
           'content-type': 'application/json',
         },
-        body: successfulCallback(runId, id),
+        body: await successfulCallback(runId, id),
       });
     try {
-      expect((await worker.fetch(callback('unknown-run'))).status).toBe(404);
-      expect((await worker.fetch(callback(failed.runId, 'failed-job'))).status).toBe(409);
-      expect((await worker.fetch(callback(superseded.runId, 'superseded-job'))).status).toBe(409);
-      expect(stored).toHaveLength(0);
+      expect((await worker.fetch(await callback('unknown-run'))).status).toBe(404);
+      expect((await worker.fetch(await callback(failed.runId, 'failed-job'))).status).toBe(202);
+      expect((await worker.fetch(await callback(superseded.runId, 'superseded-job'))).status).toBe(
+        202,
+      );
+      expect(stored).toHaveLength(2);
       expect(published).toHaveLength(0);
+    } finally {
+      database.close();
+    }
+  });
+
+  it('publishes one concurrent duplicate success callback', async () => {
+    const database = new SqliteD1Database();
+    const stateStore = createD1ReviewStateStore(database);
+    const claimed = await stateStore.claimReview({
+      deliveryId: 'delivery-callback-concurrent',
+      job: {
+        repositoryId: 11,
+        pullRequestNumber: 42,
+        installationId: 7,
+        baseSha: eligibleEvent.baseSha,
+        headSha: eligibleEvent.headSha,
+        trigger: 'automatic',
+      },
+      occurredAt: '2026-09-01T00:00:00.000Z',
+    });
+    if (claimed.kind !== 'claimed') throw new Error('concurrent run was not claimed');
+    await stateStore.recordRunnerJob({ runId: claimed.runId, jobId: 'runner-job-1', attempt: 1 });
+    const published: unknown[] = [];
+    let releasePublication!: () => void;
+    const publicationGate = new Promise<void>((resolve) => {
+      releasePublication = resolve;
+    });
+    let publicationStarted!: () => void;
+    const publicationStartedPromise = new Promise<void>((resolve) => {
+      publicationStarted = resolve;
+    });
+    const worker = createCoreWorker(
+      {
+        REVIEW_DB: database,
+        GITHUB_APP_ID: '1234567',
+        GITHUB_APP_PRIVATE_KEY: 'test-private-key',
+        EVIDENCE_BUCKET: { put: async () => undefined },
+      },
+      {
+        stateStore,
+        github: {
+          loadReviewTarget: async () => ({ headSha: eligibleEvent.headSha }),
+          createReview: async (input) => {
+            published.push(input);
+            publicationStarted();
+            await publicationGate;
+            return { kind: 'created', review: input };
+          },
+        },
+      },
+    );
+    const callbackBody = await successfulCallback(claimed.runId);
+    const callbackRequest = () =>
+      new Request('https://core.internal/runner-results', {
+        method: 'POST',
+        headers: {
+          'x-compte-rendu-runner-callback': 'verified',
+          'content-type': 'application/json',
+        },
+        body: callbackBody,
+      });
+    try {
+      const first = worker.fetch(callbackRequest());
+      await publicationStartedPromise;
+      const second = worker.fetch(callbackRequest());
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(published).toHaveLength(1);
+      releasePublication();
+      await expect(Promise.all([first, second])).resolves.toHaveLength(2);
+      await expect(stateStore.getRunOutcome(claimed.runId)).resolves.toMatchObject({
+        status: 'completed',
+      });
     } finally {
       database.close();
     }
@@ -439,10 +615,7 @@ describe('Core Worker', () => {
             'x-compte-rendu-runner-callback': 'verified',
             'content-type': 'application/json',
           },
-          body: successfulCallback(claimed.runId).replace(
-            '"status":"succeeded"',
-            '"status":"failed"',
-          ),
+          body: await failedCallback(claimed.runId),
         }),
       );
       expect(response.status).toBe(202);
@@ -450,6 +623,70 @@ describe('Core Worker', () => {
         status: 'failed',
         commentId: 987654,
       });
+      expect(reactions).toEqual([
+        { repositoryId: 11, installationId: 7, commentId: 987654, content: '-1' },
+      ]);
+    } finally {
+      database.close();
+    }
+  });
+
+  it('fails a correlated successful callback with invalid evidence and gives manual feedback', async () => {
+    const database = new SqliteD1Database();
+    const stateStore = createD1ReviewStateStore(database);
+    const claimed = await stateStore.claimReview({
+      deliveryId: 'delivery-callback-invalid-evidence',
+      job: {
+        repositoryId: 11,
+        pullRequestNumber: 42,
+        installationId: 7,
+        baseSha: eligibleEvent.baseSha,
+        headSha: eligibleEvent.headSha,
+        trigger: 'manual',
+        commentId: 987654,
+      },
+      occurredAt: '2026-09-01T00:00:00.000Z',
+    });
+    if (claimed.kind !== 'claimed') throw new Error('invalid evidence run was not claimed');
+    await stateStore.recordRunnerJob({ runId: claimed.runId, jobId: 'runner-job-1', attempt: 1 });
+    const stored: unknown[] = [];
+    const reactions: unknown[] = [];
+    const worker = createCoreWorker(
+      {
+        REVIEW_DB: database,
+        GITHUB_APP_ID: '1234567',
+        GITHUB_APP_PRIVATE_KEY: 'test-private-key',
+        EVIDENCE_BUCKET: { put: async (...args) => stored.push(args) },
+      },
+      {
+        stateStore,
+        github: {
+          addReaction: async (input) => {
+            reactions.push(input);
+          },
+        },
+      },
+    );
+    try {
+      const callback = JSON.parse(await successfulCallback(claimed.runId)) as {
+        evidence: { manifest: { sha256: string } };
+      };
+      callback.evidence.manifest.sha256 = '0'.repeat(64);
+      const response = await worker.fetch(
+        new Request('https://core.internal/runner-results', {
+          method: 'POST',
+          headers: {
+            'x-compte-rendu-runner-callback': 'verified',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify(callback),
+        }),
+      );
+      expect(response.status).toBe(202);
+      await expect(stateStore.getRunOutcome(claimed.runId)).resolves.toMatchObject({
+        status: 'failed',
+      });
+      expect(stored).toHaveLength(0);
       expect(reactions).toEqual([
         { repositoryId: 11, installationId: 7, commentId: 987654, content: '-1' },
       ]);
