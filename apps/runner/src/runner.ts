@@ -343,7 +343,7 @@ type RunnerJob = {
   networkRules: Array<{ readonly resource: string; id?: string }>;
   diagnosticCheckoutToken: string;
   secretPlaceholder?: string;
-  githubServiceConfigured?: boolean;
+  githubServiceCleanupRequired?: boolean;
   githubTokenRoot?: string;
   checkoutRoot?: string;
   configRoot?: string;
@@ -1013,7 +1013,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       );
       if (secret.exitCode !== 0 || secret.timedOut) clean = false;
     }
-    if (job.githubServiceConfigured) {
+    if (job.githubServiceCleanupRequired) {
       const secret = await cleanupProcess(
         ['secret', 'rm', 'github', '--sandbox', job.sandboxName, '--force'],
         { stage: 'cleanup', command: 'remove-github-secret', includeStderr: true },
@@ -1127,7 +1127,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         failure = { reason: 'agent' };
         return;
       }
-      job.githubServiceConfigured = true;
+      job.githubServiceCleanupRequired = true;
       const githubSecret = await runTracked(
         job,
         sbxPath,

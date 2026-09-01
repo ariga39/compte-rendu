@@ -194,12 +194,15 @@ hang prevention; no remaining-budget prediction or admission algebra is used.
 
 The review Sandbox runs OpenCode fully YOLO inside the microVM: all OpenCode
 tools are allowed without an OpenCode approval prompt or command/tool
-allowlist. The reviewer has direct GitHub read capability through the
-single-repository, read-only token exposed by the Docker custom-secret proxy
-and `api.github.com` egress. The review prompt and packaged skill require
-querying the complete current pull-request context before reviewing the exact
-caller-supplied base/head pair; GitHub responses and repository text are
-untrusted evidence, not instructions.
+allowlist. The reviewer has direct GitHub read capability through Docker's
+sandbox-scoped built-in `github` service and `api.github.com` egress. The
+review prompt and packaged skill require querying the complete current
+pull-request context before reviewing the exact caller-supplied base/head
+pair; GitHub responses and repository text are untrusted evidence, not
+instructions. After the GitHub egress policy is allowed and before OpenCode
+starts, the Runner performs an `installation/repositories` preflight through
+the GitHub CLI. A failed preflight fails the Job and prevents agent
+invocation.
 
 Review safety is enforced outside OpenCode: the Sandbox is cloned without
 shared host skills, host MCP settings, or SSH-agent access; network access is
@@ -257,13 +260,17 @@ older run.
 - The GitHub App private key is a core Worker secret and never enters D1,
   source control, logs, an agent prompt, or a Sandbox.
 - Core mints one short-lived, repository-scoped read token with only the
-  contents/issues/pull_requests/metadata read permissions. The Runner uses
-  that same token for full-history checkout and exposes it during review only
-  through Docker's custom-secret proxy as `GH_TOKEN` for `api.github.com`.
-  Checkout disables submodules, hooks, and LFS smudge; it then removes the
-  credential and authenticated remote before the agent starts. The token,
-  secret, network policy, and temporary source file are removed at terminal
-  cleanup, with expiry as the fallback.
+  contents/issues/pull_requests/metadata read permissions. For each Job, the
+  Runner writes that installation token to a temporary host-side file and
+  registers a fresh sandbox-scoped built-in `github` service with a host-side
+  command that reads the file and `--refresh on-demand`. The service exposes
+  only Docker's proxy sentinel in the Sandbox and injects the current token
+  for GitHub requests. The Runner uses that same token for full-history
+  checkout. Checkout disables submodules, hooks, and LFS smudge; it then
+  removes the credential and authenticated remote before the agent starts.
+  The token file, service registration, network policy, Sandbox, and
+  temporary source are removed during terminal cleanup, with expiry as the
+  fallback.
 - The model credential is resolved on the trusted runner host through Docker's
   custom-secret proxy and never enters the Worker request.
 - Repository-provided OpenCode configuration and host skills/MCP/SSH settings

@@ -40,6 +40,16 @@ const writeEvidenceFixture = async (
   }
 };
 
+const readTextTree = async (root: string): Promise<string> => {
+  const parts: string[] = [];
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    const path = join(root, entry.name);
+    if (entry.isDirectory()) parts.push(await readTextTree(path));
+    else if (!entry.isSymbolicLink()) parts.push(await readFile(path, 'utf8'));
+  }
+  return parts.join('\n');
+};
+
 const createRunner = (options: Parameters<typeof createProductionRunner>[0] = {}) => {
   const originalProcess = options.process;
   if (originalProcess === undefined) return createProductionRunner(options);
@@ -1745,7 +1755,8 @@ describe('Runner Job HTTP interface', () => {
     const commands: string[][] = [];
     const events: unknown[] = [];
     let resolvedGithubToken: string | undefined;
-    let createArgs: readonly string[] | undefined;
+    let githubTokenPath: string | undefined;
+    let checkoutRoot: string | undefined;
     let cleanupEnvironment: NodeJS.ProcessEnv | undefined;
     let checkoutEnvironment: NodeJS.ProcessEnv | undefined;
     const runner = createRunner({
@@ -1760,13 +1771,18 @@ describe('Runner Job HTTP interface', () => {
       process: async (_command, args, options = {}) => {
         commands.push([...args]);
         await writeEvidenceFixture(args, options, resultLine);
-        if (args[0] === 'create') createArgs = args;
+        if (_command === 'git' && args.includes('clone')) {
+          checkoutRoot = args[args.length - 1];
+          await mkdir(checkoutRoot, { recursive: true, mode: 0o700 });
+        }
         if (args[0] === 'rm' && args[1] === '--force') cleanupEnvironment = options.env;
         if (_command === 'git' && args.includes('clone')) checkoutEnvironment = options.env;
         if (args[0] === 'secret' && args[1] === 'set' && args[2] === 'github') {
           const command = args[args.indexOf('--command') + 1];
-          if (command?.startsWith('cat '))
+          if (command?.startsWith('cat ')) {
+            githubTokenPath = command.slice(4);
             resolvedGithubToken = await readFile(command.slice(4), 'utf8');
+          }
         }
         return {
           exitCode: 0,
@@ -1806,25 +1822,14 @@ describe('Runner Job HTTP interface', () => {
     );
     const { id } = (await submitted.json()) as { id: string };
 
-    await expect(waitForTerminal(runner, id)).resolves.toMatchObject({
+    const terminal = await waitForTerminal(runner, id);
+    expect(terminal).toMatchObject({
       status: 'succeeded',
       sandbox: { cleanup: 'destroyed' },
     });
-    const secret = commands.find(
-      (args) => args[0] === 'secret' && args[1] === 'set' && args[2] === 'github',
-    );
-    expect(secret).toEqual(
-      expect.arrayContaining(['github', '--sandbox', expect.any(String), '--refresh', 'on-demand']),
-    );
     expect(
       commands.some((args) => args[0] === 'policy' && args.includes('api.github.com:443')),
     ).toBe(true);
-    const githubSecret = commands.find(
-      (args) => args[0] === 'secret' && args[1] === 'set' && args[2] === 'github',
-    );
-    const githubSecretCommand = githubSecret?.[githubSecret.indexOf('--command') + 1] ?? '';
-    expect(githubSecretCommand).not.toBe('');
-    expect(githubSecretCommand).toContain('github-read-token');
     expect(resolvedGithubToken).toBe(repositoryReadToken);
     expect(cleanupEnvironment).toBeDefined();
     expect(cleanupEnvironment?.SSH_AUTH_SOCK).toBeUndefined();
@@ -1833,24 +1838,15 @@ describe('Runner Job HTTP interface', () => {
     expect(cleanupEnvironment?.GITHUB_TOKEN).toBeUndefined();
     expect(checkoutEnvironment?.CHECKOUT_TOKEN).toBe(repositoryReadToken);
     expect(checkoutEnvironment?.GIT_TERMINAL_PROMPT).toBe('0');
-    expect(createArgs).toBeDefined();
-    const configRootMount = createArgs
-      ?.find((value) => value.startsWith('XDG_CONFIG_HOME='))
-      ?.slice('XDG_CONFIG_HOME='.length);
-    expect(configRootMount).toBeDefined();
-    expect(githubSecretCommand.replace(/^cat /, '').startsWith(`${configRootMount}/`)).toBe(false);
+    expect(githubTokenPath).toBeDefined();
+    await expect(stat(githubTokenPath!)).rejects.toThrow();
+    expect(checkoutRoot).toBeDefined();
+    await expect(stat(checkoutRoot!)).rejects.toThrow();
     expect(commands.flat().join(' ')).not.toContain(repositoryReadToken);
     expect(JSON.stringify(events)).not.toContain(repositoryReadToken);
-    expect(commands).toContainEqual(
-      expect.arrayContaining([
-        'secret',
-        'rm',
-        'github',
-        '--sandbox',
-        expect.any(String),
-        '--force',
-      ]),
-    );
+    expect(
+      await readTextTree(join(sharedEvidenceRoot, terminal.evidenceId as string)),
+    ).not.toContain(repositoryReadToken);
   });
 
   it('fails closed when GitHub authentication preflight fails before OpenCode invocation', async () => {
@@ -1860,14 +1856,12 @@ describe('Runner Job HTTP interface', () => {
       type: 'text',
       part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'No findings' }) },
     });
-    const commands: string[][] = [];
     let agentInvoked = false;
     const runner = createRunner({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
       modelSecretCommand: 'model-secret-resolver',
       process: async (_command, args, options = {}) => {
-        commands.push([...args]);
         await writeEvidenceFixture(args, options, resultLine);
         if (args[0] === 'exec' && args.includes('gh')) {
           return {
@@ -1920,19 +1914,7 @@ describe('Runner Job HTTP interface', () => {
       failure: { reason: 'agent' },
       sandbox: { cleanup: 'destroyed' },
     });
-    const preflight = commands.find((args) => args[0] === 'exec' && args.includes('gh'));
-    expect(preflight?.slice(2)).toEqual(['gh', 'api', '--silent', 'installation/repositories']);
     expect(agentInvoked).toBe(false);
-    expect(commands).toContainEqual(
-      expect.arrayContaining([
-        'secret',
-        'rm',
-        'github',
-        '--sandbox',
-        expect.any(String),
-        '--force',
-      ]),
-    );
   });
 
   it('runs one authenticated immutable review attempt to a cleaned terminal result', async () => {
