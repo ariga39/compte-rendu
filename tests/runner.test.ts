@@ -172,6 +172,7 @@ const runAgentScenario = async (scenario: {
 }) => {
   const baseSha = '1111111111111111111111111111111111111111';
   const headSha = '2222222222222222222222222222222222222222';
+  let agentInvoked = false;
   const runner = createRunner({
     evidenceRoot: sharedEvidenceRoot,
     authToken: 'runner-test-token',
@@ -179,6 +180,7 @@ const runAgentScenario = async (scenario: {
     process: async (_command, args, options = {}) => {
       await writeEvidenceFixture(args, options, scenario.output);
       const isAgent = args[0] === 'exec' && args.includes('--agent');
+      if (isAgent) agentInvoked = true;
       return {
         exitCode: isAgent
           ? (scenario.exitCode ?? 0)
@@ -225,7 +227,7 @@ const runAgentScenario = async (scenario: {
       'utf8',
     ),
   );
-  return { terminal, manifest };
+  return { terminal, manifest, agentInvoked };
 };
 
 describe('Runner Job HTTP interface', () => {
@@ -437,6 +439,30 @@ describe('Runner Job HTTP interface', () => {
     expect(terminal).toMatchObject({
       status: 'failed',
       failure: { reason: 'invalid-output', cause: 'multiple-results' },
+    });
+    expect(manifest).toMatchObject({
+      execution: { status: 'failed', reason: 'invalid-output', cause: 'multiple-results' },
+      terminal: { status: 'failed', reason: 'invalid-output', cause: 'multiple-results' },
+    });
+  });
+
+  it('fails closed when one text event contains two outermost schema-valid results', async () => {
+    const result = JSON.stringify({ findings: [], summary: 'No findings' });
+    const resultEvent = JSON.stringify({
+      type: 'text',
+      part: { type: 'text', text: `${result}\n${result}` },
+    });
+    const { terminal, manifest, agentInvoked } = await runAgentScenario({
+      runId: 'run-103-multiple-results-one-event',
+      output: resultEvent,
+    });
+
+    expect(agentInvoked).toBe(true);
+    expect(terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'invalid-output', cause: 'multiple-results' },
+      evidence: { status: 'complete' },
+      sandbox: { cleanup: 'destroyed' },
     });
     expect(manifest).toMatchObject({
       execution: { status: 'failed', reason: 'invalid-output', cause: 'multiple-results' },
@@ -1853,6 +1879,65 @@ describe('Runner Job HTTP interface', () => {
       ),
     );
     expect(manifest).toMatchObject({ complete: true, terminal: { status: 'succeeded' } });
+  });
+
+  it('fails bounded and closed for brace-heavy text without a schema-valid result', async () => {
+    const baseSha = '1111111111111111111111111111111111111111';
+    const headSha = '2222222222222222222222222222222222222222';
+    const agentEvent = JSON.stringify({
+      type: 'text',
+      part: { type: 'text', text: '{'.repeat(80_000) },
+    });
+    const runner = createRunner({
+      evidenceRoot: sharedEvidenceRoot,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'model-secret-resolver',
+      process: async (_command, args, options = {}) => {
+        await writeEvidenceFixture(args, options, agentEvent);
+        return {
+          exitCode: 0,
+          stdout: args.includes('rev-parse')
+            ? `${baseSha}\n${headSha}\n`
+            : args.includes('session')
+              ? '[{"id":"brace-heavy-session"}]\n'
+              : args.includes('export')
+                ? ''
+                : options.captureStdout === true
+                  ? `${agentEvent}\n`
+                  : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
+    });
+    const submitted = await runner.handle(
+      new Request('http://runner/jobs', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer runner-test-token',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          ...runnerJobFields,
+          runId: 'run-103-brace-heavy-result',
+          attempt: 1,
+          repositoryUrl: 'https://github.com/acme/reviewed.git',
+          baseSha,
+          headSha,
+        }),
+      }),
+    );
+    const { id } = (await submitted.json()) as { id: string };
+    const startedAt = performance.now();
+    const terminal = await waitForTerminal(runner, id);
+
+    expect(performance.now() - startedAt).toBeLessThan(2_000);
+    expect(terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'invalid-output', cause: 'result-schema-failure' },
+      evidence: { status: 'complete' },
+      sandbox: { cleanup: 'destroyed' },
+    });
   });
 
   it('reviews a behind target from merge base to head while retaining admitted revision facts', async () => {
