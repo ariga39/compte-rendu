@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import {
   createRunner as createProductionRunner,
+  type RunnerProcess,
   type RunnerProcessResult,
 } from '../apps/runner/src/runner';
 
@@ -50,9 +51,51 @@ const readTextTree = async (root: string): Promise<string> => {
   return parts.join('\n');
 };
 
-const createRunner = (options: Parameters<typeof createProductionRunner>[0] = {}) => {
-  const originalProcess = options.process;
-  if (originalProcess === undefined) return createProductionRunner(options);
+type MergeBaseOverride = Partial<
+  Pick<RunnerProcessResult, 'exitCode' | 'stdout' | 'timedOut' | 'truncated'>
+>;
+type TestRunnerOptions = Parameters<typeof createProductionRunner>[0] & {
+  readonly mergeBase?: MergeBaseOverride;
+};
+
+const withMergeBaseFixture = (
+  originalProcess: RunnerProcess,
+  mergeBaseOverride?: MergeBaseOverride,
+): RunnerProcess => {
+  let verifiedBaseSha: string | undefined;
+  return async (command, args, processOptions) => {
+    const result = await originalProcess(command, args, processOptions);
+    if (command === 'git' && args.includes('rev-parse') && result.exitCode === 0) {
+      const reported = result.stdout.trim().split(/\s+/);
+      if (reported.length === 2 && /^[0-9a-f]{40}$/i.test(reported[0])) {
+        verifiedBaseSha = reported[0];
+      }
+    }
+    if (command === 'git' && args.includes('merge-base')) {
+      if (mergeBaseOverride !== undefined) return { ...result, ...mergeBaseOverride };
+      if (verifiedBaseSha !== undefined && result.exitCode === 0) {
+        return { ...result, stdout: `${verifiedBaseSha}\n` };
+      }
+    }
+    return result;
+  };
+};
+
+const createProductionRunnerWithMergeBase = (
+  options: Parameters<typeof createProductionRunner>[0] = {},
+) =>
+  options.process === undefined
+    ? createProductionRunner(options)
+    : createProductionRunner({
+        ...options,
+        process: withMergeBaseFixture(options.process),
+      });
+
+const createRunner = (options: TestRunnerOptions = {}) => {
+  const { mergeBase: mergeBaseOverride, ...productionOptions } = options;
+  const originalProcess = productionOptions.process;
+  if (originalProcess === undefined) return createProductionRunner(productionOptions);
+  const mergeBaseProcess = withMergeBaseFixture(originalProcess, mergeBaseOverride);
   const rules: Array<Record<string, unknown>> = [
     {
       id: 'default-deny-all',
@@ -63,7 +106,7 @@ const createRunner = (options: Parameters<typeof createProductionRunner>[0] = {}
     },
   ];
   return createProductionRunner({
-    ...options,
+    ...productionOptions,
     process: async (command, args, processOptions) => {
       if (args[0] === 'policy' && args[1] === 'ls') {
         return {
@@ -73,7 +116,7 @@ const createRunner = (options: Parameters<typeof createProductionRunner>[0] = {}
           truncated: false,
         };
       }
-      const result = await originalProcess(command, args, processOptions);
+      const result = await mergeBaseProcess(command, args, processOptions);
       if (args[0] === 'policy' && args[1] === 'allow' && result.exitCode === 0) {
         const sandbox = args[args.indexOf('--sandbox') + 1];
         const resource = args[args.length - 1];
@@ -473,7 +516,7 @@ describe('Runner Job HTTP interface', () => {
         layer: 'local',
       },
     ];
-    const runner = createProductionRunner({
+    const runner = createProductionRunnerWithMergeBase({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
       modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
@@ -612,7 +655,7 @@ describe('Runner Job HTTP interface', () => {
     ];
     let sandboxRemoved = false;
     let secretRemoved = false;
-    const runner = createProductionRunner({
+    const runner = createProductionRunnerWithMergeBase({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
       modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
@@ -711,7 +754,7 @@ describe('Runner Job HTTP interface', () => {
         layer: 'local',
       },
     ];
-    const runner = createProductionRunner({
+    const runner = createProductionRunnerWithMergeBase({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
       modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
@@ -829,7 +872,7 @@ describe('Runner Job HTTP interface', () => {
       },
     ];
     let policyLists = 0;
-    const runner = createProductionRunner({
+    const runner = createProductionRunnerWithMergeBase({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
       modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
@@ -939,7 +982,7 @@ describe('Runner Job HTTP interface', () => {
     let replacementRemoved = false;
     let sandboxRemoved = false;
     let secretRemoved = false;
-    const runner = createProductionRunner({
+    const runner = createProductionRunnerWithMergeBase({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
       modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
@@ -1743,6 +1786,198 @@ describe('Runner Job HTTP interface', () => {
       readFile(join(configRootAtSandboxBoundary!, 'opencode/skills/pr-review/SKILL.md'), 'utf8'),
     ).rejects.toThrow();
   });
+
+  it('reviews a behind target from merge base to head while retaining admitted revision facts', async () => {
+    const baseSha = '1111111111111111111111111111111111111111';
+    const mergeBaseSha = '3333333333333333333333333333333333333333';
+    const headSha = '2222222222222222222222222222222222222222';
+    const resultLine = JSON.stringify({
+      type: 'text',
+      part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'No findings' }) },
+    });
+    let agentPrompt: string | undefined;
+    const runner = createRunner({
+      evidenceRoot: sharedEvidenceRoot,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'model-secret-resolver',
+      mergeBase: { stdout: `${mergeBaseSha}\n` },
+      process: async (_command, args, options = {}) => {
+        await writeEvidenceFixture(args, options, resultLine);
+        if (args[0] === 'exec' && args.includes('--agent')) {
+          agentPrompt = args[args.length - 1];
+        }
+        return {
+          exitCode: 0,
+          stdout: args.includes('rev-parse')
+            ? `${baseSha}\n${headSha}\n`
+            : args.includes('session')
+              ? '[{"id":"merge-base-session"}]\n'
+              : args.includes('export')
+                ? ''
+                : options.captureStdout === true
+                  ? `${resultLine}\n`
+                  : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
+    });
+
+    const submitted = await runner.handle(
+      new Request('http://runner/jobs', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer runner-test-token',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          ...runnerJobFields,
+          runId: 'run-100-behind-target',
+          attempt: 1,
+          repositoryUrl: 'https://github.com/acme/reviewed.git',
+          baseSha,
+          headSha,
+        }),
+      }),
+    );
+    const { id } = (await submitted.json()) as { id: string };
+
+    await expect(waitForTerminal(runner, id)).resolves.toMatchObject({
+      status: 'succeeded',
+      result: { findings: [], summary: 'No findings' },
+      sandbox: { cleanup: 'destroyed' },
+    });
+    expect(agentPrompt).toContain(`git diff --find-renames ${mergeBaseSha} ${headSha}`);
+    expect(agentPrompt).toContain(`base ${baseSha}`);
+    expect(agentPrompt).toContain(`head ${headSha}`);
+  });
+
+  it('preserves the expected diff when the merge base equals the admitted base', async () => {
+    const baseSha = '1111111111111111111111111111111111111111';
+    const headSha = '2222222222222222222222222222222222222222';
+    const resultLine = JSON.stringify({
+      type: 'text',
+      part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'No findings' }) },
+    });
+    let agentPrompt: string | undefined;
+    const runner = createRunner({
+      evidenceRoot: sharedEvidenceRoot,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'model-secret-resolver',
+      process: async (_command, args, options = {}) => {
+        await writeEvidenceFixture(args, options, resultLine);
+        if (args[0] === 'exec' && args.includes('--agent')) {
+          agentPrompt = args[args.length - 1];
+        }
+        return {
+          exitCode: 0,
+          stdout: args.includes('rev-parse')
+            ? `${baseSha}\n${headSha}\n`
+            : args.includes('session')
+              ? '[{"id":"merge-base-equal-session"}]\n'
+              : args.includes('export')
+                ? ''
+                : options.captureStdout === true
+                  ? `${resultLine}\n`
+                  : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
+    });
+    const submitted = await runner.handle(
+      new Request('http://runner/jobs', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer runner-test-token',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          ...runnerJobFields,
+          runId: 'run-100-equal-merge-base',
+          attempt: 1,
+          repositoryUrl: 'https://github.com/acme/reviewed.git',
+          baseSha,
+          headSha,
+        }),
+      }),
+    );
+    const { id } = (await submitted.json()) as { id: string };
+
+    await expect(waitForTerminal(runner, id)).resolves.toMatchObject({
+      status: 'succeeded',
+      sandbox: { cleanup: 'destroyed' },
+    });
+    expect(agentPrompt).toContain(`git diff --find-renames ${baseSha} ${headSha}`);
+  });
+
+  it.each([
+    ['missing history', { exitCode: 1, stdout: '', truncated: false }],
+    [
+      'truncated output',
+      {
+        exitCode: 0,
+        stdout: '3333333333333333333333333333333333333333\n',
+        truncated: true,
+      },
+    ],
+  ] as const)(
+    'fails closed for %s merge-base history before agent invocation',
+    async (_mode, mergeBase) => {
+      const baseSha = '1111111111111111111111111111111111111111';
+      const headSha = '2222222222222222222222222222222222222222';
+      const resultLine = JSON.stringify({
+        type: 'text',
+        part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'unused' }) },
+      });
+      let agentInvoked = false;
+      const runner = createRunner({
+        evidenceRoot: sharedEvidenceRoot,
+        authToken: 'runner-test-token',
+        modelSecretCommand: 'model-secret-resolver',
+        mergeBase,
+        process: async (_command, args, options = {}) => {
+          await writeEvidenceFixture(args, options, resultLine);
+          if (args[0] === 'exec' && args.includes('--agent')) agentInvoked = true;
+          return {
+            exitCode: 0,
+            stdout: args.includes('rev-parse')
+              ? `${baseSha}\n${headSha}\n`
+              : options.captureStdout === true
+                ? `${resultLine}\n`
+                : '',
+            timedOut: false,
+            truncated: false,
+          };
+        },
+      });
+      const submitted = await runner.handle(
+        new Request('http://runner/jobs', {
+          method: 'POST',
+          headers: {
+            authorization: 'Bearer runner-test-token',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            ...runnerJobFields,
+            runId: 'run-100-merge-base-failure',
+            attempt: 1,
+            repositoryUrl: 'https://github.com/acme/reviewed.git',
+            baseSha,
+            headSha,
+          }),
+        }),
+      );
+      const { id } = (await submitted.json()) as { id: string };
+
+      await expect(waitForTerminal(runner, id)).resolves.toMatchObject({
+        status: 'failed',
+        failure: { reason: 'checkout' },
+        sandbox: { cleanup: 'destroyed' },
+      });
+      expect(agentInvoked).toBe(false);
+    },
+  );
 
   it('exposes the per-run GitHub read token only through a scoped GitHub service', async () => {
     const repositoryReadToken = 'github-read-token-must-not-be-an-argument';
