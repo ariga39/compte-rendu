@@ -22,6 +22,32 @@ const readTokenServices = {
 
 const evidenceRoot = join(tmpdir(), 'compte-rendu-review-workflow-evidence');
 
+const submittedReviewJsonl = (markdown: string) =>
+  [
+    JSON.stringify({
+      type: 'text',
+      part: { type: 'text', messageID: 'msg-final', text: 'Terminal narration.' },
+    }),
+    JSON.stringify({
+      type: 'tool_use',
+      part: {
+        type: 'tool',
+        tool: 'submit_review',
+        callID: 'call-submit-review',
+        state: {
+          status: 'completed',
+          input: { markdown },
+          output: 'Review submitted.',
+          title: 'Review submitted.',
+        },
+      },
+    }),
+    JSON.stringify({
+      type: 'step_finish',
+      part: { type: 'step-finish', messageID: 'msg-final', reason: 'stop' },
+    }),
+  ].join('\n');
+
 const writeEvidenceFixture = async (
   args: readonly string[],
   options: { readonly stdoutFilePath?: string; readonly stderrFilePath?: string },
@@ -110,16 +136,7 @@ afterAll(async () => {
 
 describe('review Workflow runner tracer', () => {
   it('completes through the real client and Runner HTTP handler before publication', async () => {
-    const agentOutput = [
-      JSON.stringify({
-        type: 'text',
-        part: { type: 'text', messageID: 'msg-final', text: '## Review:\n\nNo findings.' },
-      }),
-      JSON.stringify({
-        type: 'step_finish',
-        part: { type: 'step-finish', messageID: 'msg-final', reason: 'stop' },
-      }),
-    ].join('\n');
+    const agentOutput = submittedReviewJsonl('## Review:\n\nNo findings.');
     const runner = createRunner({
       evidenceRoot,
       authToken: 'runner-tracer-token',
@@ -254,16 +271,7 @@ describe('review Workflow runner tracer', () => {
   });
 
   it('returns terminal failure after a lost GET once the known job is cleaned up', async () => {
-    const agentOutput = [
-      JSON.stringify({
-        type: 'text',
-        part: { type: 'text', messageID: 'msg-final', text: '## Review:\n\nFresh attempt.' },
-      }),
-      JSON.stringify({
-        type: 'step_finish',
-        part: { type: 'step-finish', messageID: 'msg-final', reason: 'stop' },
-      }),
-    ].join('\n');
+    const agentOutput = submittedReviewJsonl('## Review:\n\nFresh attempt.');
     let agentRuns = 0;
     let agentStarted!: () => void;
     const firstAgentReady = new Promise<void>((resolve) => {

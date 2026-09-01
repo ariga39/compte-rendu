@@ -73,19 +73,22 @@ introduce feedback state.
 
 ### Review result
 
-The agent returns one concise human-readable Markdown review. The Runner
-validates the JSONL transport, selects the last assistant message completed by
-a `step_finish` event with reason `stop`, and joins its publishable text parts
-in event order. Malformed JSONL, explicit agent errors, oversized output, a
-missing terminal message, or empty final text fail closed.
+The agent submits one concise human-readable Markdown review through the
+packaged `submit_review` custom tool. The Runner validates the JSONL transport,
+requires exactly one completed submission plus a `step_finish` event with
+reason `stop`, and accepts the tool's exact `state.input.markdown` value.
+Terminal assistant prose remains raw evidence and is never a product result.
+Malformed JSONL, explicit agent errors, oversized output, a missing or errored
+submission, duplicate submissions, a missing terminal stop, or invalid review
+Markdown fail closed.
 
-Core accepts the non-empty Markdown body only after confirming that the run
-still targets the pull request's current head SHA, then publishes it as a
-body-only `COMMENT` review with no inline finding projection. Review guidance
-may suggest up to five high-confidence actionable findings when present and a
-clear conclusion when none are found; this is guidance for the human-readable
-review, not a JSON schema. It never publishes `APPROVE` or `REQUEST_CHANGES`
-in v1.
+Core accepts the submitted, size-bounded Markdown body beginning with
+`## Review:` only after confirming that the run still targets the pull
+request's current head SHA, then publishes it as a body-only `COMMENT` review
+with no inline finding projection. Review guidance may suggest up to five
+high-confidence actionable findings when present and a clear conclusion when
+none are found; this is guidance for the human-readable review, not a JSON
+schema. It never publishes `APPROVE` or `REQUEST_CHANGES` in v1.
 
 ## Deployment shape
 
@@ -217,7 +220,7 @@ shared host skills, host MCP settings, or SSH-agent access; network access is
 limited to `opencode.ai` and `api.github.com`; CPU, memory, and deadline are
 fixed; and the Sandbox, secret, network policy, and temporary credential
 sources are destroyed during terminal cleanup. Exact base/head verification,
-current-head publication checks, and one non-empty final Markdown body remain
+current-head publication checks, and one valid submitted Markdown body remain
 required. YOLO tool access does not grant publication authority.
 
 ## Fail-closed rules

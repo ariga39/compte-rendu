@@ -25,6 +25,9 @@ export const RunnerFailureCause = Schema.Literals([
   'output-truncated',
   'malformed-jsonl',
   'agent-error',
+  'zero-results',
+  'multiple-results',
+  'result-schema-failure',
   'missing-terminal-message',
   'empty-final-text',
 ]);
