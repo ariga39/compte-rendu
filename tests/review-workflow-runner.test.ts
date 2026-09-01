@@ -113,7 +113,7 @@ describe('review Workflow runner tracer', () => {
     const agentOutput = [
       JSON.stringify({
         type: 'text',
-        part: { type: 'text', messageID: 'msg-final', text: '# Review\n\nNo findings.' },
+        part: { type: 'text', messageID: 'msg-final', text: '## Review:\n\nNo findings.' },
       }),
       JSON.stringify({
         type: 'step_finish',
@@ -178,7 +178,7 @@ describe('review Workflow runner tracer', () => {
     );
 
     expect(disposition).toBe('completed');
-    expect(published).toBe('# Review\n\nNo findings.');
+    expect(published).toBe('## Review:\n\nNo findings.');
   });
 
   it('fails after one retryable invalid-output attempt without creating another Runner Job', async () => {
@@ -257,7 +257,7 @@ describe('review Workflow runner tracer', () => {
     const agentOutput = [
       JSON.stringify({
         type: 'text',
-        part: { type: 'text', messageID: 'msg-final', text: '# Review\n\nFresh attempt.' },
+        part: { type: 'text', messageID: 'msg-final', text: '## Review:\n\nFresh attempt.' },
       }),
       JSON.stringify({
         type: 'step_finish',
