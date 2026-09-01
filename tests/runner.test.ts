@@ -44,12 +44,20 @@ const writeEvidenceFixture = async (
     );
   }
   if (args[0] === 'cp') {
+    const source = args[1];
     const destination = args[2];
-    await mkdir(destination, { recursive: true, mode: 0o700 });
-    await writeFile(join(destination, 'opencode.db'), 'db', { mode: 0o600 });
-    await writeFile(join(destination, 'opencode.db-wal'), 'wal', { mode: 0o600 });
-    await writeFile(join(destination, 'opencode.db-shm'), 'shm', { mode: 0o600 });
-    await writeFile(join(destination, 'review.log'), 'log', { mode: 0o600 });
+    const sessionId = source.match(/opencode-export-([A-Za-z0-9._:-]+)\.json$/)?.[1];
+    if (sessionId !== undefined) {
+      await writeFile(destination, JSON.stringify({ info: { id: sessionId }, messages: [] }), {
+        mode: 0o600,
+      });
+    } else {
+      await mkdir(destination, { recursive: true, mode: 0o700 });
+      await writeFile(join(destination, 'opencode.db'), 'db', { mode: 0o600 });
+      await writeFile(join(destination, 'opencode.db-wal'), 'wal', { mode: 0o600 });
+      await writeFile(join(destination, 'opencode.db-shm'), 'shm', { mode: 0o600 });
+      await writeFile(join(destination, 'review.log'), 'log', { mode: 0o600 });
+    }
   }
 };
 
@@ -129,6 +137,34 @@ const createRunner = (options: TestRunnerOptions = {}) => {
         };
       }
       const result = await mergeBaseProcess(command, args, processOptions);
+      if (
+        args[0] === 'cp' &&
+        result.exitCode === 0 &&
+        !args[1].endsWith('/data') &&
+        !args[1].endsWith('/state')
+      ) {
+        const destination = args[2];
+        let destinationIsDirectory = false;
+        try {
+          const mode = (await stat(destination)).mode;
+          destinationIsDirectory = (mode & 0o170000) === 0o040000;
+        } catch {
+          // The external Sandbox copy may not create the destination in a test double.
+        }
+        if (destinationIsDirectory) await rm(destination, { recursive: true, force: true });
+        try {
+          await stat(destination);
+        } catch {
+          const sessionId = args[1].match(/opencode-export-([A-Za-z0-9._:-]+)\.json$/)?.[1];
+          if (sessionId !== undefined) {
+            await writeFile(
+              destination,
+              JSON.stringify({ info: { id: sessionId }, messages: [] }),
+              { mode: 0o600 },
+            );
+          }
+        }
+      }
       if (args[0] === 'policy' && args[1] === 'allow' && result.exitCode === 0) {
         const sandbox = args[args.indexOf('--sandbox') + 1];
         const resource = args[args.length - 1];
@@ -1267,6 +1303,185 @@ describe('Runner Job HTTP interface', () => {
           entry.isDirectory() ? 0o700 : 0o600,
         );
       }
+    } finally {
+      await rm(evidenceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('retains a complete valid JSON export larger than the Sandbox exec stdout limit', async () => {
+    const evidenceRoot = await mkdtemp(`${tmpdir()}/compte-rendu-large-export-`);
+    const baseSha = '1111111111111111111111111111111111111111';
+    const headSha = '2222222222222222222222222222222222222222';
+    const sessionExport = JSON.stringify({
+      info: { id: 'large-session' },
+      messages: [{ id: 'message-1', parts: [{ type: 'text', text: 'x'.repeat(70 * 1024) }] }],
+    });
+    const sessionExportBytes = new TextEncoder().encode(sessionExport);
+    expect(sessionExportBytes.byteLength).toBeGreaterThan(64 * 1024);
+    const truncatedBySandbox = new TextDecoder().decode(sessionExportBytes.slice(0, 64 * 1024));
+    try {
+      const runner = createRunner({
+        authToken: 'runner-test-token',
+        evidenceRoot,
+        modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+        process: async (command, args, options = {}) => {
+          if (args[0] === 'exec' && args.includes('--agent')) {
+            await writeFile(options.stdoutFilePath!, `${finalMarkdownJsonl()}\n`, { mode: 0o600 });
+            await writeFile(options.stderrFilePath!, '', { mode: 0o600 });
+          }
+          if (args[0] === 'exec' && args.includes('export')) {
+            if (options.stdoutFilePath !== undefined) {
+              await writeFile(options.stdoutFilePath, truncatedBySandbox, { mode: 0o600 });
+            }
+          }
+          if (command === 'sbx' && args[0] === 'cp') {
+            const source = args[1];
+            const destination = args[2];
+            if (!source.endsWith('/data') && !source.endsWith('/state')) {
+              await writeFile(destination, sessionExport, { mode: 0o600 });
+            } else {
+              await mkdir(destination, { recursive: true, mode: 0o700 });
+              await writeFile(join(destination, 'opencode.db'), 'db', { mode: 0o600 });
+              await writeFile(join(destination, 'review.log'), 'log', { mode: 0o600 });
+            }
+          }
+          return {
+            exitCode: 0,
+            stdout: args.includes('rev-parse')
+              ? `${baseSha}\n${headSha}\n`
+              : args.includes('session')
+                ? '[{"id":"large-session"}]\n'
+                : args.includes('--agent')
+                  ? `${finalMarkdownJsonl()}\n`
+                  : '',
+            timedOut: false,
+            truncated: false,
+          };
+        },
+      });
+      const submitted = await runner.handle(
+        new Request('http://runner/jobs', {
+          method: 'POST',
+          headers: {
+            authorization: 'Bearer runner-test-token',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            ...runnerJobFields,
+            runId: 'run-107-large-export',
+            attempt: 1,
+            repositoryUrl: 'https://github.com/acme/reviewed.git',
+            baseSha,
+            headSha,
+          }),
+        }),
+      );
+      const { id } = (await submitted.json()) as { id: string };
+      const terminal = await waitForTerminal(runner, id);
+
+      expect(terminal).toMatchObject({
+        status: 'succeeded',
+        evidence: { status: 'complete' },
+        sandbox: { cleanup: 'destroyed' },
+      });
+      const archive = join(evidenceRoot, terminal.evidenceId as string);
+      const retainedExport = await readFile(
+        join(archive, 'opencode-export-large-session.json'),
+        'utf8',
+      );
+      expect(new TextEncoder().encode(retainedExport).byteLength).toBe(
+        sessionExportBytes.byteLength,
+      );
+      expect(JSON.parse(retainedExport)).toEqual(JSON.parse(sessionExport));
+      expect(JSON.parse(await readFile(join(archive, 'manifest.json'), 'utf8'))).toMatchObject({
+        complete: true,
+        evidence: { status: 'complete' },
+      });
+    } finally {
+      await rm(evidenceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('does not report complete evidence for a malformed or truncated session export', async () => {
+    const evidenceRoot = await mkdtemp(`${tmpdir()}/compte-rendu-malformed-export-`);
+    const baseSha = '1111111111111111111111111111111111111111';
+    const headSha = '2222222222222222222222222222222222222222';
+    const malformedExport =
+      '{"info":{"id":"malformed-session"},"messages":[' + '"x",'.repeat(16 * 1024);
+    try {
+      const runner = createRunner({
+        authToken: 'runner-test-token',
+        evidenceRoot,
+        modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+        process: async (_command, args, options = {}) => {
+          if (args[0] === 'exec' && args.includes('--agent')) {
+            await writeFile(options.stdoutFilePath!, `${finalMarkdownJsonl()}\n`, { mode: 0o600 });
+            await writeFile(options.stderrFilePath!, '', { mode: 0o600 });
+          }
+          if (args[0] === 'exec' && args.includes('export')) {
+            if (options.stdoutFilePath !== undefined) {
+              await writeFile(options.stdoutFilePath, malformedExport, { mode: 0o600 });
+            }
+          }
+          if (args[0] === 'cp') {
+            const source = args[1];
+            const destination = args[2];
+            if (!source.endsWith('/data') && !source.endsWith('/state')) {
+              await writeFile(destination, malformedExport, { mode: 0o600 });
+            } else {
+              await mkdir(destination, { recursive: true, mode: 0o700 });
+              await writeFile(join(destination, 'opencode.db'), 'db', { mode: 0o600 });
+              await writeFile(join(destination, 'review.log'), 'log', { mode: 0o600 });
+            }
+          }
+          return {
+            exitCode: 0,
+            stdout: args.includes('rev-parse')
+              ? `${baseSha}\n${headSha}\n`
+              : args.includes('session')
+                ? '[{"id":"malformed-session"}]\n'
+                : args.includes('--agent')
+                  ? `${finalMarkdownJsonl()}\n`
+                  : '',
+            timedOut: false,
+            truncated: false,
+          };
+        },
+      });
+      const submitted = await runner.handle(
+        new Request('http://runner/jobs', {
+          method: 'POST',
+          headers: {
+            authorization: 'Bearer runner-test-token',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            ...runnerJobFields,
+            runId: 'run-107-malformed-export',
+            attempt: 1,
+            repositoryUrl: 'https://github.com/acme/reviewed.git',
+            baseSha,
+            headSha,
+          }),
+        }),
+      );
+      const { id } = (await submitted.json()) as { id: string };
+      const terminal = await waitForTerminal(runner, id);
+      const manifest = JSON.parse(
+        await readFile(join(evidenceRoot, terminal.evidenceId as string, 'manifest.json'), 'utf8'),
+      );
+
+      expect(terminal).toMatchObject({
+        status: 'failed',
+        failure: { reason: 'evidence' },
+        evidence: { status: 'incomplete' },
+        sandbox: { cleanup: 'destroyed' },
+      });
+      expect(manifest).toMatchObject({
+        complete: false,
+        evidence: { status: 'incomplete' },
+        terminal: { status: 'failed', reason: 'evidence' },
+      });
     } finally {
       await rm(evidenceRoot, { recursive: true, force: true });
     }

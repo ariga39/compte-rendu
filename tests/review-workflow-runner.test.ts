@@ -40,11 +40,18 @@ const writeEvidenceFixture = async (
   }
   if (args[0] === 'cp') {
     const destination = args[2];
-    await mkdir(destination, { recursive: true, mode: 0o700 });
-    await writeFile(join(destination, 'opencode.db'), 'db', { mode: 0o600 });
-    await writeFile(join(destination, 'opencode.db-wal'), 'wal', { mode: 0o600 });
-    await writeFile(join(destination, 'opencode.db-shm'), 'shm', { mode: 0o600 });
-    await writeFile(join(destination, 'review.log'), 'log', { mode: 0o600 });
+    const sessionId = args[1].match(/opencode-export-([A-Za-z0-9._:-]+)\.json$/)?.[1];
+    if (sessionId !== undefined) {
+      await writeFile(destination, JSON.stringify({ info: { id: sessionId }, messages: [] }), {
+        mode: 0o600,
+      });
+    } else {
+      await mkdir(destination, { recursive: true, mode: 0o700 });
+      await writeFile(join(destination, 'opencode.db'), 'db', { mode: 0o600 });
+      await writeFile(join(destination, 'opencode.db-wal'), 'wal', { mode: 0o600 });
+      await writeFile(join(destination, 'opencode.db-shm'), 'shm', { mode: 0o600 });
+      await writeFile(join(destination, 'review.log'), 'log', { mode: 0o600 });
+    }
   }
 };
 
