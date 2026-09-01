@@ -68,3 +68,8 @@ Return a concise human-readable Markdown review ready to publish. Include up to
 five high-confidence actionable findings when present, with clear file/line
 references in prose, no weak or no-action items, and a short overall conclusion;
 if none, say so plainly. Do not impose a rigid template or artificial brevity.
+Tool calls and intermediate work may remain visible during the review, but the
+final assistant message completed by a `step_finish` event with reason `stop`
+must contain only publishable review Markdown: findings and conclusion ready to
+post. Do not include visible planning, self-dialogue, candidate triage, or
+process narration in that final message.
