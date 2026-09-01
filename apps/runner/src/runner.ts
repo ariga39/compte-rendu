@@ -1,7 +1,17 @@
 import { randomUUID } from 'node:crypto';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createWriteStream, type WriteStream } from 'node:fs';
-import { chmod, mkdir, mkdtemp, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DateTime, Effect, Option, Schema } from 'effect';
@@ -138,6 +148,10 @@ const OpenCodeSessionList = Schema.Union([
   Schema.Array(OpenCodeSession),
   Schema.Struct({ sessions: Schema.Array(OpenCodeSession) }),
 ]);
+const OpenCodeSessionExport = Schema.Struct({
+  info: Schema.Struct({ id: OpenCodeSessionId }),
+  messages: Schema.Array(Schema.Unknown),
+});
 const NetworkPolicyRule = Schema.Struct({
   id: Schema.NonEmptyString,
   resources: Schema.Array(Schema.NonEmptyString),
@@ -696,6 +710,16 @@ export const createRunner = (options: RunnerOptions = {}) => {
         return false;
       }
     };
+    const validSessionExport = async (path: string, sessionId: string) => {
+      try {
+        const decoded = Schema.decodeUnknownOption(OpenCodeSessionExport)(
+          JSON.parse(await readFile(path, 'utf8')),
+        );
+        return Option.isSome(decoded) && decoded.value.info.id === sessionId;
+      } catch {
+        return false;
+      }
+    };
     if (!(await nonemptyFile(join(evidencePath, 'opencode.jsonl')))) complete = false;
     if (!(await fileExists(join(evidencePath, 'opencode.stderr')))) complete = false;
 
@@ -724,18 +748,35 @@ export const createRunner = (options: RunnerOptions = {}) => {
         job.sessionIds = sessionIds;
         for (const sessionId of sessionIds) {
           const exportPath = join(evidencePath, `opencode-export-${sessionId}.json`);
+          const sandboxExportPath = `${SANDBOX_EVIDENCE_ROOT}/opencode-export-${sessionId}.json`;
           const exported = await runArchive(
             job,
             sbxPath,
-            ['exec', job.sandboxName, 'opencode', 'export', sessionId],
+            [
+              'exec',
+              job.sandboxName,
+              'sh',
+              '-c',
+              `opencode export ${sessionId} > ${sandboxExportPath}`,
+            ],
             deadlineAt,
-            { stdoutFilePath: exportPath },
+            {},
+          );
+          const copied = await runArchive(
+            job,
+            sbxPath,
+            ['cp', `${job.sandboxName}:${sandboxExportPath}`, exportPath],
+            deadlineAt,
+            {},
           );
           if (
             exported.exitCode !== 0 ||
             exported.timedOut ||
             exported.streamError === true ||
-            !(await nonemptyFile(exportPath))
+            copied.exitCode !== 0 ||
+            copied.timedOut ||
+            copied.streamError === true ||
+            !(await validSessionExport(exportPath, sessionId))
           ) {
             complete = false;
           }
