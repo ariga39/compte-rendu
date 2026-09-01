@@ -46,6 +46,7 @@ declare module 'node:child_process' {
       encoding?: 'utf8';
       stdio?: 'pipe';
       maxBuffer?: number;
+      env?: Record<string, string | undefined>;
     },
   ): string;
 }

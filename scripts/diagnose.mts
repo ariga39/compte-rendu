@@ -93,10 +93,15 @@ export interface DiagnosticWorkflowSnapshot {
   readonly events: ReadonlyArray<DiagnosticWorkflowEvent>;
 }
 
+export interface DiagnosticCommandOptions {
+  readonly env?: Readonly<Record<string, string | undefined>>;
+}
+
 export interface DiagnosticCommandAdapter {
   run(
     command: string,
     args: readonly string[],
+    options?: DiagnosticCommandOptions,
   ): Promise<{ readonly stdout: string; readonly exitCode: number }>;
 }
 
@@ -113,6 +118,7 @@ export interface DiagnosticSources {
       readonly repositoryId?: number;
       readonly pullRequestNumber?: number;
       readonly commentId?: number;
+      readonly triggerKind?: string;
     }): Promise<DiagnosticGitHubSnapshot | undefined>;
   };
   readonly r2: { get(key: string): Promise<DiagnosticR2Snapshot | undefined> };
@@ -442,6 +448,7 @@ export const runDiagnostic = async (argument: string, sources: DiagnosticSources
       repositoryId: d1?.delivery?.repositoryId,
       pullRequestNumber: d1?.delivery?.pullRequestNumber,
       commentId: d1?.run?.commentId,
+      triggerKind: d1?.delivery?.trigger,
     });
   } catch {
     missingSources.push('github');
@@ -453,6 +460,7 @@ export const runDiagnostic = async (argument: string, sources: DiagnosticSources
         repositoryId: d1.delivery.repositoryId,
         pullRequestNumber: d1.delivery.pullRequestNumber,
         commentId: d1.run?.commentId,
+        triggerKind: d1.delivery.trigger,
       });
     } catch {
       if (!missingSources.includes('github')) missingSources.push('github');
@@ -472,6 +480,7 @@ export const runDiagnostic = async (argument: string, sources: DiagnosticSources
           repositoryId: d1.delivery?.repositoryId,
           pullRequestNumber: d1.delivery?.pullRequestNumber,
           commentId: d1.run?.commentId,
+          triggerKind: d1.delivery?.trigger,
         });
         if (enriched !== undefined) github = enriched;
       } catch {
@@ -727,12 +736,13 @@ export const runDiagnostic = async (argument: string, sources: DiagnosticSources
 };
 
 const commandAdapter: DiagnosticCommandAdapter = {
-  run: async (command, args) => {
+  run: async (command, args, options) => {
     try {
       const stdout = execFileSync(command, [...args], {
         encoding: 'utf8',
         stdio: 'pipe',
         maxBuffer: 40 * 1024 * 1024,
+        env: options?.env === undefined ? undefined : { ...process.env, ...options.env },
       });
       return { stdout, exitCode: 0 };
     } catch (error) {
@@ -916,7 +926,7 @@ export const createDefaultDiagnosticSources = (
     },
   },
   github: {
-    find: async ({ target, repositoryId, pullRequestNumber, commentId }) => {
+    find: async ({ target, repositoryId, pullRequestNumber, commentId, triggerKind }) => {
       const repo =
         target.kind === 'pull-request' ? `${target.owner}/${target.repository}` : undefined;
       const repository =
@@ -956,11 +966,13 @@ export const createDefaultDiagnosticSources = (
         (comment) => typeof comment.body === 'string' && comment.body.trim() === '/ai-review',
       );
       const commandComment =
-        commentId === undefined
-          ? [...exactComments]
-              .sort((a, b) => (a.created_at ?? '').localeCompare(b.created_at ?? ''))
-              .at(-1)
-          : commentList.find((comment) => comment.id === commentId);
+        commentId !== undefined
+          ? commentList.find((comment) => comment.id === commentId)
+          : triggerKind === 'automatic'
+            ? undefined
+            : [...exactComments]
+                .sort((a, b) => (a.created_at ?? '').localeCompare(b.created_at ?? ''))
+                .at(-1);
       const reactions =
         commandComment?.reactions === undefined
           ? []
@@ -977,11 +989,11 @@ export const createDefaultDiagnosticSources = (
         repository: { owner, name, id: repository.id },
         pullRequest: { state: pull.state, baseSha: pull.base.sha, headSha: pull.head.sha },
         trigger:
-          commandComment === undefined
+          commandComment === undefined && triggerKind === undefined
             ? undefined
             : {
-                kind: 'manual',
-                commentId: typeof commandComment.id === 'number' ? commandComment.id : undefined,
+                kind: triggerKind ?? 'manual',
+                commentId: typeof commandComment?.id === 'number' ? commandComment.id : undefined,
               },
         reactions,
         reviews: (reviews ?? []).map((review) => ({
@@ -1030,18 +1042,22 @@ export const createDefaultDiagnosticSources = (
           find: async (_target: DiagnosticTarget, context?: { readonly runId?: string }) => {
             if (context?.runId === undefined || config.wranglerConfig.length === 0)
               return undefined;
-            const result = await command.run('corepack', [
-              'pnpm',
-              'dlx',
-              'wrangler@4.124.0',
-              'workflows',
-              'instances',
-              'describe',
-              config.workflowName!,
-              context.runId,
-              '--config',
-              config.wranglerConfig,
-            ]);
+            const result = await command.run(
+              'corepack',
+              [
+                'pnpm',
+                'dlx',
+                'wrangler@4.124.0',
+                'workflows',
+                'instances',
+                'describe',
+                config.workflowName!,
+                context.runId,
+                '--config',
+                config.wranglerConfig,
+              ],
+              { env: { TZ: 'UTC', LANG: 'en_US.UTF-8', LC_ALL: 'en_US.UTF-8' } },
+            );
             return workflowText(result.stdout, context.runId);
           },
         },
