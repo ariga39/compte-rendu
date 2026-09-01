@@ -17,7 +17,7 @@ The repository deploys these resources:
 | Public Worker      | `<INSTANCE_NAME>-ingress`                                                   | Receives GitHub webhooks. `workers_dev` is enabled.                                            |
 | Private Worker     | `<INSTANCE_NAME>-core`                                                      | Owns authorization, GitHub API calls, orchestration, and run state. `workers_dev` is disabled. |
 | Service binding    | `CORE` → `<INSTANCE_NAME>-core`                                             | Lets ingress call core without a public core URL.                                              |
-| D1 database        | `<INSTANCE_NAME>-review-state`, binding `REVIEW_DB`                         | Stores delivery, approval, run, and finding-fingerprint state.                                 |
+| D1 database        | `<INSTANCE_NAME>-review-state`, binding `REVIEW_DB`                         | Stores delivery, approval, and run state.                                                      |
 | Workflow           | `<INSTANCE_NAME>-review`, binding `REVIEW_WORKFLOW`, class `ReviewWorkflow` | Carries one review through checkout, agent execution, validation, and publication.             |
 | Runner Job service | Self-hosted runner reached through the core `RUNNER` VPC Service binding    | Owns one authenticated asynchronous review attempt and fresh Docker Sandbox cleanup.           |
 
@@ -234,8 +234,8 @@ Configure the GitHub App with only these repository permissions:
 | --------------------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Metadata              | Read  | Resolve the repository by numeric ID, validate repository metadata, and check the `/ai-review` commenter's collaborator permission before approving a public fork review.                                                      |
 | Contents              | Read  | Fetch the repository at the exact base/head SHAs in the Sandbox checkout. GitHub documents Contents as the permission for HTTP-based Git access.                                                                               |
-| Pull requests         | Read  | Load PR facts and current head SHA, list changed files, and find existing reviews for idempotent publication.                                                                                                                  |
-| Pull requests         | Write | Create the `COMMENT` review with inline findings.                                                                                                                                                                              |
+| Pull requests         | Read  | Load PR facts and current head SHA, and find existing reviews for idempotent publication.                                                                                                                                      |
+| Pull requests         | Write | Create the body-only `COMMENT` review.                                                                                                                                                                                         |
 | Issues                | Write | Make the `issue_comment` webhook available for PR comments and create `eyes`, `confused`, or `-1` reactions on the originating command comment. The handler accepts only a created comment whose body is exactly `/ai-review`. |
 
 The endpoint-to-permission mapping should be checked against GitHub's
@@ -453,8 +453,9 @@ uses the temporary invocation described above.
 
    Apply both tracked migrations in order:
    `apps/core/migrations/0001_review_state.sql` creates the deliveries,
-   approvals, review-runs, and finding-fingerprints tables plus the active-PR
-   index. `apps/core/migrations/0002_allow_manual_retry.sql` rebuilds
+   approvals, and review-runs tables plus the active-PR index. It also retains
+   an unused legacy finding-fingerprints table; body-only publication does not
+   populate or use it. `apps/core/migrations/0002_allow_manual_retry.sql` rebuilds
    `review_runs` while preserving its rows, then permits another run for a
    head after a failed or superseded run by making uniqueness apply only to
    `scheduled` and `completed` rows; it retains the active-PR index. D1
@@ -588,9 +589,10 @@ head SHA, and the single installation ID in the generated config.
 1. Trigger one eligible review through the real GitHub webhook. Confirm the
    delivery is accepted and record its `<DELIVERY_ID>` and the resulting
    `<RUN_ID>`.
-2. Confirm GitHub shows one visible review for that PR and exact `<HEAD_SHA>`
-   with event type `COMMENT`. It must contain useful review content (actionable
-   findings or a clear no-findings summary), and its URL must be retained as
+2. Confirm GitHub shows one visible body-only review for that PR and exact
+   `<HEAD_SHA>` with event type `COMMENT`. It must contain a useful, readable
+   Markdown review body (actionable findings in prose or a clear no-findings
+   conclusion), and its URL must be retained as
    `<PR_URL>#pullrequestreview-<REVIEW_ID>`.
 3. Query the deployed D1 binding and require the delivery and run to be
    terminal and to retain the exact recorded base/head SHAs:

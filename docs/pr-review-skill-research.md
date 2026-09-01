@@ -38,7 +38,11 @@ scoped GitHub read capability.
   adaptation also prohibited dependency installation, package-manager use,
   builds, tests, hooks, plugins, MCP, repository programs, and web access;
   these were project adaptations, not requirements from `poi`.
-- Retain the project's existing bare, schema-valid JSON output contract. The `poi` source specifies finding content but does not require JSON, a particular schema, or head-side line anchoring.
+- [Superseded by issue #105] Retain the project's earlier bare, schema-valid
+  JSON output contract. The selected product output is instead one concise,
+  human-readable Markdown review without a rigid format; the `poi` source
+  still supplies useful finding-quality principles but does not require JSON,
+  a particular schema, or head-side line anchoring.
 
 ## Source 2: i-have-adhd skill
 
@@ -63,7 +67,7 @@ The source also defines session persistence, numbered user task plans, repeated 
 - Do not add interactive next-step prompts, time estimates, progress narration, motivational language, or “ADHD mode” persistence to an autonomous review result.
 - Preserve uncertainty only where evidence is incomplete; otherwise use direct cause/effect wording. If a concern cannot be made concrete and actionable in a short finding, omit it.
 
-## Combined contract for this project (historical static-only adaptation; superseded by issue #86)
+## Combined contract for this project (historical static-only adaptation; superseded by issues #86 and #105)
 
 The dedicated reviewer skill should say, in substance:
 
@@ -74,9 +78,12 @@ The dedicated reviewer skill should say, in substance:
    run package managers/builds/tests/hooks/plugins/MCP, or use the web. The
    current #86 contract permits the YOLO reviewer to use whatever tools
    materially help inside the isolated microVM.
-5. Emit exactly one bare schema-valid JSON object. Keep its summary and finding messages direct, concise, free of preamble, tangents, recap, and pleasantries.
+5. [Superseded by issue #105] Emit exactly one bare schema-valid JSON object.
+   The selected product output is one concise human-readable Markdown review
+   with useful findings and a short conclusion, without a rigid template or
+   artificial formatting requirements.
 
-## Current issue #86 decision
+## Historical issue #86 decision (superseded by issue #105)
 
 The current product contract runs OpenCode fully YOLO in the isolated Docker
 microVM: there is no OpenCode tool allowlist or approval prompt. The reviewer
@@ -84,8 +91,8 @@ has direct GitHub read capability through the single-repository, read-only
 token available to the Sandbox, and the prompt/skill require complete current
 pull-request context before reviewing the exact base/head pair. Agent output,
 GitHub responses, and repository text are untrusted evidence. Exact SHA
-verification, current-head publication checks, and validated bare JSON output
-remain required.
+verification and current-head publication checks remain required. Issue #105
+supersedes the bare JSON output with the final Markdown review selected above.
 
 Security is provided by external boundaries: no sensitive host mounts or host
 skills/MCP/SSH-agent sharing, the scoped token and `api.github.com` network
@@ -102,4 +109,8 @@ resource/deadline, and cleanup contract.
 
 A real E2E against head `ca436a414763995924cd79412752d63f9f514477` returned a preamble and Markdown-fenced JSON, so the Runner correctly failed it as `invalid-output`; durable local-only evidence was retained outside the repository. It also showed that `git diff/show --output` can write and `git diff --no-index` can read outside the checkout. The correction keeps only `git diff`, `git show`, and `git grep` bash allows, places later-match denies for `git diff*--output*`, `git show*--output*`, and `git diff*--no-index*`, and removes bash `grep`/`rg` allows because native OpenCode grep/read/glob remain available.
 
-A corrected E2E at head `cbe60f1` succeeded with one bare JSON result. Independent OpenCode source validation accepted only the command-boundary/redirect finding and rejected the compound-operator and writable-XDG conclusions.
+A corrected historical E2E at head `cbe60f1` succeeded with one bare JSON
+result. Independent OpenCode source validation accepted only the
+command-boundary/redirect finding and rejected the compound-operator and
+writable-XDG conclusions; this result predates the issue #105 Markdown output
+decision.

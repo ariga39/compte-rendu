@@ -8,7 +8,7 @@ Actions. Its first release proves one complete product path:
 1. receive a GitHub pull-request event;
 2. decide whether that exact PR revision may be reviewed;
 3. submit an authenticated Runner Job to the self-hosted review runner;
-4. publish high-confidence findings to the same revision; and
+4. publish the review's Markdown body to the same revision; and
 5. terminate the run and reclaim the Sandbox.
 
 The project optimizes for a working, safe review loop. It is not a general CI
@@ -27,7 +27,8 @@ Included:
 - `issue_comment.created` events containing the manual review command;
 - `opened`, `reopened`, `synchronize`, and `ready_for_review` PR events;
 - one self-hosted Runner Job/OpenCode execution path;
-- one review summary with at most five high-confidence findings;
+- one concise human-readable Markdown review, guided by at most five
+  high-confidence findings when present;
 - D1 run history and delivery deduplication; and
 - runner-owned Sandbox cleanup for each attempt.
 
@@ -72,16 +73,19 @@ introduce feedback state.
 
 ### Review result
 
-The agent returns structured findings. The core publishes a `COMMENT` review
-only after validating that:
+The agent returns one concise human-readable Markdown review. The Runner
+validates the JSONL transport, selects the last normal terminal assistant
+message, and joins its publishable text parts in event order. Malformed JSONL,
+explicit agent errors, oversized output, a missing terminal message, or empty
+final text fail closed.
 
-- the run still targets the PR's current head SHA;
-- every inline finding refers to a changed path and valid diff position; and
-- the result satisfies the output schema and configured finding limit.
-
-Invalid individual findings are discarded. If no valid findings remain, the
-core may publish a short no-findings summary. It never publishes `APPROVE` or
-`REQUEST_CHANGES` in v1.
+Core accepts the non-empty Markdown body only after confirming that the run
+still targets the pull request's current head SHA, then publishes it as a
+body-only `COMMENT` review with no inline finding projection. Review guidance
+may suggest up to five high-confidence actionable findings when present and a
+clear conclusion when none are found; this is guidance for the human-readable
+review, not a JSON schema. It never publishes `APPROVE` or `REQUEST_CHANGES`
+in v1.
 
 ## Deployment shape
 
@@ -123,8 +127,8 @@ docs/
 
 Vite+ supplies the shared TypeScript/test/lint toolchain and pnpm supplies the
 workspace and dependency lockfile. Runtime code uses the pinned Effect 4 RC.
-Effect Schema validates webhook and agent-output contracts; Effect services and
-scopes model true external seams and Sandbox cleanup. Small pure transformations
+Effect Schema validates webhook and OpenCode event contracts; Effect services
+and scopes model true external seams and Sandbox cleanup. Small pure transformations
 remain ordinary TypeScript rather than being wrapped for uniformity. Additional
 packages require demonstrated reuse, not anticipated reuse.
 
@@ -213,10 +217,8 @@ shared host skills, host MCP settings, or SSH-agent access; network access is
 limited to `opencode.ai` and `api.github.com`; CPU, memory, and deadline are
 fixed; and the Sandbox, secret, network policy, and temporary credential
 sources are destroyed during terminal cleanup. Exact base/head verification,
-current-head publication checks, and exactly one schema-valid `ReviewResult` JSON
-object remain required. The object may be surrounded by prose or a Markdown
-fence; zero, multiple, or schema-invalid objects fail closed. YOLO tool access
-does not grant publication authority.
+current-head publication checks, and one non-empty final Markdown body remain
+required. YOLO tool access does not grant publication authority.
 
 ## Fail-closed rules
 
@@ -292,13 +294,13 @@ D1 stores only queryable product state:
 - installation and repository IDs;
 - PR number, base SHA, head SHA, trigger, status, and timestamps;
 - maintainer approval bound to repository, PR number, and head SHA; and
-- published finding fingerprints needed for idempotency.
+- review completion state needed for idempotency.
 
 The originating manual comment id is carried in the immutable manual job
 input needed by the Workflow; it is not a separate feedback table.
 
-It does not store repository contents, complete diffs, credentials, or model
-transcripts.
+It does not store repository contents, complete diffs, credentials, model
+transcripts, or finding fingerprints for inline comments.
 
 ## Behaviour-based TDD
 

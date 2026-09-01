@@ -35,20 +35,13 @@ const PermissionResponse = Schema.Struct({
   permission: Schema.Literals(['none', 'read', 'triage', 'write', 'maintain', 'admin']),
 });
 
-const PullRequestFile = Schema.Struct({
-  filename: Schema.NonEmptyString,
-  patch: Schema.optional(Schema.NullOr(Schema.String)),
-});
-
 const ReviewRecord = Schema.Struct({
   id: Schema.Int,
   body: Schema.NullOr(Schema.String),
 });
 
 const ReviewRecords = Schema.Array(ReviewRecord);
-const PullRequestFiles = Schema.Array(PullRequestFile);
 const pageSize = 100;
-const maxFilePages = 30;
 const maxReviewPages = 10;
 
 const CreatedReview = Schema.Struct({
@@ -160,24 +153,6 @@ export const createGitHubPublicationAdapter = (
     throw new Error('GitHub review marker lookup retry exhausted');
   };
 
-  const listFiles = async (
-    repositoryId: number,
-    pullRequestNumber: number,
-    installationId: number,
-  ) => {
-    const files: Array<typeof PullRequestFile.Type> = [];
-    for (let page = 1; page <= maxFilePages; page += 1) {
-      const value = await requestJson(
-        installationId,
-        `${await pullRequestPath(repositoryId, pullRequestNumber, installationId)}/files?per_page=${pageSize}&page=${page}`,
-      );
-      const pageFiles = await Schema.decodeUnknownPromise(PullRequestFiles)(value);
-      files.push(...pageFiles);
-      if (pageFiles.length < pageSize) return files;
-    }
-    return files;
-  };
-
   return {
     getPullRequest: async ({ repositoryId, pullRequestNumber, installationId }) => {
       try {
@@ -228,11 +203,7 @@ export const createGitHubPublicationAdapter = (
         await pullRequestPath(repositoryId, pullRequestNumber, installationId),
       );
       const pullRequest = await Schema.decodeUnknownPromise(PullRequest)(pullRequestValue);
-      const files = await listFiles(repositoryId, pullRequestNumber, installationId);
-      return {
-        headSha: pullRequest.head.sha,
-        files: files.map((file) => ({ path: file.filename, patch: file.patch })),
-      };
+      return { headSha: pullRequest.head.sha };
     },
     createReview: async ({ repositoryId, pullRequestNumber, installationId, payload }) => {
       let attempt = 0;

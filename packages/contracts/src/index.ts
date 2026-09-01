@@ -15,16 +15,7 @@ export interface CoreServiceBinding {
 
 export const GitHubSha = Schema.String.check(Schema.isPattern(/^[0-9a-f]{40}$/i));
 
-export const ReviewResult = Schema.Struct({
-  findings: Schema.Array(
-    Schema.Struct({
-      path: Schema.String,
-      line: Schema.Int,
-      message: Schema.String,
-    }),
-  ),
-  summary: Schema.String,
-});
+export const ReviewResult = Schema.NonEmptyString;
 
 export type ReviewResult = typeof ReviewResult.Type;
 
@@ -34,9 +25,8 @@ export const RunnerFailureCause = Schema.Literals([
   'output-truncated',
   'malformed-jsonl',
   'agent-error',
-  'zero-results',
-  'multiple-results',
-  'result-schema-failure',
+  'missing-terminal-message',
+  'empty-final-text',
 ]);
 
 export const RunnerJobInput = Schema.Struct({
