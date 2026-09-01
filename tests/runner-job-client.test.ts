@@ -129,7 +129,7 @@ describe('Runner Job client', () => {
               attempt: 1,
               status: 'succeeded',
               stage: 'cleanup',
-              result: '# Review\n\nNo findings.',
+              result: '## Review:\n\nNo findings.',
               sandbox: { cleanup: 'destroyed' },
             });
           }
@@ -191,7 +191,7 @@ describe('Runner Job client', () => {
                   status: 'succeeded',
                   attempt: 1,
                   stage: 'cleanup',
-                  result: '# Review\n\nNo findings.',
+                  result: '## Review:\n\nNo findings.',
                   sandbox: { cleanup: 'destroyed' },
                 });
           }
@@ -213,7 +213,7 @@ describe('Runner Job client', () => {
       status: 'succeeded',
       attempt: 1,
       sandboxId: 'job-1',
-      output: '# Review\n\nNo findings.',
+      output: '## Review:\n\nNo findings.',
     });
   });
 

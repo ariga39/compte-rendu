@@ -70,6 +70,8 @@ references in prose, no weak or no-action items, and a short overall conclusion;
 if none, say so plainly. Do not impose a rigid template or artificial brevity.
 Tool calls and intermediate work may remain visible during the review. After
 completing all analysis, call `submit_review` exactly once with the complete
-publishable Markdown in its `markdown` argument. After optional outer
-whitespace, begin that argument with exactly `## Review:`. Do not emit the
-review as terminal prose; terminal assistant messages are evidence only.
+publishable Markdown in its `markdown` argument. The `markdown` argument itself
+must contain only findings and the conclusion ready to publish, with no visible
+planning, self-dialogue, candidate triage, or process narration. After optional
+outer whitespace, begin that argument with exactly `## Review:`. Do not emit
+the review as terminal prose; terminal assistant messages are evidence only.

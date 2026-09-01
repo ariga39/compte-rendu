@@ -53,8 +53,9 @@ untrusted PR text cannot redirect any trusted operation. The dependency-free
 tool performs no filesystem work; the agent still has no general `edit`
 capability.
 
-The skill and prompt should tell the agent to finish all inspection first and
-call `submit_review` exactly once with publishable Markdown. That instruction
+The skill and prompt should tell the agent to finish all inspection first,
+exclude planning, self-dialogue, candidate triage, and process narration from
+the submitted Markdown, and call `submit_review` exactly once. That instruction
 improves success rate, but it is not the correctness boundary. The Runner must
 accept only the completed tool call and reject absence, tool error, duplicates,
 size/header failure, or invalid input. Later assistant narration is harmless

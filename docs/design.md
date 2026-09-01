@@ -199,10 +199,11 @@ Core polls for at most 35 minutes, and the enclosing Workflow step timeout is
 40 minutes. These are deliberately simple finite ceilings for real reviews and
 hang prevention; no remaining-budget prediction or admission algebra is used.
 
-The review Sandbox runs OpenCode fully YOLO inside the microVM: all OpenCode
-tools are allowed without an OpenCode approval prompt or command/tool
-allowlist. The reviewer has direct GitHub read capability through Docker's
-sandbox-scoped built-in `github` service and `api.github.com` egress. After
+The review Sandbox runs OpenCode non-interactively inside the microVM, without
+per-call approval prompts. Its static-review policy allows the packaged skill,
+the final-review submission tool, read/search, and narrowly bounded read-only
+Git/GitHub commands. The reviewer has direct GitHub read capability through
+Docker's sandbox-scoped built-in `github` service and `api.github.com` egress. After
 fetching and verifying the immutable admitted base and head commits, the
 Runner derives one valid merge base with `git merge-base`. Missing, invalid,
 or unavailable merge-base history fails the Job before Sandbox/OpenCode. The

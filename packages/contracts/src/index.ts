@@ -15,7 +15,20 @@ export interface CoreServiceBinding {
 
 export const GitHubSha = Schema.String.check(Schema.isPattern(/^[0-9a-f]{40}$/i));
 
-export const ReviewResult = Schema.NonEmptyString;
+export const MAX_REVIEW_RESULT_BYTES = 8 * 1024 * 1024;
+
+export const ReviewResult = Schema.String.check(
+  Schema.makeFilter((markdown) => markdown.trim().length > 0, {
+    expected: 'non-empty review Markdown',
+  }),
+  Schema.makeFilter(
+    (markdown) => new TextEncoder().encode(markdown).byteLength <= MAX_REVIEW_RESULT_BYTES,
+    { expected: `review Markdown no larger than ${MAX_REVIEW_RESULT_BYTES} bytes` },
+  ),
+  Schema.makeFilter((markdown) => markdown.trim().startsWith('## Review:'), {
+    expected: 'review Markdown beginning with ## Review:',
+  }),
+);
 
 export type ReviewResult = typeof ReviewResult.Type;
 
