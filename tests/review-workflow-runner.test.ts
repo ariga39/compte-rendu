@@ -103,13 +103,16 @@ afterAll(async () => {
 
 describe('review Workflow runner tracer', () => {
   it('completes through the real client and Runner HTTP handler before publication', async () => {
-    const agentOutput = JSON.stringify({
-      type: 'text',
-      part: {
+    const agentOutput = [
+      JSON.stringify({
         type: 'text',
-        text: JSON.stringify({ findings: [], summary: 'No findings' }),
-      },
-    });
+        part: { type: 'text', messageID: 'msg-final', text: '# Review\n\nNo findings.' },
+      }),
+      JSON.stringify({
+        type: 'step_finish',
+        part: { type: 'step-finish', messageID: 'msg-final', reason: 'stop' },
+      }),
+    ].join('\n');
     const runner = createRunner({
       evidenceRoot,
       authToken: 'runner-tracer-token',
@@ -168,7 +171,7 @@ describe('review Workflow runner tracer', () => {
     );
 
     expect(disposition).toBe('completed');
-    expect(published).toEqual({ findings: [], summary: 'No findings' });
+    expect(published).toBe('# Review\n\nNo findings.');
   });
 
   it('fails after one retryable invalid-output attempt without creating another Runner Job', async () => {
@@ -244,13 +247,16 @@ describe('review Workflow runner tracer', () => {
   });
 
   it('returns terminal failure after a lost GET once the known job is cleaned up', async () => {
-    const agentOutput = JSON.stringify({
-      type: 'text',
-      part: {
+    const agentOutput = [
+      JSON.stringify({
         type: 'text',
-        text: JSON.stringify({ findings: [], summary: 'Fresh attempt' }),
-      },
-    });
+        part: { type: 'text', messageID: 'msg-final', text: '# Review\n\nFresh attempt.' },
+      }),
+      JSON.stringify({
+        type: 'step_finish',
+        part: { type: 'step-finish', messageID: 'msg-final', reason: 'stop' },
+      }),
+    ].join('\n');
     let agentRuns = 0;
     let agentStarted!: () => void;
     const firstAgentReady = new Promise<void>((resolve) => {

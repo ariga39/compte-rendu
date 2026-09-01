@@ -64,10 +64,7 @@ reads, Git history, GitHub queries, and repository inspection when useful. Keep
 the bounded run focused on the target and avoid wasting time or changing the
 checkout; do not publish, commit, or push.
 
-The final response must be exactly one bare JSON object with no Markdown fence,
-prose, or other text:
-
-`{"findings":[{"path":"string","line":0,"message":"string"}],"summary":"string"}`
-
-The summary must be short, accurate, and limited to the reviewed diff. Findings
-must use paths and head-side changed lines from that diff.
+Return a concise human-readable Markdown review ready to publish. Include up to
+five high-confidence actionable findings when present, with clear file/line
+references in prose, no weak or no-action items, and a short overall conclusion;
+if none, say so plainly. Do not impose a rigid template or artificial brevity.

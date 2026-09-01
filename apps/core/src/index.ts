@@ -159,14 +159,6 @@ export interface ReviewPublicationPayload {
   readonly event: 'COMMENT';
   readonly commit_id: GitHubShaValue;
   readonly body: string;
-  readonly comments: readonly ReviewPublicationComment[];
-}
-
-export interface ReviewPublicationComment {
-  readonly path: string;
-  readonly line: number;
-  readonly side: 'RIGHT';
-  readonly body: string;
 }
 
 export type ReviewPublicationCreateResult =
@@ -244,12 +236,6 @@ const recordOperationalLog = (log: OperationalLog | undefined, event: Operationa
 
 const ReviewPublicationTarget = Schema.Struct({
   headSha: GitHubSha,
-  files: Schema.Array(
-    Schema.Struct({
-      path: Schema.NonEmptyString,
-      patch: Schema.optional(Schema.NullOr(Schema.String)),
-    }),
-  ),
 });
 
 const ReviewPublicationCreateResult = Schema.Union([
@@ -258,55 +244,6 @@ const ReviewPublicationCreateResult = Schema.Union([
 ]);
 
 type ReviewPublicationTarget = typeof ReviewPublicationTarget.Type;
-
-const rightLinesForPatch = (patch: string): ReadonlySet<number> => {
-  const rightLines = new Set<number>();
-  let rightLine: number | undefined;
-
-  for (const line of patch.split(/\r?\n/)) {
-    const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
-    if (hunk !== null) {
-      rightLine = Number(hunk[1]);
-      continue;
-    }
-
-    if (line.startsWith('+++') && rightLine === undefined) continue;
-    if (rightLine === undefined || line.startsWith('\\')) continue;
-    if (line.startsWith('+')) {
-      rightLines.add(rightLine);
-      rightLine += 1;
-    } else if (line.startsWith(' ')) {
-      rightLines.add(rightLine);
-      rightLine += 1;
-    } else if (line.startsWith('-')) {
-      continue;
-    }
-  }
-
-  return rightLines;
-};
-
-const publicationComments = (
-  output: typeof ReviewRunOutput.Type,
-  target: ReviewPublicationTarget,
-): readonly ReviewPublicationComment[] => {
-  const comments: ReviewPublicationComment[] = [];
-  const seen = new Set<string>();
-
-  for (const finding of output.findings) {
-    const file = target.files.find((candidate) => candidate.path === finding.path);
-    if (file === undefined || file.patch === undefined || file.patch === null) continue;
-    if (!rightLinesForPatch(file.patch).has(finding.line)) continue;
-
-    const fingerprint = `${finding.path}\u0000${finding.line}\u0000${finding.message}`;
-    if (seen.has(fingerprint)) continue;
-    seen.add(fingerprint);
-    comments.push({ path: finding.path, line: finding.line, side: 'RIGHT', body: finding.message });
-    if (comments.length === 5) break;
-  }
-
-  return comments;
-};
 
 type ReviewCompletionStateStore = ReviewStateStore & Partial<ReviewStateQueries>;
 
@@ -493,7 +430,6 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
   }
 
   const marker = `<!-- compte-rendu:run:${input.runId} -->`;
-  const comments = publicationComments(decodedOutput, target);
   const lookupMarker = () =>
     github.findReviewByMarker === undefined
       ? Effect.succeed({ ok: true as const, review: undefined })
@@ -525,9 +461,7 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
   }
 
   if (markerLookup.review !== undefined) {
-    const completed = yield* completeRun(
-      comments.map((comment) => `${comment.path}\u0000${comment.line}\u0000${comment.body}`),
-    );
+    const completed = yield* completeRun([]);
     if (!completed) {
       yield* recordPublicationTerminal(log, input.runId, {
         outcome: 'failed',
@@ -542,8 +476,7 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
   const payload: ReviewPublicationPayload = {
     event: 'COMMENT',
     commit_id: outcome.headSha,
-    body: `${marker}\n${decodedOutput.summary}`,
-    comments,
+    body: `${marker}\n${decodedOutput}`,
   };
 
   const publication = yield* Effect.tryPromise({
@@ -588,9 +521,7 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
   if (publication === false || publication === undefined) {
     const recoveredLookup = yield* lookupMarker();
     if (recoveredLookup.ok && recoveredLookup.review !== undefined) {
-      const completed = yield* completeRun(
-        comments.map((comment) => `${comment.path}\u0000${comment.line}\u0000${comment.body}`),
-      );
+      const completed = yield* completeRun([]);
       if (!completed) {
         yield* recordPublicationTerminal(log, input.runId, {
           outcome: 'failed',
@@ -611,9 +542,7 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
     });
     return 'failed' as const;
   }
-  const completed = yield* completeRun(
-    comments.map((comment) => `${comment.path}\u0000${comment.line}\u0000${comment.body}`),
-  );
+  const completed = yield* completeRun([]);
   if (!completed) {
     yield* recordPublicationTerminal(log, input.runId, {
       outcome: 'failed',

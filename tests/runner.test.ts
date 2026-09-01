@@ -15,6 +15,18 @@ const runnerJobFields = {
 };
 const sharedEvidenceRoot = join(tmpdir(), 'compte-rendu-runner-evidence');
 
+const finalMarkdownJsonl = (markdown = '# Review\n\nNo findings.') =>
+  [
+    JSON.stringify({
+      type: 'text',
+      part: { type: 'text', messageID: 'msg-final', text: markdown },
+    }),
+    JSON.stringify({
+      type: 'step_finish',
+      part: { type: 'step-finish', messageID: 'msg-final', reason: 'stop' },
+    }),
+  ].join('\n');
+
 const writeEvidenceFixture = async (
   args: readonly string[],
   options: { readonly stdoutFilePath?: string; readonly stderrFilePath?: string },
@@ -236,10 +248,7 @@ describe('Runner Job HTTP interface', () => {
   it('reports a process-exit cause without exposing agent content', async () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
-    const resultLine = JSON.stringify({
-      type: 'text',
-      part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'unused' }) },
-    });
+    const resultLine = finalMarkdownJsonl();
     const runner = createRunner({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
@@ -361,10 +370,7 @@ describe('Runner Job HTTP interface', () => {
   it('does not treat stderr capture truncation alone as invalid output', async () => {
     const { terminal, manifest } = await runAgentScenario({
       runId: 'run-90-stderr-truncated-only',
-      output: JSON.stringify({
-        type: 'text',
-        part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'No findings' }) },
-      }),
+      output: finalMarkdownJsonl(),
       stderrTruncated: true,
     });
 
@@ -378,6 +384,27 @@ describe('Runner Job HTTP interface', () => {
       terminal: { status: 'succeeded' },
     });
     expect(manifest.terminal).not.toHaveProperty('cause');
+  });
+
+  it('preserves final Markdown whitespace in the result and durable evidence', async () => {
+    const finalMarkdown = '\n  # Review\n\nNo findings.  \n';
+    const { terminal } = await runAgentScenario({
+      runId: 'run-105-preserve-markdown-whitespace',
+      output: finalMarkdownJsonl(finalMarkdown),
+    });
+
+    expect(terminal).toMatchObject({
+      status: 'succeeded',
+      result: finalMarkdown,
+      evidence: { status: 'complete' },
+      sandbox: { cleanup: 'destroyed' },
+    });
+    await expect(
+      readFile(
+        join(sharedEvidenceRoot, terminal.evidenceId as string, 'validated-review.md'),
+        'utf8',
+      ),
+    ).resolves.toBe(finalMarkdown);
   });
 
   it('reports a malformed-jsonl cause for invalid agent event lines', async () => {
@@ -412,85 +439,55 @@ describe('Runner Job HTTP interface', () => {
     });
   });
 
-  it('reports zero-results when no event contains a schema-valid result', async () => {
+  it('reports missing-terminal-message when OpenCode emits no terminal assistant message', async () => {
     const { terminal, manifest } = await runAgentScenario({
-      runId: 'run-90-zero-results',
+      runId: 'run-90-missing-terminal-message',
       output: JSON.stringify({ type: 'step-start' }),
     });
 
     expect(terminal).toMatchObject({
       status: 'failed',
-      failure: { reason: 'invalid-output', cause: 'zero-results' },
+      failure: { reason: 'invalid-output', cause: 'missing-terminal-message' },
     });
     expect(manifest).toMatchObject({
-      execution: { status: 'failed', reason: 'invalid-output', cause: 'zero-results' },
-      terminal: { status: 'failed', reason: 'invalid-output', cause: 'zero-results' },
+      execution: {
+        status: 'failed',
+        reason: 'invalid-output',
+        cause: 'missing-terminal-message',
+      },
+      terminal: {
+        status: 'failed',
+        reason: 'invalid-output',
+        cause: 'missing-terminal-message',
+      },
     });
   });
 
-  it('reports multiple-results when more than one event contains a schema-valid result', async () => {
-    const resultEvent = JSON.stringify({
-      type: 'text',
-      part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'No findings' }) },
-    });
+  it('reports empty-final-text when the terminal assistant message has no publishable text', async () => {
+    const output = [
+      JSON.stringify({
+        type: 'text',
+        part: { type: 'text', messageID: 'msg-final', text: '', ignored: true },
+      }),
+      JSON.stringify({
+        type: 'step_finish',
+        part: { type: 'step-finish', messageID: 'msg-final', reason: 'stop' },
+      }),
+    ].join('\n');
     const { terminal, manifest } = await runAgentScenario({
-      runId: 'run-90-multiple-results',
-      output: `${resultEvent}\n${resultEvent}`,
+      runId: 'run-90-empty-final-text',
+      output,
     });
 
     expect(terminal).toMatchObject({
       status: 'failed',
-      failure: { reason: 'invalid-output', cause: 'multiple-results' },
-    });
-    expect(manifest).toMatchObject({
-      execution: { status: 'failed', reason: 'invalid-output', cause: 'multiple-results' },
-      terminal: { status: 'failed', reason: 'invalid-output', cause: 'multiple-results' },
-    });
-  });
-
-  it('fails closed when one text event contains two outermost schema-valid results', async () => {
-    const result = JSON.stringify({ findings: [], summary: 'No findings' });
-    const resultEvent = JSON.stringify({
-      type: 'text',
-      part: { type: 'text', text: `${result}\n${result}` },
-    });
-    const { terminal, manifest, agentInvoked } = await runAgentScenario({
-      runId: 'run-103-multiple-results-one-event',
-      output: resultEvent,
-    });
-
-    expect(agentInvoked).toBe(true);
-    expect(terminal).toMatchObject({
-      status: 'failed',
-      failure: { reason: 'invalid-output', cause: 'multiple-results' },
+      failure: { reason: 'invalid-output', cause: 'empty-final-text' },
       evidence: { status: 'complete' },
       sandbox: { cleanup: 'destroyed' },
     });
     expect(manifest).toMatchObject({
-      execution: { status: 'failed', reason: 'invalid-output', cause: 'multiple-results' },
-      terminal: { status: 'failed', reason: 'invalid-output', cause: 'multiple-results' },
-    });
-  });
-
-  it('reports result-schema-failure when a result event fails the output schema', async () => {
-    const { terminal, manifest } = await runAgentScenario({
-      runId: 'run-90-result-schema-failure',
-      output: JSON.stringify({
-        type: 'text',
-        part: {
-          type: 'text',
-          text: JSON.stringify({ findings: [], summary: 42 }),
-        },
-      }),
-    });
-
-    expect(terminal).toMatchObject({
-      status: 'failed',
-      failure: { reason: 'invalid-output', cause: 'result-schema-failure' },
-    });
-    expect(manifest).toMatchObject({
-      execution: { status: 'failed', reason: 'invalid-output', cause: 'result-schema-failure' },
-      terminal: { status: 'failed', reason: 'invalid-output', cause: 'result-schema-failure' },
+      execution: { status: 'failed', reason: 'invalid-output', cause: 'empty-final-text' },
+      terminal: { status: 'failed', reason: 'invalid-output', cause: 'empty-final-text' },
     });
   });
 
@@ -515,10 +512,7 @@ describe('Runner Job HTTP interface', () => {
   it('removes only each job-owned network rules for jobs sharing resources', async () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
-    const resultLine = JSON.stringify({
-      type: 'text',
-      part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'No findings' }) },
-    });
+    const resultLine = finalMarkdownJsonl();
     type PolicyRule = {
       id: string;
       resources: string[];
@@ -668,10 +662,7 @@ describe('Runner Job HTTP interface', () => {
   it('fails cleanup on exact policy removal failure while continuing Sandbox cleanup', async () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
-    const resultLine = JSON.stringify({
-      type: 'text',
-      part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'No findings' }) },
-    });
+    const resultLine = finalMarkdownJsonl();
     const rules: Array<Record<string, unknown>> = [
       {
         id: 'default-deny-all',
@@ -769,10 +760,7 @@ describe('Runner Job HTTP interface', () => {
   it('fails cleanup when a read-only policy rule remains attached after Sandbox removal', async () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
-    const resultLine = JSON.stringify({
-      type: 'text',
-      part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'No findings' }) },
-    });
+    const resultLine = finalMarkdownJsonl();
     const rules: Array<Record<string, unknown>> = [
       {
         id: 'default-deny-all',
@@ -886,10 +874,7 @@ describe('Runner Job HTTP interface', () => {
   it('removes a rule recorded before an initial policy lookup failure', async () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
-    const resultLine = JSON.stringify({
-      type: 'text',
-      part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'unused' }) },
-    });
+    const resultLine = finalMarkdownJsonl();
     const rules: Array<Record<string, unknown>> = [
       {
         id: 'default-deny-all',
@@ -993,10 +978,7 @@ describe('Runner Job HTTP interface', () => {
   it('does not remove a replacement rule when a recorded policy ID disappears', async () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
-    const resultLine = JSON.stringify({
-      type: 'text',
-      part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'No findings' }) },
-    });
+    const resultLine = finalMarkdownJsonl();
     const sandboxRules: Array<Record<string, unknown>> = [
       {
         id: 'default-deny-all',
@@ -1121,10 +1103,17 @@ describe('Runner Job HTTP interface', () => {
     const evidenceRoot = await mkdtemp(`${tmpdir()}/compte-rendu-evidence-`);
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
-    const agentJsonl = JSON.stringify({
-      type: 'text',
-      part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'No findings' }) },
-    });
+    const finalMarkdown = '# Review\n\nNo findings.';
+    const agentJsonl = [
+      JSON.stringify({
+        type: 'text',
+        part: { type: 'text', messageID: 'msg-final', text: finalMarkdown },
+      }),
+      JSON.stringify({
+        type: 'step_finish',
+        part: { type: 'step-finish', messageID: 'msg-final', reason: 'stop' },
+      }),
+    ].join('\n');
     try {
       const runner = createRunner({
         authToken: 'runner-test-token',
@@ -1212,9 +1201,9 @@ describe('Runner Job HTTP interface', () => {
       await expect(readFile(join(archive, 'opencode-data', 'review.log'), 'utf8')).resolves.toBe(
         'log',
       );
-      await expect(
-        readFile(join(archive, 'validated-review-result.json'), 'utf8'),
-      ).resolves.toContain('No findings');
+      await expect(readFile(join(archive, 'validated-review.md'), 'utf8')).resolves.toBe(
+        finalMarkdown,
+      );
       expect(JSON.parse(await readFile(join(archive, 'manifest.json'), 'utf8'))).toMatchObject({
         jobId: expect.any(String),
         sandboxName: expect.any(String),
@@ -1250,10 +1239,7 @@ describe('Runner Job HTTP interface', () => {
   it('reports incomplete evidence as its own failure when archiving fails', async () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
-    const resultLine = JSON.stringify({
-      type: 'text',
-      part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'No findings' }) },
-    });
+    const resultLine = finalMarkdownJsonl();
     const runner = createRunner({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
@@ -1454,10 +1440,7 @@ describe('Runner Job HTTP interface', () => {
   it('archives available Sandbox evidence when network setup fails before the agent', async () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
-    const resultLine = JSON.stringify({
-      type: 'text',
-      part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'unused' }) },
-    });
+    const resultLine = finalMarkdownJsonl();
     const runner = createRunner({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
@@ -1599,10 +1582,17 @@ describe('Runner Job HTTP interface', () => {
   it('loads the packaged review skill and exact revision through the OpenCode sandbox boundary', async () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
-    const resultLine = JSON.stringify({
-      type: 'text',
-      part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'No findings' }) },
-    });
+    const finalMarkdown = '# Review\n\nNo findings.';
+    const resultLine = [
+      JSON.stringify({
+        type: 'text',
+        part: { type: 'text', messageID: 'msg-final', text: finalMarkdown },
+      }),
+      JSON.stringify({
+        type: 'step_finish',
+        part: { type: 'step-finish', messageID: 'msg-final', reason: 'stop' },
+      }),
+    ].join('\n');
     let createArgs: readonly string[] | undefined;
     let fetchArgs: readonly string[] | undefined;
     let agentArgs: readonly string[] | undefined;
@@ -1679,7 +1669,7 @@ describe('Runner Job HTTP interface', () => {
 
     await expect(waitForTerminal(runner, id)).resolves.toMatchObject({
       status: 'succeeded',
-      result: { findings: [], summary: 'No findings' },
+      result: finalMarkdown,
       sandbox: { cleanup: 'destroyed' },
     });
     expect(createArgs).toEqual(expect.arrayContaining(['--clone', '--no-share-skills']));
@@ -1732,6 +1722,15 @@ describe('Runner Job HTTP interface', () => {
     expect(skillAtSandboxBoundary).toContain('completion (`pageInfo.hasNextPage` false)');
     expect(skillAtSandboxBoundary).toContain('Re-read the pull request base and');
     expect(skillAtSandboxBoundary).toContain('head OIDs after pagination');
+    expect(skillAtSandboxBoundary).toContain(
+      'concise human-readable Markdown review ready to publish',
+    );
+    expect(skillAtSandboxBoundary).toMatch(/up to\s+five high-confidence actionable findings/);
+    expect(skillAtSandboxBoundary).toContain('short overall conclusion');
+    expect(skillAtSandboxBoundary).not.toContain(
+      'The final response must be exactly one bare JSON object',
+    );
+    expect(skillAtSandboxBoundary).not.toContain('schema-valid');
     expect(skillAtSandboxBoundary).not.toContain('web or repository inspection');
     expect(skillAtSandboxBoundary).not.toContain('```');
     const configContent = createArgs?.find((value) => value.startsWith('OPENCODE_CONFIG_CONTENT='));
@@ -1810,266 +1809,60 @@ describe('Runner Job HTTP interface', () => {
     expect(agentArgs?.join(' ')).toContain('after pagination');
     expect(agentArgs?.join(' ')).toContain(baseSha);
     expect(agentArgs?.join(' ')).toContain(headSha);
+    expect(agentArgs?.join(' ')).toContain(
+      'concise human-readable Markdown review ready to publish',
+    );
+    expect(agentArgs?.join(' ')).not.toContain('Return exactly one bare JSON object');
+    expect(agentArgs?.join(' ')).not.toContain('schema-valid');
     await expect(
       readFile(join(configRootAtSandboxBoundary!, 'opencode/skills/pr-review/SKILL.md'), 'utf8'),
     ).rejects.toThrow();
   });
 
-  it('accepts one schema-valid review result wrapped in prose and a markdown fence', async () => {
-    const baseSha = '1111111111111111111111111111111111111111';
-    const headSha = '2222222222222222222222222222222222222222';
-    const reviewResult = { findings: [], summary: 'No findings' };
-    const agentEvent = JSON.stringify({
+  it('returns the final Markdown review text after progress output', async () => {
+    const finalPartOne =
+      '# Review summary\n\nThe change is sound; ordinary braces like `{example}` are part of the prose.';
+    const finalPartTwo = '- No blocking findings.';
+    const finalReview = `${finalPartOne}\n${finalPartTwo}`;
+    const progressEvent = JSON.stringify({
       type: 'text',
       part: {
         type: 'text',
-        text: `Here is the review result:\n\n\`\`\`json\n${JSON.stringify(reviewResult)}\n\`\`\`\n\nEnd of review.`,
+        messageID: 'msg-progress',
+        text: 'Inspecting the pull request...',
       },
     });
-    const runner = createRunner({
-      evidenceRoot: sharedEvidenceRoot,
-      authToken: 'runner-test-token',
-      modelSecretCommand: 'model-secret-resolver',
-      process: async (_command, args, options = {}) => {
-        await writeEvidenceFixture(args, options, agentEvent);
-        return {
-          exitCode: 0,
-          stdout: args.includes('rev-parse')
-            ? `${baseSha}\n${headSha}\n`
-            : args.includes('session')
-              ? '[{"id":"wrapped-result-session"}]\n'
-              : args.includes('export')
-                ? ''
-                : options.captureStdout === true
-                  ? `${agentEvent}\n`
-                  : '',
-          timedOut: false,
-          truncated: false,
-        };
-      },
-    });
-    const submitted = await runner.handle(
-      new Request('http://runner/jobs', {
-        method: 'POST',
-        headers: {
-          authorization: 'Bearer runner-test-token',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          ...runnerJobFields,
-          runId: 'run-103-wrapped-review-result',
-          attempt: 1,
-          repositoryUrl: 'https://github.com/acme/reviewed.git',
-          baseSha,
-          headSha,
-        }),
-      }),
-    );
-    const { id } = (await submitted.json()) as { id: string };
-
-    const terminal = await waitForTerminal(runner, id);
-    expect(terminal).toMatchObject({
-      status: 'succeeded',
-      result: reviewResult,
-      evidence: { status: 'complete' },
-      sandbox: { cleanup: 'destroyed' },
-    });
-    const manifest = JSON.parse(
-      await readFile(
-        join(sharedEvidenceRoot, terminal.evidenceId as string, 'manifest.json'),
-        'utf8',
-      ),
-    );
-    expect(manifest).toMatchObject({ complete: true, terminal: { status: 'succeeded' } });
-  });
-
-  it('accepts a fenced result after prose with an unmatched opening brace', async () => {
-    const reviewResult = { findings: [], summary: 'No findings' };
-    const agentEvent = JSON.stringify({
+    const finalPartOneEvent = JSON.stringify({
       type: 'text',
-      part: {
-        type: 'text',
-        text: `json\nThe explanatory object begins here {\n\`\`\`json\n${JSON.stringify(reviewResult)}\n\`\`\``,
-      },
+      part: { type: 'text', messageID: 'msg-final', text: finalPartOne },
+    });
+    const finalPartTwoEvent = JSON.stringify({
+      type: 'text',
+      part: { type: 'text', messageID: 'msg-final', text: finalPartTwo },
+    });
+    const finishEvent = JSON.stringify({
+      type: 'step_finish',
+      part: { type: 'step-finish', messageID: 'msg-final', reason: 'stop' },
     });
     const { terminal, manifest } = await runAgentScenario({
-      runId: 'run-103-unmatched-prose-brace',
-      output: agentEvent,
+      runId: 'run-105-final-markdown-review',
+      output: `${progressEvent}\n${finalPartOneEvent}\n${finalPartTwoEvent}\n${finishEvent}`,
     });
 
     expect(terminal).toMatchObject({
       status: 'succeeded',
-      result: reviewResult,
+      result: finalReview,
       evidence: { status: 'complete' },
       sandbox: { cleanup: 'destroyed' },
     });
     expect(manifest).toMatchObject({ complete: true, terminal: { status: 'succeeded' } });
-  });
-
-  it('accepts a fenced result after prose with an unmatched brace and quote', async () => {
-    const reviewResult = { findings: [], summary: 'No findings' };
-    const agentEvent = JSON.stringify({
-      type: 'text',
-      part: {
-        type: 'text',
-        text: `Explanation of foo starts { with an unfinished quote "\n\`\`\`json\n${JSON.stringify(reviewResult)}\n\`\`\``,
-      },
-    });
-    const { terminal, manifest } = await runAgentScenario({
-      runId: 'run-103-unmatched-prose-brace-and-quote',
-      output: agentEvent,
-    });
-
-    expect(terminal).toMatchObject({
-      status: 'succeeded',
-      result: reviewResult,
-      evidence: { status: 'complete' },
-      sandbox: { cleanup: 'destroyed' },
-    });
-    expect(manifest).toMatchObject({ complete: true, terminal: { status: 'succeeded' } });
-  });
-
-  it('accepts an unfenced result after prose with an unmatched brace and quote', async () => {
-    const reviewResult = { findings: [], summary: 'No findings' };
-    const agentEvent = JSON.stringify({
-      type: 'text',
-      part: {
-        type: 'text',
-        text: `Explanation of foo starts { with an unfinished quote "\n${JSON.stringify(reviewResult)}`,
-      },
-    });
-    const { terminal, manifest } = await runAgentScenario({
-      runId: 'run-103-unfenced-unmatched-brace-and-quote',
-      output: agentEvent,
-    });
-
-    expect(terminal).toMatchObject({
-      status: 'succeeded',
-      result: reviewResult,
-      evidence: { status: 'complete' },
-      sandbox: { cleanup: 'destroyed' },
-    });
-    expect(manifest).toMatchObject({ complete: true, terminal: { status: 'succeeded' } });
-  });
-
-  it('accepts a schema-valid result with 512 findings', async () => {
-    const reviewResult = {
-      findings: Array.from({ length: 512 }, (_, index) => ({
-        path: `src/file-${index}.ts`,
-        line: index + 1,
-        message: `Finding ${index}`,
-      })),
-      summary: '512 findings',
-    };
-    const agentEvent = JSON.stringify({
-      type: 'text',
-      part: { type: 'text', text: JSON.stringify(reviewResult) },
-    });
-    const { terminal, manifest } = await runAgentScenario({
-      runId: 'run-103-512-findings',
-      output: agentEvent,
-    });
-
-    expect(terminal).toMatchObject({
-      status: 'succeeded',
-      result: reviewResult,
-      evidence: { status: 'complete' },
-      sandbox: { cleanup: 'destroyed' },
-    });
-    expect(manifest).toMatchObject({ complete: true, terminal: { status: 'succeeded' } });
-  });
-
-  it('fails bounded and closed for brace-heavy text without a schema-valid result', async () => {
-    const baseSha = '1111111111111111111111111111111111111111';
-    const headSha = '2222222222222222222222222222222222222222';
-    const agentEvent = JSON.stringify({
-      type: 'text',
-      part: { type: 'text', text: '{'.repeat(80_000) },
-    });
-    const runner = createRunner({
-      evidenceRoot: sharedEvidenceRoot,
-      authToken: 'runner-test-token',
-      modelSecretCommand: 'model-secret-resolver',
-      process: async (_command, args, options = {}) => {
-        await writeEvidenceFixture(args, options, agentEvent);
-        return {
-          exitCode: 0,
-          stdout: args.includes('rev-parse')
-            ? `${baseSha}\n${headSha}\n`
-            : args.includes('session')
-              ? '[{"id":"brace-heavy-session"}]\n'
-              : args.includes('export')
-                ? ''
-                : options.captureStdout === true
-                  ? `${agentEvent}\n`
-                  : '',
-          timedOut: false,
-          truncated: false,
-        };
-      },
-    });
-    const submitted = await runner.handle(
-      new Request('http://runner/jobs', {
-        method: 'POST',
-        headers: {
-          authorization: 'Bearer runner-test-token',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          ...runnerJobFields,
-          runId: 'run-103-brace-heavy-result',
-          attempt: 1,
-          repositoryUrl: 'https://github.com/acme/reviewed.git',
-          baseSha,
-          headSha,
-        }),
-      }),
-    );
-    const { id } = (await submitted.json()) as { id: string };
-    const startedAt = performance.now();
-    const terminal = await waitForTerminal(runner, id);
-
-    expect(performance.now() - startedAt).toBeLessThan(2_000);
-    expect(terminal).toMatchObject({
-      status: 'failed',
-      failure: { reason: 'invalid-output', cause: 'result-schema-failure' },
-      evidence: { status: 'complete' },
-      sandbox: { cleanup: 'destroyed' },
-    });
-  });
-
-  it('fails bounded and closed for many consecutive balanced empty objects', async () => {
-    const reviewResult = JSON.stringify({ findings: [], summary: 'No findings' });
-    const agentEvent = JSON.stringify({
-      type: 'text',
-      part: { type: 'text', text: '{}'.repeat(5_000) + reviewResult },
-    });
-    const { terminal, manifest, terminalDurationMs } = await runAgentScenario({
-      runId: 'run-103-many-empty-objects',
-      output: agentEvent,
-    });
-
-    expect(terminalDurationMs).toBeLessThan(2_000);
-    expect(terminal).toMatchObject({
-      status: 'failed',
-      failure: { reason: 'invalid-output', cause: 'result-schema-failure' },
-      evidence: { status: 'complete' },
-      sandbox: { cleanup: 'destroyed' },
-    });
-    expect(manifest).toMatchObject({
-      complete: true,
-      terminal: { status: 'failed', reason: 'invalid-output', cause: 'result-schema-failure' },
-    });
   });
 
   it('reviews a behind target from merge base to head while retaining admitted revision facts', async () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const mergeBaseSha = '3333333333333333333333333333333333333333';
     const headSha = '2222222222222222222222222222222222222222';
-    const resultLine = JSON.stringify({
-      type: 'text',
-      part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'No findings' }) },
-    });
+    const resultLine = finalMarkdownJsonl();
     let agentPrompt: string | undefined;
     const runner = createRunner({
       evidenceRoot: sharedEvidenceRoot,
@@ -2119,7 +1912,7 @@ describe('Runner Job HTTP interface', () => {
 
     await expect(waitForTerminal(runner, id)).resolves.toMatchObject({
       status: 'succeeded',
-      result: { findings: [], summary: 'No findings' },
+      result: '# Review\n\nNo findings.',
       sandbox: { cleanup: 'destroyed' },
     });
     expect(agentPrompt).toContain(`git diff --find-renames ${mergeBaseSha} ${headSha}`);
@@ -2130,10 +1923,7 @@ describe('Runner Job HTTP interface', () => {
   it('preserves the expected diff when the merge base equals the admitted base', async () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
-    const resultLine = JSON.stringify({
-      type: 'text',
-      part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'No findings' }) },
-    });
+    const resultLine = finalMarkdownJsonl();
     let agentPrompt: string | undefined;
     const runner = createRunner({
       evidenceRoot: sharedEvidenceRoot,
@@ -2258,10 +2048,7 @@ describe('Runner Job HTTP interface', () => {
     const repositoryReadToken = 'github-read-token-must-not-be-an-argument';
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
-    const resultLine = JSON.stringify({
-      type: 'text',
-      part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'No findings' }) },
-    });
+    const resultLine = finalMarkdownJsonl();
     const commands: string[][] = [];
     const events: unknown[] = [];
     let resolvedGithubToken: string | undefined;
@@ -2432,13 +2219,7 @@ describe('Runner Job HTTP interface', () => {
     try {
       const baseSha = '1111111111111111111111111111111111111111';
       const headSha = '2222222222222222222222222222222222222222';
-      const resultLine = JSON.stringify({
-        type: 'text',
-        part: {
-          type: 'text',
-          text: JSON.stringify({ findings: [], summary: 'No findings' }),
-        },
-      });
+      const resultLine = finalMarkdownJsonl();
       const successfulProcess = async (
         _command: string,
         args: readonly string[],
@@ -2495,7 +2276,7 @@ describe('Runner Job HTTP interface', () => {
       expect(terminal).toMatchObject({
         status: 'succeeded',
         attempt: 1,
-        result: { findings: [], summary: 'No findings' },
+        result: '# Review\n\nNo findings.',
         sandbox: { cleanup: 'destroyed' },
       });
     } finally {
@@ -2648,10 +2429,7 @@ describe('Runner Job HTTP interface', () => {
   it('fails closed when custom secret cleanup returns exit 1', async () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
-    const resultLine = JSON.stringify({
-      type: 'text',
-      part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'No findings' }) },
-    });
+    const resultLine = finalMarkdownJsonl();
     const runner = createRunner({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
@@ -3044,18 +2822,10 @@ describe('Runner Job HTTP interface', () => {
     expect(manifest.terminal).not.toHaveProperty('cause');
   });
 
-  it('rejects error events, multiple valid candidates, and oversized output', async () => {
+  it('rejects error events and oversized output', async () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
-    const validLine = JSON.stringify({
-      type: 'text',
-      part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'No findings' }) },
-    });
-    const outputs = [
-      JSON.stringify({ type: 'error' }),
-      `${validLine}\n${validLine}\n`,
-      'x'.repeat(8 * 1024 * 1024 + 1),
-    ];
+    const outputs = [JSON.stringify({ type: 'error' }), 'x'.repeat(8 * 1024 * 1024 + 1)];
 
     for (const [index, agentOutput] of outputs.entries()) {
       const runner = createRunner({
