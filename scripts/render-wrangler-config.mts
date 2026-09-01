@@ -6,7 +6,7 @@ import { Schema } from 'effect';
 const instanceNamePattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-57][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const maxCloudflareNameLength = 63;
-const longestDerivedSuffix = '-review-state';
+const longestDerivedSuffix = '-review-evidence';
 const InstallationId = Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0)));
 const InstallationIds = Schema.Array(InstallationId).pipe(Schema.check(Schema.isMinLength(1)));
 
@@ -61,14 +61,18 @@ const renderDeploymentConfigs = (
   core = replaceRequired(
     core,
     '"database_name": "compte-rendu-review-state"',
-    `"database_name": "${instanceName}${longestDerivedSuffix}"`,
+    `"database_name": "${instanceName}-review-state"`,
+  );
+  core = replaceRequired(
+    core,
+    '"bucket_name": "compte-rendu-review-evidence"',
+    `"bucket_name": "${instanceName}${longestDerivedSuffix}"`,
   );
   core = replaceRequired(
     core,
     '"service_id": "REPLACE_WITH_RUNNER_VPC_SERVICE_ID"',
     `"service_id": "${runnerVpcServiceId}"`,
   );
-  core = replaceRequired(core, '"name": "compte-rendu-review"', `"name": "${instanceName}-review"`);
   core = replaceRequired(
     core,
     '"GITHUB_APP_ID": "REPLACE_WITH_GITHUB_APP_ID"',

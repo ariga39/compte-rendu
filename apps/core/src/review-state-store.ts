@@ -7,6 +7,7 @@ import type {
   ReviewStateStore,
   ReviewStoredStatus,
 } from './index';
+import type { ReviewEvidenceMetadata } from './index';
 
 export interface D1ResultLike {
   readonly meta: {
@@ -38,6 +39,17 @@ interface DeliveryRow {
   status: ReviewStoredStatus;
   created_at: string;
   updated_at: string;
+  runner_job_id?: string | null;
+  runner_attempt?: number | null;
+  comment_id?: number | null;
+  evidence_key?: string | null;
+  evidence_status?: 'complete' | 'incomplete' | null;
+  evidence_size?: number | null;
+  evidence_sha256?: string | null;
+  evidence_uploaded_at?: string | null;
+  execution_started_at?: string | null;
+  submission_completed_at?: string | null;
+  cleanup_completed_at?: string | null;
 }
 
 interface RunRow {
@@ -74,6 +86,33 @@ const outcomeFromRow = (row: DeliveryRow): ReviewOutcome => ({
   status: row.status,
   createdAt: row.created_at,
   updatedAt: row.updated_at,
+  ...(row.runner_job_id == null ? {} : { runnerJobId: row.runner_job_id }),
+  ...(row.runner_attempt == null ? {} : { runnerAttempt: row.runner_attempt }),
+  ...(row.comment_id == null ? {} : { commentId: row.comment_id }),
+  ...(row.evidence_key == null ||
+  row.evidence_status == null ||
+  row.evidence_size == null ||
+  row.evidence_sha256 == null ||
+  row.evidence_uploaded_at == null
+    ? {}
+    : {
+        evidence: {
+          key: row.evidence_key,
+          status: row.evidence_status,
+          size: row.evidence_size,
+          sha256: row.evidence_sha256,
+          uploadedAt: row.evidence_uploaded_at,
+          ...(row.execution_started_at == null
+            ? {}
+            : { executionStartedAt: row.execution_started_at }),
+          ...(row.submission_completed_at == null
+            ? {}
+            : { submissionCompletedAt: row.submission_completed_at }),
+          ...(row.cleanup_completed_at == null
+            ? {}
+            : { cleanupCompletedAt: row.cleanup_completed_at }),
+        } satisfies ReviewEvidenceMetadata,
+      }),
 });
 
 const deliverySelect = `
@@ -85,7 +124,10 @@ const deliverySelect = `
 const runOutcomeSelect = `
   SELECT d.delivery_id, d.installation_id, d.repository_id, d.pull_request_number,
     d.base_sha, d.head_sha, d.trigger, r.status,
-    r.created_at, r.updated_at
+    r.created_at, r.updated_at, r.runner_job_id, r.runner_attempt, r.comment_id,
+    r.evidence_key, r.evidence_status,
+    r.evidence_size, r.evidence_sha256, r.evidence_uploaded_at,
+    r.execution_started_at, r.submission_completed_at, r.cleanup_completed_at
   FROM review_runs r
   JOIN deliveries d ON d.delivery_id = r.delivery_id
   WHERE r.run_id = ?
@@ -177,8 +219,8 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
           `INSERT INTO review_runs
             (run_id, delivery_id, installation_id, repository_id,
              pull_request_number, base_sha, head_sha, trigger,
-             status, created_at, updated_at)
-           SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?
+             status, created_at, updated_at, comment_id)
+           SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?
            WHERE EXISTS (
              SELECT 1 FROM deliveries
              WHERE delivery_id = ? AND status = 'claiming'
@@ -216,6 +258,7 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
           job.trigger,
           occurredAt,
           occurredAt,
+          job.commentId ?? null,
           deliveryId,
           job.repositoryId,
           job.pullRequestNumber,
@@ -344,6 +387,47 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
         )
         .bind(occurredAt, runId),
     ]);
+  },
+
+  recordEvidence: async ({ runId, evidence }) => {
+    const result = await database
+      .prepare(
+        `UPDATE review_runs SET
+           evidence_key = ?, evidence_status = ?, evidence_size = ?,
+           evidence_sha256 = ?, evidence_uploaded_at = ?,
+           execution_started_at = ?, submission_completed_at = ?,
+           cleanup_completed_at = ?
+         WHERE run_id = ? AND (
+           evidence_key IS NULL OR evidence_key = ?
+         )`,
+      )
+      .bind(
+        evidence.key,
+        evidence.status,
+        evidence.size,
+        evidence.sha256,
+        evidence.uploadedAt,
+        evidence.executionStartedAt ?? null,
+        evidence.submissionCompletedAt ?? null,
+        evidence.cleanupCompletedAt ?? null,
+        runId,
+        evidence.key,
+      )
+      .run();
+    return result.meta.changes === 1;
+  },
+
+  recordRunnerJob: async ({ runId, jobId, attempt }) => {
+    const result = await database
+      .prepare(
+        `UPDATE review_runs SET runner_job_id = ?, runner_attempt = ?
+         WHERE run_id = ? AND status = 'scheduled'
+           AND (runner_job_id IS NULL OR runner_job_id = ?)
+           AND (runner_attempt IS NULL OR runner_attempt = ?)`,
+      )
+      .bind(jobId, attempt, runId, jobId, attempt)
+      .run();
+    return result.meta.changes === 1;
   },
 
   markRunCompleted: async ({ runId, occurredAt }) => {

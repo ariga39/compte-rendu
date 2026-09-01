@@ -2,6 +2,7 @@ import { DateTime, Effect, Schema } from 'effect';
 import {
   PullRequestFacts,
   ReviewEvent,
+  ReviewResult,
   GitHubSha,
   type PullRequestFacts as PullRequestFactsType,
   type OperationalLog,
@@ -10,14 +11,12 @@ import {
   sanitizeOperationalLogEvent,
 } from '@compte-rendu/contracts';
 import type { RunnerJobBinding } from './runner-job-client';
-import { ReviewRunOutput } from './review-run';
 
 export { createRunnerJobClient, type RunnerJobBinding } from './runner-job-client';
 export { createGitHubPublicationAdapter } from './github-review-adapter';
 export type { GitHubPublicationAdapterOptions } from './github-review-adapter';
 export { createGitHubAppTokenProvider } from './github-app-token';
 export type { GitHubAppTokenProvider, GitHubAppTokenProviderOptions } from './github-app-token';
-export * from './review-run';
 
 type GitHubShaValue = typeof GitHubSha.Type;
 
@@ -62,6 +61,21 @@ export interface ReviewOutcome {
   status: ReviewStoredStatus;
   createdAt: string;
   updatedAt: string;
+  runnerJobId?: string;
+  runnerAttempt?: number;
+  commentId?: number;
+  evidence?: ReviewEvidenceMetadata;
+}
+
+export interface ReviewEvidenceMetadata {
+  readonly key: string;
+  readonly status: 'complete' | 'incomplete';
+  readonly size: number;
+  readonly sha256: string;
+  readonly uploadedAt: string;
+  readonly executionStartedAt?: string;
+  readonly submissionCompletedAt?: string;
+  readonly cleanupCompletedAt?: string;
 }
 
 export interface ReviewDeliveryRecord {
@@ -100,6 +114,8 @@ export interface ReviewStateStore {
 }
 
 export interface ReviewStateQueries {
+  recordEvidence(input: { runId: string; evidence: ReviewEvidenceMetadata }): Promise<boolean>;
+  recordRunnerJob(input: { runId: string; jobId: string; attempt: number }): Promise<boolean>;
   markRunCompleted(input: { runId: string; occurredAt: string }): Promise<boolean>;
   markRunSuperseded(input: { runId: string; occurredAt: string }): Promise<boolean>;
   completeRunPublication(input: {
@@ -343,7 +359,7 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
     return 'failed' as const;
   }
 
-  const decodedOutput = yield* Schema.decodeUnknownEffect(ReviewRunOutput)(input.output).pipe(
+  const decodedOutput = yield* Schema.decodeUnknownEffect(ReviewResult)(input.output).pipe(
     Effect.catch(() => Effect.succeed(undefined)),
   );
   if (decodedOutput === undefined) {
@@ -882,6 +898,9 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
       deliveryId: string;
       createdAt: string;
       updatedAt: string;
+      runnerJobId?: string;
+      runnerAttempt?: number;
+      evidence?: ReviewEvidenceMetadata;
     }
   >();
   let nextRunId = 1;
@@ -1026,6 +1045,22 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
         setDeliveryStatus(run.deliveryId, 'failed', occurredAt);
       }
     },
+    recordEvidence: async ({ runId, evidence }) => {
+      const run = runs.get(runId);
+      if (run === undefined) return false;
+      if (run.evidence !== undefined && run.evidence.key !== evidence.key) return false;
+      run.evidence = evidence;
+      return true;
+    },
+    recordRunnerJob: async ({ runId, jobId, attempt }) => {
+      const run = runs.get(runId);
+      if (run === undefined || run.status !== 'scheduled') return false;
+      if (run.runnerJobId !== undefined && run.runnerJobId !== jobId) return false;
+      if (run.runnerAttempt !== undefined && run.runnerAttempt !== attempt) return false;
+      run.runnerJobId = jobId;
+      run.runnerAttempt = attempt;
+      return true;
+    },
     markRunCompleted: async ({ runId, occurredAt }) => {
       const run = runs.get(runId);
       if (run !== undefined && run.status === 'scheduled') {
@@ -1063,7 +1098,15 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
       const delivery = deliveries.get(run.deliveryId);
       return delivery === undefined
         ? undefined
-        : { ...delivery, status: run.status, updatedAt: run.updatedAt };
+        : {
+            ...delivery,
+            status: run.status,
+            updatedAt: run.updatedAt,
+            ...(run.job.commentId === undefined ? {} : { commentId: run.job.commentId }),
+            ...(run.runnerJobId === undefined ? {} : { runnerJobId: run.runnerJobId }),
+            ...(run.runnerAttempt === undefined ? {} : { runnerAttempt: run.runnerAttempt }),
+            evidence: run.evidence,
+          };
     },
   };
 };

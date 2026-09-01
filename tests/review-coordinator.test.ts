@@ -574,8 +574,8 @@ describe('Review coordinator', () => {
     }
   });
 
-  it('preserves failed run history when the retry migration is applied forward', async () => {
-    const database = new SqliteD1Database(['0001_review_state.sql']);
+  it('preserves failed run history when manual retry support is present', async () => {
+    const database = new SqliteD1Database();
     const stateStore = createD1ReviewStateStore(database);
     const job: ReviewJob = {
       repositoryId: 11,
@@ -598,8 +598,6 @@ describe('Review coordinator', () => {
         runId: first.runId,
         occurredAt: '2026-08-25T00:01:00.000Z',
       });
-
-      database.applyMigrations(['0002_allow_manual_retry.sql']);
 
       const retry = await createD1ReviewStateStore(database).claimReview({
         deliveryId: 'manual-delivery-after-migration',
@@ -1041,7 +1039,7 @@ describe('Review coordinator', () => {
           attempts += 1;
           if (attempts === 1) {
             failedRunId = runId;
-            throw new Error('workflow unavailable');
+            throw new Error('runner unavailable');
           }
           scheduled.push({ job, runId });
         },

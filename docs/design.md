@@ -37,7 +37,6 @@ Deferred:
 - running repository tests or build scripts;
 - an administration UI, billing, and cross-installation analytics;
 - multiple model or agent adapters;
-- R2 source or artifact storage;
 - automatic approval or request-changes reviews; and
 - a generic CI/workflow product.
 
@@ -63,7 +62,7 @@ handled. A later `synchronize` event requires a new command.
 The originating numeric `issue_comment` id is retained for manual-command
 feedback. A successfully authorized and scheduled manual command gets the
 GitHub `eyes` reaction. A conclusive denial, missing pull request, or draft
-gets `confused` and does not start a Workflow. An accepted run that ends in a
+gets `confused` and does not start a Runner Job. An accepted run that ends in a
 failure gets `-1`; a run superseded by a newer head gets `confused`. A
 successful run adds no reaction beyond `eyes`, because its published
 `COMMENT` review is the completion signal. Automatic jobs have no command
@@ -104,17 +103,21 @@ review-ingress (public route; webhook secret only)
   | Service Binding
   v
 review-core (no public route)
-  |- Review Workflow
   |- D1
+  |- private R2 evidence bucket
   `- private Workers VPC Runner binding
          `- self-hosted runner → fresh Docker Sandbox/OpenCode
+              `- public ingress callback → review-core
 ```
 
 `review-ingress` verifies the webhook and converts it to a small internal
-event. `review-core` owns policy, GitHub App authentication, orchestration,
-review publication, and run records. A Workflow carries one review run through
-Runner Job submission, polling, validation, and publication. The self-hosted
-runner owns the Sandbox deadline and forced cleanup.
+event. `review-core` owns policy, GitHub App authentication, Runner Job
+admission, review publication, evidence metadata, and run records. It durably
+claims a run and immediately submits one immutable Runner Job through the VPC
+binding. The Runner owns execution and cleanup, then sends one authenticated
+result callback through public ingress. Core stores the bounded named-field
+evidence bundle in private R2 before confirming publication. There is no
+Workflow.
 
 The repository layout is intentionally small:
 
@@ -159,11 +162,12 @@ createCoreWorker(env: CoreEnv): WorkerEntrypoint
 ```
 
 The private core Worker accepts only normalized `POST /review-events` requests.
-It constructs the D1 state store, production GitHub App adapter, and Workflow
-scheduler, then returns `202` only after the event is durably classified.
-Malformed input returns `400`; storage, binding, or scheduling uncertainty
-returns `503`. Workflow input contains only `{ runId, job }`; credentials stay
-inside the Workflow execution.
+It constructs the D1 state store, production GitHub App adapter, and Runner
+scheduler, then returns `202` only after the event is durably classified and
+one Runner Job is admitted. Malformed input returns `400`; storage, binding,
+or scheduling uncertainty returns `503`. Runner admission is one authenticated
+`POST /jobs` through the VPC binding; the callback is accepted only through
+the static-token ingress route.
 
 ### Review coordinator
 
@@ -174,11 +178,10 @@ completeReview(input: { runId: string; output: unknown }): Promise<ReviewDisposi
 
 This is the main deep module. Behind the interface it deduplicates deliveries,
 loads repository facts, applies policy, records approvals, starts or supersedes
-runs, invokes the review Workflow, verifies the current head SHA, and publishes
-validated output. `completeReview` accepts only the run identity and untrusted
-agent output; repository, pull request, installation, and target SHA are loaded
-from durable state. GitHub, D1, Workflow, and clock adapters sit at internal
-seams.
+runs, verifies the current head SHA, and publishes validated callback output.
+`completeReview` accepts only the run identity and untrusted agent output;
+repository, pull request, installation, and target SHA are loaded from durable
+state. GitHub, D1, Runner, and clock adapters sit at internal seams.
 
 Observable dispositions are deliberately few: rejected, ignored, awaiting
 approval, scheduled, completed, or failed.
@@ -186,18 +189,22 @@ approval, scheduled, completed, or failed.
 ### Runner Job
 
 ```ts
-runJob(spec: ReviewRunSpec): Promise<ReviewRunResult>
+submitJob(spec: ReviewRunSpec): Promise<void>
 ```
 
-The Worker-side implementation uses the authenticated private Runner Job HTTP
-interface (`POST /jobs`, `GET /jobs/:id`, and `DELETE /jobs/:id`). A job is one
-immutable review attempt; success is accepted only after the runner reports
-validated output and Docker Sandbox cleanup. Callers do not manage Docker lifecycle.
+The Core-side implementation uses one authenticated private Runner Job HTTP
+admission (`POST /jobs`). A job is one immutable review attempt; the Runner
+reports terminal status through the public-ingress callback after validation
+and Docker Sandbox cleanup. Core does not poll, retry, or manage Docker
+lifecycle.
 The shared review policy gives each Runner attempt a 30-minute agent timeout and
 treats a failed Review Attempt as terminal: there is one attempt and no retry.
-Core polls for at most 35 minutes, and the enclosing Workflow step timeout is
-40 minutes. These are deliberately simple finite ceilings for real reviews and
-hang prevention; no remaining-budget prediction or admission algebra is used.
+The Runner has one fixed finite execution ceiling for hang prevention. Callback
+transport gives each request its own timeout and may make one immediate retry
+of the same result; local evidence stays available when both deliveries fail.
+If the fixed callback bundle exceeds the 32 MiB request bound, the Runner sends
+one small terminal incomplete-evidence failure instead of truncating or
+uploading that bundle.
 
 The review Sandbox runs OpenCode non-interactively inside the microVM, without
 per-call approval prompts. Its static-review policy allows the packaged skill,
@@ -242,8 +249,9 @@ Sandbox:
   not publish;
 - cleanup failure: mark the job failed until forced Sandbox cleanup succeeds.
 
-Ordinary transient failures are retried by the Workflow within a small bounded
-attempt count. They are not turned into elaborate recovery protocols.
+Callback transport loss does not erase local evidence. It is handled only by
+the Runner's one bounded immediate retry; there is no queue, outbox, cron, or
+generic retry framework.
 
 ## Clean break
 
@@ -261,11 +269,12 @@ publication succeeds:
 3. perform fixed checkout and remove the checkout credential;
 4. run the review agent with its scoped GitHub read capability;
 5. destroy the Sandbox in the normal completion path; and
-6. let the runner force destruction if the normal path is interrupted.
+6. let the runner force destruction if the normal path is interrupted; and
+7. send the terminal result callback, retaining local evidence if delivery is
+   unavailable.
 
-No run resumes inside an old Sandbox. A retry starts from the exact base/head
-SHA pair in a fresh Sandbox. A new PR head supersedes, rather than mutates, an
-older run.
+No run resumes inside an old Sandbox. A new PR head supersedes, rather than
+mutates, an older run.
 
 ## Credentials
 
@@ -290,6 +299,12 @@ older run.
   are not loaded or shared in v1; the review agent uses only the static-review
   tool policy inside the isolated microVM.
 
+The callback contains only named evidence fields for `manifest.json`,
+`opencode.jsonl`, `opencode.stderr`, `validated-review.md`,
+`opencode-session-list.json`, and one matching `opencode-export-SESSION.json`.
+The complete local recovery tree may retain OpenCode DB/state/log artifacts;
+those are never serialized into the callback bundle.
+
 ## Minimal persistence
 
 D1 stores only queryable product state:
@@ -299,12 +314,16 @@ D1 stores only queryable product state:
 - PR number, base SHA, head SHA, trigger, status, and timestamps;
 - maintainer approval bound to repository, PR number, and head SHA; and
 - review completion state needed for idempotency.
+- evidence object key, status, size, SHA-256, and execution/submission/cleanup
+  timestamps.
 
 The originating manual comment id is carried in the immutable manual job
-input needed by the Workflow; it is not a separate feedback table.
+input needed by the Runner Job; it is not a separate feedback table.
 
-It does not store repository contents, complete diffs, credentials, model
-transcripts, or finding fingerprints for inline comments.
+The bounded named-field bundle itself is stored as one private R2 JSON object
+per Job. D1 does not store its content. It does not store repository contents,
+complete diffs, credentials, model transcripts, or finding fingerprints for
+inline comments.
 
 ## Behaviour-based TDD
 

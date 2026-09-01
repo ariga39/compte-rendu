@@ -17,10 +17,12 @@ import { join } from 'node:path';
 import { DateTime, Effect, Option, Schema } from 'effect';
 import {
   MAX_REVIEW_RESULT_BYTES,
+  MAX_RUNNER_CALLBACK_BYTES,
   REVIEW_ATTEMPT_BUDGET_MS,
   ReviewResult,
   RunnerFailureCause,
   RunnerJobInput,
+  RunnerResultCallback,
   sanitizeOperationalLogEvent,
   type OperationalLog,
   type OperationalLogEvent,
@@ -44,6 +46,7 @@ const MAX_DIAGNOSTIC_STDERR_BYTES = 4 * 1024;
 const MAX_POLICY_JSON_BYTES = 256 * 1024;
 const MAX_AGENT_OUTPUT_BYTES = MAX_REVIEW_RESULT_BYTES;
 const MAX_REQUEST_BYTES = 64 * 1024;
+const CALLBACK_REQUEST_TIMEOUT_MS = 30 * 1000;
 const SANDBOX_EVIDENCE_ROOT = '/tmp/petit-chiba-opencode-evidence';
 
 const trustedOpenCodeConfig = JSON.stringify({
@@ -381,6 +384,9 @@ type RunnerJob = {
   checkoutRoot?: string;
   configRoot?: string;
   deadlineAt: number;
+  executionStartedAt?: string;
+  submissionCompletedAt?: string;
+  cleanupCompletedAt?: string;
 };
 
 export interface RunnerOptions {
@@ -390,6 +396,10 @@ export interface RunnerOptions {
   readonly evidenceRoot?: string;
   readonly process?: RunnerProcess;
   readonly log?: OperationalLog;
+  readonly callbackUrl?: string;
+  readonly callbackToken?: string;
+  readonly callbackFetch?: typeof fetch;
+  readonly callbackTimeoutMs?: number;
 }
 
 type RunnerDiagnostic = {
@@ -544,6 +554,10 @@ export const createRunner = (options: RunnerOptions = {}) => {
     );
   const executeProcess = options.process ?? runProcess;
   const log = options.log;
+  const callbackUrl = options.callbackUrl ?? process.env.RUNNER_CALLBACK_URL;
+  const callbackToken = options.callbackToken ?? process.env.RUNNER_CALLBACK_TOKEN;
+  const callbackFetch = options.callbackFetch ?? globalThis.fetch;
+  const callbackTimeoutMs = options.callbackTimeoutMs ?? CALLBACK_REQUEST_TIMEOUT_MS;
   const strippedSandboxEnvironment = {
     ...process.env,
     SSH_AUTH_SOCK: undefined,
@@ -783,7 +797,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
         }
       }
     }
-
     for (const tree of ['data', 'state']) {
       const destination = join(evidencePath, `opencode-${tree}`);
       const copied = await runArchive(
@@ -796,7 +809,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
       );
       if (copied.exitCode !== 0 || copied.timedOut) complete = false;
     }
-
     await secureEvidenceTree(evidencePath);
     const files = await evidenceFiles(evidencePath);
     const hasNonemptyFile = async (predicate: (file: string) => boolean) => {
@@ -1126,6 +1138,123 @@ export const createRunner = (options: RunnerOptions = {}) => {
     return clean;
   };
 
+  const callbackEvidence = async (evidencePath: string, job: RunnerJob) => {
+    const encoded = async (name: string) => {
+      try {
+        return Buffer.from(await readFile(join(evidencePath, name))).toString('base64');
+      } catch {
+        return '';
+      }
+    };
+    const sessionId = job.sessionIds[0];
+    return {
+      id: job.state.evidence.id,
+      status: job.state.evidence.status,
+      manifest: await encoded('manifest.json'),
+      opencodeJsonl: await encoded('opencode.jsonl'),
+      opencodeStderr: await encoded('opencode.stderr'),
+      ...(job.state.result === undefined
+        ? {}
+        : { validatedReview: await encoded('validated-review.md') }),
+      opencodeSessionList: await encoded('opencode-session-list.json'),
+      ...(sessionId === undefined
+        ? {}
+        : {
+            opencodeExport: {
+              sessionId,
+              content: await encoded(`opencode-export-${sessionId}.json`),
+            },
+          }),
+    };
+  };
+
+  const sendCallback = async (
+    job: RunnerJob,
+    evidencePath: string,
+    status: RunnerJobState['status'],
+    failure: RunnerJobState['failure'],
+  ) => {
+    if (callbackUrl === undefined || callbackToken === undefined) return;
+    if (status !== 'succeeded' && status !== 'failed' && status !== 'aborted') return;
+    const callback = {
+      id: job.id,
+      runId: job.input.runId,
+      attempt: job.input.attempt,
+      status,
+      stage: job.state.stage,
+      sandbox: job.state.sandbox,
+      evidence: await callbackEvidence(evidencePath, job),
+      timestamps: {
+        ...(job.executionStartedAt === undefined
+          ? {}
+          : { executionStartedAt: job.executionStartedAt }),
+        ...(job.submissionCompletedAt === undefined
+          ? {}
+          : { submissionCompletedAt: job.submissionCompletedAt }),
+        ...(job.cleanupCompletedAt === undefined
+          ? {}
+          : { cleanupCompletedAt: job.cleanupCompletedAt }),
+      },
+      ...(job.state.result === undefined ? {} : { result: job.state.result }),
+      ...(failure === undefined ? {} : { failure }),
+    };
+    const decoded = await Schema.decodeUnknownPromise(RunnerResultCallback)(callback);
+    const completeBody = JSON.stringify(decoded);
+    const body =
+      new TextEncoder().encode(completeBody).byteLength > MAX_RUNNER_CALLBACK_BYTES
+        ? JSON.stringify(
+            await Schema.decodeUnknownPromise(RunnerResultCallback)({
+              id: callback.id,
+              runId: callback.runId,
+              attempt: callback.attempt,
+              status: 'failed',
+              stage: callback.stage,
+              sandbox: callback.sandbox,
+              evidence: {
+                id: callback.evidence.id,
+                status: 'incomplete',
+                manifest: '',
+                opencodeJsonl: '',
+                opencodeStderr: '',
+              },
+              timestamps: callback.timestamps,
+              failure: { reason: 'evidence' },
+            }),
+          )
+        : completeBody;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const controller = new AbortController();
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const response = await Promise.race([
+          callbackFetch(callbackUrl, {
+            method: 'POST',
+            headers: {
+              authorization: `Bearer ${callbackToken}`,
+              'content-type': 'application/json',
+            },
+            body,
+            signal: controller.signal,
+          }),
+          new Promise<Response>((_, reject) => {
+            timeout = setTimeout(() => {
+              controller.abort();
+              reject(new Error('runner callback request timed out'));
+            }, callbackTimeoutMs);
+          }),
+        ]);
+        if (response.ok) return;
+      } catch {
+        // The local evidence remains the recovery copy when callback delivery is lost.
+      } finally {
+        if (timeout !== undefined) clearTimeout(timeout);
+      }
+      if (attempt === 0) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      }
+    }
+  };
+
   const execute = async (job: RunnerJob) => {
     let failure: RunnerJobState['failure'];
     let executionCause: RunnerFailureCauseValue | undefined;
@@ -1139,6 +1268,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
     let evidenceFailure: string | undefined;
     try {
       evidenceStartedAt = await currentIso();
+      job.executionStartedAt = evidenceStartedAt;
       if (modelSecretCommand === undefined || modelSecretCommand.length === 0) {
         failure = { reason: 'agent' };
         return;
@@ -1421,6 +1551,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         evidenceFailure = 'sandbox-not-created';
       }
       if (agent !== undefined && failure === undefined) {
+        job.submissionCompletedAt = await currentIso();
         if (agent.timedOut) {
           executionCause = 'timeout';
           failure = { reason: 'timeout', cause: executionCause };
@@ -1460,6 +1591,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       } catch {
         cleaned = false;
       }
+      job.cleanupCompletedAt = await currentIso();
       if (!cleaned) {
         failure = {
           reason: 'cleanup',
@@ -1544,6 +1676,11 @@ export const createRunner = (options: RunnerOptions = {}) => {
             ? { status: 'failed', failure: finalFailure, result: undefined }
             : { status: 'succeeded', result, failure: undefined },
       );
+      try {
+        await sendCallback(job, evidencePath, finalStatus, finalFailure);
+      } catch {
+        // Callback serialization or transport failure must not discard local evidence.
+      }
       job.diagnosticCheckoutToken = '';
       job.resolveDone();
     }

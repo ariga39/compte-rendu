@@ -12,14 +12,14 @@ from another installation.
 
 The repository deploys these resources:
 
-| Resource           | Configuration name                                                          | Purpose                                                                                        |
-| ------------------ | --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| Public Worker      | `<INSTANCE_NAME>-ingress`                                                   | Receives GitHub webhooks. `workers_dev` is enabled.                                            |
-| Private Worker     | `<INSTANCE_NAME>-core`                                                      | Owns authorization, GitHub API calls, orchestration, and run state. `workers_dev` is disabled. |
-| Service binding    | `CORE` → `<INSTANCE_NAME>-core`                                             | Lets ingress call core without a public core URL.                                              |
-| D1 database        | `<INSTANCE_NAME>-review-state`, binding `REVIEW_DB`                         | Stores delivery, approval, and run state.                                                      |
-| Workflow           | `<INSTANCE_NAME>-review`, binding `REVIEW_WORKFLOW`, class `ReviewWorkflow` | Carries one review through checkout, agent execution, validation, and publication.             |
-| Runner Job service | Self-hosted runner reached through the core `RUNNER` VPC Service binding    | Owns one authenticated asynchronous review attempt and fresh Docker Sandbox cleanup.           |
+| Resource           | Configuration name                                                       | Purpose                                                                                                            |
+| ------------------ | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
+| Public Worker      | `<INSTANCE_NAME>-ingress`                                                | Receives GitHub webhooks. `workers_dev` is enabled.                                                                |
+| Private Worker     | `<INSTANCE_NAME>-core`                                                   | Owns authorization, GitHub API calls, orchestration, and run state. `workers_dev` is disabled.                     |
+| Service binding    | `CORE` → `<INSTANCE_NAME>-core`                                          | Lets ingress call core without a public core URL.                                                                  |
+| D1 database        | `<INSTANCE_NAME>-review-state`, binding `REVIEW_DB`                      | Stores delivery, approval, and run state.                                                                          |
+| R2 evidence bucket | `<INSTANCE_NAME>-review-evidence`, binding `EVIDENCE_BUCKET`             | Private bucket storing one bounded JSON evidence bundle per Job; lifecycle expiration is configured at deployment. |
+| Runner Job service | Self-hosted runner reached through the core `RUNNER` VPC Service binding | Owns one authenticated asynchronous review attempt and fresh Docker Sandbox cleanup.                               |
 
 The request path is:
 
@@ -28,7 +28,7 @@ GitHub webhook
     → <INSTANCE_NAME>-ingress (public, verifies WEBHOOK_SECRET)
     → CORE service binding
     → <INSTANCE_NAME>-core (private)
-       → REVIEW_DB / REVIEW_WORKFLOW / RUNNER VPC Service
+       → REVIEW_DB / EVIDENCE_BUCKET / RUNNER VPC Service
        → GitHub App installation token for GitHub API operations
 ```
 
@@ -51,7 +51,7 @@ For example, instance `petit-chiba` produces
 `apps/core/wrangler.petit-chiba.jsonc` and
 `apps/ingress/wrangler.petit-chiba.jsonc`, with names derived as
 `petit-chiba-core`, `petit-chiba-ingress`, `petit-chiba-review-state`, and
-`petit-chiba-review`. Instance names never require editing the repository or
+`petit-chiba-review-evidence`. Instance names never require editing the repository or
 the tracked templates. The renderer keeps the tracked placeholders unchanged
 and refuses to overwrite an existing generated config.
 
@@ -92,12 +92,13 @@ corepack pnpm dlx wrangler@4.124.0 whoami
 custom API-token permissions. The
 following are separate authorization layers:
 
-| Operation                                             | Cloudflare account member role                             | Wrangler OAuth scope    | Custom API-token permission                                                                                                                          |
-| ----------------------------------------------------- | ---------------------------------------------------------- | ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Bind an existing VPC Service while deploying a Worker | `Connectivity Directory Bind` (or `Admin`)                 | `connectivity:admin`    | There is no `Connectivity Directory: Bind` token permission. The token must be issued by a member with the role and include `Workers Scripts Write`. |
-| Provision, update, or delete a VPC Service            | `Connectivity Directory Admin`                             | `connectivity:admin`    | There is no `Connectivity Directory: Admin` token permission; a custom token must be issued by a member with the Admin role.                         |
-| Deploy Workers, bindings, secrets, and triggers       | The issuing member must also be authorized for the account | `workers_scripts:write` | `Workers Scripts Write`; add `D1 Edit` for D1 create/migrate operations.                                                                             |
-| Tail Worker logs                                      | Account access for the issuing member                      | `workers_tail:read`     | Optional `Workers Tail Read`; not needed for installation or deployment.                                                                             |
+| Operation                                             | Cloudflare account member role                             | Wrangler OAuth scope     | Custom API-token permission                                                                                                                          |
+| ----------------------------------------------------- | ---------------------------------------------------------- | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Bind an existing VPC Service while deploying a Worker | `Connectivity Directory Bind` (or `Admin`)                 | `connectivity:admin`     | There is no `Connectivity Directory: Bind` token permission. The token must be issued by a member with the role and include `Workers Scripts Write`. |
+| Provision, update, or delete a VPC Service            | `Connectivity Directory Admin`                             | `connectivity:admin`     | There is no `Connectivity Directory: Admin` token permission; a custom token must be issued by a member with the Admin role.                         |
+| Deploy Workers, bindings, secrets, and triggers       | The issuing member must also be authorized for the account | `workers_scripts:write`  | `Workers Scripts Write`; add `D1 Edit` for D1 create/migrate operations.                                                                             |
+| Create the evidence bucket and configure retention    | The issuing member must also be authorized for the account | Wrangler's account grant | `Workers R2 Storage Edit`.                                                                                                                           |
+| Tail Worker logs                                      | Account access for the issuing member                      | `workers_tail:read`      | Optional `Workers Tail Read`; not needed for installation or deployment.                                                                             |
 
 Wrangler 4.124.0's normal/default OAuth grant currently includes
 `connectivity:admin`. That is an OAuth scope in the Wrangler grant, not the
@@ -109,8 +110,9 @@ existing VPC Service; Admin is required for VPC Service provisioning and
 deletion. Wrangler OAuth uses the broader `connectivity:admin` scope for both
 operations. Do not describe either member role as a custom token permission.
 Select the single deployment account as the
-token resource; no zone, DNS, Access, KV, R2, Pages, or Workers Routes
-permission is needed for this product. See Cloudflare's
+token resource; no zone, DNS, Access, KV, Pages, or Workers Routes permission
+is needed for this product. R2 bucket creation and lifecycle configuration do
+require `Workers R2 Storage Edit`. See Cloudflare's
 [VPC Service roles](https://developers.cloudflare.com/workers-vpc/configuration/vpc-services/#required-roles),
 [OAuth scopes](https://github.com/cloudflare/workers-sdk/blob/wrangler%404.124.0/packages/workers-auth/src/core/scopes.ts),
 and [API-token permission catalog](https://developers.cloudflare.com/fundamentals/api/reference/permissions/).
@@ -374,6 +376,8 @@ also runs the remotely managed Tunnel connector:
 ```sh
 MODEL_SECRET_COMMAND='<host-secret-resolver-command>' \
 RUNNER_AUTH_TOKEN='<runner-application-token>' \
+RUNNER_CALLBACK_URL='https://<INGRESS_HOST>/runner-callback' \
+RUNNER_CALLBACK_TOKEN='<static-runner-callback-token>' \
 corepack pnpm --filter @compte-rendu/runner start
 ```
 
@@ -429,6 +433,20 @@ uses the temporary invocation described above.
    corepack pnpm dlx wrangler@4.124.0 d1 create <INSTANCE_NAME>-review-state
    ```
 
+   Create the private R2 bucket and apply one 90-day official R2 lifecycle
+   rule. The rule name and `reviews/` prefix are positional arguments in
+   Wrangler 4.124.0; this is bucket configuration, not application cleanup
+   code:
+
+   ```sh
+   corepack pnpm dlx wrangler@4.124.0 r2 bucket create <INSTANCE_NAME>-review-evidence
+   corepack pnpm dlx wrangler@4.124.0 r2 bucket lifecycle add <INSTANCE_NAME>-review-evidence review-evidence-retention reviews/ --expire-days 90 --force
+   ```
+
+   The lifecycle rule is evaluated by Cloudflare R2 and expires objects under
+   `reviews/` automatically. Do not add a cleanup Worker, cron, or maintenance
+   process.
+
    Copy only the returned `database_id` into the renderer command below. Do
    not edit either tracked template or copy any account ID, token, or other
    output into the repository.
@@ -451,7 +469,7 @@ uses the temporary invocation described above.
    corepack pnpm dlx wrangler@4.124.0 d1 migrations apply REVIEW_DB --remote --config apps/core/wrangler.<INSTANCE_NAME>.jsonc
    ```
 
-   Apply both tracked migrations in order:
+   Apply all tracked migrations in order:
    `apps/core/migrations/0001_review_state.sql` creates the deliveries,
    approvals, and review-runs tables plus the active-PR index. It also retains
    an unused legacy finding-fingerprints table; body-only publication does not
@@ -459,7 +477,10 @@ uses the temporary invocation described above.
    `review_runs` while preserving its rows, then permits another run for a
    head after a failed or superseded run by making uniqueness apply only to
    `scheduled` and `completed` rows; it retains the active-PR index. D1
-   migration files are versioned and applied in order; see
+   `0003_runner_evidence.sql` adds only evidence object metadata and execution
+   timestamps, while `0004_runner_admission.sql` adds the admitted Runner Job
+   identity, attempt, and originating manual comment id. D1 migration files
+   are versioned and applied in order; see
    [D1 migrations](https://developers.cloudflare.com/d1/reference/migrations/).
 
    The generated core config also retains the legacy Durable Object migration
@@ -503,8 +524,8 @@ uses the temporary invocation described above.
    corepack pnpm dlx wrangler@4.124.0 deploy --config apps/core/wrangler.<INSTANCE_NAME>.jsonc
    ```
 
-   Confirm the deployment reports the configured Workflow, `RUNNER` VPC Service,
-   and `REVIEW_DB` bindings without a missing-secret or
+   Confirm the deployment reports the `RUNNER` VPC Service, `REVIEW_DB`, and
+   `EVIDENCE_BUCKET` bindings without a missing-secret or
    missing-D1 error.
 
 7. Enter the ingress webhook secret only after core is deployed, then deploy
@@ -512,12 +533,15 @@ uses the temporary invocation described above.
 
    ```sh
    corepack pnpm dlx wrangler@4.124.0 secret put WEBHOOK_SECRET --config apps/ingress/wrangler.<INSTANCE_NAME>.jsonc
+   corepack pnpm dlx wrangler@4.124.0 secret put RUNNER_CALLBACK_TOKEN --config apps/ingress/wrangler.<INSTANCE_NAME>.jsonc
    corepack pnpm dlx wrangler@4.124.0 deploy --config apps/ingress/wrangler.<INSTANCE_NAME>.jsonc
    ```
 
    The `secret put` command itself creates an ingress version; the explicit
    deploy then publishes the current checkout with the same secret. The
    `WEBHOOK_SECRET` value must match the GitHub App webhook secret exactly.
+   `RUNNER_CALLBACK_TOKEN` must be the same static bearer value configured on
+   the Runner and is used only for the `/runner-callback` route.
    Record the resulting public ingress URL as the operator's
    `<INGRESS_URL>`. The `CORE` binding points to the already deployed
    `<INSTANCE_NAME>-core`; deploying in the opposite order can fail because the
@@ -545,8 +569,8 @@ The deployed variables-versus-secrets inventory is deliberately small:
 
 | Worker                    | Plain variable             | Secrets                                       | Non-secret bindings                                  |
 | ------------------------- | -------------------------- | --------------------------------------------- | ---------------------------------------------------- |
-| `<INSTANCE_NAME>-ingress` | `ALLOWED_INSTALLATION_IDS` | `WEBHOOK_SECRET`                              | `CORE` → `<INSTANCE_NAME>-core`                      |
-| `<INSTANCE_NAME>-core`    | `GITHUB_APP_ID`            | `GITHUB_APP_PRIVATE_KEY`, `RUNNER_AUTH_TOKEN` | `REVIEW_DB`, `REVIEW_WORKFLOW`, `RUNNER` VPC Service |
+| `<INSTANCE_NAME>-ingress` | `ALLOWED_INSTALLATION_IDS` | `WEBHOOK_SECRET`, `RUNNER_CALLBACK_TOKEN`     | `CORE` → `<INSTANCE_NAME>-core`                      |
+| `<INSTANCE_NAME>-core`    | `GITHUB_APP_ID`            | `GITHUB_APP_PRIVATE_KEY`, `RUNNER_AUTH_TOKEN` | `REVIEW_DB`, `EVIDENCE_BUCKET`, `RUNNER` VPC Service |
 
 `GITHUB_APP_ID` and `ALLOWED_INSTALLATION_IDS` are deployment configuration, not
 secrets. Supply them only through the renderer: copy the dedicated product App
@@ -570,8 +594,8 @@ git diff --check
 ```
 
 These checks can prove local behavior such as a signed webhook reaching CORE,
-D1 state changes, Workflow capture, and the relevant public behavior. They do
-not prove real Cloudflare Workflow retry/deadline behavior, the deployed
+D1 state changes, Runner admission capture, and the relevant public behavior.
+They do not prove the deployed
 Runner service, Docker Sandbox lifecycle, GitHub publication, or model
 usefulness. Green local mechanics alone do not prove that a review is useful;
 use the deployed acceptance gate below for that. See
@@ -637,7 +661,7 @@ same value. A scheduled core event adds `runId`; Runner Job events add
 `sandboxId`. The useful chain is:
 
 ```text
-deliveryId → core scheduled → runId → Runner Job sandboxId → workflow/publication outcome
+deliveryId → core scheduled → runId → Runner Job sandboxId → callback/R2/publication outcome
 ```
 
 Identifier values are sanitized by the application before logging. Do not
@@ -645,15 +669,15 @@ work around that sanitization by logging request bodies, git URLs with
 credentials, Sandbox files, OpenCode stdout/stderr, model prompts, or session
 artifacts.
 
-| Symptom                               | Check first                                                                            | Safe action                                                                                                                     |
-| ------------------------------------- | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| GitHub delivery is `400`              | `WEBHOOK_SECRET`, `X-Hub-Signature-256`, and the raw configured URL                    | Re-enter the same high-entropy secret in GitHub and ingress, then redeliver. Do not disable signature checking.                 |
-| Ingress is `503` / `core_unavailable` | Core deployment name, `CORE` service binding, and core availability                    | Deploy or update core first, then ingress. Redeliver the GitHub event.                                                          |
-| Core is `503` / scheduling failure    | D1 migration, required core secrets, Workflow binding, and the GitHub App installation | Correct the missing binding/credential or installation permission, then redeliver. Do not create a second database.             |
-| Run fails at checkout                 | `runId`, `sandboxId`, and runner reason `checkout`                                     | Check Contents read access and installation scope. Never put the installation token in a log or retry an old Sandbox manually.  |
-| Run fails at agent or cleanup         | Runner/workflow records for the same IDs                                               | Treat a cleanup failure as a failed run until forced Sandbox cleanup succeeds.                                                  |
-| No review is published                | Publication reason, current PR head SHA, and Pull requests write permission            | If the head changed, issue a new review command. If publication is uncertain, check the existing review marker before retrying. |
-| Public fork PR does nothing           | Comment body and commenter permission                                                  | Use the exact `/ai-review` command from a maintainer with `write`, `maintain`, or `admin`; a new head needs a new command.      |
+| Symptom                               | Check first                                                                              | Safe action                                                                                                                     |
+| ------------------------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| GitHub delivery is `400`              | `WEBHOOK_SECRET`, `X-Hub-Signature-256`, and the raw configured URL                      | Re-enter the same high-entropy secret in GitHub and ingress, then redeliver. Do not disable signature checking.                 |
+| Ingress is `503` / `core_unavailable` | Core deployment name, `CORE` service binding, and core availability                      | Deploy or update core first, then ingress. Redeliver the GitHub event.                                                          |
+| Core is `503` / scheduling failure    | D1 migration, required core secrets, Runner VPC binding, and the GitHub App installation | Correct the missing binding/credential or installation permission, then redeliver. Do not create a second database.             |
+| Run fails at checkout                 | `runId`, `sandboxId`, and runner reason `checkout`                                       | Check Contents read access and installation scope. Never put the installation token in a log or retry an old Sandbox manually.  |
+| Run fails at agent or cleanup         | Runner records for the same IDs                                                          | Treat a cleanup failure as a failed run until forced Sandbox cleanup succeeds.                                                  |
+| No review is published                | Publication reason, current PR head SHA, and Pull requests write permission              | If the head changed, issue a new review command. If publication is uncertain, check the existing review marker before retrying. |
+| Public fork PR does nothing           | Comment body and commenter permission                                                    | Use the exact `/ai-review` command from a maintainer with `write`, `maintain`, or `admin`; a new head needs a new command.      |
 
 ## Update and rollback
 

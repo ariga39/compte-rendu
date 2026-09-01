@@ -46,12 +46,13 @@ const workerPoolOptions = {
         bindings: {
           GITHUB_APP_ID: 'test-app-id',
           GITHUB_APP_PRIVATE_KEY: 'test-private-key',
+          RUNNER_AUTH_TOKEN: 'test-runner-token',
         },
-        serviceBindings: { WORKFLOW_CAPTURE: 'compte-rendu-tracer-workflow-capture' },
+        serviceBindings: { RUNNER: 'compte-rendu-tracer-runner-capture' },
       },
       {
-        name: 'compte-rendu-tracer-workflow-capture',
-        scriptPath: 'tests/runtime/workflow-capture-entry.mjs',
+        name: 'compte-rendu-tracer-runner-capture',
+        scriptPath: 'tests/runtime/runner-capture-entry.mjs',
         modules: true,
         compatibilityDate: '2026-08-22',
       },

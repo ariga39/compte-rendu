@@ -4,6 +4,7 @@ import {
   createIngressWorker as createIngressWorkerWithConfig,
   type IngressDependencies,
 } from '../apps/ingress/src/index';
+import { MAX_RUNNER_CALLBACK_BYTES } from '../packages/contracts/src';
 import type { OperationalLogEvent } from '../packages/contracts/src';
 
 const secret = 'test-webhook-secret';
@@ -65,6 +66,120 @@ const collectingLog = () => {
 };
 
 describe('Webhook ingress', () => {
+  it('forwards an authenticated runner callback through the public ingress route', async () => {
+    const forwarded: Request[] = [];
+    const callbackBody = JSON.stringify({ runId: 'run-callback-1', status: 'succeeded' });
+    const worker = createIngressWorker({
+      secret,
+      crypto: globalThis.crypto,
+      allowedInstallationIds: '[7]',
+      runnerCallbackToken: 'callback-token',
+      core: {
+        fetch: async (request) => {
+          forwarded.push(request.clone());
+          return new Response(null, { status: 202 });
+        },
+      },
+    });
+
+    const response = await worker.fetch(
+      new Request('https://ingress.internal/runner-callback', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer callback-token',
+          'content-type': 'application/json',
+        },
+        body: callbackBody,
+      }),
+    );
+
+    expect(response.status).toBe(202);
+    expect(forwarded).toHaveLength(1);
+    expect(await forwarded[0]?.text()).toBe(callbackBody);
+    expect(forwarded[0]?.url).toBe('https://core.internal/runner-results');
+  });
+
+  it('rejects an unauthenticated runner callback without contacting core', async () => {
+    const forwarded: Request[] = [];
+    const worker = createIngressWorker({
+      secret,
+      crypto: globalThis.crypto,
+      allowedInstallationIds: '[7]',
+      runnerCallbackToken: 'callback-token',
+      core: {
+        fetch: async (request) => {
+          forwarded.push(request);
+          return new Response(null, { status: 202 });
+        },
+      },
+    });
+
+    const response = await worker.fetch(
+      new Request('https://ingress.internal/runner-callback', {
+        method: 'POST',
+        body: '{}',
+      }),
+    );
+
+    expect(response.status).toBe(401);
+    expect(forwarded).toHaveLength(0);
+  });
+
+  it('rejects an oversized runner callback Content-Length before buffering', async () => {
+    let bodyReads = 0;
+    const worker = createIngressWorker({
+      secret,
+      crypto: globalThis.crypto,
+      runnerCallbackToken: 'callback-token',
+      core: { fetch: async () => new Response(null, { status: 202 }) },
+    });
+    class TrackingRequest extends Request {
+      override arrayBuffer() {
+        bodyReads += 1;
+        return super.arrayBuffer();
+      }
+    }
+
+    const request = new TrackingRequest('https://ingress.internal/runner-callback', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer callback-token',
+        'content-length': String(MAX_RUNNER_CALLBACK_BYTES + 1),
+      },
+      body: '{}',
+    });
+    const response = await worker.fetch(request);
+
+    expect(response.status).toBe(413);
+    expect(bodyReads).toBe(0);
+  });
+
+  it('rejects a runner callback whose buffered body exceeds 32 MiB without contacting core', async () => {
+    const forwarded: Request[] = [];
+    const worker = createIngressWorker({
+      secret,
+      crypto: globalThis.crypto,
+      runnerCallbackToken: 'callback-token',
+      core: {
+        fetch: async (request) => {
+          forwarded.push(request);
+          return new Response(null, { status: 202 });
+        },
+      },
+    });
+
+    const response = await worker.fetch(
+      new Request('https://ingress.internal/runner-callback', {
+        method: 'POST',
+        headers: { authorization: 'Bearer callback-token' },
+        body: new Uint8Array(MAX_RUNNER_CALLBACK_BYTES + 1),
+      }),
+    );
+
+    expect(response.status).toBe(413);
+    expect(forwarded).toHaveLength(0);
+  });
+
   it('ignores eligible webhooks from an unapproved installation before reaching core', async () => {
     const forwarded: Request[] = [];
     const worker = createIngressWorker({
