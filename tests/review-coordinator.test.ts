@@ -32,7 +32,7 @@ describe('Review coordinator', () => {
     const stateStore = createInMemoryReviewStateStore();
     const reviews: ReviewPublicationPayload[] = [];
     let runId = '';
-    const finalMarkdown = '# Review\n\nUse `{body}` exactly.\n';
+    const finalMarkdown = '## Review:\n\nUse `{body}` exactly.\n';
     const coordinator = createReviewCoordinator({
       github: {
         loadReviewTarget: async () => ({
@@ -94,7 +94,7 @@ describe('Review coordinator', () => {
     expect(
       await coordinator.completeReview({
         runId,
-        output: '# Review\n\nPublished review.',
+        output: '## Review:\n\nPublished review.',
       }),
     ).toBe('completed');
     expect(events).toContainEqual({
@@ -183,7 +183,7 @@ describe('Review coordinator', () => {
     expect(
       await coordinator.completeReview({
         runId,
-        output: '# Review\n\nTOCTOU review.',
+        output: '## Review:\n\nTOCTOU review.',
       }),
     ).toBe('ignored');
     expect(reviews).toEqual([]);
@@ -244,7 +244,7 @@ describe('Review coordinator', () => {
     expect(
       await coordinator.completeReview({
         runId,
-        output: '# Review\n\nRetryable publication.',
+        output: '## Review:\n\nRetryable publication.',
       }),
     ).toBe('completed');
     expect(postedReviews).toHaveLength(1);
@@ -300,7 +300,7 @@ describe('Review coordinator', () => {
     expect(
       await coordinator.completeReview({
         runId,
-        output: '# Review\n\nUncertain publication.',
+        output: '## Review:\n\nUncertain publication.',
       }),
     ).toBe('failed');
     expect(remoteReviews).toHaveLength(1);
@@ -381,7 +381,7 @@ describe('Review coordinator', () => {
     expect(
       await coordinator.completeReview({
         runId,
-        output: '# Existing review\n\nAlready published.',
+        output: '## Review:\n\nAlready published.',
       }),
     ).toBe('completed');
     expect(postedPayloads).toHaveLength(0);
@@ -418,7 +418,7 @@ describe('Review coordinator', () => {
       expect(
         await coordinator.completeReview({
           runId,
-          output: '# Review\n\nD1 completion.',
+          output: '## Review:\n\nD1 completion.',
         }),
       ).toBe('completed');
       expect(await coordinator.handleReviewEvent(event)).toBe('completed');
@@ -645,7 +645,7 @@ describe('Review coordinator', () => {
 
     const disposition = await coordinator.completeReview({
       runId,
-      output: '# Review\n\nStale review.',
+      output: '## Review:\n\nStale review.',
     });
 
     expect(disposition).toBe('ignored');
@@ -686,7 +686,7 @@ describe('Review coordinator', () => {
 
     expect(await coordinator.handleReviewEvent(eligiblePrivatePullRequest)).toBe('scheduled');
 
-    const output = '# Review\n\nRepeatable summary.';
+    const output = '## Review:\n\nRepeatable summary.';
     expect(await coordinator.completeReview({ runId, output })).toBe('completed');
     expect(await coordinator.completeReview({ runId, output })).toBe('completed');
     expect(reviews).toHaveLength(1);

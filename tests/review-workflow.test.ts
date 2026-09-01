@@ -52,7 +52,7 @@ describe('Review workflow', () => {
           status: 'succeeded',
           attempt: 1,
           sandboxId: 'read-token-run',
-          output: '# Review\n\nNo findings.',
+          output: '## Review:\n\nNo findings.',
         };
       },
       completeReview: async () => 'completed',
@@ -91,7 +91,7 @@ describe('Review workflow', () => {
         status: 'succeeded',
         attempt: 1,
         sandboxId: 'run-revocation-failure',
-        output: '# Review\n\nNo findings.',
+        output: '## Review:\n\nNo findings.',
       }),
       completeReview: async () => {
         publicationAttempted = true;
@@ -115,7 +115,7 @@ describe('Review workflow', () => {
     let jobSpec: ReviewRunSpec | undefined;
     let completedOutput: unknown;
     let workflowTimeout: string | undefined;
-    const finalMarkdown = '# Review\n\nNo findings.';
+    const finalMarkdown = '## Review:\n\nNo findings.';
     const reactions: unknown[] = [];
     const events: OperationalLogEvent[] = [];
     const step: ReviewWorkflowStep = {
@@ -285,7 +285,7 @@ describe('Review workflow', () => {
         status: 'succeeded',
         attempt: 1,
         sandboxId: 'run-workflow-publication-failed-attempt-1',
-        output: '# Review\n\nNo findings.',
+        output: '## Review:\n\nNo findings.',
       }),
       completeReview: async () => 'failed',
       markRunFailed: async () => {},
@@ -322,7 +322,7 @@ describe('Review workflow', () => {
         status: 'succeeded',
         attempt: 1,
         sandboxId: 'run-workflow-superseded-attempt-1',
-        output: '# Review\n\nNo findings.',
+        output: '## Review:\n\nNo findings.',
       }),
       completeReview: async () => 'ignored',
       markRunFailed: async () => {},
@@ -401,7 +401,7 @@ describe('Review workflow', () => {
         status: 'succeeded',
         attempt: 1,
         sandboxId: 'run-workflow-step-1-attempt-1',
-        output: '# Review\n\nNo findings.',
+        output: '## Review:\n\nNo findings.',
       }),
       completeReview: async () => {
         publicationAttempted = true;
