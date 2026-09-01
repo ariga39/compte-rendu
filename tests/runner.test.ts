@@ -1978,6 +1978,12 @@ describe('Runner Job HTTP interface', () => {
     );
     expect(skillAtSandboxBoundary).toMatch(/up to\s+five high-confidence actionable findings/);
     expect(skillAtSandboxBoundary).toContain('short overall conclusion');
+    expect(skillAtSandboxBoundary?.replace(/\s+/g, ' ')).toContain(
+      'Tool calls and intermediate work may remain visible during the review, but the final assistant message completed by a `step_finish` event with reason `stop` must contain only publishable review Markdown: findings and conclusion ready to post.',
+    );
+    expect(skillAtSandboxBoundary?.replace(/\s+/g, ' ')).toContain(
+      'Do not include visible planning, self-dialogue, candidate triage, or process narration in that final message.',
+    );
     expect(skillAtSandboxBoundary).not.toContain(
       'The final response must be exactly one bare JSON object',
     );
@@ -2062,6 +2068,12 @@ describe('Runner Job HTTP interface', () => {
     expect(agentArgs?.join(' ')).toContain(headSha);
     expect(agentArgs?.join(' ')).toContain(
       'concise human-readable Markdown review ready to publish',
+    );
+    expect(agentArgs?.join(' ')).toContain(
+      'Tool calls and intermediate work may remain visible during the review, but the final assistant message completed by a `step_finish` event with reason `stop` must contain only publishable review Markdown: findings and conclusion ready to post.',
+    );
+    expect(agentArgs?.join(' ')).toContain(
+      'Do not include visible planning, self-dialogue, candidate triage, or process narration in that final message.',
     );
     expect(agentArgs?.join(' ')).not.toContain('Return exactly one bare JSON object');
     expect(agentArgs?.join(' ')).not.toContain('schema-valid');
