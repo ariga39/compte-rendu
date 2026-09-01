@@ -19,9 +19,10 @@ platform.
 Included:
 
 - GitHub.com repositories on which the GitHub App is installed;
-- private-repository PRs, reviewed automatically;
-- public same-repository PRs, including PRs created by another GitHub App,
-  reviewed automatically;
+- non-Bot-authored private-repository PRs, reviewed automatically;
+- non-Bot-authored public same-repository PRs, reviewed automatically;
+- Bot-authored PRs, reviewed only after a maintainer issues `/ai-review` for
+  the current head SHA;
 - public fork PRs, reviewed only after a maintainer issues `/ai-review` for the
   current head SHA;
 - `issue_comment.created` events containing the manual review command;
@@ -44,20 +45,24 @@ Deferred:
 
 ### Automatic review
 
-A non-draft PR is eligible for automatic review when either:
+A non-draft PR whose GitHub author type is not `Bot` is eligible for automatic
+review when either:
 
 - its base repository is private; or
 - its head repository ID equals its base repository ID.
 
-The second rule covers branches created in a public base repository by people
-or GitHub Apps without special-casing actor types.
+The second rule covers branches created in a public base repository by people.
+Ingress ignores automatic pull-request events whose `pull_request.user.type`
+is `Bot`, before Core can schedule a Runner Job. This avoids routine Dependabot,
+Renovate, and other Bot-authored PRs consuming Sandbox and model capacity. It
+uses GitHub's actor type rather than a login-name list.
 
 ### External public PR
 
-A public fork PR does not start a Sandbox or model call when opened or updated.
-A maintainer with `write`, `maintain`, or `admin` permission may comment
-`/ai-review`. Approval applies only to the head SHA observed when the command is
-handled. A later `synchronize` event requires a new command.
+A public fork or Bot-authored PR does not start a Sandbox or model call when
+opened or updated. A maintainer with `write`, `maintain`, or `admin` permission
+may comment `/ai-review`. Approval applies only to the head SHA observed when
+the command is handled. A later `synchronize` event requires a new command.
 
 The originating numeric `issue_comment` id is retained for manual-command
 feedback. A successfully authorized and scheduled manual command gets the

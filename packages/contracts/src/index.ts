@@ -257,6 +257,7 @@ export type OperationalLogEvent =
         | 'unsupported_event'
         | 'unsupported_action'
         | 'non_pull_request_issue'
+        | 'bot_pull_request'
         | 'unapproved_installation';
     }
   | {
