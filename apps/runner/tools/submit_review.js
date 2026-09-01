@@ -1,3 +1,5 @@
+// Keep this dependency-free Sandbox copy aligned with MAX_REVIEW_RESULT_BYTES
+// in @compte-rendu/contracts whenever the publication bound changes.
 const MAX_MARKDOWN_BYTES = 8 * 1024 * 1024;
 
 const isPublishableMarkdown = (markdown) =>

@@ -222,7 +222,7 @@ limited to `opencode.ai` and `api.github.com`; CPU, memory, and deadline are
 fixed; and the Sandbox, secret, network policy, and temporary credential
 sources are destroyed during terminal cleanup. Exact base/head verification,
 current-head publication checks, and one valid submitted Markdown body remain
-required. YOLO tool access does not grant publication authority.
+required. Agent tool access does not grant publication authority.
 
 ## Fail-closed rules
 
@@ -259,7 +259,7 @@ publication succeeds:
 1. admit the authenticated Runner Job and deadline;
 2. create the Sandbox;
 3. perform fixed checkout and remove the checkout credential;
-4. run the YOLO agent with its scoped GitHub read capability;
+4. run the review agent with its scoped GitHub read capability;
 5. destroy the Sandbox in the normal completion path; and
 6. let the runner force destruction if the normal path is interrupted.
 
@@ -287,8 +287,8 @@ older run.
 - The model credential is resolved on the trusted runner host through Docker's
   custom-secret proxy and never enters the Worker request.
 - Repository-provided OpenCode configuration and host skills/MCP/SSH settings
-  are not loaded or shared in v1; the review agent itself remains fully YOLO
-  inside the isolated microVM.
+  are not loaded or shared in v1; the review agent uses only the static-review
+  tool policy inside the isolated microVM.
 
 ## Minimal persistence
 

@@ -134,6 +134,9 @@ The review Sandbox intentionally has no npm-registry access and must not
 install dependencies during review. For this exact pinned release, the
 smallest no-network tool can therefore be a dependency-free JavaScript default
 export with plain JSON-Schema argument entries and explicit runtime validation.
+Its isolated source cannot import the workspace contract, so its publication
+bound is intentionally repeated and marked to change with
+`MAX_REVIEW_RESULT_BYTES`.
 The 1.18.25 registry recognizes any object with `args`, `description`, and
 `execute`, and has a compatibility path that converts non-Zod argument entries
 to JSON Schema
