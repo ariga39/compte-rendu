@@ -15,7 +15,7 @@ const runnerJobFields = {
 };
 const sharedEvidenceRoot = join(tmpdir(), 'compte-rendu-runner-evidence');
 
-const finalMarkdownJsonl = (markdown = '# Review\n\nNo findings.') =>
+const finalMarkdownJsonl = (markdown = '## Review:\n\nNo findings.') =>
   [
     JSON.stringify({
       type: 'text',
@@ -423,7 +423,7 @@ describe('Runner Job HTTP interface', () => {
   });
 
   it('preserves final Markdown whitespace in the result and durable evidence', async () => {
-    const finalMarkdown = '\n  # Review\n\nNo findings.  \n';
+    const finalMarkdown = '\n  ## Review:\n\nNo findings.  \n';
     const { terminal } = await runAgentScenario({
       runId: 'run-105-preserve-markdown-whitespace',
       output: finalMarkdownJsonl(finalMarkdown),
@@ -441,6 +441,34 @@ describe('Runner Job HTTP interface', () => {
         'utf8',
       ),
     ).resolves.toBe(finalMarkdown);
+  });
+
+  it('rejects process narration before the stopped final review heading', async () => {
+    const narratedReview =
+      'I inspected the pull request and found no issues.\n\n## Review:\n\nNo findings.';
+    const output = finalMarkdownJsonl(narratedReview);
+    const { terminal, manifest } = await runAgentScenario({
+      runId: 'run-109-narration-before-review',
+      output,
+    });
+
+    expect(terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'invalid-output' },
+      evidence: { status: 'complete' },
+      sandbox: { cleanup: 'destroyed' },
+    });
+    expect(terminal).not.toHaveProperty('result');
+    expect(manifest).toMatchObject({
+      complete: true,
+      execution: { status: 'failed', reason: 'invalid-output' },
+      terminal: { status: 'failed', reason: 'invalid-output' },
+      evidence: { status: 'complete' },
+      cleanup: { status: 'destroyed' },
+    });
+    await expect(
+      readFile(join(sharedEvidenceRoot, terminal.evidenceId as string, 'opencode.jsonl'), 'utf8'),
+    ).resolves.toBe(`${output}\n`);
   });
 
   it('reports a malformed-jsonl cause for invalid agent event lines', async () => {
@@ -1175,7 +1203,7 @@ describe('Runner Job HTTP interface', () => {
     const evidenceRoot = await mkdtemp(`${tmpdir()}/compte-rendu-evidence-`);
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
-    const finalMarkdown = '# Review\n\nNo findings.';
+    const finalMarkdown = '## Review:\n\nNo findings.';
     const agentJsonl = [
       JSON.stringify({
         type: 'text',
@@ -1833,7 +1861,7 @@ describe('Runner Job HTTP interface', () => {
   it('loads the packaged review skill and exact revision through the OpenCode sandbox boundary', async () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
-    const finalMarkdown = '# Review\n\nNo findings.';
+    const finalMarkdown = '## Review:\n\nNo findings.';
     const resultLine = [
       JSON.stringify({
         type: 'text',
@@ -1984,6 +2012,9 @@ describe('Runner Job HTTP interface', () => {
     expect(skillAtSandboxBoundary?.replace(/\s+/g, ' ')).toContain(
       'Do not include visible planning, self-dialogue, candidate triage, or process narration in that final message.',
     );
+    expect(skillAtSandboxBoundary?.replace(/\s+/g, ' ')).toContain(
+      'Begin the final assistant message with exactly `## Review:`; do not put process narration before it.',
+    );
     expect(skillAtSandboxBoundary).not.toContain(
       'The final response must be exactly one bare JSON object',
     );
@@ -2075,6 +2106,9 @@ describe('Runner Job HTTP interface', () => {
     expect(agentArgs?.join(' ')).toContain(
       'Do not include visible planning, self-dialogue, candidate triage, or process narration in that final message.',
     );
+    expect(agentArgs?.join(' ')).toContain(
+      'Begin the final assistant message with exactly `## Review:`; do not put process narration before it.',
+    );
     expect(agentArgs?.join(' ')).not.toContain('Return exactly one bare JSON object');
     expect(agentArgs?.join(' ')).not.toContain('schema-valid');
     await expect(
@@ -2084,7 +2118,7 @@ describe('Runner Job HTTP interface', () => {
 
   it('returns the final Markdown review text after progress output', async () => {
     const finalPartOne =
-      '# Review summary\n\nThe change is sound; ordinary braces like `{example}` are part of the prose.';
+      '## Review:\n\nThe change is sound; ordinary braces like `{example}` are part of the prose.';
     const finalPartTwo = '- No blocking findings.';
     const finalReview = `${finalPartOne}\n${finalPartTwo}`;
     const progressEvent = JSON.stringify({
@@ -2175,7 +2209,7 @@ describe('Runner Job HTTP interface', () => {
 
     await expect(waitForTerminal(runner, id)).resolves.toMatchObject({
       status: 'succeeded',
-      result: '# Review\n\nNo findings.',
+      result: '## Review:\n\nNo findings.',
       sandbox: { cleanup: 'destroyed' },
     });
     expect(agentPrompt).toContain(`git diff --find-renames ${mergeBaseSha} ${headSha}`);
@@ -2539,7 +2573,7 @@ describe('Runner Job HTTP interface', () => {
       expect(terminal).toMatchObject({
         status: 'succeeded',
         attempt: 1,
-        result: '# Review\n\nNo findings.',
+        result: '## Review:\n\nNo findings.',
         sandbox: { cleanup: 'destroyed' },
       });
     } finally {

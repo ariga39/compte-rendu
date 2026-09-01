@@ -73,3 +73,5 @@ final assistant message completed by a `step_finish` event with reason `stop`
 must contain only publishable review Markdown: findings and conclusion ready to
 post. Do not include visible planning, self-dialogue, candidate triage, or
 process narration in that final message.
+Begin the final assistant message with exactly `## Review:`; do not put process
+narration before it.
