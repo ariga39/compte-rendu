@@ -5,8 +5,9 @@ description: Review an exact pull request diff for high-confidence, actionable d
 
 # Pull request review
 
-Review only the exact repository, pull request number, and base/head revision
-pair supplied by the caller. Before inspecting the diff, use the official GitHub CLI
+Review only the exact repository and pull request number supplied by the caller.
+The caller supplies the admitted base and immutable head revisions. The Runner
+derives the merge-base revision. Before inspecting the diff, use the official GitHub CLI
 with the proxy-provided `GH_TOKEN` to query that pull request on
 `api.github.com`: read its current title, body, all commits, issue comments,
 submitted reviews, and every review thread plus independently paginated reply.
@@ -33,10 +34,12 @@ repository programs. You may inspect already-present dependency source. Use
 the GitHub CLI for current context, read-only Git history and diff inspection,
 and the native read, grep, and glob tools.
 
-Start with `git diff --find-renames BASE_SHA HEAD_SHA` and use the head revision
-as the source of truth. Every finding must point to a changed line on the head
-side. Read only the changed code and the call sites, types, configuration, or
-tests needed to establish reachability and impact.
+Start with `git diff --find-renames MERGE_BASE_SHA HEAD_SHA` and use the head
+revision as the source of truth. Keep the admitted `BASE_SHA` and `HEAD_SHA` as
+freshness/context facts; do not use `BASE_SHA` as the diff starting point.
+Every finding must point to a changed line on the head side. Read only the
+changed code and the call sites, types, configuration, or tests needed to
+establish reachability and impact.
 
 Inspect adversarially for concrete correctness, security, permission,
 reliability, CI, performance, and maintainability defects. Keep a candidate

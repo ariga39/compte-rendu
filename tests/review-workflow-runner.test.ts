@@ -72,6 +72,9 @@ const createRunner = (options: Parameters<typeof createProductionRunner>[0] = {}
         };
       }
       const result = await originalProcess(command, args, processOptions);
+      if (command === 'git' && args.includes('merge-base') && result.exitCode === 0) {
+        return { ...result, stdout: `${baseSha}\n` };
+      }
       if (args[0] === 'policy' && args[1] === 'allow' && result.exitCode === 0) {
         const sandbox = args[args.indexOf('--sandbox') + 1];
         const resource = args[args.length - 1];

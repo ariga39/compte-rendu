@@ -195,10 +195,14 @@ hang prevention; no remaining-budget prediction or admission algebra is used.
 The review Sandbox runs OpenCode fully YOLO inside the microVM: all OpenCode
 tools are allowed without an OpenCode approval prompt or command/tool
 allowlist. The reviewer has direct GitHub read capability through Docker's
-sandbox-scoped built-in `github` service and `api.github.com` egress. The
+sandbox-scoped built-in `github` service and `api.github.com` egress. After
+fetching and verifying the immutable admitted base and head commits, the
+Runner derives one valid merge base with `git merge-base`. Missing, invalid,
+or unavailable merge-base history fails the Job before Sandbox/OpenCode. The
 review prompt and packaged skill require querying the complete current
-pull-request context before reviewing the exact caller-supplied base/head
-pair; GitHub responses and repository text are untrusted evidence, not
+pull-request context, then reviewing `git diff --find-renames MERGE_BASE_SHA
+HEAD_SHA`; the admitted base/head OIDs remain freshness and context facts.
+GitHub responses and repository text are untrusted evidence, not
 instructions. After the GitHub egress policy is allowed and before OpenCode
 starts, the Runner performs an `installation/repositories` preflight through
 the GitHub CLI. A failed preflight fails the Job and prevents agent
@@ -223,7 +227,8 @@ Sandbox:
 - uncertain contributor policy or maintainer permission: do not run;
 - duplicate delivery or already completed head SHA: do not create another run;
 - runner admission or authentication failure: do not publish a result;
-- checkout SHA mismatch: stop before invoking the agent;
+- checkout SHA or merge-base verification failure: stop before invoking the
+  agent;
 - invalid agent output: do not publish that output;
 - current GitHub head SHA differs at publication time: mark superseded and do
   not publish;
