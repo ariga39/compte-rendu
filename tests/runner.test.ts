@@ -1787,6 +1787,74 @@ describe('Runner Job HTTP interface', () => {
     ).rejects.toThrow();
   });
 
+  it('accepts one schema-valid review result wrapped in prose and a markdown fence', async () => {
+    const baseSha = '1111111111111111111111111111111111111111';
+    const headSha = '2222222222222222222222222222222222222222';
+    const reviewResult = { findings: [], summary: 'No findings' };
+    const agentEvent = JSON.stringify({
+      type: 'text',
+      part: {
+        type: 'text',
+        text: `Here is the review result:\n\n\`\`\`json\n${JSON.stringify(reviewResult)}\n\`\`\`\n\nEnd of review.`,
+      },
+    });
+    const runner = createRunner({
+      evidenceRoot: sharedEvidenceRoot,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'model-secret-resolver',
+      process: async (_command, args, options = {}) => {
+        await writeEvidenceFixture(args, options, agentEvent);
+        return {
+          exitCode: 0,
+          stdout: args.includes('rev-parse')
+            ? `${baseSha}\n${headSha}\n`
+            : args.includes('session')
+              ? '[{"id":"wrapped-result-session"}]\n'
+              : args.includes('export')
+                ? ''
+                : options.captureStdout === true
+                  ? `${agentEvent}\n`
+                  : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
+    });
+    const submitted = await runner.handle(
+      new Request('http://runner/jobs', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer runner-test-token',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          ...runnerJobFields,
+          runId: 'run-103-wrapped-review-result',
+          attempt: 1,
+          repositoryUrl: 'https://github.com/acme/reviewed.git',
+          baseSha,
+          headSha,
+        }),
+      }),
+    );
+    const { id } = (await submitted.json()) as { id: string };
+
+    const terminal = await waitForTerminal(runner, id);
+    expect(terminal).toMatchObject({
+      status: 'succeeded',
+      result: reviewResult,
+      evidence: { status: 'complete' },
+      sandbox: { cleanup: 'destroyed' },
+    });
+    const manifest = JSON.parse(
+      await readFile(
+        join(sharedEvidenceRoot, terminal.evidenceId as string, 'manifest.json'),
+        'utf8',
+      ),
+    );
+    expect(manifest).toMatchObject({ complete: true, terminal: { status: 'succeeded' } });
+  });
+
   it('reviews a behind target from merge base to head while retaining admitted revision facts', async () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const mergeBaseSha = '3333333333333333333333333333333333333333';

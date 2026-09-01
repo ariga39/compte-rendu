@@ -392,6 +392,47 @@ type ParsedAgentResult = {
   readonly cause?: RunnerFailureCauseValue;
 };
 
+const jsonObjectCandidates = (text: string): string[] => {
+  const candidates: string[] = [];
+  for (let start = 0; start < text.length; start += 1) {
+    if (text[start] !== '{') continue;
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let index = start; index < text.length; index += 1) {
+      const character = text[index];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (character === '\\') escaped = true;
+        else if (character === '"') inString = false;
+        continue;
+      }
+      if (character === '"') inString = true;
+      else if (character === '{') depth += 1;
+      else if (character === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          candidates.push(text.slice(start, index + 1));
+          break;
+        }
+      }
+    }
+  }
+  return candidates;
+};
+
+const reviewResultsFromText = (text: string): Array<Schema.Schema.Type<typeof ReviewResult>> => {
+  const decode = Schema.decodeUnknownOption(Schema.fromJsonString(ReviewResult));
+  const exact = decode(text);
+  if (Option.isSome(exact)) return [exact.value];
+  const results: Array<Schema.Schema.Type<typeof ReviewResult>> = [];
+  for (const candidate of jsonObjectCandidates(text)) {
+    const decoded = decode(candidate);
+    if (Option.isSome(decoded)) results.push(decoded.value);
+  }
+  return results;
+};
+
 const parseResult = (stdout: string): ParsedAgentResult => {
   if (new TextEncoder().encode(stdout).byteLength > MAX_AGENT_OUTPUT_BYTES) {
     return { cause: 'output-truncated' };
@@ -412,11 +453,8 @@ const parseResult = (stdout: string): ParsedAgentResult => {
     const textEvent = Schema.decodeUnknownOption(OpenCodeTextEvent)(event);
     if (Option.isNone(textEvent)) continue;
     sawTextEvent = true;
-    const decoded = Schema.decodeUnknownOption(Schema.fromJsonString(ReviewResult))(
-      textEvent.value.part.text,
-    );
-    if (Option.isSome(decoded)) {
-      candidate = decoded.value;
+    for (const result of reviewResultsFromText(textEvent.value.part.text)) {
+      candidate = result;
       count += 1;
     }
   }
