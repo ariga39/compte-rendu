@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   createDefaultDiagnosticSources,
   runDiagnosticCommand,
+  type DiagnosticCommandOptions,
   type DiagnosticSources,
 } from '../scripts/diagnose.mts';
 
@@ -476,16 +477,22 @@ describe('diagnostics command', () => {
   });
 
   it('retrieves configured historical Workflow details through the production CLI adapter', async () => {
+    let automatic = false;
     const command = {
-      run: async (_executable: string, args: readonly string[]) => {
+      run: async (
+        _executable: string,
+        args: readonly string[],
+        options?: DiagnosticCommandOptions,
+      ) => {
         if (args.includes('workflows')) {
+          const end = options?.env?.TZ === 'UTC' ? '9/1/2026, 1:44:02 PM' : '9/1/2026, 6:44:02 AM';
           return {
             exitCode: 0,
             stdout: [
               'Name: review-1',
               'Type: step',
               'Start: 9/1/2026, 1:43:58 PM',
-              'End: 9/1/2026, 1:44:02 PM',
+              `End: ${end}`,
               'Status: errored',
               '┌─────────┬─────────┐',
               '│ Step    │ Status  │',
@@ -575,7 +582,7 @@ describe('diagnostics command', () => {
                     pull_request_number: 7,
                     base_sha: null,
                     head_sha: null,
-                    trigger: 'automatic',
+                    trigger: automatic ? 'automatic' : 'manual',
                     status: 'failed',
                     created_at: '2026-09-01T13:44:01.000Z',
                     updated_at: '2026-09-01T13:44:14.000Z',
@@ -585,7 +592,7 @@ describe('diagnostics command', () => {
                     run_updated_at: '2026-09-01T13:44:14.000Z',
                     runner_job_id: '5a7149b6-b99c-4cee-b47b-ff4ca39ecb49',
                     runner_attempt: 1,
-                    comment_id: 202,
+                    comment_id: automatic ? null : 202,
                     evidence_key: null,
                     evidence_status: null,
                     evidence_size: null,
@@ -649,51 +656,83 @@ describe('diagnostics command', () => {
         reason: 'Attempt failed due to internal workflows error',
       },
     });
+
+    automatic = true;
+    const automaticReport = JSON.parse(
+      await runDiagnosticCommand(['f963a9fa-de77-4481-b482-0ba671e02468'], sources),
+    ) as Record<string, unknown>;
+    expect(automaticReport).toMatchObject({
+      github: {
+        available: true,
+        trigger: { kind: 'automatic' },
+        reactions: [],
+      },
+    });
   });
 
-  it('does not report evidence from a stale R2 object fetched for the run key', async () => {
+  it('reports only independently correlated evidence metadata', async () => {
     const runId = 'run-correlated';
     const jobId = 'job-correlated';
     const evidenceId = 'evidence-correlated';
     const sessionId = 'ses-correlated';
-    const manifest = await artifact(
-      JSON.stringify({
-        jobId,
-        runId,
-        attempt: 1,
-        evidenceId,
-        sandboxName: 'sandbox-correlated',
-        sandboxId: 'sandbox-correlated',
-        sessionIds: [sessionId],
-        terminal: { status: 'succeeded' },
-        evidence: { id: evidenceId, status: 'complete' },
-        complete: true,
-        cleanup: { status: 'destroyed' },
-      }),
-    );
-    const jsonl = await artifact('');
-    const stderr = await artifact('');
-    const review = await artifact('review');
-    const sessionList = await artifact(JSON.stringify([{ id: sessionId }]));
-    const sessionExport = await artifact(JSON.stringify({ info: { id: sessionId }, messages: [] }));
-    const object = {
-      version: 1 as const,
-      runId,
-      jobId,
-      evidenceId,
-      evidence: {
-        id: evidenceId,
-        status: 'complete' as const,
-        manifest,
-        opencodeJsonl: jsonl,
-        opencodeStderr: stderr,
-        validatedReview: review,
-        opencodeSessionList: sessionList,
-        opencodeExport: { sessionId, content: sessionExport },
-      },
+    type Override = {
+      readonly key?: string;
+      readonly rawSize?: number;
+      readonly rawSha256?: string;
+      readonly envelopeRunId?: string;
+      readonly envelopeJobId?: string;
+      readonly envelopeEvidenceId?: string;
+      readonly exportSessionId?: string;
     };
-    const report = JSON.parse(
-      await runDiagnosticCommand(['run:run-correlated'], {
+    const makeSources = async (override: Override = {}): Promise<DiagnosticSources> => {
+      const envelopeRunId = override.envelopeRunId ?? runId;
+      const envelopeJobId = override.envelopeJobId ?? jobId;
+      const envelopeEvidenceId = override.envelopeEvidenceId ?? evidenceId;
+      const exportSessionId = override.exportSessionId ?? sessionId;
+      const manifest = await artifact(
+        JSON.stringify({
+          jobId: envelopeJobId,
+          runId: envelopeRunId,
+          attempt: 1,
+          evidenceId: envelopeEvidenceId,
+          sandboxName: 'sandbox-correlated',
+          sandboxId: 'sandbox-correlated',
+          sessionIds: [sessionId],
+          terminal: { status: 'succeeded' },
+          evidence: { id: evidenceId, status: 'complete' },
+          complete: true,
+          cleanup: { status: 'destroyed' },
+        }),
+      );
+      const opencodeJsonl = await artifact('');
+      const opencodeStderr = await artifact('');
+      const validatedReview = await artifact('review');
+      const opencodeSessionList = await artifact(JSON.stringify([{ id: sessionId }]));
+      const opencodeExport = await artifact(
+        JSON.stringify({ info: { id: exportSessionId }, messages: [] }),
+      );
+      const object = {
+        version: 1 as const,
+        runId: envelopeRunId,
+        jobId: envelopeJobId,
+        evidenceId: envelopeEvidenceId,
+        evidence: {
+          id: evidenceId,
+          status: 'complete' as const,
+          manifest,
+          opencodeJsonl,
+          opencodeStderr,
+          validatedReview,
+          opencodeSessionList,
+          opencodeExport: { sessionId: exportSessionId, content: opencodeExport },
+        },
+      };
+      const raw = new TextEncoder().encode(JSON.stringify(object));
+      const digest = await crypto.subtle.digest('SHA-256', raw);
+      const rawSha256 = Array.from(new Uint8Array(digest), (byte) =>
+        byte.toString(16).padStart(2, '0'),
+      ).join('');
+      return {
         d1: {
           find: async () => ({
             delivery: {
@@ -717,8 +756,8 @@ describe('diagnostics command', () => {
               evidence: {
                 key: 'reviews/run-correlated',
                 status: 'complete',
-                size: 999,
-                sha256: 'f'.repeat(64),
+                size: raw.byteLength,
+                sha256: rawSha256,
                 uploadedAt: '2026-09-01T00:00:00.000Z',
               },
             },
@@ -738,15 +777,37 @@ describe('diagnostics command', () => {
         },
         r2: {
           get: async () => ({
-            key: 'reviews/old-run',
-            rawSize: 999,
-            rawSha256: 'f'.repeat(64),
+            key: override.key ?? 'reviews/run-correlated',
+            rawSize: override.rawSize ?? raw.byteLength,
+            rawSha256: override.rawSha256 ?? rawSha256,
             object,
           }),
         },
-      }),
+      };
+    };
+    const report = JSON.parse(
+      await runDiagnosticCommand(['run:run-correlated'], await makeSources()),
     ) as Record<string, unknown>;
-    expect(report).toMatchObject({ evidence: { available: false } });
-    expect(report).toMatchObject({ missingSources: ['r2'] });
+    expect(report).toMatchObject({ evidence: { available: true }, missingSources: [] });
+
+    const cases: ReadonlyArray<{ readonly name: string; readonly override: Override }> = [
+      { name: 'stale key', override: { key: 'reviews/old-run' } },
+      { name: 'raw size mismatch', override: { rawSize: 1 } },
+      { name: 'raw SHA-256 mismatch', override: { rawSha256: '0'.repeat(64) } },
+      { name: 'envelope run ID mismatch', override: { envelopeRunId: 'other-run' } },
+      { name: 'envelope Job ID mismatch', override: { envelopeJobId: 'other-job' } },
+      { name: 'evidence identity mismatch', override: { envelopeEvidenceId: 'other-evidence' } },
+      {
+        name: 'exported session is absent from the session list',
+        override: { exportSessionId: 'other-session' },
+      },
+    ];
+    for (const { name, override } of cases) {
+      const overridden = JSON.parse(
+        await runDiagnosticCommand(['run:run-correlated'], await makeSources(override)),
+      ) as Record<string, unknown>;
+      expect(overridden, name).toMatchObject({ evidence: { available: false } });
+      expect(overridden.missingSources, name).toContain('r2');
+    }
   });
 });
