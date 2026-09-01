@@ -428,7 +428,7 @@ const parseResult = (stdout: string): ParsedAgentResult => {
   if (new TextEncoder().encode(stdout).byteLength > MAX_AGENT_OUTPUT_BYTES) {
     return { cause: 'output-truncated' };
   }
-  let terminalMessageID: string | undefined;
+  let sawTerminalStop = false;
   let submittedMarkdown: string | undefined;
   for (const line of stdout.split(/\r?\n/).filter((value) => value.length > 0)) {
     let event: unknown;
@@ -450,10 +450,10 @@ const parseResult = (stdout: string): ParsedAgentResult => {
     }
     const stepFinishEvent = Schema.decodeUnknownOption(OpenCodeStepFinishEvent)(event);
     if (Option.isSome(stepFinishEvent) && stepFinishEvent.value.part.reason === 'stop') {
-      terminalMessageID = stepFinishEvent.value.part.messageID;
+      sawTerminalStop = true;
     }
   }
-  if (terminalMessageID === undefined) return { cause: 'missing-terminal-message' };
+  if (!sawTerminalStop) return { cause: 'missing-terminal-message' };
   if (submittedMarkdown === undefined) return { cause: 'zero-results' };
   if (Option.isNone(Schema.decodeUnknownOption(Schema.NonEmptyString)(submittedMarkdown.trim()))) {
     return { cause: 'empty-final-text' };
