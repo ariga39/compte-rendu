@@ -44,8 +44,8 @@ describe('diagnostics command', () => {
             evidence: {
               key: 'reviews/run-115',
               status: 'complete',
-              size: 1234,
-              sha256: 'a'.repeat(64),
+              size: 2003,
+              sha256: '6e8546d0a49666a4073772917ae103786d9312b6087bf1f55f5e4dbb91d17fb7',
               uploadedAt: '2026-09-01T13:44:14.000Z',
               executionStartedAt: '2026-09-01T13:44:03.000Z',
               submissionCompletedAt: '2026-09-01T13:44:12.000Z',
@@ -70,9 +70,8 @@ describe('diagnostics command', () => {
         }),
       },
       r2: {
-        get: async () => ({
-          key: 'reviews/run-115',
-          object: {
+        get: async () => {
+          const object = {
             version: 1,
             runId: 'run-115',
             jobId: 'job-115',
@@ -120,18 +119,27 @@ describe('diagnostics command', () => {
                     info: { id: 'ses-115' },
                     messages: [
                       {
-                        time: {
-                          created: '2026-09-01T13:44:03.000Z',
-                          completed: '2026-09-01T13:44:13.000Z',
+                        info: {
+                          time: {
+                            created: '2026-09-01T13:44:03.000Z',
+                            completed: '2026-09-01T13:44:13.000Z',
+                          },
                         },
+                        parts: [],
                       },
                     ],
                   }),
                 ),
               },
             },
-          },
-        }),
+          };
+          return {
+            key: 'reviews/run-115',
+            rawSize: 2003,
+            rawSha256: '6e8546d0a49666a4073772917ae103786d9312b6087bf1f55f5e4dbb91d17fb7',
+            object,
+          };
+        },
       },
     };
 
@@ -147,6 +155,7 @@ describe('diagnostics command', () => {
         number: 7,
       },
       github: {
+        repository: { owner: 'poooi', name: 'plugin-hensei-nikki', id: 42 },
         state: 'open',
         baseSha: '1111111111111111111111111111111111111111',
         headSha: '2222222222222222222222222222222222222222',
@@ -157,12 +166,14 @@ describe('diagnostics command', () => {
         ],
       },
       d1: {
-        deliveryId: 'delivery-115',
-        runId: 'run-115',
-        status: 'completed',
-        runnerJobId: 'job-115',
-        runnerAttempt: 1,
-        commentId: 99,
+        delivery: { deliveryId: 'delivery-115', status: 'completed' },
+        run: {
+          runId: 'run-115',
+          status: 'completed',
+          runnerJobId: 'job-115',
+          runnerAttempt: 1,
+          commentId: 99,
+        },
       },
       runner: {
         jobId: 'job-115',
@@ -176,6 +187,7 @@ describe('diagnostics command', () => {
         key: 'reviews/run-115',
         status: 'complete',
         sessionId: 'ses-115',
+        timestamps: { terminalAt: '2026-09-01T13:44:13.000Z' },
         output: {
           present: true,
           size: 24,
@@ -231,6 +243,57 @@ describe('diagnostics command', () => {
     });
   });
 
+  it('reports the earliest concrete failure boundary across available systems', async () => {
+    const report = JSON.parse(
+      await runDiagnosticCommand(['run:run-boundary'], {
+        d1: {
+          find: async () => ({
+            delivery: {
+              deliveryId: 'delivery-boundary',
+              repositoryId: 42,
+              pullRequestNumber: 7,
+              baseSha: null,
+              headSha: null,
+              trigger: 'automatic',
+              status: 'failed',
+              createdAt: '2026-09-01T13:42:00.000Z',
+              updatedAt: '2026-09-01T13:43:00.000Z',
+            },
+            run: {
+              runId: 'run-boundary',
+              status: 'failed',
+              createdAt: '2026-09-01T13:42:00.000Z',
+              updatedAt: '2026-09-01T13:43:00.000Z',
+            },
+          }),
+        },
+        github: { find: async () => undefined },
+        r2: { get: async () => undefined },
+        workflow: {
+          find: async () => ({
+            id: 'run-boundary',
+            events: [
+              {
+                at: '2026-09-01T13:44:00.000Z',
+                type: 'WorkflowInternalError',
+                status: 'failed',
+                reason: 'later workflow failure',
+              },
+            ],
+          }),
+        },
+      }),
+    ) as Record<string, unknown>;
+
+    expect(report).toMatchObject({
+      firstFailureBoundary: {
+        source: 'd1',
+        at: '2026-09-01T13:43:00.000Z',
+        reason: 'run failed',
+      },
+    });
+  });
+
   it('correlates historical Workflow failure with the real R2 envelope and sanitized times', async () => {
     const runId = 'f963a9fa-de77-4481-b482-0ba671e02468';
     const jobId = '5a7149b6-b99c-4cee-b47b-ff4ca39ecb49';
@@ -240,49 +303,51 @@ describe('diagnostics command', () => {
       d1: {
         find: async () => ({
           delivery: {
-            deliveryId: 'delivery-42',
-            repositoryId: 42,
-            pullRequestNumber: 7,
-            baseSha: '1111111111111111111111111111111111111111',
-            headSha: '2222222222222222222222222222222222222222',
-            trigger: 'automatic',
+            deliveryId: '78b779d0-a60a-11f1-98e0-24c70cb57033',
+            repositoryId: 40348075,
+            pullRequestNumber: 42,
+            baseSha: 'b25ed2f03dfa66413e2c0ad602dd12996b193801',
+            headSha: 'de0a8ff88634306bd05570e79bf12e5ce978f0ae',
+            trigger: 'manual',
             status: 'failed',
-            createdAt: '2026-09-01T13:44:01.000Z',
-            updatedAt: '2026-09-01T13:44:14.000Z',
+            createdAt: '2026-09-01T13:38:55.390Z',
+            updatedAt: '2026-09-01T13:44:02.799Z',
           },
           run: {
             runId,
             status: 'failed',
             runnerJobId: jobId,
             runnerAttempt: 1,
-            createdAt: '2026-09-01T13:44:01.000Z',
-            updatedAt: '2026-09-01T13:44:14.000Z',
+            createdAt: '2026-09-01T13:38:55.390Z',
+            updatedAt: '2026-09-01T13:44:02.799Z',
             evidence: {
               key: `reviews/${runId}`,
               status: 'complete',
-              size: 42,
-              sha256: 'a'.repeat(64),
-              uploadedAt: '2026-09-01T13:44:14.000Z',
+              size: 2389,
+              sha256: '1a41ca811bcb1f50acff5ba8c036c2c7cb16d9199abf901be284dd839a0006f7',
+              uploadedAt: '2026-09-01T16:48:52.000Z',
+              executionStartedAt: '2026-09-01T13:39:02.004Z',
+              submissionCompletedAt: '2026-09-01T13:44:14.615Z',
+              cleanupCompletedAt: '2026-09-01T13:45:12.760Z',
             },
           },
         }),
       },
       github: {
         find: async () => ({
-          repository: { owner: 'poooi', name: 'plugin-hensei-nikki', id: 42 },
+          repository: { owner: 'poooi', name: 'plugin-hensei-nikki', id: 40348075 },
           pullRequest: {
             state: 'open',
-            baseSha: '1111111111111111111111111111111111111111',
-            headSha: '2222222222222222222222222222222222222222',
+            baseSha: 'b25ed2f03dfa66413e2c0ad602dd12996b193801',
+            headSha: 'de0a8ff88634306bd05570e79bf12e5ce978f0ae',
           },
           reactions: [],
           reviews: [],
         }),
       },
       r2: {
-        get: async () => ({
-          key: `reviews/${runId}`,
-          object: {
+        get: async () => {
+          const object = {
             version: 1,
             runId,
             jobId,
@@ -299,12 +364,12 @@ describe('diagnostics command', () => {
                   sandboxName: 'compte-rendu-5a7149b6-b99c-4cee-b47b-ff4ca39ecb49',
                   sandboxId: 'compte-rendu-5a7149b6-b99c-4cee-b47b-ff4ca39ecb49',
                   sessionIds: [sessionId],
-                  terminal: { status: 'failed' },
+                  terminal: { status: 'succeeded' },
                   evidence: { id: evidenceId, status: 'complete' },
                   complete: true,
                   cleanup: { status: 'destroyed' },
-                  startedAt: '2026-09-01T13:44:03.000Z',
-                  finishedAt: '2026-09-01T13:44:14.000Z',
+                  startedAt: '2026-09-01T13:39:02.004Z',
+                  finishedAt: '2026-09-01T13:45:12.760Z',
                 }),
               ),
               opencodeJsonl: await artifact(
@@ -315,7 +380,7 @@ describe('diagnostics command', () => {
                     tool: 'submit_review',
                     state: {
                       status: 'completed',
-                      time: { end: '2026-09-01T13:44:14.000Z' },
+                      time: { end: '2026-09-01T13:44:14.615Z' },
                     },
                   },
                 }),
@@ -328,13 +393,29 @@ describe('diagnostics command', () => {
                 content: await artifact(
                   JSON.stringify({
                     info: { id: sessionId },
-                    messages: [{ time: { completed: '2026-09-01T13:44:14.000Z' } }],
+                    messages: [
+                      {
+                        info: {
+                          time: {
+                            created: 1788270254639,
+                            completed: 1788270257988,
+                          },
+                        },
+                        parts: [],
+                      },
+                    ],
                   }),
                 ),
               },
             },
-          },
-        }),
+          };
+          return {
+            key: `reviews/${runId}`,
+            rawSize: 2389,
+            rawSha256: '1a41ca811bcb1f50acff5ba8c036c2c7cb16d9199abf901be284dd839a0006f7',
+            object,
+          };
+        },
       },
       workflow: {
         find: async () => ({
@@ -362,7 +443,7 @@ describe('diagnostics command', () => {
         stage: 'cleanup',
         sandboxName: 'compte-rendu-5a7149b6-b99c-4cee-b47b-ff4ca39ecb49',
         sandboxId: 'compte-rendu-5a7149b6-b99c-4cee-b47b-ff4ca39ecb49',
-        terminal: 'failed',
+        terminal: 'succeeded',
         evidence: 'complete',
         cleanup: 'destroyed',
       },
@@ -370,8 +451,8 @@ describe('diagnostics command', () => {
         available: true,
         sessionId,
         timestamps: {
-          submissionCompletedAt: '2026-09-01T13:44:14.000Z',
-          terminalAt: '2026-09-01T13:44:14.000Z',
+          submissionCompletedAt: '2026-09-01T13:44:14.615Z',
+          terminalAt: '2026-09-01T13:44:17.988Z',
         },
       },
       workflow: {
@@ -413,6 +494,75 @@ describe('diagnostics command', () => {
             ].join('\n'),
           };
         }
+        if (args.includes('repositories/42')) {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({ full_name: 'poooi/plugin-hensei-nikki', id: 42 }),
+          };
+        }
+        if (args.some((arg) => arg.includes('/pulls/7/reviews'))) {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify([
+              [
+                {
+                  id: 301,
+                  state: 'commented',
+                  commit_id: '1111111111111111111111111111111111111111',
+                },
+              ],
+              [
+                {
+                  id: 302,
+                  state: 'approved',
+                  commit_id: '2222222222222222222222222222222222222222',
+                },
+              ],
+            ]),
+          };
+        }
+        if (args.some((arg) => arg.includes('/issues/7/comments'))) {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify([
+              [
+                {
+                  id: 101,
+                  body: 'unrelated comment',
+                  reactions: { url: 'https://api.github.com/reactions', total_count: 1, eyes: 1 },
+                },
+                {
+                  id: 202,
+                  body: '/ai-review',
+                  created_at: '2026-09-01T13:00:00.000Z',
+                  reactions: { url: 'https://api.github.com/reactions', total_count: 1, '-1': 1 },
+                },
+              ],
+              [
+                {
+                  id: 303,
+                  body: '/ai-review',
+                  created_at: '2026-09-01T14:00:00.000Z',
+                  reactions: {
+                    url: 'https://api.github.com/reactions',
+                    total_count: 1,
+                    confused: 1,
+                  },
+                },
+              ],
+            ]),
+          };
+        }
+        if (args.some((arg) => arg.includes('/pulls/7'))) {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              state: 'open',
+              base: { sha: '1111111111111111111111111111111111111111' },
+              head: { sha: '2222222222222222222222222222222222222222' },
+            }),
+          };
+        }
         if (args.includes('d1')) {
           return {
             exitCode: 0,
@@ -435,7 +585,7 @@ describe('diagnostics command', () => {
                     run_updated_at: '2026-09-01T13:44:14.000Z',
                     runner_job_id: '5a7149b6-b99c-4cee-b47b-ff4ca39ecb49',
                     runner_attempt: 1,
-                    comment_id: null,
+                    comment_id: 202,
                     evidence_key: null,
                     evidence_status: null,
                     evidence_size: null,
@@ -464,6 +614,23 @@ describe('diagnostics command', () => {
       await runDiagnosticCommand(['f963a9fa-de77-4481-b482-0ba671e02468'], sources),
     ) as Record<string, unknown>;
     expect(report).toMatchObject({
+      github: {
+        available: true,
+        trigger: { kind: 'manual', commentId: 202 },
+        reactions: [{ content: '-1', count: 1 }],
+        reviews: [
+          {
+            id: 301,
+            state: 'commented',
+            commitSha: '1111111111111111111111111111111111111111',
+          },
+          {
+            id: 302,
+            state: 'approved',
+            commitSha: '2222222222222222222222222222222222222222',
+          },
+        ],
+      },
       workflow: {
         available: true,
         id: 'f963a9fa-de77-4481-b482-0ba671e02468',
@@ -482,5 +649,104 @@ describe('diagnostics command', () => {
         reason: 'Attempt failed due to internal workflows error',
       },
     });
+  });
+
+  it('does not report evidence from a stale R2 object fetched for the run key', async () => {
+    const runId = 'run-correlated';
+    const jobId = 'job-correlated';
+    const evidenceId = 'evidence-correlated';
+    const sessionId = 'ses-correlated';
+    const manifest = await artifact(
+      JSON.stringify({
+        jobId,
+        runId,
+        attempt: 1,
+        evidenceId,
+        sandboxName: 'sandbox-correlated',
+        sandboxId: 'sandbox-correlated',
+        sessionIds: [sessionId],
+        terminal: { status: 'succeeded' },
+        evidence: { id: evidenceId, status: 'complete' },
+        complete: true,
+        cleanup: { status: 'destroyed' },
+      }),
+    );
+    const jsonl = await artifact('');
+    const stderr = await artifact('');
+    const review = await artifact('review');
+    const sessionList = await artifact(JSON.stringify([{ id: sessionId }]));
+    const sessionExport = await artifact(JSON.stringify({ info: { id: sessionId }, messages: [] }));
+    const object = {
+      version: 1 as const,
+      runId,
+      jobId,
+      evidenceId,
+      evidence: {
+        id: evidenceId,
+        status: 'complete' as const,
+        manifest,
+        opencodeJsonl: jsonl,
+        opencodeStderr: stderr,
+        validatedReview: review,
+        opencodeSessionList: sessionList,
+        opencodeExport: { sessionId, content: sessionExport },
+      },
+    };
+    const report = JSON.parse(
+      await runDiagnosticCommand(['run:run-correlated'], {
+        d1: {
+          find: async () => ({
+            delivery: {
+              deliveryId: 'delivery-correlated',
+              repositoryId: 42,
+              pullRequestNumber: 7,
+              baseSha: null,
+              headSha: null,
+              trigger: 'automatic',
+              status: 'completed',
+              createdAt: '2026-09-01T00:00:00.000Z',
+              updatedAt: '2026-09-01T00:00:00.000Z',
+            },
+            run: {
+              runId,
+              status: 'completed',
+              runnerJobId: jobId,
+              runnerAttempt: 1,
+              createdAt: '2026-09-01T00:00:00.000Z',
+              updatedAt: '2026-09-01T00:00:00.000Z',
+              evidence: {
+                key: 'reviews/run-correlated',
+                status: 'complete',
+                size: 999,
+                sha256: 'f'.repeat(64),
+                uploadedAt: '2026-09-01T00:00:00.000Z',
+              },
+            },
+          }),
+        },
+        github: {
+          find: async () => ({
+            repository: { owner: 'poooi', name: 'repo', id: 42 },
+            pullRequest: {
+              state: 'open',
+              baseSha: 'a'.repeat(40),
+              headSha: 'b'.repeat(40),
+            },
+            reactions: [],
+            reviews: [],
+          }),
+        },
+        r2: {
+          get: async () => ({
+            key: 'reviews/old-run',
+            rawSize: 999,
+            rawSha256: 'f'.repeat(64),
+            object,
+          }),
+        },
+      }),
+    ) as Record<string, unknown>;
+    expect(report).toMatchObject({ evidence: { available: false } });
+    expect(report).toMatchObject({ missingSources: ['r2'] });
   });
 });
