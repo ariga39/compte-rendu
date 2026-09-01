@@ -343,7 +343,7 @@ type RunnerJob = {
   networkRules: Array<{ readonly resource: string; id?: string }>;
   diagnosticCheckoutToken: string;
   secretPlaceholder?: string;
-  githubSecretPlaceholder?: string;
+  githubServiceConfigured?: boolean;
   githubTokenRoot?: string;
   checkoutRoot?: string;
   configRoot?: string;
@@ -1013,17 +1013,9 @@ export const createRunner = (options: RunnerOptions = {}) => {
       );
       if (secret.exitCode !== 0 || secret.timedOut) clean = false;
     }
-    if (job.githubSecretPlaceholder !== undefined) {
+    if (job.githubServiceConfigured) {
       const secret = await cleanupProcess(
-        [
-          'secret',
-          'rm',
-          '--placeholder',
-          job.githubSecretPlaceholder,
-          '--sandbox',
-          job.sandboxName,
-          '--force',
-        ],
+        ['secret', 'rm', 'github', '--sandbox', job.sandboxName, '--force'],
         { stage: 'cleanup', command: 'remove-github-secret', includeStderr: true },
       );
       if (secret.exitCode !== 0 || secret.timedOut) clean = false;
@@ -1135,27 +1127,23 @@ export const createRunner = (options: RunnerOptions = {}) => {
         failure = { reason: 'agent' };
         return;
       }
-      const githubPlaceholder = `cr-gh-${job.id}`;
-      job.githubSecretPlaceholder = githubPlaceholder;
+      job.githubServiceConfigured = true;
       const githubSecret = await runTracked(
         job,
         sbxPath,
         [
           'secret',
-          'set-custom',
+          'set',
+          'github',
           '--sandbox',
           job.sandboxName,
-          '--host',
-          'api.github.com',
-          '--env',
-          'GH_TOKEN',
-          '--placeholder',
-          githubPlaceholder,
           '--command',
           `cat ${githubTokenPath}`,
+          '--refresh',
+          'on-demand',
         ],
         {},
-        { stage: 'sandbox', command: 'set-github-secret' },
+        { stage: 'sandbox', command: 'set-github-service' },
       );
       if (githubSecret.exitCode !== 0 || githubSecret.timedOut) {
         failure = { reason: 'agent' };
@@ -1275,6 +1263,17 @@ export const createRunner = (options: RunnerOptions = {}) => {
         return;
       }
       githubNetworkRule.id = githubMatches[0].id;
+      const githubPreflight = await runTracked(
+        job,
+        sbxPath,
+        ['exec', job.sandboxName, 'gh', 'api', '--silent', 'installation/repositories'],
+        {},
+        { stage: 'sandbox', command: 'github-preflight' },
+      );
+      if (githubPreflight.exitCode !== 0 || githubPreflight.timedOut) {
+        failure = { reason: 'agent' };
+        return;
+      }
       update(job, { stage: 'agent' });
       agent = await runTracked(
         job,

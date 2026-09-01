@@ -1734,7 +1734,7 @@ describe('Runner Job HTTP interface', () => {
     ).rejects.toThrow();
   });
 
-  it('exposes the per-run GitHub read token only through a scoped Sandbox secret', async () => {
+  it('exposes the per-run GitHub read token only through a scoped GitHub service', async () => {
     const repositoryReadToken = 'github-read-token-must-not-be-an-argument';
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
@@ -1763,7 +1763,7 @@ describe('Runner Job HTTP interface', () => {
         if (args[0] === 'create') createArgs = args;
         if (args[0] === 'rm' && args[1] === '--force') cleanupEnvironment = options.env;
         if (_command === 'git' && args.includes('clone')) checkoutEnvironment = options.env;
-        if (args[0] === 'secret' && args[1] === 'set-custom' && args.includes('api.github.com')) {
+        if (args[0] === 'secret' && args[1] === 'set' && args[2] === 'github') {
           const command = args[args.indexOf('--command') + 1];
           if (command?.startsWith('cat '))
             resolvedGithubToken = await readFile(command.slice(4), 'utf8');
@@ -1811,16 +1811,16 @@ describe('Runner Job HTTP interface', () => {
       sandbox: { cleanup: 'destroyed' },
     });
     const secret = commands.find(
-      (args) => args[0] === 'secret' && args[1] === 'set-custom' && args.includes('api.github.com'),
+      (args) => args[0] === 'secret' && args[1] === 'set' && args[2] === 'github',
     );
     expect(secret).toEqual(
-      expect.arrayContaining(['--host', 'api.github.com', '--env', 'GH_TOKEN', '--placeholder']),
+      expect.arrayContaining(['github', '--sandbox', expect.any(String), '--refresh', 'on-demand']),
     );
     expect(
       commands.some((args) => args[0] === 'policy' && args.includes('api.github.com:443')),
     ).toBe(true);
     const githubSecret = commands.find(
-      (args) => args[0] === 'secret' && args[1] === 'set-custom' && args.includes('api.github.com'),
+      (args) => args[0] === 'secret' && args[1] === 'set' && args[2] === 'github',
     );
     const githubSecretCommand = githubSecret?.[githubSecret.indexOf('--command') + 1] ?? '';
     expect(githubSecretCommand).not.toBe('');
@@ -1841,6 +1841,98 @@ describe('Runner Job HTTP interface', () => {
     expect(githubSecretCommand.replace(/^cat /, '').startsWith(`${configRootMount}/`)).toBe(false);
     expect(commands.flat().join(' ')).not.toContain(repositoryReadToken);
     expect(JSON.stringify(events)).not.toContain(repositoryReadToken);
+    expect(commands).toContainEqual(
+      expect.arrayContaining([
+        'secret',
+        'rm',
+        'github',
+        '--sandbox',
+        expect.any(String),
+        '--force',
+      ]),
+    );
+  });
+
+  it('fails closed when GitHub authentication preflight fails before OpenCode invocation', async () => {
+    const baseSha = '1111111111111111111111111111111111111111';
+    const headSha = '2222222222222222222222222222222222222222';
+    const resultLine = JSON.stringify({
+      type: 'text',
+      part: { type: 'text', text: JSON.stringify({ findings: [], summary: 'No findings' }) },
+    });
+    const commands: string[][] = [];
+    let agentInvoked = false;
+    const runner = createRunner({
+      evidenceRoot: sharedEvidenceRoot,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'model-secret-resolver',
+      process: async (_command, args, options = {}) => {
+        commands.push([...args]);
+        await writeEvidenceFixture(args, options, resultLine);
+        if (args[0] === 'exec' && args.includes('gh')) {
+          return {
+            exitCode: 1,
+            stdout: '',
+            stderr: 'GitHub authentication failed',
+            timedOut: false,
+            truncated: false,
+          };
+        }
+        if (args[0] === 'exec' && args.includes('--agent')) agentInvoked = true;
+        return {
+          exitCode: 0,
+          stdout: args.includes('rev-parse')
+            ? `${baseSha}\n${headSha}\n`
+            : args.includes('session')
+              ? '[{"id":"fixture-session"}]\n'
+              : args.includes('export')
+                ? ''
+                : options.captureStdout === true
+                  ? `${resultLine}\n`
+                  : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
+    });
+
+    const submitted = await runner.handle(
+      new Request('http://runner/jobs', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer runner-test-token',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          ...runnerJobFields,
+          runId: 'run-github-preflight-failure',
+          attempt: 1,
+          repositoryUrl: 'https://github.com/acme/reviewed.git',
+          baseSha,
+          headSha,
+        }),
+      }),
+    );
+    const { id } = (await submitted.json()) as { id: string };
+
+    await expect(waitForTerminal(runner, id)).resolves.toMatchObject({
+      status: 'failed',
+      failure: { reason: 'agent' },
+      sandbox: { cleanup: 'destroyed' },
+    });
+    const preflight = commands.find((args) => args[0] === 'exec' && args.includes('gh'));
+    expect(preflight?.slice(2)).toEqual(['gh', 'api', '--silent', 'installation/repositories']);
+    expect(agentInvoked).toBe(false);
+    expect(commands).toContainEqual(
+      expect.arrayContaining([
+        'secret',
+        'rm',
+        'github',
+        '--sandbox',
+        expect.any(String),
+        '--force',
+      ]),
+    );
   });
 
   it('runs one authenticated immutable review attempt to a cleaned terminal result', async () => {
