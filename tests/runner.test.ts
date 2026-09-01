@@ -220,14 +220,16 @@ const runAgentScenario = async (scenario: {
     }),
   );
   const { id } = (await submitted.json()) as { id: string };
+  const terminalStartedAt = performance.now();
   const terminal = await waitForTerminal(runner, id);
+  const terminalDurationMs = performance.now() - terminalStartedAt;
   const manifest = JSON.parse(
     await readFile(
       join(sharedEvidenceRoot, terminal.evidenceId as string, 'manifest.json'),
       'utf8',
     ),
   );
-  return { terminal, manifest, agentInvoked };
+  return { terminal, manifest, agentInvoked, terminalDurationMs };
 };
 
 describe('Runner Job HTTP interface', () => {
@@ -1881,6 +1883,102 @@ describe('Runner Job HTTP interface', () => {
     expect(manifest).toMatchObject({ complete: true, terminal: { status: 'succeeded' } });
   });
 
+  it('accepts a fenced result after prose with an unmatched opening brace', async () => {
+    const reviewResult = { findings: [], summary: 'No findings' };
+    const agentEvent = JSON.stringify({
+      type: 'text',
+      part: {
+        type: 'text',
+        text: `json\nThe explanatory object begins here {\n\`\`\`json\n${JSON.stringify(reviewResult)}\n\`\`\``,
+      },
+    });
+    const { terminal, manifest } = await runAgentScenario({
+      runId: 'run-103-unmatched-prose-brace',
+      output: agentEvent,
+    });
+
+    expect(terminal).toMatchObject({
+      status: 'succeeded',
+      result: reviewResult,
+      evidence: { status: 'complete' },
+      sandbox: { cleanup: 'destroyed' },
+    });
+    expect(manifest).toMatchObject({ complete: true, terminal: { status: 'succeeded' } });
+  });
+
+  it('accepts a fenced result after prose with an unmatched brace and quote', async () => {
+    const reviewResult = { findings: [], summary: 'No findings' };
+    const agentEvent = JSON.stringify({
+      type: 'text',
+      part: {
+        type: 'text',
+        text: `Explanation of foo starts { with an unfinished quote "\n\`\`\`json\n${JSON.stringify(reviewResult)}\n\`\`\``,
+      },
+    });
+    const { terminal, manifest } = await runAgentScenario({
+      runId: 'run-103-unmatched-prose-brace-and-quote',
+      output: agentEvent,
+    });
+
+    expect(terminal).toMatchObject({
+      status: 'succeeded',
+      result: reviewResult,
+      evidence: { status: 'complete' },
+      sandbox: { cleanup: 'destroyed' },
+    });
+    expect(manifest).toMatchObject({ complete: true, terminal: { status: 'succeeded' } });
+  });
+
+  it('accepts an unfenced result after prose with an unmatched brace and quote', async () => {
+    const reviewResult = { findings: [], summary: 'No findings' };
+    const agentEvent = JSON.stringify({
+      type: 'text',
+      part: {
+        type: 'text',
+        text: `Explanation of foo starts { with an unfinished quote "\n${JSON.stringify(reviewResult)}`,
+      },
+    });
+    const { terminal, manifest } = await runAgentScenario({
+      runId: 'run-103-unfenced-unmatched-brace-and-quote',
+      output: agentEvent,
+    });
+
+    expect(terminal).toMatchObject({
+      status: 'succeeded',
+      result: reviewResult,
+      evidence: { status: 'complete' },
+      sandbox: { cleanup: 'destroyed' },
+    });
+    expect(manifest).toMatchObject({ complete: true, terminal: { status: 'succeeded' } });
+  });
+
+  it('accepts a schema-valid result with 512 findings', async () => {
+    const reviewResult = {
+      findings: Array.from({ length: 512 }, (_, index) => ({
+        path: `src/file-${index}.ts`,
+        line: index + 1,
+        message: `Finding ${index}`,
+      })),
+      summary: '512 findings',
+    };
+    const agentEvent = JSON.stringify({
+      type: 'text',
+      part: { type: 'text', text: JSON.stringify(reviewResult) },
+    });
+    const { terminal, manifest } = await runAgentScenario({
+      runId: 'run-103-512-findings',
+      output: agentEvent,
+    });
+
+    expect(terminal).toMatchObject({
+      status: 'succeeded',
+      result: reviewResult,
+      evidence: { status: 'complete' },
+      sandbox: { cleanup: 'destroyed' },
+    });
+    expect(manifest).toMatchObject({ complete: true, terminal: { status: 'succeeded' } });
+  });
+
   it('fails bounded and closed for brace-heavy text without a schema-valid result', async () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
@@ -1937,6 +2035,30 @@ describe('Runner Job HTTP interface', () => {
       failure: { reason: 'invalid-output', cause: 'result-schema-failure' },
       evidence: { status: 'complete' },
       sandbox: { cleanup: 'destroyed' },
+    });
+  });
+
+  it('fails bounded and closed for many consecutive balanced empty objects', async () => {
+    const reviewResult = JSON.stringify({ findings: [], summary: 'No findings' });
+    const agentEvent = JSON.stringify({
+      type: 'text',
+      part: { type: 'text', text: '{}'.repeat(5_000) + reviewResult },
+    });
+    const { terminal, manifest, terminalDurationMs } = await runAgentScenario({
+      runId: 'run-103-many-empty-objects',
+      output: agentEvent,
+    });
+
+    expect(terminalDurationMs).toBeLessThan(2_000);
+    expect(terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'invalid-output', cause: 'result-schema-failure' },
+      evidence: { status: 'complete' },
+      sandbox: { cleanup: 'destroyed' },
+    });
+    expect(manifest).toMatchObject({
+      complete: true,
+      terminal: { status: 'failed', reason: 'invalid-output', cause: 'result-schema-failure' },
     });
   });
 

@@ -31,6 +31,10 @@ const ARCHIVE_PHASE_TIMEOUT_MS = 2 * 60 * 1000;
 const MAX_DIAGNOSTIC_STDERR_BYTES = 4 * 1024;
 const MAX_POLICY_JSON_BYTES = 256 * 1024;
 const MAX_AGENT_OUTPUT_BYTES = 8 * 1024 * 1024;
+const MAX_RESULT_NESTING_DEPTH = 128;
+const MAX_RESULT_CANDIDATES = 512;
+const MAX_RESULT_SCAN_CHARS = 8 * MAX_AGENT_OUTPUT_BYTES;
+const MAX_RESULT_DECODE_BYTES = 2 * MAX_AGENT_OUTPUT_BYTES;
 const MAX_REQUEST_BYTES = 64 * 1024;
 const SANDBOX_EVIDENCE_ROOT = '/tmp/petit-chiba-opencode-evidence';
 
@@ -392,48 +396,77 @@ type ParsedAgentResult = {
   readonly cause?: RunnerFailureCauseValue;
 };
 
-const jsonObjectCandidates = (text: string): string[] => {
-  const candidates: string[] = [];
-  let start: number | undefined;
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-  for (let index = 0; index < text.length; index += 1) {
-    const character = text[index];
-    if (depth === 0) {
-      if (character === '{') {
-        start = index;
-        depth = 1;
-      }
-      continue;
-    }
-    if (inString) {
-      if (escaped) escaped = false;
-      else if (character === '\\') escaped = true;
-      else if (character === '"') inString = false;
-      continue;
-    }
-    if (character === '"') inString = true;
-    else if (character === '{') depth += 1;
-    else if (character === '}') {
-      depth -= 1;
-      if (depth === 0 && start !== undefined) {
-        candidates.push(text.slice(start, index + 1));
-        start = undefined;
-      }
-    }
-  }
-  return candidates;
+type TextResultParse = {
+  readonly results: Array<Schema.Schema.Type<typeof ReviewResult>>;
+  readonly budgetExceeded: boolean;
 };
 
-const reviewResultsFromText = (text: string): Array<Schema.Schema.Type<typeof ReviewResult>> => {
+type ResultFramingBudget = {
+  candidateCount: number;
+  scanChars: number;
+  decodeBytes: number;
+};
+
+const reviewResultsFromText = (text: string, budget: ResultFramingBudget): TextResultParse => {
   const decode = Schema.decodeUnknownOption(Schema.fromJsonString(ReviewResult));
   const results: Array<Schema.Schema.Type<typeof ReviewResult>> = [];
-  for (const candidate of jsonObjectCandidates(text)) {
-    const decoded = decode(candidate);
-    if (Option.isSome(decoded)) results.push(decoded.value);
+  const encoder = new TextEncoder();
+  let start = 0;
+  while (start < text.length) {
+    budget.scanChars += 1;
+    if (budget.scanChars > MAX_RESULT_SCAN_CHARS) {
+      return { results, budgetExceeded: true };
+    }
+    if (text[start] !== '{') {
+      start += 1;
+      continue;
+    }
+
+    let depth = 1;
+    let inString = false;
+    let escaped = false;
+    let acceptedEnd: number | undefined;
+    for (let index = start + 1; index < text.length; index += 1) {
+      budget.scanChars += 1;
+      if (budget.scanChars > MAX_RESULT_SCAN_CHARS) {
+        return { results, budgetExceeded: true };
+      }
+      const character = text[index];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (character === '\\') escaped = true;
+        else if (character === '"') inString = false;
+        continue;
+      }
+      if (character === '"') inString = true;
+      else if (character === '{') {
+        if (depth >= MAX_RESULT_NESTING_DEPTH) {
+          return { results, budgetExceeded: true };
+        }
+        depth += 1;
+      } else if (character === '}') {
+        depth -= 1;
+        if (depth !== 0) continue;
+        budget.candidateCount += 1;
+        if (budget.candidateCount > MAX_RESULT_CANDIDATES) {
+          return { results, budgetExceeded: true };
+        }
+        const candidate = text.slice(start, index + 1);
+        budget.decodeBytes += encoder.encode(candidate).byteLength;
+        if (budget.decodeBytes > MAX_RESULT_DECODE_BYTES) {
+          return { results, budgetExceeded: true };
+        }
+        const decoded = decode(candidate);
+        if (Option.isSome(decoded)) {
+          results.push(decoded.value);
+          acceptedEnd = index;
+        }
+        break;
+      }
+    }
+    start = acceptedEnd === undefined ? start + 1 : acceptedEnd + 1;
   }
-  return results;
+  return { results, budgetExceeded: false };
 };
 
 const parseResult = (stdout: string): ParsedAgentResult => {
@@ -443,6 +476,11 @@ const parseResult = (stdout: string): ParsedAgentResult => {
   let candidate: Schema.Schema.Type<typeof ReviewResult> | undefined;
   let count = 0;
   let sawTextEvent = false;
+  const budget: ResultFramingBudget = {
+    candidateCount: 0,
+    scanChars: 0,
+    decodeBytes: 0,
+  };
   for (const line of stdout.split(/\r?\n/).filter((value) => value.length > 0)) {
     let event: unknown;
     try {
@@ -456,7 +494,9 @@ const parseResult = (stdout: string): ParsedAgentResult => {
     const textEvent = Schema.decodeUnknownOption(OpenCodeTextEvent)(event);
     if (Option.isNone(textEvent)) continue;
     sawTextEvent = true;
-    for (const result of reviewResultsFromText(textEvent.value.part.text)) {
+    const parsedText = reviewResultsFromText(textEvent.value.part.text, budget);
+    if (parsedText.budgetExceeded) return { cause: 'result-schema-failure' };
+    for (const result of parsedText.results) {
       candidate = result;
       count += 1;
     }
