@@ -2309,7 +2309,13 @@ describe('Runner Job HTTP interface', () => {
       'concise human-readable Markdown review ready to publish',
     );
     expect(skillAtSandboxBoundary).toMatch(/up to\s+five high-confidence actionable findings/);
-    expect(skillAtSandboxBoundary).toContain('short overall conclusion');
+    expect(skillAtSandboxBoundary).toContain(
+      'the first prose sentence must state the overall verdict',
+    );
+    expect(skillAtSandboxBoundary).toContain('exact actionable-finding count');
+    expect(skillAtSandboxBoundary).toContain('No actionable findings.');
+    expect(skillAtSandboxBoundary?.replace(/\s+/g, ' ')).toContain('Found 1 actionable finding.');
+    expect(skillAtSandboxBoundary).toContain('pagination status');
     expect(skillAtSandboxBoundary?.replace(/\s+/g, ' ')).toContain(
       'Tool calls and intermediate work may remain visible during the review.',
     );
@@ -2403,6 +2409,7 @@ describe('Runner Job HTTP interface', () => {
     expect(agentArgs?.join(' ')).toContain(
       'concise human-readable Markdown review ready to publish',
     );
+    expect(agentArgs?.join(' ')).toContain("pr-review skill's verdict-first output contract");
     expect(agentArgs?.join(' ')).toContain(
       'Tool calls and intermediate work may remain visible during the review.',
     );

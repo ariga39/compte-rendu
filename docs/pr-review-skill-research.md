@@ -67,6 +67,37 @@ The source also defines session persistence, numbered user task plans, repeated 
 - Do not add interactive next-step prompts, time estimates, progress narration, motivational language, or “ADHD mode” persistence to an autonomous review result.
 - Preserve uncertainty only where evidence is incomplete; otherwise use direct cause/effect wording. If a concern cannot be made concrete and actionable in a short finding, omit it.
 
+### 2026-09-01 current-source addendum: verdict and finding count first
+
+Current upstream `main` is commit
+[`284a2013ae313405382a0c8a88b0cb64fd1543c5`](https://github.com/ayghri/i-have-adhd/commit/284a2013ae313405382a0c8a88b0cb64fd1543c5);
+the source used here is its commit-pinned
+[`SKILL.md`](https://github.com/ayghri/i-have-adhd/blob/284a2013ae313405382a0c8a88b0cb64fd1543c5/skills/i-have-adhd/SKILL.md).
+
+The source directly requires the answer rather than context or a plan to come
+first ([lines 33–40](https://github.com/ayghri/i-have-adhd/blob/284a2013ae313405382a0c8a88b0cb64fd1543c5/skills/i-have-adhd/SKILL.md#L33-L40)),
+forbids preambles and says to “Start with the answer”
+([lines 107–115](https://github.com/ayghri/i-have-adhd/blob/284a2013ae313405382a0c8a88b0cb64fd1543c5/skills/i-have-adhd/SKILL.md#L107-L115)),
+and asks whether the first line alone makes the state clear
+([lines 128–140](https://github.com/ayghri/i-have-adhd/blob/284a2013ae313405382a0c8a88b0cb64fd1543c5/skills/i-have-adhd/SKILL.md#L128-L140)).
+For a review, the answer is whether actionable defects exist. This directly
+supports making a no-findings verdict obvious before any explanation.
+
+The upstream source does **not** mention code-review verdicts or require an
+exact finding count in the first sentence. That count is a justified project
+adaptation of its answer-first and bounded-list principles, not a verbatim
+upstream rule. Before issue #118, the project skill only asked for a short
+overall conclusion and said to state no findings plainly; it did not require
+either to appear first or require an exact count.
+
+Exact adaptation recommendation: after the required `## Review:` heading, make
+the first publishable sentence one of `No actionable findings.` or
+`Found N actionable findings.` (with the exact integer `N`, 1–5). Put any PR
+description, evidence, and finding details after that sentence. For a
+no-findings review, end there unless a short explanation materially helps; the
+reader must never have to read the explanation to discover that the count is
+zero.
+
 ## Combined contract for this project (historical static-only adaptation; superseded by issues #86 and #105)
 
 The dedicated reviewer skill should say, in substance:

@@ -66,8 +66,16 @@ checkout; do not publish, commit, or push.
 
 Return a concise human-readable Markdown review ready to publish. Include up to
 five high-confidence actionable findings when present, with clear file/line
-references in prose, no weak or no-action items, and a short overall conclusion;
-if none, say so plainly. Do not impose a rigid template or artificial brevity.
+references in prose and no weak or no-action items. Immediately after the
+`## Review:` heading, the first prose sentence must state the overall verdict
+and exact actionable-finding count: `No actionable findings.`, `Found 1
+actionable finding.`, or `Found N actionable findings.` for two to five. Put no
+scope recap, PR summary, changed-file or commit count, pagination status, tool
+activity, CI result, or review-process narration before that sentence. Omit
+those details entirely unless they materially establish a finding; even then,
+put them after the verdict. For zero findings, stop after the verdict unless a
+short explanation materially helps. Do not impose artificial brevity on a
+technical finding that needs detail.
 Tool calls and intermediate work may remain visible during the review. After
 completing all analysis, call `submit_review` exactly once with the complete
 publishable Markdown in its `markdown` argument. The `markdown` argument itself
