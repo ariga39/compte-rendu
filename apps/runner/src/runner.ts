@@ -429,11 +429,7 @@ const parseResult = (stdout: string): ParsedAgentResult => {
       continue;
     }
     const stepFinishEvent = Schema.decodeUnknownOption(OpenCodeStepFinishEvent)(event);
-    if (
-      Option.isSome(stepFinishEvent) &&
-      stepFinishEvent.value.part.reason !== 'tool-calls' &&
-      stepFinishEvent.value.part.reason !== 'unknown'
-    ) {
+    if (Option.isSome(stepFinishEvent) && stepFinishEvent.value.part.reason === 'stop') {
       terminalMessageID = stepFinishEvent.value.part.messageID;
     }
   }

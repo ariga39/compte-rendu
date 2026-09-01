@@ -14,12 +14,12 @@ Keep `opencode run --format json` for the current Docker Sandbox Runner. After
 a successful process with no OpenCode error event:
 
 1. Find the terminal assistant message from the last completed `step_finish`
-   event. Its `part.messageID` identifies the assistant message; a normal
-   terminal reason is not `tool-calls` or `unknown`.
+   event whose `part.reason` is `stop`. Its `part.messageID` identifies the
+   assistant message; other terminal reasons are not publishable completion.
 2. In original event order, take every completed `text` event whose
    `part.messageID` matches that terminal message. Ignore synthetic or ignored
-   parts, trim only the outer whitespace, and join multiple parts with a
-   newline.
+   parts, preserve the selected text including outer whitespace, and join
+   multiple parts with a newline.
 3. Require one non-empty, size-bounded Markdown body. Publish the selected text
    directly, preserving its content including outer whitespace; use trimming
    only to determine whether it is empty.
