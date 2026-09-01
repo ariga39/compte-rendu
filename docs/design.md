@@ -213,8 +213,10 @@ shared host skills, host MCP settings, or SSH-agent access; network access is
 limited to `opencode.ai` and `api.github.com`; CPU, memory, and deadline are
 fixed; and the Sandbox, secret, network policy, and temporary credential
 sources are destroyed during terminal cleanup. Exact base/head verification,
-current-head publication checks, and validated bare JSON output remain
-required. YOLO tool access does not grant publication authority.
+current-head publication checks, and exactly one schema-valid `ReviewResult` JSON
+object remain required. The object may be surrounded by prose or a Markdown
+fence; zero, multiple, or schema-invalid objects fail closed. YOLO tool access
+does not grant publication authority.
 
 ## Fail-closed rules
 
