@@ -65,6 +65,34 @@ allowlist before contacting `CORE`.
 Independent deployed instances require distinct product GitHub Apps because
 each App has one webhook URL and secret; this does not require a router.
 
+## Correlated diagnosis
+
+The one read-only root diagnosis command accepts a GitHub PR URL, delivery ID,
+or run ID and emits one sanitized report assembled from GitHub, D1, and the
+private R2 evidence bucket:
+
+```sh
+DIAGNOSTIC_D1_DATABASE=<INSTANCE_NAME>-review-state \
+DIAGNOSTIC_R2_BUCKET=<INSTANCE_NAME>-review-evidence \
+DIAGNOSTIC_WRANGLER_CONFIG=apps/core/wrangler.<INSTANCE_NAME>.jsonc \
+corepack pnpm diagnose <PR_URL|DELIVERY_ID|RUN_ID>
+```
+
+The command invokes `gh` for GitHub and
+`corepack pnpm dlx wrangler@4.124.0 --config ...` for the deployed D1 and R2
+bindings. There is no default database or bucket name: use the generated
+config and resource names for the intended instance. Authenticate `gh` or
+provide `GH_TOKEN` for repositories that require it. To include a retained
+historical Workflow whose instance ID is the run ID, also set
+`DIAGNOSTIC_WORKFLOW_NAME=<INSTANCE_NAME>-review`.
+
+Missing sources are reported without suppressing available sources. Normal
+diagnosis never uses SSH; it mentions SSH only as a fallback for Runner-host
+loss or cleanup recovery. Output contains sanitized identities, states,
+timestamps, bounded stderr metadata, and artifact presence/size/hash—not
+credentials, repository contents, review bodies, or raw model/session/tool
+output.
+
 ## Access and credentials
 
 ### Wrangler authentication

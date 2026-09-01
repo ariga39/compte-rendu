@@ -45,6 +45,7 @@ declare module 'node:child_process' {
       cwd?: string;
       encoding?: 'utf8';
       stdio?: 'pipe';
+      maxBuffer?: number;
     },
   ): string;
 }
