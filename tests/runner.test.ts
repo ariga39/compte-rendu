@@ -15,12 +15,39 @@ const runnerJobFields = {
 };
 const sharedEvidenceRoot = join(tmpdir(), 'compte-rendu-runner-evidence');
 
+const submitReviewEvent = (
+  markdown = '## Review:\n\nNo findings.',
+  options: { readonly callID?: string; readonly status?: string } = {},
+) =>
+  JSON.stringify({
+    type: 'tool_use',
+    part: {
+      type: 'tool',
+      tool: 'submit_review',
+      callID: options.callID ?? 'call-submit-review',
+      state:
+        options.status === undefined || options.status === 'completed'
+          ? {
+              status: 'completed',
+              input: { markdown },
+              output: 'Review submitted.',
+              title: 'Review submitted.',
+            }
+          : { status: options.status, error: 'submission failed' },
+    },
+  });
+
 const finalMarkdownJsonl = (markdown = '## Review:\n\nNo findings.') =>
   [
     JSON.stringify({
       type: 'text',
-      part: { type: 'text', messageID: 'msg-final', text: markdown },
+      part: {
+        type: 'text',
+        messageID: 'msg-final',
+        text: 'I finished reviewing the pull request.',
+      },
     }),
+    submitReviewEvent(markdown),
     JSON.stringify({
       type: 'step_finish',
       part: { type: 'step-finish', messageID: 'msg-final', reason: 'stop' },
@@ -422,11 +449,12 @@ describe('Runner Job HTTP interface', () => {
     expect(manifest.terminal).not.toHaveProperty('cause');
   });
 
-  it('preserves final Markdown whitespace in the result and durable evidence', async () => {
+  it('publishes the completed submit_review tool Markdown instead of terminal narration', async () => {
     const finalMarkdown = '\n  ## Review:\n\nNo findings.  \n';
-    const { terminal } = await runAgentScenario({
-      runId: 'run-105-preserve-markdown-whitespace',
-      output: finalMarkdownJsonl(finalMarkdown),
+    const output = finalMarkdownJsonl(finalMarkdown);
+    const { terminal, manifest } = await runAgentScenario({
+      runId: 'run-109-submit-review-tool',
+      output,
     });
 
     expect(terminal).toMatchObject({
@@ -435,40 +463,60 @@ describe('Runner Job HTTP interface', () => {
       evidence: { status: 'complete' },
       sandbox: { cleanup: 'destroyed' },
     });
+    expect(manifest).toMatchObject({
+      complete: true,
+      terminal: { status: 'succeeded' },
+      evidence: { status: 'complete' },
+      cleanup: { status: 'destroyed' },
+    });
     await expect(
       readFile(
         join(sharedEvidenceRoot, terminal.evidenceId as string, 'validated-review.md'),
         'utf8',
       ),
     ).resolves.toBe(finalMarkdown);
+    await expect(
+      readFile(join(sharedEvidenceRoot, terminal.evidenceId as string, 'opencode.jsonl'), 'utf8'),
+    ).resolves.toBe(`${output}\n`);
   });
 
-  it('rejects process narration before the stopped final review heading', async () => {
-    const narratedReview =
-      'I inspected the pull request and found no issues.\n\n## Review:\n\nNo findings.';
-    const output = finalMarkdownJsonl(narratedReview);
-    const { terminal, manifest } = await runAgentScenario({
-      runId: 'run-109-narration-before-review',
+  it.each([
+    ['missing submission', 'text-only', 'zero-results'],
+    ['errored submission', 'errored', 'result-schema-failure'],
+    ['empty submission', 'empty', 'empty-final-text'],
+    ['invalid Markdown', 'invalid-markdown', 'result-schema-failure'],
+    ['duplicate submissions', 'duplicate', 'multiple-results'],
+  ] as const)('rejects %s as invalid output', async (_name, kind, cause) => {
+    const terminalEvent = JSON.stringify({
+      type: 'step_finish',
+      part: { type: 'step-finish', messageID: 'msg-final', reason: 'stop' },
+    });
+    const narrationEvent = JSON.stringify({
+      type: 'text',
+      part: { type: 'text', messageID: 'msg-final', text: 'Terminal narration.' },
+    });
+    const output =
+      kind === 'text-only'
+        ? `${narrationEvent}\n${terminalEvent}`
+        : kind === 'errored'
+          ? `${narrationEvent}\n${submitReviewEvent('## Review:\n\nNo findings.', { status: 'error' })}\n${terminalEvent}`
+          : kind === 'empty'
+            ? `${narrationEvent}\n${submitReviewEvent('')}\n${terminalEvent}`
+            : kind === 'invalid-markdown'
+              ? `${narrationEvent}\n${submitReviewEvent('not a review')}\n${terminalEvent}`
+              : `${narrationEvent}\n${submitReviewEvent()}\n${submitReviewEvent('## Review:\n\nSecond.', { callID: 'call-submit-review-2' })}\n${terminalEvent}`;
+    const { terminal } = await runAgentScenario({
+      runId: `run-109-${kind}`,
       output,
     });
 
     expect(terminal).toMatchObject({
       status: 'failed',
-      failure: { reason: 'invalid-output' },
+      failure: { reason: 'invalid-output', cause },
       evidence: { status: 'complete' },
       sandbox: { cleanup: 'destroyed' },
     });
     expect(terminal).not.toHaveProperty('result');
-    expect(manifest).toMatchObject({
-      complete: true,
-      execution: { status: 'failed', reason: 'invalid-output' },
-      terminal: { status: 'failed', reason: 'invalid-output' },
-      evidence: { status: 'complete' },
-      cleanup: { status: 'destroyed' },
-    });
-    await expect(
-      readFile(join(sharedEvidenceRoot, terminal.evidenceId as string, 'opencode.jsonl'), 'utf8'),
-    ).resolves.toBe(`${output}\n`);
   });
 
   it('reports a malformed-jsonl cause for invalid agent event lines', async () => {
@@ -562,34 +610,6 @@ describe('Runner Job HTTP interface', () => {
       });
     },
   );
-
-  it('reports empty-final-text when the terminal assistant message has no publishable text', async () => {
-    const output = [
-      JSON.stringify({
-        type: 'text',
-        part: { type: 'text', messageID: 'msg-final', text: '', ignored: true },
-      }),
-      JSON.stringify({
-        type: 'step_finish',
-        part: { type: 'step-finish', messageID: 'msg-final', reason: 'stop' },
-      }),
-    ].join('\n');
-    const { terminal, manifest } = await runAgentScenario({
-      runId: 'run-90-empty-final-text',
-      output,
-    });
-
-    expect(terminal).toMatchObject({
-      status: 'failed',
-      failure: { reason: 'invalid-output', cause: 'empty-final-text' },
-      evidence: { status: 'complete' },
-      sandbox: { cleanup: 'destroyed' },
-    });
-    expect(manifest).toMatchObject({
-      execution: { status: 'failed', reason: 'invalid-output', cause: 'empty-final-text' },
-      terminal: { status: 'failed', reason: 'invalid-output', cause: 'empty-final-text' },
-    });
-  });
 
   it('preserves the execution cause when cleanup also fails', async () => {
     const { terminal, manifest } = await runAgentScenario({
@@ -1207,8 +1227,13 @@ describe('Runner Job HTTP interface', () => {
     const agentJsonl = [
       JSON.stringify({
         type: 'text',
-        part: { type: 'text', messageID: 'msg-final', text: finalMarkdown },
+        part: {
+          type: 'text',
+          messageID: 'msg-final',
+          text: 'I finished reviewing the pull request.',
+        },
       }),
+      submitReviewEvent(finalMarkdown),
       JSON.stringify({
         type: 'step_finish',
         part: { type: 'step-finish', messageID: 'msg-final', reason: 'stop' },
@@ -1865,8 +1890,13 @@ describe('Runner Job HTTP interface', () => {
     const resultLine = [
       JSON.stringify({
         type: 'text',
-        part: { type: 'text', messageID: 'msg-final', text: finalMarkdown },
+        part: {
+          type: 'text',
+          messageID: 'msg-final',
+          text: 'I finished reviewing the pull request.',
+        },
       }),
+      submitReviewEvent(finalMarkdown),
       JSON.stringify({
         type: 'step_finish',
         part: { type: 'step-finish', messageID: 'msg-final', reason: 'stop' },
@@ -1877,6 +1907,8 @@ describe('Runner Job HTTP interface', () => {
     let agentArgs: readonly string[] | undefined;
     let configRootAtSandboxBoundary: string | undefined;
     let skillAtSandboxBoundary: string | undefined;
+    let submitReviewToolAtSandboxBoundary: string | undefined;
+    let executeSubmitReviewAtSandboxBoundary: ((args: unknown) => Promise<string>) | undefined;
     let sandboxEnvironment: NodeJS.ProcessEnv | undefined;
     const process = async (
       _command: string,
@@ -1900,6 +1932,14 @@ describe('Runner Job HTTP interface', () => {
             join(configRoot, 'opencode/skills/pr-review/SKILL.md'),
             'utf8',
           );
+          submitReviewToolAtSandboxBoundary = await readFile(
+            join(configRoot, 'opencode/tools/submit_review.js'),
+            'utf8',
+          );
+          const submitReviewModule = (await import(
+            `data:text/javascript,${encodeURIComponent(submitReviewToolAtSandboxBoundary)}`
+          )) as { readonly default: { readonly execute: (args: unknown) => Promise<string> } };
+          executeSubmitReviewAtSandboxBoundary = submitReviewModule.default.execute;
         }
       }
       if (args.includes('fetch')) fetchArgs = args;
@@ -2007,14 +2047,27 @@ describe('Runner Job HTTP interface', () => {
     expect(skillAtSandboxBoundary).toMatch(/up to\s+five high-confidence actionable findings/);
     expect(skillAtSandboxBoundary).toContain('short overall conclusion');
     expect(skillAtSandboxBoundary?.replace(/\s+/g, ' ')).toContain(
-      'Tool calls and intermediate work may remain visible during the review, but the final assistant message completed by a `step_finish` event with reason `stop` must contain only publishable review Markdown: findings and conclusion ready to post.',
+      'Tool calls and intermediate work may remain visible during the review.',
     );
     expect(skillAtSandboxBoundary?.replace(/\s+/g, ' ')).toContain(
-      'Do not include visible planning, self-dialogue, candidate triage, or process narration in that final message.',
+      'After completing all analysis, call `submit_review` exactly once with the complete publishable Markdown in its `markdown` argument. After optional outer whitespace, begin that argument with exactly `## Review:`. Do not emit the review as terminal prose; terminal assistant messages are evidence only.',
     );
-    expect(skillAtSandboxBoundary?.replace(/\s+/g, ' ')).toContain(
-      'Begin the final assistant message with exactly `## Review:`; do not put process narration before it.',
+    expect(submitReviewToolAtSandboxBoundary).toContain('export default');
+    expect(submitReviewToolAtSandboxBoundary).toContain('Review submitted.');
+    expect(submitReviewToolAtSandboxBoundary).not.toMatch(
+      /node:fs|writeFile|package\.json|bun install|npm install|pnpm install/,
     );
+    await expect(executeSubmitReviewAtSandboxBoundary!({ markdown: finalMarkdown })).resolves.toBe(
+      'Review submitted.',
+    );
+    await expect(
+      executeSubmitReviewAtSandboxBoundary!({ markdown: 'not a review' }),
+    ).rejects.toThrow();
+    await expect(
+      executeSubmitReviewAtSandboxBoundary!({
+        markdown: `## Review:\n${'x'.repeat(8 * 1024 * 1024)}`,
+      }),
+    ).rejects.toThrow();
     expect(skillAtSandboxBoundary).not.toContain(
       'The final response must be exactly one bare JSON object',
     );
@@ -2032,6 +2085,7 @@ describe('Runner Job HTTP interface', () => {
           description: 'Pull request reviewer',
           permission: {
             '*': 'deny',
+            submit_review: 'allow',
             bash: {
               '*': 'deny',
               'gh *': 'deny',
@@ -2101,13 +2155,10 @@ describe('Runner Job HTTP interface', () => {
       'concise human-readable Markdown review ready to publish',
     );
     expect(agentArgs?.join(' ')).toContain(
-      'Tool calls and intermediate work may remain visible during the review, but the final assistant message completed by a `step_finish` event with reason `stop` must contain only publishable review Markdown: findings and conclusion ready to post.',
+      'Tool calls and intermediate work may remain visible during the review.',
     );
     expect(agentArgs?.join(' ')).toContain(
-      'Do not include visible planning, self-dialogue, candidate triage, or process narration in that final message.',
-    );
-    expect(agentArgs?.join(' ')).toContain(
-      'Begin the final assistant message with exactly `## Review:`; do not put process narration before it.',
+      'After completing all analysis, call `submit_review` exactly once with the complete publishable Markdown in its `markdown` argument. After optional outer whitespace, begin that argument with exactly `## Review:`. Do not emit the review as terminal prose; terminal assistant messages are evidence only.',
     );
     expect(agentArgs?.join(' ')).not.toContain('Return exactly one bare JSON object');
     expect(agentArgs?.join(' ')).not.toContain('schema-valid');
@@ -2116,7 +2167,7 @@ describe('Runner Job HTTP interface', () => {
     ).rejects.toThrow();
   });
 
-  it('returns the final Markdown review text after progress output', async () => {
+  it('returns submitted Markdown after terminal progress output', async () => {
     const finalPartOne =
       '## Review:\n\nThe change is sound; ordinary braces like `{example}` are part of the prose.';
     const finalPartTwo = '- No blocking findings.';
@@ -2141,9 +2192,23 @@ describe('Runner Job HTTP interface', () => {
       type: 'step_finish',
       part: { type: 'step-finish', messageID: 'msg-final', reason: 'stop' },
     });
+    const submitEvent = JSON.stringify({
+      type: 'tool_use',
+      part: {
+        type: 'tool',
+        tool: 'submit_review',
+        callID: 'call-final-review',
+        state: {
+          status: 'completed',
+          input: { markdown: finalReview },
+          output: 'Review submitted.',
+          title: 'Review submitted.',
+        },
+      },
+    });
     const { terminal, manifest } = await runAgentScenario({
-      runId: 'run-105-final-markdown-review',
-      output: `${progressEvent}\n${finalPartOneEvent}\n${finalPartTwoEvent}\n${finishEvent}`,
+      runId: 'run-109-submitted-markdown-review',
+      output: `${progressEvent}\n${finalPartOneEvent}\n${finalPartTwoEvent}\n${submitEvent}\n${finishEvent}`,
     });
 
     expect(terminal).toMatchObject({
