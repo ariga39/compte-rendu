@@ -44,6 +44,7 @@ export const RunnerFailureCause = Schema.Literals([
 ]);
 
 export const RunnerJobInput = Schema.Struct({
+  id: Schema.NonEmptyString,
   runId: Schema.NonEmptyString,
   attempt: Schema.Int,
   repositoryUrl: Schema.NonEmptyString,
@@ -84,45 +85,104 @@ export const RunnerJobResponse = Schema.Struct({
   ),
 });
 
-export const RunnerResultCallback = Schema.Struct({
+const EvidenceSize = Schema.Int.check(
+  Schema.makeFilter((size) => size >= 0, { expected: 'non-negative evidence size' }),
+);
+const EvidenceSha256 = Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/i));
+export const RunnerEvidenceField = Schema.Struct({
+  content: Schema.String,
+  size: EvidenceSize,
+  sha256: EvidenceSha256,
+});
+const RequiredRunnerEvidenceField = Schema.Struct({
+  content: Schema.NonEmptyString,
+  size: EvidenceSize,
+  sha256: EvidenceSha256,
+});
+const RunnerEvidenceExport = Schema.Struct({
+  sessionId: Schema.NonEmptyString,
+  content: RequiredRunnerEvidenceField,
+});
+const IncompleteRunnerEvidence = Schema.Struct({
+  id: Schema.NonEmptyString,
+  status: Schema.Literals(['complete', 'incomplete']),
+  manifest: RunnerEvidenceField,
+  opencodeJsonl: RunnerEvidenceField,
+  opencodeStderr: RunnerEvidenceField,
+  validatedReview: Schema.optional(RunnerEvidenceField),
+  opencodeSessionList: Schema.optional(RunnerEvidenceField),
+  opencodeExport: Schema.optional(RunnerEvidenceExport),
+});
+const CompleteRunnerEvidence = Schema.Struct({
+  id: Schema.NonEmptyString,
+  status: Schema.Literal('complete'),
+  manifest: RequiredRunnerEvidenceField,
+  opencodeJsonl: RequiredRunnerEvidenceField,
+  opencodeStderr: RunnerEvidenceField,
+  validatedReview: RequiredRunnerEvidenceField,
+  opencodeSessionList: RequiredRunnerEvidenceField,
+  opencodeExport: RunnerEvidenceExport,
+});
+const CallbackTimestamps = Schema.Struct({
+  executionStartedAt: Schema.NonEmptyString,
+  submissionCompletedAt: Schema.NonEmptyString,
+  cleanupCompletedAt: Schema.NonEmptyString,
+});
+const PartialCallbackTimestamps = Schema.Struct({
+  executionStartedAt: Schema.optional(Schema.NonEmptyString),
+  submissionCompletedAt: Schema.optional(Schema.NonEmptyString),
+  cleanupCompletedAt: Schema.optional(Schema.NonEmptyString),
+});
+const CallbackFailure = Schema.Struct({
+  reason: Schema.Literals([
+    'checkout',
+    'agent',
+    'timeout',
+    'invalid-output',
+    'evidence',
+    'cleanup',
+  ]),
+  cause: Schema.optional(RunnerFailureCause),
+});
+const CallbackIdentity = {
   id: Schema.NonEmptyString,
   runId: Schema.NonEmptyString,
   attempt: Schema.Int,
-  status: Schema.Literals(['succeeded', 'failed', 'aborted']),
   stage: Schema.Literals(['admission', 'checkout', 'sandbox', 'agent', 'cleanup']),
-  evidence: Schema.Struct({
-    id: Schema.NonEmptyString,
-    status: Schema.Literals(['complete', 'incomplete']),
-    manifest: Schema.String,
-    opencodeJsonl: Schema.String,
-    opencodeStderr: Schema.String,
-    validatedReview: Schema.optional(Schema.String),
-    opencodeSessionList: Schema.optional(Schema.String),
-    opencodeExport: Schema.optional(
-      Schema.Struct({ sessionId: Schema.NonEmptyString, content: Schema.String }),
-    ),
-  }),
-  timestamps: Schema.Struct({
-    executionStartedAt: Schema.optional(Schema.String),
-    submissionCompletedAt: Schema.optional(Schema.String),
-    cleanupCompletedAt: Schema.optional(Schema.String),
-  }),
-  sandbox: Schema.Struct({ cleanup: Schema.Literals(['pending', 'destroyed', 'failed']) }),
-  result: Schema.optional(ReviewResult),
-  failure: Schema.optional(
-    Schema.Struct({
-      reason: Schema.Literals([
-        'checkout',
-        'agent',
-        'timeout',
-        'invalid-output',
-        'evidence',
-        'cleanup',
-      ]),
-      cause: Schema.optional(RunnerFailureCause),
-    }),
-  ),
+};
+const CallbackSandbox = Schema.Struct({
+  cleanup: Schema.Literals(['pending', 'destroyed', 'failed']),
 });
+
+const SuccessfulRunnerResultCallback = Schema.Struct({
+  ...CallbackIdentity,
+  status: Schema.Literal('succeeded'),
+  evidence: CompleteRunnerEvidence,
+  timestamps: CallbackTimestamps,
+  sandbox: Schema.Struct({ cleanup: Schema.Literal('destroyed') }),
+  result: ReviewResult,
+});
+const FailedRunnerResultCallback = Schema.Struct({
+  ...CallbackIdentity,
+  status: Schema.Literal('failed'),
+  evidence: IncompleteRunnerEvidence,
+  timestamps: PartialCallbackTimestamps,
+  sandbox: CallbackSandbox,
+  failure: CallbackFailure,
+});
+const AbortedRunnerResultCallback = Schema.Struct({
+  ...CallbackIdentity,
+  status: Schema.Literal('aborted'),
+  evidence: IncompleteRunnerEvidence,
+  timestamps: PartialCallbackTimestamps,
+  sandbox: CallbackSandbox,
+});
+
+export const RunnerResultCallback = Schema.Union([
+  SuccessfulRunnerResultCallback,
+  FailedRunnerResultCallback,
+  AbortedRunnerResultCallback,
+]);
 
 export type RunnerJobInput = typeof RunnerJobInput.Type;
 export type RunnerJobResponse = typeof RunnerJobResponse.Type;

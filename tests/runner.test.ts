@@ -9,6 +9,7 @@ import {
 } from '../apps/runner/src/runner';
 
 const runnerJobFields = {
+  id: 'runner-job-test',
   repositoryName: 'acme/reviewed',
   pullRequestNumber: 42,
   repositoryReadToken: 'github-read-token',
@@ -130,18 +131,32 @@ const withMergeBaseFixture = (
 
 const createProductionRunnerWithMergeBase = (
   options: Parameters<typeof createProductionRunner>[0] = {},
-) =>
-  options.process === undefined
-    ? createProductionRunner(options)
+) => {
+  const optionsWithCallback = {
+    ...options,
+    callbackUrl: options.callbackUrl ?? 'https://ingress.test/runner-callback',
+    callbackToken: options.callbackToken ?? 'callback-token',
+    callbackFetch: options.callbackFetch ?? (async () => new Response(null, { status: 202 })),
+  };
+  return options.process === undefined
+    ? createProductionRunner(optionsWithCallback)
     : createProductionRunner({
-        ...options,
+        ...optionsWithCallback,
         process: withMergeBaseFixture(options.process),
       });
+};
 
 const createRunner = (options: TestRunnerOptions = {}) => {
   const { mergeBase: mergeBaseOverride, ...productionOptions } = options;
+  const optionsWithCallback = {
+    ...productionOptions,
+    callbackUrl: productionOptions.callbackUrl ?? 'https://ingress.test/runner-callback',
+    callbackToken: productionOptions.callbackToken ?? 'callback-token',
+    callbackFetch:
+      productionOptions.callbackFetch ?? (async () => new Response(null, { status: 202 })),
+  };
   const originalProcess = productionOptions.process;
-  if (originalProcess === undefined) return createProductionRunner(productionOptions);
+  if (originalProcess === undefined) return createProductionRunner(optionsWithCallback);
   const mergeBaseProcess = withMergeBaseFixture(originalProcess, mergeBaseOverride);
   const rules: Array<Record<string, unknown>> = [
     {
@@ -153,7 +168,7 @@ const createRunner = (options: TestRunnerOptions = {}) => {
     },
   ];
   return createProductionRunner({
-    ...productionOptions,
+    ...optionsWithCallback,
     process: async (command, args, processOptions) => {
       if (args[0] === 'policy' && args[1] === 'ls') {
         return {
@@ -328,6 +343,39 @@ const runAgentScenario = async (scenario: {
 };
 
 describe('Runner Job HTTP interface', () => {
+  it('rejects admission when callback configuration is incomplete before starting a Job', async () => {
+    let processCalls = 0;
+    const runner = createProductionRunner({
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      process: async () => {
+        processCalls += 1;
+        return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+      },
+    });
+
+    const response = await runner.handle(
+      new Request('http://runner/jobs', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer runner-test-token',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          ...runnerJobFields,
+          runId: 'run-callback-config-missing',
+          attempt: 1,
+          repositoryUrl: 'https://github.com/acme/reviewed.git',
+          baseSha: '1111111111111111111111111111111111111111',
+          headSha: '2222222222222222222222222222222222222222',
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(503);
+    expect(processCalls).toBe(0);
+  });
+
   it('sends one named-field evidence callback after a successful Job', async () => {
     const callbackRequests: Request[] = [];
     const result = await runAgentScenario({
@@ -343,17 +391,41 @@ describe('Runner Job HTTP interface', () => {
     const callback = (await callbackRequests[0]?.json()) as {
       evidence: Record<string, unknown>;
     };
-    expect(callback.evidence).toEqual({
+    expect(callback.evidence).toMatchObject({
       id: result.terminal.evidenceId,
       status: 'complete',
-      manifest: expect.any(String),
-      opencodeJsonl: expect.any(String),
-      opencodeStderr: expect.any(String),
-      validatedReview: expect.any(String),
-      opencodeSessionList: expect.any(String),
+      manifest: {
+        content: expect.any(String),
+        size: expect.any(Number),
+        sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      },
+      opencodeJsonl: {
+        content: expect.any(String),
+        size: expect.any(Number),
+        sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      },
+      opencodeStderr: {
+        content: expect.any(String),
+        size: expect.any(Number),
+        sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      },
+      validatedReview: {
+        content: expect.any(String),
+        size: expect.any(Number),
+        sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      },
+      opencodeSessionList: {
+        content: expect.any(String),
+        size: expect.any(Number),
+        sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      },
       opencodeExport: {
         sessionId: 'scenario-session',
-        content: expect.any(String),
+        content: {
+          content: expect.any(String),
+          size: expect.any(Number),
+          sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+        },
       },
     });
     expect(callback.evidence).not.toHaveProperty('files');
@@ -472,7 +544,7 @@ describe('Runner Job HTTP interface', () => {
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
 
-      expect(terminal.status).toBe('succeeded');
+      expect(terminal.status).toBe('failed');
       expect(callbackRequests).toHaveLength(1);
       const callback = (await callbackRequests[0]?.clone().json()) as {
         status: string;
@@ -485,9 +557,9 @@ describe('Runner Job HTTP interface', () => {
         evidence: {
           id: terminal.evidenceId,
           status: 'incomplete',
-          manifest: '',
-          opencodeJsonl: '',
-          opencodeStderr: '',
+          manifest: { content: '', size: 0, sha256: expect.any(String) },
+          opencodeJsonl: { content: '', size: 0, sha256: expect.any(String) },
+          opencodeStderr: { content: '', size: 0, sha256: expect.any(String) },
         },
       });
       expect(callback.evidence).not.toHaveProperty('opencodeExport');
@@ -2645,6 +2717,7 @@ describe('Runner Job HTTP interface', () => {
           'content-type': 'application/json',
         },
         body: JSON.stringify({
+          id: 'runner-job-github-read-secret',
           repositoryName: 'acme/reviewed',
           pullRequestNumber: 42,
           runId: 'run-github-read-secret',
@@ -3042,6 +3115,7 @@ describe('Runner Job HTTP interface', () => {
         body: JSON.stringify({
           ...runnerJobFields,
           runId: 'run-64-idempotency',
+          id: `runner-job-test-${attempt}`,
           attempt,
           repositoryUrl: 'https://github.com/acme/reviewed.git',
           baseSha: '1111111111111111111111111111111111111111',

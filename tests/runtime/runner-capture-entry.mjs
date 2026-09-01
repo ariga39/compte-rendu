@@ -18,7 +18,7 @@ export default {
       captures.push(input);
       return Response.json(
         {
-          id: 'runner-job-1',
+          id: input.id,
           runId: input.runId,
           attempt: input.attempt,
           evidence: { id: 'evidence-1', status: 'pending' },
