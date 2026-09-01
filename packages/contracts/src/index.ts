@@ -1,9 +1,6 @@
 import { Schema } from 'effect';
 
 export const REVIEW_ATTEMPT_BUDGET_MS = 30 * 60 * 1000;
-export const REVIEW_MAX_ATTEMPTS = 1;
-export const REVIEW_CORE_DEADLINE_MS = 35 * 60 * 1000;
-export const REVIEW_WORKFLOW_TIMEOUT = '40 minutes' as const;
 
 export interface WorkerEntrypoint<Env = unknown> {
   fetch(request: Request, env?: Env): Response | Promise<Response>;
@@ -16,6 +13,7 @@ export interface CoreServiceBinding {
 export const GitHubSha = Schema.String.check(Schema.isPattern(/^[0-9a-f]{40}$/i));
 
 export const MAX_REVIEW_RESULT_BYTES = 8 * 1024 * 1024;
+export const MAX_RUNNER_CALLBACK_BYTES = 32 * 1024 * 1024;
 
 export const ReviewResult = Schema.String.check(
   Schema.makeFilter((markdown) => markdown.trim().length > 0, {
@@ -86,8 +84,49 @@ export const RunnerJobResponse = Schema.Struct({
   ),
 });
 
+export const RunnerResultCallback = Schema.Struct({
+  id: Schema.NonEmptyString,
+  runId: Schema.NonEmptyString,
+  attempt: Schema.Int,
+  status: Schema.Literals(['succeeded', 'failed', 'aborted']),
+  stage: Schema.Literals(['admission', 'checkout', 'sandbox', 'agent', 'cleanup']),
+  evidence: Schema.Struct({
+    id: Schema.NonEmptyString,
+    status: Schema.Literals(['complete', 'incomplete']),
+    manifest: Schema.String,
+    opencodeJsonl: Schema.String,
+    opencodeStderr: Schema.String,
+    validatedReview: Schema.optional(Schema.String),
+    opencodeSessionList: Schema.optional(Schema.String),
+    opencodeExport: Schema.optional(
+      Schema.Struct({ sessionId: Schema.NonEmptyString, content: Schema.String }),
+    ),
+  }),
+  timestamps: Schema.Struct({
+    executionStartedAt: Schema.optional(Schema.String),
+    submissionCompletedAt: Schema.optional(Schema.String),
+    cleanupCompletedAt: Schema.optional(Schema.String),
+  }),
+  sandbox: Schema.Struct({ cleanup: Schema.Literals(['pending', 'destroyed', 'failed']) }),
+  result: Schema.optional(ReviewResult),
+  failure: Schema.optional(
+    Schema.Struct({
+      reason: Schema.Literals([
+        'checkout',
+        'agent',
+        'timeout',
+        'invalid-output',
+        'evidence',
+        'cleanup',
+      ]),
+      cause: Schema.optional(RunnerFailureCause),
+    }),
+  ),
+});
+
 export type RunnerJobInput = typeof RunnerJobInput.Type;
 export type RunnerJobResponse = typeof RunnerJobResponse.Type;
+export type RunnerResultCallback = typeof RunnerResultCallback.Type;
 
 const PullRequestAction = Schema.Literals([
   'opened',
@@ -184,17 +223,6 @@ export type OperationalLogEvent =
         | 'scheduling_failure';
     }
   | {
-      readonly phase: 'workflow';
-      readonly outcome: 'completed';
-      readonly runId: string;
-    }
-  | {
-      readonly phase: 'workflow';
-      readonly outcome: 'failed';
-      readonly runId: string;
-      readonly reason: 'runner_failed' | 'publication_failed' | 'execution_failed' | 'step_failed';
-    }
-  | {
       readonly phase: 'publication';
       readonly outcome: 'published';
       readonly runId: string;
@@ -250,7 +278,7 @@ export const sanitizeOperationalLogEvent = (event: OperationalLogEvent): Operati
         };
   }
 
-  if (event.phase === 'workflow' || event.phase === 'publication') {
+  if (event.phase === 'publication') {
     return { ...event, runId: sanitizeOperationalLogIdentifier(event.runId) ?? 'redacted' };
   }
 

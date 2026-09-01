@@ -24,19 +24,15 @@ const payload = {
   },
 };
 
-interface CapturedWorkflowInput {
-  readonly id: string;
-  readonly params: {
-    readonly runId: string;
-    readonly job: {
-      readonly repositoryId: number;
-      readonly pullRequestNumber: number;
-      readonly installationId: number;
-      readonly baseSha: string;
-      readonly headSha: string;
-      readonly trigger: 'automatic' | 'manual';
-    };
-  };
+interface CapturedRunnerJob {
+  readonly runId: string;
+  readonly attempt: number;
+  readonly repositoryUrl: string;
+  readonly repositoryName: string;
+  readonly pullRequestNumber: number;
+  readonly baseSha: string;
+  readonly headSha: string;
+  readonly repositoryReadToken: string;
 }
 
 interface DeliveryOutcome {
@@ -77,11 +73,11 @@ const runtimeHarness = {
     const response = await SELF.fetch(
       new Request('https://tracer.internal/__test/capture', { method: 'DELETE' }),
     );
-    if (!response.ok) throw new Error(`could not clear workflow capture: ${response.status}`);
+    if (!response.ok) throw new Error(`could not clear runner capture: ${response.status}`);
   },
-  readCapture: async (): Promise<readonly CapturedWorkflowInput[]> => {
+  readCapture: async (): Promise<readonly CapturedRunnerJob[]> => {
     const response = await SELF.fetch('https://tracer.internal/__test/capture');
-    return (await response.json()) as readonly CapturedWorkflowInput[];
+    return (await response.json()) as readonly CapturedRunnerJob[];
   },
   readDeliveryOutcome: async (id: string): Promise<DeliveryOutcome | undefined> => {
     const response = await SELF.fetch(
@@ -95,33 +91,28 @@ const runtimeHarness = {
 describe('local Worker runtime tracer', () => {
   beforeEach(() => runtimeHarness.clearCapture());
 
-  it('routes a signed eligible webhook through ingress, CORE, D1, and Workflow capture', async () => {
+  it('routes a signed eligible webhook through ingress, CORE, D1, and immediate Runner submission', async () => {
     const response = await runtimeHarness.send(await signedWebhook());
 
     expect(response.status).toBe(202);
     const captures = await runtimeHarness.readCapture();
     expect(captures).toHaveLength(1);
     expect(captures[0]).toMatchObject({
-      id: expect.any(String),
-      params: {
-        runId: expect.any(String),
-        job: {
-          repositoryId: 11,
-          pullRequestNumber: 42,
-          installationId: 7,
-          baseSha: payload.pull_request.base.sha,
-          headSha: payload.pull_request.head.sha,
-          trigger: 'automatic',
-        },
-      },
+      runId: expect.any(String),
+      attempt: 1,
+      repositoryUrl: 'https://github.com/acme/reviewed.git',
+      repositoryName: 'acme/reviewed',
+      pullRequestNumber: 42,
+      baseSha: payload.pull_request.base.sha,
+      headSha: payload.pull_request.head.sha,
+      repositoryReadToken: 'test-read-token',
     });
-    expect(captures[0].id).toBe(captures[0].params.runId);
 
     const outcome = await runtimeHarness.readDeliveryOutcome(deliveryId);
     expect(outcome).toMatchObject({
       deliveryId,
       status: 'scheduled',
-      runId: captures[0].id,
+      runId: captures[0].runId,
     });
   });
 

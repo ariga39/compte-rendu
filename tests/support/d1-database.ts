@@ -35,7 +35,12 @@ export class SqliteD1Database implements D1DatabaseLike {
   private batchTail: Promise<void> = Promise.resolve();
 
   constructor(
-    migrationNames: readonly string[] = ['0001_review_state.sql', '0002_allow_manual_retry.sql'],
+    migrationNames: readonly string[] = [
+      '0001_review_state.sql',
+      '0002_allow_manual_retry.sql',
+      '0003_runner_evidence.sql',
+      '0004_runner_admission.sql',
+    ],
   ) {
     this.applyMigrations(migrationNames);
   }

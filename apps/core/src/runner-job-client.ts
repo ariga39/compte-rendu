@@ -2,16 +2,18 @@ import { Schema } from 'effect';
 import {
   RunnerJobInput,
   RunnerJobResponse,
-  REVIEW_CORE_DEADLINE_MS,
-  REVIEW_MAX_ATTEMPTS,
   type RunnerJobResponse as RunnerJobResponseValue,
 } from '@compte-rendu/contracts';
-import type {
-  ReviewRunFailureReason,
-  ReviewRunResult,
-  ReviewRunSpec,
-  ReviewRunner,
-} from './review-run';
+
+export interface ReviewRunSpec {
+  readonly runId: string;
+  readonly repositoryUrl: string;
+  readonly repositoryName: string;
+  readonly pullRequestNumber: number;
+  readonly baseSha: string;
+  readonly headSha: string;
+  readonly repositoryReadToken: string;
+}
 
 export interface RunnerJobBinding {
   readonly fetch: (request: Request) => Response | Promise<Response>;
@@ -20,217 +22,52 @@ export interface RunnerJobBinding {
 export interface RunnerJobClientOptions {
   readonly binding: RunnerJobBinding;
   readonly authToken: string;
-  readonly pollIntervalMs?: number;
-  readonly deadlineMs?: number;
 }
 
-const MAX_POLL_INTERVAL_MS = 5_000;
-const MAX_POST_RETRIES = 3;
+export interface RunnerJobSubmitter {
+  readonly submitJob: (
+    spec: ReviewRunSpec,
+  ) => Promise<{ readonly id: string; readonly attempt: number }>;
+}
 
-const authorizedRequest = (url: string, token: string, init: RequestInit = {}) => {
+const authorizedRequest = (token: string, init: RequestInit = {}) => {
   const headers = new Headers(init.headers);
   headers.set('authorization', `Bearer ${token}`);
-  return new Request(url, { ...init, headers });
+  return new Request('http://runner.internal/jobs', { ...init, headers });
 };
-
-const readResponse = async (
-  response: Response,
-  expectedStatus: number,
-): Promise<RunnerJobResponseValue | undefined> => {
-  if (response.status !== expectedStatus) return undefined;
-  try {
-    return await Schema.decodeUnknownPromise(RunnerJobResponse)(await response.json());
-  } catch {
-    return undefined;
-  }
-};
-
-const matches = (
-  state: RunnerJobResponseValue,
-  input: { readonly id?: string; readonly runId: string; readonly attempt: number },
-) =>
-  (input.id === undefined || state.id === input.id) &&
-  state.runId === input.runId &&
-  state.attempt === input.attempt;
-
-const failureReason = (state: RunnerJobResponseValue): ReviewRunFailureReason => {
-  if (state.status === 'aborted' || state.failure?.reason === 'timeout') return 'timeout';
-  if (state.failure?.reason !== undefined) return state.failure.reason;
-  return 'agent';
-};
-
-const failed = (
-  reason: ReviewRunFailureReason,
-  attempt: number,
-  sandboxId?: string,
-): Extract<ReviewRunResult, { status: 'failed' }> => ({
-  status: 'failed',
-  reason,
-  attempt,
-  ...(sandboxId === undefined ? {} : { sandboxId }),
-  retryable: reason !== 'timeout' && reason !== 'cleanup' && reason !== 'superseded',
-});
-
-const delay = (milliseconds: number) =>
-  new Promise<void>((resolve) => {
-    setTimeout(resolve, milliseconds);
-  });
 
 export const createRunnerJobClient = ({
   binding,
   authToken,
-  pollIntervalMs = 1_000,
-  deadlineMs = REVIEW_CORE_DEADLINE_MS,
-}: RunnerJobClientOptions): ReviewRunner => ({
-  runJob: async (spec: ReviewRunSpec) => {
-    const maxAttempts = Math.max(1, Math.min(spec.maxAttempts ?? 1, REVIEW_MAX_ATTEMPTS));
-    const deadline = Date.now() + deadlineMs;
-    let lastFailure = failed('agent', 1);
-
-    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-      let initial: RunnerJobResponseValue | undefined;
-      for (let retry = 0; retry < MAX_POST_RETRIES && Date.now() < deadline; retry += 1) {
-        try {
-          const response = await binding.fetch(
-            authorizedRequest('http://runner.internal/jobs', authToken, {
-              method: 'POST',
-              headers: { 'content-type': 'application/json' },
-              body: JSON.stringify({
-                runId: spec.runId,
-                attempt,
-                repositoryUrl: spec.repositoryUrl,
-                repositoryName: spec.repositoryName,
-                pullRequestNumber: spec.pullRequestNumber,
-                baseSha: spec.baseSha,
-                headSha: spec.headSha,
-                repositoryReadToken: spec.repositoryReadToken,
-              }),
-            }),
-          );
-          const decoded = await readResponse(response, 202);
-          if (decoded !== undefined && matches(decoded, { runId: spec.runId, attempt })) {
-            initial = decoded;
-            break;
-          }
-        } catch {
-          // A POST response can be lost after the runner admits the job. Retry
-          // the same idempotency key before considering a new attempt.
-        }
-        if (retry + 1 < MAX_POST_RETRIES) await delay(0);
-      }
-
-      if (initial === undefined) {
-        lastFailure = failed('agent', attempt);
-        break;
-      }
-
-      let state = initial;
-      let retryAfterLostGet = false;
-      const deleteJob = async (requireAborted: boolean) => {
-        try {
-          const response = await binding.fetch(
-            authorizedRequest(
-              `http://runner.internal/jobs/${encodeURIComponent(state.id)}`,
-              authToken,
-              { method: 'DELETE' },
-            ),
-          );
-          const deleted = await readResponse(response, 200);
-          if (
-            deleted === undefined ||
-            !matches(deleted, { id: state.id, runId: spec.runId, attempt }) ||
-            (requireAborted && deleted.status !== 'aborted') ||
-            (deleted.status !== 'succeeded' &&
-              deleted.status !== 'failed' &&
-              deleted.status !== 'aborted') ||
-            deleted.sandbox.cleanup !== 'destroyed'
-          ) {
-            return undefined;
-          }
-          return deleted;
-        } catch {
-          return undefined;
-        }
-      };
-
-      const abortFor = async (reason: 'timeout' | 'superseded') => {
-        const deleted = await deleteJob(true);
-        return deleted === undefined
-          ? failed('cleanup', attempt, state.id)
-          : failed(reason, attempt, state.id);
-      };
-
-      while (state.status === 'queued' || state.status === 'running') {
-        let superseded = false;
-        if (spec.shouldAbort !== undefined) {
-          try {
-            superseded = await spec.shouldAbort();
-          } catch {
-            superseded = true;
-          }
-        }
-        if (superseded) return abortFor('superseded');
-        if (Date.now() >= deadline) return abortFor('timeout');
-
-        await delay(Math.min(Math.max(0, pollIntervalMs), MAX_POLL_INTERVAL_MS));
-        if (Date.now() >= deadline) return abortFor('timeout');
-
-        let next: RunnerJobResponseValue | undefined;
-        try {
-          const response = await binding.fetch(
-            authorizedRequest(
-              `http://runner.internal/jobs/${encodeURIComponent(state.id)}`,
-              authToken,
-            ),
-          );
-          const decoded = await readResponse(response, 200);
-          if (
-            decoded !== undefined &&
-            matches(decoded, { id: state.id, runId: spec.runId, attempt })
-          ) {
-            next = decoded;
-          }
-        } catch {
-          next = undefined;
-        }
-
-        if (next === undefined) {
-          const deleted = await deleteJob(false);
-          if (deleted === undefined) return failed('cleanup', attempt, state.id);
-          state = deleted;
-          retryAfterLostGet = state.status === 'aborted';
-          break;
-        }
-        state = next;
-      }
-
-      if (
-        state.status === 'succeeded' &&
-        state.sandbox.cleanup === 'destroyed' &&
-        state.result !== undefined
-      ) {
-        return {
-          status: 'succeeded',
-          attempt,
-          sandboxId: state.id,
-          output: state.result,
-        };
-      }
-
-      if (state.sandbox.cleanup !== 'destroyed') {
-        const deleted = await deleteJob(false);
-        if (deleted === undefined) return failed('cleanup', attempt, state.id);
-        state = deleted;
-      }
-
-      lastFailure = failed(failureReason(state), attempt, state.id);
-      if ((retryAfterLostGet || lastFailure.retryable) && attempt < maxAttempts) {
-        continue;
-      }
-      if (!lastFailure.retryable) break;
+}: RunnerJobClientOptions): RunnerJobSubmitter => ({
+  submitJob: async (spec) => {
+    const response = await binding.fetch(
+      authorizedRequest(authToken, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          runId: spec.runId,
+          attempt: 1,
+          repositoryUrl: spec.repositoryUrl,
+          repositoryName: spec.repositoryName,
+          pullRequestNumber: spec.pullRequestNumber,
+          baseSha: spec.baseSha,
+          headSha: spec.headSha,
+          repositoryReadToken: spec.repositoryReadToken,
+        }),
+      }),
+    );
+    if (response.status !== 202) throw new Error('Runner Job admission failed');
+    let admitted: RunnerJobResponseValue;
+    try {
+      admitted = await Schema.decodeUnknownPromise(RunnerJobResponse)(await response.json());
+    } catch {
+      throw new Error('Runner Job admission failed');
     }
-
-    return lastFailure;
+    if (admitted.runId !== spec.runId || admitted.attempt !== 1) {
+      throw new Error('Runner Job admission failed');
+    }
+    return { id: admitted.id, attempt: admitted.attempt };
   },
 });
 

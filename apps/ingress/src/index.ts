@@ -2,6 +2,7 @@ import { Effect, Schema } from 'effect';
 import {
   ReviewEvent,
   GitHubSha,
+  MAX_RUNNER_CALLBACK_BYTES,
   type CoreServiceBinding,
   type OperationalLog,
   type OperationalLogEvent,
@@ -17,6 +18,7 @@ export const MAX_WEBHOOK_BYTES = 256 * 1024;
 export { createCloudflareOperationalLog } from './operational-log';
 
 const supportedEvents = ['pull_request', 'issue_comment'] as const;
+const runnerCallbackPath = '/runner-callback';
 const supportedPullRequestActions = [
   'opened',
   'reopened',
@@ -72,6 +74,7 @@ export interface IngressDependencies {
   readonly crypto: Pick<Crypto, 'subtle'>;
   readonly allowedInstallationIds: unknown;
   readonly core: CoreServiceBinding;
+  readonly runnerCallbackToken?: string;
   readonly log?: OperationalLog;
 }
 
@@ -79,6 +82,7 @@ export interface IngressEnv {
   readonly WEBHOOK_SECRET: string;
   readonly ALLOWED_INSTALLATION_IDS: string;
   readonly CORE: CoreServiceBinding;
+  readonly RUNNER_CALLBACK_TOKEN?: string;
 }
 
 const InvalidWebhookReason = Schema.Literals(['invalid_signature', 'invalid_webhook']);
@@ -387,11 +391,48 @@ const forwardEvent = (event: NormalizedReviewEvent, dependencies: IngressDepende
     return 'accepted' as const;
   });
 
+const forwardRunnerCallback = async (request: Request, dependencies: IngressDependencies) => {
+  if (
+    dependencies.runnerCallbackToken === undefined ||
+    request.headers.get('authorization') !== `Bearer ${dependencies.runnerCallbackToken}`
+  ) {
+    return new Response(null, { status: 401 });
+  }
+
+  const contentLength = request.headers.get('content-length');
+  if (contentLength !== null && Number(contentLength) > MAX_RUNNER_CALLBACK_BYTES) {
+    return new Response(null, { status: 413 });
+  }
+  const body = await request.arrayBuffer();
+  if (body.byteLength > MAX_RUNNER_CALLBACK_BYTES) {
+    return new Response(null, { status: 413 });
+  }
+  const forwarded = await dependencies.core.fetch(
+    new Request('https://core.internal/runner-results', {
+      method: 'POST',
+      headers: {
+        'content-type': request.headers.get('content-type') ?? 'application/json',
+        'x-compte-rendu-runner-callback': 'verified',
+      },
+      body,
+    }),
+  );
+  return new Response(null, { status: forwarded.ok ? 202 : 503 });
+};
+
 export function createIngressWorker(dependencies: IngressDependencies): WorkerEntrypoint {
   return {
     fetch: async (request) => {
       if (request.method !== 'POST') {
         return new Response(null, { status: 405 });
+      }
+
+      if (new URL(request.url).pathname === runnerCallbackPath) {
+        try {
+          return await forwardRunnerCallback(request, dependencies);
+        } catch {
+          return new Response(null, { status: 503 });
+        }
       }
 
       const eventName = request.headers.get('x-github-event');
@@ -457,6 +498,7 @@ const ingress: WorkerEntrypoint<IngressEnv> = {
       crypto: globalThis.crypto,
       allowedInstallationIds: env.ALLOWED_INSTALLATION_IDS,
       core: env.CORE,
+      runnerCallbackToken: env.RUNNER_CALLBACK_TOKEN,
     }).fetch(request);
   },
 };

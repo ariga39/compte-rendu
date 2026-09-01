@@ -18,6 +18,7 @@ type WranglerConfig = {
   vars?: { GITHUB_APP_ID?: string; ALLOWED_INSTALLATION_IDS?: string };
   secrets?: { required?: readonly string[] };
   d1_databases?: readonly { database_id?: string }[];
+  r2_buckets?: readonly { binding?: string; bucket_name?: string }[];
   migrations?: readonly {
     tag?: string;
     new_sqlite_classes?: readonly string[];
@@ -171,7 +172,6 @@ describe('Wrangler deployment tooling', () => {
 
       expect(first.core).toContain('"name": "petit-chiba-core"');
       expect(first.core).toContain('"database_name": "petit-chiba-review-state"');
-      expect(first.core).toContain('"name": "petit-chiba-review"');
       expect(first.core).toContain('"main": "src/worker.ts"');
       expect(first.core).toContain('"migrations_dir": "migrations"');
       expect(first.core).toContain('"binding": "RUNNER"');
@@ -262,9 +262,12 @@ describe('Wrangler deployment tooling', () => {
     expect(ingress.workers_dev).toBe(true);
     expect(ingress.vars?.ALLOWED_INSTALLATION_IDS).toBe('REPLACE_WITH_GITHUB_INSTALLATION_IDS');
     expect(core.secrets?.required).toEqual(['GITHUB_APP_PRIVATE_KEY', 'RUNNER_AUTH_TOKEN']);
-    expect(ingress.secrets?.required).toEqual(['WEBHOOK_SECRET']);
+    expect(ingress.secrets?.required).toEqual(['WEBHOOK_SECRET', 'RUNNER_CALLBACK_TOKEN']);
     expect(core.vars?.GITHUB_APP_ID).toBe('REPLACE_WITH_GITHUB_APP_ID');
     expect(core.d1_databases?.[0]?.database_id).toBe('REPLACE_WITH_D1_DATABASE_ID');
+    expect(core.r2_buckets).toEqual([
+      { binding: 'EVIDENCE_BUCKET', bucket_name: 'compte-rendu-review-evidence' },
+    ]);
   });
 
   it('retains ordered Durable Object retirement migrations in tracked and rendered config', () => {

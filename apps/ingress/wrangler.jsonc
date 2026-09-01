@@ -8,7 +8,7 @@
     "ALLOWED_INSTALLATION_IDS": "REPLACE_WITH_GITHUB_INSTALLATION_IDS",
   },
   "secrets": {
-    "required": ["WEBHOOK_SECRET"],
+    "required": ["WEBHOOK_SECRET", "RUNNER_CALLBACK_TOKEN"],
   },
   "services": [
     {

@@ -18,6 +18,12 @@
       "migrations_dir": "migrations",
     },
   ],
+  "r2_buckets": [
+    {
+      "binding": "EVIDENCE_BUCKET",
+      "bucket_name": "compte-rendu-review-evidence",
+    },
+  ],
   "migrations": [
     {
       "tag": "v1",
@@ -26,13 +32,6 @@
     {
       "tag": "v2",
       "deleted_classes": ["Sandbox", "ReviewLeaseDurableObject"],
-    },
-  ],
-  "workflows": [
-    {
-      "binding": "REVIEW_WORKFLOW",
-      "name": "compte-rendu-review",
-      "class_name": "ReviewWorkflow",
     },
   ],
   "vpc_services": [

@@ -1,12 +1,12 @@
 import { createCoreWorker, type CoreWorkerEnv } from '../../apps/core/src/core-worker';
 import { createD1ReviewStateStore } from '../../apps/core/src/index';
 
-interface WorkflowCaptureBinding {
+interface RunnerCaptureBinding {
   readonly fetch: (request: Request) => Promise<Response>;
 }
 
 interface RuntimeCoreEnv extends CoreWorkerEnv {
-  readonly WORKFLOW_CAPTURE: WorkflowCaptureBinding;
+  readonly RUNNER: RunnerCaptureBinding;
 }
 
 export default {
@@ -14,7 +14,7 @@ export default {
     const url = new URL(request.url);
 
     if (url.pathname === '/__test/capture') {
-      return env.WORKFLOW_CAPTURE.fetch(request);
+      return env.RUNNER.fetch(request);
     }
 
     if (url.pathname === '/__test/outcome') {
@@ -30,21 +30,18 @@ export default {
       return Response.json({ ...outcome, runId: run?.run_id });
     }
 
-    const worker = createCoreWorker({
-      ...env,
-      REVIEW_WORKFLOW: {
-        create: async (input) => {
-          const response = await env.WORKFLOW_CAPTURE.fetch(
-            new Request('https://workflow-capture.internal/create', {
-              method: 'POST',
-              headers: { 'content-type': 'application/json' },
-              body: JSON.stringify(input),
-            }),
-          );
-          if (!response.ok) throw new Error('workflow capture failed');
+    const worker = createCoreWorker(
+      { ...env },
+      {
+        github: {
+          getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
         },
+        getReadInstallationToken: async () => ({
+          token: 'test-read-token',
+          expiresAt: '2026-09-01T01:00:00.000Z',
+        }),
       },
-    });
+    );
     return worker.fetch(request, env);
   },
 };
