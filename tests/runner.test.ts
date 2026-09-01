@@ -463,6 +463,42 @@ describe('Runner Job HTTP interface', () => {
     });
   });
 
+  it.each(['length', 'error'] as const)(
+    'does not publish final text when the terminal step finishes with %s',
+    async (reason) => {
+      const output = [
+        JSON.stringify({
+          type: 'text',
+          part: { type: 'text', messageID: 'msg-final', text: '# Partial review' },
+        }),
+        JSON.stringify({
+          type: 'step_finish',
+          part: { type: 'step-finish', messageID: 'msg-final', reason },
+        }),
+      ].join('\n');
+      const { terminal, manifest } = await runAgentScenario({
+        runId: `run-105-${reason}-terminal`,
+        output,
+      });
+
+      expect(terminal).toMatchObject({
+        status: 'failed',
+        failure: { reason: 'invalid-output', cause: 'missing-terminal-message' },
+        evidence: { status: 'complete' },
+        sandbox: { cleanup: 'destroyed' },
+      });
+      expect(terminal).not.toHaveProperty('result');
+      expect(manifest).toMatchObject({
+        execution: {
+          status: 'failed',
+          reason: 'invalid-output',
+          cause: 'missing-terminal-message',
+        },
+        terminal: { status: 'failed', reason: 'invalid-output', cause: 'missing-terminal-message' },
+      });
+    },
+  );
+
   it('reports empty-final-text when the terminal assistant message has no publishable text', async () => {
     const output = [
       JSON.stringify({

@@ -74,10 +74,10 @@ introduce feedback state.
 ### Review result
 
 The agent returns one concise human-readable Markdown review. The Runner
-validates the JSONL transport, selects the last normal terminal assistant
-message, and joins its publishable text parts in event order. Malformed JSONL,
-explicit agent errors, oversized output, a missing terminal message, or empty
-final text fail closed.
+validates the JSONL transport, selects the last assistant message completed by
+a `step_finish` event with reason `stop`, and joins its publishable text parts
+in event order. Malformed JSONL, explicit agent errors, oversized output, a
+missing terminal message, or empty final text fail closed.
 
 Core accepts the non-empty Markdown body only after confirming that the run
 still targets the pull request's current head SHA, then publishes it as a
