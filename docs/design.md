@@ -7,7 +7,7 @@ Actions. Its first release proves one complete product path:
 
 1. receive a GitHub pull-request event;
 2. decide whether that exact PR revision may be reviewed;
-3. submit an authenticated Runner Job to the self-hosted review runner;
+3. durably queue the review in D1 for the self-hosted Runner;
 4. publish the review's Markdown body to the same revision; and
 5. terminate the run and reclaim the Sandbox.
 
@@ -100,29 +100,31 @@ The pnpm monorepo contains two Cloudflare Worker services and one self-hosted
 Runner Job process:
 
 ```text
-GitHub
-  |
-  v
-review-ingress (public route; webhook secret only)
-  |
-  | Service Binding
-  v
-review-core (no public route)
-  |- D1
-  |- private R2 evidence bucket
-  `- private Workers VPC Runner binding
-         `- self-hosted runner → fresh Docker Sandbox/OpenCode
-              `- public ingress callback → review-core
+GitHub webhook ────────────────┐
+                              v
+self-hosted Runner ──────> review-ingress (public)
+  ^  claim/callback             |
+  |                             | Service Binding
+  | targeted DELETE             v
+  `──── Workers VPC ───── review-core (no public route)
+                              |- GitHub App
+                              |- D1
+                              `- private R2 evidence bucket
+
+self-hosted Runner → fresh Docker Sandbox/OpenCode
 ```
 
 `review-ingress` verifies the webhook and converts it to a small internal
-event. `review-core` owns policy, GitHub App authentication, Runner Job
-admission, review publication, evidence metadata, and run records. It durably
-claims a run and immediately submits one immutable Runner Job through the VPC
-binding. The Runner owns execution and cleanup, then sends one authenticated
-result callback through public ingress. Core stores the bounded named-field
-evidence bundle in private R2 before confirming publication. There is no
-Workflow.
+event. `review-core` owns policy, GitHub App authentication, the D1 queue,
+review publication, evidence metadata, and run records. Webhook acceptance
+only durably schedules a run; it does not mint a GitHub read token or admit a
+Runner Job. An idle Runner calls the authenticated public `/runner-claim` route
+through ingress. Core atomically claims the oldest eligible unclaimed run,
+records one immutable Job id/attempt, then resolves the repository and mints
+the scoped read token. The Runner owns execution and cleanup, then sends one
+authenticated result callback through the same public ingress. Core stores the
+bounded named-field evidence bundle in private R2 before confirming
+publication. There is no Workflow.
 
 The repository layout is intentionally small:
 
@@ -166,13 +168,16 @@ core; a core failure is retryable and is not acknowledged as accepted.
 createCoreWorker(env: CoreEnv): WorkerEntrypoint
 ```
 
-The private core Worker accepts only normalized `POST /review-events` requests.
-It constructs the D1 state store, production GitHub App adapter, and Runner
-scheduler, then returns `202` only after the event is durably classified and
-one Runner Job is admitted. Malformed input returns `400`; storage, binding,
-or scheduling uncertainty returns `503`. Runner admission is one authenticated
-`POST /jobs` through the VPC binding; the callback is accepted only through
-the static-token ingress route.
+The private core Worker accepts normalized `POST /review-events` requests and
+the internal forwarding routes for Runner claim and callback. A webhook
+returns `202` only after the event is durably classified in D1; it does not
+admit a Runner Job. The authenticated public `/runner-claim` route forwards to
+Core, whose atomic D1 claim returns one immutable Job input only after the Job
+identity is recorded and the repository URL/read token are resolved. Malformed
+input returns `400`; storage or binding uncertainty returns `503`. The
+existing authenticated VPC `DELETE /jobs/:id` remains the cancellation seam
+for a reachable Runner; the callback is accepted only through the shared
+static-token ingress route.
 
 ### Review coordinator
 
@@ -191,17 +196,25 @@ state. GitHub, D1, Runner, and clock adapters sit at internal seams.
 Observable dispositions are deliberately few: rejected, ignored, awaiting
 approval, scheduled, completed, or failed.
 
-### Runner Job
+### Runner Job and pull interface
 
 ```ts
-submitJob(spec: ReviewRunSpec): Promise<void>
+POST /runner-claim -> 200 RunnerJobInput | 204
 ```
 
-The Core-side implementation uses one authenticated private Runner Job HTTP
-admission (`POST /jobs`). A job is one immutable review attempt; the Runner
-reports terminal status through the public-ingress callback after validation
-and Docker Sandbox cleanup. Core does not poll, retry, or manage Docker
-lifecycle.
+The public Runner interface has one authenticated pull route, `/runner-claim`,
+and the existing authenticated callback route, `/runner-callback`. Both use
+the same `RUNNER_CALLBACK_TOKEN` at ingress. Core's D1 `review_runs` rows are
+the sole durable queue: an atomic claim selects the oldest `scheduled` row
+whose `runner_job_id` is still null, records one immutable Job id/attempt, and
+only then resolves the repository URL and mints the scoped read token. A job
+is one immutable review attempt; the Runner reports terminal status through the
+callback after validation and Docker Sandbox cleanup. Core does not run a
+generic scheduler, use Cloudflare Queues/Redis, or reconcile orphaned rows.
+The Runner polls only while idle and starts at most one active Job; it asks
+for the next Job only after terminal cleanup/callback. A fresh Runner process
+may claim a later unclaimed row even when an abandoned scheduled row retains a
+Job id.
 The shared review policy gives each Runner attempt a 30-minute agent timeout and
 treats a failed Review Attempt as terminal: there is one attempt and no retry.
 The Runner has one fixed finite execution ceiling for hang prevention. Callback
@@ -246,7 +259,7 @@ Sandbox:
 - unknown event or incomplete repository identity: ignore without a run;
 - uncertain contributor policy or maintainer permission: do not run;
 - duplicate delivery or already completed head SHA: do not create another run;
-- runner admission or authentication failure: do not publish a result;
+- runner claim, callback, or authentication failure: do not publish a result;
 - checkout SHA or merge-base verification failure: stop before invoking the
   agent;
 - invalid agent output: do not publish that output;
@@ -255,8 +268,8 @@ Sandbox:
 - cleanup failure: mark the job failed until forced Sandbox cleanup succeeds.
 
 Callback transport loss does not erase local evidence. It is handled only by
-the Runner's one bounded immediate retry; there is no queue, outbox, cron, or
-generic retry framework.
+the Runner's one bounded immediate retry; D1 is the sole product queue and
+there is no outbox, cron, or generic retry framework.
 
 ## Clean break
 
@@ -269,7 +282,7 @@ completed | failed | superseded | denied
 The Runner Job lifecycle is independent of whether status persistence or review
 publication succeeds:
 
-1. admit the authenticated Runner Job and deadline;
+1. claim the authenticated Job while the Runner is idle and set its deadline;
 2. create the Sandbox;
 3. perform fixed checkout and remove the checkout credential;
 4. run the review agent with its scoped GitHub read capability;
@@ -283,7 +296,8 @@ mutates, an older run.
 
 ## Credentials
 
-- Ingress receives only the webhook secret.
+- Ingress receives the webhook secret and the one static
+  `RUNNER_CALLBACK_TOKEN` used by both public Runner routes.
 - The GitHub App private key is a core Worker secret and never enters D1,
   source control, logs, an agent prompt, or a Sandbox.
 - Core mints one short-lived, repository-scoped read token with only the

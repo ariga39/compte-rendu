@@ -602,7 +602,7 @@ export const runDiagnostic = async (argument: string, sources: DiagnosticSources
   const timeline = [
     d1?.run?.createdAt === undefined
       ? undefined
-      : { at: d1.run.createdAt, source: 'd1', event: 'run claimed' },
+      : { at: d1.run.createdAt, source: 'd1', event: 'run scheduled' },
     (d1?.run?.evidence?.executionStartedAt ?? manifest?.startedAt) === undefined
       ? undefined
       : {

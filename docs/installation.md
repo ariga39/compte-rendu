@@ -14,7 +14,7 @@ The repository deploys these resources:
 
 | Resource           | Configuration name                                                       | Purpose                                                                                                            |
 | ------------------ | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
-| Public Worker      | `<INSTANCE_NAME>-ingress`                                                | Receives GitHub webhooks. `workers_dev` is enabled.                                                                |
+| Public Worker      | `<INSTANCE_NAME>-ingress`                                                | Receives GitHub webhooks and authenticated Runner claim/callback requests. `workers_dev` is enabled.               |
 | Private Worker     | `<INSTANCE_NAME>-core`                                                   | Owns authorization, GitHub API calls, orchestration, and run state. `workers_dev` is disabled.                     |
 | Service binding    | `CORE` → `<INSTANCE_NAME>-core`                                          | Lets ingress call core without a public core URL.                                                                  |
 | D1 database        | `<INSTANCE_NAME>-review-state`, binding `REVIEW_DB`                      | Stores delivery, approval, and run state.                                                                          |
@@ -28,9 +28,22 @@ GitHub webhook
     → <INSTANCE_NAME>-ingress (public, verifies WEBHOOK_SECRET)
     → CORE service binding
     → <INSTANCE_NAME>-core (private)
-       → REVIEW_DB / EVIDENCE_BUCKET / RUNNER VPC Service
+       → REVIEW_DB / EVIDENCE_BUCKET / RUNNER VPC Service (targeted cancellation only)
        → GitHub App installation token for GitHub API operations
+
+Idle Runner
+    → <INSTANCE_NAME>-ingress `/runner-claim` (RUNNER_CALLBACK_TOKEN)
+    → <INSTANCE_NAME>-core atomic D1 claim
+    → Runner Job execution and cleanup
+    → <INSTANCE_NAME>-ingress `/runner-callback` (same token)
 ```
+
+For a newer head that supersedes a reachable running old-head Job, Core uses
+the private `RUNNER` VPC Service for the authenticated targeted
+`DELETE /jobs/:id`, waits for the Runner's terminal cleanup confirmation, and
+only then permits the newer queued run to be claimed. Core does not use this
+binding to submit new Jobs. The Tunnel and VPC Service remain required for
+that cancellation path.
 
 Cloudflare service bindings are internal Worker-to-Worker calls and can be
 used to isolate a Worker from the public Internet. The target Worker must be
@@ -410,6 +423,12 @@ RUNNER_CALLBACK_TOKEN='<static-runner-callback-token>' \
 corepack pnpm --filter @compte-rendu/runner start
 ```
 
+The Runner derives its claim URL by resolving `/runner-claim` on the same
+origin as `RUNNER_CALLBACK_URL`; no separate claim URL environment variable is
+required in production. `RUNNER_CALLBACK_TOKEN` authenticates both public
+Runner routes; keep it identical to the ingress secret and do not create a
+second claim bearer.
+
 Create the remotely managed Tunnel first with the pinned `tunnel create`
 command above, and retain its returned `<TUNNEL_ID>`. Retrieve its connector
 token from the Dashboard's **Add a replica** action or the documented API
@@ -507,7 +526,7 @@ uses the temporary invocation described above.
    head after a failed or superseded run by making uniqueness apply only to
    `scheduled` and `completed` rows; it retains the active-PR index. D1
    `0003_runner_evidence.sql` adds only evidence object metadata and execution
-   timestamps, while `0004_runner_admission.sql` adds the admitted Runner Job
+   timestamps, while `0004_runner_admission.sql` adds the claimed Runner Job
    identity, attempt, and originating manual comment id.
    `0005_publication_claim.sql` adds the atomic publication claim used to keep
    concurrent duplicate callbacks from creating duplicate reviews. D1 migration
@@ -572,7 +591,7 @@ uses the temporary invocation described above.
    deploy then publishes the current checkout with the same secret. The
    `WEBHOOK_SECRET` value must match the GitHub App webhook secret exactly.
    `RUNNER_CALLBACK_TOKEN` must be the same static bearer value configured on
-   the Runner and is used only for the `/runner-callback` route.
+   the Runner and authenticates both `/runner-claim` and `/runner-callback`.
    Record the resulting public ingress URL as the operator's
    `<INGRESS_URL>`. The `CORE` binding points to the already deployed
    `<INSTANCE_NAME>-core`; deploying in the opposite order can fail because the
@@ -625,7 +644,8 @@ git diff --check
 ```
 
 These checks can prove local behavior such as a signed webhook reaching CORE,
-D1 state changes, Runner admission capture, and the relevant public behavior.
+D1 queue/claim state changes, Runner pull capture, and the relevant public
+behavior.
 They do not prove the deployed
 Runner service, Docker Sandbox lifecycle, GitHub publication, or model
 usefulness. Green local mechanics alone do not prove that a review is useful;
@@ -703,11 +723,11 @@ corepack pnpm dlx wrangler@4.124.0 tail <INSTANCE_NAME>-core
 ```
 
 Use the GitHub delivery page for `deliveryId` and then search logs for the
-same value. A scheduled core event adds `runId`; Runner Job events add
-`sandboxId`. The useful chain is:
+same value. A scheduled core event adds `runId`; a claimed Runner Job adds
+its Job and `sandboxId`. The useful chain is:
 
 ```text
-deliveryId → core scheduled → runId → Runner Job sandboxId → callback/R2/publication outcome
+deliveryId → core scheduled → runId → D1 claim/jobId → Runner sandboxId → callback/R2/publication outcome
 ```
 
 Identifier values are sanitized by the application before logging. Do not

@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { SELF } from 'cloudflare:test';
 
 const webhookSecret = 'runtime-test-webhook-secret';
+const runnerCallbackToken = 'runtime-test-runner-callback-token';
 const deliveryId = 'runtime-tracer-eligible-1';
 const invalidDeliveryId = 'runtime-tracer-invalid-1';
 const payload = {
@@ -80,6 +81,13 @@ const runtimeHarness = {
     const response = await SELF.fetch('https://tracer.internal/__test/capture');
     return (await response.json()) as readonly CapturedRunnerJob[];
   },
+  claim: () =>
+    SELF.fetch(
+      new Request('https://tracer.internal/runner-claim', {
+        method: 'POST',
+        headers: { authorization: `Bearer ${runnerCallbackToken}` },
+      }),
+    ),
   readDeliveryOutcome: async (id: string): Promise<DeliveryOutcome | undefined> => {
     const response = await SELF.fetch(
       `https://tracer.internal/__test/outcome?deliveryId=${encodeURIComponent(id)}`,
@@ -92,13 +100,17 @@ const runtimeHarness = {
 describe('local Worker runtime tracer', () => {
   beforeEach(() => runtimeHarness.clearCapture());
 
-  it('routes a signed eligible webhook through ingress, CORE, D1, and immediate Runner submission', async () => {
+  it('routes a signed webhook to D1, then pulls its Job through public ingress', async () => {
     const response = await runtimeHarness.send(await signedWebhook());
 
     expect(response.status).toBe(202);
-    const captures = await runtimeHarness.readCapture();
-    expect(captures).toHaveLength(1);
-    expect(captures[0]).toMatchObject({
+    expect(await runtimeHarness.readCapture()).toEqual([]);
+
+    const claim = await runtimeHarness.claim();
+    expect(claim.status).toBe(200);
+    const claimed = (await claim.json()) as CapturedRunnerJob & { readonly id: string };
+    expect(claimed).toMatchObject({
+      id: expect.any(String),
       runId: expect.any(String),
       attempt: 1,
       repositoryUrl: 'https://github.com/acme/reviewed.git',
@@ -113,7 +125,7 @@ describe('local Worker runtime tracer', () => {
     expect(outcome).toMatchObject({
       deliveryId,
       status: 'scheduled',
-      runId: captures[0].runId,
+      runId: claimed.runId,
     });
   });
 

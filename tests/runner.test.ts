@@ -343,6 +343,248 @@ const runAgentScenario = async (scenario: {
 };
 
 describe('Runner Job HTTP interface', () => {
+  it('does not claim durable work until local Job admission is fully configured', async () => {
+    let claims = 0;
+    for (const options of [
+      { authToken: undefined, modelSecretCommand: 'secret-resolver get MODEL_API_KEY' },
+      { authToken: 'runner-test-token', modelSecretCommand: undefined },
+    ]) {
+      createProductionRunner({
+        ...options,
+        callbackUrl: 'https://ingress.test/runner-callback',
+        callbackToken: 'callback-token',
+        claimUrl: 'https://ingress.test/runner-claim',
+        claimFetch: async () => {
+          claims += 1;
+          return new Response(null, { status: 204 });
+        },
+        claimIntervalMs: 1,
+      });
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(claims).toBe(0);
+  });
+
+  it('polls again after a hanging claim request reaches its finite timeout', async () => {
+    let claims = 0;
+    let secondClaim!: () => void;
+    const secondClaimObserved = new Promise<void>((resolve) => {
+      secondClaim = resolve;
+    });
+    const runner = createRunner({
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      callbackUrl: 'https://ingress.test/runner-callback',
+      claimUrl: 'https://ingress.test/runner-claim',
+      claimTimeoutMs: 5,
+      claimIntervalMs: 1,
+      claimFetch: async (_input, init) => {
+        claims += 1;
+        if (claims === 1) {
+          return new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => reject(new Error('claim aborted')), {
+              once: true,
+            });
+          });
+        }
+        secondClaim();
+        return new Response(null, { status: 204 });
+      },
+    });
+
+    await secondClaimObserved;
+    expect(claims).toBeGreaterThanOrEqual(2);
+    expect(
+      (
+        await runner.handle(
+          new Request('http://runner/jobs/unknown', {
+            headers: { authorization: 'Bearer runner-test-token' },
+          }),
+        )
+      ).status,
+    ).toBe(404);
+  });
+
+  it('derives the claim route from the callback URL when no claim URL is injected', async () => {
+    let claimedUrl: string | undefined;
+    let observed!: () => void;
+    const claimObserved = new Promise<void>((resolve) => {
+      observed = resolve;
+    });
+    createRunner({
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      callbackUrl: 'https://ingress.test/runner-callback',
+      claimFetch: async (input) => {
+        claimedUrl =
+          typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+        observed();
+        return new Response(null, { status: 204 });
+      },
+      claimIntervalMs: 60_000,
+    });
+
+    await claimObserved;
+    expect(claimedUrl).toBe('https://ingress.test/runner-claim');
+  });
+
+  it('lets a fresh Runner instance claim later queued work', async () => {
+    const firstEvidenceRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-runner-restart-1-'));
+    const secondEvidenceRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-runner-restart-2-'));
+    const firstJob = {
+      ...runnerJobFields,
+      id: 'runner-restart-job-1',
+      runId: 'run-restart-1',
+      attempt: 1,
+      repositoryUrl: 'https://github.com/acme/reviewed.git',
+      baseSha: '1111111111111111111111111111111111111111',
+      headSha: '2222222222222222222222222222222222222222',
+    };
+    const secondJob = { ...firstJob, id: 'runner-restart-job-2', runId: 'run-restart-2' };
+    let firstClaimed!: () => void;
+    const firstClaimObserved = new Promise<void>((resolve) => {
+      firstClaimed = resolve;
+    });
+    const process = async (
+      _command: string,
+      args: readonly string[],
+      options: Parameters<RunnerProcess>[2] = {},
+    ) => {
+      await writeEvidenceFixture(args, options, finalMarkdownJsonl());
+      return {
+        exitCode: 0,
+        stdout: args.includes('rev-parse')
+          ? `${firstJob.baseSha}\n${firstJob.headSha}\n`
+          : args.includes('session')
+            ? '[{"id":"session-1"}]\n'
+            : args.includes('export')
+              ? ''
+              : options.captureStdout === true
+                ? finalMarkdownJsonl()
+                : '',
+        timedOut: false,
+        truncated: false,
+      };
+    };
+
+    const firstRunner = createRunner({
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      evidenceRoot: firstEvidenceRoot,
+      claimUrl: 'https://ingress.test/runner-claim',
+      claimFetch: async () => {
+        firstClaimed();
+        return Response.json(firstJob);
+      },
+      claimIntervalMs: 1,
+      process,
+    });
+
+    try {
+      await firstClaimObserved;
+      const secondRunner = createRunner({
+        authToken: 'runner-test-token',
+        modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+        evidenceRoot: secondEvidenceRoot,
+        claimUrl: 'https://ingress.test/runner-claim',
+        claimFetch: async () => Response.json(secondJob),
+        claimIntervalMs: 1,
+        process,
+      });
+
+      const secondTerminal = await waitForTerminal(secondRunner, secondJob.id);
+      expect(secondTerminal.status).toBe('succeeded');
+      const firstTerminal = await waitForTerminal(firstRunner, firstJob.id);
+      expect(firstTerminal.status).toBe('succeeded');
+    } finally {
+      await Promise.all([
+        rm(firstEvidenceRoot, { recursive: true, force: true }),
+        rm(secondEvidenceRoot, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
+  it('pulls one Job while idle and claims the next only after terminal cleanup', async () => {
+    const evidenceRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-runner-queue-'));
+    const jobs = [
+      {
+        ...runnerJobFields,
+        id: 'runner-claimed-job-1',
+        runId: 'run-claimed-1',
+        attempt: 1,
+        repositoryUrl: 'https://github.com/acme/reviewed.git',
+        baseSha: '1111111111111111111111111111111111111111',
+        headSha: '2222222222222222222222222222222222222222',
+      },
+      {
+        ...runnerJobFields,
+        id: 'runner-claimed-job-2',
+        runId: 'run-claimed-2',
+        attempt: 1,
+        repositoryUrl: 'https://github.com/acme/reviewed.git',
+        baseSha: '1111111111111111111111111111111111111111',
+        headSha: '2222222222222222222222222222222222222222',
+      },
+    ];
+    let claims = 0;
+    let activeAgents = 0;
+    let maximumActiveAgents = 0;
+    const runner = createRunner({
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      evidenceRoot,
+      callbackUrl: 'https://ingress.test/runner-callback',
+      callbackToken: 'callback-token',
+      callbackFetch: async () => new Response(null, { status: 202 }),
+      claimUrl: 'https://ingress.test/runner-claim',
+      claimFetch: async () => {
+        const job = jobs[claims++];
+        return job === undefined
+          ? new Response(null, { status: 204 })
+          : Response.json(job, { status: 200 });
+      },
+      claimIntervalMs: 1,
+      process: async (_command, args, options = {}) => {
+        if (args[0] === 'exec' && args.includes('--agent')) {
+          activeAgents += 1;
+          maximumActiveAgents = Math.max(maximumActiveAgents, activeAgents);
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          await writeEvidenceFixture(args, options, finalMarkdownJsonl());
+          activeAgents -= 1;
+          return {
+            exitCode: 0,
+            stdout: `${finalMarkdownJsonl()}\n`,
+            timedOut: false,
+            truncated: false,
+          };
+        }
+        await writeEvidenceFixture(args, options, finalMarkdownJsonl());
+        return {
+          exitCode: 0,
+          stdout: args.includes('rev-parse')
+            ? `${jobs[0]!.baseSha}\n${jobs[0]!.headSha}\n`
+            : args.includes('session')
+              ? '[{"id":"session-1"}]\n'
+              : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
+    });
+
+    try {
+      const first = await waitForTerminal(runner, jobs[0]!.id);
+      expect(first.status).toBe('succeeded');
+      const second = await waitForTerminal(runner, jobs[1]!.id);
+      expect(second.status).toBe('succeeded');
+      expect(claims).toBeGreaterThanOrEqual(2);
+      expect(maximumActiveAgents).toBe(1);
+    } finally {
+      await rm(evidenceRoot, { recursive: true, force: true });
+    }
+  });
+
   it('rejects admission when callback configuration is incomplete before starting a Job', async () => {
     let processCalls = 0;
     const runner = createProductionRunner({
@@ -1014,14 +1256,10 @@ describe('Runner Job HTTP interface', () => {
       return (await response.json()) as { id: string };
     };
 
-    const [first, second] = await Promise.all([
-      submit('run-93-policy-first'),
-      submit('run-93-policy-second'),
-    ]);
-    const [firstTerminal, secondTerminal] = await Promise.all([
-      waitForTerminal(runner, first.id),
-      waitForTerminal(runner, second.id),
-    ]);
+    const first = await submit('run-93-policy-first');
+    const firstTerminal = await waitForTerminal(runner, first.id);
+    const second = await submit('run-93-policy-second');
+    const secondTerminal = await waitForTerminal(runner, second.id);
 
     expect(firstTerminal).toMatchObject({
       status: 'succeeded',
@@ -3133,8 +3371,9 @@ describe('Runner Job HTTP interface', () => {
 
     const first = await runner.handle(request(1));
     const duplicate = await runner.handle(request(1));
+    const firstState = (await first.clone().json()) as { id: string; attempt: number };
+    await waitForTerminal(runner, firstState.id);
     const retry = await runner.handle(request(2));
-    const firstState = (await first.json()) as { id: string; attempt: number };
     const duplicateState = (await duplicate.json()) as { id: string; attempt: number };
     const retryState = (await retry.json()) as { id: string; attempt: number };
 

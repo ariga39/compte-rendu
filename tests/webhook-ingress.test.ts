@@ -67,6 +67,88 @@ const collectingLog = () => {
 };
 
 describe('Webhook ingress', () => {
+  it('forwards an authenticated Runner claim through the public ingress route', async () => {
+    const forwarded: Request[] = [];
+    const worker = createIngressWorker({
+      secret,
+      crypto: globalThis.crypto,
+      runnerCallbackToken: 'callback-token',
+      core: {
+        fetch: async (request) => {
+          forwarded.push(request.clone());
+          return new Response(JSON.stringify({ id: 'job-1' }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        },
+      },
+    });
+
+    const response = await worker.fetch(
+      new Request('https://ingress.internal/runner-claim', {
+        method: 'POST',
+        headers: { authorization: 'Bearer callback-token' },
+        body: JSON.stringify({ runnerInstanceId: 'runner-1' }),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ id: 'job-1' });
+    expect(forwarded).toHaveLength(1);
+    expect(forwarded[0]?.url).toBe('https://core.internal/runner-claims');
+    expect(forwarded[0]?.headers.get('x-compte-rendu-runner-claim')).toBe('verified');
+  });
+
+  it('rejects an unauthenticated Runner claim without contacting core', async () => {
+    const forwarded: Request[] = [];
+    const worker = createIngressWorker({
+      secret,
+      crypto: globalThis.crypto,
+      runnerCallbackToken: 'callback-token',
+      core: {
+        fetch: async (request) => {
+          forwarded.push(request);
+          return new Response(null, { status: 200 });
+        },
+      },
+    });
+
+    const response = await worker.fetch(
+      new Request('https://ingress.internal/runner-claim', {
+        method: 'POST',
+        body: '{}',
+      }),
+    );
+
+    expect(response.status).toBe(401);
+    expect(forwarded).toHaveLength(0);
+  });
+
+  it('requires POST for the public Runner claim route', async () => {
+    const forwarded: Request[] = [];
+    const worker = createIngressWorker({
+      secret,
+      crypto: globalThis.crypto,
+      runnerCallbackToken: 'callback-token',
+      core: {
+        fetch: async (request) => {
+          forwarded.push(request);
+          return new Response(null, { status: 200 });
+        },
+      },
+    });
+
+    const response = await worker.fetch(
+      new Request('https://ingress.internal/runner-claim', {
+        method: 'GET',
+        headers: { authorization: 'Bearer callback-token' },
+      }),
+    );
+
+    expect(response.status).toBe(405);
+    expect(forwarded).toHaveLength(0);
+  });
+
   it('forwards an authenticated runner callback through the public ingress route', async () => {
     const forwarded: Request[] = [];
     const callbackBody = JSON.stringify({ runId: 'run-callback-1', status: 'succeeded' });

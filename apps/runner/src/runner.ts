@@ -47,6 +47,7 @@ const MAX_POLICY_JSON_BYTES = 256 * 1024;
 const MAX_AGENT_OUTPUT_BYTES = MAX_REVIEW_RESULT_BYTES;
 const MAX_REQUEST_BYTES = 64 * 1024;
 const CALLBACK_REQUEST_TIMEOUT_MS = 30 * 1000;
+const CLAIM_REQUEST_TIMEOUT_MS = 30 * 1000;
 const SANDBOX_EVIDENCE_ROOT = '/tmp/petit-chiba-opencode-evidence';
 const EMPTY_EVIDENCE_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 
@@ -402,6 +403,10 @@ export interface RunnerOptions {
   readonly callbackToken?: string;
   readonly callbackFetch?: typeof fetch;
   readonly callbackTimeoutMs?: number;
+  readonly claimUrl?: string;
+  readonly claimFetch?: typeof fetch;
+  readonly claimTimeoutMs?: number;
+  readonly claimIntervalMs?: number;
 }
 
 type RunnerDiagnostic = {
@@ -560,6 +565,20 @@ export const createRunner = (options: RunnerOptions = {}) => {
   const callbackToken = options.callbackToken ?? process.env.RUNNER_CALLBACK_TOKEN;
   const callbackFetch = options.callbackFetch ?? globalThis.fetch;
   const callbackTimeoutMs = options.callbackTimeoutMs ?? CALLBACK_REQUEST_TIMEOUT_MS;
+  const claimUrl =
+    options.claimUrl ??
+    (callbackUrl === undefined
+      ? undefined
+      : (() => {
+          try {
+            return new URL('/runner-claim', callbackUrl).toString();
+          } catch {
+            return undefined;
+          }
+        })());
+  const claimFetch = options.claimFetch ?? globalThis.fetch;
+  const claimTimeoutMs = options.claimTimeoutMs ?? CLAIM_REQUEST_TIMEOUT_MS;
+  const claimIntervalMs = options.claimIntervalMs ?? 1000;
   const strippedSandboxEnvironment = {
     ...process.env,
     SSH_AUTH_SOCK: undefined,
@@ -569,6 +588,13 @@ export const createRunner = (options: RunnerOptions = {}) => {
   };
   const jobs = new Map<string, RunnerJob>();
   const jobsByRun = new Map<string, RunnerJob>();
+  let claiming = false;
+  let claimPollingHalted = false;
+  let requestNextJob: (() => void) | undefined;
+  const hasActiveJob = () =>
+    [...jobs.values()].some(
+      (candidate) => candidate.state.status === 'queued' || candidate.state.status === 'running',
+    );
 
   const update = (job: RunnerJob, state: Partial<RunnerJobState>) => {
     Object.assign(job.state, state);
@@ -1734,6 +1760,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       );
       job.diagnosticCheckoutToken = '';
       job.resolveDone();
+      requestNextJob?.();
     }
   };
 
@@ -1774,6 +1801,9 @@ export const createRunner = (options: RunnerOptions = {}) => {
       }
       const existing = jobsByRun.get(`${input.runId}:${input.attempt}`);
       if (existing !== undefined) return jsonResponse(409, publicState(existing));
+      if (hasActiveJob()) {
+        return jsonResponse(409, { error: 'runner is busy' });
+      }
       let resolveDone = () => {};
       const done = new Promise<void>((resolve) => {
         resolveDone = resolve;
@@ -1828,6 +1858,83 @@ export const createRunner = (options: RunnerOptions = {}) => {
     }
     return jsonResponse(404, { error: 'not found' });
   };
+
+  const scheduleClaim = () => {
+    const timer = setTimeout(() => void claimNextJob(), claimIntervalMs);
+    if (typeof timer === 'object' && timer !== null && 'unref' in timer) {
+      (timer as { unref: () => void }).unref();
+    }
+  };
+
+  const claimNextJob = async () => {
+    if (
+      claiming ||
+      claimPollingHalted ||
+      claimUrl === undefined ||
+      claimUrl.length === 0 ||
+      authToken === undefined ||
+      authToken.length === 0 ||
+      callbackToken === undefined ||
+      callbackToken.length === 0 ||
+      modelSecretCommand === undefined ||
+      modelSecretCommand.length === 0 ||
+      hasActiveJob()
+    ) {
+      return;
+    }
+
+    claiming = true;
+    let continuePolling = true;
+    const controller = new AbortController();
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const response = await Promise.race([
+        claimFetch(claimUrl, {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${callbackToken}`,
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({}),
+          signal: controller.signal,
+        }),
+        new Promise<Response>((_, reject) => {
+          timeout = setTimeout(() => {
+            controller.abort();
+            reject(new Error('Runner claim request timed out'));
+          }, claimTimeoutMs);
+        }),
+      ]);
+      if (response.status === 200) {
+        continuePolling = false;
+        claimPollingHalted = true;
+        const input = await Schema.decodeUnknownPromise(RunnerJobInput)(await response.json());
+        const admitted = await handle(
+          new Request('http://runner.internal/jobs', {
+            method: 'POST',
+            headers: {
+              authorization: `Bearer ${authToken ?? ''}`,
+              'content-type': 'application/json',
+            },
+            body: JSON.stringify(input),
+          }),
+        );
+        if (admitted.status !== 202) throw new Error('Claimed Runner Job could not be admitted');
+        claimPollingHalted = false;
+      }
+    } catch {
+      // The next idle poll is the bounded transport retry for claim availability.
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+      claiming = false;
+      if (continuePolling && !hasActiveJob()) {
+        scheduleClaim();
+      }
+    }
+  };
+
+  requestNextJob = () => void claimNextJob();
+  if (claimUrl !== undefined && claimUrl.length > 0) void claimNextJob();
 
   return { handle };
 };
