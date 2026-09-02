@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { chmod, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, stat, unlink, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { join, resolve } from 'node:path';
 import { Schema } from 'effect';
@@ -51,9 +51,58 @@ const readProbeJobs = async (jobsPath: string): Promise<readonly ProbeJob[]> => 
   return Schema.decodeUnknownPromise(Schema.Array(probeJob))(value);
 };
 
-const writePrivate = async (path: string, content: string | Uint8Array) => {
-  await writeFile(path, content, { mode: 0o600 });
-  await chmod(path, 0o600);
+const isFileError = (error: unknown, code: string) =>
+  typeof error === 'object' && error !== null && 'code' in error && error.code === code;
+
+const createPrivate = async (path: string, content: string | Uint8Array) => {
+  let created = false;
+  try {
+    await writeFile(path, content, { flag: 'wx', mode: 0o600 });
+    created = true;
+    await chmod(path, 0o600);
+  } catch (error) {
+    if (created) await unlink(path);
+    throw error;
+  }
+};
+
+const artifactExists = async (path: string) => {
+  try {
+    await stat(path);
+    return true;
+  } catch (error) {
+    if (isFileError(error, 'ENOENT')) return false;
+    throw error;
+  }
+};
+
+const reserveCallbackSlot = async (
+  directory: string,
+  content: string | Uint8Array,
+  retainedCallbacks: string[],
+) => {
+  for (let number = 1; ; number += 1) {
+    const callbackPath = join(directory, `callback-${number}.json`);
+    const reviewPath = join(directory, `captured-review-${number}.json`);
+    if (await artifactExists(reviewPath)) continue;
+    try {
+      await createPrivate(callbackPath, content);
+    } catch (error) {
+      if (!isFileError(error, 'EEXIST')) throw error;
+      continue;
+    }
+    if (await artifactExists(reviewPath)) {
+      retainedCallbacks.push(callbackPath);
+      continue;
+    }
+    return { callbackPath, reviewPath };
+  }
+};
+
+const writeNextCallback = async (directory: string, content: string | Uint8Array) => {
+  const retainedCallbacks: string[] = [];
+  await reserveCallbackSlot(directory, content, retainedCallbacks);
+  for (const retainedCallback of retainedCallbacks) await unlink(retainedCallback);
 };
 
 const response = (status: number, body?: string, contentType?: string) =>
@@ -78,8 +127,6 @@ export const createGitHubPublicationProbe = async (
 
   const github = createGitHubPublicationShim(options.readAdapter ?? {});
   const claimed = new Map<string, ProbeJob>();
-  let callbackNumber = 0;
-  let reviewNumber = 0;
 
   const handleClaim = async (request: Request) => {
     if (!authorized(request, options.callbackToken)) return response(401);
@@ -109,47 +156,63 @@ export const createGitHubPublicationProbe = async (
       return response(409);
     }
 
-    callbackNumber += 1;
-    await writePrivate(
-      join(options.evidenceRoot, `callback-${callbackNumber}.json`),
-      new Uint8Array(body),
-    );
-
-    if (callback.status === 'succeeded') {
-      if (options.readAdapter?.loadReviewTarget !== undefined) {
-        try {
-          const target = await Schema.decodeUnknownPromise(reviewTarget)(
-            await options.readAdapter.loadReviewTarget({
-              repositoryId: expected.repositoryId,
-              pullRequestNumber: expected.job.pullRequestNumber,
-              installationId: expected.installationId,
-            }),
-          );
-          if (target.headSha !== expected.job.headSha) return response(409);
-        } catch {
-          return response(503);
-        }
-      }
-
-      await github.createReview!({
-        repositoryId: expected.repositoryId,
-        pullRequestNumber: expected.job.pullRequestNumber,
-        installationId: expected.installationId,
-        payload: formatReviewPublicationPayload({
-          runId: expected.job.runId,
-          headSha: expected.job.headSha,
-          markdown: callback.result,
-        }),
-      });
-      const capturedReview = github.capturedReviews.at(-1);
-      if (capturedReview === undefined) return response(500);
-      reviewNumber += 1;
-      await writePrivate(
-        join(options.evidenceRoot, `captured-review-${reviewNumber}.json`),
-        JSON.stringify(capturedReview, null, 2),
-      );
+    const callbackBytes = new Uint8Array(body);
+    if (callback.status !== 'succeeded') {
+      await writeNextCallback(options.evidenceRoot, callbackBytes);
+      claimed.delete(callback.id);
+      return response(202);
     }
 
+    const retainedCallbacks: string[] = [];
+    let reservation = await reserveCallbackSlot(
+      options.evidenceRoot,
+      callbackBytes,
+      retainedCallbacks,
+    );
+    if (options.readAdapter?.loadReviewTarget !== undefined) {
+      try {
+        const target = await Schema.decodeUnknownPromise(reviewTarget)(
+          await options.readAdapter.loadReviewTarget({
+            repositoryId: expected.repositoryId,
+            pullRequestNumber: expected.job.pullRequestNumber,
+            installationId: expected.installationId,
+          }),
+        );
+        if (target.headSha !== expected.job.headSha) return response(409);
+      } catch {
+        return response(503);
+      }
+    }
+
+    const publication = await github.createReview!({
+      repositoryId: expected.repositoryId,
+      pullRequestNumber: expected.job.pullRequestNumber,
+      installationId: expected.installationId,
+      payload: formatReviewPublicationPayload({
+        runId: expected.job.runId,
+        headSha: expected.job.headSha,
+        markdown: callback.result,
+      }),
+    });
+    if (publication.kind !== 'created') return response(409);
+    const capturedReview = publication.review;
+    if (capturedReview === undefined) return response(500);
+    const reviewBytes = JSON.stringify(capturedReview, null, 2);
+    while (true) {
+      try {
+        await createPrivate(reservation.reviewPath, reviewBytes);
+        break;
+      } catch (error) {
+        if (!isFileError(error, 'EEXIST')) throw error;
+        retainedCallbacks.push(reservation.callbackPath);
+        reservation = await reserveCallbackSlot(
+          options.evidenceRoot,
+          callbackBytes,
+          retainedCallbacks,
+        );
+      }
+    }
+    for (const retainedCallback of retainedCallbacks) await unlink(retainedCallback);
     claimed.delete(callback.id);
     return response(202);
   };
