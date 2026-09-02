@@ -123,8 +123,340 @@ const failedCallback = async (runId: string, id = 'runner-job-1', attempt = 1) =
     failure: { reason: 'agent' },
   });
 
+const abortedCallback = async (runId: string, id: string, attempt = 1) =>
+  JSON.stringify({
+    id,
+    runId,
+    attempt,
+    status: 'aborted',
+    stage: 'cleanup',
+    sandbox: { cleanup: 'destroyed' },
+    evidence: {
+      id: 'evidence-aborted',
+      status: 'incomplete',
+      manifest: await evidenceField(''),
+      opencodeJsonl: await evidenceField(''),
+      opencodeStderr: await evidenceField(''),
+    },
+    timestamps: { cleanupCompletedAt: '2026-09-01T00:00:03.000Z' },
+  });
+
 describe('Core Worker', () => {
-  it('claims and immediately submits one Runner Job without creating a Workflow', async () => {
+  it('durably schedules an eligible webhook without admitting a Job or minting a read token', async () => {
+    const database = new SqliteD1Database();
+    let runnerAdmissions = 0;
+    let tokenMints = 0;
+    const worker = createCoreWorker(
+      {
+        REVIEW_DB: database,
+        RUNNER: {
+          fetch: async () => {
+            runnerAdmissions += 1;
+            return new Response(null, { status: 202 });
+          },
+        },
+        RUNNER_AUTH_TOKEN: 'runner-auth-token',
+        GITHUB_APP_ID: '1234567',
+        GITHUB_APP_PRIVATE_KEY: 'test-private-key',
+      },
+      {
+        github: { getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git' },
+        getReadInstallationToken: async () => {
+          tokenMints += 1;
+          return { token: 'repository-read-token', expiresAt: '2026-09-01T01:00:00.000Z' };
+        },
+      },
+    );
+
+    try {
+      const response = await worker.fetch(
+        new Request('https://core.internal/review-events', {
+          method: 'POST',
+          body: JSON.stringify({ ...eligibleEvent, deliveryId: 'delivery-queued-only' }),
+        }),
+      );
+
+      expect(response.status).toBe(202);
+      expect(runnerAdmissions).toBe(0);
+      expect(tokenMints).toBe(0);
+    } finally {
+      database.close();
+    }
+  });
+
+  it('claims the oldest queued run and mints its read token only at claim time', async () => {
+    const database = new SqliteD1Database();
+    let tokenMints = 0;
+    const worker = createCoreWorker(
+      {
+        REVIEW_DB: database,
+        GITHUB_APP_ID: '1234567',
+        GITHUB_APP_PRIVATE_KEY: 'test-private-key',
+      },
+      {
+        github: { getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git' },
+        getReadInstallationToken: async () => {
+          tokenMints += 1;
+          return { token: 'repository-read-token', expiresAt: '2026-09-01T01:00:00.000Z' };
+        },
+      },
+    );
+
+    try {
+      const scheduled = await worker.fetch(
+        new Request('https://core.internal/review-events', {
+          method: 'POST',
+          body: JSON.stringify({ ...eligibleEvent, deliveryId: 'delivery-claimable' }),
+        }),
+      );
+      expect(scheduled.status).toBe(202);
+      expect(tokenMints).toBe(0);
+
+      const claim = await worker.fetch(
+        new Request('https://core.internal/runner-claims', {
+          method: 'POST',
+          headers: { 'x-compte-rendu-runner-claim': 'verified' },
+        }),
+      );
+
+      expect(claim.status).toBe(200);
+      expect(await claim.json()).toMatchObject({
+        id: expect.stringMatching(/^[0-9a-f-]{36}$/),
+        runId: expect.any(String),
+        attempt: 1,
+        repositoryUrl: 'https://github.com/acme/reviewed.git',
+        repositoryName: 'acme/reviewed',
+        pullRequestNumber: 42,
+        baseSha: eligibleEvent.baseSha,
+        headSha: eligibleEvent.headSha,
+        repositoryReadToken: 'repository-read-token',
+      });
+      expect(tokenMints).toBe(1);
+    } finally {
+      database.close();
+    }
+  });
+
+  it('allows a fresh claim to take later queued work after an earlier claim remains recorded', async () => {
+    const database = new SqliteD1Database();
+    const worker = createCoreWorker(
+      { REVIEW_DB: database, GITHUB_APP_ID: '1234567', GITHUB_APP_PRIVATE_KEY: 'test-private-key' },
+      {
+        github: { getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git' },
+        getReadInstallationToken: async () => ({
+          token: 'repository-read-token',
+          expiresAt: '2026-09-01T01:00:00.000Z',
+        }),
+      },
+    );
+
+    try {
+      for (const event of [
+        { ...eligibleEvent, deliveryId: 'delivery-restart-old' },
+        {
+          ...eligibleEvent,
+          deliveryId: 'delivery-restart-new',
+          pullRequestNumber: 43,
+        },
+      ]) {
+        expect(
+          (
+            await worker.fetch(
+              new Request('https://core.internal/review-events', {
+                method: 'POST',
+                body: JSON.stringify(event),
+              }),
+            )
+          ).status,
+        ).toBe(202);
+      }
+
+      const firstClaim = await worker.fetch(
+        new Request('https://core.internal/runner-claims', {
+          method: 'POST',
+          headers: { 'x-compte-rendu-runner-claim': 'verified' },
+        }),
+      );
+      expect(firstClaim.status).toBe(200);
+      expect(await firstClaim.json()).toMatchObject({ runId: expect.any(String) });
+
+      const restartedClaim = await worker.fetch(
+        new Request('https://core.internal/runner-claims', {
+          method: 'POST',
+          headers: { 'x-compte-rendu-runner-claim': 'verified' },
+        }),
+      );
+      expect(restartedClaim.status).toBe(200);
+      expect(await restartedClaim.json()).toMatchObject({
+        pullRequestNumber: 43,
+        headSha: eligibleEvent.headSha,
+      });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('does not return the same queued run to concurrent claims', async () => {
+    const database = new SqliteD1Database();
+    const worker = createCoreWorker(
+      { REVIEW_DB: database, GITHUB_APP_ID: '1234567', GITHUB_APP_PRIVATE_KEY: 'test-private-key' },
+      {
+        github: { getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git' },
+        getReadInstallationToken: async () => ({
+          token: 'repository-read-token',
+          expiresAt: '2026-09-01T01:00:00.000Z',
+        }),
+      },
+    );
+
+    try {
+      for (const deliveryId of ['delivery-concurrent-1', 'delivery-concurrent-2']) {
+        const response = await worker.fetch(
+          new Request('https://core.internal/review-events', {
+            method: 'POST',
+            body: JSON.stringify({ ...eligibleEvent, deliveryId }),
+          }),
+        );
+        expect(response.status).toBe(202);
+      }
+
+      const claims = await Promise.all(
+        [1, 2].map(() =>
+          Promise.resolve(
+            worker.fetch(
+              new Request('https://core.internal/runner-claims', {
+                method: 'POST',
+                headers: { 'x-compte-rendu-runner-claim': 'verified' },
+              }),
+            ),
+          ),
+        ),
+      );
+
+      expect(claims.map((response) => response.status).sort((left, right) => left - right)).toEqual(
+        [200, 204],
+      );
+      const claimed = claims.find((response) => response.status === 200);
+      expect(claimed).toBeDefined();
+      expect(await claimed!.json()).toMatchObject({
+        headSha: eligibleEvent.headSha,
+        attempt: 1,
+      });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('aborts a running old head before allowing the newer head to claim', async () => {
+    const database = new SqliteD1Database();
+    const runnerRequests: Request[] = [];
+    let oldRunId = '';
+    let worker!: ReturnType<typeof createCoreWorker>;
+    worker = createCoreWorker(
+      {
+        REVIEW_DB: database,
+        EVIDENCE_BUCKET: { put: async () => undefined },
+        RUNNER: {
+          fetch: async (request) => {
+            runnerRequests.push(request.clone());
+            if (request.method === 'DELETE') {
+              const jobId = new URL(request.url).pathname.split('/').pop();
+              await worker.fetch(
+                new Request('https://core.internal/runner-results', {
+                  method: 'POST',
+                  headers: {
+                    'content-type': 'application/json',
+                    'x-compte-rendu-runner-callback': 'verified',
+                  },
+                  body: await abortedCallback(oldRunId, jobId!),
+                }),
+              );
+              return Response.json(
+                {
+                  id: jobId,
+                  runId: oldRunId,
+                  attempt: 1,
+                  evidence: { id: 'evidence-old', status: 'pending' },
+                  status: 'aborted',
+                  stage: 'cleanup',
+                  sandbox: { cleanup: 'destroyed' },
+                },
+                { status: 200 },
+              );
+            }
+            return new Response(null, { status: 404 });
+          },
+        },
+        RUNNER_AUTH_TOKEN: 'runner-auth-token',
+        GITHUB_APP_ID: '1234567',
+        GITHUB_APP_PRIVATE_KEY: 'test-private-key',
+      },
+      {
+        github: { getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git' },
+        getReadInstallationToken: async () => ({
+          token: 'repository-read-token',
+          expiresAt: '2026-09-01T01:00:00.000Z',
+        }),
+      },
+    );
+
+    try {
+      const oldEvent = { ...eligibleEvent, deliveryId: 'delivery-old-running' };
+      const newEvent = {
+        ...eligibleEvent,
+        deliveryId: 'delivery-new-queued',
+        headSha: '3333333333333333333333333333333333333333',
+      };
+      expect(
+        (
+          await worker.fetch(
+            new Request('https://core.internal/review-events', {
+              method: 'POST',
+              body: JSON.stringify(oldEvent),
+            }),
+          )
+        ).status,
+      ).toBe(202);
+      const oldClaim = await worker.fetch(
+        new Request('https://core.internal/runner-claims', {
+          method: 'POST',
+          headers: { 'x-compte-rendu-runner-claim': 'verified' },
+        }),
+      );
+      const oldJob = (await oldClaim.json()) as { id: string; runId: string };
+      oldRunId = oldJob.runId;
+
+      expect(
+        (
+          await worker.fetch(
+            new Request('https://core.internal/review-events', {
+              method: 'POST',
+              body: JSON.stringify(newEvent),
+            }),
+          )
+        ).status,
+      ).toBe(202);
+      expect(runnerRequests).toHaveLength(1);
+      expect(runnerRequests[0]?.method).toBe('DELETE');
+      expect(runnerRequests[0]?.url).toBe(`http://runner.internal/jobs/${oldJob.id}`);
+      expect((await createD1ReviewStateStore(database).getRunOutcome(oldRunId))?.status).toBe(
+        'superseded',
+      );
+
+      const newClaim = await worker.fetch(
+        new Request('https://core.internal/runner-claims', {
+          method: 'POST',
+          headers: { 'x-compte-rendu-runner-claim': 'verified' },
+        }),
+      );
+      expect(newClaim.status).toBe(200);
+      expect(await newClaim.json()).toMatchObject({ headSha: newEvent.headSha, attempt: 1 });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('queues an eligible review without creating a Runner Job', async () => {
     const database = new SqliteD1Database();
     const runnerRequests: Request[] = [];
     const worker = createCoreWorker(
@@ -158,26 +490,22 @@ describe('Core Worker', () => {
       );
 
       expect(response.status).toBe(202);
-      expect(runnerRequests).toHaveLength(1);
-      expect(runnerRequests[0]?.method).toBe('POST');
-      expect(runnerRequests[0]?.headers.get('authorization')).toBe('Bearer runner-auth-token');
-      expect(await runnerRequests[0]?.json()).toMatchObject({
-        runId: expect.any(String),
-        id: expect.stringMatching(/^[0-9a-f-]{36}$/),
-        attempt: 1,
-        repositoryUrl: 'https://github.com/acme/reviewed.git',
-        repositoryName: 'acme/reviewed',
-        pullRequestNumber: 42,
-        baseSha: eligibleEvent.baseSha,
-        headSha: eligibleEvent.headSha,
-        repositoryReadToken: 'repository-read-token',
-      });
+      expect(runnerRequests).toHaveLength(0);
+      const claim = await worker.fetch(
+        new Request('https://core.internal/runner-claims', {
+          method: 'POST',
+          headers: { 'x-compte-rendu-runner-claim': 'verified' },
+        }),
+      );
+      expect(claim.status).toBe(200);
+      expect(await claim.json()).toMatchObject({ repositoryReadToken: 'repository-read-token' });
+      expect(runnerRequests).toHaveLength(0);
     } finally {
       database.close();
     }
   });
 
-  it('retries a lost Runner admission with the same immutable Job input', async () => {
+  it('does not retry or admit a Runner while accepting a webhook', async () => {
     const database = new SqliteD1Database();
     const runnerRequests: Request[] = [];
     let admissions = 0;
@@ -214,11 +542,7 @@ describe('Core Worker', () => {
       );
 
       expect(response.status).toBe(202);
-      expect(runnerRequests).toHaveLength(2);
-      const firstInput = await runnerRequests[0]?.json();
-      const secondInput = await runnerRequests[1]?.json();
-      expect(secondInput).toEqual(firstInput);
-      expect(firstInput).toMatchObject({ id: expect.any(String), attempt: 1 });
+      expect(runnerRequests).toHaveLength(0);
     } finally {
       database.close();
     }
@@ -454,6 +778,10 @@ describe('Core Worker', () => {
       occurredAt: '2026-09-01T00:00:02.000Z',
     });
     if (replacement.kind !== 'claimed') throw new Error('replacement test run was not claimed');
+    await stateStore.markRunSuperseded({
+      runId: superseded.runId,
+      occurredAt: '2026-09-01T00:00:03.000Z',
+    });
     const stored: unknown[] = [];
     const published: unknown[] = [];
     const worker = createCoreWorker(
@@ -725,7 +1053,7 @@ describe('Core Worker', () => {
           }),
         ),
       ).toMatchObject({ status: 202 });
-      expect(runnerRequests).toHaveLength(1);
+      expect(runnerRequests).toHaveLength(0);
     } finally {
       database.close();
     }
@@ -1028,7 +1356,7 @@ describe('Core Worker', () => {
     }
   });
 
-  it('keeps Runner admission failure fail-closed', async () => {
+  it('accepts a queued review without requiring Runner admission', async () => {
     const database = new SqliteD1Database();
     const events: OperationalLogEvent[] = [];
     const worker = createCoreWorker(
@@ -1059,13 +1387,13 @@ describe('Core Worker', () => {
             }),
           }),
         ),
-      ).toMatchObject({ status: 503 });
+      ).toMatchObject({ status: 202 });
       expect(events).toEqual([
         {
           phase: 'core',
-          outcome: 'retryable',
+          outcome: 'scheduled',
           deliveryId: 'delivery-core-worker-schedule-failed',
-          reason: 'scheduling_failure',
+          runId: expect.any(String),
         },
       ]);
     } finally {

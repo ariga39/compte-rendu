@@ -19,6 +19,7 @@ export { createCloudflareOperationalLog } from './operational-log';
 
 const supportedEvents = ['pull_request', 'issue_comment'] as const;
 const runnerCallbackPath = '/runner-callback';
+const runnerClaimPath = '/runner-claim';
 const supportedPullRequestActions = [
   'opened',
   'reopened',
@@ -431,6 +432,33 @@ const forwardRunnerCallback = async (request: Request, dependencies: IngressDepe
   return new Response(null, { status: forwarded.ok ? 202 : 503 });
 };
 
+const forwardRunnerClaim = async (request: Request, dependencies: IngressDependencies) => {
+  if (
+    dependencies.runnerCallbackToken === undefined ||
+    request.headers.get('authorization') !== `Bearer ${dependencies.runnerCallbackToken}`
+  ) {
+    return new Response(null, { status: 401 });
+  }
+
+  const body = await request.arrayBuffer();
+  if (body.byteLength > 64 * 1024) return new Response(null, { status: 413 });
+  const forwarded = await dependencies.core.fetch(
+    new Request('https://core.internal/runner-claims', {
+      method: 'POST',
+      headers: {
+        'content-type': request.headers.get('content-type') ?? 'application/json',
+        'x-compte-rendu-runner-claim': 'verified',
+      },
+      body,
+    }),
+  );
+  const responseBody = await forwarded.arrayBuffer();
+  return new Response(responseBody, {
+    status: forwarded.status,
+    headers: forwarded.headers,
+  });
+};
+
 export function createIngressWorker(dependencies: IngressDependencies): WorkerEntrypoint {
   return {
     fetch: async (request) => {
@@ -441,6 +469,14 @@ export function createIngressWorker(dependencies: IngressDependencies): WorkerEn
       if (new URL(request.url).pathname === runnerCallbackPath) {
         try {
           return await forwardRunnerCallback(request, dependencies);
+        } catch {
+          return new Response(null, { status: 503 });
+        }
+      }
+
+      if (new URL(request.url).pathname === runnerClaimPath) {
+        try {
+          return await forwardRunnerClaim(request, dependencies);
         } catch {
           return new Response(null, { status: 503 });
         }

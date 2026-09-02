@@ -98,6 +98,11 @@ export interface ReviewApproval {
   headSha: GitHubShaValue;
 }
 
+export interface ActiveRunnerJob {
+  readonly runId: string;
+  readonly jobId: string;
+}
+
 export interface ReviewStateStore {
   claimReview(input: {
     deliveryId: string;
@@ -105,9 +110,17 @@ export interface ReviewStateStore {
     occurredAt: string;
     approval?: ReviewApproval;
   }): Promise<
-    | { kind: 'claimed'; runId: string }
-    | { kind: 'replay'; disposition: ReviewDisposition }
-    | { kind: 'existing'; disposition: ReviewDisposition }
+    | { kind: 'claimed'; runId: string; activeRunnerJob?: ActiveRunnerJob }
+    | { kind: 'replay'; disposition: ReviewDisposition; activeRunnerJob?: ActiveRunnerJob }
+    | { kind: 'existing'; disposition: ReviewDisposition; activeRunnerJob?: ActiveRunnerJob }
+  >;
+  claimNextJob?(input: {
+    jobId: string;
+    attempt: number;
+    occurredAt: string;
+  }): Promise<
+    | { kind: 'claimed'; runId: string; jobId: string; attempt: number; job: ReviewJob }
+    | { kind: 'empty' }
   >;
   markSchedulingFailed(input: { runId: string; occurredAt: string }): Promise<void>;
   recordDelivery: (input: ReviewDeliveryRecord) => Promise<void>;
@@ -132,6 +145,7 @@ export type ReviewPublicationStateStore = ReviewStateStore & ReviewStateQueries;
 
 export interface ReviewScheduler {
   schedule(job: ReviewJob, runId: string): Promise<void>;
+  cancel?(jobId: string): Promise<void>;
 }
 
 export interface GitHubAdapter {
@@ -634,7 +648,7 @@ const schedule = (scheduler: ReviewScheduler, job: ReviewJob, runId: string) =>
   );
 
 const claimAndSchedule = (
-  stateStore: ReviewStateStore,
+  stateStore: ReviewCompletionStateStore,
   scheduler: ReviewScheduler,
   deliveryId: string,
   job: ReviewJob,
@@ -668,6 +682,26 @@ const claimAndSchedule = (
 
     if (claim.kind !== 'claimed') {
       return claim.disposition;
+    }
+
+    if (claim.activeRunnerJob !== undefined) {
+      if (scheduler.cancel === undefined || stateStore.markRunSuperseded === undefined) {
+        return 'scheduled' as const;
+      }
+      const superseded = yield* Effect.tryPromise({
+        try: () =>
+          stateStore.markRunSuperseded!({ runId: claim.activeRunnerJob!.runId, occurredAt }),
+        catch: () => false,
+      }).pipe(Effect.catch(() => Effect.succeed(false)));
+      if (!superseded) return 'scheduled' as const;
+      const canceled = yield* Effect.tryPromise({
+        try: () => scheduler.cancel!(claim.activeRunnerJob!.jobId),
+        catch: () => undefined,
+      }).pipe(
+        Effect.map(() => true),
+        Effect.catch(() => Effect.succeed(false)),
+      );
+      if (!canceled) return 'scheduled' as const;
     }
 
     yield* schedule(scheduler, job, claim.runId).pipe(
@@ -707,7 +741,7 @@ const recordDelivery = (stateStore: ReviewStateStore, input: ReviewDeliveryRecor
 };
 
 const createAutomaticCoordinator = (
-  stateStore: ReviewStateStore,
+  stateStore: ReviewCompletionStateStore,
   scheduler: ReviewScheduler,
   log?: OperationalLog,
 ) =>
@@ -837,7 +871,7 @@ const writeManualReaction = (
 
 const createManualCoordinator = (
   github: GitHubAdapter,
-  stateStore: ReviewStateStore,
+  stateStore: ReviewCompletionStateStore,
   scheduler: ReviewScheduler,
   log?: OperationalLog,
 ) =>
@@ -945,6 +979,7 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
   const runs = new Map<
     string,
     {
+      runId: string;
       job: ReviewJob;
       status: ReviewRunStatus;
       deliveryId: string;
@@ -1055,11 +1090,20 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
         return { kind: 'existing', disposition };
       }
 
+      const activeRunnerJob = [...runs.values()].find(
+        (run) =>
+          run.job.repositoryId === job.repositoryId &&
+          run.job.pullRequestNumber === job.pullRequestNumber &&
+          run.job.headSha !== job.headSha &&
+          run.status === 'scheduled' &&
+          run.runnerJobId !== undefined,
+      );
       for (const run of runs.values()) {
         if (
           run.job.repositoryId === job.repositoryId &&
           run.job.pullRequestNumber === job.pullRequestNumber &&
           run.status === 'scheduled' &&
+          run.runnerJobId === undefined &&
           run.job.headSha !== job.headSha
         ) {
           run.status = 'superseded';
@@ -1070,6 +1114,7 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
 
       const runId = `run-${nextRunId++}`;
       runs.set(runId, {
+        runId,
         deliveryId,
         job,
         status: 'scheduled',
@@ -1088,7 +1133,30 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
         createdAt: occurredAt,
         updatedAt: occurredAt,
       });
-      return { kind: 'claimed', runId };
+      return {
+        kind: 'claimed',
+        runId,
+        ...(activeRunnerJob === undefined
+          ? {}
+          : {
+              activeRunnerJob: {
+                runId: activeRunnerJob.runId,
+                jobId: activeRunnerJob.runnerJobId!,
+              },
+            }),
+      };
+    },
+    claimNextJob: async ({ jobId, attempt, occurredAt }) => {
+      const run = [...runs.values()]
+        .filter(
+          (candidate) => candidate.status === 'scheduled' && candidate.runnerJobId === undefined,
+        )
+        .sort((left, right) => left.createdAt.localeCompare(right.createdAt))[0];
+      if (run === undefined) return { kind: 'empty' as const };
+      run.runnerJobId = jobId;
+      run.runnerAttempt = attempt;
+      run.updatedAt = occurredAt;
+      return { kind: 'claimed' as const, runId: run.runId, jobId, attempt, job: run.job };
     },
     markSchedulingFailed: async ({ runId, occurredAt }) => {
       const run = runs.get(runId);

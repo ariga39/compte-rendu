@@ -57,6 +57,24 @@ interface RunRow {
   status: ReviewRunStatus;
 }
 
+interface ClaimRow {
+  run_id: string;
+  installation_id: number;
+  repository_id: number;
+  pull_request_number: number;
+  base_sha: string;
+  head_sha: string;
+  trigger: ReviewJob['trigger'];
+  comment_id?: number | null;
+  runner_job_id: string;
+  runner_attempt: number;
+}
+
+interface ActiveRunnerRow {
+  run_id: string;
+  runner_job_id: string;
+}
+
 const dispositionForStatus = (status: ReviewStoredStatus) => {
   switch (status) {
     case 'failed':
@@ -277,7 +295,7 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
            SET status = 'superseded', updated_at = ?
            WHERE installation_id = ? AND repository_id = ?
              AND pull_request_number = ? AND head_sha <> ?
-             AND status = 'scheduled'
+             AND status = 'scheduled' AND runner_job_id IS NULL
              AND EXISTS (
                SELECT 1 FROM review_runs
                WHERE run_id = ? AND delivery_id = ? AND status = 'scheduled'
@@ -346,6 +364,20 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
     ];
 
     const results = await database.batch(statements);
+    const activeRunner = await database
+      .prepare(
+        `SELECT run_id, runner_job_id FROM review_runs
+         WHERE installation_id = ? AND repository_id = ?
+           AND pull_request_number = ? AND head_sha <> ?
+           AND status = 'scheduled' AND runner_job_id IS NOT NULL
+         ORDER BY created_at ASC, rowid ASC LIMIT 1`,
+      )
+      .bind(job.installationId, job.repositoryId, job.pullRequestNumber, job.headSha)
+      .first<ActiveRunnerRow>();
+    const activeRunnerJob =
+      activeRunner === null
+        ? undefined
+        : { runId: activeRunner.run_id, jobId: activeRunner.runner_job_id };
     const delivery = await database.prepare(deliverySelect).bind(deliveryId).first<DeliveryRow>();
     if (delivery === null) {
       throw new Error('D1 did not retain the claimed delivery');
@@ -353,7 +385,11 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
 
     const disposition = dispositionForStatus(delivery.status);
     if ((results[0]?.meta.changes ?? 0) === 0) {
-      return { kind: 'replay' as const, disposition };
+      return {
+        kind: 'replay' as const,
+        disposition,
+        ...(activeRunnerJob ? { activeRunnerJob } : {}),
+      };
     }
 
     const run = await database
@@ -364,10 +400,53 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
       .bind(deliveryId)
       .first<RunRow>();
     if (run !== null) {
-      return { kind: 'claimed' as const, runId: run.run_id };
+      return {
+        kind: 'claimed' as const,
+        runId: run.run_id,
+        ...(activeRunnerJob ? { activeRunnerJob } : {}),
+      };
     }
 
-    return { kind: 'existing' as const, disposition };
+    return {
+      kind: 'existing' as const,
+      disposition,
+      ...(activeRunnerJob ? { activeRunnerJob } : {}),
+    };
+  },
+
+  claimNextJob: async ({ jobId, attempt, occurredAt }) => {
+    const row = await database
+      .prepare(
+        `UPDATE review_runs
+         SET runner_job_id = ?, runner_attempt = ?, updated_at = ?
+         WHERE run_id = (
+           SELECT run_id FROM review_runs
+           WHERE status = 'scheduled' AND runner_job_id IS NULL
+           ORDER BY created_at ASC, rowid ASC
+           LIMIT 1
+         )
+         RETURNING run_id, installation_id, repository_id, pull_request_number,
+           base_sha, head_sha, trigger, comment_id, runner_job_id, runner_attempt`,
+      )
+      .bind(jobId, attempt, occurredAt)
+      .first<ClaimRow>();
+
+    if (row === null) return { kind: 'empty' as const };
+    return {
+      kind: 'claimed' as const,
+      runId: row.run_id,
+      jobId: row.runner_job_id,
+      attempt: row.runner_attempt,
+      job: {
+        repositoryId: row.repository_id,
+        pullRequestNumber: row.pull_request_number,
+        installationId: row.installation_id,
+        baseSha: row.base_sha as ReviewJob['baseSha'],
+        headSha: row.head_sha as ReviewJob['headSha'],
+        trigger: row.trigger,
+        ...(row.comment_id == null ? {} : { commentId: row.comment_id }),
+      },
+    };
   },
 
   markSchedulingFailed: async ({ runId, occurredAt }) => {

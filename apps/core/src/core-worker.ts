@@ -2,6 +2,7 @@ import { DateTime, Effect, Option, Schema } from 'effect';
 import {
   MAX_RUNNER_CALLBACK_BYTES,
   ReviewEvent,
+  RunnerJobInput,
   RunnerResultCallback,
 } from '@compte-rendu/contracts';
 import {
@@ -13,13 +14,11 @@ import {
   type CoreEnv,
   type GitHubAdapter,
   type ReviewPublicationStateStore,
-  type ReviewScheduler,
 } from './index';
 import type { D1DatabaseLike } from './review-state-store';
 import type { WorkerEntrypoint } from '@compte-rendu/contracts';
 import { createCloudflareOperationalLog } from './operational-log';
 import type { OperationalLog } from '@compte-rendu/contracts';
-import type { RunnerJobSubmitter } from './runner-job-client';
 
 export interface CoreWorkerEnv extends Partial<CoreEnv> {
   readonly REVIEW_DB: D1DatabaseLike;
@@ -44,6 +43,7 @@ export interface CoreWorkerDependencies {
 }
 
 const reviewEventsPath = '/review-events';
+const runnerClaimsPath = '/runner-claims';
 const runnerResultsPath = '/runner-results';
 const RunnerManifest = Schema.Struct({
   jobId: Schema.NonEmptyString,
@@ -156,51 +156,6 @@ const completeCallbackEvidenceIsValid = async (
   );
 };
 
-const createRunnerScheduler = (
-  runner: RunnerJobSubmitter,
-  github: GitHubAdapter,
-  stateStore: ReviewPublicationStateStore,
-  getReadInstallationToken: (input: {
-    installationId: number;
-    repositoryId: number;
-  }) => Promise<{ readonly token: string; readonly expiresAt: string }>,
-): ReviewScheduler => ({
-  schedule: async (job, runId) => {
-    if (github.getRepositoryUrl === undefined) throw new Error('Repository lookup unavailable');
-    const repositoryUrl = await Schema.decodeUnknownPromise(Schema.NonEmptyString)(
-      await github.getRepositoryUrl({
-        repositoryId: job.repositoryId,
-        installationId: job.installationId,
-      }),
-    );
-    const repositoryName = new URL(repositoryUrl).pathname.replace(/^\//, '').replace(/\.git$/, '');
-    if (!/^[^/]+\/[^/]+$/.test(repositoryName)) throw new Error('Repository identity is invalid');
-    const readGrant = await getReadInstallationToken({
-      installationId: job.installationId,
-      repositoryId: job.repositoryId,
-    });
-    const id = globalThis.crypto.randomUUID();
-    const attempt = 1;
-    if (!(await stateStore.recordRunnerJob({ runId, jobId: id, attempt }))) {
-      throw new Error('Runner Job identity could not be recorded');
-    }
-    const admitted = await runner.submitJob({
-      id,
-      attempt,
-      runId,
-      repositoryUrl,
-      repositoryName,
-      pullRequestNumber: job.pullRequestNumber,
-      baseSha: job.baseSha,
-      headSha: job.headSha,
-      repositoryReadToken: readGrant.token,
-    });
-    if (admitted.id !== id || admitted.attempt !== attempt) {
-      throw new Error('Runner Job identity could not be recorded');
-    }
-  },
-});
-
 const responseForDisposition = (
   disposition: Awaited<ReturnType<ReturnType<typeof createReviewCoordinator>['handleReviewEvent']>>,
 ) => new Response(null, { status: disposition === 'failed' ? 503 : 202 });
@@ -227,21 +182,12 @@ export const createCoreWorker = (
   const coordinator = createReviewCoordinator({
     github,
     stateStore,
-    scheduler:
-      runner === undefined
-        ? {
-            schedule: async () => {
-              throw new Error('Runner binding unavailable');
-            },
-          }
-        : createRunnerScheduler(
-            runner,
-            github,
-            stateStore,
-            dependencies.getReadInstallationToken ??
-              ((input) =>
-                tokenProvider.getReadInstallationToken(input.installationId, input.repositoryId)),
-          ),
+    scheduler: {
+      // A webhook only places a durable item in review_runs. The idle Runner
+      // claims it through the pull route below.
+      schedule: async () => undefined,
+      ...(runner === undefined ? {} : { cancel: runner.cancelJob }),
+    },
     log: dependencies.log ?? createCloudflareOperationalLog(),
   });
 
@@ -352,8 +298,68 @@ export const createCoreWorker = (
     return new Response(null, { status: 202 });
   };
 
+  const handleRunnerClaim = async (request: Request): Promise<Response> => {
+    if (request.headers.get('x-compte-rendu-runner-claim') !== 'verified') {
+      return new Response(null, { status: 401 });
+    }
+    if (stateStore.claimNextJob === undefined) return new Response(null, { status: 503 });
+
+    const occurredAt = await Effect.runPromise(DateTime.now.pipe(Effect.map(DateTime.formatIso)));
+    const jobId = globalThis.crypto.randomUUID();
+    const claim = await stateStore.claimNextJob({ jobId, attempt: 1, occurredAt });
+    if (claim.kind === 'empty') return new Response(null, { status: 204 });
+
+    try {
+      if (github.getRepositoryUrl === undefined) throw new Error('Repository lookup unavailable');
+      const repositoryUrl = await Schema.decodeUnknownPromise(Schema.NonEmptyString)(
+        await github.getRepositoryUrl({
+          repositoryId: claim.job.repositoryId,
+          installationId: claim.job.installationId,
+        }),
+      );
+      const repositoryName = new URL(repositoryUrl).pathname
+        .replace(/^\//, '')
+        .replace(/\.git$/, '');
+      if (!/^[^/]+\/[^/]+$/.test(repositoryName)) throw new Error('Repository identity is invalid');
+      const readGrant = await (
+        dependencies.getReadInstallationToken ??
+        ((input: { installationId: number; repositoryId: number }) =>
+          tokenProvider.getReadInstallationToken(input.installationId, input.repositoryId))
+      )({
+        installationId: claim.job.installationId,
+        repositoryId: claim.job.repositoryId,
+      });
+      const input = {
+        id: claim.jobId,
+        runId: claim.runId,
+        attempt: claim.attempt,
+        repositoryUrl,
+        repositoryName,
+        pullRequestNumber: claim.job.pullRequestNumber,
+        baseSha: claim.job.baseSha,
+        headSha: claim.job.headSha,
+        repositoryReadToken: readGrant.token,
+      };
+      await Schema.decodeUnknownPromise(RunnerJobInput)(input);
+      return new Response(JSON.stringify(input), {
+        status: 200,
+        headers: { 'content-type': 'application/json; charset=utf-8' },
+      });
+    } catch {
+      await stateStore.markSchedulingFailed({ runId: claim.runId, occurredAt });
+      return new Response(null, { status: 503 });
+    }
+  };
+
   return {
     fetch: async (request) => {
+      if (request.method === 'POST' && new URL(request.url).pathname === runnerClaimsPath) {
+        try {
+          return await handleRunnerClaim(request);
+        } catch {
+          return new Response(null, { status: 503 });
+        }
+      }
       if (request.method === 'POST' && new URL(request.url).pathname === runnerResultsPath) {
         try {
           return await handleRunnerResult(request);
