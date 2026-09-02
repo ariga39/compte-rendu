@@ -123,14 +123,19 @@ const failedCallback = async (runId: string, id = 'runner-job-1', attempt = 1) =
     failure: { reason: 'agent' },
   });
 
-const abortedCallback = async (runId: string, id: string, attempt = 1) =>
+const abortedCallback = async (
+  runId: string,
+  id: string,
+  attempt = 1,
+  cleanup: 'pending' | 'destroyed' | 'failed' = 'destroyed',
+) =>
   JSON.stringify({
     id,
     runId,
     attempt,
     status: 'aborted',
     stage: 'cleanup',
-    sandbox: { cleanup: 'destroyed' },
+    sandbox: { cleanup },
     evidence: {
       id: 'evidence-aborted',
       status: 'incomplete',
@@ -142,6 +147,140 @@ const abortedCallback = async (runId: string, id: string, attempt = 1) =>
   });
 
 describe('Core Worker', () => {
+  it('keeps an existing scheduled run claimable after Check migration', async () => {
+    const database = new SqliteD1Database([
+      '0001_review_state.sql',
+      '0002_allow_manual_retry.sql',
+      '0003_runner_evidence.sql',
+      '0004_runner_admission.sql',
+      '0005_publication_claim.sql',
+    ]);
+    const legacyRunId = 'legacy-run-before-check-migration';
+    database.database.exec(`
+      INSERT INTO deliveries (
+        delivery_id, installation_id, repository_id, pull_request_number,
+        base_sha, head_sha, trigger, status, created_at, updated_at
+      ) VALUES (
+        'delivery-before-check-migration', 7, 11, 42,
+        '1111111111111111111111111111111111111111',
+        '2222222222222222222222222222222222222222',
+        'automatic', 'scheduled', '2026-09-01T00:00:00.000Z',
+        '2026-09-01T00:00:00.000Z'
+      );
+      INSERT INTO review_runs (
+        run_id, delivery_id, installation_id, repository_id,
+        pull_request_number, base_sha, head_sha, trigger,
+        status, created_at, updated_at
+      ) VALUES (
+        '${legacyRunId}', 'delivery-before-check-migration', 7, 11, 42,
+        '1111111111111111111111111111111111111111',
+        '2222222222222222222222222222222222222222',
+        'automatic', 'scheduled', '2026-09-01T00:00:00.000Z',
+        '2026-09-01T00:00:00.000Z'
+      );
+    `);
+
+    try {
+      database.applyMigrations(['0006_review_check_runs.sql']);
+      const migratedStore = createD1ReviewStateStore(database);
+      if (migratedStore.claimNextJob === undefined) throw new Error('claim route is unavailable');
+      await expect(
+        migratedStore.claimNextJob!({
+          jobId: 'legacy-runner-job',
+          attempt: 1,
+          occurredAt: '2026-09-01T00:00:01.000Z',
+        }),
+      ).resolves.toMatchObject({ kind: 'claimed', runId: legacyRunId });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('does not return an admitted Job until Check setup completes', async () => {
+    const database = new SqliteD1Database();
+    let signalCheckStarted!: () => void;
+    const checkStarted = new Promise<void>((resolve) => {
+      signalCheckStarted = resolve;
+    });
+    let finishCheck!: (check: { id: number }) => void;
+    const check = new Promise<{ id: number }>((resolve) => {
+      finishCheck = resolve;
+    });
+    const worker = createCoreWorker(coreEnv(database), {
+      github: {
+        createCheckRun: async () => {
+          signalCheckStarted();
+          return check;
+        },
+        getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+      },
+      getReadInstallationToken: async () => ({
+        token: 'repository-read-token',
+        expiresAt: '2026-09-01T01:00:00.000Z',
+      }),
+    });
+    const scheduling = worker.fetch(
+      new Request('https://core.internal/review-events', {
+        method: 'POST',
+        body: JSON.stringify({ ...eligibleEvent, deliveryId: 'delivery-check-gates-claim' }),
+      }),
+    );
+    const claimRequest = () =>
+      new Request('https://core.internal/runner-claims', {
+        method: 'POST',
+        headers: { 'x-compte-rendu-runner-claim': 'verified' },
+      });
+
+    try {
+      await checkStarted;
+      expect((await worker.fetch(claimRequest())).status).toBe(204);
+      finishCheck({ id: 321 });
+      expect((await scheduling).status).toBe(202);
+      expect((await worker.fetch(claimRequest())).status).toBe(200);
+    } finally {
+      database.close();
+    }
+  });
+
+  it('unblocks a run when Check setup fails at the GitHub API', async () => {
+    const database = new SqliteD1Database();
+    const worker = createCoreWorker(coreEnv(database), {
+      github: {
+        createCheckRun: async () => {
+          throw new Error('Checks API unavailable');
+        },
+        getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+      },
+      getReadInstallationToken: async () => ({
+        token: 'repository-read-token',
+        expiresAt: '2026-09-01T01:00:00.000Z',
+      }),
+    });
+
+    try {
+      expect(
+        (
+          await worker.fetch(
+            new Request('https://core.internal/review-events', {
+              method: 'POST',
+              body: JSON.stringify({ ...eligibleEvent, deliveryId: 'delivery-check-fails' }),
+            }),
+          )
+        ).status,
+      ).toBe(202);
+      const claim = await worker.fetch(
+        new Request('https://core.internal/runner-claims', {
+          method: 'POST',
+          headers: { 'x-compte-rendu-runner-claim': 'verified' },
+        }),
+      );
+      expect(claim.status).toBe(200);
+      expect(await claim.json()).toMatchObject({ headSha: eligibleEvent.headSha });
+    } finally {
+      database.close();
+    }
+  });
+
   it('creates one queued Check for a durably scheduled run', async () => {
     const database = new SqliteD1Database();
     const checks: unknown[] = [];
@@ -170,6 +309,86 @@ describe('Core Worker', () => {
           runId: expect.any(String),
         },
       ]);
+    } finally {
+      database.close();
+    }
+  });
+
+  it('recovers pending Check setup on delivery replay without duplicating the Check', async () => {
+    const database = new SqliteD1Database();
+    const baseStateStore = createD1ReviewStateStore(database);
+    const remoteChecks: Array<{ id: number; external_id: string }> = [];
+    const checkCreates: unknown[] = [];
+    const fetcher: typeof fetch = async (input, init) => {
+      const inputUrl =
+        typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      const url = new URL(inputUrl);
+      const method = init?.method ?? 'GET';
+      if (url.pathname === '/repositories/11') {
+        return Response.json({ full_name: 'acme/reviewed' });
+      }
+      if (url.pathname.endsWith('/commits/2222222222222222222222222222222222222222/check-runs')) {
+        return Response.json({ total_count: remoteChecks.length, check_runs: remoteChecks });
+      }
+      if (url.pathname === '/repos/acme/reviewed/check-runs' && method === 'POST') {
+        const body = JSON.parse(typeof init?.body === 'string' ? init.body : '{}') as {
+          external_id: string;
+        };
+        checkCreates.push(body);
+        remoteChecks.push({ id: 321, external_id: body.external_id });
+        return Response.json({ id: 321, external_id: body.external_id }, { status: 201 });
+      }
+      return new Response('{}', { status: 404 });
+    };
+    const github = createGitHubPublicationAdapter({ token: 'installation-token', fetch: fetcher });
+    let interruptAdmission = true;
+    let admittedRunId = '';
+    const stateStore = {
+      ...baseStateStore,
+      claimReview: async (input: Parameters<typeof baseStateStore.claimReview>[0]) => {
+        const result = await baseStateStore.claimReview(input);
+        if (interruptAdmission) {
+          interruptAdmission = false;
+          if (result.kind === 'claimed') admittedRunId = result.runId;
+          throw new Error('worker interrupted after durable admission');
+        }
+        return result;
+      },
+    };
+    const worker = createCoreWorker(coreEnv(database), { stateStore, github });
+    const request = (deliveryId = 'delivery-check-replay-recovery') =>
+      new Request('https://core.internal/review-events', {
+        method: 'POST',
+        body: JSON.stringify({ ...eligibleEvent, deliveryId }),
+      });
+
+    try {
+      expect((await worker.fetch(request())).status).toBe(503);
+      expect(admittedRunId).not.toBe('');
+      expect(await baseStateStore.getRunOutcome(admittedRunId)).toMatchObject({
+        status: 'scheduled',
+      });
+      if (github.createCheckRun === undefined) throw new Error('Check adapter is unavailable');
+      await github.createCheckRun({
+        repositoryId: 11,
+        installationId: 7,
+        headSha: eligibleEvent.headSha,
+        runId: admittedRunId,
+      });
+      expect(checkCreates).toHaveLength(1);
+      expect((await worker.fetch(request('delivery-check-existing-recovery'))).status).toBe(202);
+      expect(await baseStateStore.getRunOutcome(admittedRunId)).toMatchObject({
+        status: 'scheduled',
+        checkRunId: 321,
+      });
+      expect(checkCreates).toHaveLength(1);
+      expect((await worker.fetch(request())).status).toBe(202);
+      expect(await baseStateStore.getRunOutcome(admittedRunId)).toMatchObject({
+        status: 'scheduled',
+        checkRunId: 321,
+      });
+      expect((await worker.fetch(request())).status).toBe(202);
+      expect(checkCreates).toHaveLength(1);
     } finally {
       database.close();
     }
@@ -265,7 +484,7 @@ describe('Core Worker', () => {
       );
 
       expect(claim.status).toBe(503);
-      expect(comments).toEqual([expect.stringContaining('Review failed.')]);
+      expect(comments).toEqual([expect.stringContaining('Review failed')]);
       expect(checks).toEqual(['failure']);
     } finally {
       database.close();
@@ -647,6 +866,128 @@ describe('Core Worker', () => {
     }
   });
 
+  it('creates the replacement Check when old-head cancellation fails', async () => {
+    const database = new SqliteD1Database();
+    const checks: Array<{ headSha: string }> = [];
+    const worker = createCoreWorker(
+      {
+        ...coreEnv(database),
+        EVIDENCE_BUCKET: { put: async () => undefined },
+        RUNNER: {
+          fetch: async (request) => {
+            if (request.method === 'DELETE') return new Response(null, { status: 503 });
+            return runnerResponse(request);
+          },
+        },
+      },
+      {
+        github: {
+          getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+          createCheckRun: async ({ headSha }) => {
+            checks.push({ headSha });
+            return { id: 321 + checks.length - 1 };
+          },
+        },
+        getReadInstallationToken: async () => ({
+          token: 'repository-read-token',
+          expiresAt: '2026-09-01T01:00:00.000Z',
+        }),
+      },
+    );
+
+    try {
+      expect(
+        (
+          await worker.fetch(
+            new Request('https://core.internal/review-events', {
+              method: 'POST',
+              body: JSON.stringify({ ...eligibleEvent, deliveryId: 'delivery-cancel-fails-old' }),
+            }),
+          )
+        ).status,
+      ).toBe(202);
+      const oldClaim = await worker.fetch(
+        new Request('https://core.internal/runner-claims', {
+          method: 'POST',
+          headers: { 'x-compte-rendu-runner-claim': 'verified' },
+        }),
+      );
+      expect(oldClaim.status).toBe(200);
+      const oldJob = (await oldClaim.json()) as { id: string; runId: string };
+      const newEvent = {
+        ...eligibleEvent,
+        deliveryId: 'delivery-cancel-fails-new',
+        headSha: '3333333333333333333333333333333333333333',
+      };
+      expect(
+        (
+          await worker.fetch(
+            new Request('https://core.internal/review-events', {
+              method: 'POST',
+              body: JSON.stringify(newEvent),
+            }),
+          )
+        ).status,
+      ).toBe(202);
+      expect(checks.map(({ headSha }) => headSha)).toEqual([
+        eligibleEvent.headSha,
+        newEvent.headSha,
+      ]);
+      const replacementClaim = await worker.fetch(
+        new Request('https://core.internal/runner-claims', {
+          method: 'POST',
+          headers: { 'x-compte-rendu-runner-claim': 'verified' },
+        }),
+      );
+      expect(replacementClaim.status).toBe(204);
+      expect(
+        (
+          await worker.fetch(
+            new Request('https://core.internal/runner-results', {
+              method: 'POST',
+              headers: {
+                'content-type': 'application/json',
+                'x-compte-rendu-runner-callback': 'verified',
+              },
+              body: await abortedCallback(oldJob.runId, oldJob.id, 1, 'failed'),
+            }),
+          )
+        ).status,
+      ).toBe(202);
+      const claimBeforeCleanup = await worker.fetch(
+        new Request('https://core.internal/runner-claims', {
+          method: 'POST',
+          headers: { 'x-compte-rendu-runner-claim': 'verified' },
+        }),
+      );
+      expect(claimBeforeCleanup.status).toBe(204);
+      expect(
+        (
+          await worker.fetch(
+            new Request('https://core.internal/runner-results', {
+              method: 'POST',
+              headers: {
+                'content-type': 'application/json',
+                'x-compte-rendu-runner-callback': 'verified',
+              },
+              body: await abortedCallback(oldJob.runId, oldJob.id),
+            }),
+          )
+        ).status,
+      ).toBe(202);
+      const claimAfterCleanup = await worker.fetch(
+        new Request('https://core.internal/runner-claims', {
+          method: 'POST',
+          headers: { 'x-compte-rendu-runner-claim': 'verified' },
+        }),
+      );
+      expect(claimAfterCleanup.status).toBe(200);
+      expect(await claimAfterCleanup.json()).toMatchObject({ headSha: newEvent.headSha });
+    } finally {
+      database.close();
+    }
+  });
+
   it('does not return a claimed old head that becomes superseded while its token is minted', async () => {
     const database = new SqliteD1Database();
     let tokenMintStarted!: () => void;
@@ -1021,6 +1362,157 @@ describe('Core Worker', () => {
     }
   });
 
+  it('keeps duplicate success callbacks retryable until publication completes', async () => {
+    const database = new SqliteD1Database();
+    const stateStore = createD1ReviewStateStore(database);
+    const claimed = await stateStore.claimReview({
+      deliveryId: 'delivery-duplicate-success',
+      job: {
+        repositoryId: 11,
+        pullRequestNumber: 42,
+        installationId: 7,
+        baseSha: eligibleEvent.baseSha,
+        headSha: eligibleEvent.headSha,
+        trigger: 'automatic',
+      },
+      occurredAt: '2026-09-01T00:00:00.000Z',
+    });
+    if (claimed.kind !== 'claimed') throw new Error('duplicate callback run was not claimed');
+    await stateStore.recordRunnerJob({ runId: claimed.runId, jobId: 'runner-job-1', attempt: 1 });
+    await stateStore.recordCheckRun?.({ runId: claimed.runId, checkRunId: 321 });
+    let signalPublicationStarted!: () => void;
+    const publicationStarted = new Promise<void>((resolve) => {
+      signalPublicationStarted = resolve;
+    });
+    let finishPublication!: () => void;
+    const publicationFinished = new Promise<void>((resolve) => {
+      finishPublication = resolve;
+    });
+    const checkUpdates: Array<{ status: string }> = [];
+    let firstPublication = true;
+    const worker = createCoreWorker(
+      {
+        REVIEW_DB: database,
+        GITHUB_APP_ID: '1234567',
+        GITHUB_APP_PRIVATE_KEY: 'test-private-key',
+        EVIDENCE_BUCKET: { put: async () => undefined },
+      },
+      {
+        stateStore,
+        github: {
+          loadReviewTarget: async () => ({ headSha: eligibleEvent.headSha }),
+          findReviewByMarker: async () => undefined,
+          createReview: async ({ payload }) => {
+            if (firstPublication) {
+              firstPublication = false;
+              signalPublicationStarted();
+              await publicationFinished;
+            }
+            return { kind: 'created', review: payload };
+          },
+          updateCheckRun: async ({ status }) => {
+            checkUpdates.push({ status });
+          },
+        },
+      },
+    );
+    const callback = async () =>
+      new Request('https://core.internal/runner-results', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-compte-rendu-runner-callback': 'verified',
+        },
+        body: await successfulCallback(claimed.runId),
+      });
+
+    try {
+      const winner = worker.fetch(await callback());
+      await publicationStarted;
+      const duplicate = await worker.fetch(await callback());
+      expect(duplicate.status).toBe(503);
+      expect(checkUpdates).toEqual([]);
+      finishPublication();
+      expect((await winner).status).toBe(202);
+      expect(checkUpdates).toEqual([{ status: 'success' }]);
+    } finally {
+      database.close();
+    }
+  });
+
+  it('retries failure feedback for a succeeded callback after publication fails', async () => {
+    const database = new SqliteD1Database();
+    const stateStore = createD1ReviewStateStore(database);
+    const claimed = await stateStore.claimReview({
+      deliveryId: 'delivery-succeeded-callback-failure-retry',
+      job: {
+        repositoryId: 11,
+        pullRequestNumber: 42,
+        installationId: 7,
+        baseSha: eligibleEvent.baseSha,
+        headSha: eligibleEvent.headSha,
+        trigger: 'automatic',
+      },
+      occurredAt: '2026-09-01T00:00:00.000Z',
+    });
+    if (claimed.kind !== 'claimed') throw new Error('failure retry run was not claimed');
+    await stateStore.recordRunnerJob({ runId: claimed.runId, jobId: 'runner-job-1', attempt: 1 });
+    await stateStore.recordCheckRun?.({ runId: claimed.runId, checkRunId: 321 });
+    const comments: string[] = [];
+    const checkUpdates: string[] = [];
+    let firstComment = true;
+    const worker = createCoreWorker(
+      {
+        REVIEW_DB: database,
+        GITHUB_APP_ID: '1234567',
+        GITHUB_APP_PRIVATE_KEY: 'test-private-key',
+        EVIDENCE_BUCKET: { put: async () => undefined },
+      },
+      {
+        stateStore,
+        github: {
+          loadReviewTarget: async () => ({ headSha: eligibleEvent.headSha }),
+          createReview: async () => {
+            throw new Error('review publication unavailable');
+          },
+          createIssueComment: async ({ body }) => {
+            if (firstComment) {
+              firstComment = false;
+              throw new Error('failure comment unavailable');
+            }
+            comments.push(body);
+            return { id: 123, body };
+          },
+          updateCheckRun: async ({ status }) => {
+            checkUpdates.push(status);
+          },
+        },
+      },
+    );
+    const callbackBody = await successfulCallback(claimed.runId);
+    const request = () =>
+      new Request('https://core.internal/runner-results', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-compte-rendu-runner-callback': 'verified',
+        },
+        body: callbackBody,
+      });
+
+    try {
+      expect((await worker.fetch(request())).status).toBe(503);
+      expect((await worker.fetch(request())).status).toBe(202);
+      expect(comments).toEqual([
+        `Review failed before a result could be published. Please retry with \`/ai-review\`.\n\n<!-- compte-rendu:failure:run:${claimed.runId} -->`,
+      ]);
+      expect(checkUpdates.at(-1)).toBe('failure');
+      expect(await stateStore.getRunOutcome(claimed.runId)).toMatchObject({ status: 'failed' });
+    } finally {
+      database.close();
+    }
+  });
+
   it('does not publish callbacks for unknown, failed, or superseded runs', async () => {
     const database = new SqliteD1Database();
     const stateStore = createD1ReviewStateStore(database);
@@ -1276,6 +1768,75 @@ describe('Core Worker', () => {
           status: 'failure',
         },
       ]);
+    } finally {
+      database.close();
+    }
+  });
+
+  it('publishes failure feedback when the manual reaction fails', async () => {
+    const database = new SqliteD1Database();
+    const stateStore = createD1ReviewStateStore(database);
+    const claimed = await stateStore.claimReview({
+      deliveryId: 'delivery-reaction-fails',
+      job: {
+        repositoryId: 11,
+        pullRequestNumber: 42,
+        installationId: 7,
+        baseSha: eligibleEvent.baseSha,
+        headSha: eligibleEvent.headSha,
+        trigger: 'manual',
+        commentId: 987654,
+      },
+      occurredAt: '2026-09-01T00:00:00.000Z',
+    });
+    if (claimed.kind !== 'claimed') throw new Error('reaction failure run was not claimed');
+    await stateStore.recordRunnerJob({ runId: claimed.runId, jobId: 'runner-job-1', attempt: 1 });
+    await stateStore.recordCheckRun?.({ runId: claimed.runId, checkRunId: 321 });
+    const comments: string[] = [];
+    const checkUpdates: string[] = [];
+    const worker = createCoreWorker(
+      {
+        REVIEW_DB: database,
+        GITHUB_APP_ID: '1234567',
+        GITHUB_APP_PRIVATE_KEY: 'test-private-key',
+        EVIDENCE_BUCKET: { put: async () => undefined },
+      },
+      {
+        stateStore,
+        github: {
+          addReaction: async () => {
+            throw new Error('reaction unavailable');
+          },
+          createIssueComment: async ({ body }) => {
+            comments.push(body);
+            return { id: 123, body };
+          },
+          updateCheckRun: async ({ status }) => {
+            checkUpdates.push(status);
+          },
+        },
+      },
+    );
+
+    try {
+      expect(
+        (
+          await worker.fetch(
+            new Request('https://core.internal/runner-results', {
+              method: 'POST',
+              headers: {
+                'content-type': 'application/json',
+                'x-compte-rendu-runner-callback': 'verified',
+              },
+              body: await failedCallback(claimed.runId),
+            }),
+          )
+        ).status,
+      ).toBe(202);
+      expect(comments).toEqual([
+        `Review failed before a result could be published. Please retry with \`/ai-review\`.\n\n<!-- compte-rendu:failure:run:${claimed.runId} -->`,
+      ]);
+      expect(checkUpdates).toEqual(['failure']);
     } finally {
       database.close();
     }

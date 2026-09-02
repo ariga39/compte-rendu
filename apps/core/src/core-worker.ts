@@ -206,12 +206,14 @@ export const createCoreWorker = (
       outcome.commentId !== undefined &&
       github.addReaction !== undefined
     ) {
-      await github.addReaction({
-        repositoryId: outcome.repositoryId,
-        installationId: outcome.installationId,
-        commentId: outcome.commentId,
-        content: outcome.status === 'superseded' ? 'confused' : '-1',
-      });
+      await github
+        .addReaction({
+          repositoryId: outcome.repositoryId,
+          installationId: outcome.installationId,
+          commentId: outcome.commentId,
+          content: outcome.status === 'superseded' ? 'confused' : '-1',
+        })
+        .catch(() => undefined);
     }
     if (
       notificationClaimed &&
@@ -270,6 +272,10 @@ export const createCoreWorker = (
       const occurredAt = await Effect.runPromise(DateTime.now.pipe(Effect.map(DateTime.formatIso)));
       await markRunFailed(outcome, callback.runId, occurredAt);
     };
+    const clearRunnerJob = async () => {
+      if (callback.sandbox.cleanup !== 'destroyed') return;
+      await stateStore.clearRunnerJob?.({ runId: callback.runId, jobId: callback.id });
+    };
     if (callback.status === 'succeeded') {
       if (!(await completeCallbackEvidenceIsValid(callback))) {
         if (outcome.status !== 'scheduled') return new Response(null, { status: 409 });
@@ -307,6 +313,7 @@ export const createCoreWorker = (
 
     if (callback.status === 'succeeded') {
       if (outcome.status === 'superseded') {
+        await clearRunnerJob();
         if (
           outcome.trigger === 'manual' &&
           outcome.commentId !== undefined &&
@@ -321,6 +328,10 @@ export const createCoreWorker = (
         }
         return new Response(null, { status: 202 });
       }
+      if (outcome.status === 'failed') {
+        await markCallbackFailed();
+        return new Response(null, { status: 202 });
+      }
       if (outcome.status !== 'scheduled') return new Response(null, { status: 202 });
       if (callback.evidence.status !== 'complete' || callback.result === undefined) {
         return new Response(null, { status: 400 });
@@ -329,24 +340,30 @@ export const createCoreWorker = (
         runId: callback.runId,
         output: callback.result,
       });
+      const finalOutcome = await stateStore.getRunOutcome(callback.runId);
+      if (finalOutcome === undefined || finalOutcome.status === 'scheduled') {
+        return new Response(null, { status: 503 });
+      }
       if (
         disposition === 'completed' &&
-        outcome.checkRunId !== undefined &&
+        finalOutcome.status === 'completed' &&
+        finalOutcome.checkRunId !== undefined &&
         github.updateCheckRun !== undefined
       ) {
         await github
           .updateCheckRun({
-            repositoryId: outcome.repositoryId,
-            installationId: outcome.installationId,
-            checkRunId: outcome.checkRunId,
+            repositoryId: finalOutcome.repositoryId,
+            installationId: finalOutcome.installationId,
+            checkRunId: finalOutcome.checkRunId,
             status: 'success',
           })
           .catch(() => undefined);
       }
-      return new Response(null, { status: disposition === 'failed' ? 503 : 202 });
+      return new Response(null, { status: finalOutcome.status === 'failed' ? 503 : 202 });
     }
 
     await markCallbackFailed();
+    await clearRunnerJob();
     return new Response(null, { status: 202 });
   };
 
