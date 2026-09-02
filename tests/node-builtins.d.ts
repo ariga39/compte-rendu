@@ -98,6 +98,7 @@ declare module 'node:fs/promises' {
   export function readFile(path: string): Promise<Buffer>;
   export function rename(oldPath: string, newPath: string): Promise<void>;
   export function stat(path: string): Promise<{ readonly mode: number; readonly size: number }>;
+  export function unlink(path: string): Promise<void>;
   export function rm(
     path: string,
     options?: { force?: boolean; recursive?: boolean },
@@ -105,7 +106,7 @@ declare module 'node:fs/promises' {
   export function writeFile(
     path: string,
     data: string | Uint8Array,
-    options?: { mode?: number } | 'utf8',
+    options?: { flag?: string; mode?: number } | 'utf8',
   ): Promise<void>;
 }
 
