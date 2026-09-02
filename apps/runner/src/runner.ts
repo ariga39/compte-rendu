@@ -1874,6 +1874,8 @@ export const createRunner = (options: RunnerOptions = {}) => {
       claimUrl.length === 0 ||
       authToken === undefined ||
       authToken.length === 0 ||
+      callbackUrl === undefined ||
+      callbackUrl.length === 0 ||
       callbackToken === undefined ||
       callbackToken.length === 0 ||
       modelSecretCommand === undefined ||

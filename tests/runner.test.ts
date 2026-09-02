@@ -345,13 +345,18 @@ const runAgentScenario = async (scenario: {
 describe('Runner Job HTTP interface', () => {
   it('does not claim durable work until local Job admission is fully configured', async () => {
     let claims = 0;
-    for (const options of [
+    for (const overrides of [
       { authToken: undefined, modelSecretCommand: 'secret-resolver get MODEL_API_KEY' },
       { authToken: 'runner-test-token', modelSecretCommand: undefined },
+      {
+        authToken: 'runner-test-token',
+        modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+        callbackUrl: undefined,
+      },
     ]) {
       createProductionRunner({
-        ...options,
         callbackUrl: 'https://ingress.test/runner-callback',
+        ...overrides,
         callbackToken: 'callback-token',
         claimUrl: 'https://ingress.test/runner-claim',
         claimFetch: async () => {
