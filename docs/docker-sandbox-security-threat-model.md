@@ -50,14 +50,15 @@ deployment: the product intentionally sends the repository and PR context to
 | Shared skills, MCP, or SSH-agent forwarding                             | Shared skills are a writable host store across sandboxes; local stdio MCP servers run on the host; when `SSH_AUTH_SOCK` is present Docker forwards signing capability into the VM. These are real exceptions to VM isolation ([security model](https://docs.docker.com/ai/sandboxes/security/#what-is-not-isolated-by-default), [SSH agent](https://docs.docker.com/ai/sandboxes/configuration/credentials/#ssh-agent)).                                      | Keep `--no-share-skills`, no MCP server, and ensure the runner/daemon has no SSH agent to forward.                                                                                                                                                                                                                         |
 | Arbitrary outbound network                                              | Docker's host proxy makes connections using host routing. A wildcard allow can therefore expose LAN/internal services reachable from the NUC, not just the public Internet ([architecture](https://docs.docker.com/ai/sandboxes/architecture/#networking)).                                                                                                                                                                                                   | Keep deny-by-default and allow only `opencode.ai:443` and `api.github.com:443`. This is a high-value security boundary.                                                                                                                                                                                                    |
 | Model-secret misuse                                                     | A custom secret puts only a generated placeholder in the VM. However, **any sandbox process** can put that placeholder in a request to the configured host and Docker replaces it with the real value ([custom secrets](https://docs.docker.com/ai/sandboxes/configuration/credentials/#custom-secrets)). Arbitrary code therefore cannot recover the key, but can make authenticated `opencode.ai` requests, spend quota, and send any readable input there. | Keep the secret sandbox-scoped, one host, a job deadline/resource limits, and immediate cleanup. This capability is inherent: OpenCode itself needs it, so shell micromanagement cannot eliminate it. Custom secrets are documented as experimental.                                                                       |
-| Execute repository scripts, builds, tests, hooks, or package installers | Untrusted code receives sudo and a private Docker daemon inside the VM ([default posture](https://docs.docker.com/ai/sandboxes/security/defaults/#agent-capabilities-inside-the-sandbox)). It can corrupt the private working copy, falsify later evidence, exhaust resources, and use the model or optional GitHub placeholder against its allowed host. With the outer boundaries above it still cannot normally alter the NUC or reach arbitrary services. | Allowed by the fully autonomous-agent decision. Bound the consequence outside OpenCode with immutable input revisions, CPU/memory/disk/wall-time limits, narrow credentials/network, output validation, and forced VM destruction.                                                                                         |
+| Execute repository scripts, builds, tests, hooks, or package installers | Untrusted code receives sudo and a private Docker daemon inside the VM ([default posture](https://docs.docker.com/ai/sandboxes/security/defaults/#agent-capabilities-inside-the-sandbox)). It can corrupt the private working copy, falsify later evidence, exhaust resources, and use the model or built-in GitHub placeholder against its allowed host. With the outer boundaries above it still cannot normally alter the NUC or reach arbitrary services. | Allowed by the fully autonomous-agent decision. Bound the consequence outside OpenCode with immutable input revisions, CPU/memory/disk/wall-time limits, narrow credentials/network, output validation, and forced VM destruction.                                                                                         |
 | Edit the private clone                                                  | Clone mode prevents writes reaching the host, but edits can make the agent inspect its own modified state rather than the submitted PR.                                                                                                                                                                                                                                                                                                                       | Allowed. Preserve the immutable base/head objects and read-only PR-context evidence outside the writable clone, and validate/publicize the result against those exact revisions. Treat a review that cannot be tied back to that evidence as an integrity failure, not as a host-security incident.                        |
 | Read files and inspect Git history                                      | `read`, `grep`, `glob`, and Git history commands inspect data already supplied to the model. They neither add a host path nor an egress destination.                                                                                                                                                                                                                                                                                                          | Unrestricted inside the VM. Full commit history and normal Git/shell analysis are expected review inputs.                                                                                                                                                                                                                  |
 
-## Optional live GitHub read access
+## Live GitHub read access
 
-It is technically possible to let the reviewer fetch earlier repository/PR
-context without giving it the Product App's write authority.
+The product lets the reviewer fetch live repository/PR context without giving it
+the Product App's write authority. Docker Sandboxes 0.39 provides this through
+the sandbox-scoped built-in `github` service.
 
 When minting an installation access token, GitHub accepts `repositories` or
 `repository_ids` to restrict that token to named repositories, and a
@@ -96,23 +97,41 @@ invalidated immediately by authenticating with it to
 `DELETE /installation/token`; after revocation it cannot be used again
 ([expiry](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/authenticating-as-a-github-app-installation#using-an-installation-access-token),
 [revocation endpoint](https://docs.github.com/en/rest/apps/installations?apiVersion=2022-11-28#revoke-an-installation-access-token)).
-Removing a Docker custom secret only removes the proxy mapping; it is not a
-GitHub revocation. Revoke explicitly at terminal cleanup, with the one-hour
-expiry as the fallback.
+Removing the built-in `github` service only removes the proxy mapping; it is not
+a GitHub revocation. Runner terminal cleanup removes the Sandbox-local proxy
+access and host-side token file. The current implementation relies on GitHub's
+one-hour expiry; explicit token revocation is unimplemented optional hardening,
+not an active Core path.
 
-The token can be supplied as another sandbox-scoped Docker custom secret whose
-only host is `api.github.com`, with network egress allowed only to
-`api.github.com:443`. The VM receives a placeholder, not the raw token. REST
-and GraphQL (`/graphql`) both use that host, while the existing checkout already
-supplies Git history. As with the model secret, any sandbox process can use the
-placeholder at the matched host; the meaningful maximum consequence is reading
-the target repository's Contents/Issues/Pull requests/Metadata and consuming
-its API quota. It cannot comment, review, merge, push, or access another private
-repository with that token.
+For each run, the Runner writes the validated one-repository installation token
+to a temporary host-side file and registers the built-in service with a host
+command that reads it:
 
-For the current public-repository product, this is a proportionate option if
-live repository context materially improves review. It adds two product risks,
-not a NUC-compromise path:
+```console
+sbx secret set github \
+  --sandbox SANDBOX_NAME \
+  --command 'cat TOKEN_FILE' \
+  --refresh on-demand
+```
+
+Docker exposes only a proxy placeholder in the VM and provides `GH_TOKEN` to
+the sandbox-scoped service for matching GitHub requests. Network egress remains
+limited to `api.github.com:443`; REST and GraphQL (`/graphql`) both use that
+host, while the existing checkout already supplies Git history. Any sandbox
+process can use the proxy placeholder at that host; the meaningful maximum
+consequence is reading the target repository's Contents/Issues/Pull
+requests/Metadata and consuming its API quota. It cannot comment, review,
+merge, push, or access another private repository with that token.
+
+`--refresh on-demand` reruns the host command for each credential use. With
+`cat TOKEN_FILE`, that rereads the file but does not mint or renew the
+installation token. Terminal cleanup removes the Sandbox, built-in service
+registration, network policy, and host-side token file. The current
+implementation relies on GitHub's one-hour expiry; explicit token revocation is
+unimplemented optional hardening, not an active Core path.
+
+For the current public-repository product, live repository context is a
+proportionate capability. It adds two product risks, not a NUC-compromise path:
 
 - live comments/review state can change during a run, so results are less
   reproducible than a Core-produced snapshot tied to the accepted base/head;
@@ -120,10 +139,10 @@ not a NUC-compromise path:
   repository and consume API quota.
 
 Those risks can be bounded by retaining the exact queried/derived context with
-the review evidence, the existing run deadline, one token per run, and explicit
-revocation. A precomputed immutable snapshot remains preferable when complete
-reproducibility is required; the narrow live token is reasonable when useful
-historical context cannot be predicted upfront.
+the review evidence, the existing run deadline, one token per run, and optional
+explicit-revocation hardening. A precomputed immutable snapshot remains
+preferable when complete reproducibility is required; the narrow live token
+remains reasonable when useful historical context cannot be predicted upfront.
 
 ## OpenCode's unrestricted inner environment
 
@@ -145,9 +164,9 @@ This intentionally accepts residual risk inside one disposable run:
 - repository code can alter the private clone and any other writable in-VM
   state, so the resulting review can be incomplete, misleading, or based on
   modified evidence;
-- any process can exercise the model credential at `opencode.ai`, and—when the
-  optional read-only token is supplied—the single-repository GitHub read
-  capability at `api.github.com`;
+- any process can exercise the model credential at `opencode.ai`, and the
+  built-in GitHub service provides the single-repository read capability at
+  `api.github.com`;
 - a hostile workload can crash or wedge the VM and turn the run into a failed
   cleanup/retry rather than a review result.
 
@@ -173,9 +192,12 @@ Documented by Docker:
 Runner-specific facts visible in
 [`runner.ts`](../apps/runner/src/runner.ts): it uses `--clone` and
 `--no-share-skills`, removes the Git remote and checkout credential before VM
-creation, scopes the custom secret to one sandbox, allows only
-`opencode.ai:443` and `api.github.com:443`, bounds the run, and removes the
-Sandbox, secret, policy, and temp directories afterward.
+creation, scopes the model custom secret to one sandbox, registers the
+sandbox-scoped built-in `github` service with a host command that reads the
+temporary one-repository token file, allows only `opencode.ai:443` and
+`api.github.com:443`, bounds the run, and removes the Sandbox, model custom
+secret, built-in `github` service, policy, and temporary source/token-file
+directories afterward.
 
 Still assumptions until checked on the deployed NUC:
 
@@ -184,8 +206,8 @@ Still assumptions until checked on the deployed NUC:
   `opencode.ai:443` and `api.github.com:443` (`sbx policy ls --wide` is the
   authority);
 - every new PR-context artifact is mounted read-only and contains no GitHub
-  credential, unless the explicitly chosen per-run read-only proxy option above
-  is used;
+  credential; the built-in `github` service exposes only its proxy placeholder,
+  while its host-side one-repository token file remains outside the Sandbox;
 - resource and cleanup behavior remains effective against a deliberately
   hostile fork/CPU/disk probe.
 

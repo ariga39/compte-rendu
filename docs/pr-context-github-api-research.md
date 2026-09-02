@@ -7,9 +7,10 @@ Research date: 2026-08-31
 Let the review agent query GitHub directly with the official `gh` CLI. Give
 each run a separate installation token restricted to exactly the target
 repository and to `Contents`, `Issues`, `Pull requests`, and `Metadata` read.
-Expose only a Docker custom-secret placeholder inside the Sandbox and allow
-egress only to `api.github.com:443`; Core retains the App's write authority for
-publication.
+Register Docker Sandboxes 0.39's sandbox-scoped built-in `github` service with
+a host command that reads the one-repository token file. Docker provides
+`GH_TOKEN` through its proxy, and egress is allowed only to `api.github.com:443`;
+Core retains the App's write authority for publication.
 
 Do not build or transport a duplicate PR-context snapshot. The required
 review skill tells the agent which complete GitHub surfaces to inspect and how
@@ -159,9 +160,10 @@ order threads by their first comment's timestamp, then thread ID. Sources:
 
 ## Pagination algorithm
 
-Use `gh api graphql` inside the Sandbox. `GH_TOKEN` contains a proxy placeholder;
-Docker substitutes the real repository-scoped installation token only for
-requests to `api.github.com`. GitHub documents that installation access tokens
+Use `gh api graphql` inside the Sandbox. Docker Sandboxes 0.39's built-in
+`github` service provides `GH_TOKEN` through the proxy; its host-side command
+reads the one-repository token file, and the proxy supplies the token for
+matching GitHub requests. GitHub documents that installation access tokens
 work with both GraphQL and REST, subject to the installation's repository
 access and permissions. Source: [Authenticating as a GitHub App
 installation](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/authenticating-as-a-github-app-installation).
@@ -330,9 +332,11 @@ reviews, and review comments. Issue comments accept either `Issues: read` or
 Mint a distinct token for each run with exactly one `repository_id` and the
 four read permissions above. Validate the effective repositories, permissions,
 and expiry returned by GitHub. Use this same read token for checkout and live
-GitHub queries, revoke it after the Runner reaches a terminal result, and rely
-on GitHub's one-hour expiry only as fallback. The App's write-capable token
-never crosses the Core-to-Runner interface.
+GitHub queries. Runner terminal cleanup removes the built-in `github` service
+and its Sandbox-local proxy access plus the host token file. The current
+implementation relies on GitHub's one-hour expiry; explicit token revocation
+is unimplemented optional hardening, not an active Core path. The App's
+write-capable token never crosses the Core-to-Runner interface.
 
 ## Full Git history in the Sandbox
 
@@ -401,8 +405,12 @@ The focused implementation is:
    Runner;
 3. use the read token for full-history checkout, then remove the Git remote and
    checkout credential;
-4. expose the token to the microVM only as `GH_TOKEN` through a Docker custom
-   secret for `api.github.com`, and remove/revoke it at terminal cleanup; and
+4. register Docker Sandboxes 0.39's sandbox-scoped built-in `github` service
+   with a host command that reads the one-repository token file; Docker
+   provides `GH_TOKEN` through its proxy, and Runner terminal cleanup removes
+   the Sandbox-local built-in service/proxy access and host token file; the
+   current implementation relies on GitHub's one-hour expiry; explicit token
+   revocation is unimplemented optional hardening, not an active Core path; and
 5. require the packaged review skill to query all relevant GitHub connections
    directly before reviewing the exact diff.
 
