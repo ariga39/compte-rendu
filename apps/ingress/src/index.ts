@@ -228,13 +228,19 @@ const checkInstallation = (
     return false;
   });
 
-const isAllowedBotAuthor = (authorId: number | undefined, dependencies: IngressDependencies) =>
-  Schema.decodeUnknownEffect(BotAuthorIdsConfig)(dependencies.allowedBotAuthorIds).pipe(
+const isAllowedBotAuthor = Effect.fn('isAllowedBotAuthor')(function* (
+  authorId: number | undefined,
+  dependencies: IngressDependencies,
+) {
+  return yield* Schema.decodeUnknownEffect(BotAuthorIdsConfig)(
+    dependencies.allowedBotAuthorIds,
+  ).pipe(
     Effect.orElseSucceed(() => [] as readonly number[]),
     Effect.map(
       (allowedBotAuthorIds) => authorId !== undefined && allowedBotAuthorIds.includes(authorId),
     ),
   );
+});
 
 const processWebhook = (request: Request, dependencies: IngressDependencies) =>
   Effect.gen(function* () {

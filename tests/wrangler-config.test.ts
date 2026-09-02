@@ -137,7 +137,7 @@ describe('Wrangler deployment tooling', () => {
       .replaceAll('<D1_DATABASE_ID>', d1DatabaseId)
       .replaceAll('<RUNNER_VPC_SERVICE_ID>', runnerVpcServiceId)
       .replaceAll('<GITHUB_INSTALLATION_IDS_JSON>', allowedInstallationIds)
-      .replaceAll('<GITHUB_BOT_AUTHOR_IDS_JSON>', '')
+      .replaceAll('<GITHUB_BOT_AUTHOR_IDS_JSON>', allowedBotAuthorIds)
       .split(/\s+/)
       .map((argument) => argument.replace(/^'(.*)'$/, '$1'));
 

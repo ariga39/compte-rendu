@@ -57,7 +57,7 @@ templates. From the repository root, render deployment-only sibling configs
 for the chosen instance:
 
 ```sh
-corepack pnpm render:wrangler <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '[<GITHUB_BOT_AUTHOR_IDS_JSON>]'
+corepack pnpm render:wrangler <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '<GITHUB_BOT_AUTHOR_IDS_JSON>'
 ```
 
 For example, instance `petit-chiba` produces
@@ -82,6 +82,12 @@ automatic Bot pull requests are ignored. Ingress ignores Bot events when this
 value is missing, malformed, or does not contain the event's numeric user ID.
 It does not affect human pull requests or manual `/ai-review` commands. Do not
 use Bot login names or app slugs as configuration values.
+
+To obtain a Bot account's numeric ID without writing to GitHub, query a pull
+request it created with `gh api repos/<OWNER>/<REPO>/pulls/<NUMBER> --jq
+'.user.id'`, or use the `pull_request.user.id` field from a verified webhook.
+Each independent deployment and its GitHub App must configure its own
+`ALLOWED_BOT_AUTHOR_IDS` value.
 
 Independent deployed instances require distinct product GitHub Apps because
 each App has one webhook URL and secret; this does not require a router.
@@ -528,7 +534,7 @@ uses the temporary invocation described above.
 3. Render deployment-only configs from the repository root:
 
    ```sh
-   corepack pnpm render:wrangler <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '[<GITHUB_BOT_AUTHOR_IDS_JSON>]'
+   corepack pnpm render:wrangler <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '<GITHUB_BOT_AUTHOR_IDS_JSON>'
    ```
 
    This writes `apps/core/wrangler.<INSTANCE_NAME>.jsonc` and
