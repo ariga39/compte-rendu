@@ -11,6 +11,10 @@ import {
   sanitizeOperationalLogEvent,
 } from '@compte-rendu/contracts';
 import type { RunnerJobBinding } from './runner-job-client';
+import {
+  formatReviewPublicationMarker,
+  formatReviewPublicationPayload,
+} from './review-publication-format.ts';
 
 export { createRunnerJobClient, type RunnerJobBinding } from './runner-job-client';
 export { createGitHubPublicationAdapter } from './github-review-adapter';
@@ -505,7 +509,7 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
     return 'failed' as const;
   }
 
-  const marker = `<!-- compte-rendu:run:${input.runId} -->`;
+  const marker = formatReviewPublicationMarker(input.runId);
   const lookupMarker = () =>
     github.findReviewByMarker === undefined
       ? Effect.succeed({ ok: true as const, review: undefined })
@@ -555,11 +559,11 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
     if (!publicationClaimed) return 'completed' as const;
   }
 
-  const payload: ReviewPublicationPayload = {
-    event: 'COMMENT',
-    commit_id: outcome.headSha,
-    body: `${marker}\n${decodedOutput}`,
-  };
+  const payload: ReviewPublicationPayload = formatReviewPublicationPayload({
+    runId: input.runId,
+    headSha: outcome.headSha,
+    markdown: decodedOutput,
+  });
 
   const publication = yield* Effect.tryPromise({
     try: () =>

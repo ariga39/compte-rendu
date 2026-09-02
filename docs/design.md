@@ -357,6 +357,27 @@ guidance from <https://github.com/Effect-TS/skills>. Repository instructions and
 the lockfile pin the chosen RC so agent-generated code does not drift between
 Effect versions.
 
+Review-quality and queue probes use the checked-in GitHub publication shim in
+`tests/support/github-publication-shim.ts`: it delegates supplied read behavior
+and captures review and reaction writes locally. Real GitHub publication is
+tested only when publication behavior changes.
+
+The isolated publication probe is runnable with a mode-0600 jobs file and an
+evidence directory:
+
+```sh
+RUNNER_CALLBACK_TOKEN='caller-supplied-token' \
+  node --experimental-strip-types scripts/github-publication-probe.mts \
+  ./probe-jobs.json ./probe-evidence
+```
+
+The jobs file is an array of `{ repositoryId, installationId, job }` entries,
+where `job` is a `RunnerJobInput`. The probe listens only on `127.0.0.1` and
+serves authenticated `POST /runner-claim` and `POST /runner-callback`. It
+writes raw callbacks and captured review requests as mode-0600 files beside
+Runner/session evidence; it has no GitHub write path. The exported probe
+factory accepts a read adapter when a probe needs live read-only behavior.
+
 The initial tracer bullets are:
 
 1. a valid signed eligible PR webhook is accepted and schedules one run;
