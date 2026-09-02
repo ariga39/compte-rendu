@@ -2,6 +2,7 @@ import type {
   ReviewDeliveryRecord,
   ReviewJob,
   ReviewOutcome,
+  ReviewCheckSetupStatus,
   ReviewRunStatus,
   ReviewStateQueries,
   ReviewStateStore,
@@ -43,6 +44,7 @@ interface DeliveryRow {
   runner_attempt?: number | null;
   comment_id?: number | null;
   check_run_id?: number | null;
+  check_setup_status: 'pending' | 'ready' | 'failed';
   evidence_key?: string | null;
   evidence_status?: 'complete' | 'incomplete' | null;
   evidence_size?: number | null;
@@ -56,6 +58,12 @@ interface DeliveryRow {
 interface RunRow {
   run_id: string;
   status: ReviewRunStatus;
+}
+
+interface ReplayRunRow {
+  run_id: string;
+  status: ReviewRunStatus;
+  check_setup_status: ReviewCheckSetupStatus;
 }
 
 interface ClaimRow {
@@ -150,6 +158,7 @@ const runOutcomeSelect = `
     d.base_sha, d.head_sha, d.trigger, r.status,
     r.created_at, r.updated_at, r.runner_job_id, r.runner_attempt, r.comment_id,
     r.check_run_id,
+    r.check_setup_status,
     r.evidence_key, r.evidence_status,
     r.evidence_size, r.evidence_sha256, r.evidence_uploaded_at,
     r.execution_started_at, r.submission_completed_at, r.cleanup_completed_at
@@ -244,8 +253,8 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
           `INSERT INTO review_runs
             (run_id, delivery_id, installation_id, repository_id,
              pull_request_number, base_sha, head_sha, trigger,
-             status, created_at, updated_at, comment_id)
-           SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?
+             status, created_at, updated_at, comment_id, check_setup_status)
+           SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, 'pending'
            WHERE EXISTS (
              SELECT 1 FROM deliveries
              WHERE delivery_id = ? AND status = 'claiming'
@@ -403,9 +412,22 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
 
     const disposition = dispositionForStatus(delivery.status);
     if ((results[0]?.meta.changes ?? 0) === 0) {
+      const replayRun = await database
+        .prepare(
+          `SELECT run_id, status, check_setup_status FROM review_runs
+           WHERE delivery_id = ? ORDER BY rowid DESC LIMIT 1`,
+        )
+        .bind(deliveryId)
+        .first<ReplayRunRow>();
       return {
         kind: 'replay' as const,
         disposition,
+        ...(replayRun?.status !== 'scheduled' || replayRun.check_setup_status !== 'pending'
+          ? {}
+          : {
+              runId: replayRun.run_id,
+              checkSetupStatus: replayRun.check_setup_status,
+            }),
         ...(activeRunnerJob ? { activeRunnerJob } : {}),
       };
     }
@@ -426,9 +448,25 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
       };
     }
 
+    const existingRun = await database
+      .prepare(
+        `SELECT run_id, status, check_setup_status FROM review_runs
+         WHERE installation_id = ? AND repository_id = ?
+           AND pull_request_number = ? AND head_sha = ?
+           AND status IN ('scheduled', 'completed')
+         ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+      )
+      .bind(job.installationId, job.repositoryId, job.pullRequestNumber, job.headSha)
+      .first<ReplayRunRow>();
     return {
       kind: 'existing' as const,
       disposition,
+      ...(existingRun?.status !== 'scheduled' || existingRun.check_setup_status !== 'pending'
+        ? {}
+        : {
+            runId: existingRun.run_id,
+            checkSetupStatus: existingRun.check_setup_status,
+          }),
       ...(activeRunnerJob ? { activeRunnerJob } : {}),
     };
   },
@@ -441,6 +479,16 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
          WHERE run_id = (
            SELECT run_id FROM review_runs
            WHERE status = 'scheduled' AND runner_job_id IS NULL
+             AND check_setup_status <> 'pending'
+             AND NOT EXISTS (
+               SELECT 1 FROM review_runs AS active
+               WHERE active.installation_id = review_runs.installation_id
+                 AND active.repository_id = review_runs.repository_id
+                 AND active.pull_request_number = review_runs.pull_request_number
+                 AND active.head_sha <> review_runs.head_sha
+                 AND active.status IN ('scheduled', 'superseded')
+                 AND active.runner_job_id IS NOT NULL
+             )
            ORDER BY created_at ASC, rowid ASC
            LIMIT 1
          )
@@ -528,13 +576,35 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
     return result.meta.changes === 1;
   },
 
+  clearRunnerJob: async ({ runId, jobId }) => {
+    const result = await database
+      .prepare(
+        `UPDATE review_runs SET runner_job_id = NULL, runner_attempt = NULL
+         WHERE run_id = ? AND runner_job_id = ? AND status = 'superseded'`,
+      )
+      .bind(runId, jobId)
+      .run();
+    return result.meta.changes === 1;
+  },
+
   recordCheckRun: async ({ runId, checkRunId }) => {
     const result = await database
       .prepare(
-        `UPDATE review_runs SET check_run_id = ?
-         WHERE run_id = ? AND check_run_id IS NULL`,
+        `UPDATE review_runs SET check_run_id = ?, check_setup_status = 'ready'
+         WHERE run_id = ? AND check_run_id IS NULL AND check_setup_status = 'pending'`,
       )
       .bind(checkRunId, runId)
+      .run();
+    return result.meta.changes === 1;
+  },
+
+  markCheckSetupFailed: async ({ runId }) => {
+    const result = await database
+      .prepare(
+        `UPDATE review_runs SET check_setup_status = 'failed'
+         WHERE run_id = ? AND check_setup_status = 'pending'`,
+      )
+      .bind(runId)
       .run();
     return result.meta.changes === 1;
   },

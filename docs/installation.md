@@ -282,6 +282,14 @@ Configure the GitHub App with only these repository permissions:
 | Issues                | Write | Make the `issue_comment` webhook available for PR comments, create command reactions, and publish one ordinary PR comment when a Review fails. The handler accepts only a created comment whose body is exactly `/ai-review`. |
 | Checks                | Write | Create one head-SHA-bound Check Run per review run and update its queued, in-progress, success, failure, or cancelled state.                                                                                                  |
 
+Before applying the D1 migration or deploying either Worker, approve the
+GitHub App installation's **Checks: Write** permission. Existing installations
+must approve this permission change explicitly; an unapproved permission must
+block the rollout. After approval, verify one successful run transitions its
+Check from `queued` to `in_progress` to `success`, and one controlled failed
+run transitions from `queued` to `in_progress` to `failure`, with the matching
+terminal Review or failure comment.
+
 The endpoint-to-permission mapping should be checked against GitHub's
 [permission-to-endpoint reference](https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps)
 when GitHub changes an endpoint. The general rule to request the minimum is in
@@ -539,9 +547,11 @@ uses the temporary invocation described above.
    identity, attempt, and originating manual comment id.
    `0005_publication_claim.sql` adds the atomic publication claim used to keep
    concurrent duplicate callbacks from creating duplicate terminal
-   publications. `0006_review_check_runs.sql` stores the GitHub Check Run id so
-   Runner claims and terminal callbacks update the same Check. D1 migration
-   files are versioned and applied in order; see
+   publications. `0006_review_check_runs.sql` stores the GitHub Check Run id and
+   setup state so Runner claims wait for new Check setup while legacy scheduled
+   rows remain claimable as failed setup. New admissions explicitly begin in
+   pending setup and unblock after Check success or Check API failure. D1
+   migration files are versioned and applied in order; see
    [D1 migrations](https://developers.cloudflare.com/d1/reference/migrations/).
 
    The generated core config also retains the legacy Durable Object migration

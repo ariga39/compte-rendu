@@ -325,6 +325,52 @@ describe('Review coordinator', () => {
     });
   });
 
+  it('cancels an old Check when supersession races Check setup', async () => {
+    const stateStore = createInMemoryReviewStateStore();
+    let signalOldCheckStarted!: () => void;
+    const oldCheckStarted = new Promise<void>((resolve) => {
+      signalOldCheckStarted = resolve;
+    });
+    let finishOldCheck!: (check: { id: number }) => void;
+    const oldCheck = new Promise<{ id: number }>((resolve) => {
+      finishOldCheck = resolve;
+    });
+    const checkUpdates: Array<{ checkRunId: number; status: string }> = [];
+    const coordinator = createReviewCoordinator({
+      github: {
+        createCheckRun: async ({ headSha }) => {
+          if (headSha === eligiblePrivatePullRequest.headSha) {
+            signalOldCheckStarted();
+            return oldCheck;
+          }
+          return { id: 322 };
+        },
+        updateCheckRun: async ({ checkRunId, status }) => {
+          checkUpdates.push({ checkRunId, status });
+        },
+      },
+      stateStore,
+      scheduler: { schedule: async () => {} },
+    });
+    const newerEvent = {
+      ...eligiblePrivatePullRequest,
+      deliveryId: 'delivery-check-race-new',
+      action: 'synchronize' as const,
+      headSha: '3333333333333333333333333333333333333333',
+    };
+
+    const oldScheduling = coordinator.handleReviewEvent({
+      ...eligiblePrivatePullRequest,
+      deliveryId: 'delivery-check-race-old',
+    });
+    await oldCheckStarted;
+    expect(await coordinator.handleReviewEvent(newerEvent)).toBe('scheduled');
+    finishOldCheck({ id: 321 });
+
+    expect(await oldScheduling).toBe('scheduled');
+    expect(checkUpdates).toContainEqual({ checkRunId: 321, status: 'cancelled' });
+  });
+
   it('retries one transient GitHub POST and exposes one completed review', async () => {
     const stateStore = createInMemoryReviewStateStore();
     const postedReviews: unknown[] = [];
@@ -647,7 +693,12 @@ describe('Review coordinator', () => {
           job: { ...job, commentId: 987655 },
           occurredAt: '2026-08-25T00:01:00.000Z',
         }),
-      ).toEqual({ kind: 'existing', disposition: 'scheduled' });
+      ).toEqual({
+        kind: 'existing',
+        disposition: 'scheduled',
+        runId: first.runId,
+        checkSetupStatus: 'pending',
+      });
 
       expect(
         await stateStore.markRunCompleted({
@@ -707,7 +758,12 @@ describe('Review coordinator', () => {
 
       expect(results.filter((result) => result.kind === 'claimed')).toHaveLength(1);
       expect(results.filter((result) => result.kind === 'existing')).toEqual([
-        { kind: 'existing', disposition: 'scheduled' },
+        {
+          kind: 'existing',
+          disposition: 'scheduled',
+          runId: expect.any(String),
+          checkSetupStatus: 'pending',
+        },
       ]);
     } finally {
       database.close();
