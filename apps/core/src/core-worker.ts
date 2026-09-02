@@ -341,6 +341,14 @@ export const createCoreWorker = (
         repositoryReadToken: readGrant.token,
       };
       await Schema.decodeUnknownPromise(RunnerJobInput)(input);
+      const current = await stateStore.getRunOutcome(claim.runId);
+      if (
+        current?.status !== 'scheduled' ||
+        current.runnerJobId !== claim.jobId ||
+        current.runnerAttempt !== claim.attempt
+      ) {
+        return new Response(null, { status: 204 });
+      }
       return new Response(JSON.stringify(input), {
         status: 200,
         headers: { 'content-type': 'application/json; charset=utf-8' },
