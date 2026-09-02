@@ -456,6 +456,96 @@ describe('Core Worker', () => {
     }
   });
 
+  it('does not return a claimed old head that becomes superseded while its token is minted', async () => {
+    const database = new SqliteD1Database();
+    let tokenMintStarted!: () => void;
+    let releaseTokenMint!: () => void;
+    const mintStarted = new Promise<void>((resolve) => {
+      tokenMintStarted = resolve;
+    });
+    const tokenMintGate = new Promise<void>((resolve) => {
+      releaseTokenMint = resolve;
+    });
+    const worker = createCoreWorker(
+      {
+        REVIEW_DB: database,
+        RUNNER: {
+          fetch: async (request) =>
+            Response.json({
+              id: new URL(request.url).pathname.split('/').pop(),
+              runId: 'old-run',
+              attempt: 1,
+              evidence: { id: 'old-evidence', status: 'incomplete' },
+              status: 'aborted',
+              stage: 'cleanup',
+              sandbox: { cleanup: 'destroyed' },
+            }),
+        },
+        RUNNER_AUTH_TOKEN: 'runner-auth-token',
+        GITHUB_APP_ID: '1234567',
+        GITHUB_APP_PRIVATE_KEY: 'test-private-key',
+      },
+      {
+        github: { getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git' },
+        getReadInstallationToken: async () => {
+          tokenMintStarted();
+          await tokenMintGate;
+          return { token: 'repository-read-token', expiresAt: '2026-09-01T01:00:00.000Z' };
+        },
+      },
+    );
+
+    try {
+      expect(
+        (
+          await worker.fetch(
+            new Request('https://core.internal/review-events', {
+              method: 'POST',
+              body: JSON.stringify({ ...eligibleEvent, deliveryId: 'delivery-claim-race-old' }),
+            }),
+          )
+        ).status,
+      ).toBe(202);
+      const oldClaim = worker.fetch(
+        new Request('https://core.internal/runner-claims', {
+          method: 'POST',
+          headers: { 'x-compte-rendu-runner-claim': 'verified' },
+        }),
+      );
+      await mintStarted;
+
+      const newHead = '3333333333333333333333333333333333333333';
+      expect(
+        (
+          await worker.fetch(
+            new Request('https://core.internal/review-events', {
+              method: 'POST',
+              body: JSON.stringify({
+                ...eligibleEvent,
+                deliveryId: 'delivery-claim-race-new',
+                headSha: newHead,
+              }),
+            }),
+          )
+        ).status,
+      ).toBe(202);
+      releaseTokenMint();
+
+      expect((await oldClaim).status).toBe(204);
+      const currentClaim = await worker.fetch(
+        new Request('https://core.internal/runner-claims', {
+          method: 'POST',
+          headers: { 'x-compte-rendu-runner-claim': 'verified' },
+        }),
+      );
+      expect(currentClaim.status).toBe(200);
+      expect(await currentClaim.json()).toMatchObject({ headSha: newHead });
+    } finally {
+      releaseTokenMint();
+      database.close();
+    }
+  });
+
   it('queues an eligible review without creating a Runner Job', async () => {
     const database = new SqliteD1Database();
     const runnerRequests: Request[] = [];
