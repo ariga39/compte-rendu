@@ -141,6 +141,8 @@ describe('Review coordinator', () => {
   it('gives a manual failed completion the existing negative feedback', async () => {
     const stateStore = createInMemoryReviewStateStore();
     const reactions: string[] = [];
+    const comments: string[] = [];
+    const checks: string[] = [];
     const claimed = await stateStore.claimReview({
       deliveryId: 'manual-completion-failed',
       job: {
@@ -155,10 +157,18 @@ describe('Review coordinator', () => {
       occurredAt: '2026-08-25T00:00:00.000Z',
     });
     if (claimed.kind !== 'claimed') throw new Error('manual completion was not claimed');
+    await stateStore.recordCheckRun?.({ runId: claimed.runId, checkRunId: 321 });
     const coordinator = createReviewCoordinator({
       github: {
         addReaction: async ({ content }) => {
           reactions.push(content);
+        },
+        createIssueComment: async ({ body }) => {
+          comments.push(body);
+          return { id: 123, body };
+        },
+        updateCheckRun: async ({ status }) => {
+          checks.push(status);
         },
       },
       stateStore,
@@ -167,6 +177,49 @@ describe('Review coordinator', () => {
 
     expect(await coordinator.completeReview({ runId: claimed.runId, output: '' })).toBe('failed');
     expect(reactions).toEqual(['-1']);
+    expect(comments).toEqual([
+      `Review failed before a result could be published. Please retry with \`/ai-review\`.\n\n<!-- compte-rendu:failure:run:${claimed.runId} -->`,
+    ]);
+    expect(checks).toEqual(['failure']);
+  });
+
+  it('retries a terminal failure notification that GitHub did not create', async () => {
+    const stateStore = createInMemoryReviewStateStore();
+    const claimed = await stateStore.claimReview({
+      deliveryId: 'automatic-completion-failure-comment-retry',
+      job: {
+        repositoryId: 11,
+        pullRequestNumber: 42,
+        installationId: 7,
+        baseSha: eligiblePrivatePullRequest.baseSha,
+        headSha: eligiblePrivatePullRequest.headSha,
+        trigger: 'automatic',
+      },
+      occurredAt: '2026-08-25T00:00:00.000Z',
+    });
+    if (claimed.kind !== 'claimed') throw new Error('automatic completion was not claimed');
+    const comments: string[] = [];
+    let first = true;
+    const coordinator = createReviewCoordinator({
+      github: {
+        createIssueComment: async ({ body }) => {
+          if (first) {
+            first = false;
+            throw new Error('GitHub unavailable before create');
+          }
+          comments.push(body);
+          return { id: 123, body };
+        },
+      },
+      stateStore,
+      scheduler: { schedule: async () => {} },
+    });
+
+    expect(await coordinator.completeReview({ runId: claimed.runId, output: '' })).toBe('failed');
+    expect(await coordinator.completeReview({ runId: claimed.runId, output: '' })).toBe('failed');
+    expect(comments).toEqual([
+      `Review failed before a result could be published. Please retry with \`/ai-review\`.\n\n<!-- compte-rendu:failure:run:${claimed.runId} -->`,
+    ]);
   });
 
   it('gives a manual superseded completion confused feedback', async () => {
@@ -212,11 +265,16 @@ describe('Review coordinator', () => {
   it('marks a review superseded when the head changes at the POST edge', async () => {
     const stateStore = createInMemoryReviewStateStore();
     const reviews: ReviewPublicationPayload[] = [];
+    const checkUpdates: string[] = [];
     const events: unknown[] = [];
     let runId = '';
     let headChanged = false;
     const coordinator = createReviewCoordinator({
       github: {
+        createCheckRun: async () => ({ id: 321 }),
+        updateCheckRun: async ({ status }) => {
+          checkUpdates.push(status);
+        },
         loadReviewTarget: async () => ({
           headSha: eligiblePrivatePullRequest.headSha,
           files: [],
@@ -258,6 +316,7 @@ describe('Review coordinator', () => {
       }),
     ).toBe('ignored');
     expect(reviews).toEqual([]);
+    expect(checkUpdates).toEqual(['cancelled']);
     expect(await coordinator.handleReviewEvent(eligiblePrivatePullRequest)).toBe('ignored');
     expect(events).toContainEqual({
       phase: 'publication',
@@ -326,6 +385,7 @@ describe('Review coordinator', () => {
     const stateStore = createInMemoryReviewStateStore();
     let runId = '';
     const remoteReviews: string[] = [];
+    const failureComments: string[] = [];
     const events: unknown[] = [];
     const fetcher: typeof fetch = async (input, init) => {
       const inputUrl =
@@ -353,7 +413,13 @@ describe('Review coordinator', () => {
       return new Response('{}', { status: 404 });
     };
     const coordinator = createReviewCoordinator({
-      github: createGitHubPublicationAdapter({ token: 'installation-token', fetch: fetcher }),
+      github: {
+        ...createGitHubPublicationAdapter({ token: 'installation-token', fetch: fetcher }),
+        createIssueComment: async ({ body }) => {
+          failureComments.push(body);
+          return { id: 123, body };
+        },
+      },
       stateStore,
       scheduler: {
         schedule: async (_job, scheduledRunId) => {
@@ -375,6 +441,9 @@ describe('Review coordinator', () => {
       }),
     ).toBe('failed');
     expect(remoteReviews).toHaveLength(1);
+    expect(failureComments).toEqual([
+      `Review failed before a result could be published. Please retry with \`/ai-review\`.\n\n<!-- compte-rendu:failure:run:${runId} -->`,
+    ]);
     expect(await coordinator.handleReviewEvent(eligiblePrivatePullRequest)).toBe('failed');
     expect(events).toContainEqual({
       phase: 'publication',

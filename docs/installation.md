@@ -273,13 +273,14 @@ VPC Service.
 
 Configure the GitHub App with only these repository permissions:
 
-| GitHub App permission | Level | Concrete operation in this repository                                                                                                                                                                                          |
-| --------------------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Metadata              | Read  | Resolve the repository by numeric ID, validate repository metadata, and check the `/ai-review` commenter's collaborator permission before approving a public fork review.                                                      |
-| Contents              | Read  | Fetch the repository at the exact base/head SHAs in the Sandbox checkout. GitHub documents Contents as the permission for HTTP-based Git access.                                                                               |
-| Pull requests         | Read  | Load PR facts and current head SHA, and find existing reviews for idempotent publication.                                                                                                                                      |
-| Pull requests         | Write | Create the body-only `COMMENT` review.                                                                                                                                                                                         |
-| Issues                | Write | Make the `issue_comment` webhook available for PR comments and create `eyes`, `confused`, or `-1` reactions on the originating command comment. The handler accepts only a created comment whose body is exactly `/ai-review`. |
+| GitHub App permission | Level | Concrete operation in this repository                                                                                                                                                                                         |
+| --------------------- | ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Metadata              | Read  | Resolve the repository by numeric ID, validate repository metadata, and check the `/ai-review` commenter's collaborator permission before approving a public fork review.                                                     |
+| Contents              | Read  | Fetch the repository at the exact base/head SHAs in the Sandbox checkout. GitHub documents Contents as the permission for HTTP-based Git access.                                                                              |
+| Pull requests         | Read  | Load PR facts and current head SHA, and find existing reviews for idempotent publication.                                                                                                                                     |
+| Pull requests         | Write | Create the body-only `COMMENT` review.                                                                                                                                                                                        |
+| Issues                | Write | Make the `issue_comment` webhook available for PR comments, create command reactions, and publish one ordinary PR comment when a Review fails. The handler accepts only a created comment whose body is exactly `/ai-review`. |
+| Checks                | Write | Create one head-SHA-bound Check Run per review run and update its queued, in-progress, success, failure, or cancelled state.                                                                                                  |
 
 The endpoint-to-permission mapping should be checked against GitHub's
 [permission-to-endpoint reference](https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps)
@@ -303,9 +304,17 @@ Manual command reactions are compact operator feedback: `eyes` means the
 authorized command was claimed and scheduled, `confused` means the command
 was denied, the pull request was missing or draft, or the run was superseded,
 and `-1` means the accepted run ended failed. A successful run keeps only
-`eyes`; its published `COMMENT` review is the completion signal. Automatic
-reviews do not react to a command. Reaction writes target the originating
-numeric comment id and may be replayed safely with the same app and content.
+`eyes`; its published `COMMENT` review is the completion signal. A failed run
+also publishes one ordinary PR comment so automatic and manual runs both have
+a visible terminal notification. Automatic reviews do not react to a command.
+Reaction writes target the originating numeric comment id and may be replayed
+safely with the same app and content.
+
+The Check Run is progress display rather than a replacement for those terminal
+notifications. It is created as `queued`, becomes `in_progress` when claimed,
+and completes as `success`, `failure`, or `cancelled`. Its `external_id` is the
+Core run id and it is always attached to that run's immutable head SHA. A Check
+API failure must not block the Review or failure comment.
 
 Install the App on the owning account with **Only select repositories**, then
 select the target repository or repositories. Do not choose all repositories
@@ -529,7 +538,9 @@ uses the temporary invocation described above.
    timestamps, while `0004_runner_admission.sql` adds the claimed Runner Job
    identity, attempt, and originating manual comment id.
    `0005_publication_claim.sql` adds the atomic publication claim used to keep
-   concurrent duplicate callbacks from creating duplicate reviews. D1 migration
+   concurrent duplicate callbacks from creating duplicate terminal
+   publications. `0006_review_check_runs.sql` stores the GitHub Check Run id so
+   Runner claims and terminal callbacks update the same Check. D1 migration
    files are versioned and applied in order; see
    [D1 migrations](https://developers.cloudflare.com/d1/reference/migrations/).
 

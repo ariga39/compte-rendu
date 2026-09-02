@@ -42,6 +42,7 @@ interface DeliveryRow {
   runner_job_id?: string | null;
   runner_attempt?: number | null;
   comment_id?: number | null;
+  check_run_id?: number | null;
   evidence_key?: string | null;
   evidence_status?: 'complete' | 'incomplete' | null;
   evidence_size?: number | null;
@@ -73,6 +74,10 @@ interface ClaimRow {
 interface ActiveRunnerRow {
   run_id: string;
   runner_job_id: string;
+}
+
+interface SupersededRunRow {
+  run_id: string;
 }
 
 const dispositionForStatus = (status: ReviewStoredStatus) => {
@@ -107,6 +112,7 @@ const outcomeFromRow = (row: DeliveryRow): ReviewOutcome => ({
   ...(row.runner_job_id == null ? {} : { runnerJobId: row.runner_job_id }),
   ...(row.runner_attempt == null ? {} : { runnerAttempt: row.runner_attempt }),
   ...(row.comment_id == null ? {} : { commentId: row.comment_id }),
+  ...(row.check_run_id == null ? {} : { checkRunId: row.check_run_id }),
   ...(row.evidence_key == null ||
   row.evidence_status == null ||
   row.evidence_size == null ||
@@ -143,6 +149,7 @@ const runOutcomeSelect = `
   SELECT d.delivery_id, d.installation_id, d.repository_id, d.pull_request_number,
     d.base_sha, d.head_sha, d.trigger, r.status,
     r.created_at, r.updated_at, r.runner_job_id, r.runner_attempt, r.comment_id,
+    r.check_run_id,
     r.evidence_key, r.evidence_status,
     r.evidence_size, r.evidence_sha256, r.evidence_uploaded_at,
     r.execution_started_at, r.submission_completed_at, r.cleanup_completed_at
@@ -378,6 +385,17 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
       activeRunner === null
         ? undefined
         : { runId: activeRunner.run_id, jobId: activeRunner.runner_job_id };
+    const supersededRun = await database
+      .prepare(
+        `SELECT run_id FROM review_runs
+         WHERE installation_id = ? AND repository_id = ?
+           AND pull_request_number = ? AND head_sha <> ?
+           AND status = 'superseded' AND runner_job_id IS NULL
+           AND updated_at = ?
+         ORDER BY created_at ASC, rowid ASC LIMIT 1`,
+      )
+      .bind(job.installationId, job.repositoryId, job.pullRequestNumber, job.headSha, occurredAt)
+      .first<SupersededRunRow>();
     const delivery = await database.prepare(deliverySelect).bind(deliveryId).first<DeliveryRow>();
     if (delivery === null) {
       throw new Error('D1 did not retain the claimed delivery');
@@ -404,6 +422,7 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
         kind: 'claimed' as const,
         runId: run.run_id,
         ...(activeRunnerJob ? { activeRunnerJob } : {}),
+        ...(supersededRun === null ? {} : { supersededRunIds: [supersededRun.run_id] }),
       };
     }
 
@@ -509,13 +528,36 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
     return result.meta.changes === 1;
   },
 
+  recordCheckRun: async ({ runId, checkRunId }) => {
+    const result = await database
+      .prepare(
+        `UPDATE review_runs SET check_run_id = ?
+         WHERE run_id = ? AND check_run_id IS NULL`,
+      )
+      .bind(checkRunId, runId)
+      .run();
+    return result.meta.changes === 1;
+  },
+
   claimRunPublication: async ({ runId, occurredAt }) => {
     const result = await database
       .prepare(
         `UPDATE review_runs SET publication_claimed_at = ?
-         WHERE run_id = ? AND status = 'scheduled' AND publication_claimed_at IS NULL`,
+         WHERE run_id = ? AND status IN ('scheduled', 'failed')
+           AND publication_claimed_at IS NULL`,
       )
       .bind(occurredAt, runId)
+      .run();
+    return result.meta.changes === 1;
+  },
+
+  releaseRunPublicationClaim: async ({ runId, occurredAt }) => {
+    const result = await database
+      .prepare(
+        `UPDATE review_runs SET publication_claimed_at = NULL
+         WHERE run_id = ? AND status = 'failed' AND publication_claimed_at = ?`,
+      )
+      .bind(runId, occurredAt)
       .run();
     return result.meta.changes === 1;
   },
