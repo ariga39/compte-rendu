@@ -53,22 +53,27 @@ declare module 'node:child_process' {
 
 declare module 'node:http' {
   export interface IncomingMessage {
-    readonly headers: Record<string, string | readonly string[] | undefined>;
+    readonly headers: Record<string, string | string[] | undefined>;
     readonly method?: string;
     readonly url?: string;
     [Symbol.asyncIterator](): AsyncIterableIterator<Buffer | string>;
   }
   export interface ServerResponse {
     statusCode: number;
+    readonly headersSent: boolean;
     setHeader(name: string, value: string): void;
+    writeHead(statusCode: number, headers?: Record<string, string>): this;
     end(data?: string | Uint8Array): void;
   }
+  export interface Server {
+    listen(port: number, host: string, callback: () => void): this;
+    listen(options: { port: number; host: string }): this;
+    once(event: 'error', listener: (error: unknown) => void): this;
+    address(): { readonly port: number } | string | null;
+  }
   export function createServer(
-    handler: (request: IncomingMessage, response: ServerResponse) => void,
-  ): {
-    listen(port: number): unknown;
-    listen(options: { port: number; host: string }): unknown;
-  };
+    handler: (request: IncomingMessage, response: ServerResponse) => void | Promise<void>,
+  ): Server;
 }
 
 declare module 'node:crypto' {
@@ -87,6 +92,7 @@ declare module 'node:fs/promises' {
     options?: { recursive?: boolean; mode?: number },
   ): Promise<string | undefined>;
   export function mkdtemp(prefix: string): Promise<string>;
+  export function readdir(path: string): Promise<string[]>;
   export function readdir(path: string, options: { withFileTypes: true }): Promise<Dirent[]>;
   export function readFile(path: string, encoding: 'utf8'): Promise<string>;
   export function readFile(path: string): Promise<Buffer>;
@@ -98,7 +104,7 @@ declare module 'node:fs/promises' {
   ): Promise<void>;
   export function writeFile(
     path: string,
-    data: string,
+    data: string | Uint8Array,
     options?: { mode?: number } | 'utf8',
   ): Promise<void>;
 }
@@ -145,11 +151,13 @@ declare const process: {
   cwd(): string;
   execPath: string;
   env: NodeJS.ProcessEnv;
+  stdout: { write(value: string): boolean };
 };
 
 declare class Buffer extends Uint8Array {
   static concat(chunks: readonly Buffer[]): Buffer;
   static isBuffer(value: unknown): value is Buffer;
   static from(value: string | Uint8Array | ArrayBuffer): Buffer;
+  static from(value: string, encoding: string): Buffer;
   toString(encoding?: string): string;
 }
