@@ -57,7 +57,7 @@ templates. From the repository root, render deployment-only sibling configs
 for the chosen instance:
 
 ```sh
-corepack pnpm render:wrangler <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>'
+corepack pnpm render:wrangler <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '[<GITHUB_BOT_AUTHOR_IDS_JSON>]'
 ```
 
 For example, instance `petit-chiba` produces
@@ -74,6 +74,14 @@ only to the generated ingress config as `ALLOWED_INSTALLATION_IDS`; the tracked
 template remains a placeholder. Ingress fails closed with HTTP `503` when the
 value is missing or malformed, and ignores signed events from installations outside the
 allowlist before contacting `CORE`.
+
+`<GITHUB_BOT_AUTHOR_IDS_JSON>` is an optional JSON array of positive numeric
+GitHub user IDs, for example `[49699333]`. The renderer writes it to
+`ALLOWED_BOT_AUTHOR_IDS`; omitting it writes `[]`, preserving the default that
+automatic Bot pull requests are ignored. Ingress ignores Bot events when this
+value is missing, malformed, or does not contain the event's numeric user ID.
+It does not affect human pull requests or manual `/ai-review` commands. Do not
+use Bot login names or app slugs as configuration values.
 
 Independent deployed instances require distinct product GitHub Apps because
 each App has one webhook URL and secret; this does not require a router.
@@ -299,7 +307,8 @@ Subscribe the App to:
 
 - `Pull requests`: `opened`, `reopened`, `synchronize`, and
   `ready_for_review` (all four are accepted by `apps/ingress/src/index.ts` for
-  non-Bot authors; Bot-authored automatic events are ignored).
+  non-Bot authors and configured Bot author IDs; other Bot-authored automatic
+  events are ignored).
 - `Issue comment`: `created`. The product path is only a comment on a pull
   request with the exact body `/ai-review`.
 
@@ -519,7 +528,7 @@ uses the temporary invocation described above.
 3. Render deployment-only configs from the repository root:
 
    ```sh
-   corepack pnpm render:wrangler <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>'
+   corepack pnpm render:wrangler <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '[<GITHUB_BOT_AUTHOR_IDS_JSON>]'
    ```
 
    This writes `apps/core/wrangler.<INSTANCE_NAME>.jsonc` and
@@ -638,16 +647,17 @@ uses the temporary invocation described above.
 
 The deployed variables-versus-secrets inventory is deliberately small:
 
-| Worker                    | Plain variable             | Secrets                                       | Non-secret bindings                                  |
-| ------------------------- | -------------------------- | --------------------------------------------- | ---------------------------------------------------- |
-| `<INSTANCE_NAME>-ingress` | `ALLOWED_INSTALLATION_IDS` | `WEBHOOK_SECRET`, `RUNNER_CALLBACK_TOKEN`     | `CORE` → `<INSTANCE_NAME>-core`                      |
-| `<INSTANCE_NAME>-core`    | `GITHUB_APP_ID`            | `GITHUB_APP_PRIVATE_KEY`, `RUNNER_AUTH_TOKEN` | `REVIEW_DB`, `EVIDENCE_BUCKET`, `RUNNER` VPC Service |
+| Worker                    | Plain variable                                       | Secrets                                       | Non-secret bindings                                  |
+| ------------------------- | ---------------------------------------------------- | --------------------------------------------- | ---------------------------------------------------- |
+| `<INSTANCE_NAME>-ingress` | `ALLOWED_INSTALLATION_IDS`, `ALLOWED_BOT_AUTHOR_IDS` | `WEBHOOK_SECRET`, `RUNNER_CALLBACK_TOKEN`     | `CORE` → `<INSTANCE_NAME>-core`                      |
+| `<INSTANCE_NAME>-core`    | `GITHUB_APP_ID`                                      | `GITHUB_APP_PRIVATE_KEY`, `RUNNER_AUTH_TOKEN` | `REVIEW_DB`, `EVIDENCE_BUCKET`, `RUNNER` VPC Service |
 
-`GITHUB_APP_ID` and `ALLOWED_INSTALLATION_IDS` are deployment configuration, not
-secrets. Supply them only through the renderer: copy the dedicated product App
-ID into its core argument and pass the numeric installation IDs in its ingress
-argument. Do not leave either placeholder, duplicate either value in a secret,
-or reuse the repository-operations App identity. Repository IDs, PR numbers,
+`GITHUB_APP_ID`, `ALLOWED_INSTALLATION_IDS`, and `ALLOWED_BOT_AUTHOR_IDS` are
+deployment configuration, not secrets. Supply them only through the renderer:
+copy the dedicated product App ID into its core argument and pass the numeric
+installation and optional Bot author IDs in its ingress arguments. Do not leave
+either required placeholder, duplicate either value in a secret, or reuse the
+repository-operations App identity. Repository IDs, PR numbers,
 SHAs, `deliveryId`s, `runId`s, and `sandboxId`s are runtime data, not values to
 hard-code in the manual.
 
@@ -756,16 +766,16 @@ work around that sanitization by logging request bodies, git URLs with
 credentials, Sandbox files, OpenCode stdout/stderr, model prompts, or session
 artifacts.
 
-| Symptom                               | Check first                                                                              | Safe action                                                                                                                     |
-| ------------------------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| GitHub delivery is `400`              | `WEBHOOK_SECRET`, `X-Hub-Signature-256`, and the raw configured URL                      | Re-enter the same high-entropy secret in GitHub and ingress, then redeliver. Do not disable signature checking.                 |
-| Ingress is `503` / `core_unavailable` | Core deployment name, `CORE` service binding, and core availability                      | Deploy or update core first, then ingress. Redeliver the GitHub event.                                                          |
-| Core is `503` / scheduling failure    | D1 migration, required core secrets, Runner VPC binding, and the GitHub App installation | Correct the missing binding/credential or installation permission, then redeliver. Do not create a second database.             |
-| Run fails at checkout                 | `runId`, `sandboxId`, and runner reason `checkout`                                       | Check Contents read access and installation scope. Never put the installation token in a log or retry an old Sandbox manually.  |
-| Run fails at agent or cleanup         | Runner records for the same IDs                                                          | Treat a cleanup failure as a failed run until forced Sandbox cleanup succeeds.                                                  |
-| No review is published                | Publication reason, current PR head SHA, and Pull requests write permission              | If the head changed, issue a new review command. If publication is uncertain, check the existing review marker before retrying. |
-| Public fork PR does nothing           | Comment body and commenter permission                                                    | Use the exact `/ai-review` command from a maintainer with `write`, `maintain`, or `admin`; a new head needs a new command.      |
-| Bot-authored PR does nothing          | Pull request author type and comment body                                                | Automatic Bot PRs are intentionally ignored; use exact `/ai-review` from a maintainer when a review is useful.                  |
+| Symptom                               | Check first                                                                              | Safe action                                                                                                                                            |
+| ------------------------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| GitHub delivery is `400`              | `WEBHOOK_SECRET`, `X-Hub-Signature-256`, and the raw configured URL                      | Re-enter the same high-entropy secret in GitHub and ingress, then redeliver. Do not disable signature checking.                                        |
+| Ingress is `503` / `core_unavailable` | Core deployment name, `CORE` service binding, and core availability                      | Deploy or update core first, then ingress. Redeliver the GitHub event.                                                                                 |
+| Core is `503` / scheduling failure    | D1 migration, required core secrets, Runner VPC binding, and the GitHub App installation | Correct the missing binding/credential or installation permission, then redeliver. Do not create a second database.                                    |
+| Run fails at checkout                 | `runId`, `sandboxId`, and runner reason `checkout`                                       | Check Contents read access and installation scope. Never put the installation token in a log or retry an old Sandbox manually.                         |
+| Run fails at agent or cleanup         | Runner records for the same IDs                                                          | Treat a cleanup failure as a failed run until forced Sandbox cleanup succeeds.                                                                         |
+| No review is published                | Publication reason, current PR head SHA, and Pull requests write permission              | If the head changed, issue a new review command. If publication is uncertain, check the existing review marker before retrying.                        |
+| Public fork PR does nothing           | Comment body and commenter permission                                                    | Use the exact `/ai-review` command from a maintainer with `write`, `maintain`, or `admin`; a new head needs a new command.                             |
+| Bot-authored PR does nothing          | Pull request author type, numeric author ID, and `ALLOWED_BOT_AUTHOR_IDS`                | Automatic Bot PRs are ignored unless their positive numeric author ID is configured; use exact `/ai-review` from a maintainer when a review is useful. |
 
 ## Update and rollback
 

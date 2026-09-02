@@ -21,8 +21,8 @@ Included:
 - GitHub.com repositories on which the GitHub App is installed;
 - non-Bot-authored private-repository PRs, reviewed automatically;
 - non-Bot-authored public same-repository PRs, reviewed automatically;
-- Bot-authored PRs, reviewed only after a maintainer issues `/ai-review` for
-  the current head SHA;
+- Bot-authored PRs, ignored automatically by default, with an instance option
+  to admit only explicitly allowlisted stable numeric GitHub author IDs;
 - public fork PRs, reviewed only after a maintainer issues `/ai-review` for the
   current head SHA;
 - `issue_comment.created` events containing the manual review command;
@@ -48,7 +48,8 @@ Deferred:
 
 ### Automatic review
 
-A non-draft PR whose GitHub author type is not `Bot` is eligible for automatic
+A non-draft PR whose GitHub author type is not `Bot`, or whose `Bot` author ID
+is explicitly allowlisted by the ingress instance, is eligible for automatic
 review when either:
 
 - its base repository is private; or
@@ -56,16 +57,22 @@ review when either:
 
 The second rule covers branches created in a public base repository by people.
 Ingress ignores automatic pull-request events whose `pull_request.user.type`
-is `Bot`, before Core can schedule a Runner Job. This avoids routine Dependabot,
-Renovate, and other Bot-authored PRs consuming Sandbox and model capacity. It
-uses GitHub's actor type rather than a login-name list.
+is `Bot` unless its stable positive numeric `pull_request.user.id` is in the
+instance's `ALLOWED_BOT_AUTHOR_IDS` JSON array. Missing or malformed bot
+configuration, missing IDs, and IDs not in the array remain ignored before
+Core can schedule a Runner Job. This avoids routine Dependabot, Renovate, and
+other non-allowlisted Bot-authored PRs consuming Sandbox and model capacity.
+It uses GitHub's actor type and numeric ID rather than a login-name or app-slug
+list. Human events and manual `/ai-review` events do not consult this bot
+allowlist.
 
 ### External public PR
 
-A public fork or Bot-authored PR does not start a Sandbox or model call when
-opened or updated. A maintainer with `write`, `maintain`, or `admin` permission
-may comment `/ai-review`. Approval applies only to the head SHA observed when
-the command is handled. A later `synchronize` event requires a new command.
+A public fork or non-allowlisted Bot-authored PR does not start a Sandbox or
+model call when opened or updated. A maintainer with `write`, `maintain`, or
+`admin` permission may comment `/ai-review`. Approval applies only to the head
+SHA observed when the command is handled. A later `synchronize` event requires
+a new command.
 
 The originating numeric `issue_comment` id is retained for manual-command
 feedback. A successfully authorized and scheduled manual command gets the
