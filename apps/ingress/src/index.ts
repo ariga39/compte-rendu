@@ -31,6 +31,8 @@ const WebhookAction = Schema.Struct({ action: Schema.String });
 const InstallationId = Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0)));
 const InstallationIds = Schema.Array(InstallationId).pipe(Schema.check(Schema.isMinLength(1)));
 const InstallationIdsConfig = Schema.fromJsonString(InstallationIds);
+const BotAuthorId = Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0)));
+const BotAuthorIdsConfig = Schema.fromJsonString(Schema.Array(BotAuthorId));
 
 const PullRequestWebhook = Schema.Struct({
   action: PullRequestAction,
@@ -42,7 +44,7 @@ const PullRequestWebhook = Schema.Struct({
   }),
   pull_request: Schema.Struct({
     draft: Schema.Boolean,
-    user: Schema.Struct({ type: Schema.String }),
+    user: Schema.Struct({ type: Schema.String, id: Schema.optional(Schema.Int) }),
     base: Schema.Struct({
       sha: GitHubSha,
       repo: Schema.Struct({ id: Schema.Int }),
@@ -75,6 +77,7 @@ export interface IngressDependencies {
   readonly secret: string;
   readonly crypto: Pick<Crypto, 'subtle'>;
   readonly allowedInstallationIds: unknown;
+  readonly allowedBotAuthorIds?: unknown;
   readonly core: CoreServiceBinding;
   readonly runnerCallbackToken?: string;
   readonly log?: OperationalLog;
@@ -83,6 +86,7 @@ export interface IngressDependencies {
 export interface IngressEnv {
   readonly WEBHOOK_SECRET: string;
   readonly ALLOWED_INSTALLATION_IDS: string;
+  readonly ALLOWED_BOT_AUTHOR_IDS?: string;
   readonly CORE: CoreServiceBinding;
   readonly RUNNER_CALLBACK_TOKEN?: string;
 }
@@ -224,6 +228,14 @@ const checkInstallation = (
     return false;
   });
 
+const isAllowedBotAuthor = (authorId: number | undefined, dependencies: IngressDependencies) =>
+  Schema.decodeUnknownEffect(BotAuthorIdsConfig)(dependencies.allowedBotAuthorIds).pipe(
+    Effect.orElseSucceed(() => [] as readonly number[]),
+    Effect.map(
+      (allowedBotAuthorIds) => authorId !== undefined && allowedBotAuthorIds.includes(authorId),
+    ),
+  );
+
 const processWebhook = (request: Request, dependencies: IngressDependencies) =>
   Effect.gen(function* () {
     const contentLength = request.headers.get('content-length');
@@ -288,7 +300,10 @@ const processWebhook = (request: Request, dependencies: IngressDependencies) =>
       ) {
         return 'ignored' as const;
       }
-      if (payload.pull_request.user.type === 'Bot') {
+      if (
+        payload.pull_request.user.type === 'Bot' &&
+        !(yield* isAllowedBotAuthor(payload.pull_request.user.id, dependencies))
+      ) {
         yield* recordOperationalLog(dependencies.log ?? createCloudflareOperationalLog(), {
           phase: 'ingress',
           outcome: 'ignored',
@@ -544,6 +559,7 @@ const ingress: WorkerEntrypoint<IngressEnv> = {
       secret: env.WEBHOOK_SECRET,
       crypto: globalThis.crypto,
       allowedInstallationIds: env.ALLOWED_INSTALLATION_IDS,
+      allowedBotAuthorIds: env.ALLOWED_BOT_AUTHOR_IDS,
       core: env.CORE,
       runnerCallbackToken: env.RUNNER_CALLBACK_TOKEN,
     }).fetch(request);

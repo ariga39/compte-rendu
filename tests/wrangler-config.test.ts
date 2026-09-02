@@ -12,10 +12,15 @@ const d1DatabaseId = '01234567-89ab-4cde-8123-456789abcdef';
 const runnerVpcServiceId = '11234567-89ab-4cde-8123-456789abcdef';
 const canonicalRunnerVpcServiceId = '01a04174-56d3-7160-ab77-fc3de2b68c57';
 const allowedInstallationIds = '[7]';
+const allowedBotAuthorIds = '[12345]';
 
 type WranglerConfig = {
   workers_dev?: boolean;
-  vars?: { GITHUB_APP_ID?: string; ALLOWED_INSTALLATION_IDS?: string };
+  vars?: {
+    GITHUB_APP_ID?: string;
+    ALLOWED_INSTALLATION_IDS?: string;
+    ALLOWED_BOT_AUTHOR_IDS?: string;
+  };
   secrets?: { required?: readonly string[] };
   d1_databases?: readonly { database_id?: string }[];
   r2_buckets?: readonly { binding?: string; bucket_name?: string }[];
@@ -39,6 +44,7 @@ type DeploymentFixture = {
   runWithoutRunnerId: (instanceName: string) => string;
   runWithoutInstallationIds: (instanceName: string) => string;
   runWithInstallationIds: (instanceName: string, installationIds: string) => string;
+  runWithBotAuthorIds: (instanceName: string, botAuthorIds: string) => string;
   outputs: (instanceName: string) => { core: string; ingress: string };
   read: (instanceName: string) => { core: string; ingress: string };
 };
@@ -66,6 +72,7 @@ const withDeploymentFixture = <T>(callback: (fixture: DeploymentFixture) => T): 
     instanceName: string,
     runnerId?: string,
     configuredInstallationIds: string | null = allowedInstallationIds,
+    configuredBotAuthorIds?: string,
   ) =>
     execFileSync(
       process.execPath,
@@ -77,6 +84,7 @@ const withDeploymentFixture = <T>(callback: (fixture: DeploymentFixture) => T): 
         d1DatabaseId,
         ...(runnerId === undefined ? [] : [runnerId]),
         ...(configuredInstallationIds === null ? [] : [configuredInstallationIds]),
+        ...(configuredBotAuthorIds === undefined ? [] : [configuredBotAuthorIds]),
       ],
       { cwd: root, encoding: 'utf8', stdio: 'pipe' },
     );
@@ -96,6 +104,8 @@ const withDeploymentFixture = <T>(callback: (fixture: DeploymentFixture) => T): 
       runWithoutInstallationIds: (instanceName) => invoke(instanceName, runnerVpcServiceId, null),
       runWithInstallationIds: (instanceName, installationIds) =>
         invoke(instanceName, runnerVpcServiceId, installationIds),
+      runWithBotAuthorIds: (instanceName, botAuthorIds) =>
+        invoke(instanceName, runnerVpcServiceId, allowedInstallationIds, botAuthorIds),
       outputs,
       read,
     });
@@ -127,6 +137,7 @@ describe('Wrangler deployment tooling', () => {
       .replaceAll('<D1_DATABASE_ID>', d1DatabaseId)
       .replaceAll('<RUNNER_VPC_SERVICE_ID>', runnerVpcServiceId)
       .replaceAll('<GITHUB_INSTALLATION_IDS_JSON>', allowedInstallationIds)
+      .replaceAll('<GITHUB_BOT_AUTHOR_IDS_JSON>', '')
       .split(/\s+/)
       .map((argument) => argument.replace(/^'(.*)'$/, '$1'));
 
@@ -186,6 +197,16 @@ describe('Wrangler deployment tooling', () => {
       expect(second.ingress).toContain('"service": "second-instance-core"');
       expect(first.core).not.toContain('second-instance');
       expect(second.core).not.toContain('petit-chiba');
+    });
+  });
+
+  it('renders an optional automatic Bot author allowlist', () => {
+    withDeploymentFixture(({ runWithBotAuthorIds: run, read }) => {
+      run('trusted-bots', allowedBotAuthorIds);
+
+      expect(read('trusted-bots').ingress).toContain(
+        `"ALLOWED_BOT_AUTHOR_IDS": "${allowedBotAuthorIds}"`,
+      );
     });
   });
 
@@ -261,6 +282,7 @@ describe('Wrangler deployment tooling', () => {
     expect(core.workers_dev).toBe(false);
     expect(ingress.workers_dev).toBe(true);
     expect(ingress.vars?.ALLOWED_INSTALLATION_IDS).toBe('REPLACE_WITH_GITHUB_INSTALLATION_IDS');
+    expect(ingress.vars?.ALLOWED_BOT_AUTHOR_IDS).toBe('REPLACE_WITH_GITHUB_BOT_AUTHOR_IDS');
     expect(core.secrets?.required).toEqual(['GITHUB_APP_PRIVATE_KEY', 'RUNNER_AUTH_TOKEN']);
     expect(ingress.secrets?.required).toEqual(['WEBHOOK_SECRET', 'RUNNER_CALLBACK_TOKEN']);
     expect(core.vars?.GITHUB_APP_ID).toBe('REPLACE_WITH_GITHUB_APP_ID');

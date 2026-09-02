@@ -9,6 +9,8 @@ const maxCloudflareNameLength = 63;
 const longestDerivedSuffix = '-review-evidence';
 const InstallationId = Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0)));
 const InstallationIds = Schema.Array(InstallationId).pipe(Schema.check(Schema.isMinLength(1)));
+const BotAuthorId = Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0)));
+const BotAuthorIds = Schema.Array(BotAuthorId);
 
 const replaceRequired = (template: string, marker: string, value: string) => {
   if (!template.includes(marker)) {
@@ -23,6 +25,7 @@ const renderDeploymentConfigs = (
   d1DatabaseId: string,
   runnerVpcServiceId: string,
   allowedInstallationIds: string,
+  allowedBotAuthorIds = '[]',
 ) => {
   if (
     !instanceNamePattern.test(instanceName) ||
@@ -46,6 +49,14 @@ const renderDeploymentConfigs = (
     );
   } catch {
     throw new Error('GitHub installation IDs must be a non-empty JSON array of positive integers');
+  }
+  let parsedBotAuthorIds: readonly number[];
+  try {
+    parsedBotAuthorIds = Schema.decodeUnknownSync(Schema.fromJsonString(BotAuthorIds))(
+      allowedBotAuthorIds,
+    );
+  } catch {
+    throw new Error('GitHub Bot author IDs must be a JSON array of positive integers');
   }
 
   const coreDirectory = join(process.cwd(), 'apps/core');
@@ -100,6 +111,11 @@ const renderDeploymentConfigs = (
     '"ALLOWED_INSTALLATION_IDS": "REPLACE_WITH_GITHUB_INSTALLATION_IDS"',
     `"ALLOWED_INSTALLATION_IDS": ${JSON.stringify(JSON.stringify(parsedInstallationIds))}`,
   );
+  ingress = replaceRequired(
+    ingress,
+    '"ALLOWED_BOT_AUTHOR_IDS": "REPLACE_WITH_GITHUB_BOT_AUTHOR_IDS"',
+    `"ALLOWED_BOT_AUTHOR_IDS": ${JSON.stringify(JSON.stringify(parsedBotAuthorIds))}`,
+  );
 
   let coreCreated = false;
   try {
@@ -116,12 +132,12 @@ const renderDeploymentConfigs = (
 };
 
 const main = (args: readonly string[]) => {
-  if (args.length !== 5) {
+  if (args.length !== 5 && args.length !== 6) {
     throw new Error(
-      'usage: render-wrangler-config <instance-name> <github-app-id> <d1-uuid> <runner-vpc-service-uuid> <github-installation-ids-json>',
+      'usage: render-wrangler-config <instance-name> <github-app-id> <d1-uuid> <runner-vpc-service-uuid> <github-installation-ids-json> [github-bot-author-ids-json]',
     );
   }
-  renderDeploymentConfigs(args[0], Number(args[1]), args[2], args[3], args[4]);
+  renderDeploymentConfigs(args[0], Number(args[1]), args[2], args[3], args[4], args[5]);
 };
 
 if (fileURLToPath(import.meta.url) === resolve(process.argv[1] ?? '')) {

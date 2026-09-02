@@ -6,6 +6,7 @@
   "workers_dev": true,
   "vars": {
     "ALLOWED_INSTALLATION_IDS": "REPLACE_WITH_GITHUB_INSTALLATION_IDS",
+    "ALLOWED_BOT_AUTHOR_IDS": "REPLACE_WITH_GITHUB_BOT_AUTHOR_IDS",
   },
   "secrets": {
     "required": ["WEBHOOK_SECRET", "RUNNER_CALLBACK_TOKEN"],

@@ -403,6 +403,67 @@ describe('Webhook ingress', () => {
       },
     ]);
   });
+  it('forwards an automatic pull request from an allowlisted Bot author', async () => {
+    const forwarded: Request[] = [];
+    const workerDependencies: IngressDependencies = {
+      secret,
+      crypto: globalThis.crypto,
+      allowedInstallationIds: '[7]',
+      allowedBotAuthorIds: '[12345]',
+      core: {
+        fetch: async (request: Request) => {
+          forwarded.push(request);
+          return new Response(null, { status: 202 });
+        },
+      },
+    };
+    const worker = createIngressWorkerWithConfig(workerDependencies);
+
+    const response = await worker.fetch(
+      await signedRequest({
+        ...payload,
+        pull_request: {
+          ...payload.pull_request,
+          user: { login: 'dependabot[bot]', id: 12345, type: 'Bot' },
+        },
+      }),
+    );
+
+    expect(response.status).toBe(202);
+    expect(forwarded).toHaveLength(1);
+  });
+  it('keeps non-allowlisted or malformed Bot events ignored without disabling humans', async () => {
+    for (const allowedBotAuthorIds of ['[54321]', 'not-json']) {
+      const forwarded: Request[] = [];
+      const worker = createIngressWorkerWithConfig({
+        secret,
+        crypto: globalThis.crypto,
+        allowedInstallationIds: '[7]',
+        allowedBotAuthorIds,
+        core: {
+          fetch: async (request) => {
+            forwarded.push(request);
+            return new Response(null, { status: 202 });
+          },
+        },
+      });
+
+      const botResponse = await worker.fetch(
+        await signedRequest({
+          ...payload,
+          pull_request: {
+            ...payload.pull_request,
+            user: { login: 'other-bot[bot]', id: 12345, type: 'Bot' },
+          },
+        }),
+      );
+      const humanResponse = await worker.fetch(await signedRequest());
+
+      expect(botResponse.status).toBe(204);
+      expect(humanResponse.status).toBe(202);
+      expect(forwarded).toHaveLength(1);
+    }
+  });
   it('keeps the accepted response when operational logging fails', async () => {
     let forwarded = false;
     const worker = createIngressWorker({
