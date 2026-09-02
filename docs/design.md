@@ -30,6 +30,9 @@ Included:
 - one self-hosted Runner Job/OpenCode execution path;
 - one concise human-readable Markdown review, guided by at most five
   high-confidence findings when present;
+- one GitHub Check Run showing queued, running, and terminal review state;
+- a visible terminal notification: the Review itself on success or one pull
+  request comment when the Review fails;
 - D1 run history and delivery deduplication; and
 - runner-owned Sandbox cleanup for each attempt.
 
@@ -74,6 +77,16 @@ successful run adds no reaction beyond `eyes`, because its published
 reaction. Feedback uses GitHub's issue-comment reaction endpoint; repeating a
 same-app, same-content write is the replay-idempotency mechanism and does not
 introduce feedback state.
+
+Each scheduled run also creates one Check Run bound to the immutable head SHA
+with the Core run id as `external_id`. It moves from `queued` to `in_progress`
+when the Runner claims the Job, then to `success` only after the Review is
+published. A terminal execution or publication failure completes it as
+`failure`; a run replaced by a newer head completes as `cancelled`. Checks are
+progress display, not the terminal notification: success publishes the Review
+body, while failure publishes one ordinary pull request comment. GitHub Check
+API failure degrades progress visibility but never suppresses either terminal
+publication.
 
 ### Review result
 
@@ -121,10 +134,11 @@ only durably schedules a run; it does not mint a GitHub read token or admit a
 Runner Job. An idle Runner calls the authenticated public `/runner-claim` route
 through ingress. Core atomically claims the oldest eligible unclaimed run,
 records one immutable Job id/attempt, then resolves the repository and mints
-the scoped read token. The Runner owns execution and cleanup, then sends one
+the scoped read token. The claim also moves the persisted Check Run to
+`in_progress`. The Runner owns execution and cleanup, then sends one
 authenticated result callback through the same public ingress. Core stores the
 bounded named-field evidence bundle in private R2 before confirming
-publication. There is no Workflow.
+publication, then completes the Check. There is no Workflow.
 
 The repository layout is intentionally small:
 

@@ -49,6 +49,24 @@ const CreatedReview = Schema.Struct({
   body: Schema.NullOr(Schema.String),
 });
 
+const IssueComment = Schema.Struct({
+  id: Schema.Int,
+  body: Schema.NullOr(Schema.String),
+});
+
+const IssueComments = Schema.Array(IssueComment);
+const failureMarkerPattern = /<!-- compte-rendu:failure:run:[^>]+ -->/;
+
+const CheckRun = Schema.Struct({
+  id: Schema.Int,
+  external_id: Schema.optional(Schema.NullOr(Schema.String)),
+});
+
+const CheckRuns = Schema.Struct({
+  check_runs: Schema.Array(CheckRun),
+});
+const checkName = 'Petit Chiba Review';
+
 class MarkerLookupFailed extends Error {}
 class GitHubNotFoundError extends Error {}
 
@@ -153,6 +171,49 @@ export const createGitHubPublicationAdapter = (
     throw new Error('GitHub review marker lookup retry exhausted');
   };
 
+  const findIssueCommentByMarker = async ({
+    repositoryId,
+    pullRequestNumber,
+    installationId,
+    marker,
+  }: {
+    repositoryId: number;
+    pullRequestNumber: number;
+    installationId: number;
+    marker: string;
+  }) => {
+    for (let page = 1; page <= maxReviewPages; page += 1) {
+      const value = await requestJson(
+        installationId,
+        `/repos/${await repositoryName(repositoryId, installationId)}/issues/${pullRequestNumber}/comments?per_page=${pageSize}&page=${page}`,
+      );
+      const comments = await Schema.decodeUnknownPromise(IssueComments)(value);
+      const existing = comments.find((comment) => comment.body?.includes(marker));
+      if (existing !== undefined) return existing;
+      if (comments.length < pageSize) return undefined;
+    }
+    throw new Error('GitHub issue comment listing exceeded the safe page limit');
+  };
+
+  const findCheckRun = async ({
+    repositoryId,
+    installationId,
+    headSha,
+    runId,
+  }: {
+    repositoryId: number;
+    installationId: number;
+    headSha: string;
+    runId: string;
+  }) => {
+    const value = await requestJson(
+      installationId,
+      `/repos/${await repositoryName(repositoryId, installationId)}/commits/${headSha}/check-runs?check_name=${encodeURIComponent(checkName)}&per_page=${pageSize}`,
+    );
+    const checks = await Schema.decodeUnknownPromise(CheckRuns)(value);
+    return checks.check_runs.find((check) => check.external_id === runId);
+  };
+
   return {
     getPullRequest: async ({ repositoryId, pullRequestNumber, installationId }) => {
       try {
@@ -191,6 +252,97 @@ export const createGitHubPublicationAdapter = (
         installationId,
         `/repos/${await repositoryName(repositoryId, installationId)}/issues/comments/${commentId}/reactions`,
         { method: 'POST', body: JSON.stringify({ content }) },
+      );
+    },
+    createIssueComment: async ({ repositoryId, pullRequestNumber, installationId, body }) => {
+      const marker = failureMarkerPattern.exec(body)?.[0];
+      if (marker === undefined) throw new Error('Failure comment marker is required');
+      const lookup = () =>
+        findIssueCommentByMarker({
+          repositoryId,
+          pullRequestNumber,
+          installationId,
+          marker,
+        });
+      const existing = await lookup();
+      if (existing !== undefined) return existing;
+      try {
+        const value = await requestJson(
+          installationId,
+          `/repos/${await repositoryName(repositoryId, installationId)}/issues/${pullRequestNumber}/comments`,
+          { method: 'POST', body: JSON.stringify({ body }) },
+        );
+        return await Schema.decodeUnknownPromise(IssueComment)(value);
+      } catch (error) {
+        const recovered = await lookup();
+        if (recovered !== undefined) return recovered;
+        throw error;
+      }
+    },
+    createCheckRun: async ({ repositoryId, installationId, headSha, runId }) => {
+      const lookup = () => findCheckRun({ repositoryId, installationId, headSha, runId });
+      const existing = await lookup();
+      if (existing !== undefined) return { id: existing.id };
+      try {
+        const value = await requestJson(
+          installationId,
+          `/repos/${await repositoryName(repositoryId, installationId)}/check-runs`,
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              name: checkName,
+              head_sha: headSha,
+              status: 'queued',
+              external_id: runId,
+              output: {
+                title: 'Review queued',
+                summary: 'Waiting for an available review runner.',
+              },
+            }),
+          },
+        );
+        const check = await Schema.decodeUnknownPromise(CheckRun)(value);
+        return { id: check.id };
+      } catch (error) {
+        const recovered = await lookup();
+        if (recovered !== undefined) return { id: recovered.id };
+        throw error;
+      }
+    },
+    updateCheckRun: async ({ repositoryId, installationId, checkRunId, status }) => {
+      const payload =
+        status === 'in_progress'
+          ? {
+              status,
+              output: { title: 'Review in progress', summary: 'The review agent is running.' },
+            }
+          : status === 'success'
+            ? {
+                status: 'completed',
+                conclusion: status,
+                output: { title: 'Review completed', summary: 'The Review was published.' },
+              }
+            : status === 'failure'
+              ? {
+                  status: 'completed',
+                  conclusion: status,
+                  output: {
+                    title: 'Review failed',
+                    summary: 'See the failure comment on this pull request.',
+                  },
+                }
+              : {
+                  status: 'completed',
+                  conclusion: status,
+                  output: {
+                    title: 'Review cancelled',
+                    summary: 'A newer pull request revision replaced this run.',
+                  },
+                };
+      await requestJson(
+        installationId,
+        `/repos/${await repositoryName(repositoryId, installationId)}/check-runs/${checkRunId}`,
+        { method: 'PATCH', body: JSON.stringify(payload) },
       );
     },
     getRepositoryUrl: async ({ repositoryId, installationId }) => {

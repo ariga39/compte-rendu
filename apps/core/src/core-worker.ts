@@ -13,12 +13,14 @@ import {
   createRunnerJobClient,
   type CoreEnv,
   type GitHubAdapter,
+  type ReviewOutcome,
   type ReviewPublicationStateStore,
 } from './index';
 import type { D1DatabaseLike } from './review-state-store';
 import type { WorkerEntrypoint } from '@compte-rendu/contracts';
 import { createCloudflareOperationalLog } from './operational-log';
 import type { OperationalLog } from '@compte-rendu/contracts';
+import { formatReviewFailureComment } from './review-publication-format';
 
 export interface CoreWorkerEnv extends Partial<CoreEnv> {
   readonly REVIEW_DB: D1DatabaseLike;
@@ -191,6 +193,55 @@ export const createCoreWorker = (
     log: dependencies.log ?? createCloudflareOperationalLog(),
   });
 
+  const markRunFailed = async (outcome: ReviewOutcome, runId: string, occurredAt: string) => {
+    const notificationClaimed =
+      (outcome.status === 'scheduled' || outcome.status === 'failed') &&
+      stateStore.claimRunPublication !== undefined
+        ? await stateStore.claimRunPublication({ runId, occurredAt })
+        : false;
+    await stateStore.markSchedulingFailed({ runId, occurredAt });
+    if (
+      (outcome.status === 'scheduled' || outcome.status === 'superseded') &&
+      outcome.trigger === 'manual' &&
+      outcome.commentId !== undefined &&
+      github.addReaction !== undefined
+    ) {
+      await github.addReaction({
+        repositoryId: outcome.repositoryId,
+        installationId: outcome.installationId,
+        commentId: outcome.commentId,
+        content: outcome.status === 'superseded' ? 'confused' : '-1',
+      });
+    }
+    if (
+      notificationClaimed &&
+      outcome.checkRunId !== undefined &&
+      github.updateCheckRun !== undefined
+    ) {
+      await github
+        .updateCheckRun({
+          repositoryId: outcome.repositoryId,
+          installationId: outcome.installationId,
+          checkRunId: outcome.checkRunId,
+          status: 'failure',
+        })
+        .catch(() => undefined);
+    }
+    if (notificationClaimed && github.createIssueComment !== undefined) {
+      try {
+        await github.createIssueComment({
+          repositoryId: outcome.repositoryId,
+          pullRequestNumber: outcome.pullRequestNumber,
+          installationId: outcome.installationId,
+          body: formatReviewFailureComment(runId),
+        });
+      } catch (error) {
+        await stateStore.releaseRunPublicationClaim?.({ runId, occurredAt }).catch(() => false);
+        throw error;
+      }
+    }
+  };
+
   const handleRunnerResult = async (request: Request): Promise<Response> => {
     if (request.headers.get('x-compte-rendu-runner-callback') !== 'verified') {
       return new Response(null, { status: 401 });
@@ -217,20 +268,7 @@ export const createCoreWorker = (
     }
     const markCallbackFailed = async () => {
       const occurredAt = await Effect.runPromise(DateTime.now.pipe(Effect.map(DateTime.formatIso)));
-      await stateStore.markSchedulingFailed({ runId: callback.runId, occurredAt });
-      if (
-        (outcome.status === 'scheduled' || outcome.status === 'superseded') &&
-        outcome.trigger === 'manual' &&
-        outcome.commentId !== undefined &&
-        github.addReaction !== undefined
-      ) {
-        await github.addReaction({
-          repositoryId: outcome.repositoryId,
-          installationId: outcome.installationId,
-          commentId: outcome.commentId,
-          content: outcome.status === 'superseded' ? 'confused' : '-1',
-        });
-      }
+      await markRunFailed(outcome, callback.runId, occurredAt);
     };
     if (callback.status === 'succeeded') {
       if (!(await completeCallbackEvidenceIsValid(callback))) {
@@ -291,6 +329,20 @@ export const createCoreWorker = (
         runId: callback.runId,
         output: callback.result,
       });
+      if (
+        disposition === 'completed' &&
+        outcome.checkRunId !== undefined &&
+        github.updateCheckRun !== undefined
+      ) {
+        await github
+          .updateCheckRun({
+            repositoryId: outcome.repositoryId,
+            installationId: outcome.installationId,
+            checkRunId: outcome.checkRunId,
+            status: 'success',
+          })
+          .catch(() => undefined);
+      }
       return new Response(null, { status: disposition === 'failed' ? 503 : 202 });
     }
 
@@ -349,12 +401,27 @@ export const createCoreWorker = (
       ) {
         return new Response(null, { status: 204 });
       }
+      if (current.checkRunId !== undefined && github.updateCheckRun !== undefined) {
+        await github
+          .updateCheckRun({
+            repositoryId: current.repositoryId,
+            installationId: current.installationId,
+            checkRunId: current.checkRunId,
+            status: 'in_progress',
+          })
+          .catch(() => undefined);
+      }
       return new Response(JSON.stringify(input), {
         status: 200,
         headers: { 'content-type': 'application/json; charset=utf-8' },
       });
     } catch {
-      await stateStore.markSchedulingFailed({ runId: claim.runId, occurredAt });
+      const current = await stateStore.getRunOutcome(claim.runId);
+      if (current === undefined) {
+        await stateStore.markSchedulingFailed({ runId: claim.runId, occurredAt });
+      } else {
+        await markRunFailed(current, claim.runId, occurredAt);
+      }
       return new Response(null, { status: 503 });
     }
   };
