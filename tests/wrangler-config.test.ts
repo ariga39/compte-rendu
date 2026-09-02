@@ -115,6 +115,17 @@ const withDeploymentFixture = <T>(callback: (fixture: DeploymentFixture) => T): 
 };
 
 describe('Wrangler deployment tooling', () => {
+  it('keeps Bot author IDs in update/rollback and uninstall renderer commands', () => {
+    const installation = readFileSync(resolve(repositoryRoot, 'docs/installation.md'), 'utf8');
+    const lifecycle = installation.slice(installation.indexOf('## Update and rollback'));
+    const commands = lifecycle.match(/^   `corepack pnpm render:wrangler.*`$/gm);
+
+    expect(commands).toHaveLength(2);
+    for (const command of commands ?? []) {
+      expect(command).toContain("'<GITHUB_BOT_AUTHOR_IDS_JSON>'");
+    }
+  });
+
   it('renders gitignored configs through the documented root pnpm command', () => {
     const instanceName = 'package-script-invocation';
     const outputPaths = {
@@ -191,6 +202,7 @@ describe('Wrangler deployment tooling', () => {
       expect(first.ingress).toContain('"name": "petit-chiba-ingress"');
       expect(first.ingress).toContain('"service": "petit-chiba-core"');
       expect(first.ingress).toContain(`"ALLOWED_INSTALLATION_IDS": "${allowedInstallationIds}"`);
+      expect(parseConfigText(first.ingress).vars?.ALLOWED_BOT_AUTHOR_IDS).toBe('[]');
 
       expect(second.core).toContain('"name": "second-instance-core"');
       expect(second.core).toContain('"database_name": "second-instance-review-state"');

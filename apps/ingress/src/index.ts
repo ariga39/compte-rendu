@@ -44,7 +44,7 @@ const PullRequestWebhook = Schema.Struct({
   }),
   pull_request: Schema.Struct({
     draft: Schema.Boolean,
-    user: Schema.Struct({ type: Schema.String, id: Schema.optional(Schema.Int) }),
+    user: Schema.Struct({ type: Schema.String, id: Schema.optional(Schema.NullOr(Schema.Int)) }),
     base: Schema.Struct({
       sha: GitHubSha,
       repo: Schema.Struct({ id: Schema.Int }),
@@ -229,7 +229,7 @@ const checkInstallation = (
   });
 
 const isAllowedBotAuthor = Effect.fn('isAllowedBotAuthor')(function* (
-  authorId: number | undefined,
+  authorId: number | null | undefined,
   dependencies: IngressDependencies,
 ) {
   return yield* Schema.decodeUnknownEffect(BotAuthorIdsConfig)(
@@ -237,7 +237,8 @@ const isAllowedBotAuthor = Effect.fn('isAllowedBotAuthor')(function* (
   ).pipe(
     Effect.orElseSucceed(() => [] as readonly number[]),
     Effect.map(
-      (allowedBotAuthorIds) => authorId !== undefined && allowedBotAuthorIds.includes(authorId),
+      (allowedBotAuthorIds) =>
+        authorId !== null && authorId !== undefined && allowedBotAuthorIds.includes(authorId),
     ),
   );
 });

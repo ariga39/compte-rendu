@@ -366,6 +366,32 @@ describe('Webhook ingress', () => {
       headSha: '2222222222222222222222222222222222222222',
     });
   });
+  it('preserves human pull request handling when the author ID is explicitly null', async () => {
+    const forwarded: Request[] = [];
+    const worker = createIngressWorker({
+      secret,
+      crypto: globalThis.crypto,
+      core: {
+        fetch: async (request) => {
+          forwarded.push(request);
+          return new Response(null, { status: 202 });
+        },
+      },
+    });
+
+    const response = await worker.fetch(
+      await signedRequest({
+        ...payload,
+        pull_request: {
+          ...payload.pull_request,
+          user: { login: 'maintainer', type: 'User', id: null },
+        },
+      }),
+    );
+
+    expect(response.status).toBe(202);
+    expect(forwarded).toHaveLength(1);
+  });
   it('ignores an automatic pull request authored by a GitHub Bot', async () => {
     const forwarded: Request[] = [];
     const { events, log } = collectingLog();
@@ -431,6 +457,108 @@ describe('Webhook ingress', () => {
 
     expect(response.status).toBe(202);
     expect(forwarded).toHaveLength(1);
+  });
+  it('fails closed for Bot pull requests with null or missing author IDs', async () => {
+    const forwarded: Request[] = [];
+    const worker = createIngressWorkerWithConfig({
+      secret,
+      crypto: globalThis.crypto,
+      allowedInstallationIds: '[7]',
+      allowedBotAuthorIds: '[12345]',
+      core: {
+        fetch: async (request) => {
+          forwarded.push(request);
+          return new Response(null, { status: 202 });
+        },
+      },
+    });
+
+    for (const user of [
+      { login: 'bot-with-null-id[bot]', type: 'Bot', id: null },
+      { login: 'bot-without-id[bot]', type: 'Bot' },
+    ]) {
+      const response = await worker.fetch(
+        await signedRequest({
+          ...payload,
+          pull_request: { ...payload.pull_request, user },
+        }),
+      );
+
+      expect(response.status).toBe(204);
+    }
+
+    expect(forwarded).toHaveLength(0);
+  });
+  it('ignores an allowlisted Bot author from an unapproved installation before contacting core', async () => {
+    const forwarded: Request[] = [];
+    const worker = createIngressWorkerWithConfig({
+      secret,
+      crypto: globalThis.crypto,
+      allowedInstallationIds: '[7]',
+      allowedBotAuthorIds: '[12345]',
+      core: {
+        fetch: async (request) => {
+          forwarded.push(request);
+          return new Response(null, { status: 202 });
+        },
+      },
+    });
+
+    const response = await worker.fetch(
+      await signedRequest({
+        ...payload,
+        installation: { id: 99 },
+        pull_request: {
+          ...payload.pull_request,
+          user: { login: 'dependabot[bot]', id: 12345, type: 'Bot' },
+        },
+      }),
+    );
+
+    expect(response.status).toBe(204);
+    expect(forwarded).toHaveLength(0);
+  });
+  it('forwards a manual review command when the Bot author allowlist is malformed', async () => {
+    const forwarded: Request[] = [];
+    const worker = createIngressWorkerWithConfig({
+      secret,
+      crypto: globalThis.crypto,
+      allowedInstallationIds: '[7]',
+      allowedBotAuthorIds: 'not-json',
+      core: {
+        fetch: async (request) => {
+          forwarded.push(request);
+          return new Response(null, { status: 202 });
+        },
+      },
+    });
+    const request = await signedRequest({
+      action: 'created',
+      installation: { id: 7 },
+      repository: { id: 11 },
+      issue: {
+        number: 42,
+        pull_request: { url: 'https://api.github.com/repos/example/repo/pulls/42' },
+      },
+      comment: {
+        id: 987654,
+        body: '/ai-review',
+        user: { login: 'maintainer' },
+      },
+    });
+    request.headers.set('x-github-event', 'issue_comment');
+
+    const response = await worker.fetch(request);
+
+    expect(response.status).toBe(202);
+    expect(forwarded).toHaveLength(1);
+    expect(await forwarded[0]?.clone().json()).toMatchObject({
+      event: 'issue_comment',
+      installationId: 7,
+      pullRequestNumber: 42,
+      commentId: 987654,
+      command: '/ai-review',
+    });
   });
   it('keeps non-allowlisted or malformed Bot events ignored without disabling humans', async () => {
     for (const allowedBotAuthorIds of ['[54321]', 'not-json']) {
