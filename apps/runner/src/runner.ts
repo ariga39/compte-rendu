@@ -73,6 +73,7 @@ const trustedOpenCodeConfig = JSON.stringify({
           'git grep *': 'allow',
           'git log': 'allow',
           'git log *': 'allow',
+          'git log *--output*': 'deny',
           'git show': 'allow',
           'git show *': 'allow',
           'git diff *--no-index*': 'deny',

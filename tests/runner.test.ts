@@ -2595,6 +2595,7 @@ describe('Runner Job HTTP interface', () => {
               'git grep *': 'allow',
               'git log': 'allow',
               'git log *': 'allow',
+              'git log *--output*': 'deny',
               'git show': 'allow',
               'git show *': 'allow',
               'git diff *--no-index*': 'deny',
