@@ -599,7 +599,6 @@ describe('Core Worker', () => {
           outcome: 'failed',
           published: false,
           total_duration_ms: 6000,
-          queue_wait_ms: 1000,
           cleanup_status: 'destroyed',
           evidence_status: 'incomplete',
           failure_phase: 'agent',
@@ -607,6 +606,9 @@ describe('Core Worker', () => {
           $process_person_profile: false,
         },
       });
+      expect((events[2] as { properties: Record<string, unknown> }).properties).not.toHaveProperty(
+        'queue_wait_ms',
+      );
     } finally {
       fetcher.mockRestore();
       database.close();
@@ -2058,32 +2060,33 @@ describe('Core Worker', () => {
 
   it('creates the replacement Check when old-head cancellation fails', async () => {
     const database = new SqliteD1Database();
+    const { fetcher, requests, waitUntilTasks } = capturePostHogTransport();
     const checks: Array<{ headSha: string }> = [];
-    const worker = createCoreWorker(
-      {
-        ...coreEnv(database),
-        EVIDENCE_BUCKET: { put: async () => undefined },
-        RUNNER: {
-          fetch: async (request) => {
-            if (request.method === 'DELETE') return new Response(null, { status: 503 });
-            return runnerResponse(request);
-          },
+    const env = {
+      ...coreEnv(database),
+      EVIDENCE_BUCKET: { put: async () => undefined },
+      RUNNER: {
+        fetch: async (request: Request) => {
+          if (request.method === 'DELETE') return new Response(null, { status: 503 });
+          return runnerResponse(request);
         },
       },
-      {
-        github: {
-          getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
-          createCheckRun: async ({ headSha }) => {
-            checks.push({ headSha });
-            return { id: 321 + checks.length - 1 };
-          },
+      ...postHogTestDefaults.environment,
+    };
+    const context = { waitUntil: (task: Promise<unknown>) => waitUntilTasks.push(task) };
+    const worker = createCoreWorker(env, {
+      github: {
+        getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+        createCheckRun: async ({ headSha }) => {
+          checks.push({ headSha });
+          return { id: 321 + checks.length - 1 };
         },
-        getReadInstallationToken: async () => ({
-          token: 'repository-read-token',
-          expiresAt: '2026-09-01T01:00:00.000Z',
-        }),
       },
-    );
+      getReadInstallationToken: async () => ({
+        token: 'repository-read-token',
+        expiresAt: '2026-09-01T01:00:00.000Z',
+      }),
+    });
 
     try {
       expect(
@@ -2093,17 +2096,23 @@ describe('Core Worker', () => {
               method: 'POST',
               body: JSON.stringify({ ...eligibleEvent, deliveryId: 'delivery-cancel-fails-old' }),
             }),
+            env,
+            context,
           )
         ).status,
       ).toBe(202);
+      await Promise.all(waitUntilTasks.splice(0));
       const oldClaim = await worker.fetch(
         new Request('https://core.internal/runner-claims', {
           method: 'POST',
           headers: { 'x-compte-rendu-runner-claim': 'verified' },
         }),
+        env,
+        context,
       );
       expect(oldClaim.status).toBe(200);
       const oldJob = (await oldClaim.json()) as { id: string; runId: string };
+      await Promise.all(waitUntilTasks.splice(0));
       const newEvent = {
         ...eligibleEvent,
         deliveryId: 'delivery-cancel-fails-new',
@@ -2116,9 +2125,16 @@ describe('Core Worker', () => {
               method: 'POST',
               body: JSON.stringify(newEvent),
             }),
+            env,
+            context,
           )
         ).status,
       ).toBe(202);
+      await Promise.all(waitUntilTasks.splice(0));
+      const scheduledEvents = (await postHogEvents(requests)).filter(
+        (event) => (event as { event: string }).event === 'review scheduled',
+      );
+      expect(scheduledEvents).toHaveLength(2);
       expect(checks.map(({ headSha }) => headSha)).toEqual([
         eligibleEvent.headSha,
         newEvent.headSha,
@@ -2174,6 +2190,7 @@ describe('Core Worker', () => {
       expect(claimAfterCleanup.status).toBe(200);
       expect(await claimAfterCleanup.json()).toMatchObject({ headSha: newEvent.headSha });
     } finally {
+      fetcher.mockRestore();
       database.close();
     }
   });
@@ -2957,6 +2974,67 @@ describe('Core Worker', () => {
           checkRunId: 321,
           status: 'failure',
         },
+      ]);
+    } finally {
+      database.close();
+    }
+  });
+
+  it('keeps manual supersession feedback when an aborted callback arrives late', async () => {
+    const database = new SqliteD1Database();
+    const stateStore = createD1ReviewStateStore(database);
+    const claimed = await stateStore.claimReview({
+      deliveryId: 'delivery-callback-manual-superseded',
+      job: {
+        repositoryId: 11,
+        pullRequestNumber: 42,
+        installationId: 7,
+        baseSha: eligibleEvent.baseSha,
+        headSha: eligibleEvent.headSha,
+        trigger: 'manual',
+        commentId: 987654,
+      },
+      occurredAt: '2026-09-01T00:00:00.000Z',
+    });
+    if (claimed.kind !== 'claimed') throw new Error('manual superseded run was not claimed');
+    await stateStore.recordRunnerJob({ runId: claimed.runId, jobId: 'runner-job-1', attempt: 1 });
+    await stateStore.markRunSuperseded?.({
+      runId: claimed.runId,
+      occurredAt: '2026-09-01T00:00:01.000Z',
+    });
+    const reactions: unknown[] = [];
+    const worker = createCoreWorker(
+      {
+        REVIEW_DB: database,
+        GITHUB_APP_ID: '1234567',
+        GITHUB_APP_PRIVATE_KEY: 'test-private-key',
+        EVIDENCE_BUCKET: { put: async () => undefined },
+      },
+      {
+        stateStore,
+        github: {
+          addReaction: async (input) => {
+            reactions.push(input);
+          },
+        },
+      },
+    );
+
+    try {
+      const response = await worker.fetch(
+        new Request('https://core.internal/runner-results', {
+          method: 'POST',
+          headers: {
+            'x-compte-rendu-runner-callback': 'verified',
+            'content-type': 'application/json',
+          },
+          body: await abortedCallback(claimed.runId, 'runner-job-1'),
+        }),
+      );
+
+      expect(response.status).toBe(202);
+      expect(reactions).toEqual([
+        { repositoryId: 11, installationId: 7, commentId: 987654, content: 'confused' },
       ]);
     } finally {
       database.close();
