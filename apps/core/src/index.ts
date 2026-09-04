@@ -55,7 +55,6 @@ export type ReviewDisposition =
 export type ReviewRunStatus = 'scheduled' | 'failed' | 'completed' | 'superseded';
 export type ReviewStoredStatus = ReviewDisposition | ReviewRunStatus | 'claiming';
 export type ReviewCheckSetupStatus = 'pending' | 'ready' | 'failed';
-
 export interface ReviewOutcome {
   deliveryId: string;
   installationId: number;
@@ -154,8 +153,17 @@ export interface ReviewStateQueries {
   recordEvidence(input: { runId: string; evidence: ReviewEvidenceMetadata }): Promise<boolean>;
   recordRunnerJob(input: { runId: string; jobId: string; attempt: number }): Promise<boolean>;
   clearRunnerJob?(input: { runId: string; jobId: string }): Promise<boolean>;
-  recordCheckRun?(input: { runId: string; checkRunId: number }): Promise<boolean>;
-  markCheckSetupFailed?(input: { runId: string }): Promise<boolean>;
+  claimCheckSetup?(input: {
+    runId: string;
+    claimedAt: string;
+    staleBefore: string;
+  }): Promise<boolean>;
+  recordCheckRun?(input: {
+    runId: string;
+    checkRunId: number;
+    setupClaim?: string;
+  }): Promise<boolean>;
+  markCheckSetupFailed?(input: { runId: string; setupClaim?: string }): Promise<boolean>;
   markRunCompleted(input: { runId: string; occurredAt: string }): Promise<boolean>;
   markRunSuperseded(input: { runId: string; occurredAt: string }): Promise<boolean>;
   completeRunPublication(input: {
@@ -754,12 +762,38 @@ const schedule = (scheduler: ReviewScheduler, job: ReviewJob, runId: string) =>
     ),
   );
 
+const checkStatusForOutcome = (
+  outcome: ReviewOutcome | undefined,
+): 'in_progress' | 'success' | 'failure' | 'cancelled' | undefined =>
+  outcome?.status === 'completed'
+    ? 'success'
+    : outcome?.status === 'failed'
+      ? 'failure'
+      : outcome?.status === 'superseded'
+        ? 'cancelled'
+        : outcome?.status === 'scheduled' && outcome.runnerJobId !== undefined
+          ? 'in_progress'
+          : undefined;
+
+const checkSetupLeaseDuration = { minutes: 1 } as const;
+
 const setupCheck = Effect.fn('setupCheck')(function* (
   github: GitHubAdapter,
   stateStore: ReviewCompletionStateStore,
   runId: string,
   job: ReviewJob,
 ) {
+  let setupClaim: string | undefined;
+  if (stateStore.claimCheckSetup !== undefined) {
+    const now = yield* DateTime.now;
+    setupClaim = DateTime.formatIso(now);
+    const staleBefore = DateTime.formatIso(DateTime.subtract(now, checkSetupLeaseDuration));
+    const claimed = yield* Effect.tryPromise({
+      try: () => stateStore.claimCheckSetup!({ runId, claimedAt: setupClaim!, staleBefore }),
+      catch: () => false,
+    }).pipe(Effect.catch(() => Effect.succeed(false)));
+    if (!claimed) return;
+  }
   if (github.createCheckRun !== undefined && stateStore.recordCheckRun !== undefined) {
     const checkRun = yield* Effect.tryPromise({
       try: () =>
@@ -773,7 +807,12 @@ const setupCheck = Effect.fn('setupCheck')(function* (
     }).pipe(Effect.catch(() => Effect.succeed(undefined)));
     if (checkRun !== undefined) {
       const recorded = yield* Effect.tryPromise({
-        try: () => stateStore.recordCheckRun!({ runId, checkRunId: checkRun.id }),
+        try: () =>
+          stateStore.recordCheckRun!({
+            runId,
+            checkRunId: checkRun.id,
+            ...(setupClaim === undefined ? {} : { setupClaim }),
+          }),
         catch: () => false,
       }).pipe(Effect.catch(() => Effect.succeed(false)));
       const getRunOutcome = stateStore.getRunOutcome;
@@ -782,50 +821,86 @@ const setupCheck = Effect.fn('setupCheck')(function* (
           try: () => getRunOutcome(runId),
           catch: () => undefined,
         }).pipe(Effect.catch(() => Effect.succeed(undefined)));
-        if (current?.status === 'superseded' && github.updateCheckRun !== undefined) {
+        const status = checkStatusForOutcome(current);
+        if (current !== undefined && status !== undefined && github.updateCheckRun !== undefined) {
           yield* Effect.tryPromise({
             try: () =>
               github.updateCheckRun!({
                 repositoryId: current.repositoryId,
                 installationId: current.installationId,
                 checkRunId: checkRun.id,
-                status: 'cancelled',
+                status,
               }),
             catch: () => undefined,
           }).pipe(Effect.catch(() => Effect.succeed(undefined)));
+          if (status === 'in_progress') {
+            const latest = yield* Effect.tryPromise({
+              try: () => getRunOutcome(runId),
+              catch: () => undefined,
+            }).pipe(Effect.catch(() => Effect.succeed(undefined)));
+            const latestStatus = checkStatusForOutcome(latest);
+            if (
+              latest !== undefined &&
+              latestStatus !== undefined &&
+              latestStatus !== 'in_progress'
+            ) {
+              yield* Effect.tryPromise({
+                try: () =>
+                  github.updateCheckRun!({
+                    repositoryId: latest.repositoryId,
+                    installationId: latest.installationId,
+                    checkRunId: checkRun.id,
+                    status: latestStatus,
+                  }),
+                catch: () => undefined,
+              }).pipe(Effect.catch(() => Effect.succeed(undefined)));
+            }
+          }
         }
       }
       if (!recorded && stateStore.markCheckSetupFailed !== undefined) {
         yield* Effect.tryPromise({
-          try: () => stateStore.markCheckSetupFailed!({ runId }),
+          try: () =>
+            stateStore.markCheckSetupFailed!({
+              runId,
+              ...(setupClaim === undefined ? {} : { setupClaim }),
+            }),
           catch: () => false,
         }).pipe(Effect.catch(() => Effect.succeed(false)));
       }
     } else if (stateStore.markCheckSetupFailed !== undefined) {
       yield* Effect.tryPromise({
-        try: () => stateStore.markCheckSetupFailed!({ runId }),
+        try: () =>
+          stateStore.markCheckSetupFailed!({
+            runId,
+            ...(setupClaim === undefined ? {} : { setupClaim }),
+          }),
         catch: () => false,
       }).pipe(Effect.catch(() => Effect.succeed(false)));
     }
   } else if (stateStore.markCheckSetupFailed !== undefined) {
     yield* Effect.tryPromise({
-      try: () => stateStore.markCheckSetupFailed!({ runId }),
+      try: () =>
+        stateStore.markCheckSetupFailed!({
+          runId,
+          ...(setupClaim === undefined ? {} : { setupClaim }),
+        }),
       catch: () => false,
     }).pipe(Effect.catch(() => Effect.succeed(false)));
   }
 });
 
-const startCheckSetup = (
+const startCheckSetup = Effect.fn('startCheckSetup')(function* (
   github: GitHubAdapter,
   stateStore: ReviewCompletionStateStore,
   runId: string,
   job: ReviewJob,
   defer?: ReviewCheckSetupDefer,
-) => {
+) {
   const task = setupCheck(github, stateStore, runId, job);
-  if (defer === undefined) return task;
-  return Effect.sync(() => defer(Effect.runPromise(task)));
-};
+  if (defer === undefined) return yield* task;
+  yield* Effect.sync(() => defer(Effect.runPromise(task)));
+});
 
 const claimAndSchedule = (
   github: GitHubAdapter,
@@ -863,10 +938,9 @@ const claimAndSchedule = (
     );
 
     if (claim.kind !== 'claimed') {
-      if (claim.runId === undefined || claim.checkSetupStatus !== 'pending') {
-        return claim.disposition;
+      if (claim.runId !== undefined && claim.checkSetupStatus === 'pending') {
+        yield* startCheckSetup(github, stateStore, claim.runId, job, deferCheckSetup);
       }
-      yield* startCheckSetup(github, stateStore, claim.runId, job, deferCheckSetup);
       return claim.disposition;
     }
 
@@ -1254,6 +1328,7 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
       evidence?: ReviewEvidenceMetadata;
       checkRunId?: number;
       checkSetupStatus: 'pending' | 'ready' | 'failed';
+      checkSetupClaimedAt?: string;
       publicationClaimedAt?: string;
     }
   >();
@@ -1306,7 +1381,7 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
         return {
           kind: 'replay',
           disposition: dispositionForStatus(previous.status),
-          ...(previousRun?.status !== 'scheduled' || previousRun.checkSetupStatus !== 'pending'
+          ...(previousRun?.checkSetupStatus !== 'pending'
             ? {}
             : {
                 runId: previousRun.runId,
@@ -1477,17 +1552,43 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
       run.runnerAttempt = undefined;
       return true;
     },
-    recordCheckRun: async ({ runId, checkRunId }) => {
+    claimCheckSetup: async ({ runId, claimedAt, staleBefore }) => {
       const run = runs.get(runId);
-      if (run === undefined || run.checkRunId !== undefined) return false;
-      run.checkRunId = checkRunId;
-      run.checkSetupStatus = 'ready';
+      if (
+        run === undefined ||
+        run.checkSetupStatus !== 'pending' ||
+        (run.checkSetupClaimedAt !== undefined && run.checkSetupClaimedAt > staleBefore)
+      ) {
+        return false;
+      }
+      run.checkSetupClaimedAt = claimedAt;
       return true;
     },
-    markCheckSetupFailed: async ({ runId }) => {
+    recordCheckRun: async ({ runId, checkRunId, setupClaim }) => {
       const run = runs.get(runId);
-      if (run === undefined || run.checkSetupStatus !== 'pending') return false;
+      if (
+        run === undefined ||
+        run.checkRunId !== undefined ||
+        (setupClaim !== undefined && run.checkSetupClaimedAt !== setupClaim)
+      ) {
+        return false;
+      }
+      run.checkRunId = checkRunId;
+      run.checkSetupStatus = 'ready';
+      run.checkSetupClaimedAt = undefined;
+      return true;
+    },
+    markCheckSetupFailed: async ({ runId, setupClaim }) => {
+      const run = runs.get(runId);
+      if (
+        run === undefined ||
+        run.checkSetupStatus !== 'pending' ||
+        (setupClaim !== undefined && run.checkSetupClaimedAt !== setupClaim)
+      ) {
+        return false;
+      }
       run.checkSetupStatus = 'failed';
+      run.checkSetupClaimedAt = undefined;
       return true;
     },
     claimRunPublication: async ({ runId, occurredAt }) => {

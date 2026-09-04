@@ -87,7 +87,15 @@ introduce feedback state.
 
 After durable admission, Core starts best-effort Check Run setup outside the
 webhook response path. The Check is bound to the immutable head SHA with the
-Core run id as `external_id`. When available, it moves from `queued` to
+Core run id as `external_id`. Only the newly admitted run starts setup;
+an atomic D1 claim lets delivery replay recover setup that never began without
+starting a concurrent second attempt. Its one-minute lease is longer than
+Cloudflare's 30-second post-response [`waitUntil()` limit](https://developers.cloudflare.com/workers/runtime-apis/context/#waituntil),
+so replay cannot take ownership while the original background invocation can
+still run. When late setup finishes, it reconciles
+the persisted run so the Check catches up to
+`in_progress`, `success`, `failure`, or `cancelled` rather than remaining
+`queued`. When available, it moves from `queued` to
 `in_progress` when the Runner claims the Job, then to `success` only after the
 Review is published. A terminal execution or publication failure completes it
 as `failure`; a run replaced by a newer head completes as `cancelled`. A slow,
