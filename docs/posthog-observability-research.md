@@ -107,14 +107,23 @@ transport errors follow the same local diagnostic/no-product-impact rule.
 
 ### Event and property allowlist
 
-Reject unknown names, unknown properties, free-form values, and strings over a
-small fixed bound before calling the SDK.
+Reject unknown application event names, properties, free-form values, and
+strings over a small fixed bound before calling the SDK. `total_duration_ms`
+runs from durable scheduling through the Core terminal/publication boundary;
+it is not truncated at Runner cleanup.
 
 | Event              | Allowed properties                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `review scheduled` | `schema_version` (integer), `environment` (`production`/`staging`), `deployment` (configured bounded opaque alias), `run_id` (existing sanitized opaque ID), `trigger` (`automatic`/`manual`)                                                                                                                                                                                                                                                                                                                    |
 | `review claimed`   | common fields above plus `queue_wait_ms` (non-negative integer)                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `review finished`  | common fields above plus `outcome` (`completed`/`failed`/`superseded`), `published` (boolean), `total_duration_ms` (non-negative integer), `queue_wait_ms` (non-negative integer or absent), `cleanup_status` (`destroyed`/`failed`/`unknown`), `evidence_status` (`complete`/`incomplete`/`unknown`), `failure_phase` (`checkout`/`sandbox`/`agent`/`output_validation`/`evidence`/`callback`/`publication`/`cleanup`/`unknown`, only when failed), `failure_reason` (a closed code enum, never exception text) |
+
+The official `posthog-node` transport adds only its standard envelope fields
+(`timestamp` and `uuid`) and SDK properties (`$lib`, `$lib_version`,
+`$is_server`, and `$geoip_disable`) after this application allowlist. These are
+explicitly allowed transport metadata, not repository or review data. The wire
+test asserts the complete scheduled-event envelope so an SDK upgrade cannot
+silently widen it.
 
 Explicitly forbidden are repository owner/name/URL/visibility/content, file
 paths or diffs, PR/comment/delivery/installation/repository IDs, base/head SHA,

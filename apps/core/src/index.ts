@@ -33,13 +33,15 @@ export {
   type D1ReviewStateStore,
 } from './review-state-store';
 
+const ReviewTrigger = Schema.Literals(['automatic', 'manual']);
+
 export const ReviewJob = Schema.Struct({
   repositoryId: Schema.Int,
   pullRequestNumber: Schema.Int,
   installationId: Schema.Int,
   baseSha: GitHubSha,
   headSha: GitHubSha,
-  trigger: Schema.Literals(['automatic', 'manual']),
+  trigger: ReviewTrigger,
   commentId: Schema.optional(Schema.Int),
 });
 
@@ -55,6 +57,10 @@ export type ReviewDisposition =
 export type ReviewRunStatus = 'scheduled' | 'failed' | 'completed' | 'superseded';
 export type ReviewStoredStatus = ReviewDisposition | ReviewRunStatus | 'claiming';
 export type ReviewCheckSetupStatus = 'pending' | 'ready' | 'failed';
+const CoreLifecycleIdentifier = Schema.String.pipe(
+  Schema.check(Schema.isPattern(/^[A-Za-z0-9._:-]{1,128}$/)),
+);
+const CoreLifecycleMilliseconds = Schema.Natural;
 export const CoreLifecycleFailureReason = Schema.Literals([
   'checkout',
   'sandbox',
@@ -70,44 +76,61 @@ export const CoreLifecycleFailureReason = Schema.Literals([
   'unknown',
 ]);
 export type CoreLifecycleFailureReason = typeof CoreLifecycleFailureReason.Type;
-
-export type CoreLifecycleEvent =
-  | {
-      readonly event: 'review scheduled';
-      readonly runId: string;
-      readonly trigger: ReviewJob['trigger'];
-    }
-  | {
-      readonly event: 'review claimed';
-      readonly runId: string;
-      readonly trigger: ReviewJob['trigger'];
-      readonly queueWaitMs: number;
-    }
-  | {
-      readonly event: 'review finished';
-      readonly runId: string;
-      readonly trigger: ReviewJob['trigger'];
-      readonly outcome: 'completed' | 'failed' | 'superseded';
-      readonly published: boolean;
-      readonly totalDurationMs: number;
-      readonly queueWaitMs?: number;
-      readonly cleanupStatus: 'destroyed' | 'failed' | 'unknown';
-      readonly evidenceStatus: 'complete' | 'incomplete' | 'unknown';
-      readonly failurePhase?:
-        | 'checkout'
-        | 'sandbox'
-        | 'agent'
-        | 'output_validation'
-        | 'evidence'
-        | 'callback'
-        | 'publication'
-        | 'cleanup'
-        | 'unknown';
-      readonly failureReason?: CoreLifecycleFailureReason;
-    };
+const CoreLifecycleCommon = {
+  runId: CoreLifecycleIdentifier,
+  trigger: ReviewTrigger,
+} as const;
+const CoreLifecycleFinishedCommon = {
+  event: Schema.Literal('review finished'),
+  ...CoreLifecycleCommon,
+  totalDurationMs: CoreLifecycleMilliseconds,
+  queueWaitMs: Schema.optional(CoreLifecycleMilliseconds),
+  cleanupStatus: Schema.Literals(['destroyed', 'failed', 'unknown']),
+  evidenceStatus: Schema.Literals(['complete', 'incomplete', 'unknown']),
+} as const;
+const CoreLifecycleFailurePhase = Schema.Literals([
+  'checkout',
+  'sandbox',
+  'agent',
+  'output_validation',
+  'evidence',
+  'callback',
+  'publication',
+  'cleanup',
+  'unknown',
+]);
+export const CoreLifecycleEvent = Schema.Union([
+  Schema.Struct({
+    event: Schema.Literal('review scheduled'),
+    ...CoreLifecycleCommon,
+  }),
+  Schema.Struct({
+    event: Schema.Literal('review claimed'),
+    ...CoreLifecycleCommon,
+    queueWaitMs: CoreLifecycleMilliseconds,
+  }),
+  Schema.Struct({
+    ...CoreLifecycleFinishedCommon,
+    outcome: Schema.Literal('completed'),
+    published: Schema.Literal(true),
+  }),
+  Schema.Struct({
+    ...CoreLifecycleFinishedCommon,
+    outcome: Schema.Literal('superseded'),
+    published: Schema.Literal(false),
+  }),
+  Schema.Struct({
+    ...CoreLifecycleFinishedCommon,
+    outcome: Schema.Literal('failed'),
+    published: Schema.Literal(false),
+    failurePhase: CoreLifecycleFailurePhase,
+    failureReason: CoreLifecycleFailureReason,
+  }),
+]);
+export type CoreLifecycleEvent = typeof CoreLifecycleEvent.Type;
 
 export interface CoreLifecycleLog {
-  readonly record: (event: CoreLifecycleEvent) => void | Promise<void>;
+  readonly record: (event: CoreLifecycleEvent) => void;
 }
 export interface ReviewOutcome {
   deliveryId: string;
@@ -379,11 +402,36 @@ const recordLifecycleLog = (log: CoreLifecycleLog | undefined, event: CoreLifecy
   Effect.sync(() => {
     if (log === undefined) return;
     try {
-      void Promise.resolve(log.record(event)).catch(() => undefined);
+      log.record(event);
     } catch {
       // Lifecycle capture is best effort and cannot affect product behavior.
     }
   });
+
+const recordSupersededLifecycle = (
+  log: CoreLifecycleLog | undefined,
+  runId: string,
+  outcome: ReviewOutcome,
+  finishedAt: string,
+  cleanupStatus: 'destroyed' | 'unknown',
+) => {
+  const created = DateTime.make(outcome.createdAt);
+  const finished = DateTime.make(finishedAt);
+  const totalDurationMs =
+    Option.isSome(created) && Option.isSome(finished)
+      ? Math.max(0, finished.value.epochMilliseconds - created.value.epochMilliseconds)
+      : 0;
+  return recordLifecycleLog(log, {
+    event: 'review finished',
+    runId,
+    trigger: outcome.trigger,
+    outcome: 'superseded',
+    published: false,
+    totalDurationMs,
+    cleanupStatus,
+    evidenceStatus: 'unknown',
+  });
+};
 
 const ReviewPublicationTarget = Schema.Struct({
   headSha: GitHubSha,
@@ -1028,25 +1076,13 @@ const claimAndSchedule = (
           }).pipe(Effect.catch(() => Effect.succeed(undefined)));
         }
         if (supersededOutcome?.status === 'superseded') {
-          const createdAt = DateTime.make(supersededOutcome.createdAt);
-          const supersededAt = DateTime.make(occurredAt);
-          const totalDurationMs =
-            Option.isSome(createdAt) && Option.isSome(supersededAt)
-              ? Math.max(
-                  0,
-                  supersededAt.value.epochMilliseconds - createdAt.value.epochMilliseconds,
-                )
-              : 0;
-          yield* recordLifecycleLog(lifecycleLog, {
-            event: 'review finished',
-            runId: supersededRunId,
-            trigger: supersededOutcome.trigger,
-            outcome: 'superseded',
-            published: false,
-            totalDurationMs,
-            cleanupStatus: 'unknown',
-            evidenceStatus: 'unknown',
-          });
+          yield* recordSupersededLifecycle(
+            lifecycleLog,
+            supersededRunId,
+            supersededOutcome,
+            occurredAt,
+            'unknown',
+          );
         }
       }
     }
@@ -1101,6 +1137,15 @@ const claimAndSchedule = (
           catch: () => false,
         }).pipe(Effect.catch(() => Effect.succeed(false)));
         if (!cleared) return 'scheduled' as const;
+      }
+      if (supersededOutcome !== undefined) {
+        yield* recordSupersededLifecycle(
+          lifecycleLog,
+          claim.activeRunnerJob.runId,
+          supersededOutcome,
+          yield* currentIso,
+          'destroyed',
+        );
       }
     }
 

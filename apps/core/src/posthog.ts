@@ -1,12 +1,6 @@
 import { Option, Schema } from 'effect';
 import { PostHog } from 'posthog-node';
-import {
-  CoreLifecycleFailureReason,
-  type CoreLifecycleEvent,
-  type CoreLifecycleLog,
-} from './index';
-
-type LifecycleEnvironment = 'production' | 'staging';
+import { CoreLifecycleEvent, type CoreLifecycleLog } from './index';
 
 interface PostHogEnvironment {
   readonly POSTHOG_ENABLED?: string;
@@ -20,39 +14,25 @@ interface WaitUntilContext {
   readonly waitUntil: (task: Promise<unknown>) => void;
 }
 
-const boundedIdentifier = /^[A-Za-z0-9._:-]{1,128}$/;
-const postHogProjectApiKey = /^phc_[A-Za-z0-9._:-]{1,124}$/;
-const isHttpsHost = (value: string | undefined) => {
-  if (value === undefined) return false;
-  try {
-    return new URL(value).protocol === 'https:';
-  } catch {
-    return false;
-  }
-};
-const isLifecycleEvent = (event: CoreLifecycleEvent): boolean => {
-  if (!boundedIdentifier.test(event.runId)) return false;
-  if (event.event === 'review scheduled') return true;
-  if (event.event === 'review claimed') {
-    return Number.isSafeInteger(event.queueWaitMs) && event.queueWaitMs >= 0;
-  }
-  if (
-    !Number.isSafeInteger(event.totalDurationMs) ||
-    event.totalDurationMs < 0 ||
-    (event.queueWaitMs !== undefined &&
-      (!Number.isSafeInteger(event.queueWaitMs) || event.queueWaitMs < 0))
-  ) {
-    return false;
-  }
-  return (
-    event.failureReason === undefined ||
-    Option.isSome(Schema.decodeUnknownOption(CoreLifecycleFailureReason)(event.failureReason))
-  );
-};
+const BoundedIdentifier = Schema.String.pipe(
+  Schema.check(Schema.isPattern(/^[A-Za-z0-9._:-]{1,128}$/)),
+);
+const ProjectApiKey = Schema.String.pipe(
+  Schema.check(Schema.isPattern(/^phc_[A-Za-z0-9._:-]{1,124}$/)),
+);
+const HttpsUrl = Schema.URLFromString.pipe(
+  Schema.check(Schema.makeFilter((url) => url.protocol === 'https:', { expected: 'an HTTPS URL' })),
+);
+const PostHogConfiguration = Schema.Struct({
+  projectApiKey: ProjectApiKey,
+  host: HttpsUrl,
+  environment: Schema.Literals(['production', 'staging']),
+  deployment: BoundedIdentifier,
+});
 
 const propertiesFor = (
   event: CoreLifecycleEvent,
-  environment: LifecycleEnvironment,
+  environment: typeof PostHogConfiguration.Type.environment,
   deployment: string,
 ) => {
   const common = {
@@ -67,7 +47,7 @@ const propertiesFor = (
   if (event.event === 'review claimed') {
     return { ...common, queue_wait_ms: event.queueWaitMs };
   }
-  return {
+  const finished = {
     ...common,
     outcome: event.outcome,
     published: event.published,
@@ -75,17 +55,19 @@ const propertiesFor = (
     ...(event.queueWaitMs === undefined ? {} : { queue_wait_ms: event.queueWaitMs }),
     cleanup_status: event.cleanupStatus,
     evidence_status: event.evidenceStatus,
-    ...(event.failurePhase === undefined ? {} : { failure_phase: event.failurePhase }),
-    ...(event.failureReason === undefined ? {} : { failure_reason: event.failureReason }),
   };
+  return event.outcome === 'failed'
+    ? {
+        ...finished,
+        failure_phase: event.failurePhase,
+        failure_reason: event.failureReason,
+      }
+    : finished;
 };
 
 const reportLocalFailure = (message: string) => {
   console.warn(`PostHog telemetry unavailable: ${message}`);
 };
-
-const environmentFrom = (value: string | undefined): LifecycleEnvironment | undefined =>
-  value === 'production' || value === 'staging' ? value : undefined;
 
 export const createPostHogLifecycleLog = (
   environment: PostHogEnvironment,
@@ -93,27 +75,23 @@ export const createPostHogLifecycleLog = (
 ): CoreLifecycleLog => {
   if (environment.POSTHOG_ENABLED !== 'true') return { record: () => undefined };
 
-  const projectApiKey = environment.POSTHOG_PROJECT_API_KEY;
-  const host = environment.POSTHOG_HOST;
-  const posthogEnvironment = environmentFrom(environment.POSTHOG_ENVIRONMENT);
-  const deployment = environment.POSTHOG_DEPLOYMENT;
-  if (
-    projectApiKey === undefined ||
-    !postHogProjectApiKey.test(projectApiKey) ||
-    host === undefined ||
-    !isHttpsHost(host) ||
-    posthogEnvironment === undefined ||
-    deployment === undefined ||
-    !boundedIdentifier.test(deployment)
-  ) {
+  const configuration = Option.getOrUndefined(
+    Schema.decodeUnknownOption(PostHogConfiguration, { onExcessProperty: 'error' })({
+      projectApiKey: environment.POSTHOG_PROJECT_API_KEY,
+      host: environment.POSTHOG_HOST,
+      environment: environment.POSTHOG_ENVIRONMENT,
+      deployment: environment.POSTHOG_DEPLOYMENT,
+    }),
+  );
+  if (configuration === undefined) {
     reportLocalFailure('configuration');
     return { record: () => undefined };
   }
 
   let client: PostHog;
   try {
-    client = new PostHog(projectApiKey, {
-      host,
+    client = new PostHog(configuration.projectApiKey, {
+      host: configuration.host.href,
       flushAt: 1,
       flushInterval: 0,
       fetchRetryCount: 0,
@@ -140,15 +118,18 @@ export const createPostHogLifecycleLog = (
 
   return {
     record: (event) => {
-      if (!isLifecycleEvent(event)) {
+      const decoded = Option.getOrUndefined(
+        Schema.decodeUnknownOption(CoreLifecycleEvent, { onExcessProperty: 'error' })(event),
+      );
+      if (decoded === undefined) {
         reportLocalFailure('event validation');
         return;
       }
       const task = client
         .captureImmediate({
-          distinctId: event.runId,
-          event: event.event,
-          properties: propertiesFor(event, posthogEnvironment, deployment),
+          distinctId: decoded.runId,
+          event: decoded.event,
+          properties: propertiesFor(decoded, configuration.environment, configuration.deployment),
         })
         .catch(() => reportLocalFailure('capture'));
       if (context === undefined) {
