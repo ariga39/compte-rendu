@@ -1057,6 +1057,12 @@ const claimAndSchedule = (
       return claim.disposition;
     }
 
+    yield* recordLifecycleLog(lifecycleLog, {
+      event: 'review scheduled',
+      runId: claim.runId,
+      trigger: job.trigger,
+    });
+
     if (claim.supersededRunIds !== undefined && stateStore.getRunOutcome !== undefined) {
       for (const supersededRunId of claim.supersededRunIds) {
         const supersededOutcome = yield* Effect.tryPromise({
@@ -1174,11 +1180,6 @@ const claimAndSchedule = (
       outcome: 'scheduled',
       deliveryId,
       runId: claim.runId,
-    });
-    yield* recordLifecycleLog(lifecycleLog, {
-      event: 'review scheduled',
-      runId: claim.runId,
-      trigger: job.trigger,
     });
     return 'scheduled' as const;
   });

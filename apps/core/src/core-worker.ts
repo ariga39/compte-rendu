@@ -245,14 +245,7 @@ export const createCoreWorker = (
   ) => {
     const occurredAt = await Effect.runPromise(DateTime.now.pipe(Effect.map(DateTime.formatIso)));
     const created = epochMilliseconds(outcome.createdAt);
-    const executionStarted = epochMilliseconds(
-      callback?.timestamps.executionStartedAt ?? occurredAt,
-    );
     const finishedAt = epochMilliseconds(occurredAt);
-    const queueWaitMs =
-      created !== undefined && executionStarted !== undefined
-        ? Math.max(0, executionStarted - created)
-        : 0;
     const totalDurationMs =
       created !== undefined && finishedAt !== undefined ? Math.max(0, finishedAt - created) : 0;
     const failedCallback = callback?.status === 'failed' ? callback : undefined;
@@ -270,7 +263,6 @@ export const createCoreWorker = (
       runId: callback?.runId ?? runId ?? outcome.deliveryId,
       trigger: outcome.trigger,
       totalDurationMs,
-      queueWaitMs,
       cleanupStatus:
         callback?.sandbox.cleanup === 'destroyed' || callback?.sandbox.cleanup === 'failed'
           ? callback.sandbox.cleanup
@@ -489,7 +481,7 @@ export const createCoreWorker = (
     }
 
     const terminal = outcome.status === 'superseded' ? 'superseded' : 'failed';
-    if (terminal === 'failed') await markCallbackFailed();
+    await markCallbackFailed();
     await recordFinishedLifecycle(lifecycleLog, outcome, terminal, callback);
     await clearRunnerJob();
     return new Response(null, { status: 202 });
