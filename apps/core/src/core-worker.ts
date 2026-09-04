@@ -221,8 +221,7 @@ export const createCoreWorker = (
     event: Parameters<ReturnType<typeof createPostHogLifecycleLog>['record']>[0],
   ) => {
     try {
-      const result = lifecycleLog.record(event);
-      if (result instanceof Promise) void result.catch(() => undefined);
+      lifecycleLog.record(event);
     } catch {
       // Lifecycle capture is strictly best effort and cannot affect product behavior.
     }
@@ -237,7 +236,7 @@ export const createCoreWorker = (
       readonly phase: NonNullable<
         Extract<
           Parameters<CoreLifecycleLog['record']>[0],
-          { event: 'review finished' }
+          { event: 'review finished'; outcome: 'failed' }
         >['failurePhase']
       >;
       readonly reason: CoreLifecycleFailureReason;
@@ -249,17 +248,13 @@ export const createCoreWorker = (
     const executionStarted = epochMilliseconds(
       callback?.timestamps.executionStartedAt ?? occurredAt,
     );
-    const cleanupCompleted = epochMilliseconds(
-      callback?.timestamps.cleanupCompletedAt ?? occurredAt,
-    );
+    const finishedAt = epochMilliseconds(occurredAt);
     const queueWaitMs =
       created !== undefined && executionStarted !== undefined
         ? Math.max(0, executionStarted - created)
         : 0;
     const totalDurationMs =
-      created !== undefined && cleanupCompleted !== undefined
-        ? Math.max(0, cleanupCompleted - created)
-        : 0;
+      created !== undefined && finishedAt !== undefined ? Math.max(0, finishedAt - created) : 0;
     const failedCallback = callback?.status === 'failed' ? callback : undefined;
     const failureReason =
       terminal !== 'failed'
@@ -270,12 +265,10 @@ export const createCoreWorker = (
             : failedCallback.failure.reason === 'invalid-output'
               ? 'invalid_output'
               : failedCallback.failure.reason));
-    recordLifecycle(lifecycleLog, {
+    const common = {
       event: 'review finished',
       runId: callback?.runId ?? runId ?? outcome.deliveryId,
       trigger: outcome.trigger,
-      outcome: terminal,
-      published: terminal === 'completed',
       totalDurationMs,
       queueWaitMs,
       cleanupStatus:
@@ -283,20 +276,27 @@ export const createCoreWorker = (
           ? callback.sandbox.cleanup
           : 'unknown',
       evidenceStatus: callback?.evidence.status ?? outcome.evidence?.status ?? 'unknown',
-      ...(terminal === 'failed'
-        ? {
-            failurePhase:
-              failure?.phase ??
-              (failedCallback?.stage === 'checkout' ||
-              failedCallback?.stage === 'sandbox' ||
-              failedCallback?.stage === 'agent' ||
-              failedCallback?.stage === 'cleanup'
-                ? failedCallback.stage
-                : 'unknown'),
-            failureReason,
-          }
-        : {}),
-    });
+    } as const;
+    if (terminal === 'completed') {
+      recordLifecycle(lifecycleLog, { ...common, outcome: terminal, published: true });
+    } else if (terminal === 'superseded') {
+      recordLifecycle(lifecycleLog, { ...common, outcome: terminal, published: false });
+    } else {
+      recordLifecycle(lifecycleLog, {
+        ...common,
+        outcome: terminal,
+        published: false,
+        failurePhase:
+          failure?.phase ??
+          (failedCallback?.stage === 'checkout' ||
+          failedCallback?.stage === 'sandbox' ||
+          failedCallback?.stage === 'agent' ||
+          failedCallback?.stage === 'cleanup'
+            ? failedCallback.stage
+            : 'unknown'),
+        failureReason: failureReason ?? 'unknown',
+      });
+    }
   };
 
   const markRunFailed = async (outcome: ReviewOutcome, runId: string, occurredAt: string) => {
