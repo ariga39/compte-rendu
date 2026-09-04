@@ -85,11 +85,13 @@ reaction. Feedback uses GitHub's issue-comment reaction endpoint; repeating a
 same-app, same-content write is the replay-idempotency mechanism and does not
 introduce feedback state.
 
-Each scheduled run also creates one Check Run bound to the immutable head SHA
-with the Core run id as `external_id`. It moves from `queued` to `in_progress`
-when the Runner claims the Job, then to `success` only after the Review is
-published. A terminal execution or publication failure completes it as
-`failure`; a run replaced by a newer head completes as `cancelled`. Checks are
+After durable admission, Core starts best-effort Check Run setup outside the
+webhook response path. The Check is bound to the immutable head SHA with the
+Core run id as `external_id`. When available, it moves from `queued` to
+`in_progress` when the Runner claims the Job, then to `success` only after the
+Review is published. A terminal execution or publication failure completes it
+as `failure`; a run replaced by a newer head completes as `cancelled`. A slow,
+interrupted, or failed Check setup never blocks Runner admission. Checks are
 progress display, not the terminal notification: success publishes the Review
 body, while failure publishes one ordinary pull request comment. GitHub Check
 API failure degrades progress visibility but never suppresses either terminal
@@ -137,15 +139,16 @@ self-hosted Runner → fresh Docker Sandbox/OpenCode
 `review-ingress` verifies the webhook and converts it to a small internal
 event. `review-core` owns policy, GitHub App authentication, the D1 queue,
 review publication, evidence metadata, and run records. Webhook acceptance
-only durably schedules a run; it does not mint a GitHub read token or admit a
-Runner Job. An idle Runner calls the authenticated public `/runner-claim` route
-through ingress. Core atomically claims the oldest eligible unclaimed run,
-records one immutable Job id/attempt, then resolves the repository and mints
-the scoped read token. The claim also moves the persisted Check Run to
-`in_progress`. The Runner owns execution and cleanup, then sends one
-authenticated result callback through the same public ingress. Core stores the
-bounded named-field evidence bundle in private R2 before confirming
-publication, then completes the Check. There is no Workflow.
+only durably schedules a run; it does not wait for GitHub Check setup, mint a
+GitHub read token, or admit a Runner Job. An idle Runner calls the authenticated
+public `/runner-claim` route through ingress. Core atomically claims the oldest
+eligible unclaimed run, records one immutable Job id/attempt, then resolves the
+repository and mints the scoped read token. The claim also moves an available
+persisted Check Run to `in_progress`. The Runner owns execution and cleanup,
+then sends one authenticated result callback through the same public ingress.
+Core stores the bounded named-field evidence bundle in private R2 before
+confirming publication, then completes the Check when one is available. There
+is no Workflow.
 
 The repository layout is intentionally small:
 
@@ -191,14 +194,15 @@ createCoreWorker(env: CoreEnv): WorkerEntrypoint
 
 The private core Worker accepts normalized `POST /review-events` requests and
 the internal forwarding routes for Runner claim and callback. A webhook
-returns `202` only after the event is durably classified in D1; it does not
-admit a Runner Job. The authenticated public `/runner-claim` route forwards to
-Core, whose atomic D1 claim returns one immutable Job input only after the Job
-identity is recorded and the repository URL/read token are resolved. Malformed
-input returns `400`; storage or binding uncertainty returns `503`. The
-existing authenticated VPC `DELETE /jobs/:id` remains the cancellation seam
-for a reachable Runner; the callback is accepted only through the shared
-static-token ingress route.
+returns `202` only after the event is durably classified in D1. Check setup is
+then registered as best-effort background work and cannot delay that response
+or block Runner admission. The authenticated public `/runner-claim` route
+forwards to Core, whose atomic D1 claim returns one immutable Job input only
+after the Job identity is recorded and the repository URL/read token are
+resolved. Malformed input returns `400`; storage or binding uncertainty returns
+`503`. The existing authenticated VPC `DELETE /jobs/:id` remains the
+cancellation seam for a reachable Runner; the callback is accepted only
+through the shared static-token ingress route.
 
 ### Review coordinator
 

@@ -196,8 +196,9 @@ describe('Core Worker', () => {
     }
   });
 
-  it('does not return an admitted Job until Check setup completes', async () => {
+  it('acknowledges and admits a durable Job while Check setup remains pending', async () => {
     const database = new SqliteD1Database();
+    const backgroundTasks: Promise<unknown>[] = [];
     let signalCheckStarted!: () => void;
     const checkStarted = new Promise<void>((resolve) => {
       signalCheckStarted = resolve;
@@ -224,6 +225,8 @@ describe('Core Worker', () => {
         method: 'POST',
         body: JSON.stringify({ ...eligibleEvent, deliveryId: 'delivery-check-gates-claim' }),
       }),
+      undefined,
+      { waitUntil: (task) => backgroundTasks.push(task) },
     );
     const claimRequest = () =>
       new Request('https://core.internal/runner-claims', {
@@ -233,10 +236,11 @@ describe('Core Worker', () => {
 
     try {
       await checkStarted;
-      expect((await worker.fetch(claimRequest())).status).toBe(204);
-      finishCheck({ id: 321 });
+      expect(backgroundTasks).toHaveLength(1);
       expect((await scheduling).status).toBe(202);
       expect((await worker.fetch(claimRequest())).status).toBe(200);
+      finishCheck({ id: 321 });
+      await Promise.all(backgroundTasks);
     } finally {
       database.close();
     }

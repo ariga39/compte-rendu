@@ -181,7 +181,7 @@ export const createCoreWorker = (
     env.RUNNER === undefined || env.RUNNER_AUTH_TOKEN === undefined
       ? undefined
       : createRunnerJobClient({ binding: env.RUNNER, authToken: env.RUNNER_AUTH_TOKEN });
-  const coordinator = createReviewCoordinator({
+  const coordinatorDependencies = {
     github,
     stateStore,
     scheduler: {
@@ -191,7 +191,8 @@ export const createCoreWorker = (
       ...(runner === undefined ? {} : { cancel: runner.cancelJob }),
     },
     log: dependencies.log ?? createCloudflareOperationalLog(),
-  });
+  } as const;
+  const coordinator = createReviewCoordinator(coordinatorDependencies);
 
   const markRunFailed = async (outcome: ReviewOutcome, runId: string, occurredAt: string) => {
     const notificationClaimed =
@@ -444,7 +445,7 @@ export const createCoreWorker = (
   };
 
   return {
-    fetch: async (request) => {
+    fetch: async (request, _env, context) => {
       if (request.method === 'POST' && new URL(request.url).pathname === runnerClaimsPath) {
         try {
           return await handleRunnerClaim(request);
@@ -479,7 +480,14 @@ export const createCoreWorker = (
       if (event === undefined) return new Response(null, { status: 400 });
 
       try {
-        const disposition = await coordinator.handleReviewEvent(event);
+        const eventCoordinator =
+          context === undefined
+            ? coordinator
+            : createReviewCoordinator({
+                ...coordinatorDependencies,
+                deferCheckSetup: (task) => context.waitUntil(task),
+              });
+        const disposition = await eventCoordinator.handleReviewEvent(event);
         return responseForDisposition(disposition);
       } catch {
         return new Response(null, { status: 503 });
