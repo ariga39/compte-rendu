@@ -176,6 +176,8 @@ export interface ReviewScheduler {
   cancel?(jobId: string): Promise<void>;
 }
 
+export type ReviewCheckSetupDefer = (task: Promise<void>) => void;
+
 export interface GitHubAdapter {
   getPullRequest?(input: {
     repositoryId: number;
@@ -813,6 +815,18 @@ const setupCheck = Effect.fn('setupCheck')(function* (
   }
 });
 
+const startCheckSetup = (
+  github: GitHubAdapter,
+  stateStore: ReviewCompletionStateStore,
+  runId: string,
+  job: ReviewJob,
+  defer?: ReviewCheckSetupDefer,
+) => {
+  const task = setupCheck(github, stateStore, runId, job);
+  if (defer === undefined) return task;
+  return Effect.sync(() => defer(Effect.runPromise(task)));
+};
+
 const claimAndSchedule = (
   github: GitHubAdapter,
   stateStore: ReviewCompletionStateStore,
@@ -821,6 +835,7 @@ const claimAndSchedule = (
   job: ReviewJob,
   approval?: ReviewApproval,
   log?: OperationalLog,
+  deferCheckSetup?: ReviewCheckSetupDefer,
 ) =>
   Effect.gen(function* () {
     const occurredAt = yield* currentIso;
@@ -851,7 +866,7 @@ const claimAndSchedule = (
       if (claim.runId === undefined || claim.checkSetupStatus !== 'pending') {
         return claim.disposition;
       }
-      yield* setupCheck(github, stateStore, claim.runId, job);
+      yield* startCheckSetup(github, stateStore, claim.runId, job, deferCheckSetup);
       return claim.disposition;
     }
 
@@ -880,7 +895,7 @@ const claimAndSchedule = (
       }
     }
 
-    yield* setupCheck(github, stateStore, claim.runId, job);
+    yield* startCheckSetup(github, stateStore, claim.runId, job, deferCheckSetup);
 
     if (claim.activeRunnerJob !== undefined) {
       if (scheduler.cancel === undefined || stateStore.markRunSuperseded === undefined) {
@@ -974,6 +989,7 @@ const createAutomaticCoordinator = (
   stateStore: ReviewCompletionStateStore,
   scheduler: ReviewScheduler,
   log?: OperationalLog,
+  deferCheckSetup?: ReviewCheckSetupDefer,
 ) =>
   Effect.fn('handleAutomaticReviewEvent')(function* (
     event: Extract<ReviewEvent, { event: 'pull_request' }>,
@@ -1018,6 +1034,7 @@ const createAutomaticCoordinator = (
       jobForEvent(event, 'automatic'),
       undefined,
       log,
+      deferCheckSetup,
     );
   });
 
@@ -1105,6 +1122,7 @@ const createManualCoordinator = (
   stateStore: ReviewCompletionStateStore,
   scheduler: ReviewScheduler,
   log?: OperationalLog,
+  deferCheckSetup?: ReviewCheckSetupDefer,
 ) =>
   Effect.fn('handleManualReviewEvent')(function* (
     event: Extract<ReviewEvent, { event: 'issue_comment' }>,
@@ -1180,6 +1198,7 @@ const createManualCoordinator = (
         headSha: facts.headSha,
       },
       log,
+      deferCheckSetup,
     );
 
     if (disposition === 'scheduled') yield* writeManualReaction(github, event, 'eyes');
@@ -1193,6 +1212,7 @@ const reviewEventEffect = (
   stateStore: ReviewStateStore,
   scheduler: ReviewScheduler,
   log?: OperationalLog,
+  deferCheckSetup?: ReviewCheckSetupDefer,
 ) =>
   Effect.gen(function* () {
     const decoded = yield* Schema.decodeUnknownEffect(ReviewEvent)(event).pipe(
@@ -1200,10 +1220,22 @@ const reviewEventEffect = (
     );
 
     if (decoded.event === 'pull_request') {
-      return yield* createAutomaticCoordinator(github, stateStore, scheduler, log)(decoded);
+      return yield* createAutomaticCoordinator(
+        github,
+        stateStore,
+        scheduler,
+        log,
+        deferCheckSetup,
+      )(decoded);
     }
 
-    return yield* createManualCoordinator(github, stateStore, scheduler, log)(decoded);
+    return yield* createManualCoordinator(
+      github,
+      stateStore,
+      scheduler,
+      log,
+      deferCheckSetup,
+    )(decoded);
   });
 
 export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore => {
@@ -1534,6 +1566,7 @@ export function createReviewCoordinator(dependencies: {
   stateStore: ReviewCompletionStateStore;
   scheduler: ReviewScheduler;
   log?: OperationalLog;
+  deferCheckSetup?: ReviewCheckSetupDefer;
 }): ReviewCoordinator {
   return {
     handleReviewEvent: async (event) =>
@@ -1544,6 +1577,7 @@ export function createReviewCoordinator(dependencies: {
           dependencies.stateStore,
           dependencies.scheduler,
           dependencies.log,
+          dependencies.deferCheckSetup,
         ),
       ).catch((error) => {
         if (error instanceof InvalidReviewEvent) {

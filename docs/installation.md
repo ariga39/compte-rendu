@@ -563,10 +563,11 @@ uses the temporary invocation described above.
    `0005_publication_claim.sql` adds the atomic publication claim used to keep
    concurrent duplicate callbacks from creating duplicate terminal
    publications. `0006_review_check_runs.sql` stores the GitHub Check Run id and
-   setup state so Runner claims wait for new Check setup while legacy scheduled
-   rows remain claimable as failed setup. New admissions explicitly begin in
-   pending setup and unblock after Check success or Check API failure. D1
-   migration files are versioned and applied in order; see
+   setup state. New admissions begin in pending setup, but Runner claims never
+   wait for this progress-only GitHub API work. Check success records the id,
+   Check API failure records degraded visibility, and an interrupted pending
+   setup remains claimable without manual D1 repair. D1 migration files are
+   versioned and applied in order; see
    [D1 migrations](https://developers.cloudflare.com/d1/reference/migrations/).
 
    The generated core config also retains the legacy Durable Object migration

@@ -3,7 +3,11 @@ import { Schema } from 'effect';
 export const REVIEW_ATTEMPT_BUDGET_MS = 30 * 60 * 1000;
 
 export interface WorkerEntrypoint<Env = unknown> {
-  fetch(request: Request, env?: Env): Response | Promise<Response>;
+  fetch(
+    request: Request,
+    env?: Env,
+    context?: { waitUntil(task: Promise<unknown>): void },
+  ): Response | Promise<Response>;
 }
 
 export interface CoreServiceBinding {

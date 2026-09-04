@@ -4,10 +4,14 @@ export { createCoreWorker, type CoreWorkerDependencies, type CoreWorkerEnv } fro
 export * from './index';
 
 const core = {
-  fetch: (request: Request, env?: CoreWorkerEnv) =>
+  fetch: (
+    request: Request,
+    env?: CoreWorkerEnv,
+    context?: { waitUntil(task: Promise<unknown>): void },
+  ) =>
     env === undefined
       ? new Response(null, { status: 501 })
-      : createCoreWorker(env).fetch(request, env),
+      : createCoreWorker(env).fetch(request, env, context),
 };
 
 export default core;

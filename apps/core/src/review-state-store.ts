@@ -479,7 +479,6 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
          WHERE run_id = (
            SELECT run_id FROM review_runs
            WHERE status = 'scheduled' AND runner_job_id IS NULL
-             AND check_setup_status <> 'pending'
              AND NOT EXISTS (
                SELECT 1 FROM review_runs AS active
                WHERE active.installation_id = review_runs.installation_id
