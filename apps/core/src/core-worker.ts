@@ -11,7 +11,9 @@ import {
   createGitHubAppTokenProvider,
   createReviewCoordinator,
   createRunnerJobClient,
+  type CoreLifecycleLog,
   type CoreEnv,
+  type CoreLifecycleFailureReason,
   type GitHubAdapter,
   type ReviewOutcome,
   type ReviewPublicationStateStore,
@@ -19,6 +21,7 @@ import {
 import type { D1DatabaseLike } from './review-state-store';
 import type { WorkerEntrypoint } from '@compte-rendu/contracts';
 import { createCloudflareOperationalLog } from './operational-log';
+import { createPostHogLifecycleLog } from './posthog';
 import type { OperationalLog } from '@compte-rendu/contracts';
 import { formatReviewFailureComment } from './review-publication-format';
 
@@ -27,6 +30,11 @@ export interface CoreWorkerEnv extends Partial<CoreEnv> {
   readonly GITHUB_APP_ID: string;
   readonly GITHUB_APP_PRIVATE_KEY: string;
   readonly EVIDENCE_BUCKET?: R2BucketLike;
+  readonly POSTHOG_ENABLED?: string;
+  readonly POSTHOG_PROJECT_API_KEY?: string;
+  readonly POSTHOG_HOST?: string;
+  readonly POSTHOG_DEPLOYMENT?: string;
+  readonly POSTHOG_ENVIRONMENT?: string;
   readonly [key: string]: unknown;
 }
 
@@ -47,6 +55,10 @@ export interface CoreWorkerDependencies {
 const reviewEventsPath = '/review-events';
 const runnerClaimsPath = '/runner-claims';
 const runnerResultsPath = '/runner-results';
+const epochMilliseconds = (value: string) => {
+  const parsed = DateTime.make(value);
+  return Option.isSome(parsed) ? parsed.value.epochMilliseconds : undefined;
+};
 const RunnerManifest = Schema.Struct({
   jobId: Schema.NonEmptyString,
   runId: Schema.NonEmptyString,
@@ -192,7 +204,100 @@ export const createCoreWorker = (
     },
     log: dependencies.log ?? createCloudflareOperationalLog(),
   } as const;
-  const coordinator = createReviewCoordinator(coordinatorDependencies);
+  const createCoordinator = (
+    lifecycleLog: ReturnType<typeof createPostHogLifecycleLog>,
+    deferCheckSetup?: (task: Promise<unknown>) => void,
+  ) =>
+    createReviewCoordinator({
+      ...coordinatorDependencies,
+      lifecycleLog,
+      ...(deferCheckSetup === undefined
+        ? {}
+        : { deferCheckSetup: (task: Promise<void>) => deferCheckSetup(task) }),
+    });
+
+  const recordLifecycle = (
+    lifecycleLog: ReturnType<typeof createPostHogLifecycleLog>,
+    event: Parameters<ReturnType<typeof createPostHogLifecycleLog>['record']>[0],
+  ) => {
+    try {
+      const result = lifecycleLog.record(event);
+      if (result instanceof Promise) void result.catch(() => undefined);
+    } catch {
+      // Lifecycle capture is strictly best effort and cannot affect product behavior.
+    }
+  };
+
+  const recordFinishedLifecycle = async (
+    lifecycleLog: ReturnType<typeof createPostHogLifecycleLog>,
+    outcome: ReviewOutcome,
+    terminal: 'completed' | 'failed' | 'superseded',
+    callback?: typeof RunnerResultCallback.Type,
+    failure?: {
+      readonly phase: NonNullable<
+        Extract<
+          Parameters<CoreLifecycleLog['record']>[0],
+          { event: 'review finished' }
+        >['failurePhase']
+      >;
+      readonly reason: CoreLifecycleFailureReason;
+    },
+    runId?: string,
+  ) => {
+    const occurredAt = await Effect.runPromise(DateTime.now.pipe(Effect.map(DateTime.formatIso)));
+    const created = epochMilliseconds(outcome.createdAt);
+    const executionStarted = epochMilliseconds(
+      callback?.timestamps.executionStartedAt ?? occurredAt,
+    );
+    const cleanupCompleted = epochMilliseconds(
+      callback?.timestamps.cleanupCompletedAt ?? occurredAt,
+    );
+    const queueWaitMs =
+      created !== undefined && executionStarted !== undefined
+        ? Math.max(0, executionStarted - created)
+        : 0;
+    const totalDurationMs =
+      created !== undefined && cleanupCompleted !== undefined
+        ? Math.max(0, cleanupCompleted - created)
+        : 0;
+    const failedCallback = callback?.status === 'failed' ? callback : undefined;
+    const failureReason =
+      terminal !== 'failed'
+        ? undefined
+        : (failure?.reason ??
+          (failedCallback?.failure === undefined
+            ? 'unknown'
+            : failedCallback.failure.reason === 'invalid-output'
+              ? 'invalid_output'
+              : failedCallback.failure.reason));
+    recordLifecycle(lifecycleLog, {
+      event: 'review finished',
+      runId: callback?.runId ?? runId ?? outcome.deliveryId,
+      trigger: outcome.trigger,
+      outcome: terminal,
+      published: terminal === 'completed',
+      totalDurationMs,
+      queueWaitMs,
+      cleanupStatus:
+        callback?.sandbox.cleanup === 'destroyed' || callback?.sandbox.cleanup === 'failed'
+          ? callback.sandbox.cleanup
+          : 'unknown',
+      evidenceStatus: callback?.evidence.status ?? outcome.evidence?.status ?? 'unknown',
+      ...(terminal === 'failed'
+        ? {
+            failurePhase:
+              failure?.phase ??
+              (failedCallback?.stage === 'checkout' ||
+              failedCallback?.stage === 'sandbox' ||
+              failedCallback?.stage === 'agent' ||
+              failedCallback?.stage === 'cleanup'
+                ? failedCallback.stage
+                : 'unknown'),
+            failureReason,
+          }
+        : {}),
+    });
+  };
 
   const markRunFailed = async (outcome: ReviewOutcome, runId: string, occurredAt: string) => {
     const notificationClaimed =
@@ -245,7 +350,10 @@ export const createCoreWorker = (
     }
   };
 
-  const handleRunnerResult = async (request: Request): Promise<Response> => {
+  const handleRunnerResult = async (
+    request: Request,
+    lifecycleLog: ReturnType<typeof createPostHogLifecycleLog>,
+  ): Promise<Response> => {
     if (request.headers.get('x-compte-rendu-runner-callback') !== 'verified') {
       return new Response(null, { status: 401 });
     }
@@ -281,6 +389,10 @@ export const createCoreWorker = (
       if (!(await completeCallbackEvidenceIsValid(callback))) {
         if (outcome.status !== 'scheduled') return new Response(null, { status: 409 });
         await markCallbackFailed();
+        await recordFinishedLifecycle(lifecycleLog, outcome, 'failed', callback, {
+          phase: 'evidence',
+          reason: 'evidence',
+        });
         return new Response(null, { status: 202 });
       }
     }
@@ -327,17 +439,19 @@ export const createCoreWorker = (
             content: 'confused',
           });
         }
+        await recordFinishedLifecycle(lifecycleLog, outcome, 'superseded', callback);
         return new Response(null, { status: 202 });
       }
       if (outcome.status === 'failed') {
         await markCallbackFailed();
+        await recordFinishedLifecycle(lifecycleLog, outcome, 'failed', callback);
         return new Response(null, { status: 202 });
       }
       if (outcome.status !== 'scheduled') return new Response(null, { status: 202 });
       if (callback.evidence.status !== 'complete' || callback.result === undefined) {
         return new Response(null, { status: 400 });
       }
-      const disposition = await coordinator.completeReview({
+      const disposition = await createCoordinator(lifecycleLog).completeReview({
         runId: callback.runId,
         output: callback.result,
       });
@@ -345,6 +459,17 @@ export const createCoreWorker = (
       if (finalOutcome === undefined || finalOutcome.status === 'scheduled') {
         return new Response(null, { status: 503 });
       }
+      await recordFinishedLifecycle(
+        lifecycleLog,
+        finalOutcome,
+        finalOutcome.status === 'completed'
+          ? 'completed'
+          : finalOutcome.status === 'superseded'
+            ? 'superseded'
+            : 'failed',
+        callback,
+        finalOutcome.status === 'failed' ? { phase: 'publication', reason: 'unknown' } : undefined,
+      );
       if (
         disposition === 'completed' &&
         finalOutcome.status === 'completed' &&
@@ -363,12 +488,17 @@ export const createCoreWorker = (
       return new Response(null, { status: finalOutcome.status === 'failed' ? 503 : 202 });
     }
 
-    await markCallbackFailed();
+    const terminal = outcome.status === 'superseded' ? 'superseded' : 'failed';
+    if (terminal === 'failed') await markCallbackFailed();
+    await recordFinishedLifecycle(lifecycleLog, outcome, terminal, callback);
     await clearRunnerJob();
     return new Response(null, { status: 202 });
   };
 
-  const handleRunnerClaim = async (request: Request): Promise<Response> => {
+  const handleRunnerClaim = async (
+    request: Request,
+    lifecycleLog: ReturnType<typeof createPostHogLifecycleLog>,
+  ): Promise<Response> => {
     if (request.headers.get('x-compte-rendu-runner-claim') !== 'verified') {
       return new Response(null, { status: 401 });
     }
@@ -378,6 +508,21 @@ export const createCoreWorker = (
     const jobId = globalThis.crypto.randomUUID();
     const claim = await stateStore.claimNextJob({ jobId, attempt: 1, occurredAt });
     if (claim.kind === 'empty') return new Response(null, { status: 204 });
+
+    const claimedOutcome = await stateStore.getRunOutcome(claim.runId).catch(() => undefined);
+    const createdAt = claimedOutcome?.createdAt;
+    const parsedCreatedAt = createdAt === undefined ? undefined : epochMilliseconds(createdAt);
+    const parsedClaimedAt = epochMilliseconds(occurredAt);
+    const queueWaitMs =
+      parsedCreatedAt !== undefined && parsedClaimedAt !== undefined
+        ? Math.max(0, parsedClaimedAt - parsedCreatedAt)
+        : 0;
+    recordLifecycle(lifecycleLog, {
+      event: 'review claimed',
+      runId: claim.runId,
+      trigger: claim.job.trigger,
+      queueWaitMs,
+    });
 
     try {
       if (github.getRepositoryUrl === undefined) throw new Error('Repository lookup unavailable');
@@ -440,22 +585,37 @@ export const createCoreWorker = (
       } else {
         await markRunFailed(current, claim.runId, occurredAt);
       }
+      const failedOutcome = await stateStore.getRunOutcome(claim.runId);
+      if (failedOutcome?.status === 'failed') {
+        await recordFinishedLifecycle(
+          lifecycleLog,
+          failedOutcome,
+          'failed',
+          undefined,
+          {
+            phase: 'unknown',
+            reason: 'unknown',
+          },
+          claim.runId,
+        );
+      }
       return new Response(null, { status: 503 });
     }
   };
 
   return {
     fetch: async (request, _env, context) => {
+      const lifecycleLog = createPostHogLifecycleLog(env, context);
       if (request.method === 'POST' && new URL(request.url).pathname === runnerClaimsPath) {
         try {
-          return await handleRunnerClaim(request);
+          return await handleRunnerClaim(request, lifecycleLog);
         } catch {
           return new Response(null, { status: 503 });
         }
       }
       if (request.method === 'POST' && new URL(request.url).pathname === runnerResultsPath) {
         try {
-          return await handleRunnerResult(request);
+          return await handleRunnerResult(request, lifecycleLog);
         } catch {
           return new Response(null, { status: 503 });
         }
@@ -480,13 +640,10 @@ export const createCoreWorker = (
       if (event === undefined) return new Response(null, { status: 400 });
 
       try {
-        const eventCoordinator =
-          context === undefined
-            ? coordinator
-            : createReviewCoordinator({
-                ...coordinatorDependencies,
-                deferCheckSetup: (task) => context.waitUntil(task),
-              });
+        const eventCoordinator = createCoordinator(
+          lifecycleLog,
+          context === undefined ? undefined : (task) => context.waitUntil(task),
+        );
         const disposition = await eventCoordinator.handleReviewEvent(event);
         return responseForDisposition(disposition);
       } catch {

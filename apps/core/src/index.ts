@@ -1,4 +1,4 @@
-import { DateTime, Effect, Schema } from 'effect';
+import { DateTime, Effect, Option, Schema } from 'effect';
 import {
   PullRequestFacts,
   ReviewEvent,
@@ -55,6 +55,60 @@ export type ReviewDisposition =
 export type ReviewRunStatus = 'scheduled' | 'failed' | 'completed' | 'superseded';
 export type ReviewStoredStatus = ReviewDisposition | ReviewRunStatus | 'claiming';
 export type ReviewCheckSetupStatus = 'pending' | 'ready' | 'failed';
+export const CoreLifecycleFailureReason = Schema.Literals([
+  'checkout',
+  'sandbox',
+  'agent',
+  'timeout',
+  'invalid_output',
+  'evidence',
+  'cleanup',
+  'callback',
+  'marker_lookup_failed',
+  'publication_uncertain',
+  'completion_failed',
+  'unknown',
+]);
+export type CoreLifecycleFailureReason = typeof CoreLifecycleFailureReason.Type;
+
+export type CoreLifecycleEvent =
+  | {
+      readonly event: 'review scheduled';
+      readonly runId: string;
+      readonly trigger: ReviewJob['trigger'];
+    }
+  | {
+      readonly event: 'review claimed';
+      readonly runId: string;
+      readonly trigger: ReviewJob['trigger'];
+      readonly queueWaitMs: number;
+    }
+  | {
+      readonly event: 'review finished';
+      readonly runId: string;
+      readonly trigger: ReviewJob['trigger'];
+      readonly outcome: 'completed' | 'failed' | 'superseded';
+      readonly published: boolean;
+      readonly totalDurationMs: number;
+      readonly queueWaitMs?: number;
+      readonly cleanupStatus: 'destroyed' | 'failed' | 'unknown';
+      readonly evidenceStatus: 'complete' | 'incomplete' | 'unknown';
+      readonly failurePhase?:
+        | 'checkout'
+        | 'sandbox'
+        | 'agent'
+        | 'output_validation'
+        | 'evidence'
+        | 'callback'
+        | 'publication'
+        | 'cleanup'
+        | 'unknown';
+      readonly failureReason?: CoreLifecycleFailureReason;
+    };
+
+export interface CoreLifecycleLog {
+  readonly record: (event: CoreLifecycleEvent) => void | Promise<void>;
+}
 export interface ReviewOutcome {
   deliveryId: string;
   installationId: number;
@@ -320,6 +374,16 @@ const recordOperationalLog = (log: OperationalLog | undefined, event: Operationa
         },
         catch: () => undefined,
       }).pipe(Effect.catch(() => Effect.succeed(undefined)));
+
+const recordLifecycleLog = (log: CoreLifecycleLog | undefined, event: CoreLifecycleEvent) =>
+  Effect.sync(() => {
+    if (log === undefined) return;
+    try {
+      void Promise.resolve(log.record(event)).catch(() => undefined);
+    } catch {
+      // Lifecycle capture is best effort and cannot affect product behavior.
+    }
+  });
 
 const ReviewPublicationTarget = Schema.Struct({
   headSha: GitHubSha,
@@ -911,6 +975,7 @@ const claimAndSchedule = (
   approval?: ReviewApproval,
   log?: OperationalLog,
   deferCheckSetup?: ReviewCheckSetupDefer,
+  lifecycleLog?: CoreLifecycleLog,
 ) =>
   Effect.gen(function* () {
     const occurredAt = yield* currentIso;
@@ -944,17 +1009,13 @@ const claimAndSchedule = (
       return claim.disposition;
     }
 
-    if (
-      claim.supersededRunIds !== undefined &&
-      stateStore.getRunOutcome !== undefined &&
-      github.updateCheckRun !== undefined
-    ) {
+    if (claim.supersededRunIds !== undefined && stateStore.getRunOutcome !== undefined) {
       for (const supersededRunId of claim.supersededRunIds) {
         const supersededOutcome = yield* Effect.tryPromise({
           try: () => stateStore.getRunOutcome!(supersededRunId),
           catch: () => undefined,
         }).pipe(Effect.catch(() => Effect.succeed(undefined)));
-        if (supersededOutcome?.checkRunId !== undefined) {
+        if (supersededOutcome?.checkRunId !== undefined && github.updateCheckRun !== undefined) {
           yield* Effect.tryPromise({
             try: () =>
               github.updateCheckRun!({
@@ -965,6 +1026,27 @@ const claimAndSchedule = (
               }),
             catch: () => undefined,
           }).pipe(Effect.catch(() => Effect.succeed(undefined)));
+        }
+        if (supersededOutcome?.status === 'superseded') {
+          const createdAt = DateTime.make(supersededOutcome.createdAt);
+          const supersededAt = DateTime.make(occurredAt);
+          const totalDurationMs =
+            Option.isSome(createdAt) && Option.isSome(supersededAt)
+              ? Math.max(
+                  0,
+                  supersededAt.value.epochMilliseconds - createdAt.value.epochMilliseconds,
+                )
+              : 0;
+          yield* recordLifecycleLog(lifecycleLog, {
+            event: 'review finished',
+            runId: supersededRunId,
+            trigger: supersededOutcome.trigger,
+            outcome: 'superseded',
+            published: false,
+            totalDurationMs,
+            cleanupStatus: 'unknown',
+            evidenceStatus: 'unknown',
+          });
         }
       }
     }
@@ -1048,6 +1130,11 @@ const claimAndSchedule = (
       deliveryId,
       runId: claim.runId,
     });
+    yield* recordLifecycleLog(lifecycleLog, {
+      event: 'review scheduled',
+      runId: claim.runId,
+      trigger: job.trigger,
+    });
     return 'scheduled' as const;
   });
 
@@ -1064,6 +1151,7 @@ const createAutomaticCoordinator = (
   scheduler: ReviewScheduler,
   log?: OperationalLog,
   deferCheckSetup?: ReviewCheckSetupDefer,
+  lifecycleLog?: CoreLifecycleLog,
 ) =>
   Effect.fn('handleAutomaticReviewEvent')(function* (
     event: Extract<ReviewEvent, { event: 'pull_request' }>,
@@ -1109,6 +1197,7 @@ const createAutomaticCoordinator = (
       undefined,
       log,
       deferCheckSetup,
+      lifecycleLog,
     );
   });
 
@@ -1197,6 +1286,7 @@ const createManualCoordinator = (
   scheduler: ReviewScheduler,
   log?: OperationalLog,
   deferCheckSetup?: ReviewCheckSetupDefer,
+  lifecycleLog?: CoreLifecycleLog,
 ) =>
   Effect.fn('handleManualReviewEvent')(function* (
     event: Extract<ReviewEvent, { event: 'issue_comment' }>,
@@ -1273,6 +1363,7 @@ const createManualCoordinator = (
       },
       log,
       deferCheckSetup,
+      lifecycleLog,
     );
 
     if (disposition === 'scheduled') yield* writeManualReaction(github, event, 'eyes');
@@ -1287,6 +1378,7 @@ const reviewEventEffect = (
   scheduler: ReviewScheduler,
   log?: OperationalLog,
   deferCheckSetup?: ReviewCheckSetupDefer,
+  lifecycleLog?: CoreLifecycleLog,
 ) =>
   Effect.gen(function* () {
     const decoded = yield* Schema.decodeUnknownEffect(ReviewEvent)(event).pipe(
@@ -1300,6 +1392,7 @@ const reviewEventEffect = (
         scheduler,
         log,
         deferCheckSetup,
+        lifecycleLog,
       )(decoded);
     }
 
@@ -1309,6 +1402,7 @@ const reviewEventEffect = (
       scheduler,
       log,
       deferCheckSetup,
+      lifecycleLog,
     )(decoded);
   });
 
@@ -1668,6 +1762,7 @@ export function createReviewCoordinator(dependencies: {
   scheduler: ReviewScheduler;
   log?: OperationalLog;
   deferCheckSetup?: ReviewCheckSetupDefer;
+  lifecycleLog?: CoreLifecycleLog;
 }): ReviewCoordinator {
   return {
     handleReviewEvent: async (event) =>
@@ -1679,6 +1774,7 @@ export function createReviewCoordinator(dependencies: {
           dependencies.scheduler,
           dependencies.log,
           dependencies.deferCheckSetup,
+          dependencies.lifecycleLog,
         ),
       ).catch((error) => {
         if (error instanceof InvalidReviewEvent) {

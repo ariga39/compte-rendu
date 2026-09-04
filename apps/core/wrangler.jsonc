@@ -6,6 +6,11 @@
   "workers_dev": false,
   "vars": {
     "GITHUB_APP_ID": "REPLACE_WITH_GITHUB_APP_ID",
+    "POSTHOG_ENABLED": "false",
+    "POSTHOG_PROJECT_API_KEY": "",
+    "POSTHOG_HOST": "",
+    "POSTHOG_DEPLOYMENT": "",
+    "POSTHOG_ENVIRONMENT": "production",
   },
   "secrets": {
     "required": ["GITHUB_APP_PRIVATE_KEY", "RUNNER_AUTH_TOKEN"],

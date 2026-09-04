@@ -89,6 +89,23 @@ request it created with `gh api repos/<OWNER>/<REPO>/pulls/<NUMBER> --jq
 Each independent deployment and its GitHub App must configure its own
 `ALLOWED_BOT_AUTHOR_IDS` value.
 
+PostHog capture is optional and disabled unless the final argument is supplied
+with an enabled JSON object. The project API key is a non-secret ingestion key;
+never provide a PostHog Personal API key. For example:
+
+```sh
+corepack pnpm render:wrangler petit-chiba <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '[156518087]' '[]' \
+  '{"enabled":true,"projectApiKey":"phc_<PROJECT_KEY>","host":"https://us.i.posthog.com","deployment":"petit-chiba","environment":"production"}'
+```
+
+The renderer writes these values only to the generated, gitignored Core
+configuration: `POSTHOG_ENABLED`, `POSTHOG_PROJECT_API_KEY`, `POSTHOG_HOST`,
+`POSTHOG_DEPLOYMENT`, and `POSTHOG_ENVIRONMENT`. Omit the object, or set
+`enabled` to `false`, to send no PostHog requests. An enabled configuration
+requires an HTTPS host, a `phc_` project API key, a bounded deployment alias,
+and `production` or `staging`; missing values are reported locally and do not
+change review scheduling, Runner claims, callbacks, evidence, or publication.
+
 Independent deployed instances require distinct product GitHub Apps because
 each App has one webhook URL and secret; this does not require a router.
 
@@ -534,7 +551,7 @@ uses the temporary invocation described above.
 3. Render deployment-only configs from the repository root:
 
    ```sh
-   corepack pnpm render:wrangler <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '<GITHUB_BOT_AUTHOR_IDS_JSON>'
+   corepack pnpm render:wrangler <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '<GITHUB_BOT_AUTHOR_IDS_JSON>' ['<POSTHOG_CONFIG_JSON>']
    ```
 
    This writes `apps/core/wrangler.<INSTANCE_NAME>.jsonc` and
@@ -778,6 +795,16 @@ work around that sanitization by logging request bodies, git URLs with
 credentials, Sandbox files, OpenCode stdout/stderr, model prompts, or session
 artifacts.
 
+When enabled, Core also sends only three personless PostHog events:
+`review scheduled`, `review claimed`, and `review finished`. Each event uses
+the existing opaque `run_id` as `distinct_id` and disables person profiles.
+The allowlisted properties contain only lifecycle state, bounded durations,
+deployment/environment, trigger, publication/evidence/cleanup status, and
+closed failure codes. PostHog is a lossy secondary surface: its request,
+configuration, or transport failure is locally diagnosable and cannot change
+D1/GitHub/R2 outcomes. Core uses one immediate workerd capture per request and
+registers it with `waitUntil()`.
+
 | Symptom                               | Check first                                                                              | Safe action                                                                                                                                            |
 | ------------------------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | GitHub delivery is `400`              | `WEBHOOK_SECRET`, `X-Hub-Signature-256`, and the raw configured URL                      | Re-enter the same high-entropy secret in GitHub and ingress, then redeliver. Do not disable signature checking.                                        |
@@ -798,7 +825,7 @@ For a normal compatible release:
 2. If there is a new migration, review it and apply it remotely with the D1
    migration command above. Prefer additive, backward-compatible changes.
 3. Render deployment-only configs again with the same
-   `corepack pnpm render:wrangler <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '<GITHUB_BOT_AUTHOR_IDS_JSON>'`
+   `corepack pnpm render:wrangler <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '<GITHUB_BOT_AUTHOR_IDS_JSON>' ['<POSTHOG_CONFIG_JSON>']`
    inputs, then deploy using `apps/core/wrangler.<INSTANCE_NAME>.jsonc` and
    `apps/ingress/wrangler.<INSTANCE_NAME>.jsonc`.
 4. Redeliver one controlled GitHub event and inspect the identifier chain.
@@ -824,7 +851,7 @@ that no review is in flight before proceeding.
    deliveries arrive, then delete the App registration if it is no longer
    needed and revoke its private key.
 3. Render deployment-only configs again with the same
-   `corepack pnpm render:wrangler <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '<GITHUB_BOT_AUTHOR_IDS_JSON>'`
+   `corepack pnpm render:wrangler <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '<GITHUB_BOT_AUTHOR_IDS_JSON>' ['<POSTHOG_CONFIG_JSON>']`
    inputs. Delete the public `<INSTANCE_NAME>-ingress` Worker, then the private
    `<INSTANCE_NAME>-core` Worker, in that order. Deleting the Workers removes
    their service and VPC bindings. Do not use `--force`.

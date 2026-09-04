@@ -80,6 +80,10 @@ declare module 'node:crypto' {
   export function randomUUID(): string;
 }
 
+declare module 'node:zlib' {
+  export function gunzipSync(value: Uint8Array): Buffer;
+}
+
 declare module 'node:fs/promises' {
   export interface Dirent {
     readonly name: string;
