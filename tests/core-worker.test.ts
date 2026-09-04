@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { gunzipSync } from 'node:zlib';
 import { createCoreWorker } from '../apps/core/src/core-worker';
 import { createD1ReviewStateStore, createInMemoryReviewStateStore } from '../apps/core/src/index';
 import { createGitHubPublicationAdapter } from '../apps/core/src/github-review-adapter';
@@ -154,7 +155,696 @@ const abortedCallback = async (
     timestamps: { cleanupCompletedAt: '2026-09-01T00:00:03.000Z' },
   });
 
+const postHogEvents = async (requests: readonly Request[]) =>
+  Promise.all(
+    requests.map(async (request) => {
+      const payload = JSON.parse(
+        gunzipSync(Buffer.from(await request.clone().arrayBuffer())).toString('utf8'),
+      ) as { batch: readonly unknown[] };
+      return payload.batch;
+    }),
+  ).then((batches) => batches.flat());
+
+const postHogTestDefaults = {
+  environment: {
+    POSTHOG_ENABLED: 'true',
+    POSTHOG_PROJECT_API_KEY: 'phc_test_project_key',
+    POSTHOG_HOST: 'https://posthog.example.test',
+    POSTHOG_DEPLOYMENT: 'test-installation',
+    POSTHOG_ENVIRONMENT: 'staging',
+  },
+  dependencies: {
+    github: { getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git' },
+    getReadInstallationToken: async () => ({
+      token: 'read-token',
+      expiresAt: '2026-09-01T01:00:00.000Z',
+    }),
+  },
+} as const;
+
+const capturePostHogTransport = (status = 200) => {
+  const requests: Request[] = [];
+  const waitUntilTasks: Promise<unknown>[] = [];
+  const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    requests.push(new Request(input, init));
+    return new Response('{}', { status });
+  });
+  return { fetcher, requests, waitUntilTasks };
+};
+
 describe('Core Worker', () => {
+  it('captures an enabled scheduled lifecycle event after the response is accepted', async () => {
+    const database = new SqliteD1Database();
+    const { fetcher, requests, waitUntilTasks } = capturePostHogTransport();
+    const env = {
+      ...coreEnv(database),
+      ...postHogTestDefaults.environment,
+    };
+    const worker = createCoreWorker(env, postHogTestDefaults.dependencies);
+
+    try {
+      const response = await worker.fetch(
+        new Request('https://core.internal/review-events', {
+          method: 'POST',
+          body: JSON.stringify({
+            ...eligibleEvent,
+            freeFormAcceptanceNote142: 'must-not-reach-posthog-wire-payload',
+          }),
+        }),
+        env,
+        { waitUntil: (task) => waitUntilTasks.push(task) },
+      );
+
+      expect(response.status).toBe(202);
+      expect(waitUntilTasks).toHaveLength(2);
+      await Promise.all(waitUntilTasks);
+      expect(requests).toHaveLength(1);
+      const wirePayload = gunzipSync(Buffer.from(await requests[0].arrayBuffer())).toString('utf8');
+      expect(wirePayload).not.toContain('must-not-reach-posthog-wire-payload');
+      expect(wirePayload).not.toContain(eligibleEvent.deliveryId);
+      expect(wirePayload).not.toContain(eligibleEvent.baseSha);
+      expect(wirePayload).not.toContain(eligibleEvent.headSha);
+      const requestPayload = JSON.parse(wirePayload) as {
+        api_key: string;
+        batch: Array<{
+          event: string;
+          distinct_id: string;
+          properties: Record<string, unknown>;
+        }>;
+      };
+      expect(requests[0].url).toBe('https://posthog.example.test/batch/');
+      expect(requestPayload.api_key).toBe('phc_test_project_key');
+      const payload = requestPayload.batch[0];
+      expect(payload).toMatchObject({
+        event: 'review scheduled',
+        distinct_id: expect.any(String),
+        properties: {
+          schema_version: 1,
+          environment: 'staging',
+          deployment: 'test-installation',
+          trigger: 'automatic',
+          $process_person_profile: false,
+        },
+      });
+      expect(payload.properties.run_id).toBe(payload.distinct_id);
+    } finally {
+      fetcher.mockRestore();
+      database.close();
+    }
+  });
+
+  it('sends no lifecycle requests when PostHog is disabled', async () => {
+    const database = new SqliteD1Database();
+    const { fetcher, requests, waitUntilTasks } = capturePostHogTransport();
+    const env = { ...coreEnv(database), POSTHOG_ENABLED: 'false' };
+    const worker = createCoreWorker(env, postHogTestDefaults.dependencies);
+
+    try {
+      const response = await worker.fetch(
+        new Request('https://core.internal/review-events', {
+          method: 'POST',
+          body: JSON.stringify({ ...eligibleEvent, deliveryId: 'delivery-posthog-disabled' }),
+        }),
+        env,
+        { waitUntil: (task) => waitUntilTasks.push(task) },
+      );
+
+      expect(response.status).toBe(202);
+      await Promise.all(waitUntilTasks);
+      expect(requests).toHaveLength(0);
+    } finally {
+      fetcher.mockRestore();
+      database.close();
+    }
+  });
+
+  it('keeps scheduling successful and skips capture for invalid enabled PostHog configuration', async () => {
+    const database = new SqliteD1Database();
+    const { fetcher, requests, waitUntilTasks } = capturePostHogTransport();
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const env = {
+      ...coreEnv(database),
+      ...postHogTestDefaults.environment,
+      POSTHOG_PROJECT_API_KEY: 'not-a-project-key',
+      POSTHOG_HOST: 'http://posthog.example.test',
+    };
+    const worker = createCoreWorker(env, postHogTestDefaults.dependencies);
+
+    try {
+      const response = await worker.fetch(
+        new Request('https://core.internal/review-events', {
+          method: 'POST',
+          body: JSON.stringify({
+            ...eligibleEvent,
+            deliveryId: 'delivery-posthog-invalid-configuration',
+          }),
+        }),
+        env,
+        { waitUntil: (task) => waitUntilTasks.push(task) },
+      );
+
+      expect(response.status).toBe(202);
+      await Promise.all(waitUntilTasks);
+      expect(warning).toHaveBeenCalledTimes(1);
+      expect(warning).toHaveBeenCalledWith('PostHog telemetry unavailable: configuration');
+      expect(requests).toHaveLength(0);
+    } finally {
+      fetcher.mockRestore();
+      warning.mockRestore();
+      database.close();
+    }
+  });
+
+  it('keeps scheduling successful when enabled PostHog capture fails', async () => {
+    const database = new SqliteD1Database();
+    const { fetcher, waitUntilTasks } = capturePostHogTransport(400);
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const env = {
+      ...coreEnv(database),
+      ...postHogTestDefaults.environment,
+    };
+    const worker = createCoreWorker(env, postHogTestDefaults.dependencies);
+
+    try {
+      const response = await worker.fetch(
+        new Request('https://core.internal/review-events', {
+          method: 'POST',
+          body: JSON.stringify({
+            ...eligibleEvent,
+            deliveryId: 'delivery-posthog-capture-failure',
+          }),
+        }),
+        env,
+        { waitUntil: (task) => waitUntilTasks.push(task) },
+      );
+
+      expect(response.status).toBe(202);
+      await Promise.all(waitUntilTasks);
+      expect(warning).toHaveBeenCalledWith('PostHog telemetry unavailable: capture');
+    } finally {
+      fetcher.mockRestore();
+      warning.mockRestore();
+      database.close();
+    }
+  });
+
+  it('captures a finished lifecycle event when an unclaimed old head is superseded', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1788480000000);
+    const database = new SqliteD1Database();
+    const { fetcher, requests, waitUntilTasks } = capturePostHogTransport();
+    const env = {
+      ...coreEnv(database),
+      ...postHogTestDefaults.environment,
+    };
+    const worker = createCoreWorker(env, postHogTestDefaults.dependencies);
+
+    try {
+      const oldSchedule = await worker.fetch(
+        new Request('https://core.internal/review-events', {
+          method: 'POST',
+          body: JSON.stringify({
+            ...eligibleEvent,
+            deliveryId: 'delivery-old-head-no-runner-job',
+          }),
+        }),
+        env,
+        { waitUntil: (task) => waitUntilTasks.push(task) },
+      );
+      expect(oldSchedule.status).toBe(202);
+      await Promise.all(waitUntilTasks.splice(0));
+
+      vi.setSystemTime(1788480005000);
+      const newerSchedule = await worker.fetch(
+        new Request('https://core.internal/review-events', {
+          method: 'POST',
+          body: JSON.stringify({
+            ...eligibleEvent,
+            action: 'synchronize',
+            deliveryId: 'delivery-newer-head-admitted',
+            headSha: '3333333333333333333333333333333333333333',
+          }),
+        }),
+        env,
+        { waitUntil: (task) => waitUntilTasks.push(task) },
+      );
+      expect(newerSchedule.status).toBe(202);
+      await Promise.all(waitUntilTasks);
+
+      const events = await postHogEvents(requests);
+      expect(events).toHaveLength(3);
+      const scheduledEvents = events.filter(
+        (event) => (event as { event: string }).event === 'review scheduled',
+      ) as Array<{ distinct_id: string; properties: Record<string, unknown> }>;
+      expect(scheduledEvents).toHaveLength(2);
+      const oldRunId = scheduledEvents[0]?.distinct_id;
+      expect(oldRunId).toEqual(expect.any(String));
+      const finishedEvents = events.filter(
+        (event) => (event as { event: string }).event === 'review finished',
+      ) as Array<{ distinct_id: string; properties: Record<string, unknown> }>;
+      expect(finishedEvents).toHaveLength(1);
+      const finished = finishedEvents[0];
+      if (finished === undefined || oldRunId === undefined)
+        throw new Error('lifecycle event missing');
+      expect(finished).toMatchObject({
+        properties: {
+          outcome: 'superseded',
+          published: false,
+          total_duration_ms: 5000,
+          cleanup_status: 'unknown',
+          evidence_status: 'unknown',
+        },
+      });
+      expect(finished.distinct_id).toBe(oldRunId);
+      expect(finished.properties.run_id).toBe(oldRunId);
+      expect(finished.properties).not.toHaveProperty('failure_phase');
+      expect(finished.properties).not.toHaveProperty('failure_reason');
+    } finally {
+      fetcher.mockRestore();
+      database.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it('captures a claimed lifecycle event after the atomic Runner claim', async () => {
+    const database = new SqliteD1Database();
+    const { fetcher, requests, waitUntilTasks } = capturePostHogTransport();
+    const env = {
+      ...coreEnv(database),
+      ...postHogTestDefaults.environment,
+    };
+    const worker = createCoreWorker(env, postHogTestDefaults.dependencies);
+
+    try {
+      const scheduled = await worker.fetch(
+        new Request('https://core.internal/review-events', {
+          method: 'POST',
+          body: JSON.stringify({ ...eligibleEvent, deliveryId: 'delivery-claim-lifecycle' }),
+        }),
+        env,
+        { waitUntil: (task) => waitUntilTasks.push(task) },
+      );
+      expect(scheduled.status).toBe(202);
+      await Promise.all(waitUntilTasks.splice(0));
+
+      const claim = await worker.fetch(
+        new Request('https://core.internal/runner-claims', {
+          method: 'POST',
+          headers: { 'x-compte-rendu-runner-claim': 'verified' },
+        }),
+        env,
+        { waitUntil: (task) => waitUntilTasks.push(task) },
+      );
+
+      expect(claim.status).toBe(200);
+      await Promise.all(waitUntilTasks);
+      const events = await postHogEvents(requests);
+      expect(events).toHaveLength(2);
+      expect(events[1]).toMatchObject({
+        event: 'review claimed',
+        distinct_id: expect.any(String),
+        properties: {
+          queue_wait_ms: expect.any(Number),
+          $process_person_profile: false,
+        },
+      });
+      expect(
+        (events[1] as { properties: { queue_wait_ms: number } }).properties.queue_wait_ms,
+      ).toBeGreaterThanOrEqual(0);
+    } finally {
+      fetcher.mockRestore();
+      database.close();
+    }
+  });
+
+  it('captures a finished lifecycle event after a terminal failed callback', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-04T00:00:00.000Z'));
+    const database = new SqliteD1Database();
+    const { fetcher, requests, waitUntilTasks } = capturePostHogTransport();
+    const env = {
+      ...coreEnv(database),
+      EVIDENCE_BUCKET: { put: async () => undefined },
+      ...postHogTestDefaults.environment,
+    };
+    const worker = createCoreWorker(env, postHogTestDefaults.dependencies);
+
+    try {
+      const scheduled = await worker.fetch(
+        new Request('https://core.internal/review-events', {
+          method: 'POST',
+          body: JSON.stringify({ ...eligibleEvent, deliveryId: 'delivery-finished-lifecycle' }),
+        }),
+        env,
+        { waitUntil: (task) => waitUntilTasks.push(task) },
+      );
+      expect(scheduled.status).toBe(202);
+      await Promise.all(waitUntilTasks.splice(0));
+
+      const claim = await worker.fetch(
+        new Request('https://core.internal/runner-claims', {
+          method: 'POST',
+          headers: { 'x-compte-rendu-runner-claim': 'verified' },
+        }),
+        env,
+        { waitUntil: (task) => waitUntilTasks.push(task) },
+      );
+      expect(claim.status).toBe(200);
+      const claimed = (await claim.json()) as { id: string; runId: string; attempt: number };
+      await Promise.all(waitUntilTasks.splice(0));
+
+      vi.setSystemTime(new Date('2026-09-04T00:00:06.000Z'));
+      const callbackBody = JSON.parse(
+        await failedCallback(claimed.runId, claimed.id, claimed.attempt),
+      ) as Record<string, unknown>;
+      callbackBody.timestamps = {
+        executionStartedAt: '2026-09-04T00:00:01.000Z',
+        cleanupCompletedAt: '2026-09-04T00:00:06.000Z',
+      };
+
+      const callback = await worker.fetch(
+        new Request('https://core.internal/runner-results', {
+          method: 'POST',
+          headers: {
+            'x-compte-rendu-runner-callback': 'verified',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify(callbackBody),
+        }),
+        env,
+        { waitUntil: (task) => waitUntilTasks.push(task) },
+      );
+
+      expect(callback.status).toBe(202);
+      await Promise.all(waitUntilTasks);
+      const events = await postHogEvents(requests);
+      expect(events).toHaveLength(3);
+      expect(events[2]).toMatchObject({
+        event: 'review finished',
+        distinct_id: expect.any(String),
+        properties: {
+          outcome: 'failed',
+          published: false,
+          total_duration_ms: 6000,
+          queue_wait_ms: 1000,
+          cleanup_status: 'destroyed',
+          evidence_status: 'incomplete',
+          failure_phase: 'agent',
+          failure_reason: 'agent',
+          $process_person_profile: false,
+        },
+      });
+    } finally {
+      fetcher.mockRestore();
+      database.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it('captures a completed lifecycle event after successful publication', async () => {
+    const database = new SqliteD1Database();
+    const stateStore = createD1ReviewStateStore(database);
+    const claimed = await stateStore.claimReview({
+      deliveryId: 'delivery-finished-success-lifecycle',
+      job: {
+        repositoryId: 11,
+        pullRequestNumber: 42,
+        installationId: 7,
+        baseSha: eligibleEvent.baseSha,
+        headSha: eligibleEvent.headSha,
+        trigger: 'automatic',
+      },
+      occurredAt: '2026-09-01T00:00:00.000Z',
+    });
+    if (claimed.kind !== 'claimed') throw new Error('success lifecycle run was not claimed');
+    await stateStore.recordRunnerJob({ runId: claimed.runId, jobId: 'runner-job-1', attempt: 1 });
+    const { fetcher, requests, waitUntilTasks } = capturePostHogTransport();
+    const env = {
+      REVIEW_DB: database,
+      EVIDENCE_BUCKET: { put: async () => undefined },
+      GITHUB_APP_ID: '1234567',
+      GITHUB_APP_PRIVATE_KEY: 'test-private-key',
+      ...postHogTestDefaults.environment,
+    };
+    const worker = createCoreWorker(env, {
+      ...postHogTestDefaults.dependencies,
+      stateStore,
+      github: {
+        loadReviewTarget: async () => ({ headSha: eligibleEvent.headSha }),
+        createReview: async ({ payload }) => ({ kind: 'created', review: payload }),
+      },
+    });
+
+    try {
+      const response = await worker.fetch(
+        new Request('https://core.internal/runner-results', {
+          method: 'POST',
+          headers: {
+            'x-compte-rendu-runner-callback': 'verified',
+            'content-type': 'application/json',
+          },
+          body: await successfulCallback(claimed.runId),
+        }),
+        env,
+        { waitUntil: (task) => waitUntilTasks.push(task) },
+      );
+
+      expect(response.status).toBe(202);
+      await Promise.all(waitUntilTasks);
+      const events = await postHogEvents(requests);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        event: 'review finished',
+        properties: {
+          outcome: 'completed',
+          published: true,
+        },
+      });
+      const properties = (events[0] as { properties: Record<string, unknown> }).properties;
+      expect(properties).not.toHaveProperty('failure_phase');
+      expect(properties).not.toHaveProperty('failure_reason');
+    } finally {
+      fetcher.mockRestore();
+      database.close();
+    }
+  });
+
+  it('captures a superseded lifecycle event when the head changes during publication', async () => {
+    const database = new SqliteD1Database();
+    const { fetcher, requests, waitUntilTasks } = capturePostHogTransport();
+    const env = {
+      ...coreEnv(database),
+      EVIDENCE_BUCKET: { put: async () => undefined },
+      ...postHogTestDefaults.environment,
+    };
+    const worker = createCoreWorker(env, {
+      ...postHogTestDefaults.dependencies,
+      github: {
+        ...postHogTestDefaults.dependencies.github,
+        loadReviewTarget: async () => ({
+          headSha: '3333333333333333333333333333333333333333',
+        }),
+        createReview: async ({ payload }) => ({ kind: 'created', review: payload }),
+      },
+    });
+
+    try {
+      const scheduled = await worker.fetch(
+        new Request('https://core.internal/review-events', {
+          method: 'POST',
+          body: JSON.stringify({
+            ...eligibleEvent,
+            deliveryId: 'delivery-finished-head-changed-lifecycle',
+          }),
+        }),
+        env,
+        { waitUntil: (task) => waitUntilTasks.push(task) },
+      );
+      expect(scheduled.status).toBe(202);
+      await Promise.all(waitUntilTasks.splice(0));
+
+      const claim = await worker.fetch(
+        new Request('https://core.internal/runner-claims', {
+          method: 'POST',
+          headers: { 'x-compte-rendu-runner-claim': 'verified' },
+        }),
+        env,
+        { waitUntil: (task) => waitUntilTasks.push(task) },
+      );
+      expect(claim.status).toBe(200);
+      const claimed = (await claim.json()) as { id: string; runId: string; attempt: number };
+      await Promise.all(waitUntilTasks.splice(0));
+
+      const callback = await worker.fetch(
+        new Request('https://core.internal/runner-results', {
+          method: 'POST',
+          headers: {
+            'x-compte-rendu-runner-callback': 'verified',
+            'content-type': 'application/json',
+          },
+          body: await successfulCallback(claimed.runId, claimed.id, claimed.attempt),
+        }),
+        env,
+        { waitUntil: (task) => waitUntilTasks.push(task) },
+      );
+
+      expect(callback.status).toBe(202);
+      await Promise.all(waitUntilTasks);
+      const events = await postHogEvents(requests);
+      expect(events).toHaveLength(3);
+      const finished = events.find(
+        (event) => (event as { event: string }).event === 'review finished',
+      ) as { properties: Record<string, unknown> } | undefined;
+      expect(finished).toMatchObject({
+        event: 'review finished',
+        properties: {
+          outcome: 'superseded',
+          published: false,
+        },
+      });
+      expect(finished?.properties).not.toHaveProperty('failure_phase');
+      expect(finished?.properties).not.toHaveProperty('failure_reason');
+    } finally {
+      fetcher.mockRestore();
+      database.close();
+    }
+  });
+
+  it('captures a superseded lifecycle event for a late successful callback', async () => {
+    const database = new SqliteD1Database();
+    const stateStore = createD1ReviewStateStore(database);
+    const claimed = await stateStore.claimReview({
+      deliveryId: 'delivery-finished-superseded-lifecycle',
+      job: {
+        repositoryId: 11,
+        pullRequestNumber: 42,
+        installationId: 7,
+        baseSha: eligibleEvent.baseSha,
+        headSha: eligibleEvent.headSha,
+        trigger: 'automatic',
+      },
+      occurredAt: '2026-09-01T00:00:00.000Z',
+    });
+    if (claimed.kind !== 'claimed') throw new Error('superseded lifecycle run was not claimed');
+    await stateStore.recordRunnerJob({ runId: claimed.runId, jobId: 'runner-job-1', attempt: 1 });
+    await stateStore.markRunSuperseded({
+      runId: claimed.runId,
+      occurredAt: '2026-09-01T00:00:01.000Z',
+    });
+    const { fetcher, requests, waitUntilTasks } = capturePostHogTransport();
+    const env = {
+      REVIEW_DB: database,
+      EVIDENCE_BUCKET: { put: async () => undefined },
+      GITHUB_APP_ID: '1234567',
+      GITHUB_APP_PRIVATE_KEY: 'test-private-key',
+      ...postHogTestDefaults.environment,
+    };
+    const worker = createCoreWorker(env, {
+      ...postHogTestDefaults.dependencies,
+      stateStore,
+      github: {},
+    });
+
+    try {
+      const response = await worker.fetch(
+        new Request('https://core.internal/runner-results', {
+          method: 'POST',
+          headers: {
+            'x-compte-rendu-runner-callback': 'verified',
+            'content-type': 'application/json',
+          },
+          body: await successfulCallback(claimed.runId),
+        }),
+        env,
+        { waitUntil: (task) => waitUntilTasks.push(task) },
+      );
+
+      expect(response.status).toBe(202);
+      await Promise.all(waitUntilTasks);
+      const events = await postHogEvents(requests);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        event: 'review finished',
+        properties: {
+          outcome: 'superseded',
+          published: false,
+        },
+      });
+    } finally {
+      fetcher.mockRestore();
+      database.close();
+    }
+  });
+
+  it('captures a failed lifecycle event after durable claim preparation failure', async () => {
+    const database = new SqliteD1Database();
+    const { fetcher, requests, waitUntilTasks } = capturePostHogTransport();
+    const env = {
+      ...coreEnv(database),
+      ...postHogTestDefaults.environment,
+    };
+    const worker = createCoreWorker(env, {
+      ...postHogTestDefaults.dependencies,
+      github: {
+        getRepositoryUrl: async () => {
+          throw new Error('repository lookup failed');
+        },
+      },
+    });
+
+    try {
+      const scheduled = await worker.fetch(
+        new Request('https://core.internal/review-events', {
+          method: 'POST',
+          body: JSON.stringify({
+            ...eligibleEvent,
+            deliveryId: 'delivery-claim-preparation-failure',
+          }),
+        }),
+        env,
+        { waitUntil: (task) => waitUntilTasks.push(task) },
+      );
+      expect(scheduled.status).toBe(202);
+      await Promise.all(waitUntilTasks.splice(0));
+
+      const claim = await worker.fetch(
+        new Request('https://core.internal/runner-claims', {
+          method: 'POST',
+          headers: { 'x-compte-rendu-runner-claim': 'verified' },
+        }),
+        env,
+        { waitUntil: (task) => waitUntilTasks.push(task) },
+      );
+      expect(claim.status).toBe(503);
+      await Promise.all(waitUntilTasks);
+      const events = await postHogEvents(requests);
+      expect(events).toHaveLength(3);
+      const lifecycleIds = events as Array<{
+        readonly distinct_id: string;
+        readonly properties: { readonly run_id: string };
+      }>;
+      const runId = lifecycleIds[0]?.distinct_id;
+      expect(runId).toEqual(expect.any(String));
+      expect(lifecycleIds.map((event) => [event.distinct_id, event.properties.run_id])).toEqual([
+        [runId, runId],
+        [runId, runId],
+        [runId, runId],
+      ]);
+      expect(events[2]).toMatchObject({
+        event: 'review finished',
+        properties: {
+          outcome: 'failed',
+          published: false,
+          failure_phase: 'unknown',
+          failure_reason: 'unknown',
+        },
+      });
+    } finally {
+      fetcher.mockRestore();
+      database.close();
+    }
+  });
+
   it('keeps an existing scheduled run claimable after Check migration', async () => {
     const database = new SqliteD1Database([
       '0001_review_state.sql',

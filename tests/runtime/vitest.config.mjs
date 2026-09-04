@@ -10,6 +10,9 @@ const coreBundleDirectory = resolve('tests/runtime/.generated');
 await build({
   configFile: false,
   root: process.cwd(),
+  resolve: {
+    conditions: ['workerd'],
+  },
   build: {
     lib: {
       entry: resolve('tests/runtime/core-entry.ts'),

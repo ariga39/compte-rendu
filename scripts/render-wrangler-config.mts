@@ -11,6 +11,13 @@ const InstallationId = Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0)));
 const InstallationIds = Schema.Array(InstallationId).pipe(Schema.check(Schema.isMinLength(1)));
 const BotAuthorId = Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0)));
 const BotAuthorIds = Schema.Array(BotAuthorId);
+const PostHogConfig = Schema.Struct({
+  enabled: Schema.Boolean,
+  projectApiKey: Schema.optional(Schema.String),
+  host: Schema.optional(Schema.String),
+  deployment: Schema.optional(Schema.String),
+  environment: Schema.optional(Schema.Literals(['production', 'staging'])),
+});
 
 const replaceRequired = (template: string, marker: string, value: string) => {
   if (!template.includes(marker)) {
@@ -26,6 +33,7 @@ const renderDeploymentConfigs = (
   runnerVpcServiceId: string,
   allowedInstallationIds: string,
   allowedBotAuthorIds = '[]',
+  posthogConfig = '{"enabled":false}',
 ) => {
   if (
     !instanceNamePattern.test(instanceName) ||
@@ -58,6 +66,32 @@ const renderDeploymentConfigs = (
   } catch {
     throw new Error('GitHub Bot author IDs must be a JSON array of positive integers');
   }
+  let parsedPostHogConfig: typeof PostHogConfig.Type;
+  try {
+    parsedPostHogConfig = Schema.decodeUnknownSync(Schema.fromJsonString(PostHogConfig))(
+      posthogConfig,
+    );
+  } catch {
+    throw new Error('PostHog configuration must be a JSON object');
+  }
+  const posthogProjectApiKey = parsedPostHogConfig.projectApiKey ?? '';
+  const posthogHost = parsedPostHogConfig.host ?? '';
+  const posthogDeployment = parsedPostHogConfig.deployment ?? '';
+  const posthogEnvironment = parsedPostHogConfig.environment ?? 'production';
+  if (parsedPostHogConfig.enabled) {
+    if (!/^phc_[A-Za-z0-9._:-]{1,124}$/.test(posthogProjectApiKey)) {
+      throw new Error('enabled PostHog configuration requires a project API key');
+    }
+    try {
+      const host = new URL(posthogHost);
+      if (host.protocol !== 'https:') throw new Error('host must use HTTPS');
+    } catch {
+      throw new Error('enabled PostHog configuration requires an HTTPS host');
+    }
+    if (!instanceNamePattern.test(posthogDeployment)) {
+      throw new Error('enabled PostHog configuration requires a DNS-safe deployment alias');
+    }
+  }
 
   const coreDirectory = join(process.cwd(), 'apps/core');
   const ingressDirectory = join(process.cwd(), 'apps/ingress');
@@ -88,6 +122,31 @@ const renderDeploymentConfigs = (
     core,
     '"GITHUB_APP_ID": "REPLACE_WITH_GITHUB_APP_ID"',
     `"GITHUB_APP_ID": "${githubAppId}"`,
+  );
+  core = replaceRequired(
+    core,
+    '"POSTHOG_ENABLED": "false"',
+    `"POSTHOG_ENABLED": "${parsedPostHogConfig.enabled ? 'true' : 'false'}"`,
+  );
+  core = replaceRequired(
+    core,
+    '"POSTHOG_PROJECT_API_KEY": ""',
+    `"POSTHOG_PROJECT_API_KEY": ${JSON.stringify(posthogProjectApiKey)}`,
+  );
+  core = replaceRequired(
+    core,
+    '"POSTHOG_HOST": ""',
+    `"POSTHOG_HOST": ${JSON.stringify(posthogHost)}`,
+  );
+  core = replaceRequired(
+    core,
+    '"POSTHOG_DEPLOYMENT": ""',
+    `"POSTHOG_DEPLOYMENT": ${JSON.stringify(posthogDeployment)}`,
+  );
+  core = replaceRequired(
+    core,
+    '"POSTHOG_ENVIRONMENT": "production"',
+    `"POSTHOG_ENVIRONMENT": "${posthogEnvironment}"`,
   );
   core = replaceRequired(
     core,
@@ -132,12 +191,12 @@ const renderDeploymentConfigs = (
 };
 
 const main = (args: readonly string[]) => {
-  if (args.length !== 5 && args.length !== 6) {
+  if (args.length < 5 || args.length > 7) {
     throw new Error(
-      'usage: render-wrangler-config <instance-name> <github-app-id> <d1-uuid> <runner-vpc-service-uuid> <github-installation-ids-json> [github-bot-author-ids-json]',
+      'usage: render-wrangler-config <instance-name> <github-app-id> <d1-uuid> <runner-vpc-service-uuid> <github-installation-ids-json> [github-bot-author-ids-json] [posthog-config-json]',
     );
   }
-  renderDeploymentConfigs(args[0], Number(args[1]), args[2], args[3], args[4], args[5]);
+  renderDeploymentConfigs(args[0], Number(args[1]), args[2], args[3], args[4], args[5], args[6]);
 };
 
 if (fileURLToPath(import.meta.url) === resolve(process.argv[1] ?? '')) {
