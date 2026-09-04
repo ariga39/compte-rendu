@@ -422,7 +422,7 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
       return {
         kind: 'replay' as const,
         disposition,
-        ...(replayRun?.status !== 'scheduled' || replayRun.check_setup_status !== 'pending'
+        ...(replayRun?.check_setup_status !== 'pending'
           ? {}
           : {
               runId: replayRun.run_id,
@@ -586,24 +586,39 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
     return result.meta.changes === 1;
   },
 
-  recordCheckRun: async ({ runId, checkRunId }) => {
+  claimCheckSetup: async ({ runId, claimedAt, staleBefore }) => {
     const result = await database
       .prepare(
-        `UPDATE review_runs SET check_run_id = ?, check_setup_status = 'ready'
-         WHERE run_id = ? AND check_run_id IS NULL AND check_setup_status = 'pending'`,
+        `UPDATE review_runs SET check_setup_claimed_at = ?
+         WHERE run_id = ? AND check_run_id IS NULL AND check_setup_status = 'pending'
+           AND (check_setup_claimed_at IS NULL OR check_setup_claimed_at <= ?)`,
       )
-      .bind(checkRunId, runId)
+      .bind(claimedAt, runId, staleBefore)
       .run();
     return result.meta.changes === 1;
   },
 
-  markCheckSetupFailed: async ({ runId }) => {
+  recordCheckRun: async ({ runId, checkRunId, setupClaim }) => {
     const result = await database
       .prepare(
-        `UPDATE review_runs SET check_setup_status = 'failed'
-         WHERE run_id = ? AND check_setup_status = 'pending'`,
+        `UPDATE review_runs SET check_run_id = ?, check_setup_status = 'ready',
+           check_setup_claimed_at = NULL
+         WHERE run_id = ? AND check_run_id IS NULL AND check_setup_status = 'pending'
+           AND (? IS NULL OR check_setup_claimed_at = ?)`,
       )
-      .bind(runId)
+      .bind(checkRunId, runId, setupClaim ?? null, setupClaim ?? null)
+      .run();
+    return result.meta.changes === 1;
+  },
+
+  markCheckSetupFailed: async ({ runId, setupClaim }) => {
+    const result = await database
+      .prepare(
+        `UPDATE review_runs SET check_setup_status = 'failed', check_setup_claimed_at = NULL
+         WHERE run_id = ? AND check_setup_status = 'pending'
+           AND (? IS NULL OR check_setup_claimed_at = ?)`,
+      )
+      .bind(runId, setupClaim ?? null, setupClaim ?? null)
       .run();
     return result.meta.changes === 1;
   },

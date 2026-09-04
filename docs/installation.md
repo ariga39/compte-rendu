@@ -566,8 +566,13 @@ uses the temporary invocation described above.
    setup state. New admissions begin in pending setup, but Runner claims never
    wait for this progress-only GitHub API work. Check success records the id,
    Check API failure records degraded visibility, and an interrupted pending
-   setup remains claimable without manual D1 repair. D1 migration files are
-   versioned and applied in order; see
+   setup remains claimable without manual D1 repair.
+   `0007_check_setup_lease.sql` adds the short ownership lease that prevents an
+   active delivery replay from creating a second Check while allowing a later
+   replay to recover an interrupted setup. The one-minute lease exceeds
+   Cloudflare's 30-second post-response `waitUntil()` execution limit, so an
+   expired owner is no longer running. D1 migration files are versioned and
+   applied in order; see
    [D1 migrations](https://developers.cloudflare.com/d1/reference/migrations/).
 
    The generated core config also retains the legacy Durable Object migration
