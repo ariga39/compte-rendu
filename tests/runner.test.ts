@@ -1848,7 +1848,7 @@ describe('Runner Job HTTP interface', () => {
         sandboxName: expect.any(String),
         sandboxId: expect.any(String),
         sessionIds: ['session-89', 'session-child'],
-        model: 'opencode-go/deepseek-v4-flash',
+        model: 'opencode-go/deepseek-flash',
         image: 'ghcr.io/ariga39/petit-chiba-opencode:1.18.25-gh2.98.0',
         openCodeVersion: '1.18.25',
         agent: {

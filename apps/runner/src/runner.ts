@@ -31,7 +31,7 @@ import {
 import prReviewSkill from '../skills/pr-review/SKILL.md?raw';
 import submitReviewTool from '../tools/submit_review.js?raw';
 
-const MODEL = 'opencode-go/deepseek-v4-flash';
+const MODEL = 'opencode-go/deepseek-flash';
 const MODEL_ENV = 'OPENCODE_API_KEY';
 const MODEL_HOST = 'opencode.ai';
 const MODEL_RESOURCE = `${MODEL_HOST}:443`;
