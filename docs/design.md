@@ -257,6 +257,12 @@ If the fixed callback bundle exceeds the 32 MiB request bound, the Runner sends
 one small terminal incomplete-evidence failure instead of truncating or
 uploading that bundle.
 
+The Runner reads its required `REVIEW_MODEL_CONFIG` deployment JSON at startup.
+It selects one `opencode-go` model and may register that model's metadata for
+the pinned OpenCode catalog. Missing or invalid configuration prevents Job
+claims and admission. Model selection does not change provider credentials,
+network policy, or review permissions.
+
 The review Sandbox runs OpenCode non-interactively inside the microVM, without
 per-call approval prompts. Its static-review policy allows the packaged skill,
 the final-review submission tool, read/search, and narrowly bounded read-only
