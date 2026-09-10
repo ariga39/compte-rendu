@@ -2578,6 +2578,20 @@ describe('Runner Job HTTP interface', () => {
       agent: { review: { permission: Record<string, unknown> } };
     };
     expect(config).toMatchObject({
+      model: 'opencode-go/deepseek-flash',
+      provider: {
+        'opencode-go': {
+          models: {
+            'deepseek-flash': {
+              name: 'DeepSeek V4.1 Flash',
+              reasoning: true,
+              interleaved: { field: 'reasoning_content' },
+              limit: { context: 1000000, output: 384000 },
+              cost: { input: 0.15, output: 0.6, cache_read: 0.003 },
+            },
+          },
+        },
+      },
       agent: {
         review: {
           description: 'Pull request reviewer',
