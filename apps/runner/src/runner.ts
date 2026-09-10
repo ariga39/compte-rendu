@@ -55,6 +55,20 @@ const trustedOpenCodeConfig = JSON.stringify({
   share: 'disabled',
   autoupdate: false,
   model: MODEL,
+  // The pinned OpenCode build's offline catalog lacks this new model, so register it here.
+  provider: {
+    'opencode-go': {
+      models: {
+        'deepseek-flash': {
+          name: 'DeepSeek V4.1 Flash',
+          reasoning: true,
+          interleaved: { field: 'reasoning_content' },
+          limit: { context: 1000000, output: 384000 },
+          cost: { input: 0.15, output: 0.6, cache_read: 0.003 },
+        },
+      },
+    },
+  },
   agent: {
     review: {
       description: 'Pull request reviewer',
