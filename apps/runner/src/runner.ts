@@ -31,7 +31,6 @@ import {
 import prReviewSkill from '../skills/pr-review/SKILL.md?raw';
 import submitReviewTool from '../tools/submit_review.js?raw';
 
-const MODEL = 'opencode-go/deepseek-flash';
 const MODEL_ENV = 'OPENCODE_API_KEY';
 const MODEL_HOST = 'opencode.ai';
 const MODEL_RESOURCE = `${MODEL_HOST}:443`;
@@ -51,86 +50,119 @@ const CLAIM_REQUEST_TIMEOUT_MS = 30 * 1000;
 const SANDBOX_EVIDENCE_ROOT = '/tmp/petit-chiba-opencode-evidence';
 const EMPTY_EVIDENCE_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 
-const trustedOpenCodeConfig = JSON.stringify({
-  share: 'disabled',
-  autoupdate: false,
-  model: MODEL,
-  // The pinned OpenCode build's offline catalog lacks this new model, so register it here.
-  provider: {
-    'opencode-go': {
-      models: {
-        'deepseek-flash': {
-          name: 'DeepSeek V4.1 Flash',
-          reasoning: true,
-          interleaved: { field: 'reasoning_content' },
-          limit: { context: 1000000, output: 384000 },
-          cost: { input: 0.15, output: 0.6, cache_read: 0.003 },
-        },
-      },
-    },
-  },
-  agent: {
-    review: {
-      description: 'Pull request reviewer',
-      mode: 'primary',
-      permission: {
-        '*': 'deny',
-        submit_review: 'allow',
-        bash: {
-          '*': 'deny',
-          'gh *': 'deny',
-          'gh api graphql *': 'allow',
-          'gh pr view *': 'allow',
-          'git diff': 'allow',
-          'git diff *': 'allow',
-          'git grep': 'allow',
-          'git grep *': 'allow',
-          'git log': 'allow',
-          'git log *': 'allow',
-          'git log *--output*': 'deny',
-          'git show': 'allow',
-          'git show *': 'allow',
-          'git diff *--no-index*': 'deny',
-          'git diff *--output*': 'deny',
-          'git show *--output*': 'deny',
-          'git diff *--extcmd*': 'deny',
-          'git diff *>*': 'deny',
-          'git show *>*': 'deny',
-          'git grep *>*': 'deny',
-          'git grep *--open-files-in-pager*': 'deny',
-          'git grep *-O*': 'deny',
-          'gh *&*': 'deny',
-          'gh *;*': 'deny',
-          'gh *|*': 'deny',
-          'gh *>*': 'deny',
-          'gh *<*': 'deny',
-          'gh *$(*': 'deny',
-          'gh *`*': 'deny',
-          'gh *\n*': 'deny',
-          'git *&*': 'deny',
-          'git *;*': 'deny',
-          'git *|*': 'deny',
-          'git *>*': 'deny',
-          'git *<*': 'deny',
-          'git *$(*': 'deny',
-          'git *`*': 'deny',
-          'git *\n*': 'deny',
-          'npm *': 'deny',
-          'pnpm *': 'deny',
-          'python *': 'deny',
-          './*': 'deny',
-        },
-        edit: 'deny',
-        external_directory: 'allow',
-        glob: 'allow',
-        grep: 'allow',
-        read: 'allow',
-        skill: 'allow',
-        webfetch: 'deny',
-      },
-    },
-  },
+const ReviewModelDefinition = Schema.Struct({
+  name: Schema.optional(Schema.NonEmptyString),
+  reasoning: Schema.optional(Schema.Boolean),
+  interleaved: Schema.optional(
+    Schema.Struct({ field: Schema.Literals(['reasoning_content', 'reasoning_details']) }),
+  ),
+  limit: Schema.optional(
+    Schema.Struct({
+      context: Schema.Int.check(Schema.isGreaterThan(0)),
+      output: Schema.Int.check(Schema.isGreaterThan(0)),
+    }),
+  ),
+  cost: Schema.optional(
+    Schema.Struct({
+      input: Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0)),
+      output: Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0)),
+      cache_read: Schema.optional(Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0))),
+    }),
+  ),
 });
+const ReviewModelConfig = Schema.Struct({
+  id: Schema.String.check(Schema.isPattern(/^opencode-go\/[A-Za-z0-9._:-]{1,128}$/)),
+  definition: Schema.optional(ReviewModelDefinition),
+});
+type ReviewModelConfigValue = Schema.Schema.Type<typeof ReviewModelConfig>;
+
+const decodeReviewModelConfig = (raw: string | undefined): ReviewModelConfigValue | undefined =>
+  raw === undefined
+    ? undefined
+    : Option.getOrUndefined(
+        Schema.decodeUnknownOption(Schema.fromJsonString(ReviewModelConfig), {
+          onExcessProperty: 'error',
+        })(raw),
+      );
+
+// The pinned OpenCode build's offline catalog may lack the deployment-configured model, so
+// register only the selected provider model when a definition is supplied.
+const trustedOpenCodeConfig = (config: ReviewModelConfigValue) =>
+  JSON.stringify({
+    share: 'disabled',
+    autoupdate: false,
+    model: config.id,
+    ...(config.definition === undefined
+      ? {}
+      : {
+          provider: {
+            'opencode-go': {
+              models: { [config.id.slice('opencode-go/'.length)]: config.definition },
+            },
+          },
+        }),
+    agent: {
+      review: {
+        description: 'Pull request reviewer',
+        mode: 'primary',
+        permission: {
+          '*': 'deny',
+          submit_review: 'allow',
+          bash: {
+            '*': 'deny',
+            'gh *': 'deny',
+            'gh api graphql *': 'allow',
+            'gh pr view *': 'allow',
+            'git diff': 'allow',
+            'git diff *': 'allow',
+            'git grep': 'allow',
+            'git grep *': 'allow',
+            'git log': 'allow',
+            'git log *': 'allow',
+            'git log *--output*': 'deny',
+            'git show': 'allow',
+            'git show *': 'allow',
+            'git diff *--no-index*': 'deny',
+            'git diff *--output*': 'deny',
+            'git show *--output*': 'deny',
+            'git diff *--extcmd*': 'deny',
+            'git diff *>*': 'deny',
+            'git show *>*': 'deny',
+            'git grep *>*': 'deny',
+            'git grep *--open-files-in-pager*': 'deny',
+            'git grep *-O*': 'deny',
+            'gh *&*': 'deny',
+            'gh *;*': 'deny',
+            'gh *|*': 'deny',
+            'gh *>*': 'deny',
+            'gh *<*': 'deny',
+            'gh *$(*': 'deny',
+            'gh *`*': 'deny',
+            'gh *\n*': 'deny',
+            'git *&*': 'deny',
+            'git *;*': 'deny',
+            'git *|*': 'deny',
+            'git *>*': 'deny',
+            'git *<*': 'deny',
+            'git *$(*': 'deny',
+            'git *`*': 'deny',
+            'git *\n*': 'deny',
+            'npm *': 'deny',
+            'pnpm *': 'deny',
+            'python *': 'deny',
+            './*': 'deny',
+          },
+          edit: 'deny',
+          external_directory: 'allow',
+          glob: 'allow',
+          grep: 'allow',
+          read: 'allow',
+          skill: 'allow',
+          webfetch: 'deny',
+        },
+      },
+    },
+  });
 
 const reviewPrompt = (
   repositoryName: string,
@@ -411,6 +443,7 @@ export interface RunnerOptions {
   readonly sbxPath?: string;
   readonly authToken?: string;
   readonly modelSecretCommand?: string;
+  readonly modelConfig?: string;
   readonly evidenceRoot?: string;
   readonly process?: RunnerProcess;
   readonly log?: OperationalLog;
@@ -566,6 +599,11 @@ export const createRunner = (options: RunnerOptions = {}) => {
   const sbxPath = options.sbxPath ?? process.env.SBX_BIN ?? 'sbx';
   const authToken = options.authToken ?? process.env.RUNNER_AUTH_TOKEN;
   const modelSecretCommand = options.modelSecretCommand ?? process.env.MODEL_SECRET_COMMAND;
+  const modelConfig = decodeReviewModelConfig(
+    options.modelConfig ?? process.env.REVIEW_MODEL_CONFIG,
+  );
+  const modelId = modelConfig?.id;
+  const openCodeConfig = modelConfig === undefined ? undefined : trustedOpenCodeConfig(modelConfig);
   const evidenceRoot =
     options.evidenceRoot ??
     process.env.RUNNER_EVIDENCE_ROOT ??
@@ -1359,6 +1397,10 @@ export const createRunner = (options: RunnerOptions = {}) => {
         failure = { reason: 'agent' };
         return;
       }
+      if (modelId === undefined || openCodeConfig === undefined) {
+        failure = { reason: 'agent' };
+        return;
+      }
       await mkdir(evidencePath, { recursive: true, mode: 0o700 });
       await chmod(evidencePath, 0o700);
       evidenceReady = true;
@@ -1469,7 +1511,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
           '--memory',
           '8g',
           '--env',
-          `OPENCODE_CONFIG_CONTENT=${trustedOpenCodeConfig}`,
+          `OPENCODE_CONFIG_CONTENT=${openCodeConfig}`,
           '--env',
           'OPENCODE_DISABLE_PROJECT_CONFIG=1',
           '--env',
@@ -1590,7 +1632,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
           '--format',
           'json',
           '--model',
-          MODEL,
+          modelId,
           '--agent',
           'review',
           reviewPrompt(
@@ -1705,7 +1747,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
             headSha: job.input.headSha,
             startedAt: evidenceStartedAt,
             finishedAt: await currentIso(),
-            model: MODEL,
+            model: modelId,
             image: SANDBOX_TEMPLATE,
             openCodeVersion: OPENCODE_VERSION,
             agent: {
@@ -1794,6 +1836,9 @@ export const createRunner = (options: RunnerOptions = {}) => {
         return jsonResponse(503, { error: 'callback unavailable' });
       }
       if (modelSecretCommand === undefined || modelSecretCommand.length === 0) {
+        return jsonResponse(503, { error: 'runner unavailable' });
+      }
+      if (modelConfig === undefined) {
         return jsonResponse(503, { error: 'runner unavailable' });
       }
       const input = await Schema.decodeUnknownPromise(RunnerJobInput)(
@@ -1895,6 +1940,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       callbackToken.length === 0 ||
       modelSecretCommand === undefined ||
       modelSecretCommand.length === 0 ||
+      modelConfig === undefined ||
       hasActiveJob()
     ) {
       return;

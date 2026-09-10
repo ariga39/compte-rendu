@@ -465,12 +465,36 @@ The runner listens only on IPv4 loopback port `8080`. Start it on the host that
 also runs the remotely managed Tunnel connector:
 
 ```sh
+REVIEW_MODEL_CONFIG='{
+  "id": "opencode-go/deepseek-flash",
+  "definition": {
+    "name": "DeepSeek V4.1 Flash",
+    "reasoning": true,
+    "interleaved": { "field": "reasoning_content" },
+    "limit": { "context": 1000000, "output": 384000 },
+    "cost": { "input": 0.15, "output": 0.6, "cache_read": 0.003 }
+  }
+}' \
 MODEL_SECRET_COMMAND='<host-secret-resolver-command>' \
 RUNNER_AUTH_TOKEN='<runner-application-token>' \
 RUNNER_CALLBACK_URL='https://<INGRESS_HOST>/runner-callback' \
 RUNNER_CALLBACK_TOKEN='<static-runner-callback-token>' \
 corepack pnpm --filter @compte-rendu/runner start
 ```
+
+`REVIEW_MODEL_CONFIG` is required deployment configuration, read once when the
+Runner starts. Its `id` selects an `opencode-go/<model-id>` model; there is no
+default model. The optional `definition` registers that model when the pinned
+OpenCode image's bundled catalog does not contain it. The example above uses
+the [official model metadata](https://models.dev) for DeepSeek V4.1 Flash.
+For a model already in the bundled catalog, supply only `id`.
+
+Change this JSON in the Runner's service environment and restart the Runner to
+switch models; a source change, rebuild, or Worker deployment is unnecessary.
+The selected ID is used consistently by OpenCode and the evidence manifest.
+The provider endpoint, credential resolver, network policy, and review
+permissions remain fixed by the Runner. Missing or invalid model configuration
+prevents queue claims and returns `503` for authenticated Job admission.
 
 The Runner derives its claim URL by resolving `/runner-claim` on the same
 origin as `RUNNER_CALLBACK_URL`; no separate claim URL environment variable is

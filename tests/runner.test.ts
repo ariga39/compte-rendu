@@ -8,6 +8,8 @@ import {
   type RunnerProcessResult,
 } from '../apps/runner/src/runner';
 
+delete process.env.REVIEW_MODEL_CONFIG;
+
 const runnerJobFields = {
   id: 'runner-job-test',
   repositoryName: 'acme/reviewed',
@@ -15,6 +17,17 @@ const runnerJobFields = {
   repositoryReadToken: 'github-read-token',
 };
 const sharedEvidenceRoot = join(tmpdir(), 'compte-rendu-runner-evidence');
+
+const standardModelConfig = JSON.stringify({
+  id: 'opencode-go/deepseek-flash',
+  definition: {
+    name: 'DeepSeek V4.1 Flash',
+    reasoning: true,
+    interleaved: { field: 'reasoning_content' },
+    limit: { context: 1000000, output: 384000 },
+    cost: { input: 0.15, output: 0.6, cache_read: 0.003 },
+  },
+});
 
 const submitReviewEvent = (
   markdown = '## Review:\n\nNo findings.',
@@ -134,6 +147,7 @@ const createProductionRunnerWithMergeBase = (
 ) => {
   const optionsWithCallback = {
     ...options,
+    modelConfig: options.modelConfig ?? standardModelConfig,
     callbackUrl: options.callbackUrl ?? 'https://ingress.test/runner-callback',
     callbackToken: options.callbackToken ?? 'callback-token',
     callbackFetch: options.callbackFetch ?? (async () => new Response(null, { status: 202 })),
@@ -150,6 +164,7 @@ const createRunner = (options: TestRunnerOptions = {}) => {
   const { mergeBase: mergeBaseOverride, ...productionOptions } = options;
   const optionsWithCallback = {
     ...productionOptions,
+    modelConfig: productionOptions.modelConfig ?? standardModelConfig,
     callbackUrl: productionOptions.callbackUrl ?? 'https://ingress.test/runner-callback',
     callbackToken: productionOptions.callbackToken ?? 'callback-token',
     callbackFetch:
@@ -263,14 +278,18 @@ const runAgentScenario = async (scenario: {
   callbackStatuses?: readonly number[];
   callbackHangs?: boolean;
   callbackTimeoutMs?: number;
+  modelConfig?: string;
 }) => {
   const baseSha = '1111111111111111111111111111111111111111';
   const headSha = '2222222222222222222222222222222222222222';
   let agentInvoked = false;
+  let createArgs: readonly string[] | undefined;
+  let agentArgs: readonly string[] | undefined;
   const runner = createRunner({
     evidenceRoot: sharedEvidenceRoot,
     authToken: 'runner-test-token',
     modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+    modelConfig: scenario.modelConfig,
     callbackUrl:
       scenario.callbackRequests === undefined ? undefined : 'https://ingress.test/runner-callback',
     callbackToken: scenario.callbackRequests === undefined ? undefined : 'callback-token',
@@ -289,8 +308,12 @@ const runAgentScenario = async (scenario: {
           },
     process: async (_command, args, options = {}) => {
       await writeEvidenceFixture(args, options, scenario.output);
+      if (args[0] === 'create') createArgs = args;
       const isAgent = args[0] === 'exec' && args.includes('--agent');
-      if (isAgent) agentInvoked = true;
+      if (isAgent) {
+        agentInvoked = true;
+        agentArgs = args;
+      }
       return {
         exitCode: isAgent
           ? (scenario.exitCode ?? 0)
@@ -339,7 +362,7 @@ const runAgentScenario = async (scenario: {
       'utf8',
     ),
   );
-  return { terminal, manifest, agentInvoked, terminalDurationMs };
+  return { terminal, manifest, agentInvoked, terminalDurationMs, createArgs, agentArgs };
 };
 
 describe('Runner Job HTTP interface', () => {
@@ -355,6 +378,7 @@ describe('Runner Job HTTP interface', () => {
       },
     ]) {
       createProductionRunner({
+        modelConfig: standardModelConfig,
         callbackUrl: 'https://ingress.test/runner-callback',
         ...overrides,
         callbackToken: 'callback-token',
@@ -593,6 +617,7 @@ describe('Runner Job HTTP interface', () => {
   it('rejects admission when callback configuration is incomplete before starting a Job', async () => {
     let processCalls = 0;
     const runner = createProductionRunner({
+      modelConfig: standardModelConfig,
       authToken: 'runner-test-token',
       modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       process: async () => {
@@ -621,6 +646,66 @@ describe('Runner Job HTTP interface', () => {
 
     expect(response.status).toBe(503);
     expect(processCalls).toBe(0);
+  });
+
+  it('rejects malformed or unsupported deployment model config before claims or Sandbox work', async () => {
+    const invalidConfigs = [
+      undefined,
+      '{',
+      JSON.stringify({ id: 'other-provider/model' }),
+      JSON.stringify({ id: 'opencode-go/' }),
+      JSON.stringify({ id: 'opencode-go/ has space' }),
+      JSON.stringify({ id: 'opencode-go/line\nbreak' }),
+      JSON.stringify({ id: `opencode-go/${'a'.repeat(129)}` }),
+      '{"id":"opencode-go/test-model","definition":{"cost":{"input":1e400,"output":0}}}',
+      JSON.stringify({ id: 'opencode-go/test-model', definition: { name: '' } }),
+      JSON.stringify({ id: 'opencode-go/test-model', definition: { name: 'Test' }, extra: true }),
+      JSON.stringify({ id: 'opencode-go/test-model', definition: { name: 'Test', unsafe: true } }),
+    ];
+    for (const [index, modelConfig] of invalidConfigs.entries()) {
+      let claims = 0;
+      let processCalls = 0;
+      const runner = createProductionRunner({
+        authToken: 'runner-test-token',
+        modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+        ...(modelConfig === undefined ? {} : { modelConfig }),
+        callbackUrl: 'https://ingress.test/runner-callback',
+        callbackToken: 'callback-token',
+        claimUrl: 'https://ingress.test/runner-claim',
+        claimFetch: async () => {
+          claims += 1;
+          return new Response(null, { status: 204 });
+        },
+        claimIntervalMs: 1,
+        process: async () => {
+          processCalls += 1;
+          return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+        },
+      });
+
+      const response = await runner.handle(
+        new Request('http://runner/jobs', {
+          method: 'POST',
+          headers: {
+            authorization: 'Bearer runner-test-token',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            ...runnerJobFields,
+            runId: `run-model-config-${index}`,
+            attempt: 1,
+            repositoryUrl: 'https://github.com/acme/reviewed.git',
+            baseSha: '1111111111111111111111111111111111111111',
+            headSha: '2222222222222222222222222222222222222222',
+          }),
+        }),
+      );
+
+      expect(response.status).toBe(503);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(claims).toBe(0);
+      expect(processCalls).toBe(0);
+    }
   });
 
   it('sends one named-field evidence callback after a successful Job', async () => {
@@ -2679,6 +2764,58 @@ describe('Runner Job HTTP interface', () => {
     await expect(
       readFile(join(configRootAtSandboxBoundary!, 'opencode/skills/pr-review/SKILL.md'), 'utf8'),
     ).rejects.toThrow();
+  });
+
+  it('routes the deployment-configured model through trusted config, CLI, and evidence', async () => {
+    const definition = {
+      name: 'Test Model',
+      reasoning: true,
+      interleaved: { field: 'reasoning_details' },
+      limit: { context: 200000, output: 8192 },
+      cost: { input: 0.1, output: 0.2, cache_read: 0.01 },
+    };
+    const result = await runAgentScenario({
+      runId: 'run-deployment-model',
+      output: finalMarkdownJsonl(),
+      modelConfig: JSON.stringify({ id: 'opencode-go/test-model-7', definition }),
+    });
+
+    expect(result.terminal.status).toBe('succeeded');
+    expect(result.terminal.evidenceId).toEqual(expect.any(String));
+    expect(result.manifest.model).toBe('opencode-go/test-model-7');
+    const modelIndex = result.agentArgs?.indexOf('--model') ?? -1;
+    expect(result.agentArgs?.[modelIndex + 1]).toBe('opencode-go/test-model-7');
+    const configContent = result.createArgs?.find((value) =>
+      value.startsWith('OPENCODE_CONFIG_CONTENT='),
+    );
+    expect(JSON.parse(configContent!.slice('OPENCODE_CONFIG_CONTENT='.length))).toMatchObject({
+      model: 'opencode-go/test-model-7',
+      provider: {
+        'opencode-go': {
+          models: { 'test-model-7': definition },
+        },
+      },
+    });
+  });
+
+  it('relies on the bundled catalog when the deployment config omits a definition', async () => {
+    const result = await runAgentScenario({
+      runId: 'run-deployment-model-catalog',
+      output: finalMarkdownJsonl(),
+      modelConfig: JSON.stringify({ id: 'opencode-go/test-model-catalog' }),
+    });
+
+    expect(result.terminal.status).toBe('succeeded');
+    expect(result.manifest.model).toBe('opencode-go/test-model-catalog');
+    const configContent = result.createArgs?.find((value) =>
+      value.startsWith('OPENCODE_CONFIG_CONTENT='),
+    );
+    const config = JSON.parse(configContent!.slice('OPENCODE_CONFIG_CONTENT='.length)) as {
+      model: string;
+      provider?: unknown;
+    };
+    expect(config.model).toBe('opencode-go/test-model-catalog');
+    expect(config.provider).toBeUndefined();
   });
 
   it('returns submitted Markdown after terminal progress output', async () => {
