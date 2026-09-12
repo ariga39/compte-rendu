@@ -12,6 +12,40 @@ import {
 import type { ReviewEvent } from '../packages/contracts/src';
 import { SqliteD1Database } from './support/d1-database';
 
+const currentFacts = {
+  repositoryVisibility: 'public',
+  baseRepositoryId: 11,
+  headRepositoryId: 99,
+  draft: false,
+  baseSha: '1111111111111111111111111111111111111111',
+  headSha: '3333333333333333333333333333333333333333',
+} as const;
+
+const seedFailedCheckRun = async (
+  stateStore: ReturnType<typeof createInMemoryReviewStateStore>,
+  input: { deliveryId: string; pullRequestNumber?: number; checkRunId?: number },
+) => {
+  const claim = await stateStore.claimReview({
+    deliveryId: input.deliveryId,
+    job: {
+      repositoryId: 11,
+      installationId: 7,
+      pullRequestNumber: input.pullRequestNumber ?? 43,
+      baseSha: '1111111111111111111111111111111111111111',
+      headSha: '2222222222222222222222222222222222222222',
+      trigger: 'automatic',
+    },
+    occurredAt: '2026-09-12T00:00:00.000Z',
+  });
+  if (claim.kind !== 'claimed') throw new Error('failed run was not claimed');
+  await stateStore.recordCheckRun?.({ runId: claim.runId, checkRunId: input.checkRunId ?? 321 });
+  await stateStore.markSchedulingFailed({
+    runId: claim.runId,
+    occurredAt: '2026-09-12T00:01:00.000Z',
+  });
+  return claim.runId;
+};
+
 const eligiblePrivatePullRequest: ReviewEvent = {
   deliveryId: 'delivery-private-1',
   event: 'pull_request',
@@ -1277,6 +1311,469 @@ describe('Review coordinator', () => {
       headSha: '4444444444444444444444444444444444444444',
     });
     expect(scheduled[0]?.runId).not.toBe(failedRunId);
+  });
+
+  it('schedules a fresh manual run for a failed Check re-request without a comment reaction', async () => {
+    const stateStore = createInMemoryReviewStateStore();
+    const scheduled: Array<{ job: ReviewJob; runId: string }> = [];
+    const reactions: unknown[] = [];
+    const claim = await stateStore.claimReview({
+      deliveryId: 'delivery-failed-check',
+      job: {
+        repositoryId: 11,
+        installationId: 7,
+        pullRequestNumber: 43,
+        baseSha: '1111111111111111111111111111111111111111',
+        headSha: '2222222222222222222222222222222222222222',
+        trigger: 'automatic',
+      },
+      occurredAt: '2026-09-12T00:00:00.000Z',
+    });
+    if (claim.kind !== 'claimed') throw new Error('failed run was not claimed');
+    await stateStore.recordCheckRun?.({ runId: claim.runId, checkRunId: 321 });
+    await stateStore.markSchedulingFailed({
+      runId: claim.runId,
+      occurredAt: '2026-09-12T00:01:00.000Z',
+    });
+
+    const coordinator = createReviewCoordinator({
+      github: {
+        getPullRequest: async () => ({
+          repositoryVisibility: 'public',
+          baseRepositoryId: 11,
+          headRepositoryId: 99,
+          draft: false,
+          baseSha: '1111111111111111111111111111111111111111',
+          headSha: '3333333333333333333333333333333333333333',
+        }),
+        getCommenterPermission: async () => 'write',
+        addReaction: async (input) => {
+          reactions.push(input);
+        },
+      },
+      stateStore,
+      scheduler: {
+        schedule: async (job, runId) => {
+          scheduled.push({ job, runId });
+        },
+      },
+    });
+
+    const disposition = await coordinator.handleReviewEvent({
+      deliveryId: 'delivery-check-rerequest',
+      event: 'check_run',
+      action: 'rerequested',
+      repositoryId: 11,
+      installationId: 7,
+      checkRunId: 321,
+      externalRunId: claim.runId,
+      senderLogin: 'maintainer',
+    });
+
+    expect(disposition).toBe('scheduled');
+    expect(scheduled).toEqual([
+      {
+        job: {
+          repositoryId: 11,
+          pullRequestNumber: 43,
+          installationId: 7,
+          baseSha: '1111111111111111111111111111111111111111',
+          headSha: '3333333333333333333333333333333333333333',
+          trigger: 'manual',
+        },
+        runId: expect.any(String),
+      },
+    ]);
+    expect(scheduled[0]?.runId).not.toBe(claim.runId);
+    expect(reactions).toEqual([]);
+    expect(await stateStore.getRunOutcome(claim.runId)).toMatchObject({
+      status: 'failed',
+      checkRunId: 321,
+    });
+  });
+
+  it('ignores a check re-request whose Check Run id is not the failed run', async () => {
+    const stateStore = createInMemoryReviewStateStore();
+    const failedRunId = await seedFailedCheckRun(stateStore, { deliveryId: 'delivery-check-own' });
+    const scheduled: ReviewJob[] = [];
+    let reads = 0;
+    const coordinator = createReviewCoordinator({
+      github: {
+        getPullRequest: async () => {
+          reads += 1;
+          return currentFacts;
+        },
+        getCommenterPermission: async () => {
+          reads += 1;
+          return 'write';
+        },
+      },
+      stateStore,
+      scheduler: {
+        schedule: async (job) => {
+          scheduled.push(job);
+        },
+      },
+    });
+
+    const disposition = await coordinator.handleReviewEvent({
+      deliveryId: 'delivery-check-mismatch',
+      event: 'check_run',
+      action: 'rerequested',
+      repositoryId: 11,
+      installationId: 7,
+      checkRunId: 999,
+      externalRunId: failedRunId,
+      senderLogin: 'maintainer',
+    });
+
+    expect(disposition).toBe('ignored');
+    expect(reads).toBe(0);
+    expect(scheduled).toEqual([]);
+  });
+
+  it('ignores a check re-request for an unknown or nonfailed run without scheduling', async () => {
+    const stateStore = createInMemoryReviewStateStore();
+    const scheduled: ReviewJob[] = [];
+    const coordinator = createReviewCoordinator({
+      github: {
+        getPullRequest: async () => currentFacts,
+        getCommenterPermission: async () => 'write',
+      },
+      stateStore,
+      scheduler: {
+        schedule: async (job) => {
+          scheduled.push(job);
+        },
+      },
+    });
+
+    const unknown = await coordinator.handleReviewEvent({
+      deliveryId: 'delivery-check-unknown',
+      event: 'check_run',
+      action: 'rerequested',
+      repositoryId: 11,
+      installationId: 7,
+      checkRunId: 321,
+      externalRunId: 'run-that-does-not-exist',
+      senderLogin: 'maintainer',
+    });
+
+    const scheduledRunId = await (async () => {
+      const claim = await stateStore.claimReview({
+        deliveryId: 'delivery-check-active',
+        job: {
+          repositoryId: 11,
+          installationId: 7,
+          pullRequestNumber: 43,
+          baseSha: currentFacts.baseSha,
+          headSha: currentFacts.headSha,
+          trigger: 'automatic',
+        },
+        occurredAt: '2026-09-12T00:00:00.000Z',
+      });
+      if (claim.kind !== 'claimed') throw new Error('active run was not claimed');
+      await stateStore.recordCheckRun?.({ runId: claim.runId, checkRunId: 321 });
+      return claim.runId;
+    })();
+    const nonfailed = await coordinator.handleReviewEvent({
+      deliveryId: 'delivery-check-active-rerequest',
+      event: 'check_run',
+      action: 'rerequested',
+      repositoryId: 11,
+      installationId: 7,
+      checkRunId: 321,
+      externalRunId: scheduledRunId,
+      senderLogin: 'maintainer',
+    });
+
+    expect(unknown).toBe('ignored');
+    expect(nonfailed).toBe('ignored');
+    expect(scheduled).toEqual([]);
+  });
+
+  it('does not schedule a check re-request when the current sender is not authorized', async () => {
+    const stateStore = createInMemoryReviewStateStore();
+    const failedRunId = await seedFailedCheckRun(stateStore, {
+      deliveryId: 'delivery-check-denied',
+    });
+    const scheduled: ReviewJob[] = [];
+    const reactions: unknown[] = [];
+    const coordinator = createReviewCoordinator({
+      github: {
+        getPullRequest: async () => currentFacts,
+        getCommenterPermission: async () => 'read',
+        addReaction: async (input) => {
+          reactions.push(input);
+        },
+      },
+      stateStore,
+      scheduler: {
+        schedule: async (job) => {
+          scheduled.push(job);
+        },
+      },
+    });
+
+    const disposition = await coordinator.handleReviewEvent({
+      deliveryId: 'delivery-check-denied-rerequest',
+      event: 'check_run',
+      action: 'rerequested',
+      repositoryId: 11,
+      installationId: 7,
+      checkRunId: 321,
+      externalRunId: failedRunId,
+      senderLogin: 'outsider',
+    });
+
+    expect(disposition).toBe('awaiting approval');
+    expect(scheduled).toEqual([]);
+    expect(reactions).toEqual([]);
+  });
+
+  it('fails retryably when the stored Check ownership read is uncertain', async () => {
+    const baseStateStore = createInMemoryReviewStateStore();
+    const events: unknown[] = [];
+    const stateStore = {
+      ...baseStateStore,
+      getRunOutcome: async () => {
+        throw new Error('D1 unavailable');
+      },
+    };
+    const coordinator = createReviewCoordinator({
+      github: {},
+      stateStore,
+      scheduler: { schedule: async () => {} },
+      log: {
+        record: async (event) => {
+          events.push(event);
+        },
+      },
+    });
+
+    const disposition = await coordinator.handleReviewEvent({
+      deliveryId: 'delivery-check-uncertain',
+      event: 'check_run',
+      action: 'rerequested',
+      repositoryId: 11,
+      installationId: 7,
+      checkRunId: 321,
+      externalRunId: 'run-uncertain',
+      senderLogin: 'maintainer',
+    });
+
+    expect(disposition).toBe('failed');
+    expect(events).toEqual([
+      {
+        phase: 'core',
+        outcome: 'retryable',
+        deliveryId: 'delivery-check-uncertain',
+        reason: 'state_failure',
+      },
+    ]);
+  });
+
+  it('does not schedule a duplicate check re-request delivery twice', async () => {
+    const stateStore = createInMemoryReviewStateStore();
+    const failedRunId = await seedFailedCheckRun(stateStore, { deliveryId: 'delivery-check-dup' });
+    const scheduled: Array<{ job: ReviewJob; runId: string }> = [];
+    const coordinator = createReviewCoordinator({
+      github: {
+        getPullRequest: async () => currentFacts,
+        getCommenterPermission: async () => 'write',
+      },
+      stateStore,
+      scheduler: {
+        schedule: async (job, runId) => {
+          scheduled.push({ job, runId });
+        },
+      },
+    });
+    const event = {
+      deliveryId: 'delivery-check-replay',
+      event: 'check_run' as const,
+      action: 'rerequested' as const,
+      repositoryId: 11,
+      installationId: 7,
+      checkRunId: 321,
+      externalRunId: failedRunId,
+      senderLogin: 'maintainer',
+    };
+
+    const first = await coordinator.handleReviewEvent(event);
+    const replay = await coordinator.handleReviewEvent(event);
+
+    expect(first).toBe('scheduled');
+    expect(replay).toBe('scheduled');
+    expect(scheduled).toHaveLength(1);
+  });
+
+  it('reuses current admission when a same-revision check rerequest races an active run', async () => {
+    const stateStore = createInMemoryReviewStateStore();
+    const failedRunId = await seedFailedCheckRun(stateStore, {
+      deliveryId: 'delivery-check-active-race',
+    });
+    await stateStore.claimReview({
+      deliveryId: 'delivery-current-revision',
+      job: {
+        repositoryId: 11,
+        installationId: 7,
+        pullRequestNumber: 43,
+        baseSha: currentFacts.baseSha,
+        headSha: currentFacts.headSha,
+        trigger: 'automatic',
+      },
+      occurredAt: '2026-09-12T00:02:00.000Z',
+    });
+    const scheduled: ReviewJob[] = [];
+    const coordinator = createReviewCoordinator({
+      github: {
+        getPullRequest: async () => currentFacts,
+        getCommenterPermission: async () => 'write',
+      },
+      stateStore,
+      scheduler: {
+        schedule: async (job) => {
+          scheduled.push(job);
+        },
+      },
+    });
+
+    const disposition = await coordinator.handleReviewEvent({
+      deliveryId: 'delivery-check-active-race-rerequest',
+      event: 'check_run',
+      action: 'rerequested',
+      repositoryId: 11,
+      installationId: 7,
+      checkRunId: 321,
+      externalRunId: failedRunId,
+      senderLogin: 'maintainer',
+    });
+
+    expect(disposition).toBe('scheduled');
+    expect(scheduled).toEqual([]);
+  });
+
+  it('resolves the latest product Check for a rerequested suite and schedules a fresh run', async () => {
+    const stateStore = createInMemoryReviewStateStore();
+    const failedRunId = await seedFailedCheckRun(stateStore, { deliveryId: 'delivery-suite' });
+    const suiteLookups: unknown[] = [];
+    const scheduled: Array<{ job: ReviewJob; runId: string }> = [];
+    const coordinator = createReviewCoordinator({
+      github: {
+        findCheckRunForSuite: async (input) => {
+          suiteLookups.push(input);
+          return { candidates: [{ id: 321, externalId: failedRunId }] };
+        },
+        getPullRequest: async () => currentFacts,
+        getCommenterPermission: async () => 'write',
+      },
+      stateStore,
+      scheduler: {
+        schedule: async (job, runId) => {
+          scheduled.push({ job, runId });
+        },
+      },
+    });
+
+    const disposition = await coordinator.handleReviewEvent({
+      deliveryId: 'delivery-suite-rerequest',
+      event: 'check_suite',
+      action: 'rerequested',
+      repositoryId: 11,
+      installationId: 7,
+      checkSuiteId: 555,
+      senderLogin: 'maintainer',
+    });
+
+    expect(disposition).toBe('scheduled');
+    expect(suiteLookups).toEqual([{ repositoryId: 11, installationId: 7, checkSuiteId: 555 }]);
+    expect(scheduled).toHaveLength(1);
+    expect(scheduled[0]?.job).toMatchObject({
+      pullRequestNumber: 43,
+      headSha: currentFacts.headSha,
+      trigger: 'manual',
+    });
+    expect(scheduled[0]?.job.commentId).toBeUndefined();
+  });
+
+  it('ignores a suite re-request that resolves no unique product Check', async () => {
+    const stateStore = createInMemoryReviewStateStore();
+    const failedRunId = await seedFailedCheckRun(stateStore, { deliveryId: 'delivery-suite-amb' });
+    const scheduled: ReviewJob[] = [];
+    const run = async (candidates: readonly { id: number; externalId: string | null }[]) => {
+      const coordinator = createReviewCoordinator({
+        github: {
+          findCheckRunForSuite: async () => ({ candidates }),
+          getPullRequest: async () => currentFacts,
+          getCommenterPermission: async () => 'write',
+        },
+        stateStore,
+        scheduler: {
+          schedule: async (job) => {
+            scheduled.push(job);
+          },
+        },
+      });
+      return coordinator.handleReviewEvent({
+        deliveryId: `delivery-suite-${Math.random()}`,
+        event: 'check_suite',
+        action: 'rerequested',
+        repositoryId: 11,
+        installationId: 7,
+        checkSuiteId: 555,
+        senderLogin: 'maintainer',
+      });
+    };
+
+    expect(await run([])).toBe('ignored');
+    expect(
+      await run([
+        { id: 321, externalId: failedRunId },
+        { id: 322, externalId: failedRunId },
+      ]),
+    ).toBe('ignored');
+    expect(await run([{ id: 321, externalId: null }])).toBe('ignored');
+    expect(scheduled).toEqual([]);
+  });
+
+  it('fails retryably when the suite Check lookup is uncertain', async () => {
+    const stateStore = createInMemoryReviewStateStore();
+    const events: unknown[] = [];
+    const coordinator = createReviewCoordinator({
+      github: {
+        findCheckRunForSuite: async () => {
+          throw new Error('Checks API unavailable');
+        },
+      },
+      stateStore,
+      scheduler: { schedule: async () => {} },
+      log: {
+        record: async (event) => {
+          events.push(event);
+        },
+      },
+    });
+
+    const disposition = await coordinator.handleReviewEvent({
+      deliveryId: 'delivery-suite-uncertain',
+      event: 'check_suite',
+      action: 'rerequested',
+      repositoryId: 11,
+      installationId: 7,
+      checkSuiteId: 555,
+      senderLogin: 'maintainer',
+    });
+
+    expect(disposition).toBe('failed');
+    expect(events).toEqual([
+      {
+        phase: 'core',
+        outcome: 'retryable',
+        deliveryId: 'delivery-suite-uncertain',
+        reason: 'check_lookup_uncertain',
+      },
+    ]);
   });
 
   it('schedules once when a transient manual facts read recovers', async () => {

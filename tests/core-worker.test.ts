@@ -3806,4 +3806,108 @@ describe('Core Worker', () => {
       database.close();
     }
   });
+
+  it('schedules a fresh run when a failed Check is rerequested through the Worker', async () => {
+    const database = new SqliteD1Database();
+    const stateStore = createD1ReviewStateStore(database);
+    const failed = await stateStore.claimReview({
+      deliveryId: 'delivery-core-worker-failed-check',
+      job: {
+        repositoryId: 11,
+        installationId: 7,
+        pullRequestNumber: 43,
+        baseSha: '1111111111111111111111111111111111111111',
+        headSha: '2222222222222222222222222222222222222222',
+        trigger: 'automatic',
+      },
+      occurredAt: '2026-09-12T00:00:00.000Z',
+    });
+    if (failed.kind !== 'claimed') throw new Error('failed run was not claimed');
+    await stateStore.recordCheckRun?.({ runId: failed.runId, checkRunId: 321 });
+    await stateStore.markSchedulingFailed({
+      runId: failed.runId,
+      occurredAt: '2026-09-12T00:01:00.000Z',
+    });
+    const reactions: unknown[] = [];
+    const worker = createCoreWorker(coreEnv(database), {
+      stateStore,
+      github: {
+        getPullRequest: async () => ({
+          repositoryVisibility: 'public',
+          baseRepositoryId: 11,
+          headRepositoryId: 99,
+          draft: false,
+          baseSha: '1111111111111111111111111111111111111111',
+          headSha: '3333333333333333333333333333333333333333',
+        }),
+        getCommenterPermission: async () => 'write',
+        getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+        addReaction: async (input) => {
+          reactions.push(input);
+        },
+      },
+      getReadInstallationToken: async () => ({
+        token: 'read-token',
+        expiresAt: '2026-09-01T01:00:00.000Z',
+      }),
+    });
+
+    try {
+      const response = await worker.fetch(
+        new Request('https://core.internal/review-events', {
+          method: 'POST',
+          body: JSON.stringify({
+            deliveryId: 'delivery-core-worker-check-rerequest',
+            event: 'check_run',
+            action: 'rerequested',
+            repositoryId: 11,
+            installationId: 7,
+            checkRunId: 321,
+            externalRunId: failed.runId,
+            senderLogin: 'maintainer',
+          }),
+        }),
+      );
+      expect(response.status).toBe(202);
+      expect(await stateStore.getRunOutcome(failed.runId)).toMatchObject({ status: 'failed' });
+
+      const claimResponse = await worker.fetch(
+        new Request('https://core.internal/runner-claims', {
+          method: 'POST',
+          headers: { 'x-compte-rendu-runner-claim': 'verified' },
+        }),
+      );
+      expect(claimResponse.status).toBe(200);
+      expect(await claimResponse.json()).toMatchObject({
+        pullRequestNumber: 43,
+        headSha: '3333333333333333333333333333333333333333',
+      });
+      expect(reactions).toEqual([]);
+    } finally {
+      database.close();
+    }
+  });
+
+  it('lists the latest product Check runs for a suite with the exact query', async () => {
+    const requests: string[] = [];
+    const fetcher: typeof fetch = async (input) => {
+      const inputUrl =
+        typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      const url = new URL(inputUrl);
+      requests.push(`${url.pathname}${url.search}`);
+      if (url.pathname === '/repositories/11') return Response.json({ full_name: 'acme/reviewed' });
+      if (url.pathname === '/repos/acme/reviewed/check-suites/555/check-runs') {
+        return Response.json({ total_count: 1, check_runs: [{ id: 321, external_id: 'run-1' }] });
+      }
+      return new Response('{}', { status: 404 });
+    };
+    const github = createGitHubPublicationAdapter({ token: 'installation-token', fetch: fetcher });
+
+    await expect(
+      github.findCheckRunForSuite?.({ repositoryId: 11, installationId: 7, checkSuiteId: 555 }),
+    ).resolves.toEqual({ candidates: [{ id: 321, externalId: 'run-1' }] });
+    expect(requests).toContain(
+      '/repos/acme/reviewed/check-suites/555/check-runs?check_name=Petit%20Chiba%20Review&filter=latest&per_page=100',
+    );
+  });
 });

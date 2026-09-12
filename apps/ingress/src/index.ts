@@ -17,7 +17,7 @@ export const MAX_WEBHOOK_BYTES = 256 * 1024;
 
 export { createCloudflareOperationalLog } from './operational-log';
 
-const supportedEvents = ['pull_request', 'issue_comment'] as const;
+const supportedEvents = ['pull_request', 'issue_comment', 'check_run', 'check_suite'] as const;
 const runnerCallbackPath = '/runner-callback';
 const runnerClaimPath = '/runner-claim';
 const supportedPullRequestActions = [
@@ -27,6 +27,7 @@ const supportedPullRequestActions = [
   'ready_for_review',
 ] as const;
 const PullRequestAction = Schema.Literals(supportedPullRequestActions);
+const RerequestedAction = Schema.Literal('rerequested');
 const WebhookAction = Schema.Struct({ action: Schema.String });
 const InstallationId = Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0)));
 const InstallationIds = Schema.Array(InstallationId).pipe(Schema.check(Schema.isMinLength(1)));
@@ -71,6 +72,25 @@ const IssueCommentWebhook = Schema.Struct({
   }),
 });
 
+const CheckRunRerequestWebhook = Schema.Struct({
+  action: RerequestedAction,
+  installation: Schema.Struct({ id: Schema.Int }),
+  repository: Schema.Struct({ id: Schema.Int }),
+  check_run: Schema.Struct({
+    id: Schema.Int,
+    external_id: Schema.NullOr(Schema.NonEmptyString),
+  }),
+  sender: Schema.Struct({ login: Schema.NonEmptyString }),
+});
+
+const CheckSuiteRerequestWebhook = Schema.Struct({
+  action: RerequestedAction,
+  installation: Schema.Struct({ id: Schema.Int }),
+  repository: Schema.Struct({ id: Schema.Int }),
+  check_suite: Schema.Struct({ id: Schema.Int }),
+  sender: Schema.Struct({ login: Schema.NonEmptyString }),
+});
+
 const Signature = Schema.String.check(Schema.isPattern(new RegExp('^sha256=[0-9a-f]{64}$', 'i')));
 
 export interface IngressDependencies {
@@ -101,7 +121,7 @@ class InvalidWebhook extends Schema.TaggedError<InvalidWebhook>()('InvalidWebhoo
 class CoreUnavailable extends Schema.TaggedError<CoreUnavailable>()('CoreUnavailable', {
   message: Schema.String,
   deliveryId: Schema.NonEmptyString,
-  event: Schema.Literals(['pull_request', 'issue_comment']),
+  event: Schema.Literals(['pull_request', 'issue_comment', 'check_run', 'check_suite']),
 }) {}
 
 class InvalidAdmissionConfiguration extends Schema.TaggedError<InvalidAdmissionConfiguration>()(
@@ -202,9 +222,36 @@ const normalizeIssueComment = (
   command: '/ai-review',
 });
 
+const normalizeCheckRunRerequest = (
+  deliveryId: string,
+  payload: Schema.Schema.Type<typeof CheckRunRerequestWebhook>,
+): NormalizedReviewEvent => ({
+  deliveryId,
+  event: 'check_run',
+  action: 'rerequested',
+  repositoryId: payload.repository.id,
+  installationId: payload.installation.id,
+  checkRunId: payload.check_run.id,
+  externalRunId: payload.check_run.external_id,
+  senderLogin: payload.sender.login,
+});
+
+const normalizeCheckSuiteRerequest = (
+  deliveryId: string,
+  payload: Schema.Schema.Type<typeof CheckSuiteRerequestWebhook>,
+): NormalizedReviewEvent => ({
+  deliveryId,
+  event: 'check_suite',
+  action: 'rerequested',
+  repositoryId: payload.repository.id,
+  installationId: payload.installation.id,
+  checkSuiteId: payload.check_suite.id,
+  senderLogin: payload.sender.login,
+});
+
 const checkInstallation = (
   deliveryId: string,
-  event: 'pull_request' | 'issue_comment',
+  event: NormalizedReviewEvent['event'],
   installationId: number,
   dependencies: IngressDependencies,
 ) =>
@@ -375,6 +422,67 @@ const processWebhook = (request: Request, dependencies: IngressDependencies) =>
       }
 
       return yield* forwardEvent(normalizeIssueComment(deliveryId, payload), dependencies);
+    }
+
+    if (request.headers.get('x-github-event') === 'check_run') {
+      if (action.action !== 'rerequested') {
+        yield* recordOperationalLog(dependencies.log ?? createCloudflareOperationalLog(), {
+          phase: 'ingress',
+          outcome: 'ignored',
+          deliveryId: sanitizeOperationalLogIdentifier(
+            request.headers.get('x-github-delivery') ?? '',
+          ),
+          event: 'check_run',
+          reason: 'unsupported_action',
+        });
+        return 'ignored' as const;
+      }
+
+      const deliveryId = yield* Schema.decodeUnknownEffect(Schema.NonEmptyString)(
+        request.headers.get('x-github-delivery'),
+      ).pipe(Effect.mapError(() => invalidWebhook('Webhook delivery id is missing')));
+      const payload = yield* Schema.decodeUnknownEffect(CheckRunRerequestWebhook)(decodedJson).pipe(
+        Effect.mapError(() => invalidWebhook('Check run webhook is malformed')),
+      );
+      if (
+        !(yield* checkInstallation(deliveryId, 'check_run', payload.installation.id, dependencies))
+      ) {
+        return 'ignored' as const;
+      }
+      return yield* forwardEvent(normalizeCheckRunRerequest(deliveryId, payload), dependencies);
+    }
+
+    if (request.headers.get('x-github-event') === 'check_suite') {
+      if (action.action !== 'rerequested') {
+        yield* recordOperationalLog(dependencies.log ?? createCloudflareOperationalLog(), {
+          phase: 'ingress',
+          outcome: 'ignored',
+          deliveryId: sanitizeOperationalLogIdentifier(
+            request.headers.get('x-github-delivery') ?? '',
+          ),
+          event: 'check_suite',
+          reason: 'unsupported_action',
+        });
+        return 'ignored' as const;
+      }
+
+      const deliveryId = yield* Schema.decodeUnknownEffect(Schema.NonEmptyString)(
+        request.headers.get('x-github-delivery'),
+      ).pipe(Effect.mapError(() => invalidWebhook('Webhook delivery id is missing')));
+      const payload = yield* Schema.decodeUnknownEffect(CheckSuiteRerequestWebhook)(
+        decodedJson,
+      ).pipe(Effect.mapError(() => invalidWebhook('Check suite webhook is malformed')));
+      if (
+        !(yield* checkInstallation(
+          deliveryId,
+          'check_suite',
+          payload.installation.id,
+          dependencies,
+        ))
+      ) {
+        return 'ignored' as const;
+      }
+      return yield* forwardEvent(normalizeCheckSuiteRerequest(deliveryId, payload), dependencies);
     }
 
     return 'ignored' as const;

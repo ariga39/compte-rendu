@@ -214,6 +214,28 @@ export const createGitHubPublicationAdapter = (
     return checks.check_runs.find((check) => check.external_id === runId);
   };
 
+  const findCheckRunForSuite = async ({
+    repositoryId,
+    installationId,
+    checkSuiteId,
+  }: {
+    repositoryId: number;
+    installationId: number;
+    checkSuiteId: number;
+  }) => {
+    const value = await requestJson(
+      installationId,
+      `/repos/${await repositoryName(repositoryId, installationId)}/check-suites/${checkSuiteId}/check-runs?check_name=${encodeURIComponent(checkName)}&filter=latest&per_page=${pageSize}`,
+    );
+    const checks = await Schema.decodeUnknownPromise(CheckRuns)(value);
+    return {
+      candidates: checks.check_runs.map((check) => ({
+        id: check.id,
+        externalId: check.external_id ?? null,
+      })),
+    };
+  };
+
   return {
     getPullRequest: async ({ repositoryId, pullRequestNumber, installationId }) => {
       try {
@@ -309,6 +331,7 @@ export const createGitHubPublicationAdapter = (
         throw error;
       }
     },
+    findCheckRunForSuite,
     updateCheckRun: async ({ repositoryId, installationId, checkRunId, status }) => {
       const payload =
         status === 'in_progress'

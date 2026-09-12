@@ -235,7 +235,35 @@ const IssueCommentReviewEvent = Schema.Struct({
   command: Schema.Literal('/ai-review'),
 });
 
-export const ReviewEvent = Schema.Union([PullRequestReviewEvent, IssueCommentReviewEvent]);
+const CheckRunRerequestedEvent = Schema.Struct({
+  deliveryId: Schema.String,
+  event: Schema.Literal('check_run'),
+  action: Schema.Literal('rerequested'),
+  repositoryId: Schema.Int,
+  installationId: Schema.Int,
+  checkRunId: Schema.Int,
+  externalRunId: Schema.NullOr(Schema.NonEmptyString),
+  senderLogin: Schema.NonEmptyString,
+});
+
+const CheckSuiteRerequestedEvent = Schema.Struct({
+  deliveryId: Schema.String,
+  event: Schema.Literal('check_suite'),
+  action: Schema.Literal('rerequested'),
+  repositoryId: Schema.Int,
+  installationId: Schema.Int,
+  checkSuiteId: Schema.Int,
+  senderLogin: Schema.NonEmptyString,
+});
+
+export const ReviewEvent = Schema.Union([
+  PullRequestReviewEvent,
+  IssueCommentReviewEvent,
+  CheckRunRerequestedEvent,
+  CheckSuiteRerequestedEvent,
+]);
+
+export type ReviewEventName = ReviewEvent['event'];
 
 export type ReviewEvent = typeof ReviewEvent.Type;
 export type PullRequestFacts = typeof PullRequestFacts.Type;
@@ -245,7 +273,7 @@ export type OperationalLogEvent =
       readonly phase: 'ingress';
       readonly outcome: 'accepted';
       readonly deliveryId: string;
-      readonly event: 'pull_request' | 'issue_comment';
+      readonly event: ReviewEventName;
     }
   | {
       readonly phase: 'ingress';
@@ -256,7 +284,7 @@ export type OperationalLogEvent =
       readonly phase: 'ingress';
       readonly outcome: 'ignored';
       readonly deliveryId?: string;
-      readonly event?: 'pull_request' | 'issue_comment';
+      readonly event?: ReviewEventName;
       readonly reason:
         | 'unsupported_event'
         | 'unsupported_action'
@@ -268,7 +296,7 @@ export type OperationalLogEvent =
       readonly phase: 'ingress';
       readonly outcome: 'retryable';
       readonly deliveryId?: string;
-      readonly event?: 'pull_request' | 'issue_comment';
+      readonly event?: ReviewEventName;
       readonly reason: 'core_unavailable';
     }
   | {
@@ -284,6 +312,7 @@ export type OperationalLogEvent =
       readonly reason:
         | 'pull_request_facts_uncertain'
         | 'commenter_permission_uncertain'
+        | 'check_lookup_uncertain'
         | 'state_failure'
         | 'scheduling_failure';
     }

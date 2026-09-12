@@ -30,11 +30,43 @@ export default {
       return Response.json({ ...outcome, runId: run?.run_id });
     }
 
+    if (url.pathname === '/__test/failed-review' && request.method === 'POST') {
+      const stateStore = createD1ReviewStateStore(env.REVIEW_DB);
+      const claim = await stateStore.claimReview({
+        deliveryId: 'runtime-failed-review',
+        job: {
+          repositoryId: 11,
+          installationId: 7,
+          pullRequestNumber: 43,
+          baseSha: '1111111111111111111111111111111111111111',
+          headSha: '2222222222222222222222222222222222222222',
+          trigger: 'automatic',
+        },
+        occurredAt: '2026-09-12T00:00:00.000Z',
+      });
+      if (claim.kind !== 'claimed') return new Response(null, { status: 409 });
+      await stateStore.recordCheckRun?.({ runId: claim.runId, checkRunId: 321 });
+      await stateStore.markSchedulingFailed({
+        runId: claim.runId,
+        occurredAt: '2026-09-12T00:01:00.000Z',
+      });
+      return Response.json({ runId: claim.runId, checkRunId: 321 });
+    }
+
     const worker = createCoreWorker(
       { ...env },
       {
         github: {
           getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+          getPullRequest: async () => ({
+            repositoryVisibility: 'public',
+            baseRepositoryId: 11,
+            headRepositoryId: 99,
+            draft: false,
+            baseSha: '1111111111111111111111111111111111111111',
+            headSha: '3333333333333333333333333333333333333333',
+          }),
+          getCommenterPermission: async () => 'write',
         },
         getReadInstallationToken: async () => ({
           token: 'test-read-token',

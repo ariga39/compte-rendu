@@ -43,8 +43,12 @@ interface DeliveryOutcome {
   readonly runId: string;
 }
 
-const signedWebhook = async (id = deliveryId) => {
-  const body = JSON.stringify(payload);
+const signedWebhook = async (
+  id = deliveryId,
+  event = 'pull_request',
+  webhookPayload: unknown = payload,
+) => {
+  const body = JSON.stringify(webhookPayload);
   const key = await crypto.subtle.importKey(
     'raw',
     new TextEncoder().encode(webhookSecret),
@@ -61,7 +65,7 @@ const signedWebhook = async (id = deliveryId) => {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
-      'x-github-event': 'pull_request',
+      'x-github-event': event,
       'x-github-delivery': id,
       'x-hub-signature-256': `sha256=${signature}`,
     },
@@ -138,5 +142,51 @@ describe('local Worker runtime tracer', () => {
     expect(response.status).toBe(400);
     expect(await runtimeHarness.readCapture()).toEqual([]);
     expect(await runtimeHarness.readDeliveryOutcome(invalidDeliveryId)).toBeUndefined();
+  });
+
+  it('routes a signed Check re-run through both Workers to a fresh current-revision Job', async () => {
+    const fixture = await SELF.fetch('https://tracer.internal/__test/failed-review', {
+      method: 'POST',
+    });
+    expect(fixture.status).toBe(200);
+    const failed = (await fixture.json()) as { runId: string; checkRunId: number };
+    const rerunPayload = {
+      action: 'rerequested',
+      installation: { id: 7 },
+      repository: { id: 11 },
+      sender: { login: 'maintainer' },
+      check_run: { id: failed.checkRunId, external_id: failed.runId, pull_requests: [] },
+    };
+    const rerunDelivery = 'runtime-check-rerequest';
+    const response = await runtimeHarness.send(
+      await signedWebhook(rerunDelivery, 'check_run', rerunPayload),
+    );
+    expect(response.status).toBe(202);
+
+    const claim = await runtimeHarness.claim();
+    expect(claim.status).toBe(200);
+    const claimed = (await claim.json()) as CapturedRunnerJob;
+    expect(claimed).toMatchObject({
+      runId: expect.any(String),
+      attempt: 1,
+      pullRequestNumber: 43,
+      baseSha: '1111111111111111111111111111111111111111',
+      headSha: '3333333333333333333333333333333333333333',
+    });
+    expect(claimed.runId).not.toBe(failed.runId);
+    expect(await runtimeHarness.readDeliveryOutcome('runtime-failed-review')).toMatchObject({
+      runId: failed.runId,
+      status: 'failed',
+    });
+
+    const replay = await runtimeHarness.send(
+      await signedWebhook(rerunDelivery, 'check_run', rerunPayload),
+    );
+    expect(replay.status).toBe(202);
+    expect(await runtimeHarness.readDeliveryOutcome(rerunDelivery)).toMatchObject({
+      runId: claimed.runId,
+      status: 'scheduled',
+    });
+    expect((await runtimeHarness.claim()).status).toBe(204);
   });
 });
