@@ -205,6 +205,11 @@ No public custom-tool or plugin hook in 1.18.25 exposes that internal final-tool
 callback or its `toolChoice` control. The public `chat.params` hook can change
 sampling limits/provider options, not the request's top-level `toolChoice`
 ([hook type](https://github.com/anomalyco/opencode/blob/cb7d8b2f5e44876ef98b661dc10590c915af3a9f/packages/plugin/src/index.ts#L244-L256)).
+
+> Update (2026-09-12): The no-correction-turn recommendation below is
+> superseded by the bounded same-session submission reminder in
+> [the current design](design.md). Submission validation still fails closed.
+
 Consequently the correct non-JSON behavior is fail closed when
 `submit_review` is absent, not add a correction turn or pretend that prompt
 wording can guarantee the call.
