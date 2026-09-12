@@ -299,6 +299,11 @@ export interface GitHubAdapter {
     checkRunId: number;
     status: 'in_progress' | 'success' | 'failure' | 'cancelled';
   }): Promise<void>;
+  findCheckRunForSuite?(input: {
+    repositoryId: number;
+    installationId: number;
+    checkSuiteId: number;
+  }): Promise<unknown>;
   getRepositoryUrl?(input: { repositoryId: number; installationId: number }): Promise<unknown>;
   loadReviewTarget?(input: {
     repositoryId: number;
@@ -371,19 +376,6 @@ const jobForEvent = (
   baseSha: event.baseSha,
   headSha: event.headSha,
   trigger,
-});
-
-const jobForFacts = (
-  event: Extract<ReviewEvent, { event: 'issue_comment' }>,
-  facts: PullRequestFactsType,
-): ReviewJob => ({
-  repositoryId: event.repositoryId,
-  pullRequestNumber: event.pullRequestNumber,
-  installationId: event.installationId,
-  baseSha: facts.baseSha,
-  headSha: facts.headSha,
-  trigger: 'manual',
-  commentId: event.commentId,
 });
 
 const currentIso = DateTime.now.pipe(Effect.map(DateTime.formatIso));
@@ -1277,56 +1269,69 @@ const readManualPolicyWithRetry = async <T>(
   return first.kind === 'uncertain' ? readOnce() : first;
 };
 
-const loadPullRequestWithRetry = (
-  github: GitHubAdapter,
-  event: Extract<ReviewEvent, { event: 'issue_comment' }>,
-) =>
+interface ManualIntent {
+  readonly deliveryId: string;
+  readonly repositoryId: number;
+  readonly pullRequestNumber: number;
+  readonly installationId: number;
+  readonly senderLogin: string;
+  readonly commentId?: number;
+}
+
+const loadPullRequestWithRetry = (github: GitHubAdapter, intent: ManualIntent) =>
   readManualPolicyWithRetry(async () => {
     if (github.getPullRequest === undefined) {
       throw new Error('Pull request facts adapter is unavailable');
     }
     return github.getPullRequest({
-      repositoryId: event.repositoryId,
-      pullRequestNumber: event.pullRequestNumber,
-      installationId: event.installationId,
+      repositoryId: intent.repositoryId,
+      pullRequestNumber: intent.pullRequestNumber,
+      installationId: intent.installationId,
     });
   }, PullRequestFacts);
 
-const loadPermissionWithRetry = (
-  github: GitHubAdapter,
-  event: Extract<ReviewEvent, { event: 'issue_comment' }>,
-) =>
+const loadPermissionWithRetry = (github: GitHubAdapter, intent: ManualIntent) =>
   readManualPolicyWithRetry(async () => {
     if (github.getCommenterPermission === undefined) {
       throw new Error('Commenter permission adapter is unavailable');
     }
     return github.getCommenterPermission({
-      repositoryId: event.repositoryId,
-      pullRequestNumber: event.pullRequestNumber,
-      installationId: event.installationId,
-      commenterLogin: event.commenterLogin,
+      repositoryId: intent.repositoryId,
+      pullRequestNumber: intent.pullRequestNumber,
+      installationId: intent.installationId,
+      commenterLogin: intent.senderLogin,
     });
   }, CommenterPermission);
 
 const writeManualReaction = (
   github: GitHubAdapter,
-  event: Extract<ReviewEvent, { event: 'issue_comment' }>,
+  intent: ManualIntent,
   content: 'eyes' | 'confused' | '-1',
 ) =>
-  github.addReaction === undefined
+  intent.commentId === undefined || github.addReaction === undefined
     ? Effect.succeed(undefined)
     : Effect.tryPromise({
         try: () =>
           github.addReaction!({
-            repositoryId: event.repositoryId,
-            installationId: event.installationId,
-            commentId: event.commentId,
+            repositoryId: intent.repositoryId,
+            installationId: intent.installationId,
+            commentId: intent.commentId!,
             content,
           }),
         catch: () => new SchedulingFailed({ message: 'Manual review feedback failed' }),
       });
 
-const createManualCoordinator = (
+const jobForManualFacts = (intent: ManualIntent, facts: PullRequestFactsType): ReviewJob => ({
+  repositoryId: intent.repositoryId,
+  pullRequestNumber: intent.pullRequestNumber,
+  installationId: intent.installationId,
+  baseSha: facts.baseSha,
+  headSha: facts.headSha,
+  trigger: 'manual',
+  ...(intent.commentId === undefined ? {} : { commentId: intent.commentId }),
+});
+
+const handleManualIntent = (
   github: GitHubAdapter,
   stateStore: ReviewCompletionStateStore,
   scheduler: ReviewScheduler,
@@ -1334,18 +1339,16 @@ const createManualCoordinator = (
   deferCheckSetup?: ReviewCheckSetupDefer,
   lifecycleLog?: CoreLifecycleLog,
 ) =>
-  Effect.fn('handleManualReviewEvent')(function* (
-    event: Extract<ReviewEvent, { event: 'issue_comment' }>,
-  ) {
+  Effect.fn('handleManualIntent')(function* (intent: ManualIntent) {
     const factsRead = yield* Effect.tryPromise({
-      try: () => loadPullRequestWithRetry(github, event),
+      try: () => loadPullRequestWithRetry(github, intent),
       catch: () => new SchedulingFailed({ message: 'Pull request facts are uncertain' }),
     });
     if (factsRead.kind === 'uncertain') {
       yield* recordOperationalLog(log, {
         phase: 'core',
         outcome: 'retryable',
-        deliveryId: event.deliveryId,
+        deliveryId: intent.deliveryId,
         reason: 'pull_request_facts_uncertain',
       });
       return yield* new SchedulingFailed({ message: 'Pull request facts are uncertain' });
@@ -1355,14 +1358,14 @@ const createManualCoordinator = (
     let permission: typeof CommenterPermission.Type | undefined;
     if (facts !== undefined && !facts.draft) {
       const permissionRead = yield* Effect.tryPromise({
-        try: () => loadPermissionWithRetry(github, event),
+        try: () => loadPermissionWithRetry(github, intent),
         catch: () => new SchedulingFailed({ message: 'Commenter permission is uncertain' }),
       });
       if (permissionRead.kind === 'uncertain') {
         yield* recordOperationalLog(log, {
           phase: 'core',
           outcome: 'retryable',
-          deliveryId: event.deliveryId,
+          deliveryId: intent.deliveryId,
           reason: 'commenter_permission_uncertain',
         });
         return yield* new SchedulingFailed({ message: 'Commenter permission is uncertain' });
@@ -1380,17 +1383,17 @@ const createManualCoordinator = (
     ) {
       const occurredAt = yield* currentIso;
       yield* recordDelivery(stateStore, {
-        deliveryId: event.deliveryId,
-        installationId: event.installationId,
-        repositoryId: event.repositoryId,
-        pullRequestNumber: event.pullRequestNumber,
+        deliveryId: intent.deliveryId,
+        installationId: intent.installationId,
+        repositoryId: intent.repositoryId,
+        pullRequestNumber: intent.pullRequestNumber,
         baseSha: facts?.baseSha ?? null,
         headSha: facts?.headSha ?? null,
         trigger: 'manual',
         status: 'awaiting approval',
         occurredAt,
       });
-      yield* writeManualReaction(github, event, 'confused');
+      yield* writeManualReaction(github, intent, 'confused');
       return 'awaiting approval' as const;
     }
 
@@ -1398,12 +1401,12 @@ const createManualCoordinator = (
       github,
       stateStore,
       scheduler,
-      event.deliveryId,
-      jobForFacts(event, facts),
+      intent.deliveryId,
+      jobForManualFacts(intent, facts),
       {
-        installationId: event.installationId,
-        repositoryId: event.repositoryId,
-        pullRequestNumber: event.pullRequestNumber,
+        installationId: intent.installationId,
+        repositoryId: intent.repositoryId,
+        pullRequestNumber: intent.pullRequestNumber,
         baseSha: facts.baseSha,
         headSha: facts.headSha,
       },
@@ -1412,9 +1415,223 @@ const createManualCoordinator = (
       lifecycleLog,
     );
 
-    if (disposition === 'scheduled') yield* writeManualReaction(github, event, 'eyes');
+    if (disposition === 'scheduled') yield* writeManualReaction(github, intent, 'eyes');
 
     return disposition;
+  });
+
+const createManualCoordinator = (
+  github: GitHubAdapter,
+  stateStore: ReviewCompletionStateStore,
+  scheduler: ReviewScheduler,
+  log?: OperationalLog,
+  deferCheckSetup?: ReviewCheckSetupDefer,
+  lifecycleLog?: CoreLifecycleLog,
+) =>
+  Effect.fn('handleManualReviewEvent')(function* (
+    event: Extract<ReviewEvent, { event: 'issue_comment' }>,
+  ) {
+    return yield* handleManualIntent(
+      github,
+      stateStore,
+      scheduler,
+      log,
+      deferCheckSetup,
+      lifecycleLog,
+    )({
+      deliveryId: event.deliveryId,
+      repositoryId: event.repositoryId,
+      pullRequestNumber: event.pullRequestNumber,
+      installationId: event.installationId,
+      senderLogin: event.commenterLogin,
+      commentId: event.commentId,
+    });
+  });
+
+const SuiteCheckRunCandidates = Schema.Struct({
+  candidates: Schema.Array(
+    Schema.Struct({
+      id: Schema.Int,
+      externalId: Schema.NullOr(Schema.NonEmptyString),
+    }),
+  ),
+});
+
+const verifyFailedCheckOwnership = Effect.fn('verifyFailedCheckOwnership')(function* (
+  stateStore: ReviewCompletionStateStore,
+  log: OperationalLog | undefined,
+  input: {
+    readonly deliveryId: string;
+    readonly repositoryId: number;
+    readonly installationId: number;
+    readonly checkRunId: number;
+    readonly externalRunId: string;
+  },
+) {
+  if (stateStore.getRunOutcome === undefined) {
+    yield* recordOperationalLog(log, {
+      phase: 'core',
+      outcome: 'retryable',
+      deliveryId: input.deliveryId,
+      reason: 'state_failure',
+    });
+    return yield* new SchedulingFailed({ message: 'Check ownership is uncertain' });
+  }
+  const outcome = yield* Effect.tryPromise({
+    try: () => stateStore.getRunOutcome!(input.externalRunId),
+    catch: () => new SchedulingFailed({ message: 'Check ownership is uncertain' }),
+  }).pipe(
+    Effect.catchTag('SchedulingFailed', (error) =>
+      Effect.gen(function* () {
+        yield* recordOperationalLog(log, {
+          phase: 'core',
+          outcome: 'retryable',
+          deliveryId: input.deliveryId,
+          reason: 'state_failure',
+        });
+        return yield* Effect.fail(error);
+      }),
+    ),
+  );
+  if (
+    outcome === undefined ||
+    outcome.checkRunId !== input.checkRunId ||
+    outcome.repositoryId !== input.repositoryId ||
+    outcome.installationId !== input.installationId ||
+    outcome.status !== 'failed'
+  ) {
+    return undefined;
+  }
+  return outcome;
+});
+
+const handleResolvedCheckRerequest = (
+  github: GitHubAdapter,
+  stateStore: ReviewCompletionStateStore,
+  scheduler: ReviewScheduler,
+  log?: OperationalLog,
+  deferCheckSetup?: ReviewCheckSetupDefer,
+  lifecycleLog?: CoreLifecycleLog,
+) =>
+  Effect.fn('handleResolvedCheckRerequest')(function* (input: {
+    readonly deliveryId: string;
+    readonly repositoryId: number;
+    readonly installationId: number;
+    readonly senderLogin: string;
+    readonly checkRunId: number;
+    readonly externalRunId: string;
+  }) {
+    const outcome = yield* verifyFailedCheckOwnership(stateStore, log, input);
+    if (outcome === undefined) return 'ignored' as const;
+    return yield* handleManualIntent(
+      github,
+      stateStore,
+      scheduler,
+      log,
+      deferCheckSetup,
+      lifecycleLog,
+    )({
+      deliveryId: input.deliveryId,
+      repositoryId: input.repositoryId,
+      pullRequestNumber: outcome.pullRequestNumber,
+      installationId: input.installationId,
+      senderLogin: input.senderLogin,
+    });
+  });
+
+const createCheckRunCoordinator = (
+  github: GitHubAdapter,
+  stateStore: ReviewCompletionStateStore,
+  scheduler: ReviewScheduler,
+  log?: OperationalLog,
+  deferCheckSetup?: ReviewCheckSetupDefer,
+  lifecycleLog?: CoreLifecycleLog,
+) =>
+  Effect.fn('handleCheckRunRerequest')(function* (
+    event: Extract<ReviewEvent, { event: 'check_run' }>,
+  ) {
+    if (event.externalRunId === null) return 'ignored' as const;
+    return yield* handleResolvedCheckRerequest(
+      github,
+      stateStore,
+      scheduler,
+      log,
+      deferCheckSetup,
+      lifecycleLog,
+    )({
+      deliveryId: event.deliveryId,
+      repositoryId: event.repositoryId,
+      installationId: event.installationId,
+      senderLogin: event.senderLogin,
+      checkRunId: event.checkRunId,
+      externalRunId: event.externalRunId,
+    });
+  });
+
+const createCheckSuiteCoordinator = (
+  github: GitHubAdapter,
+  stateStore: ReviewCompletionStateStore,
+  scheduler: ReviewScheduler,
+  log?: OperationalLog,
+  deferCheckSetup?: ReviewCheckSetupDefer,
+  lifecycleLog?: CoreLifecycleLog,
+) =>
+  Effect.fn('handleCheckSuiteRerequest')(function* (
+    event: Extract<ReviewEvent, { event: 'check_suite' }>,
+  ) {
+    if (github.findCheckRunForSuite === undefined) {
+      yield* recordOperationalLog(log, {
+        phase: 'core',
+        outcome: 'retryable',
+        deliveryId: event.deliveryId,
+        reason: 'check_lookup_uncertain',
+      });
+      return yield* new SchedulingFailed({ message: 'Check suite lookup is uncertain' });
+    }
+    const raw = yield* Effect.tryPromise({
+      try: () =>
+        github.findCheckRunForSuite!({
+          repositoryId: event.repositoryId,
+          installationId: event.installationId,
+          checkSuiteId: event.checkSuiteId,
+        }),
+      catch: () => undefined,
+    }).pipe(Effect.catch(() => Effect.succeed(undefined)));
+    const resolved =
+      raw === undefined
+        ? undefined
+        : yield* Schema.decodeUnknownEffect(SuiteCheckRunCandidates)(raw).pipe(
+            Effect.catch(() => Effect.succeed(undefined)),
+          );
+    if (resolved === undefined) {
+      yield* recordOperationalLog(log, {
+        phase: 'core',
+        outcome: 'retryable',
+        deliveryId: event.deliveryId,
+        reason: 'check_lookup_uncertain',
+      });
+      return yield* new SchedulingFailed({ message: 'Check suite lookup is uncertain' });
+    }
+    const candidates = resolved.candidates.filter(
+      (candidate): candidate is { id: number; externalId: string } => candidate.externalId !== null,
+    );
+    if (candidates.length !== 1) return 'ignored' as const;
+    const candidate = candidates[0]!;
+    return yield* handleResolvedCheckRerequest(
+      github,
+      stateStore,
+      scheduler,
+      log,
+      deferCheckSetup,
+      lifecycleLog,
+    )({
+      deliveryId: event.deliveryId,
+      repositoryId: event.repositoryId,
+      installationId: event.installationId,
+      senderLogin: event.senderLogin,
+      checkRunId: candidate.id,
+      externalRunId: candidate.externalId,
+    });
   });
 
 const reviewEventEffect = (
@@ -1433,6 +1650,28 @@ const reviewEventEffect = (
 
     if (decoded.event === 'pull_request') {
       return yield* createAutomaticCoordinator(
+        github,
+        stateStore,
+        scheduler,
+        log,
+        deferCheckSetup,
+        lifecycleLog,
+      )(decoded);
+    }
+
+    if (decoded.event === 'check_run') {
+      return yield* createCheckRunCoordinator(
+        github,
+        stateStore,
+        scheduler,
+        log,
+        deferCheckSetup,
+        lifecycleLog,
+      )(decoded);
+    }
+
+    if (decoded.event === 'check_suite') {
+      return yield* createCheckSuiteCoordinator(
         github,
         stateStore,
         scheduler,

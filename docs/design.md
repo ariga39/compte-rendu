@@ -26,6 +26,7 @@ Included:
 - public fork PRs, reviewed only after a maintainer issues `/ai-review` for the
   current head SHA;
 - `issue_comment.created` events containing the manual review command;
+- standard Check Run and Check Suite re-requests for failed reviews;
 - `opened`, `reopened`, `synchronize`, and `ready_for_review` PR events;
 - one self-hosted Runner Job/OpenCode execution path;
 - one concise human-readable Markdown review, guided by at most five
@@ -104,6 +105,25 @@ progress display, not the terminal notification: success publishes the Review
 body, while failure publishes one ordinary pull request comment. GitHub Check
 API failure degrades progress visibility but never suppresses either terminal
 publication.
+
+### Re-running a failed review from Checks
+
+GitHub's standard individual Check and Check Suite re-run controls are manual
+review requests. Only `check_run.rerequested` and `check_suite.rerequested`
+are accepted. Core resolves the original review through the persisted Check
+Run ID and external run ID, matching the repository and installation. Suite
+re-requests resolve the latest product Check through GitHub first. Webhook PR
+lists are not required, so fork Check payloads with empty lists still work.
+
+The original run must be failed. The requester must have the same current
+`write`, `maintain`, or `admin` permission required by `/ai-review`. Core reads
+the PR's current facts and uses the existing manual admission and deduplication
+path. Each accepted re-run gets a new run and the normal fresh Job/Sandbox;
+old failure history is retained. Duplicate deliveries and an already active or
+completed review of the current revision do not create another review.
+Missing actors, unknown or mismatched Checks, and uncertain authorization never
+start work. A Check request has no comment reaction; its new Check and terminal
+Review or failure comment provide feedback. `/ai-review` remains available.
 
 ### Review result
 

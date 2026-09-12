@@ -335,7 +335,14 @@ Subscribe the App to:
 - `Issue comment`: `created`. The product path is only a comment on a pull
   request with the exact body `/ai-review`.
 
-Do not subscribe to push, review, check, status, issue, or repository events;
+- `Check run`: `rerequested`, for the standard individual Check re-run.
+- `Check suite`: `rerequested`, for the standard suite re-run. Checks write
+  permission is required; GitHub documents these events as automatically
+  subscribed for Apps with that permission. Verify delivery when enabling an
+  installation. Other Check lifecycle actions and custom requested actions
+  are ignored.
+
+Do not subscribe to push, review, status, issue, or repository events;
 they are not part of this Worker contract. GitHub's event reference lists the
 available event actions:
 [Webhook events and payloads](https://docs.github.com/en/webhooks/webhook-events-and-payloads).
@@ -355,6 +362,13 @@ notifications. It is created as `queued`, becomes `in_progress` when claimed,
 and completes as `success`, `failure`, or `cancelled`. Its `external_id` is the
 Core run id and it is always attached to that run's immutable head SHA. A Check
 API failure must not block the Review or failure comment.
+
+After a review fails, a user with `write`, `maintain`, or `admin` permission can
+use the standard Checks re-run control or post a new `/ai-review` comment.
+Both routes load the current PR revision and share admission/deduplication;
+a re-run creates a new run and Sandbox while retaining the failed history.
+Check-origin requests do not add comment reactions. The integration only
+re-runs a failed Check owned by this deployment and ignores unrelated Checks.
 
 Install the App on the owning account with **Only select repositories**, then
 select the target repository or repositories. Do not choose all repositories

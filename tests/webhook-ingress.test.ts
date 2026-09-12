@@ -1089,4 +1089,191 @@ describe('Webhook ingress', () => {
       },
     ]);
   });
+
+  it('forwards a signed check_run rerequested event for an approved installation', async () => {
+    const forwarded: Request[] = [];
+    const { events, log } = collectingLog();
+    const worker = createIngressWorker({
+      secret,
+      crypto: globalThis.crypto,
+      log,
+      core: {
+        fetch: async (request) => {
+          forwarded.push(request);
+          return new Response(null, { status: 202 });
+        },
+      },
+    });
+    const request = await signedRequest({
+      action: 'rerequested',
+      installation: { id: 7 },
+      repository: { id: 11 },
+      check_run: { id: 555, external_id: 'run-ext-1' },
+      sender: { login: 'maintainer' },
+    });
+    request.headers.set('x-github-event', 'check_run');
+
+    const response = await worker.fetch(request);
+
+    expect(response.status).toBe(202);
+    expect(await forwarded[0]?.clone().json()).toEqual({
+      deliveryId: 'delivery-1',
+      event: 'check_run',
+      action: 'rerequested',
+      repositoryId: 11,
+      installationId: 7,
+      checkRunId: 555,
+      externalRunId: 'run-ext-1',
+      senderLogin: 'maintainer',
+    });
+    expect(events).toEqual([
+      {
+        phase: 'ingress',
+        outcome: 'accepted',
+        deliveryId: 'delivery-1',
+        event: 'check_run',
+      },
+    ]);
+  });
+
+  it('forwards a signed check_suite rerequested event for an approved installation', async () => {
+    const forwarded: Request[] = [];
+    const worker = createIngressWorker({
+      secret,
+      crypto: globalThis.crypto,
+      core: {
+        fetch: async (request) => {
+          forwarded.push(request);
+          return new Response(null, { status: 202 });
+        },
+      },
+    });
+    const request = await signedRequest({
+      action: 'rerequested',
+      installation: { id: 7 },
+      repository: { id: 11 },
+      check_suite: { id: 555 },
+      sender: { login: 'maintainer' },
+    });
+    request.headers.set('x-github-event', 'check_suite');
+
+    const response = await worker.fetch(request);
+
+    expect(response.status).toBe(202);
+    expect(await forwarded[0]?.clone().json()).toEqual({
+      deliveryId: 'delivery-1',
+      event: 'check_suite',
+      action: 'rerequested',
+      repositoryId: 11,
+      installationId: 7,
+      checkSuiteId: 555,
+      senderLogin: 'maintainer',
+    });
+  });
+
+  it('ignores non-rerequested check events without contacting core', async () => {
+    const forwarded: Request[] = [];
+    const { events, log } = collectingLog();
+    const worker = createIngressWorker({
+      secret,
+      crypto: globalThis.crypto,
+      log,
+      core: {
+        fetch: async (request) => {
+          forwarded.push(request);
+          return new Response(null, { status: 202 });
+        },
+      },
+    });
+    const checkRun = await signedRequest({
+      action: 'completed',
+      installation: { id: 7 },
+      repository: { id: 11 },
+      check_run: { id: 555, external_id: 'run-ext-1' },
+      sender: { login: 'maintainer' },
+    });
+    checkRun.headers.set('x-github-event', 'check_run');
+    const checkSuite = await signedRequest({
+      action: 'requested',
+      installation: { id: 7 },
+      repository: { id: 11 },
+      check_suite: { id: 555 },
+      sender: { login: 'maintainer' },
+    });
+    checkSuite.headers.set('x-github-event', 'check_suite');
+
+    expect((await worker.fetch(checkRun)).status).toBe(204);
+    expect((await worker.fetch(checkSuite)).status).toBe(204);
+    expect(forwarded).toHaveLength(0);
+    expect(events).toEqual([
+      {
+        phase: 'ingress',
+        outcome: 'ignored',
+        deliveryId: 'delivery-1',
+        event: 'check_run',
+        reason: 'unsupported_action',
+      },
+      {
+        phase: 'ingress',
+        outcome: 'ignored',
+        deliveryId: 'delivery-1',
+        event: 'check_suite',
+        reason: 'unsupported_action',
+      },
+    ]);
+  });
+
+  it('rejects a check re-request with a missing or null sender', async () => {
+    const forwarded: Request[] = [];
+    const worker = createIngressWorker({
+      secret,
+      crypto: globalThis.crypto,
+      core: {
+        fetch: async (request) => {
+          forwarded.push(request);
+          return new Response(null, { status: 202 });
+        },
+      },
+    });
+
+    for (const sender of [undefined, null]) {
+      const request = await signedRequest({
+        action: 'rerequested',
+        installation: { id: 7 },
+        repository: { id: 11 },
+        check_run: { id: 555, external_id: 'run-ext-1' },
+        sender,
+      });
+      request.headers.set('x-github-event', 'check_run');
+
+      expect((await worker.fetch(request)).status).toBe(400);
+    }
+
+    expect(forwarded).toHaveLength(0);
+  });
+
+  it('ignores a check re-request from an unapproved installation before reaching core', async () => {
+    const forwarded: Request[] = [];
+    const worker = createIngressWorker({
+      secret,
+      crypto: globalThis.crypto,
+      core: {
+        fetch: async (request) => {
+          forwarded.push(request);
+          return new Response(null, { status: 202 });
+        },
+      },
+    });
+    const request = await signedRequest({
+      action: 'rerequested',
+      installation: { id: 99 },
+      repository: { id: 11 },
+      check_run: { id: 555, external_id: 'run-ext-1' },
+      sender: { login: 'maintainer' },
+    });
+    request.headers.set('x-github-event', 'check_run');
+
+    expect((await worker.fetch(request)).status).toBe(204);
+    expect(forwarded).toHaveLength(0);
+  });
 });
