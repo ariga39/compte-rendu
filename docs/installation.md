@@ -497,8 +497,8 @@ for authenticated Job admission.
 
 To use a gateway compatible with the selected `opencode-go` model, add an
 optional `baseUrl`, for example `"baseUrl": "https://model.example.com/v1"`.
-It must be an absolute HTTPS URL without embedded credentials, a query, or a
-fragment. When omitted, OpenCode uses the official provider endpoint. The
+It must be an absolute HTTPS URL without embedded credentials, a query, a
+fragment, or wildcard hostname. When omitted, OpenCode uses the official provider endpoint. The
 Runner uses the configured URL for OpenCode's `options.baseURL`, scopes the
 Docker credential proxy to its hostname, and allows model traffic only to its
 host and port (443 by default). Cleanup removes that Job's exact network rule.
