@@ -284,8 +284,8 @@ invocation.
 
 Review safety is enforced outside OpenCode: the Sandbox is cloned without
 shared host skills, host MCP settings, or SSH-agent access; network access is
-limited to `opencode.ai` and `api.github.com`; CPU, memory, and deadline are
-fixed; and the Sandbox, secret, network policy, and temporary credential
+limited to the configured model host/port and `api.github.com:443`; CPU,
+memory, and deadline are fixed; and the Sandbox, secret, network policy, and temporary credential
 sources are destroyed during terminal cleanup. Exact base/head verification,
 current-head publication checks, and one valid submitted Markdown body remain
 required. Agent tool access does not grant publication authority.
