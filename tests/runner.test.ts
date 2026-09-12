@@ -285,6 +285,9 @@ const runAgentScenario = async (scenario: {
   let agentInvoked = false;
   let createArgs: readonly string[] | undefined;
   let agentArgs: readonly string[] | undefined;
+  let secretArgs: readonly string[] | undefined;
+  const allowedResources: string[] = [];
+  const removedRuleIds: string[] = [];
   const runner = createRunner({
     evidenceRoot: sharedEvidenceRoot,
     authToken: 'runner-test-token',
@@ -309,6 +312,13 @@ const runAgentScenario = async (scenario: {
     process: async (_command, args, options = {}) => {
       await writeEvidenceFixture(args, options, scenario.output);
       if (args[0] === 'create') createArgs = args;
+      if (args[0] === 'secret' && args[1] === 'set-custom') secretArgs = args;
+      if (args[0] === 'policy' && args[1] === 'allow') {
+        allowedResources.push(args[args.length - 1]);
+      }
+      if (args[0] === 'policy' && args[1] === 'rm') {
+        removedRuleIds.push(args[args.indexOf('--id') + 1]);
+      }
       const isAgent = args[0] === 'exec' && args.includes('--agent');
       if (isAgent) {
         agentInvoked = true;
@@ -362,7 +372,17 @@ const runAgentScenario = async (scenario: {
       'utf8',
     ),
   );
-  return { terminal, manifest, agentInvoked, terminalDurationMs, createArgs, agentArgs };
+  return {
+    terminal,
+    manifest,
+    agentInvoked,
+    terminalDurationMs,
+    createArgs,
+    agentArgs,
+    secretArgs,
+    allowedResources,
+    removedRuleIds,
+  };
 };
 
 describe('Runner Job HTTP interface', () => {
@@ -659,6 +679,23 @@ describe('Runner Job HTTP interface', () => {
       JSON.stringify({ id: `opencode-go/${'a'.repeat(129)}` }),
       '{"id":"opencode-go/test-model","definition":{"cost":{"input":1e400,"output":0}}}',
       JSON.stringify({ id: 'opencode-go/test-model', definition: { name: '' } }),
+      JSON.stringify({ id: 'opencode-go/test-model', baseUrl: '' }),
+      JSON.stringify({ id: 'opencode-go/test-model', baseUrl: '/v1' }),
+      JSON.stringify({ id: 'opencode-go/test-model', baseUrl: 'http://model.example.test/v1' }),
+      JSON.stringify({
+        id: 'opencode-go/test-model',
+        baseUrl: 'https://user:key@model.example.test/v1',
+      }),
+      JSON.stringify({
+        id: 'opencode-go/test-model',
+        baseUrl: 'https://model.example.test/v1?key=value',
+      }),
+      JSON.stringify({
+        id: 'opencode-go/test-model',
+        baseUrl: 'https://model.example.test/v1#fragment',
+      }),
+      JSON.stringify({ id: 'opencode-go/test-model', baseUrl: 'https://*.example.test/v1' }),
+      JSON.stringify({ id: 'opencode-go/test-model', apiKey: 'raw-secret' }),
       JSON.stringify({ id: 'opencode-go/test-model', definition: { name: 'Test' }, extra: true }),
       JSON.stringify({ id: 'opencode-go/test-model', definition: { name: 'Test', unsafe: true } }),
     ];
@@ -2816,6 +2853,68 @@ describe('Runner Job HTTP interface', () => {
     };
     expect(config.model).toBe('opencode-go/test-model-catalog');
     expect(config.provider).toBeUndefined();
+  });
+
+  it('routes a custom base URL through provider options, credential host, network, and cleanup', async () => {
+    const result = await runAgentScenario({
+      runId: 'run-custom-base-url',
+      output: finalMarkdownJsonl(),
+      modelConfig: JSON.stringify({
+        id: 'opencode-go/test-model-7',
+        baseUrl: 'https://model.example.test/v1',
+      }),
+    });
+
+    expect(result.terminal.status).toBe('succeeded');
+    expect(result.manifest.model).toBe('opencode-go/test-model-7');
+    expect(result.secretArgs?.[result.secretArgs.indexOf('--host') + 1]).toBe('model.example.test');
+    expect(result.allowedResources).toContain('model.example.test:443');
+    expect(result.allowedResources).not.toContain('opencode.ai:443');
+    expect(result.removedRuleIds).toContain('compte-rendu-runner-job-test-model.example.test:443');
+    const configContent = result.createArgs?.find((value) =>
+      value.startsWith('OPENCODE_CONFIG_CONTENT='),
+    );
+    const config = JSON.parse(configContent!.slice('OPENCODE_CONFIG_CONTENT='.length)) as {
+      model: string;
+      provider: Record<string, { options?: { baseURL?: string }; models?: unknown }>;
+    };
+    expect(config.model).toBe('opencode-go/test-model-7');
+    expect(config.provider['opencode-go']?.options).toEqual({
+      baseURL: 'https://model.example.test/v1',
+    });
+    expect(config.provider['opencode-go']?.models).toBeUndefined();
+  });
+
+  it('derives an explicit HTTPS port for the custom route and coexists with a definition', async () => {
+    const definition = { name: 'Test Model', reasoning: true };
+    const result = await runAgentScenario({
+      runId: 'run-custom-base-url-port',
+      output: finalMarkdownJsonl(),
+      modelConfig: JSON.stringify({
+        id: 'opencode-go/test-model-7',
+        baseUrl: 'https://model.example.test:8443/v1',
+        definition,
+      }),
+    });
+
+    expect(result.terminal.status).toBe('succeeded');
+    expect(result.manifest.model).toBe('opencode-go/test-model-7');
+    expect(result.secretArgs?.[result.secretArgs.indexOf('--host') + 1]).toBe('model.example.test');
+    expect(result.allowedResources).toContain('model.example.test:8443');
+    expect(result.allowedResources).not.toContain('opencode.ai:443');
+    expect(result.removedRuleIds).toContain('compte-rendu-runner-job-test-model.example.test:8443');
+    const configContent = result.createArgs?.find((value) =>
+      value.startsWith('OPENCODE_CONFIG_CONTENT='),
+    );
+    expect(JSON.parse(configContent!.slice('OPENCODE_CONFIG_CONTENT='.length))).toMatchObject({
+      model: 'opencode-go/test-model-7',
+      provider: {
+        'opencode-go': {
+          options: { baseURL: 'https://model.example.test:8443/v1' },
+          models: { 'test-model-7': definition },
+        },
+      },
+    });
   });
 
   it('returns submitted Markdown after terminal progress output', async () => {

@@ -33,7 +33,7 @@ import submitReviewTool from '../tools/submit_review.js?raw';
 
 const MODEL_ENV = 'OPENCODE_API_KEY';
 const MODEL_HOST = 'opencode.ai';
-const MODEL_RESOURCE = `${MODEL_HOST}:443`;
+const MODEL_PORT = '443';
 const OPENCODE_VERSION = '1.18.25';
 const SANDBOX_TEMPLATE = `ghcr.io/ariga39/petit-chiba-opencode:${OPENCODE_VERSION}-gh2.98.0`;
 const SETUP_TIMEOUT_MS = 2 * 60 * 1000;
@@ -70,8 +70,21 @@ const ReviewModelDefinition = Schema.Struct({
     }),
   ),
 });
+const ModelBaseUrl = Schema.URLFromString.check(
+  Schema.makeFilter(
+    (url) =>
+      url.protocol === 'https:' &&
+      url.username === '' &&
+      url.password === '' &&
+      url.search === '' &&
+      url.hash === '' &&
+      !url.hostname.includes('*'),
+    { expected: 'absolute HTTPS URL without credentials, query, fragment, or wildcard host' },
+  ),
+);
 const ReviewModelConfig = Schema.Struct({
   id: Schema.String.check(Schema.isPattern(/^opencode-go\/[A-Za-z0-9._:-]{1,128}$/)),
+  baseUrl: Schema.optional(ModelBaseUrl),
   definition: Schema.optional(ReviewModelDefinition),
 });
 type ReviewModelConfigValue = Schema.Schema.Type<typeof ReviewModelConfig>;
@@ -86,21 +99,25 @@ const decodeReviewModelConfig = (raw: string | undefined): ReviewModelConfigValu
       );
 
 // The pinned OpenCode build's offline catalog may lack the deployment-configured model, so
-// register only the selected provider model when a definition is supplied.
-const trustedOpenCodeConfig = (config: ReviewModelConfigValue) =>
-  JSON.stringify({
+// register only the selected provider model when a definition is supplied. A configured
+// base URL additionally overrides only the provider endpoint.
+const trustedOpenCodeConfig = (config: ReviewModelConfigValue) => {
+  const baseURL = config.baseUrl?.toString();
+  const providerEntry =
+    baseURL === undefined && config.definition === undefined
+      ? undefined
+      : {
+          options: baseURL === undefined ? undefined : { baseURL },
+          models:
+            config.definition === undefined
+              ? undefined
+              : { [config.id.slice('opencode-go/'.length)]: config.definition },
+        };
+  return JSON.stringify({
     share: 'disabled',
     autoupdate: false,
     model: config.id,
-    ...(config.definition === undefined
-      ? {}
-      : {
-          provider: {
-            'opencode-go': {
-              models: { [config.id.slice('opencode-go/'.length)]: config.definition },
-            },
-          },
-        }),
+    ...(providerEntry === undefined ? {} : { provider: { 'opencode-go': providerEntry } }),
     agent: {
       review: {
         description: 'Pull request reviewer',
@@ -163,6 +180,7 @@ const trustedOpenCodeConfig = (config: ReviewModelConfigValue) =>
       },
     },
   });
+};
 
 const reviewPrompt = (
   repositoryName: string,
@@ -603,6 +621,12 @@ export const createRunner = (options: RunnerOptions = {}) => {
     options.modelConfig ?? process.env.REVIEW_MODEL_CONFIG,
   );
   const modelId = modelConfig?.id;
+  const modelHost = modelConfig?.baseUrl?.hostname ?? MODEL_HOST;
+  const modelPort =
+    modelConfig?.baseUrl !== undefined && modelConfig.baseUrl.port.length > 0
+      ? modelConfig.baseUrl.port
+      : MODEL_PORT;
+  const modelResource = `${modelHost}:${modelPort}`;
   const openCodeConfig = modelConfig === undefined ? undefined : trustedOpenCodeConfig(modelConfig);
   const evidenceRoot =
     options.evidenceRoot ??
@@ -1458,7 +1482,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
           '--sandbox',
           job.sandboxName,
           '--host',
-          MODEL_HOST,
+          modelHost,
           '--env',
           MODEL_ENV,
           '--placeholder',
@@ -1536,7 +1560,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       const network = await runTracked(
         job,
         sbxPath,
-        ['policy', 'allow', 'network', '--sandbox', job.sandboxName, MODEL_RESOURCE],
+        ['policy', 'allow', 'network', '--sandbox', job.sandboxName, modelResource],
         {},
         { stage: 'sandbox', command: 'allow-network', includeStderr: true },
       );
@@ -1545,7 +1569,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         return;
       }
       const modelNetworkRule: { readonly resource: string; id?: string } = {
-        resource: MODEL_RESOURCE,
+        resource: modelResource,
       };
       job.networkRules.push(modelNetworkRule);
       const modelPolicies = await runTracked(
@@ -1564,7 +1588,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
           (rule) =>
             rule.editable &&
             rule.sandbox_id === job.sandboxName &&
-            rule.resources.includes(MODEL_RESOURCE),
+            rule.resources.includes(modelResource),
         ) ?? [];
       if (modelMatches.length !== 1) {
         failure = { reason: 'agent' };

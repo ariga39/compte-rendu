@@ -260,8 +260,10 @@ uploading that bundle.
 The Runner reads its required `REVIEW_MODEL_CONFIG` deployment JSON at startup.
 It selects one `opencode-go` model and may register that model's metadata for
 the pinned OpenCode catalog. Missing or invalid configuration prevents Job
-claims and admission. Model selection does not change provider credentials,
-network policy, or review permissions.
+claims and admission. An optional HTTPS `baseUrl` selects a gateway for that
+provider; the Runner derives the Docker credential-proxy host and exact model
+network destination from the same URL. The API key remains in the host secret
+resolver. Review permissions are unaffected.
 
 The review Sandbox runs OpenCode non-interactively inside the microVM, without
 per-call approval prompts. Its static-review policy allows the packaged skill,
