@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import {
   createRunner as createProductionRunner,
   type RunnerProcess,
@@ -70,18 +70,23 @@ const finalMarkdownJsonl = (markdown = '## Review:\n\nNo findings.') =>
 
 const writeEvidenceFixture = async (
   args: readonly string[],
-  options: { readonly stdoutFilePath?: string; readonly stderrFilePath?: string },
+  options: {
+    readonly stdoutFilePath?: string;
+    readonly stderrFilePath?: string;
+    readonly fileAppend?: boolean;
+  },
   resultLine: string,
 ) => {
+  const flag = options.fileAppend === true ? 'a' : 'w';
   if (args[0] === 'exec' && args.includes('--agent')) {
-    await writeFile(options.stdoutFilePath!, `${resultLine}\n`, { mode: 0o600 });
-    await writeFile(options.stderrFilePath!, 'agent stderr\n', { mode: 0o600 });
+    await writeFile(options.stdoutFilePath!, `${resultLine}\n`, { mode: 0o600, flag });
+    await writeFile(options.stderrFilePath!, 'agent stderr\n', { mode: 0o600, flag });
   }
   if (args[0] === 'exec' && args.includes('export')) {
     await writeFile(
       options.stdoutFilePath!,
       `{"session":"${args[args.indexOf('export') + 1]}","full":true}\n`,
-      { mode: 0o600 },
+      { mode: 0o600, flag },
     );
   }
   if (args[0] === 'cp') {
@@ -384,6 +389,133 @@ const runAgentScenario = async (scenario: {
     removedRuleIds,
   };
 };
+
+type ReminderRound = {
+  readonly output: string;
+  readonly exitCode?: number;
+  readonly timedOut?: boolean;
+  readonly truncated?: boolean;
+  readonly advanceMs?: number;
+};
+
+const runReminderScenario = async (scenario: {
+  runId: string;
+  rounds: readonly ReminderRound[];
+}) => {
+  const baseSha = '1111111111111111111111111111111111111111';
+  const headSha = '2222222222222222222222222222222222222222';
+  const sessionId = 'session-reminder';
+  const sandboxName = `compte-rendu-${runnerJobFields.id}`;
+  const agentCommands: string[][] = [];
+  const agentTimeouts: Array<number | undefined> = [];
+  const createCommands: string[][] = [];
+  let agentRuns = 0;
+  const runner = createRunner({
+    evidenceRoot: sharedEvidenceRoot,
+    authToken: 'runner-test-token',
+    modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+    process: async (_command, args, options = {}) => {
+      if (args[0] === 'create') createCommands.push([...args]);
+      const isAgent = args[0] === 'exec' && args.includes('--agent');
+      if (isAgent) {
+        const round = scenario.rounds[Math.min(agentRuns, scenario.rounds.length - 1)]!;
+        agentRuns += 1;
+        agentCommands.push([...args]);
+        agentTimeouts.push(options.timeoutMs);
+        await writeEvidenceFixture(args, options, round.output);
+        if (round.advanceMs !== undefined) {
+          vi.setSystemTime(Date.now() + round.advanceMs);
+        }
+        return {
+          exitCode: round.exitCode ?? 0,
+          stdout: `${round.output}\n`,
+          timedOut: round.timedOut ?? false,
+          truncated: round.truncated ?? false,
+        };
+      }
+      await writeEvidenceFixture(args, options, '');
+      return {
+        exitCode: 0,
+        stdout: args.includes('rev-parse')
+          ? `${baseSha}\n${headSha}\n`
+          : args.includes('session')
+            ? `[{"id":"${sessionId}"}]\n`
+            : '',
+        timedOut: false,
+        truncated: false,
+      };
+    },
+  });
+  const submitted = await runner.handle(
+    new Request('http://runner/jobs', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer runner-test-token',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        ...runnerJobFields,
+        runId: scenario.runId,
+        attempt: 1,
+        repositoryUrl: 'https://github.com/acme/reviewed.git',
+        baseSha,
+        headSha,
+      }),
+    }),
+  );
+  const { id } = (await submitted.json()) as { id: string };
+  const terminal = await waitForTerminal(runner, id);
+  const manifest = JSON.parse(
+    await readFile(
+      join(sharedEvidenceRoot, terminal.evidenceId as string, 'manifest.json'),
+      'utf8',
+    ),
+  );
+  return {
+    runner,
+    terminal,
+    manifest,
+    agentCommands,
+    agentTimeouts,
+    agentRuns,
+    createCommands,
+    sessionId,
+    sandboxName,
+  };
+};
+
+const completedWithoutSubmitJsonl = (sessionId: string) =>
+  [
+    JSON.stringify({
+      type: 'text',
+      sessionID: sessionId,
+      part: {
+        type: 'text',
+        messageID: 'msg-final',
+        text: 'I completed the review without submitting.',
+      },
+    }),
+    JSON.stringify({
+      type: 'step_finish',
+      sessionID: sessionId,
+      part: { type: 'step-finish', messageID: 'msg-final', reason: 'stop' },
+    }),
+  ].join('\n');
+
+const submitReminderJsonl = (sessionId: string, markdown: string) =>
+  [
+    JSON.stringify({
+      type: 'text',
+      sessionID: sessionId,
+      part: { type: 'text', messageID: 'msg-reminder', text: 'Submitting the review now.' },
+    }),
+    submitReviewEvent(markdown, { callID: 'call-reminder' }),
+    JSON.stringify({
+      type: 'step_finish',
+      sessionID: sessionId,
+      part: { type: 'step-finish', messageID: 'msg-reminder', reason: 'stop' },
+    }),
+  ].join('\n');
 
 describe('Runner Job HTTP interface', () => {
   it('does not claim durable work until local Job admission is fully configured', async () => {
@@ -1157,6 +1289,323 @@ describe('Runner Job HTTP interface', () => {
       sandbox: { cleanup: 'destroyed' },
     });
     expect(terminal).not.toHaveProperty('result');
+  });
+
+  it('reminds the same review session once when a completed run omitted submit_review', async () => {
+    const reminderMarkdown = '## Review:\n\nReminder submission.';
+    const result = await runReminderScenario({
+      runId: 'run-reminder-success',
+      rounds: [
+        { output: completedWithoutSubmitJsonl('session-reminder') },
+        { output: submitReminderJsonl('session-reminder', reminderMarkdown) },
+      ],
+    });
+
+    expect(result.agentRuns).toBe(2);
+    expect(result.terminal).toMatchObject({
+      status: 'succeeded',
+      result: reminderMarkdown,
+      evidence: { status: 'complete' },
+      sandbox: { cleanup: 'destroyed' },
+    });
+    expect(result.createCommands).toHaveLength(1);
+    expect(result.agentCommands[1]).toEqual(
+      expect.arrayContaining([
+        'exec',
+        result.sandboxName,
+        'opencode',
+        'run',
+        '--session',
+        'session-reminder',
+        '--agent',
+        'review',
+      ]),
+    );
+    expect(result.manifest).toMatchObject({
+      sessionIds: ['session-reminder'],
+      terminal: { status: 'succeeded' },
+    });
+    const evidencePath = join(sharedEvidenceRoot, result.terminal.evidenceId as string);
+    const combined = await readFile(join(evidencePath, 'opencode.jsonl'), 'utf8');
+    expect(combined).toContain('I completed the review without submitting.');
+    expect(combined).toContain('Submitting the review now.');
+    await expect(readFile(join(evidencePath, 'validated-review.md'), 'utf8')).resolves.toBe(
+      reminderMarkdown,
+    );
+  });
+
+  it('reports zero-results after a single reminder still omits submit_review', async () => {
+    const result = await runReminderScenario({
+      runId: 'run-reminder-still-missing',
+      rounds: [{ output: completedWithoutSubmitJsonl('session-reminder') }],
+    });
+
+    expect(result.agentRuns).toBe(2);
+    expect(result.terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'invalid-output', cause: 'zero-results' },
+    });
+    expect(result.terminal).not.toHaveProperty('result');
+  });
+
+  it.each([
+    ['duplicate submissions', 'multiple-results'],
+    ['an invalid result', 'result-schema-failure'],
+    ['an errored submission', 'result-schema-failure'],
+    ['an agent error event', 'agent-error'],
+  ] as const)('does not remind the session after a completed run with %s', async (kind, cause) => {
+    const session = 'session-reminder';
+    const textEvent = JSON.stringify({
+      type: 'text',
+      sessionID: session,
+      part: { type: 'text', messageID: 'msg-final', text: 'Completed.' },
+    });
+    const stopEvent = JSON.stringify({
+      type: 'step_finish',
+      sessionID: session,
+      part: { type: 'step-finish', messageID: 'msg-final', reason: 'stop' },
+    });
+    const markdown = '## Review:\n\nNo findings.';
+    const output =
+      kind === 'duplicate submissions'
+        ? [
+            textEvent,
+            submitReviewEvent(markdown),
+            submitReviewEvent(markdown, { callID: 'call-submit-review-2' }),
+            stopEvent,
+          ].join('\n')
+        : kind === 'an invalid result'
+          ? [textEvent, submitReviewEvent('not a review'), stopEvent].join('\n')
+          : kind === 'an errored submission'
+            ? [textEvent, submitReviewEvent(markdown, { status: 'error' }), stopEvent].join('\n')
+            : [textEvent, JSON.stringify({ type: 'error' }), stopEvent].join('\n');
+
+    const result = await runReminderScenario({
+      runId: `run-reminder-no-${kind.replace(/\W+/g, '-')}`,
+      rounds: [{ output }],
+    });
+
+    expect(result.agentRuns).toBe(1);
+    expect(result.terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'invalid-output', cause },
+    });
+  });
+
+  it('does not remind when the completed run timed out', async () => {
+    const result = await runReminderScenario({
+      runId: 'run-reminder-timeout',
+      rounds: [{ output: completedWithoutSubmitJsonl('session-reminder'), timedOut: true }],
+    });
+
+    expect(result.agentRuns).toBe(1);
+    expect(result.terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'timeout', cause: 'timeout' },
+    });
+  });
+
+  it('does not remind when the Job is aborted after a zero-results run', async () => {
+    const baseSha = '1111111111111111111111111111111111111111';
+    const headSha = '2222222222222222222222222222222222222222';
+    let agentStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      agentStarted = resolve;
+    });
+    let releaseAgent!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseAgent = resolve;
+    });
+    let agentRuns = 0;
+    const zeroResults = completedWithoutSubmitJsonl('session-reminder');
+    const runner = createRunner({
+      evidenceRoot: sharedEvidenceRoot,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      process: async (_command, args, options = {}) => {
+        const isAgent = args[0] === 'exec' && args.includes('--agent');
+        if (isAgent) {
+          agentRuns += 1;
+          agentStarted();
+          await gate;
+          await writeEvidenceFixture(args, options, zeroResults);
+          return {
+            exitCode: 0,
+            stdout: `${zeroResults}\n`,
+            timedOut: false,
+            truncated: false,
+          };
+        }
+        await writeEvidenceFixture(args, options, '');
+        return {
+          exitCode: 0,
+          stdout: args.includes('rev-parse')
+            ? `${baseSha}\n${headSha}\n`
+            : args.includes('session')
+              ? '[{"id":"session-reminder"}]\n'
+              : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
+    });
+    const submitted = await runner.handle(
+      new Request('http://runner/jobs', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer runner-test-token',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          ...runnerJobFields,
+          runId: 'run-reminder-abort',
+          attempt: 1,
+          repositoryUrl: 'https://github.com/acme/reviewed.git',
+          baseSha,
+          headSha,
+        }),
+      }),
+    );
+    const { id } = (await submitted.json()) as { id: string };
+    await started;
+    const aborted = runner.handle(
+      new Request(`http://runner/jobs/${id}`, {
+        method: 'DELETE',
+        headers: { authorization: 'Bearer runner-test-token' },
+      }),
+    );
+    releaseAgent();
+    expect((await aborted).status).toBe(200);
+    expect(agentRuns).toBe(1);
+    const terminal = await runner.handle(
+      new Request(`http://runner/jobs/${id}`, {
+        headers: { authorization: 'Bearer runner-test-token' },
+      }),
+    );
+    expect((await terminal.json()) as { status: string }).toMatchObject({ status: 'aborted' });
+  });
+
+  it('does not remind when the shared agent budget is exhausted', async () => {
+    const agentBudgetMs = 30 * 60 * 1000;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-09-12T00:00:00.000Z'));
+      const result = await runReminderScenario({
+        runId: 'run-reminder-budget-exhausted',
+        rounds: [
+          {
+            output: completedWithoutSubmitJsonl('session-reminder'),
+            advanceMs: agentBudgetMs + 1,
+          },
+        ],
+      });
+
+      expect(result.agentRuns).toBe(1);
+      expect(result.terminal).toMatchObject({
+        status: 'failed',
+        failure: { reason: 'invalid-output', cause: 'zero-results' },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('caps the reminder at the remaining shared agent budget', async () => {
+    const agentBudgetMs = 30 * 60 * 1000;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-09-12T00:00:00.000Z'));
+      const reminderMarkdown = '## Review:\n\nBudget-capped reminder.';
+      const result = await runReminderScenario({
+        runId: 'run-reminder-budget-remaining',
+        rounds: [
+          {
+            output: completedWithoutSubmitJsonl('session-reminder'),
+            advanceMs: agentBudgetMs - 30_000,
+          },
+          { output: submitReminderJsonl('session-reminder', reminderMarkdown) },
+        ],
+      });
+
+      expect(result.agentRuns).toBe(2);
+      expect(result.agentTimeouts[0]).toBe(agentBudgetMs);
+      expect(result.agentTimeouts[1]).toBe(30_000);
+      expect(result.terminal).toMatchObject({ status: 'succeeded', result: reminderMarkdown });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('rejects a reminder round that submits without its own terminal stop', async () => {
+    const session = 'session-reminder';
+    const reminderWithoutStop = [
+      JSON.stringify({
+        type: 'text',
+        sessionID: session,
+        part: { type: 'text', messageID: 'msg-reminder', text: 'Submitting the review.' },
+      }),
+      submitReviewEvent('## Review:\n\nReminder without a stop.', { callID: 'call-reminder' }),
+    ].join('\n');
+    const result = await runReminderScenario({
+      runId: 'run-reminder-no-stop',
+      rounds: [{ output: completedWithoutSubmitJsonl(session) }, { output: reminderWithoutStop }],
+    });
+
+    expect(result.agentRuns).toBe(2);
+    expect(result.terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'invalid-output', cause: 'missing-terminal-message' },
+    });
+    expect(result.terminal).not.toHaveProperty('result');
+  });
+
+  it('does not accept a reminder submission from a different session', async () => {
+    const result = await runReminderScenario({
+      runId: 'run-reminder-session-mismatch',
+      rounds: [
+        { output: completedWithoutSubmitJsonl('session-reminder') },
+        { output: submitReminderJsonl('session-other', '## Review:\n\nOther session.') },
+      ],
+    });
+
+    expect(result.agentRuns).toBe(2);
+    expect(result.terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'invalid-output', cause: 'zero-results' },
+    });
+    expect(result.terminal).not.toHaveProperty('result');
+  });
+
+  it('preserves a malformed reminder round cause', async () => {
+    const result = await runReminderScenario({
+      runId: 'run-reminder-malformed',
+      rounds: [
+        { output: completedWithoutSubmitJsonl('session-reminder') },
+        { output: 'not-jsonl' },
+      ],
+    });
+
+    expect(result.agentRuns).toBe(2);
+    expect(result.terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'invalid-output', cause: 'malformed-jsonl' },
+    });
+  });
+
+  it('preserves an explicit reminder agent error without a session ID', async () => {
+    const result = await runReminderScenario({
+      runId: 'run-reminder-agent-error',
+      rounds: [
+        { output: completedWithoutSubmitJsonl('session-reminder') },
+        { output: JSON.stringify({ type: 'error' }) },
+      ],
+    });
+
+    expect(result.agentRuns).toBe(2);
+    expect(result.terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'invalid-output', cause: 'agent-error' },
+    });
   });
 
   it('reports a malformed-jsonl cause for invalid agent event lines', async () => {

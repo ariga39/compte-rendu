@@ -37,6 +37,7 @@ const MODEL_PORT = '443';
 const OPENCODE_VERSION = '1.18.25';
 const SANDBOX_TEMPLATE = `ghcr.io/ariga39/petit-chiba-opencode:${OPENCODE_VERSION}-gh2.98.0`;
 const SETUP_TIMEOUT_MS = 2 * 60 * 1000;
+const SUBMIT_REMINDER_BUDGET_MS = 2 * 60 * 1000;
 const CLEANUP_RESERVE_MS = 60 * 1000;
 const CLEANUP_COMMAND_TIMEOUT_MS = 30 * 1000;
 const ARCHIVE_COMMAND_TIMEOUT_MS = 30 * 1000;
@@ -195,6 +196,9 @@ const reviewPrompt = (
   `git diff --find-renames ${mergeBaseSha} ${headSha} as the starting point. The admitted base ${baseSha} and head ${headSha} remain freshness facts; fail closed if GitHub's current base/head differs. ` +
   "Return a concise human-readable Markdown review ready to publish and follow the loaded pr-review skill's verdict-first output contract. Do not impose artificial brevity on a technical finding that needs detail. Tool calls and intermediate work may remain visible during the review. After completing all analysis, call `submit_review` exactly once with the complete publishable Markdown in its `markdown` argument. The `markdown` argument itself must contain only findings and the conclusion ready to publish, with no visible planning, self-dialogue, candidate triage, or process narration. After optional outer whitespace, begin that argument with exactly `## Review:`. Do not emit the review as terminal prose; terminal assistant messages are evidence only.";
 
+const submitReminderPrompt =
+  'You already completed the review in this session. Use your existing analysis and conclusion; do not redo the review and do not call any other tool. Call `submit_review` exactly once with the complete publishable Markdown in its `markdown` argument.';
+
 const OpenCodeErrorEvent = Schema.Struct({ type: Schema.Literal('error') });
 const OpenCodeToolName = Schema.Struct({
   type: Schema.Literal('tool_use'),
@@ -221,6 +225,7 @@ const OpenCodeStepFinishEvent = Schema.Struct({
   }),
 });
 const OpenCodeSessionId = Schema.NonEmptyString.check(Schema.isPattern(/^[A-Za-z0-9._:-]+$/));
+const OpenCodeSessionEvent = Schema.Struct({ sessionID: OpenCodeSessionId });
 const OpenCodeSession = Schema.Struct({ id: OpenCodeSessionId });
 const OpenCodeSessionList = Schema.Union([
   Schema.Array(OpenCodeSession),
@@ -257,6 +262,7 @@ export type RunnerProcessOptions = {
   readonly env?: NodeJS.ProcessEnv;
   readonly stdoutFilePath?: string;
   readonly stderrFilePath?: string;
+  readonly fileAppend?: boolean;
   readonly onChild?: (child: ChildProcess) => void;
 };
 
@@ -297,11 +303,12 @@ const runProcess: RunnerProcess = (command, args, options = {}) =>
     let stderrHandle: WriteStream | undefined;
 
     try {
+      const fileFlags = options.fileAppend === true ? 'a' : 'w';
       if (options.stdoutFilePath !== undefined) {
-        stdoutHandle = createWriteStream(options.stdoutFilePath, { flags: 'w', mode: 0o600 });
+        stdoutHandle = createWriteStream(options.stdoutFilePath, { flags: fileFlags, mode: 0o600 });
       }
       if (options.stderrFilePath !== undefined) {
-        stderrHandle = createWriteStream(options.stderrFilePath, { flags: 'w', mode: 0o600 });
+        stderrHandle = createWriteStream(options.stderrFilePath, { flags: fileFlags, mode: 0o600 });
       }
     } catch {
       // Evidence finalization fails closed if a stream cannot be created.
@@ -556,6 +563,40 @@ const sessionIdsFrom = (stdout: string): string[] | undefined => {
   } catch {
     return undefined;
   }
+};
+
+const uniqueSessionIdFrom = (stdout: string): string | undefined => {
+  const sessionIds = new Set<string>();
+  for (const line of stdout.split(/\r?\n/).filter((value) => value.length > 0)) {
+    let event: unknown;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      return undefined;
+    }
+    const decoded = Schema.decodeUnknownOption(OpenCodeSessionEvent)(event);
+    if (Option.isSome(decoded)) sessionIds.add(decoded.value.sessionID);
+  }
+  return sessionIds.size === 1 ? [...sessionIds][0] : undefined;
+};
+
+const mergedAgentResult = (
+  first: RunnerProcessResult,
+  reminder: RunnerProcessResult,
+): RunnerProcessResult => {
+  const stdout = first.stdout + reminder.stdout;
+  return {
+    exitCode: reminder.exitCode === 0 ? first.exitCode : reminder.exitCode,
+    stdout,
+    stderr: (first.stderr ?? '') + (reminder.stderr ?? ''),
+    stderrTruncated: first.stderrTruncated === true || reminder.stderrTruncated === true,
+    streamError: first.streamError === true || reminder.streamError === true,
+    timedOut: first.timedOut || reminder.timedOut,
+    truncated:
+      first.truncated ||
+      reminder.truncated ||
+      new TextEncoder().encode(stdout).byteLength > MAX_AGENT_OUTPUT_BYTES,
+  };
 };
 
 const networkPolicyRulesFrom = (
@@ -1408,6 +1449,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
     let executionCause: RunnerFailureCauseValue | undefined;
     let result: RunnerJobState['result'];
     let agent: RunnerProcessResult | undefined;
+    let agentParsed: ParsedAgentResult | undefined;
     const evidenceId = job.state.evidenceId ?? job.id;
     const evidencePath = join(evidenceRoot, evidenceId);
     let evidenceStartedAt: string | undefined;
@@ -1645,6 +1687,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         return;
       }
       update(job, { stage: 'agent' });
+      const agentBudgetDeadline = (await currentEpochMillis()) + REVIEW_ATTEMPT_BUDGET_MS;
       agent = await runTracked(
         job,
         sbxPath,
@@ -1676,6 +1719,55 @@ export const createRunner = (options: RunnerOptions = {}) => {
           stderrFilePath: join(evidencePath, 'opencode.stderr'),
         },
       );
+      if (
+        !job.abortRequested &&
+        agent.exitCode === 0 &&
+        !agent.timedOut &&
+        !agent.truncated &&
+        agent.streamError !== true &&
+        parseResult(agent.stdout).cause === 'zero-results'
+      ) {
+        const sessionId = uniqueSessionIdFrom(agent.stdout);
+        const remaining = agentBudgetDeadline - (await currentEpochMillis());
+        if (sessionId !== undefined && remaining > 0) {
+          const reminder = await runTracked(
+            job,
+            sbxPath,
+            [
+              'exec',
+              job.sandboxName,
+              'opencode',
+              'run',
+              '--session',
+              sessionId,
+              '--format',
+              'json',
+              '--model',
+              modelId,
+              '--agent',
+              'review',
+              submitReminderPrompt,
+            ],
+            {
+              captureStdout: true,
+              captureStderr: true,
+              maxBytes: MAX_AGENT_OUTPUT_BYTES,
+              timeoutMs: Math.min(SUBMIT_REMINDER_BUDGET_MS, remaining),
+              stdoutFilePath: join(evidencePath, 'opencode.jsonl'),
+              stderrFilePath: join(evidencePath, 'opencode.stderr'),
+              fileAppend: true,
+            },
+          );
+          const reminderParsed = parseResult(reminder.stdout);
+          agentParsed =
+            reminderParsed.cause !== undefined
+              ? reminderParsed
+              : uniqueSessionIdFrom(reminder.stdout) === sessionId
+                ? reminderParsed
+                : { cause: 'zero-results' };
+          agent = mergedAgentResult(agent, reminder);
+        }
+      }
     } catch {
       failure = { reason: 'agent' };
     } finally {
@@ -1714,7 +1806,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
           executionCause = 'output-truncated';
           failure = { reason: 'invalid-output', cause: executionCause };
         } else {
-          const parsed = parseResult(agent.stdout);
+          const parsed = agentParsed ?? parseResult(agent.stdout);
           if (parsed.cause !== undefined) {
             executionCause = parsed.cause;
             failure = { reason: 'invalid-output', cause: executionCause };

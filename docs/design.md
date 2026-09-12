@@ -112,9 +112,13 @@ packaged `submit_review` custom tool. The Runner validates the JSONL transport,
 requires exactly one completed submission plus a `step_finish` event with
 reason `stop`, and accepts the tool's exact `state.input.markdown` value.
 Terminal assistant prose remains raw evidence and is never a product result.
-Malformed JSONL, explicit agent errors, oversized output, a missing or errored
-submission, duplicate submissions, a missing terminal stop, or invalid review
-Markdown fail closed.
+If the agent stops normally without a submission, the Runner may send one
+explicit submission reminder in the same Sandbox and OpenCode session. The
+reminder asks it to submit its existing analysis without reviewing again.
+Both turns remain in the retained evidence. A missing submission after that
+reminder, malformed JSONL, explicit agent errors, oversized output, errored or
+duplicate submissions, a missing terminal stop, and invalid review Markdown
+fail closed. These other failures do not trigger a submission reminder.
 
 Core accepts the submitted, size-bounded Markdown body beginning with
 `## Review:` only after confirming that the run still targets the pull
@@ -248,8 +252,11 @@ The Runner polls only while idle and starts at most one active Job; it asks
 for the next Job only after terminal cleanup/callback. A fresh Runner process
 may claim a later unclaimed row even when an abandoned scheduled row retains a
 Job id.
-The shared review policy gives each Runner attempt a 30-minute agent timeout and
-treats a failed Review Attempt as terminal: there is one attempt and no retry.
+The shared review policy gives each Runner attempt a 30-minute agent budget and
+treats a failed Review Attempt as terminal: there is one attempt and no fresh
+attempt after failure. The optional same-session submission reminder uses at
+most two minutes of the remaining agent budget and is skipped when that budget
+is exhausted or the Job is aborted. It creates no new checkout or Sandbox.
 The Runner has one fixed finite execution ceiling for hang prevention. Callback
 transport gives each request its own timeout and may make one immediate retry
 of the same result; local evidence stays available when both deliveries fail.
