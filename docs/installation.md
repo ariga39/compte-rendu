@@ -492,9 +492,21 @@ For a model already in the bundled catalog, supply only `id`.
 Change this JSON in the Runner's service environment and restart the Runner to
 switch models; a source change, rebuild, or Worker deployment is unnecessary.
 The selected ID is used consistently by OpenCode and the evidence manifest.
-The provider endpoint, credential resolver, network policy, and review
-permissions remain fixed by the Runner. Missing or invalid model configuration
-prevents queue claims and returns `503` for authenticated Job admission.
+Missing or invalid model configuration prevents queue claims and returns `503`
+for authenticated Job admission.
+
+To use a gateway compatible with the selected `opencode-go` model, add an
+optional `baseUrl`, for example `"baseUrl": "https://model.example.com/v1"`.
+It must be an absolute HTTPS URL without embedded credentials, a query, or a
+fragment. When omitted, OpenCode uses the official provider endpoint. The
+Runner uses the configured URL for OpenCode's `options.baseURL`, scopes the
+Docker credential proxy to its hostname, and allows model traffic only to its
+host and port (443 by default). Cleanup removes that Job's exact network rule.
+
+Set `MODEL_SECRET_COMMAND` to a host resolver for the API key belonging to that
+gateway, then restart the Runner with both settings applied. Keep the key out
+of `REVIEW_MODEL_CONFIG`; the Sandbox receives only Docker's placeholder, and
+the host proxy supplies the credential. Review permissions remain unchanged.
 
 The Runner derives its claim URL by resolving `/runner-claim` on the same
 origin as `RUNNER_CALLBACK_URL`; no separate claim URL environment variable is
