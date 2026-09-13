@@ -1006,18 +1006,23 @@ const startCheckSetup = Effect.fn('startCheckSetup')(function* (
   yield* Effect.sync(() => defer(Effect.runPromise(task)));
 });
 
+interface AdmissionDependencies {
+  readonly github: GitHubAdapter;
+  readonly stateStore: ReviewCompletionStateStore;
+  readonly scheduler: ReviewScheduler;
+  readonly log?: OperationalLog;
+  readonly deferCheckSetup?: ReviewCheckSetupDefer;
+  readonly lifecycleLog?: CoreLifecycleLog;
+}
+
 const claimAndSchedule = (
-  github: GitHubAdapter,
-  stateStore: ReviewCompletionStateStore,
-  scheduler: ReviewScheduler,
+  dependencies: AdmissionDependencies,
   deliveryId: string,
   job: ReviewJob,
   approval?: ReviewApproval,
-  log?: OperationalLog,
-  deferCheckSetup?: ReviewCheckSetupDefer,
-  lifecycleLog?: CoreLifecycleLog,
 ) =>
   Effect.gen(function* () {
+    const { github, stateStore, scheduler, log, deferCheckSetup, lifecycleLog } = dependencies;
     const occurredAt = yield* currentIso;
     const claim = yield* Effect.tryPromise({
       try: () =>
@@ -1183,62 +1188,6 @@ const recordDelivery = (stateStore: ReviewStateStore, input: ReviewDeliveryRecor
   });
 };
 
-const createAutomaticCoordinator = (
-  github: GitHubAdapter,
-  stateStore: ReviewCompletionStateStore,
-  scheduler: ReviewScheduler,
-  log?: OperationalLog,
-  deferCheckSetup?: ReviewCheckSetupDefer,
-  lifecycleLog?: CoreLifecycleLog,
-) =>
-  Effect.fn('handleAutomaticReviewEvent')(function* (
-    event: Extract<ReviewEvent, { event: 'pull_request' }>,
-  ) {
-    if (event.draft) {
-      const occurredAt = yield* currentIso;
-      yield* recordDelivery(stateStore, {
-        deliveryId: event.deliveryId,
-        installationId: event.installationId,
-        repositoryId: event.repositoryId,
-        pullRequestNumber: event.pullRequestNumber,
-        baseSha: event.baseSha,
-        headSha: event.headSha,
-        trigger: 'automatic',
-        status: 'ignored',
-        occurredAt,
-      });
-      return 'ignored' as const;
-    }
-
-    if (!isAutomaticEligible(event)) {
-      const occurredAt = yield* currentIso;
-      yield* recordDelivery(stateStore, {
-        deliveryId: event.deliveryId,
-        installationId: event.installationId,
-        repositoryId: event.repositoryId,
-        pullRequestNumber: event.pullRequestNumber,
-        baseSha: event.baseSha,
-        headSha: event.headSha,
-        trigger: 'automatic',
-        status: 'awaiting approval',
-        occurredAt,
-      });
-      return 'awaiting approval' as const;
-    }
-
-    return yield* claimAndSchedule(
-      github,
-      stateStore,
-      scheduler,
-      event.deliveryId,
-      jobForEvent(event, 'automatic'),
-      undefined,
-      log,
-      deferCheckSetup,
-      lifecycleLog,
-    );
-  });
-
 type ManualRead<T> =
   | { readonly kind: 'value'; readonly value: T }
   | { readonly kind: 'missing' }
@@ -1331,15 +1280,81 @@ const jobForManualFacts = (intent: ManualIntent, facts: PullRequestFactsType): R
   ...(intent.commentId === undefined ? {} : { commentId: intent.commentId }),
 });
 
-const handleManualIntent = (
+const SuiteCheckRunCandidates = Schema.Struct({
+  candidates: Schema.Array(
+    Schema.Struct({
+      id: Schema.Int,
+      externalId: Schema.NullOr(Schema.NonEmptyString),
+    }),
+  ),
+});
+
+const lookupSuiteCheckCandidates = Effect.fn('lookupSuiteCheckCandidates')(function* (
   github: GitHubAdapter,
-  stateStore: ReviewCompletionStateStore,
-  scheduler: ReviewScheduler,
-  log?: OperationalLog,
-  deferCheckSetup?: ReviewCheckSetupDefer,
-  lifecycleLog?: CoreLifecycleLog,
-) =>
-  Effect.fn('handleManualIntent')(function* (intent: ManualIntent) {
+  input: {
+    readonly repositoryId: number;
+    readonly installationId: number;
+    readonly checkSuiteId: number;
+  },
+) {
+  if (github.findCheckRunForSuite === undefined) {
+    return yield* new SchedulingFailed({ message: 'Check suite lookup is uncertain' });
+  }
+  return yield* Effect.tryPromise({
+    try: async () =>
+      Schema.decodeUnknownPromise(SuiteCheckRunCandidates)(
+        await github.findCheckRunForSuite!({
+          repositoryId: input.repositoryId,
+          installationId: input.installationId,
+          checkSuiteId: input.checkSuiteId,
+        }),
+      ),
+    catch: () => new SchedulingFailed({ message: 'Check suite lookup is uncertain' }),
+  });
+});
+
+const createReviewEventHandler = (dependencies: AdmissionDependencies) => {
+  const { github, stateStore, log } = dependencies;
+
+  const handleAutomaticEvent = Effect.fn('handleAutomaticReviewEvent')(function* (
+    event: Extract<ReviewEvent, { event: 'pull_request' }>,
+  ) {
+    if (event.draft) {
+      const occurredAt = yield* currentIso;
+      yield* recordDelivery(stateStore, {
+        deliveryId: event.deliveryId,
+        installationId: event.installationId,
+        repositoryId: event.repositoryId,
+        pullRequestNumber: event.pullRequestNumber,
+        baseSha: event.baseSha,
+        headSha: event.headSha,
+        trigger: 'automatic',
+        status: 'ignored',
+        occurredAt,
+      });
+      return 'ignored' as const;
+    }
+
+    if (!isAutomaticEligible(event)) {
+      const occurredAt = yield* currentIso;
+      yield* recordDelivery(stateStore, {
+        deliveryId: event.deliveryId,
+        installationId: event.installationId,
+        repositoryId: event.repositoryId,
+        pullRequestNumber: event.pullRequestNumber,
+        baseSha: event.baseSha,
+        headSha: event.headSha,
+        trigger: 'automatic',
+        status: 'awaiting approval',
+        occurredAt,
+      });
+      return 'awaiting approval' as const;
+    }
+
+    return yield* claimAndSchedule(dependencies, event.deliveryId, jobForEvent(event, 'automatic'));
+  });
+
+  const handleManualIntent = Effect.fn('handleManualIntent')(function* (intent: ManualIntent) {
     const factsRead = yield* Effect.tryPromise({
       try: () => loadPullRequestWithRetry(github, intent),
       catch: () => new SchedulingFailed({ message: 'Pull request facts are uncertain' }),
@@ -1398,9 +1413,7 @@ const handleManualIntent = (
     }
 
     const disposition = yield* claimAndSchedule(
-      github,
-      stateStore,
-      scheduler,
+      dependencies,
       intent.deliveryId,
       jobForManualFacts(intent, facts),
       {
@@ -1410,9 +1423,6 @@ const handleManualIntent = (
         baseSha: facts.baseSha,
         headSha: facts.headSha,
       },
-      log,
-      deferCheckSetup,
-      lifecycleLog,
     );
 
     if (disposition === 'scheduled') yield* writeManualReaction(github, intent, 'eyes');
@@ -1420,276 +1430,109 @@ const handleManualIntent = (
     return disposition;
   });
 
-const createManualCoordinator = (
-  github: GitHubAdapter,
-  stateStore: ReviewCompletionStateStore,
-  scheduler: ReviewScheduler,
-  log?: OperationalLog,
-  deferCheckSetup?: ReviewCheckSetupDefer,
-  lifecycleLog?: CoreLifecycleLog,
-) =>
-  Effect.fn('handleManualReviewEvent')(function* (
-    event: Extract<ReviewEvent, { event: 'issue_comment' }>,
+  const handleCheckEvent = Effect.fn('handleCheckRerequest')(function* (
+    event: Extract<ReviewEvent, { event: 'check_run' | 'check_suite' }>,
   ) {
-    return yield* handleManualIntent(
-      github,
-      stateStore,
-      scheduler,
-      log,
-      deferCheckSetup,
-      lifecycleLog,
-    )({
-      deliveryId: event.deliveryId,
-      repositoryId: event.repositoryId,
-      pullRequestNumber: event.pullRequestNumber,
-      installationId: event.installationId,
-      senderLogin: event.commenterLogin,
-      commentId: event.commentId,
-    });
-  });
+    let checkRunId: number;
+    let externalRunId: string;
+    if (event.event === 'check_run') {
+      if (event.externalRunId === null) return 'ignored' as const;
+      checkRunId = event.checkRunId;
+      externalRunId = event.externalRunId;
+    } else {
+      const resolved = yield* lookupSuiteCheckCandidates(github, {
+        repositoryId: event.repositoryId,
+        installationId: event.installationId,
+        checkSuiteId: event.checkSuiteId,
+      }).pipe(
+        Effect.catchTag('SchedulingFailed', (error) =>
+          Effect.gen(function* () {
+            yield* recordOperationalLog(log, {
+              phase: 'core',
+              outcome: 'retryable',
+              deliveryId: event.deliveryId,
+              reason: 'check_lookup_uncertain',
+            });
+            return yield* Effect.fail(error);
+          }),
+        ),
+      );
+      const candidates = resolved.candidates.filter(
+        (candidate): candidate is { id: number; externalId: string } =>
+          candidate.externalId !== null,
+      );
+      if (candidates.length !== 1) return 'ignored' as const;
+      checkRunId = candidates[0]!.id;
+      externalRunId = candidates[0]!.externalId;
+    }
 
-const SuiteCheckRunCandidates = Schema.Struct({
-  candidates: Schema.Array(
-    Schema.Struct({
-      id: Schema.Int,
-      externalId: Schema.NullOr(Schema.NonEmptyString),
-    }),
-  ),
-});
-
-const verifyFailedCheckOwnership = Effect.fn('verifyFailedCheckOwnership')(function* (
-  stateStore: ReviewCompletionStateStore,
-  log: OperationalLog | undefined,
-  input: {
-    readonly deliveryId: string;
-    readonly repositoryId: number;
-    readonly installationId: number;
-    readonly checkRunId: number;
-    readonly externalRunId: string;
-  },
-) {
-  if (stateStore.getRunOutcome === undefined) {
-    yield* recordOperationalLog(log, {
-      phase: 'core',
-      outcome: 'retryable',
-      deliveryId: input.deliveryId,
-      reason: 'state_failure',
-    });
-    return yield* new SchedulingFailed({ message: 'Check ownership is uncertain' });
-  }
-  const outcome = yield* Effect.tryPromise({
-    try: () => stateStore.getRunOutcome!(input.externalRunId),
-    catch: () => new SchedulingFailed({ message: 'Check ownership is uncertain' }),
-  }).pipe(
-    Effect.catchTag('SchedulingFailed', (error) =>
-      Effect.gen(function* () {
-        yield* recordOperationalLog(log, {
-          phase: 'core',
-          outcome: 'retryable',
-          deliveryId: input.deliveryId,
-          reason: 'state_failure',
-        });
-        return yield* Effect.fail(error);
-      }),
-    ),
-  );
-  if (
-    outcome === undefined ||
-    outcome.checkRunId !== input.checkRunId ||
-    outcome.repositoryId !== input.repositoryId ||
-    outcome.installationId !== input.installationId ||
-    outcome.status !== 'failed'
-  ) {
-    return undefined;
-  }
-  return outcome;
-});
-
-const handleResolvedCheckRerequest = (
-  github: GitHubAdapter,
-  stateStore: ReviewCompletionStateStore,
-  scheduler: ReviewScheduler,
-  log?: OperationalLog,
-  deferCheckSetup?: ReviewCheckSetupDefer,
-  lifecycleLog?: CoreLifecycleLog,
-) =>
-  Effect.fn('handleResolvedCheckRerequest')(function* (input: {
-    readonly deliveryId: string;
-    readonly repositoryId: number;
-    readonly installationId: number;
-    readonly senderLogin: string;
-    readonly checkRunId: number;
-    readonly externalRunId: string;
-  }) {
-    const outcome = yield* verifyFailedCheckOwnership(stateStore, log, input);
-    if (outcome === undefined) return 'ignored' as const;
-    return yield* handleManualIntent(
-      github,
-      stateStore,
-      scheduler,
-      log,
-      deferCheckSetup,
-      lifecycleLog,
-    )({
-      deliveryId: input.deliveryId,
-      repositoryId: input.repositoryId,
-      pullRequestNumber: outcome.pullRequestNumber,
-      installationId: input.installationId,
-      senderLogin: input.senderLogin,
-    });
-  });
-
-const createCheckRunCoordinator = (
-  github: GitHubAdapter,
-  stateStore: ReviewCompletionStateStore,
-  scheduler: ReviewScheduler,
-  log?: OperationalLog,
-  deferCheckSetup?: ReviewCheckSetupDefer,
-  lifecycleLog?: CoreLifecycleLog,
-) =>
-  Effect.fn('handleCheckRunRerequest')(function* (
-    event: Extract<ReviewEvent, { event: 'check_run' }>,
-  ) {
-    if (event.externalRunId === null) return 'ignored' as const;
-    return yield* handleResolvedCheckRerequest(
-      github,
-      stateStore,
-      scheduler,
-      log,
-      deferCheckSetup,
-      lifecycleLog,
-    )({
-      deliveryId: event.deliveryId,
-      repositoryId: event.repositoryId,
-      installationId: event.installationId,
-      senderLogin: event.senderLogin,
-      checkRunId: event.checkRunId,
-      externalRunId: event.externalRunId,
-    });
-  });
-
-const createCheckSuiteCoordinator = (
-  github: GitHubAdapter,
-  stateStore: ReviewCompletionStateStore,
-  scheduler: ReviewScheduler,
-  log?: OperationalLog,
-  deferCheckSetup?: ReviewCheckSetupDefer,
-  lifecycleLog?: CoreLifecycleLog,
-) =>
-  Effect.fn('handleCheckSuiteRerequest')(function* (
-    event: Extract<ReviewEvent, { event: 'check_suite' }>,
-  ) {
-    if (github.findCheckRunForSuite === undefined) {
+    if (stateStore.getRunOutcome === undefined) {
       yield* recordOperationalLog(log, {
         phase: 'core',
         outcome: 'retryable',
         deliveryId: event.deliveryId,
-        reason: 'check_lookup_uncertain',
+        reason: 'state_failure',
       });
-      return yield* new SchedulingFailed({ message: 'Check suite lookup is uncertain' });
+      return yield* new SchedulingFailed({ message: 'Check ownership is uncertain' });
     }
-    const raw = yield* Effect.tryPromise({
-      try: () =>
-        github.findCheckRunForSuite!({
-          repositoryId: event.repositoryId,
-          installationId: event.installationId,
-          checkSuiteId: event.checkSuiteId,
+    const outcome = yield* Effect.tryPromise({
+      try: () => stateStore.getRunOutcome!(externalRunId),
+      catch: () => new SchedulingFailed({ message: 'Check ownership is uncertain' }),
+    }).pipe(
+      Effect.catchTag('SchedulingFailed', (error) =>
+        Effect.gen(function* () {
+          yield* recordOperationalLog(log, {
+            phase: 'core',
+            outcome: 'retryable',
+            deliveryId: event.deliveryId,
+            reason: 'state_failure',
+          });
+          return yield* Effect.fail(error);
         }),
-      catch: () => undefined,
-    }).pipe(Effect.catch(() => Effect.succeed(undefined)));
-    const resolved =
-      raw === undefined
-        ? undefined
-        : yield* Schema.decodeUnknownEffect(SuiteCheckRunCandidates)(raw).pipe(
-            Effect.catch(() => Effect.succeed(undefined)),
-          );
-    if (resolved === undefined) {
-      yield* recordOperationalLog(log, {
-        phase: 'core',
-        outcome: 'retryable',
-        deliveryId: event.deliveryId,
-        reason: 'check_lookup_uncertain',
-      });
-      return yield* new SchedulingFailed({ message: 'Check suite lookup is uncertain' });
-    }
-    const candidates = resolved.candidates.filter(
-      (candidate): candidate is { id: number; externalId: string } => candidate.externalId !== null,
+      ),
     );
-    if (candidates.length !== 1) return 'ignored' as const;
-    const candidate = candidates[0]!;
-    return yield* handleResolvedCheckRerequest(
-      github,
-      stateStore,
-      scheduler,
-      log,
-      deferCheckSetup,
-      lifecycleLog,
-    )({
+    if (
+      outcome === undefined ||
+      outcome.checkRunId !== checkRunId ||
+      outcome.repositoryId !== event.repositoryId ||
+      outcome.installationId !== event.installationId ||
+      outcome.status !== 'failed'
+    ) {
+      return 'ignored' as const;
+    }
+
+    return yield* handleManualIntent({
       deliveryId: event.deliveryId,
       repositoryId: event.repositoryId,
+      pullRequestNumber: outcome.pullRequestNumber,
       installationId: event.installationId,
       senderLogin: event.senderLogin,
-      checkRunId: candidate.id,
-      externalRunId: candidate.externalId,
     });
   });
 
-const reviewEventEffect = (
-  event: unknown,
-  github: GitHubAdapter,
-  stateStore: ReviewStateStore,
-  scheduler: ReviewScheduler,
-  log?: OperationalLog,
-  deferCheckSetup?: ReviewCheckSetupDefer,
-  lifecycleLog?: CoreLifecycleLog,
-) =>
-  Effect.gen(function* () {
+  return Effect.fn('handleReviewEvent')(function* (event: unknown) {
     const decoded = yield* Schema.decodeUnknownEffect(ReviewEvent)(event).pipe(
       Effect.mapError(() => new InvalidReviewEvent({ message: 'Review event is invalid' })),
     );
 
     if (decoded.event === 'pull_request') {
-      return yield* createAutomaticCoordinator(
-        github,
-        stateStore,
-        scheduler,
-        log,
-        deferCheckSetup,
-        lifecycleLog,
-      )(decoded);
+      return yield* handleAutomaticEvent(decoded);
     }
 
-    if (decoded.event === 'check_run') {
-      return yield* createCheckRunCoordinator(
-        github,
-        stateStore,
-        scheduler,
-        log,
-        deferCheckSetup,
-        lifecycleLog,
-      )(decoded);
+    if (decoded.event === 'check_run' || decoded.event === 'check_suite') {
+      return yield* handleCheckEvent(decoded);
     }
 
-    if (decoded.event === 'check_suite') {
-      return yield* createCheckSuiteCoordinator(
-        github,
-        stateStore,
-        scheduler,
-        log,
-        deferCheckSetup,
-        lifecycleLog,
-      )(decoded);
-    }
-
-    return yield* createManualCoordinator(
-      github,
-      stateStore,
-      scheduler,
-      log,
-      deferCheckSetup,
-      lifecycleLog,
-    )(decoded);
+    return yield* handleManualIntent({
+      deliveryId: decoded.deliveryId,
+      repositoryId: decoded.repositoryId,
+      pullRequestNumber: decoded.pullRequestNumber,
+      installationId: decoded.installationId,
+      senderLogin: decoded.commenterLogin,
+      commentId: decoded.commentId,
+    });
   });
+};
 
 export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore => {
   const deliveries = new Map<string, ReviewOutcome>();
@@ -2041,27 +1884,11 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
   };
 };
 
-export function createReviewCoordinator(dependencies: {
-  github: GitHubAdapter;
-  stateStore: ReviewCompletionStateStore;
-  scheduler: ReviewScheduler;
-  log?: OperationalLog;
-  deferCheckSetup?: ReviewCheckSetupDefer;
-  lifecycleLog?: CoreLifecycleLog;
-}): ReviewCoordinator {
+export function createReviewCoordinator(dependencies: AdmissionDependencies): ReviewCoordinator {
+  const handleReviewEvent = createReviewEventHandler(dependencies);
   return {
     handleReviewEvent: async (event) =>
-      Effect.runPromise(
-        reviewEventEffect(
-          event,
-          dependencies.github,
-          dependencies.stateStore,
-          dependencies.scheduler,
-          dependencies.log,
-          dependencies.deferCheckSetup,
-          dependencies.lifecycleLog,
-        ),
-      ).catch((error) => {
+      Effect.runPromise(handleReviewEvent(event)).catch((error) => {
         if (error instanceof InvalidReviewEvent) {
           return 'ignored' as const;
         }
