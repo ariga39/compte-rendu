@@ -424,7 +424,8 @@ const processWebhook = (request: Request, dependencies: IngressDependencies) =>
       return yield* forwardEvent(normalizeIssueComment(deliveryId, payload), dependencies);
     }
 
-    if (request.headers.get('x-github-event') === 'check_run') {
+    const githubEvent = request.headers.get('x-github-event');
+    if (githubEvent === 'check_run' || githubEvent === 'check_suite') {
       if (action.action !== 'rerequested') {
         yield* recordOperationalLog(dependencies.log ?? createCloudflareOperationalLog(), {
           phase: 'ingress',
@@ -432,7 +433,7 @@ const processWebhook = (request: Request, dependencies: IngressDependencies) =>
           deliveryId: sanitizeOperationalLogIdentifier(
             request.headers.get('x-github-delivery') ?? '',
           ),
-          event: 'check_run',
+          event: githubEvent,
           reason: 'unsupported_action',
         });
         return 'ignored' as const;
@@ -441,48 +442,33 @@ const processWebhook = (request: Request, dependencies: IngressDependencies) =>
       const deliveryId = yield* Schema.decodeUnknownEffect(Schema.NonEmptyString)(
         request.headers.get('x-github-delivery'),
       ).pipe(Effect.mapError(() => invalidWebhook('Webhook delivery id is missing')));
-      const payload = yield* Schema.decodeUnknownEffect(CheckRunRerequestWebhook)(decodedJson).pipe(
-        Effect.mapError(() => invalidWebhook('Check run webhook is malformed')),
-      );
-      if (
-        !(yield* checkInstallation(deliveryId, 'check_run', payload.installation.id, dependencies))
-      ) {
-        return 'ignored' as const;
-      }
-      return yield* forwardEvent(normalizeCheckRunRerequest(deliveryId, payload), dependencies);
-    }
 
-    if (request.headers.get('x-github-event') === 'check_suite') {
-      if (action.action !== 'rerequested') {
-        yield* recordOperationalLog(dependencies.log ?? createCloudflareOperationalLog(), {
-          phase: 'ingress',
-          outcome: 'ignored',
-          deliveryId: sanitizeOperationalLogIdentifier(
-            request.headers.get('x-github-delivery') ?? '',
-          ),
-          event: 'check_suite',
-          reason: 'unsupported_action',
-        });
-        return 'ignored' as const;
-      }
+      const normalized =
+        githubEvent === 'check_run'
+          ? normalizeCheckRunRerequest(
+              deliveryId,
+              yield* Schema.decodeUnknownEffect(CheckRunRerequestWebhook)(decodedJson).pipe(
+                Effect.mapError(() => invalidWebhook('Check run webhook is malformed')),
+              ),
+            )
+          : normalizeCheckSuiteRerequest(
+              deliveryId,
+              yield* Schema.decodeUnknownEffect(CheckSuiteRerequestWebhook)(decodedJson).pipe(
+                Effect.mapError(() => invalidWebhook('Check suite webhook is malformed')),
+              ),
+            );
 
-      const deliveryId = yield* Schema.decodeUnknownEffect(Schema.NonEmptyString)(
-        request.headers.get('x-github-delivery'),
-      ).pipe(Effect.mapError(() => invalidWebhook('Webhook delivery id is missing')));
-      const payload = yield* Schema.decodeUnknownEffect(CheckSuiteRerequestWebhook)(
-        decodedJson,
-      ).pipe(Effect.mapError(() => invalidWebhook('Check suite webhook is malformed')));
       if (
         !(yield* checkInstallation(
           deliveryId,
-          'check_suite',
-          payload.installation.id,
+          githubEvent,
+          normalized.installationId,
           dependencies,
         ))
       ) {
         return 'ignored' as const;
       }
-      return yield* forwardEvent(normalizeCheckSuiteRerequest(deliveryId, payload), dependencies);
+      return yield* forwardEvent(normalized, dependencies);
     }
 
     return 'ignored' as const;
