@@ -1025,7 +1025,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         '--no-recurse-submodules',
         'origin',
         `+${job.input.baseSha}:refs/remotes/origin/review-base`,
-        `+refs/pull/${job.input.pullRequestNumber}/head:refs/remotes/origin/review-head`,
+        `+${job.input.headSha}:refs/remotes/origin/review-head`,
       ],
       { env },
       { stage: 'checkout', command: 'fetch' },
