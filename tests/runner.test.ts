@@ -3078,7 +3078,7 @@ describe('Runner Job HTTP interface', () => {
     expect(fetchArgs).toEqual(
       expect.arrayContaining([
         `+${baseSha}:refs/remotes/origin/review-base`,
-        `+refs/pull/42/head:refs/remotes/origin/review-head`,
+        `+${headSha}:refs/remotes/origin/review-head`,
       ]),
     );
     expect(createArgs).toContain(configRootAtSandboxBoundary);
@@ -4088,6 +4088,81 @@ describe('Runner Job HTTP interface', () => {
     expect(duplicateState).toEqual(firstState);
     expect(retryState.attempt).toBe(2);
     expect(retryState.id).not.toBe(firstState.id);
+  });
+
+  it('fetches the exact admitted head SHA instead of a stale mutable pull request ref', async () => {
+    const baseSha = '1111111111111111111111111111111111111111';
+    const headSha = '2222222222222222222222222222222222222222';
+    const stalePullRequestHead = '8fb71a5da668f89beff853e7b8899a689a6b2401';
+    const resultLine = finalMarkdownJsonl();
+    let fetchArgs: readonly string[] | undefined;
+    let simulatedReviewHead = stalePullRequestHead;
+    const runner = createRunner({
+      evidenceRoot: sharedEvidenceRoot,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'model-secret-resolver',
+      process: async (_command, args, options = {}) => {
+        await writeEvidenceFixture(args, options, resultLine);
+        if (_command === 'git' && args.includes('clone')) {
+          await mkdir(args[args.length - 1], { recursive: true, mode: 0o700 });
+        }
+        if (_command === 'git' && args.includes('fetch')) {
+          fetchArgs = args;
+          const reviewHeadRefspec = args.find((value) =>
+            value.endsWith(':refs/remotes/origin/review-head'),
+          );
+          const source = reviewHeadRefspec?.replace(/^\+/, '').split(':')[0];
+          simulatedReviewHead = source === headSha ? headSha : stalePullRequestHead;
+        }
+        return {
+          exitCode: 0,
+          stdout: args.includes('rev-parse')
+            ? `${baseSha}\n${simulatedReviewHead}\n`
+            : args.includes('session')
+              ? '[{"id":"fixture-session"}]\n'
+              : args.includes('export')
+                ? ''
+                : options.captureStdout === true
+                  ? `${resultLine}\n`
+                  : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
+    });
+
+    const submitted = await runner.handle(
+      new Request('http://runner/jobs', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer runner-test-token',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          ...runnerJobFields,
+          runId: 'run-checkout-stale-pull-ref',
+          attempt: 1,
+          repositoryUrl: 'https://github.com/acme/reviewed.git',
+          baseSha,
+          headSha,
+          repositoryReadToken: 'checkout-token-for-test',
+        }),
+      }),
+    );
+    const { id } = (await submitted.json()) as { id: string };
+
+    const terminal = await waitForTerminal(runner, id);
+    expect(terminal).toMatchObject({
+      status: 'succeeded',
+      sandbox: { cleanup: 'destroyed' },
+    });
+    expect(fetchArgs).toEqual(
+      expect.arrayContaining([
+        `+${baseSha}:refs/remotes/origin/review-base`,
+        `+${headSha}:refs/remotes/origin/review-head`,
+      ]),
+    );
+    expect(fetchArgs).not.toContain(`+refs/pull/42/head:refs/remotes/origin/review-head`);
   });
 
   it('fails before the agent when checkout reports the wrong immutable head SHA', async () => {
