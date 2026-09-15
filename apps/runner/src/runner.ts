@@ -1594,7 +1594,8 @@ export const createRunner = (options: RunnerOptions = {}) => {
         { stage: 'sandbox', command: 'create', includeStderr: true },
       );
       if (create.exitCode !== 0 || create.timedOut) {
-        failure = { reason: 'agent' };
+        executionCause = create.timedOut ? 'timeout' : 'process-exit';
+        failure = { reason: 'agent', cause: executionCause };
         return;
       }
       job.sandboxCreated = true;
