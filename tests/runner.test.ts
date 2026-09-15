@@ -279,6 +279,8 @@ const runAgentScenario = async (scenario: {
   truncated?: boolean;
   stderrTruncated?: boolean;
   cleanupFailure?: boolean;
+  create?: { readonly exitCode?: number; readonly timedOut?: boolean };
+  sandboxRemovalFailure?: boolean;
   callbackRequests?: Request[];
   callbackStatuses?: readonly number[];
   callbackHangs?: boolean;
@@ -329,12 +331,17 @@ const runAgentScenario = async (scenario: {
         agentInvoked = true;
         agentArgs = args;
       }
+      const isCreate = args[0] === 'create';
+      const isSandboxRemoval = args[0] === 'rm' && args[1] === '--force';
       return {
         exitCode: isAgent
           ? (scenario.exitCode ?? 0)
-          : scenario.cleanupFailure && args[0] === 'policy' && args[1] === 'rm'
-            ? 1
-            : 0,
+          : isCreate && scenario.create !== undefined
+            ? (scenario.create.exitCode ?? 1)
+            : (scenario.cleanupFailure && args[0] === 'policy' && args[1] === 'rm') ||
+                (scenario.sandboxRemovalFailure === true && isSandboxRemoval)
+              ? 1
+              : 0,
         stdout: args.includes('rev-parse')
           ? `${baseSha}\n${headSha}\n`
           : args.includes('session')
@@ -345,7 +352,11 @@ const runAgentScenario = async (scenario: {
                 ? `${scenario.output}\n`
                 : '',
         stderrTruncated: isAgent ? scenario.stderrTruncated : undefined,
-        timedOut: isAgent ? (scenario.timedOut ?? false) : false,
+        timedOut: isAgent
+          ? (scenario.timedOut ?? false)
+          : isCreate && scenario.create !== undefined
+            ? (scenario.create.timedOut ?? false)
+            : false,
         truncated: isAgent ? (scenario.truncated ?? false) : false,
       };
     },
@@ -1717,6 +1728,55 @@ describe('Runner Job HTTP interface', () => {
       terminal: { status: 'failed', reason: 'cleanup', cause: 'malformed-jsonl' },
     });
   });
+
+  it.each([
+    ['exits nonzero', { exitCode: 1 }, 'process-exit'],
+    ['times out', { timedOut: true }, 'timeout'],
+  ] as const)(
+    'retains the failed Sandbox create cause when create %s',
+    async (_case, create, cause) => {
+      const { terminal, manifest } = await runAgentScenario({
+        runId: `run-153-create-${cause}`,
+        output: '',
+        create,
+      });
+
+      expect(terminal).toMatchObject({
+        status: 'failed',
+        failure: { reason: 'agent', cause },
+        sandbox: { cleanup: 'destroyed' },
+      });
+      expect(manifest).toMatchObject({
+        execution: { status: 'failed', reason: 'agent', cause },
+        terminal: { status: 'failed', reason: 'agent', cause },
+      });
+    },
+  );
+
+  it.each([
+    ['exits nonzero', { exitCode: 1 }, 'process-exit'],
+    ['times out', { timedOut: true }, 'timeout'],
+  ] as const)(
+    'retains the failed Sandbox create cause when cleanup removal also fails and create %s',
+    async (_case, create, cause) => {
+      const { terminal, manifest } = await runAgentScenario({
+        runId: `run-153-create-${cause}-through-cleanup`,
+        output: '',
+        create,
+        sandboxRemovalFailure: true,
+      });
+
+      expect(terminal).toMatchObject({
+        status: 'failed',
+        failure: { reason: 'cleanup', cause },
+        sandbox: { cleanup: 'failed' },
+      });
+      expect(manifest).toMatchObject({
+        execution: { status: 'failed', reason: 'cleanup', cause },
+        terminal: { status: 'failed', reason: 'cleanup', cause },
+      });
+    },
+  );
 
   it('removes only each job-owned network rules for jobs sharing resources', async () => {
     const baseSha = '1111111111111111111111111111111111111111';

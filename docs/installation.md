@@ -458,6 +458,7 @@ the Runner:
 sbx template load /path/to/petit-chiba-opencode.tar
 sbx create \
   --name petit-chiba-template-probe \
+  --no-share-skills \
   --template ghcr.io/ariga39/petit-chiba-opencode:1.18.25-gh2.98.0 \
   --cpus 4 \
   --memory 8g \
@@ -475,26 +476,30 @@ recorded digest, but registry access and a digest are optional for this
 offline path. Continue with the Runner start below only after the probe and
 cleanup succeed.
 
-The runner listens only on IPv4 loopback port `8080`. Start it on the host that
-also runs the remotely managed Tunnel connector:
+The runner listens only on IPv4 loopback port `8080`. It runs as the persistent
+service below on the host that also runs the remotely managed Tunnel connector.
+On a first installation, create its environment file with mode `0600` and put
+each required variable on one line in systemd `EnvironmentFile` syntax. Values
+are not shell-expanded, so do not use `export` or backslash continuations, and
+keep the JSON on one line. On an upgrade, keep the existing file and values;
+the `install` command truncates the destination:
 
 ```sh
-REVIEW_MODEL_CONFIG='{
-  "id": "opencode-go/deepseek-flash",
-  "definition": {
-    "name": "DeepSeek V4.1 Flash",
-    "reasoning": true,
-    "interleaved": { "field": "reasoning_content" },
-    "limit": { "context": 1000000, "output": 384000 },
-    "cost": { "input": 0.15, "output": 0.6, "cache_read": 0.003 }
-  }
-}' \
-MODEL_SECRET_COMMAND='<host-secret-resolver-command>' \
-RUNNER_AUTH_TOKEN='<runner-application-token>' \
-RUNNER_CALLBACK_URL='https://<INGRESS_HOST>/runner-callback' \
-RUNNER_CALLBACK_TOKEN='<static-runner-callback-token>' \
-corepack pnpm --filter @compte-rendu/runner start
+install -m 0600 /dev/null <ABSOLUTE_RUNNER_ENV_FILE>
+${EDITOR:-vi} <ABSOLUTE_RUNNER_ENV_FILE>
 ```
+
+```ini
+REVIEW_MODEL_CONFIG={"id":"opencode-go/deepseek-flash","definition":{"name":"DeepSeek V4.1 Flash","reasoning":true,"interleaved":{"field":"reasoning_content"},"limit":{"context":1000000,"output":384000},"cost":{"input":0.15,"output":0.6,"cache_read":0.003}}}
+MODEL_SECRET_COMMAND=<host-secret-resolver-command>
+RUNNER_AUTH_TOKEN=<runner-application-token>
+RUNNER_CALLBACK_URL=https://<INGRESS_HOST>/runner-callback
+RUNNER_CALLBACK_TOKEN=<static-runner-callback-token>
+```
+
+Confirm the file is still mode `0600` after editing; never commit it. The
+`RUNNER_AUTH_TOKEN` and `RUNNER_CALLBACK_TOKEN` values belong only in this file
+and the matching Worker secrets.
 
 `REVIEW_MODEL_CONFIG` is required deployment configuration, read once when the
 Runner starts. Its `id` selects an `opencode-go/<model-id>` model; there is no
@@ -527,6 +532,116 @@ origin as `RUNNER_CALLBACK_URL`; no separate claim URL environment variable is
 required in production. `RUNNER_CALLBACK_TOKEN` authenticates both public
 Runner routes; keep it identical to the ingress secret and do not create a
 second claim bearer.
+
+### KVM permissions and the persistent Runner service
+
+Docker Sandbox microVMs require `/dev/kvm`. On Debian-family hosts the device
+is owned by the `kvm` group. Account membership is necessary but not sufficient:
+a long-running `systemd --user` manager, the Runner service it spawned, and any
+already-running `sandboxd` retain the supplementary group list they had when
+they started. Adding the account to `kvm` and then restarting only the Runner
+unit does not refresh that list, so a newly started daemon can still fail with
+`KVM error: Permission denied` even though `id`, a fresh SSH session, or an
+existing daemon appears to work. Do not treat an interactive login, `id USER`,
+or a reused daemon as proof of the service startup path.
+
+Confirm the device, the group, and the account membership once:
+
+```sh
+ls -l /dev/kvm
+getent group kvm
+sudo usermod -aG kvm <RUNNER_USER>
+```
+
+Throughout this section, `<RUNNER_UNIT>` is the complete systemd user unit
+filename ending in `.service`, for example `compte-rendu-runner.service`. Stop
+the idle Runner and any running daemon before replacing them, so the explicit
+daemon startup below cannot `--detach` into the stale daemon:
+
+```sh
+systemctl --user stop <RUNNER_UNIT>
+sbx daemon stop
+```
+
+For a first installation, create a minimal base unit that reads the environment
+file above. `sg kvm` sets the command's effective group to `kvm` from the
+current `/etc/group` and passes that effective group to its descendants:
+
+```ini
+# ~/.config/systemd/user/<RUNNER_UNIT>
+[Unit]
+Description=Compte rendu Runner
+
+[Service]
+WorkingDirectory=<REPO_ROOT>
+Environment=PATH=<SBX_BIN_DIR>:<NODE_BIN_DIR>:/usr/local/sbin:/usr/sbin:/sbin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=<ABSOLUTE_RUNNER_ENV_FILE>
+UnsetEnvironment=SSH_AUTH_SOCK SSH_AGENT_PID
+ExecStart=/usr/bin/sg kvm -c "<SBX_BIN_DIR>/sbx daemon start --detach && exec <ABSOLUTE_NODE> <REPO_ROOT>/apps/runner/dist/runner.js"
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+A `systemd --user` service does not inherit the login shell PATH, and the
+Runner invokes `sbx` by name, so `PATH` must include the `sbx` binary directory,
+the Node.js binary directory, and the system sbin/bin directories (the daemon
+also needs `mkfs.ext4`). Preserve an existing `path.conf` drop-in if present;
+otherwise add the equivalent `PATH` to the existing unit or a drop-in.
+
+An existing deployment that already has a unit uses a drop-in instead; the bare
+`ExecStart=` line resets the inherited command before the replacement is added:
+
+```ini
+# ~/.config/systemd/user/<RUNNER_UNIT>.d/kvm.conf
+[Service]
+UnsetEnvironment=SSH_AUTH_SOCK SSH_AGENT_PID
+ExecStart=
+ExecStart=/usr/bin/sg kvm -c "<SBX_BIN_DIR>/sbx daemon start --detach && exec <ABSOLUTE_NODE> <REPO_ROOT>/apps/runner/dist/runner.js"
+```
+
+Keep deployment variables in the environment file rather than inlining
+credentials in the unit. Do not use `ExecStartPre` for the daemon: systemd kills
+leftover `ExecStartPre` children before `ExecStart`, so the daemon would not
+survive. Do not add a `--policy` flag to `sbx daemon start`; host policy is
+initialized once above.
+
+Enable lingering so the user service starts at boot and survives the last login
+session ending:
+
+```sh
+sudo loginctl enable-linger <RUNNER_USER>
+systemctl --user daemon-reload
+systemctl --user enable --now <RUNNER_UNIT>
+```
+
+Prove the effective permissions in the actual service process and in the newly
+started daemon rather than in the operator shell. `sg kvm` sets the effective
+GID, so compare the effective `Gid:` field (the second field) with the `kvm` GID
+from `getent group kvm`; `Groups:` may or may not also list it:
+
+```sh
+systemctl --user show -p MainPID --value <RUNNER_UNIT>
+grep -E '^(Gid|Groups):' /proc/<MAINPID>/status
+sandboxd_dir="$(dirname "$(sbx daemon status | awk '/^Socket:/ {print $2}')")"
+grep -E '^(Gid|Groups):' "/proc/$(cat "$sandboxd_dir/sandboxd.pid")/status"
+```
+
+The effective `Gid:` in both outputs must equal the `kvm` GID. Then create, run
+a harmless command in, and destroy one real Sandbox through that service-started
+daemon with plain `sbx` client calls, and confirm no scoped probe resource
+remains:
+
+```sh
+sbx create --name compte-rendu-kvm-probe --no-share-skills --template ghcr.io/ariga39/petit-chiba-opencode:1.18.25-gh2.98.0 --cpus 4 --memory 8g opencode /path/to/non-sensitive-probe-workspace
+sbx exec compte-rendu-kvm-probe opencode --version
+sbx rm --force compte-rendu-kvm-probe
+sbx ls
+```
+
+`sbx ls` must not list `compte-rendu-kvm-probe`.
 
 Create the remotely managed Tunnel first with the pinned `tunnel create`
 command above, and retain its returned `<TUNNEL_ID>`. Retrieve its connector
