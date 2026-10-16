@@ -8,6 +8,8 @@
   },
   "dependencies": {
     "@compte-rendu/contracts": "workspace:*",
-    "effect": "4.0.0-rc.111"
+    "chokidar": "5.0.0",
+    "effect": "4.0.0-rc.111",
+    "smol-toml": "1.9.1"
   }
 }
