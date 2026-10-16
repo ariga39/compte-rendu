@@ -291,13 +291,22 @@ export const createCoreWorker = (
     }
   };
 
-  const markRunFailed = async (outcome: ReviewOutcome, runId: string, occurredAt: string) => {
+  const markRunFailed = async (
+    outcome: ReviewOutcome,
+    runId: string,
+    occurredAt: string,
+    releaseRunnerClaim?: { jobId: string; attempt: number },
+  ) => {
     const notificationClaimed =
       (outcome.status === 'scheduled' || outcome.status === 'failed') &&
       stateStore.claimRunPublication !== undefined
         ? await stateStore.claimRunPublication({ runId, occurredAt })
         : false;
-    await stateStore.markSchedulingFailed({ runId, occurredAt });
+    await stateStore.markSchedulingFailed({
+      runId,
+      occurredAt,
+      ...(releaseRunnerClaim === undefined ? {} : { releaseRunnerClaim }),
+    });
     if (
       (outcome.status === 'scheduled' || outcome.status === 'superseded') &&
       outcome.trigger === 'manual' &&
@@ -401,6 +410,7 @@ export const createCoreWorker = (
     const evidenceHash = await globalThis.crypto.subtle.digest('SHA-256', evidenceBytes);
     const evidenceRecorded = await stateStore.recordEvidence({
       runId: callback.runId,
+      sandboxCleanup: callback.sandbox.cleanup,
       evidence: {
         key: `reviews/${callback.runId}`,
         status: callback.evidence.status,
@@ -549,11 +559,18 @@ export const createCoreWorker = (
       };
       await Schema.decodeUnknownPromise(RunnerJobInput)(input);
       const current = await stateStore.getRunOutcome(claim.runId);
-      if (
-        current?.status !== 'scheduled' ||
-        current.runnerJobId !== claim.jobId ||
-        current.runnerAttempt !== claim.attempt
-      ) {
+      if (current?.status !== 'scheduled') {
+        if (
+          current !== undefined &&
+          current.runnerJobId === claim.jobId &&
+          current.runnerAttempt === claim.attempt &&
+          current.status === 'superseded'
+        ) {
+          await stateStore.clearRunnerJob?.({ runId: claim.runId, jobId: claim.jobId });
+        }
+        return new Response(null, { status: 204 });
+      }
+      if (current.runnerJobId !== claim.jobId || current.runnerAttempt !== claim.attempt) {
         return new Response(null, { status: 204 });
       }
       if (current.checkRunId !== undefined && github.updateCheckRun !== undefined) {
@@ -572,10 +589,19 @@ export const createCoreWorker = (
       });
     } catch {
       const current = await stateStore.getRunOutcome(claim.runId);
+      if (
+        current !== undefined &&
+        (current.runnerJobId !== claim.jobId || current.runnerAttempt !== claim.attempt)
+      ) {
+        return new Response(null, { status: 204 });
+      }
       if (current === undefined) {
         await stateStore.markSchedulingFailed({ runId: claim.runId, occurredAt });
       } else {
-        await markRunFailed(current, claim.runId, occurredAt);
+        await markRunFailed(current, claim.runId, occurredAt, {
+          jobId: claim.jobId,
+          attempt: claim.attempt,
+        });
       }
       const failedOutcome = await stateStore.getRunOutcome(claim.runId);
       if (failedOutcome?.status === 'failed') {

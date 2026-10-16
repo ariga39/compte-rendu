@@ -172,9 +172,10 @@ self-hosted Runner → fresh Docker Sandbox/OpenCode
 event. `review-core` owns policy, GitHub App authentication, the D1 queue,
 review publication, evidence metadata, and run records. Webhook acceptance
 only durably schedules a run; it does not wait for GitHub Check setup, mint a
-GitHub read token, or admit a Runner Job. An idle Runner calls the authenticated
-public `/runner-claim` route through ingress. Core atomically claims the oldest
-eligible unclaimed run, records one immutable Job id/attempt, then resolves the
+GitHub read token, or admit a Runner Job. A Runner with available capacity calls
+the authenticated public `/runner-claim` route through ingress. Core atomically
+claims the oldest eligible unclaimed run, records one immutable Job id/attempt,
+then resolves the
 repository and mints the scoped read token. The claim also moves an available
 persisted Check Run to `in_progress`. The Runner owns execution and cleanup,
 then sends one authenticated result callback through the same public ingress.

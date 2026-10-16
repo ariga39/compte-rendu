@@ -735,7 +735,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
   const hasUnclearedSamePullRequest = (input: RunnerJobInputState) =>
     [...jobs.values()].some(
       (candidate) =>
-        (candidate.state.status === 'queued' || candidate.state.status === 'running') &&
         candidate.state.sandbox.cleanup !== 'destroyed' &&
         candidate.input.repositoryName === input.repositoryName &&
         candidate.input.pullRequestNumber === input.pullRequestNumber,
@@ -1396,12 +1395,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
     const callbackTooLarge =
       new TextEncoder().encode(completeBody).byteLength > MAX_RUNNER_CALLBACK_BYTES;
     if (callbackTooLarge) {
-      update(job, {
-        status: 'failed',
-        failure: { reason: 'evidence' },
-        result: undefined,
-        evidence: { id: callback.evidence.id, status: 'incomplete' },
-      });
       try {
         const manifest = JSON.parse(
           await readFile(join(evidencePath, 'manifest.json'), 'utf8'),
@@ -1509,6 +1502,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         complete: false,
         cleanup: { status: 'pending' },
       });
+      if (job.abortRequested) return;
       update(job, { status: 'running', stage: 'checkout' });
       const checkoutRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-review-'));
       job.checkoutRoot = checkoutRoot;
@@ -1950,6 +1944,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         finalStatus = 'failed';
         finalFailure = { reason: 'evidence' };
         evidenceComplete = false;
+        update(job, { evidence: { id: evidenceId, status: 'incomplete' } });
       }
       update(
         job,
@@ -1987,7 +1982,8 @@ export const createRunner = (options: RunnerOptions = {}) => {
     if (!claimed && !hasCapacity()) {
       return jsonResponse(409, { error: 'runner is busy' });
     }
-    if (hasUnclearedSamePullRequest(input)) {
+    const contradictsSamePullRequest = hasUnclearedSamePullRequest(input);
+    if (contradictsSamePullRequest && !claimed) {
       return jsonResponse(409, { error: 'runner is busy' });
     }
     let resolveDone = () => {};
@@ -2012,7 +2008,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       sandboxName: `compte-rendu-${id}`,
       done,
       resolveDone,
-      abortRequested: false,
+      abortRequested: contradictsSamePullRequest,
       sandboxAttempted: false,
       sandboxCreated: false,
       sessionIds: [],

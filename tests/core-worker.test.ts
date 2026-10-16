@@ -1029,7 +1029,7 @@ describe('Core Worker', () => {
     `);
 
     try {
-      database.applyMigrations(['0006_review_check_runs.sql']);
+      database.applyMigrations(['0006_review_check_runs.sql', '0008_runner_cleanup.sql']);
       const migratedStore = createD1ReviewStateStore(database);
       if (migratedStore.claimNextJob === undefined) throw new Error('claim route is unavailable');
       await expect(
@@ -3998,5 +3998,346 @@ describe('Runner claim serialization', () => {
   it('applies the same exclusion in the in-memory store', async () => {
     const store = createInMemoryReviewStateStore();
     await exerciseSamePullRequestExclusion(store);
+  });
+
+  const evidenceFor = (runId: string) => ({
+    key: `reviews/${runId}`,
+    status: 'incomplete' as const,
+    size: 1,
+    sha256: 'a'.repeat(64),
+    uploadedAt: '2026-09-01T00:00:08.000Z',
+  });
+
+  const exerciseFailedCleanupExclusion = async (
+    store: ReturnType<typeof createInMemoryReviewStateStore>,
+    fresh: ReturnType<typeof createInMemoryReviewStateStore>,
+  ) => {
+    if (store.claimNextJob === undefined || fresh.claimNextJob === undefined) {
+      throw new Error('claim is unavailable');
+    }
+    const failed = await store.claimReview({
+      deliveryId: 'delivery-failed-cleanup',
+      job: claimJob(42, oldHead),
+      occurredAt: '2026-09-01T00:00:00.000Z',
+    });
+    if (failed.kind !== 'claimed') throw new Error('failed-cleanup run was not admitted');
+    await store.claimNextJob({
+      jobId: 'job-failed-cleanup',
+      attempt: 1,
+      occurredAt: '2026-09-01T00:00:01.000Z',
+    });
+    await store.recordEvidence({
+      runId: failed.runId,
+      evidence: evidenceFor(failed.runId),
+      sandboxCleanup: 'failed',
+    });
+    await store.markSchedulingFailed({
+      runId: failed.runId,
+      occurredAt: '2026-09-01T00:00:02.000Z',
+    });
+
+    const replacement = await store.claimReview({
+      deliveryId: 'delivery-failed-cleanup-replacement',
+      job: claimJob(42, newHead),
+      occurredAt: '2026-09-01T00:00:03.000Z',
+    });
+    if (replacement.kind !== 'claimed') throw new Error('replacement was not admitted');
+    const unrelated = await store.claimReview({
+      deliveryId: 'delivery-failed-cleanup-unrelated',
+      job: claimJob(43, oldHead),
+      occurredAt: '2026-09-01T00:00:04.000Z',
+    });
+    if (unrelated.kind !== 'claimed') throw new Error('unrelated was not admitted');
+
+    expect(
+      await store.claimNextJob({
+        jobId: 'job-unrelated',
+        attempt: 1,
+        occurredAt: '2026-09-01T00:00:05.000Z',
+      }),
+    ).toMatchObject({ kind: 'claimed', job: { pullRequestNumber: 43 } });
+    expect(
+      await store.claimNextJob({
+        jobId: 'job-replacement',
+        attempt: 1,
+        occurredAt: '2026-09-01T00:00:06.000Z',
+      }),
+    ).toEqual({ kind: 'empty' });
+
+    await fresh.recordEvidence({
+      runId: failed.runId,
+      evidence: evidenceFor(failed.runId),
+      sandboxCleanup: 'destroyed',
+    });
+    expect(
+      await fresh.claimNextJob({
+        jobId: 'job-replacement',
+        attempt: 1,
+        occurredAt: '2026-09-01T00:00:07.000Z',
+      }),
+    ).toMatchObject({ kind: 'claimed', job: { pullRequestNumber: 42, headSha: newHead } });
+  };
+
+  it('keeps a same-pull-request replacement blocked by a failed cleanup until a destroyed confirmation', async () => {
+    const database = new SqliteD1Database();
+    try {
+      await exerciseFailedCleanupExclusion(
+        createD1ReviewStateStore(database),
+        createD1ReviewStateStore(database),
+      );
+    } finally {
+      database.close();
+    }
+  });
+
+  it('applies the failed-cleanup exclusion in the in-memory store', async () => {
+    const store = createInMemoryReviewStateStore();
+    await exerciseFailedCleanupExclusion(store, store);
+  });
+
+  const claimRequest = () =>
+    new Request('https://core.internal/runner-claims', {
+      method: 'POST',
+      headers: { 'x-compte-rendu-runner-claim': 'verified' },
+    });
+  const scheduleReview = (
+    worker: ReturnType<typeof createCoreWorker>,
+    headSha: string,
+    deliveryId: string,
+  ) =>
+    worker.fetch(
+      new Request('https://core.internal/review-events', {
+        method: 'POST',
+        body: JSON.stringify({ ...eligibleEvent, headSha, deliveryId }),
+      }),
+    );
+
+  it('releases an unhanded superseded same-pull-request claim so the replacement becomes claimable', async () => {
+    const database = new SqliteD1Database();
+    const tokenMint = deferred<{ token: string; expiresAt: string }>();
+    let tokenCalls = 0;
+    const worker = createCoreWorker(
+      { ...coreEnv(database), RUNNER: { fetch: async () => new Response(null, { status: 503 }) } },
+      {
+        github: { getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git' },
+        getReadInstallationToken: async () => {
+          tokenCalls += 1;
+          return tokenMint.promise;
+        },
+      },
+    );
+
+    try {
+      expect((await scheduleReview(worker, oldHead, 'delivery-unhanded-old')).status).toBe(202);
+      const oldClaim = worker.fetch(claimRequest());
+      for (let attempt = 0; attempt < 50 && tokenCalls === 0; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      }
+      expect(tokenCalls).toBe(1);
+
+      expect((await scheduleReview(worker, newHead, 'delivery-unhanded-new')).status).toBe(202);
+      tokenMint.resolve({
+        token: 'repository-read-token',
+        expiresAt: '2026-09-01T01:00:00.000Z',
+      });
+
+      expect((await oldClaim).status).toBe(204);
+
+      const replacementClaim = await worker.fetch(claimRequest());
+      expect(replacementClaim.status).toBe(200);
+      expect(await replacementClaim.json()).toMatchObject({
+        pullRequestNumber: 42,
+        headSha: newHead,
+      });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('releases a pre-handoff failed claim so the same-pull-request rerun and unrelated work progress', async () => {
+    const database = new SqliteD1Database();
+    let mintAttempts = 0;
+    const worker = createCoreWorker(coreEnv(database), {
+      github: { getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git' },
+      getReadInstallationToken: async () => {
+        mintAttempts += 1;
+        if (mintAttempts === 1) throw new Error('token mint failed');
+        return { token: 'repository-read-token', expiresAt: '2026-09-01T01:00:00.000Z' };
+      },
+    });
+
+    try {
+      expect((await scheduleReview(worker, oldHead, 'delivery-prehandoff-old')).status).toBe(202);
+      expect((await worker.fetch(claimRequest())).status).toBe(503);
+
+      expect((await scheduleReview(worker, newHead, 'delivery-prehandoff-new')).status).toBe(202);
+      const rerunClaim = await worker.fetch(claimRequest());
+      expect(rerunClaim.status).toBe(200);
+      expect(await rerunClaim.json()).toMatchObject({ pullRequestNumber: 42, headSha: newHead });
+
+      expect(
+        (
+          await worker.fetch(
+            new Request('https://core.internal/review-events', {
+              method: 'POST',
+              body: JSON.stringify({
+                ...eligibleEvent,
+                pullRequestNumber: 43,
+                deliveryId: 'delivery-prehandoff-unrelated',
+              }),
+            }),
+          )
+        ).status,
+      ).toBe(202);
+      const unrelatedClaim = await worker.fetch(claimRequest());
+      expect(unrelatedClaim.status).toBe(200);
+      expect(await unrelatedClaim.json()).toMatchObject({ pullRequestNumber: 43 });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('leaves a claim whose ownership changed during preparation untouched without failure feedback', async () => {
+    const database = new SqliteD1Database();
+    let repositoryLookupStarted!: () => void;
+    const lookupStarted = new Promise<void>((resolve) => {
+      repositoryLookupStarted = resolve;
+    });
+    let releaseLookup!: () => void;
+    const lookupGate = new Promise<void>((resolve) => {
+      releaseLookup = resolve;
+    });
+    const issueComments: unknown[] = [];
+    const worker = createCoreWorker(coreEnv(database), {
+      github: {
+        getRepositoryUrl: async () => {
+          repositoryLookupStarted();
+          await lookupGate;
+          throw new Error('preparation failed after ownership changed');
+        },
+        createIssueComment: async (input) => {
+          issueComments.push(input);
+        },
+      },
+      getReadInstallationToken: async () => ({
+        token: 'repository-read-token',
+        expiresAt: '2026-09-01T01:00:00.000Z',
+      }),
+    });
+
+    try {
+      expect((await scheduleReview(worker, oldHead, 'delivery-owner-change')).status).toBe(202);
+      const claimPromise = worker.fetch(claimRequest());
+      await lookupStarted;
+      database.database
+        .prepare('UPDATE review_runs SET runner_job_id = ?, runner_attempt = ?')
+        .run('job-new-owner', 2);
+      releaseLookup();
+
+      expect((await claimPromise).status).toBe(204);
+      const runId = (
+        database.database.prepare('SELECT run_id FROM review_runs').get() as {
+          run_id: string;
+        }
+      ).run_id;
+      await expect(createD1ReviewStateStore(database).getRunOutcome(runId)).resolves.toMatchObject({
+        status: 'scheduled',
+        runnerJobId: 'job-new-owner',
+        runnerAttempt: 2,
+      });
+      expect(issueComments).toEqual([]);
+    } finally {
+      database.close();
+    }
+  });
+
+  it('blocks a same-pull-request replacement through the Worker callback until a destroyed confirmation', async () => {
+    const database = new SqliteD1Database();
+    const env = {
+      ...coreEnv(database),
+      EVIDENCE_BUCKET: { put: async () => undefined },
+    };
+    const dependencies = {
+      github: { getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git' },
+      getReadInstallationToken: async () => ({
+        token: 'repository-read-token',
+        expiresAt: '2026-09-01T01:00:00.000Z',
+      }),
+    };
+    const callbackRequest = (body: string) =>
+      new Request('https://core.internal/runner-results', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-compte-rendu-runner-callback': 'verified',
+        },
+        body,
+      });
+    const worker = createCoreWorker(env, dependencies);
+
+    try {
+      expect((await scheduleReview(worker, oldHead, 'delivery-cleanup-block')).status).toBe(202);
+      const claim = await worker.fetch(claimRequest());
+      expect(claim.status).toBe(200);
+      const job = (await claim.json()) as { id: string; runId: string; attempt: number };
+
+      expect(
+        (
+          await worker.fetch(
+            callbackRequest(await abortedCallback(job.runId, job.id, job.attempt, 'failed')),
+          )
+        ).status,
+      ).toBe(202);
+
+      expect((await scheduleReview(worker, newHead, 'delivery-cleanup-replacement')).status).toBe(
+        202,
+      );
+      const freshWorker = createCoreWorker(env, dependencies);
+      expect((await freshWorker.fetch(claimRequest())).status).toBe(204);
+
+      expect(
+        (
+          await freshWorker.fetch(
+            callbackRequest(await abortedCallback(job.runId, job.id, job.attempt, 'destroyed')),
+          )
+        ).status,
+      ).toBe(202);
+      const released = await freshWorker.fetch(claimRequest());
+      expect(released.status).toBe(200);
+      expect(await released.json()).toMatchObject({ pullRequestNumber: 42, headSha: newHead });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('does not clear a superseded claim when the runner identity does not match another owner', async () => {
+    const database = new SqliteD1Database();
+    const store = createD1ReviewStateStore(database);
+    try {
+      const claimed = await store.claimReview({
+        deliveryId: 'delivery-owner',
+        job: claimJob(42, oldHead),
+        occurredAt: '2026-09-01T00:00:00.000Z',
+      });
+      if (claimed.kind !== 'claimed') throw new Error('run was not admitted');
+      if (store.claimNextJob === undefined) throw new Error('claim is unavailable');
+      await store.claimNextJob({
+        jobId: 'job-owner',
+        attempt: 1,
+        occurredAt: '2026-09-01T00:00:01.000Z',
+      });
+      await store.markRunSuperseded({
+        runId: claimed.runId,
+        occurredAt: '2026-09-01T00:00:02.000Z',
+      });
+      await expect(
+        store.clearRunnerJob?.({ runId: claimed.runId, jobId: 'job-other' }),
+      ).resolves.toBe(false);
+      await expect(
+        store.clearRunnerJob?.({ runId: claimed.runId, jobId: 'job-owner' }),
+      ).resolves.toBe(true);
+    } finally {
+      database.close();
+    }
   });
 });
