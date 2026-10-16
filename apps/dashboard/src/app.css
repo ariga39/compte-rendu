@@ -118,6 +118,8 @@ main#content {
 }
 
 .task-link {
+  display: block;
+  max-width: 24rem;
   overflow-wrap: anywhere;
 }
 .task-meta {
@@ -286,18 +288,14 @@ main#content {
 .stats-grid .bx--row {
   row-gap: 16px;
 }
-.review-link {
-  display: block;
-  max-width: 24rem;
-  overflow-wrap: anywhere;
-}
+
 @media (max-width: 600px) {
   .bx--data-table th:first-child,
   .bx--data-table td:first-child {
     min-width: 12.5rem;
     width: 12.5rem;
   }
-  .review-link {
+  .task-link {
     width: 10.5rem;
   }
 }
