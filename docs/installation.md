@@ -400,7 +400,7 @@ path in this repository or in an issue/comment.
 
 ## First installation
 
-Before starting, install Docker Sandboxes with `sbx` 0.39.0, complete Docker
+Before starting, install Docker Sandboxes with `sbx` 0.48.0, complete Docker
 login, ensure the service environment exposes both the Sandboxes daemon and
 `mkfs.ext4`, and initialize the host policy once. An auto-started `sandboxd`
 inherits the service's `PATH`; on Debian, `mkfs.ext4` is normally in
@@ -419,6 +419,25 @@ starts the Runner. Then initialize the host policy once:
 ```sh
 sbx policy init deny-all
 ```
+
+Host policy is operator state, not daemon state. The origin of any unintended
+global allow rules is not established here; the same default allow rules were
+present in a pre-upgrade policy backup, so do not attribute them to the upgrade.
+Treat an `sbx` upgrade as a checkpoint: inspect the effective rules with
+`sbx policy ls --type network --include-inactive` (add `--wide` to see rule IDs)
+and remove each unintended editable global allow rule by its exact ID:
+
+```sh
+sbx policy rm network --id <RULE_ID> --force
+```
+
+Removing individual IDs preserves unrelated policy. Do not use
+`sbx policy init deny-all` as an upgrade step: `policy init` is one-time setup
+and fails against an already-initialized policy. `sbx policy reset` deletes all
+custom policies and stops the daemon (stopping running sandboxes); reserve it
+for an explicitly dedicated, drained host with a backup, and re-initialize
+afterward. The Runner adds only its own per-job allow rules on top of the host
+baseline; it never establishes the host default.
 
 Install the repository dependencies and build the runner. The resolver command
 must not contain a model secret; `MODEL_SECRET_COMMAND` is never sent to the
@@ -527,6 +546,11 @@ Set `MODEL_SECRET_COMMAND` to a host resolver for the API key belonging to that
 gateway, then restart the Runner with both settings applied. Keep the key out
 of `REVIEW_MODEL_CONFIG`; the Sandbox receives only Docker's placeholder, and
 the host proxy supplies the credential. Review permissions remain unchanged.
+Under `sbx` 0.48 the command runs from a fresh temporary host directory, so use
+an absolute program path and absolute file references (for example
+`/usr/bin/cat /run/secrets/model-key`); relative commands such as `cat token` no
+longer resolve against the project or daemon working directory. Keep the helper
+and every file it reads outside writable sandbox mounts.
 
 The Runner derives its claim URL by resolving `/runner-claim` on the same
 origin as `RUNNER_CALLBACK_URL`; no separate claim URL environment variable is

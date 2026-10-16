@@ -6,6 +6,11 @@ Google-led Agent Substrate, Kubernetes Agent Sandbox, NVIDIA OpenShell and
 OpenSandbox, with a brief self-host suitability read of E2B and Daytona.
 Documentation support is not evidence of compatibility or performance on our workload.
 
+Version note (corrected 2026-10-16): the deployed baseline was Docker Sandboxes
+`sbx` 0.39, and the project now targets `sbx` **0.48.0** (released 2026-10-13)
+after issue #157. Where this note contrasts "sbx 0.39" capabilities it means the
+pre-upgrade baseline, not the current stable release.
+
 Question this note answers: is there a newer agent-sandbox runtime with a
 simpler, more stable lifecycle and better resource density than Docker Sandboxes
 `sbx` 0.39, with isolation proportionate to this review workload? Facts are labelled; inferences are marked
