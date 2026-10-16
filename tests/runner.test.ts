@@ -152,6 +152,7 @@ const createProductionRunnerWithMergeBase = (
 ) => {
   const optionsWithCallback = {
     ...options,
+    claimUrl: options.claimUrl ?? (options.claimFetch === undefined ? '' : undefined),
     modelConfig: options.modelConfig ?? standardModelConfig,
     callbackUrl: options.callbackUrl ?? 'https://ingress.test/runner-callback',
     callbackToken: options.callbackToken ?? 'callback-token',
@@ -169,6 +170,8 @@ const createRunner = (options: TestRunnerOptions = {}) => {
   const { mergeBase: mergeBaseOverride, ...productionOptions } = options;
   const optionsWithCallback = {
     ...productionOptions,
+    claimUrl:
+      productionOptions.claimUrl ?? (productionOptions.claimFetch === undefined ? '' : undefined),
     modelConfig: productionOptions.modelConfig ?? standardModelConfig,
     callbackUrl: productionOptions.callbackUrl ?? 'https://ingress.test/runner-callback',
     callbackToken: productionOptions.callbackToken ?? 'callback-token',
@@ -4574,6 +4577,653 @@ describe('Runner Job HTTP interface', () => {
         failure: { reason: 'invalid-output' },
         sandbox: { cleanup: 'destroyed' },
       });
+    }
+  });
+});
+
+describe('Runner concurrency', () => {
+  const baseSha = '1111111111111111111111111111111111111111';
+  const headSha = '2222222222222222222222222222222222222222';
+  const independentJob = (pullRequestNumber: number, runId: string) => ({
+    ...runnerJobFields,
+    id: `runner-concurrency-job-${pullRequestNumber}-${runId}`,
+    runId,
+    attempt: 1,
+    pullRequestNumber,
+    repositoryUrl: 'https://github.com/acme/reviewed.git',
+    baseSha,
+    headSha,
+  });
+
+  it('rejects a non-positive or non-integer concurrency before claiming or admitting work', async () => {
+    let claims = 0;
+    let processCalls = 0;
+    const base = {
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      evidenceRoot: sharedEvidenceRoot,
+      claimUrl: 'https://ingress.test/runner-claim',
+      claimFetch: async () => {
+        claims += 1;
+        return new Response(null, { status: 204 });
+      },
+      claimIntervalMs: 1,
+      process: async (): Promise<RunnerProcessResult> => {
+        processCalls += 1;
+        return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+      },
+    };
+    for (const concurrency of [0, -1, 1.5, Number.NaN]) {
+      expect(() => createRunner({ ...base, concurrency })).toThrow();
+    }
+
+    const previous = process.env.RUNNER_CONCURRENCY;
+    try {
+      process.env.RUNNER_CONCURRENCY = '0';
+      expect(() => createRunner(base)).toThrow();
+      process.env.RUNNER_CONCURRENCY = 'not-a-number';
+      expect(() => createRunner(base)).toThrow();
+    } finally {
+      if (previous === undefined) delete process.env.RUNNER_CONCURRENCY;
+      else process.env.RUNNER_CONCURRENCY = previous;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(claims).toBe(0);
+    expect(processCalls).toBe(0);
+  });
+
+  it('runs independent pull request reviews concurrently up to the configured limit', async () => {
+    const evidenceRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-runner-concurrency-'));
+    const jobs = [independentJob(42, 'run-overlap-1'), independentJob(43, 'run-overlap-2')];
+    let claims = 0;
+    let activeAgents = 0;
+    let agentsStarted = 0;
+    let maximumActiveAgents = 0;
+    let releaseAgents: (() => void) | undefined;
+    let bothRunning!: () => void;
+    const bothRunningObserved = new Promise<void>((resolve) => {
+      bothRunning = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      releaseAgents = resolve;
+    });
+    const runner = createRunner({
+      concurrency: 2,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      evidenceRoot,
+      claimUrl: 'https://ingress.test/runner-claim',
+      claimIntervalMs: 1,
+      claimFetch: async () => {
+        const job = jobs[claims++];
+        return job === undefined ? new Response(null, { status: 204 }) : Response.json(job);
+      },
+      process: async (_command, args, options = {}) => {
+        if (args[0] === 'exec' && args.includes('--agent')) {
+          activeAgents += 1;
+          agentsStarted += 1;
+          maximumActiveAgents = Math.max(maximumActiveAgents, activeAgents);
+          if (agentsStarted >= 2) bothRunning();
+          await gate;
+          await writeEvidenceFixture(args, options, finalMarkdownJsonl());
+          activeAgents -= 1;
+          return {
+            exitCode: 0,
+            stdout: `${finalMarkdownJsonl()}\n`,
+            timedOut: false,
+            truncated: false,
+          };
+        }
+        await writeEvidenceFixture(args, options, finalMarkdownJsonl());
+        return {
+          exitCode: 0,
+          stdout: args.includes('rev-parse')
+            ? `${jobs[0]!.baseSha}\n${jobs[0]!.headSha}\n`
+            : args.includes('session')
+              ? '[{"id":"concurrency-session"}]\n'
+              : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
+    });
+
+    try {
+      await Promise.race([
+        bothRunningObserved,
+        new Promise((_resolve, reject) =>
+          setTimeout(() => reject(new Error('independent reviews did not overlap')), 2_000),
+        ),
+      ]);
+      expect(maximumActiveAgents).toBe(2);
+      releaseAgents?.();
+      const first = await waitForTerminal(runner, jobs[0]!.id);
+      const second = await waitForTerminal(runner, jobs[1]!.id);
+      expect(first.status).toBe('succeeded');
+      expect(second.status).toBe('succeeded');
+    } finally {
+      releaseAgents?.();
+      await rm(evidenceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('waits for a free slot before starting a third independent review', async () => {
+    const evidenceRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-runner-third-'));
+    const jobs = [
+      independentJob(42, 'run-third-1'),
+      independentJob(43, 'run-third-2'),
+      independentJob(44, 'run-third-3'),
+    ];
+    let claims = 0;
+    let activeAgents = 0;
+    let startedCount = 0;
+    let maximumActiveAgents = 0;
+    let claimsWhenTwoRunning = -1;
+    let releaseFirstWave: (() => void) | undefined;
+    let twoRunning!: () => void;
+    const twoRunningObserved = new Promise<void>((resolve) => {
+      twoRunning = resolve;
+    });
+    const firstWaveGate = new Promise<void>((resolve) => {
+      releaseFirstWave = resolve;
+    });
+    const runner = createRunner({
+      concurrency: 2,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      evidenceRoot,
+      claimUrl: 'https://ingress.test/runner-claim',
+      claimIntervalMs: 1,
+      claimFetch: async () => {
+        const job = jobs[claims++];
+        return job === undefined ? new Response(null, { status: 204 }) : Response.json(job);
+      },
+      process: async (_command, args, options = {}) => {
+        if (args[0] === 'exec' && args.includes('--agent')) {
+          activeAgents += 1;
+          startedCount += 1;
+          maximumActiveAgents = Math.max(maximumActiveAgents, activeAgents);
+          if (startedCount === 2) {
+            claimsWhenTwoRunning = claims;
+            twoRunning();
+          }
+          if (startedCount <= 2) await firstWaveGate;
+          await writeEvidenceFixture(args, options, finalMarkdownJsonl());
+          activeAgents -= 1;
+          return {
+            exitCode: 0,
+            stdout: `${finalMarkdownJsonl()}\n`,
+            timedOut: false,
+            truncated: false,
+          };
+        }
+        await writeEvidenceFixture(args, options, finalMarkdownJsonl());
+        return {
+          exitCode: 0,
+          stdout: args.includes('rev-parse')
+            ? `${baseSha}\n${headSha}\n`
+            : args.includes('session')
+              ? '[{"id":"concurrency-session"}]\n'
+              : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
+    });
+
+    try {
+      await Promise.race([
+        twoRunningObserved,
+        new Promise((_resolve, reject) =>
+          setTimeout(() => reject(new Error('two reviews did not start')), 2_000),
+        ),
+      ]);
+      expect(claimsWhenTwoRunning).toBe(2);
+      releaseFirstWave?.();
+      const terminals = await Promise.all(jobs.map((job) => waitForTerminal(runner, job.id)));
+      expect(terminals.map((terminal) => terminal.status)).toEqual([
+        'succeeded',
+        'succeeded',
+        'succeeded',
+      ]);
+      expect(maximumActiveAgents).toBe(2);
+    } finally {
+      releaseFirstWave?.();
+      await rm(evidenceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps a slot occupied through callback delivery before starting the next review', async () => {
+    const evidenceRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-runner-callback-'));
+    const jobs = [independentJob(42, 'run-callback-1'), independentJob(43, 'run-callback-2')];
+    let claims = 0;
+    let callbacks = 0;
+    let callbackStarted!: () => void;
+    const callbackObserved = new Promise<void>((resolve) => {
+      callbackStarted = resolve;
+    });
+    let releaseCallback: (() => void) | undefined;
+    const callbackGate = new Promise<void>((resolve) => {
+      releaseCallback = resolve;
+    });
+    const runner = createRunner({
+      concurrency: 1,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      evidenceRoot,
+      claimUrl: 'https://ingress.test/runner-claim',
+      callbackUrl: 'https://ingress.test/runner-callback',
+      callbackToken: 'callback-token',
+      claimIntervalMs: 1,
+      claimFetch: async () => {
+        const job = jobs[claims++];
+        return job === undefined ? new Response(null, { status: 204 }) : Response.json(job);
+      },
+      callbackFetch: async () => {
+        callbacks += 1;
+        if (callbacks === 1) {
+          callbackStarted();
+          await callbackGate;
+        }
+        return new Response(null, { status: 202 });
+      },
+      process: async (_command, args, options = {}) => {
+        await writeEvidenceFixture(args, options, finalMarkdownJsonl());
+        return {
+          exitCode: 0,
+          stdout: args.includes('rev-parse')
+            ? `${baseSha}\n${headSha}\n`
+            : args.includes('session')
+              ? '[{"id":"concurrency-session"}]\n'
+              : options.captureStdout === true
+                ? `${finalMarkdownJsonl()}\n`
+                : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
+    });
+
+    try {
+      await Promise.race([
+        callbackObserved,
+        new Promise((_resolve, reject) =>
+          setTimeout(() => reject(new Error('first callback was not reached')), 2_000),
+        ),
+      ]);
+      expect(claims).toBe(1);
+      releaseCallback?.();
+      const first = await waitForTerminal(runner, jobs[0]!.id);
+      const second = await waitForTerminal(runner, jobs[1]!.id);
+      expect(first.status).toBe('succeeded');
+      expect(second.status).toBe('succeeded');
+    } finally {
+      releaseCallback?.();
+      await rm(evidenceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('reserves the only slot for an in-flight claim without rejecting its admitted job', async () => {
+    const evidenceRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-runner-reserve-'));
+    const claimedJob = independentJob(42, 'run-reserve-claimed');
+    let claimCalls = 0;
+    let claimRequested!: () => void;
+    const claimObserved = new Promise<void>((resolve) => {
+      claimRequested = resolve;
+    });
+    let resolveClaim: ((response: Response) => void) | undefined;
+    const claimResponse = new Promise<Response>((resolve) => {
+      resolveClaim = resolve;
+    });
+    const runner = createRunner({
+      concurrency: 1,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      evidenceRoot,
+      claimUrl: 'https://ingress.test/runner-claim',
+      claimIntervalMs: 1,
+      claimFetch: async () => {
+        claimCalls += 1;
+        if (claimCalls === 1) {
+          claimRequested();
+          return claimResponse;
+        }
+        return new Response(null, { status: 204 });
+      },
+      process: async (_command, args, options = {}) => {
+        await writeEvidenceFixture(args, options, finalMarkdownJsonl());
+        return {
+          exitCode: 0,
+          stdout: args.includes('rev-parse')
+            ? `${baseSha}\n${headSha}\n`
+            : args.includes('session')
+              ? '[{"id":"concurrency-session"}]\n'
+              : options.captureStdout === true
+                ? `${finalMarkdownJsonl()}\n`
+                : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
+    });
+
+    try {
+      await Promise.race([
+        claimObserved,
+        new Promise((_resolve, reject) =>
+          setTimeout(() => reject(new Error('claim was not requested')), 2_000),
+        ),
+      ]);
+      const direct = await runner.handle(
+        new Request('http://runner/jobs', {
+          method: 'POST',
+          headers: {
+            authorization: 'Bearer runner-test-token',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify(independentJob(99, 'run-reserve-direct')),
+        }),
+      );
+      expect(direct.status).toBe(409);
+
+      resolveClaim?.(Response.json(claimedJob));
+      const terminal = await waitForTerminal(runner, claimedJob.id);
+      expect(terminal.status).toBe('succeeded');
+    } finally {
+      resolveClaim?.(new Response(null, { status: 204 }));
+      await rm(evidenceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('serializes independent reviews by default without an explicit limit', async () => {
+    const evidenceRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-runner-default-'));
+    const jobs = [independentJob(42, 'run-default-1'), independentJob(43, 'run-default-2')];
+    let claims = 0;
+    let activeAgents = 0;
+    let maximumActiveAgents = 0;
+    const runner = createRunner({
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      evidenceRoot,
+      claimUrl: 'https://ingress.test/runner-claim',
+      claimIntervalMs: 1,
+      claimFetch: async () => {
+        const job = jobs[claims++];
+        return job === undefined ? new Response(null, { status: 204 }) : Response.json(job);
+      },
+      process: async (_command, args, options = {}) => {
+        if (args[0] === 'exec' && args.includes('--agent')) {
+          activeAgents += 1;
+          maximumActiveAgents = Math.max(maximumActiveAgents, activeAgents);
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          await writeEvidenceFixture(args, options, finalMarkdownJsonl());
+          activeAgents -= 1;
+          return {
+            exitCode: 0,
+            stdout: `${finalMarkdownJsonl()}\n`,
+            timedOut: false,
+            truncated: false,
+          };
+        }
+        await writeEvidenceFixture(args, options, finalMarkdownJsonl());
+        return {
+          exitCode: 0,
+          stdout: args.includes('rev-parse')
+            ? `${baseSha}\n${headSha}\n`
+            : args.includes('session')
+              ? '[{"id":"concurrency-session"}]\n'
+              : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
+    });
+
+    try {
+      const terminals = await Promise.all(jobs.map((job) => waitForTerminal(runner, job.id)));
+      expect(terminals.map((terminal) => terminal.status)).toEqual(['succeeded', 'succeeded']);
+      expect(maximumActiveAgents).toBe(1);
+    } finally {
+      await rm(evidenceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('excludes a same-pull-request admission until the prior Sandbox is destroyed while unrelated work proceeds', async () => {
+    const evidenceRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-runner-same-pr-'));
+    let releaseAgents: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      releaseAgents = resolve;
+    });
+    const runner = createRunner({
+      concurrency: 2,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      evidenceRoot,
+      process: async (_command, args, options = {}) => {
+        if (args[0] === 'exec' && args.includes('--agent')) {
+          await gate;
+          await writeEvidenceFixture(args, options, finalMarkdownJsonl());
+          return {
+            exitCode: 0,
+            stdout: `${finalMarkdownJsonl()}\n`,
+            timedOut: false,
+            truncated: false,
+          };
+        }
+        await writeEvidenceFixture(args, options, finalMarkdownJsonl());
+        return {
+          exitCode: 0,
+          stdout: args.includes('rev-parse')
+            ? `${baseSha}\n${headSha}\n`
+            : args.includes('session')
+              ? '[{"id":"concurrency-session"}]\n'
+              : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
+    });
+    const post = (job: Record<string, unknown>) =>
+      runner.handle(
+        new Request('http://runner/jobs', {
+          method: 'POST',
+          headers: {
+            authorization: 'Bearer runner-test-token',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify(job),
+        }),
+      );
+
+    try {
+      const first = independentJob(42, 'run-same-pr-first');
+      const replacement = independentJob(42, 'run-same-pr-replacement');
+      const unrelated = independentJob(43, 'run-same-pr-unrelated');
+
+      expect((await post(first)).status).toBe(202);
+      expect((await post(replacement)).status).toBe(409);
+      expect((await post(unrelated)).status).toBe(202);
+
+      releaseAgents?.();
+      expect((await waitForTerminal(runner, first.id)).status).toBe('succeeded');
+      expect((await waitForTerminal(runner, unrelated.id)).status).toBe('succeeded');
+
+      expect((await post(replacement)).status).toBe(202);
+      expect((await waitForTerminal(runner, replacement.id)).status).toBe('succeeded');
+    } finally {
+      releaseAgents?.();
+      await rm(evidenceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('admits a same-pull-request replacement in a spare slot once the old Sandbox is destroyed even while its callback is in flight', async () => {
+    const evidenceRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-runner-same-pr-callback-'));
+    let callbacks = 0;
+    let firstCallbackStarted!: () => void;
+    const firstCallbackObserved = new Promise<void>((resolve) => {
+      firstCallbackStarted = resolve;
+    });
+    let releaseCallback: (() => void) | undefined;
+    const callbackGate = new Promise<void>((resolve) => {
+      releaseCallback = resolve;
+    });
+    const runner = createRunner({
+      concurrency: 2,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      evidenceRoot,
+      callbackUrl: 'https://ingress.test/runner-callback',
+      callbackToken: 'callback-token',
+      callbackFetch: async () => {
+        callbacks += 1;
+        if (callbacks === 1) {
+          firstCallbackStarted();
+          await callbackGate;
+        }
+        return new Response(null, { status: 202 });
+      },
+      process: async (_command, args, options = {}) => {
+        await writeEvidenceFixture(args, options, finalMarkdownJsonl());
+        return {
+          exitCode: 0,
+          stdout: args.includes('rev-parse')
+            ? `${baseSha}\n${headSha}\n`
+            : args.includes('session')
+              ? '[{"id":"concurrency-session"}]\n'
+              : options.captureStdout === true
+                ? `${finalMarkdownJsonl()}\n`
+                : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
+    });
+    const post = (job: Record<string, unknown>) =>
+      runner.handle(
+        new Request('http://runner/jobs', {
+          method: 'POST',
+          headers: {
+            authorization: 'Bearer runner-test-token',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify(job),
+        }),
+      );
+
+    try {
+      const first = independentJob(42, 'run-same-pr-cleaned-first');
+      expect((await post(first)).status).toBe(202);
+      await Promise.race([
+        firstCallbackObserved,
+        new Promise((_resolve, reject) =>
+          setTimeout(() => reject(new Error('first callback was not reached')), 2_000),
+        ),
+      ]);
+
+      const replacement = independentJob(42, 'run-same-pr-cleaned-replacement');
+      expect((await post(replacement)).status).toBe(202);
+
+      releaseCallback?.();
+      expect((await waitForTerminal(runner, first.id)).status).toBe('succeeded');
+      expect((await waitForTerminal(runner, replacement.id)).status).toBe('succeeded');
+    } finally {
+      releaseCallback?.();
+      await rm(evidenceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('fails a contradictory same-pull-request claim and direct admission closed until cleanup, then admits the replacement', async () => {
+    const evidenceRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-runner-claim-same-pr-'));
+    const active = independentJob(42, 'run-claim-same-pr-active');
+    const contradictory = independentJob(42, 'run-claim-same-pr-claim');
+    const direct = independentJob(42, 'run-claim-same-pr-direct');
+    let claims = 0;
+    let contradictoryOffered!: () => void;
+    const contradictoryObserved = new Promise<void>((resolve) => {
+      contradictoryOffered = resolve;
+    });
+    let releaseAgent: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      releaseAgent = resolve;
+    });
+    const runner = createRunner({
+      concurrency: 2,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      evidenceRoot,
+      claimUrl: 'https://ingress.test/runner-claim',
+      claimIntervalMs: 1,
+      claimFetch: async () => {
+        claims += 1;
+        if (claims === 1) return Response.json(active);
+        if (claims === 2) {
+          contradictoryOffered();
+          return Response.json(contradictory);
+        }
+        return new Response(null, { status: 204 });
+      },
+      process: async (_command, args, options = {}) => {
+        if (args[0] === 'exec' && args.includes('--agent')) {
+          await gate;
+          await writeEvidenceFixture(args, options, finalMarkdownJsonl());
+          return {
+            exitCode: 0,
+            stdout: `${finalMarkdownJsonl()}\n`,
+            timedOut: false,
+            truncated: false,
+          };
+        }
+        await writeEvidenceFixture(args, options, finalMarkdownJsonl());
+        return {
+          exitCode: 0,
+          stdout: args.includes('rev-parse')
+            ? `${baseSha}\n${headSha}\n`
+            : args.includes('session')
+              ? '[{"id":"concurrency-session"}]\n'
+              : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
+    });
+    const post = (job: Record<string, unknown>) =>
+      runner.handle(
+        new Request('http://runner/jobs', {
+          method: 'POST',
+          headers: {
+            authorization: 'Bearer runner-test-token',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify(job),
+        }),
+      );
+
+    try {
+      await Promise.race([
+        contradictoryObserved,
+        new Promise((_resolve, reject) =>
+          setTimeout(() => reject(new Error('contradictory claim was not offered')), 2_000),
+        ),
+      ]);
+      expect(
+        (
+          await runner.handle(
+            new Request(`http://runner/jobs/${contradictory.id}`, {
+              headers: { authorization: 'Bearer runner-test-token' },
+            }),
+          )
+        ).status,
+      ).toBe(404);
+      expect((await post(direct)).status).toBe(409);
+
+      releaseAgent?.();
+      expect((await waitForTerminal(runner, active.id)).status).toBe('succeeded');
+
+      expect((await post(contradictory)).status).toBe(202);
+      expect((await waitForTerminal(runner, contradictory.id)).status).toBe('succeeded');
+    } finally {
+      releaseAgent?.();
+      await rm(evidenceRoot, { recursive: true, force: true });
     }
   });
 });
