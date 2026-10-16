@@ -1182,7 +1182,8 @@ workerd capture per request and registers it with `waitUntil()`.
 
 ## Public dashboard
 
-The existing Ingress serves `/`, `/history`, and `/jobs/<RUN_ID>`. Its public
+The existing Ingress serves `/`, `/history`, `/help`, and `/jobs/<RUN_ID>`. The Help
+page explains navigation, task states, cleanup, refresh, and privacy. Its public
 read APIs use only D1 through Core. Opening or refreshing these pages never
 queries GitHub or the Runner. The pages expose operational status and recorded
 milestones, not review bodies, evidence, logs, credentials, or administrative
