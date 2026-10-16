@@ -90,8 +90,10 @@ const listProviders = async (
   command: SandboxCommand,
   gatewayFlags: readonly string[],
   stage: RunnerDiagnostic['stage'],
-): Promise<Array<{ readonly name: string; readonly owner?: string }> | undefined> => {
-  const entries: Array<{ name: string; owner?: string }> = [];
+): Promise<
+  Array<{ readonly id: string; readonly name: string; readonly owner?: string }> | undefined
+> => {
+  const entries: Array<{ id: string; name: string; owner?: string }> = [];
   let token = '';
   for (let page = 0; page < 20; page += 1) {
     const listed = await command(
@@ -127,6 +129,7 @@ const listProviders = async (
     if (decoded === undefined) return undefined;
     for (const provider of decoded.providers) {
       entries.push({
+        id: provider.id,
         name: provider.name,
         ...(provider.labels?.['cr-job-owner'] === undefined
           ? {}
@@ -164,6 +167,7 @@ export const createOpenShellRuntimeFactory =
     let created = false;
     let providerOwnership: 'none' | 'owned' | 'ambiguous' = 'none';
     let sandboxId: string | undefined;
+    let providerId: string | undefined;
     const metadata = {
       get created() {
         return created;
@@ -238,7 +242,9 @@ export const createOpenShellRuntimeFactory =
           throw new Error('openshell github provider name already exists; refusing to reuse it');
         }
         providerOwnership = 'owned';
+        providerId = existing.id;
       } else {
+        providerOwnership = 'ambiguous';
         const provider = await command(
           [
             ...gatewayFlags,
@@ -258,14 +264,21 @@ export const createOpenShellRuntimeFactory =
         );
         if (provider.exitCode === 0 && !provider.timedOut && provider.streamError !== true) {
           providerOwnership = 'owned';
+          const captured = await listProviders(command, gatewayFlags, 'sandbox');
+          providerId = captured?.find(
+            (entry) => entry.name === githubProvider && entry.owner === jobOwner,
+          )?.id;
         } else {
           const reconciled = await listProviders(command, gatewayFlags, 'sandbox');
+          if (reconciled === undefined) {
+            throw new Error('openshell provider ownership could not be resolved');
+          }
           if (
-            reconciled?.some(
-              (entry) => entry.name === githubProvider && entry.owner === jobOwner,
-            ) === true
+            reconciled.some((entry) => entry.name === githubProvider && entry.owner === jobOwner)
           ) {
             providerOwnership = 'owned';
+          } else if (reconciled.some((entry) => entry.name === githubProvider)) {
+            throw new Error('openshell provider ownership conflict');
           } else {
             providerOwnership = 'none';
             throw new Error('openshell github provider setup failed');
@@ -492,13 +505,25 @@ export const createOpenShellRuntimeFactory =
         providerClean = false;
         providerError = 'openshell provider ownership unresolved; refusing to delete';
       } else if (providerOwnership === 'owned') {
-        const providerDelete = await command(
-          [...gatewayFlags, 'provider', 'delete', githubProvider],
-          { stage: 'cleanup', command: 'remove-github-provider', includeStderr: true },
-        );
-        if (providerDelete.exitCode !== 0 || providerDelete.timedOut) {
+        const current = await listProviders(command, gatewayFlags, 'cleanup');
+        const entry = current?.find((candidate) => candidate.name === githubProvider);
+        if (
+          entry === undefined ||
+          entry.owner !== jobOwnerNonce ||
+          (providerId !== undefined && entry.id !== providerId)
+        ) {
           providerClean = false;
-          providerError = 'openshell provider cleanup failed';
+          providerError =
+            'openshell provider replacement or unverified identity; refusing to delete';
+        } else {
+          const providerDelete = await command(
+            [...gatewayFlags, 'provider', 'delete', githubProvider],
+            { stage: 'cleanup', command: 'remove-github-provider', includeStderr: true },
+          );
+          if (providerDelete.exitCode !== 0 || providerDelete.timedOut) {
+            providerClean = false;
+            providerError = 'openshell provider cleanup failed';
+          }
         }
       }
 

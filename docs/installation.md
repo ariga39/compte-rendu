@@ -602,6 +602,36 @@ scoped, and a global import is not merged into that workspace. The Runner's
 startup preflight pages `provider list --output json` and fails closed unless
 the configured model provider is present.
 
+Create the pre-provisioned model provider from the host environment without
+putting the key on the command line: set `OPENCODE_API_KEY` in the environment
+and pass the bare key so OpenShell reads it from the child process environment,
+never argv:
+
+```sh
+OPENCODE_API_KEY="$(cat /run/secrets/model-key)" \
+  openshell provider create --name cr158-model --type cr-model --credential OPENCODE_API_KEY
+```
+
+On a host that runs only the Runner and manages the OpenShell gateway
+separately, the unit's `ExecStart` is just the Node process — there is no
+`sg kvm` / `sbx daemon start` prefix. If you edit the base unit that already
+defines an `ExecStart`, clear it with a blank assignment before the new one;
+otherwise systemd keeps the first `ExecStart`:
+
+```ini
+[Service]
+ExecStart=
+ExecStart=<ABSOLUTE_NODE> <REPO_ROOT>/apps/runner/dist/runner.js
+```
+
+Alternatively, leave the base unit untouched and supply the Node-only
+`ExecStart` as a drop-in override (for example
+`/etc/systemd/system/<unit>.d/openshell.conf` with the same two lines); a
+drop-in replaces the accumulated value the same way. The gateway is started and
+supervised separately (for example by its own container or service); the Runner
+only needs `RUNNER_SANDBOX_CLI` to resolve the `openshell` binary and the
+gateway endpoint/name.
+
 `cr-model` declares the model credential `OPENCODE_API_KEY`, permits only
 `POST` to `opencode.ai` under `protocol: rest` + `enforcement: enforce`, and
 allows only `/usr/local/bin/opencode`. `cr-github` gives

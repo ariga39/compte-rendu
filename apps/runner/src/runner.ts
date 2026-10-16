@@ -1910,6 +1910,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       claimPollingHalted = true;
       return;
     }
+    if (claiming || claimPollingHalted || !hasCapacity()) return;
 
     claiming = true;
     let continuePolling = true;
