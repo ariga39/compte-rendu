@@ -79,72 +79,71 @@ published.
 
 ### Overview and current work (`/`)
 
-The header shows the product name, last successful refresh, freshness/error
-notice and manual refresh control. Four primary counts show queued work,
-claimed work (not confirmed live processes), and the published/failed outcomes among runs received
-in the last 24 hours. Label the last two cards "Received in the last 24 hours"
-and use `created_at` consistently, including for legacy runs; do not pretend
-unknown historical terminal times are known. Label current counts "Queued" and
-"In progress", with "Waiting to start" and "Accepted for processing" sublabels,
-so they remain distinct from the last-24-hour outcome cohort. Include anonymous tasks.
-Superseded is a separate outcome, not a failure. Cleanup exceptions have a
-separate alert/count and can overlap terminal outcomes; they are not added to
-an allegedly disjoint total. Counts come from SQL aggregates over all matching
-runs, not the currently loaded rows. Do not display a hard-coded capacity of 6
-or equate claimed work with actual occupied execution slots.
+The shared header shows the product name, navigation, last successful refresh,
+and a manual refresh control for the current data page. Help has no refresh
+control. The footer links the commit embedded at build time.
 
-Show claimed tasks first, then queued tasks oldest first. Include a distinct
-"Cleanup needs attention" section for failed cleanup and terminal runs whose
-assigned resources still have pending cleanup. Historical unknown cleanup is
-labelled unknown, not automatically treated as an active resource leak.
-A queued task can say "waiting for the previous review to clean up" only when
-Core's persisted same-PR blocker proves it; otherwise simply say "queued."
-Do not promise strict FIFO, an exact queue position, or an estimated start time.
+Four counts show Queued, In progress, Published and Failed. Queued means
+`scheduled` with no Runner assignment; In progress means `scheduled` with a
+Runner assignment and includes preparation, review and publication. It does not
+prove that a process is currently alive. Published and Failed count reviews
+received in the past 24 hours, using `created_at` even for legacy records with
+unknown terminal times. Counts come from SQL aggregates, not loaded table rows.
+Do not display a hard-coded capacity or equate assignment with occupied slots.
 
-Each row has a task link, public repository/PR or "Anonymous review", outcome or
-current stage, received time, elapsed/total duration where known, and cleanup
-badge. For claimed tasks, show "Last progress update X ago", or an awaiting-first-update
-message with the acceptance time. These are observations, not heartbeats: a long
-model invocation can legitimately have no stage transition, and a crashed Runner
-can leave a claimed row behind. Do not show a live/healthy indicator, silently
-remove the row, or invent failure. Do not label an elapsed task age as model
-execution time. Use bounded
-pages of 25 items with an explicit more/next control; never truncate silently.
+Show in-progress reviews first, then queued reviews oldest first. The Review
+column contains identity; Status contains the same named status used by filters
+and counts, with a recorded phase beneath it for unfinished reviews. Received
+has its own column. Do not repeat terminal status and receipt time beneath the
+identity. Public rows link to their PR; private or unverified identities remain
+Anonymous review. Pages contain 25 items with an explicit link to full history.
+
+Progress timestamps are observations, not heartbeats. Do not invent failure or
+remove a review because a stage has not changed recently. Do not promise queue
+position, estimated start time, or claim that elapsed age is model execution time.
+Resource cleanup is technical detail, not a primary count, table column, or filter.
 
 ### History (`/history`)
 
-Newest admitted runs first, including terminal runs and a visible option for
-all/current work. Filters: outcome (all, active, published, failed, superseded),
-received-date range, and cleanup (all, pending, destroyed, failed, unknown).
-The default is all retained history, not an unexplained 24-hour limit. Keep
-filters in the URL; reject malformed filters without echoing raw input.
-No private-repository grouping, repo filter suggestions or identity search.
+Show newest admitted reviews first, with six Status choices: All statuses,
+Queued, In progress, Published, Failed, Superseded. Queued and In progress use
+the exact same database predicates as the public dispatch projection. Published
+means successful publication, not an absence of findings. Superseded is not a
+failure. Date filters select when the review was received, inclusive UTC dates.
 
-Use a stable `(created_at, run_id)` cursor, with the filter scope encoded and
-validated. Cursor pagination avoids offset shifts from new runs. Changing a
-filter resets the cursor. The latest page updates automatically; older pages
-refresh with the same cursor and never jump to page one. Explain that a row may
-leave an active-only filter after completing. Provide "Back to latest".
+Keep visible filters in the URL. Obsolete view/cleanup/combined-active UI filters
+normalize to the current visible choices and discard their scoped cursor; never
+leave invisible filters applied. The API retains its existing view/cleanup/active
+queries for callers. No repository suggestions, private grouping or identity search.
+Use a stable `(created_at, run_id)` cursor with validated filter scope. Changing
+a filter resets the cursor. Older pages retain their cursor during refresh.
+An unfinished review may leave a filtered list when its state changes.
 
 ### Task detail (`/jobs/<opaque-run-id>`)
 
-A direct link works before Runner claim and after completion. Show the same
-identity projection and state labels as the list, a concise outcome summary,
-received/claimed/terminal times, queue wait and total duration when endpoints
-exist, last persisted progress receipt, a chronological milestone list and a
-separate cleanup result. Public tasks link to their GitHub PR. Show a published
-review link only if its exact URL is actually retained; do not fabricate one.
+Use the same identity and status labels as the list. Show a concise summary,
+recorded timeline, received/assigned/finished times, queue wait and total duration
+when endpoints exist. Assignment is not proof that execution started. Public
+tasks link to their GitHub PR; do not fabricate a published review URL.
 
-The timeline shows recorded facts and explicit gaps, not a percentage progress
-bar. Steps that never ran are skipped/not reached; legacy missing data says
-"Not recorded". Failure shows only a finite safe category such as checkout,
-execution, validation, evidence, cleanup or publication, with unknown when not
-recorded. Never render raw exceptions or command output. Supersession may end
-the product run before cleanup; keep both facts visible in that order.
+Use shared phase labels: Fetching code, Preparing environment, Reviewing,
+Saving run records, Finishing up, Processing result and Publishing. The timeline
+shows recorded milestones, not percentage progress. Missing records say Not
+recorded; stages that never ran are not invented. Failures expose only safe
+categories and finite messages, never raw exceptions. Unconfirmed publication
+must not claim the review was never posted.
 
-A missing task has a neutral 404 page. A DB failure is an unavailable state,
-not a 404 or zero-task result. Unknown identifiers cannot be used to query
-Runner. Returning to the list preserves the user's filter and scroll position.
+Put execution observations and cleanup state in a collapsed Technical details
+section. `submissionCompletedAt` is labelled Result checks started: the Runner
+records it after its archive attempt, before checking process exit and output;
+it is not proof of submission, validation or Core receipt. Cleanup failure still
+remains visible when it caused the product failure. Supersession can precede
+cleanup and both facts remain inspectable.
+
+A missing task has a neutral 404 page. Initial load failure must not claim old
+data is visible. Refresh failure with retained data shows its freshness notice.
+Use Retry for failed loads and Refresh now for deliberate refresh. Returning to
+history preserves visible filters and scroll position.
 
 ### Presentation and accessibility
 
@@ -154,8 +153,8 @@ the existing Ingress Worker serves it and its assets through the `ASSETS`
 binding. No additional server or deployment service is needed. Components
 render typed public DTOs, with shared refresh behavior; do not assemble HTML
 strings or include task data in the build output.
-Desktop tables become readable stacked rows on narrow screens. Statuses have
-text and icons in addition to colour. Use semantic headings, labelled controls,
+Tables preserve readable column widths and scroll horizontally inside their
+container on narrow screens. Statuses have text in addition to colour. Use semantic headings, labelled controls,
 keyboard-visible focus and accessible timeline markup. Display relative times
 with absolute dates and timezone available. Do not announce every polling tick
 to screen readers; announce meaningful errors and status changes without

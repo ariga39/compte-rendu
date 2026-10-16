@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Button, Column, Grid, Row, Tag } from 'carbon-components-svelte';
+  import { Button, Column, Grid, Row } from 'carbon-components-svelte';
   import StatCard from '#lib/components/StatCard.svelte';
   import TaskTable from '#lib/components/TaskTable.svelte';
   import Toolbar from '#lib/components/Toolbar.svelte';
@@ -10,7 +10,7 @@
 
   const dash = createDashboard<OverviewModel>({
     key: () => '/',
-    urls: () => ['/api/dashboard', '/api/jobs?view=current', '/api/jobs?view=cleanup'],
+    urls: () => ['/api/dashboard', '/api/jobs?view=current'],
     build: (results, timing) => buildOverview(results, timing),
     isActive: (model) => overviewActive(model),
   });
@@ -23,15 +23,15 @@
       clock.clear();
       return;
     }
-    clock.schedule([...model.current.tasks, ...model.cleanup.tasks].map(identityDeadline));
+    clock.schedule(model.current.tasks.map(identityDeadline));
   });
 </script>
 
 <header class="page-head">
-  <h1>Review activity</h1>
+  <h1>Overview</h1>
 </header>
 
-{#if dash.error}
+{#if dash.error && dash.data}
   <div role="alert" data-testid="error-notice" class="notice error">
     {dash.error === 'offline'
       ? 'You are offline. Updates will resume when you reconnect.'
@@ -52,7 +52,7 @@
         <Column sm={2} md={2} lg={4}>
           <StatCard
             label="In progress"
-            sub="Accepted for processing"
+            sub="Preparing, reviewing or publishing"
             value={dash.data.overview.counts.claimed}
           />
         </Column>
@@ -82,26 +82,7 @@
     {/if}
     {#if dash.data.current.nextCursor}
       <div class="toolbar">
-        <a class="bx--btn bx--btn--tertiary" href="/history?view=current" data-testid="view-all-current">View all current work</a>
-      </div>
-    {/if}
-  </section>
-  <section>
-    <h2 class="section-title">
-      Cleanup needs attention
-      <Tag type={dash.data.overview.cleanupAttention > 0 ? 'red' : 'gray'}>
-        {String(dash.data.overview.cleanupAttention)}
-      </Tag>
-    </h2>
-    <p class="muted">Reviews with failed cleanup or cleanup still pending after the review ended.</p>
-    {#if dash.data.cleanup.tasks.length}
-      <TaskTable tasks={dash.data.cleanup.tasks} now={clock.now} stale={dash.error !== null} />
-    {:else}
-      <div class="empty">No cleanup issues.</div>
-    {/if}
-    {#if dash.data.cleanup.nextCursor}
-      <div class="toolbar">
-        <a class="bx--btn bx--btn--tertiary" href="/history?view=cleanup" data-testid="view-all-cleanup">View all cleanup exceptions</a>
+        <a class="bx--btn bx--btn--tertiary" href="/history" data-testid="view-all-current">View all reviews</a>
       </div>
     {/if}
   </section>
@@ -114,7 +95,7 @@
       {dash.error === 'offline' ? 'You are offline.' : 'Could not load reviews right now.'}
     </p>
     <div class="toolbar">
-      <Button size="small" on:click={dash.refresh}>Try again</Button>
+      <Button size="small" on:click={dash.refresh}>Retry</Button>
     </div>
   </section>
 {/if}

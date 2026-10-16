@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import adapter from '@sveltejs/adapter-static';
 import { sveltekit } from '@sveltejs/kit/vite';
@@ -16,7 +17,10 @@ const stripCarbonRemoteFontFaces = (): Plugin => ({
   },
 });
 
+const commitSha = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+
 export default defineConfig(async () => ({
+  define: { __COMMIT_SHA__: JSON.stringify(commitSha) },
   plugins: [
     stripCarbonRemoteFontFaces(),
     ...(await sveltekit({

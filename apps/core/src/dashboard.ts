@@ -137,7 +137,15 @@ const badRequest = () =>
 const unavailable = () =>
   new Response(null, { status: 503, headers: { 'cache-control': 'no-store' } });
 
-const StatusValue = Schema.Literals(['all', 'active', 'published', 'failed', 'superseded']);
+const StatusValue = Schema.Literals([
+  'all',
+  'active',
+  'queued',
+  'in_progress',
+  'published',
+  'failed',
+  'superseded',
+]);
 const CleanupValue = Schema.Literals(['all', 'pending', 'destroyed', 'failed', 'unknown']);
 const ViewValue = Schema.Literals(['history', 'current', 'cleanup']);
 

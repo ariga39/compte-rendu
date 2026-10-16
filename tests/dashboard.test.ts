@@ -190,6 +190,65 @@ describe('public dashboard reads are DB-only', () => {
     expect(mismatch.status).toBe(400);
   });
 
+  it('filters Queued and In progress by the same recorded dispatch state shown in each review', async () => {
+    const database = new SqliteD1Database();
+    const store = createD1ReviewStateStore(database);
+    for (let i = 0; i < 3; i += 1) {
+      await store.claimReview({
+        deliveryId: `d-dispatch-${i}`,
+        job: job({ repositoryId: 200 + i }),
+        occurredAt: `2026-01-0${i + 1}T00:00:00.000Z`,
+      });
+    }
+    const worker = createCoreWorker(coreEnv(database));
+    const list = async (query: string) => {
+      const response = await get(worker, `/api/jobs?${query}`);
+      expect(response.status).toBe(200);
+      return asJson<{
+        tasks: { runId: string; dispatch: string | null; status: string }[];
+        nextCursor: string | null;
+      }>(response);
+    };
+    const queued = await list('status=queued&limit=1');
+    expect(queued.tasks).toHaveLength(1);
+    expect(queued.tasks[0]?.dispatch).toBe('queued');
+    expect(queued.nextCursor).not.toBeNull();
+    expect((await list('status=in_progress')).tasks).toHaveLength(0);
+    expect(
+      (
+        await get(
+          worker,
+          `/api/jobs?status=in_progress&cursor=${encodeURIComponent(queued.nextCursor!)}`,
+        )
+      ).status,
+    ).toBe(400);
+
+    const claim = await store.claimNextJob!({
+      jobId: 'dispatch-job',
+      attempt: 1,
+      occurredAt: '2026-01-04T00:00:00.000Z',
+    });
+    if (claim.kind !== 'claimed') throw new Error('expected Runner claim');
+    const running = await list('status=in_progress');
+    expect(running.tasks).toEqual([
+      expect.objectContaining({ runId: claim.runId, dispatch: 'claimed', status: 'scheduled' }),
+    ]);
+    const remaining = await list('status=queued');
+    expect(remaining.tasks).toHaveLength(2);
+    expect(
+      remaining.tasks.every((task) => task.dispatch === 'queued' && task.runId !== claim.runId),
+    ).toBe(true);
+
+    await store.markSchedulingFailed({
+      runId: claim.runId,
+      occurredAt: '2026-01-04T00:01:00.000Z',
+    });
+    expect((await list('status=in_progress')).tasks).toHaveLength(0);
+    expect((await list('status=failed')).tasks).toEqual([
+      expect.objectContaining({ runId: claim.runId, dispatch: null, status: 'failed' }),
+    ]);
+  });
+
   it('accepts advancing progress and ignores a stage regression', async () => {
     const database = new SqliteD1Database();
     const store = createD1ReviewStateStore(database);

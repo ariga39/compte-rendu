@@ -5,8 +5,10 @@
   import '@fontsource/ibm-plex-mono/600.css';
   import '@fontsource/ibm-plex-mono/700.css';
   import '../app.css';
-  import { Content, Header, HeaderNav, HeaderNavItem } from 'carbon-components-svelte';
+  import { Button, Content, Header, HeaderNav, HeaderNavItem } from 'carbon-components-svelte';
   import { page } from '$app/state';
+  import { absoluteTime } from '#lib/format.ts';
+  import { createRefreshState, provideRefresh } from '#lib/refresh.svelte.ts';
 
   let { children } = $props();
 
@@ -17,6 +19,9 @@
   ] as const;
 
   let path = $derived(page.url.pathname);
+
+  const refresh = createRefreshState();
+  provideRefresh(refresh.handle);
 </script>
 
 <a class="skip-link" href="#content" data-testid="skip-link">Skip to content</a>
@@ -28,9 +33,38 @@
       <HeaderNavItem {href} text={label} isSelected={path === href} />
     {/each}
   </HeaderNav>
+  {#if refresh.state.active}
+    <div class="header-refresh">
+      <span data-testid="last-refresh" class="muted">
+        Last updated: {refresh.state.lastGoodAt
+          ? absoluteTime(new Date(refresh.state.lastGoodAt).toISOString())
+          : 'not yet'}
+      </span>
+      <Button
+        kind="ghost"
+        size="field"
+        data-testid="refresh"
+        on:click={() => refresh.state.refresh()}
+      >
+        Refresh now
+      </Button>
+    </div>
+  {/if}
   <div id="announce" class="sr-only" aria-live="polite"></div>
 </Header>
 
 <Content id="content" tabindex={-1}>
   {@render children()}
 </Content>
+
+<footer class="app-footer">
+  <a
+    data-testid="commit-link"
+    href={`https://github.com/ariga39/compte-rendu/commit/${__COMMIT_SHA__}`}
+    target="_blank"
+    rel="noopener noreferrer"
+    title={__COMMIT_SHA__}
+  >
+    {__COMMIT_SHA__.slice(0, 7)}
+  </a>
+</footer>

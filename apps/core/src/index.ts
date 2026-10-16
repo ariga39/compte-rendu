@@ -226,7 +226,7 @@ export interface PublicRunCursor {
 }
 
 export interface PublicRunFilter {
-  status: 'all' | 'active' | 'published' | 'failed' | 'superseded';
+  status: 'all' | 'active' | 'queued' | 'in_progress' | 'published' | 'failed' | 'superseded';
   cleanup: 'all' | 'pending' | 'destroyed' | 'failed' | 'unknown';
   from?: string;
   to?: string;

@@ -59,10 +59,15 @@ main#content {
 }
 
 .page-head {
-  margin: 2px 0 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 16px;
 }
 .page-head h1 {
-  margin: 0 0 4px;
+  margin: 0;
   font-size: 1.75rem;
   font-weight: 600;
 }
@@ -70,7 +75,7 @@ main#content {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 28px 0 8px;
+  margin: 24px 0 8px;
   font-size: 1.25rem;
   font-weight: 600;
 }
@@ -79,16 +84,16 @@ main#content {
   display: flex;
   flex-wrap: wrap;
   align-items: flex-end;
-  gap: 14px;
-  margin: 4px 0 12px;
+  gap: 16px;
+  margin: 0 0 16px;
 }
 .toolbar {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  margin: 12px 0;
+  gap: 8px;
+  margin: 8px 0;
 }
 .muted {
   color: #c6c6c6;
@@ -111,11 +116,14 @@ main#content {
   font-size: 0.72rem;
 }
 
+.task-link {
+  overflow-wrap: anywhere;
+}
 .task-meta {
   margin: 4px 0 0;
   color: #c6c6c6;
   font-size: 0.8rem;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
 }
 .task-pr {
   color: #78a9ff;
@@ -124,6 +132,35 @@ main#content {
 
 .bx--data-table-container {
   overflow-x: auto;
+}
+.bx--data-table {
+  min-width: 56rem;
+}
+.bx--data-table th,
+.bx--data-table td {
+  white-space: normal;
+}
+.bx--data-table th:first-child,
+.bx--data-table td:first-child {
+  min-width: 18rem;
+}
+.bx--data-table--tall td {
+  padding-block: 1rem;
+}
+
+.header-refresh {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  padding: 8px 16px;
+}
+.header-refresh .muted {
+  font-size: 12px;
+  line-height: 1.4;
+}
+.header-refresh .bx--btn {
+  color: #f4f4f4;
 }
 
 .empty {
@@ -170,6 +207,17 @@ main#content {
   margin: 4px 0;
 }
 
+.app-footer {
+  display: flex;
+  justify-content: center;
+  padding: 16px;
+  border-top: 1px solid #393939;
+}
+.app-footer a {
+  color: #c6c6c6;
+  font-size: 0.8rem;
+}
+
 .detail {
   max-width: 860px;
 }
@@ -185,14 +233,23 @@ main#content {
   font-weight: 600;
 }
 
-@media (max-width: 900px) {
+.detail h3 {
+  margin: 16px 0 8px;
+  font-size: 1rem;
+  font-weight: 600;
+  line-height: 1.5;
+}
+.timeline li {
+  line-height: 1.5;
+}
+
+@media (max-width: 1100px) {
   .bx--header {
+    position: static;
     height: auto;
     min-height: 3rem;
     flex-wrap: wrap;
-  }
-  .bx--header__name--sub {
-    display: none;
+    overflow: visible;
   }
   .bx--header__nav {
     width: 100%;
@@ -202,6 +259,16 @@ main#content {
   .bx--header__menu-bar {
     flex-wrap: wrap;
   }
+  .header-refresh {
+    width: 100%;
+    margin-left: 0;
+  }
+  #content {
+    margin-top: 0;
+  }
+}
+
+@media (max-width: 900px) {
   .bx--grid {
     padding-left: 0;
     padding-right: 0;
@@ -211,7 +278,6 @@ main#content {
     padding-right: 0;
   }
   #content {
-    margin-top: 5.5rem;
-    padding: 0 16px 48px;
+    padding: 24px 16px 48px;
   }
 }
