@@ -1,10 +1,4 @@
-import type {
-  CleanupStatus,
-  ExecutionStage,
-  ProcessingStage,
-  TaskFailure,
-  TaskState,
-} from './types';
+import type { ExecutionStage, ProcessingStage, TaskState } from './types.ts';
 
 export const STATUS_LABEL: Record<string, string> = {
   scheduled: 'Queued',
@@ -26,13 +20,6 @@ export const PROCESSING_STAGE_LABEL: Record<string, string> = {
   publishing: 'Publishing',
 };
 
-export const CLEANUP_LABEL: Record<string, string> = {
-  pending: 'Cleanup pending',
-  destroyed: 'Cleanup complete',
-  failed: 'Cleanup failed',
-  unknown: 'Cleanup not recorded',
-};
-
 export const PROCESSING_LABEL: Record<string, string> = {
   received: 'Processing result',
   publishing: 'Publishing',
@@ -47,19 +34,12 @@ export const STATUS_TONE: Record<string, BadgeTone> = {
   scheduled: 'info',
 };
 
-export const CLEANUP_TONE: Record<string, BadgeTone> = {
-  destroyed: 'good',
-  failed: 'bad',
-  pending: 'warn',
-  unknown: 'muted',
-};
-
 export function milestoneLabel(stage: ExecutionStage | ProcessingStage): string {
   return STAGE_LABEL[stage] ?? PROCESSING_STAGE_LABEL[stage] ?? stage;
 }
 
 export function statusLabel(task: TaskState): string {
-  if (task.dispatch === 'claimed') return 'Claimed';
+  if (task.dispatch === 'claimed') return 'In progress';
   if (task.dispatch === 'queued') return 'Queued';
   return STATUS_LABEL[task.status] ?? task.status;
 }
@@ -69,25 +49,40 @@ export function statusTone(task: TaskState): BadgeTone {
   return STATUS_TONE[task.status] ?? 'info';
 }
 
-export function cleanupTone(cleanup: CleanupStatus): BadgeTone {
-  return CLEANUP_TONE[cleanup] ?? 'muted';
+export function cleanupLabel(task: TaskState): string {
+  if (task.cleanup === 'destroyed') return 'Cleaned up';
+  if (task.cleanup === 'failed') return 'Cleanup failed';
+  if (task.cleanup === 'unknown') return 'Cleanup not recorded';
+  if (task.status === 'scheduled') {
+    return task.stage === 'cleanup' ? 'Cleaning up' : 'Cleanup after review';
+  }
+  return 'Cleanup pending';
 }
 
-export function cleanupLabel(cleanup: CleanupStatus): string {
-  return CLEANUP_LABEL[cleanup] ?? cleanup;
+export function cleanupTone(task: TaskState): BadgeTone {
+  if (task.cleanup === 'destroyed') return 'good';
+  if (task.cleanup === 'failed') return 'bad';
+  if (task.cleanup === 'unknown') return 'muted';
+  if (task.status === 'scheduled') return task.stage === 'cleanup' ? 'info' : 'muted';
+  return 'warn';
 }
 
-export function cleanupNote(cleanup: CleanupStatus): string {
-  if (cleanup === 'destroyed') return 'Assigned resources were confirmed destroyed.';
-  if (cleanup === 'failed') return 'Cleanup failed; resources may still be held.';
-  if (cleanup === 'pending') return 'Cleanup is still pending for this task.';
-  return 'Cleanup was not recorded for this task.';
+export function cleanupNote(task: TaskState): string {
+  if (task.cleanup === 'destroyed') return 'Cleanup was confirmed.';
+  if (task.cleanup === 'failed') return 'Cleanup failed and needs an operator.';
+  if (task.cleanup === 'unknown') return 'Cleanup was not recorded for this review.';
+  if (task.status === 'scheduled') {
+    return task.stage === 'cleanup'
+      ? 'Resource cleanup has started; confirmation is pending.'
+      : 'Cleanup is confirmed after the review ends. This is expected while a review is in progress.';
+  }
+  return 'This review has ended, but resource cleanup has not been confirmed.';
 }
 
 export function taskLabel(task: TaskState): string {
   if (task.processing) return PROCESSING_LABEL[task.processing] ?? 'Processing result';
   if (task.dispatch === 'claimed') {
-    return task.stage ? (STAGE_LABEL[task.stage] ?? task.stage) : 'Claimed; awaiting progress';
+    return task.stage ? (STAGE_LABEL[task.stage] ?? task.stage) : 'In progress';
   }
   if (task.dispatch === 'queued') return 'Queued';
   return STATUS_LABEL[task.status] ?? task.status;
@@ -95,8 +90,8 @@ export function taskLabel(task: TaskState): string {
 
 export function progressText(task: TaskState): string {
   return task.lastProgressAt
-    ? `Last progress report ${relativeTime(task.lastProgressAt)}`
-    : `No progress report; claimed ${relativeTime(task.claimedAt)}`;
+    ? `Last progress update ${relativeTime(task.lastProgressAt)}`
+    : `Awaiting first update · accepted ${relativeTime(task.claimedAt)}`;
 }
 
 export function outcomeSummary(task: TaskState): string {
@@ -104,17 +99,49 @@ export function outcomeSummary(task: TaskState): string {
   if (task.dispatch === 'claimed') {
     return task.stage
       ? `In progress: ${STAGE_LABEL[task.stage] ?? task.stage}.`
-      : 'Claimed; awaiting progress.';
+      : 'In progress; awaiting first progress update.';
   }
-  if (task.dispatch === 'queued') return 'Queued. No exact position or start time is promised.';
-  if (task.status === 'completed') return 'Published. Core durably recorded the review.';
-  if (task.status === 'failed') return task.failure ? `Failed (${task.failure.phase}).` : 'Failed.';
-  if (task.status === 'superseded') return 'Superseded by a newer revision before publication.';
+  if (task.dispatch === 'queued') return 'Waiting to start.';
+  if (task.status === 'completed') return 'Review published to GitHub.';
+  if (task.status === 'failed') return 'Review ended with an error.';
+  if (task.status === 'superseded') return 'A newer revision replaced this review.';
   return STATUS_LABEL[task.status] ?? 'Not recorded';
 }
 
-export function failureSummary(failure: TaskFailure): string {
-  return `Failure category: ${failure.phase}`;
+export const FAILURE_PHASE_LABEL: Record<string, string> = {
+  scheduling: 'Scheduling',
+  checkout: 'Checkout',
+  sandbox: 'Sandbox preparation',
+  agent: 'Review',
+  output_validation: 'Output validation',
+  evidence: 'Evidence handling',
+  callback: 'Result callback',
+  publication: 'GitHub publication',
+  cleanup: 'Cleanup',
+  unknown: 'Failure reason not recorded',
+};
+
+export const FAILURE_REASON_LABEL: Record<string, string> = {
+  checkout: 'Checkout could not be completed',
+  sandbox: 'The sandbox could not be prepared',
+  agent: 'The review agent did not complete',
+  timeout: 'The review timed out',
+  invalid_output: 'The submitted output was not valid',
+  evidence: 'Evidence could not be stored',
+  cleanup: 'Cleanup could not be completed',
+  callback: 'The result could not be delivered',
+  marker_lookup_failed: 'Could not verify an earlier publication',
+  publication_uncertain: 'Publication could not be confirmed',
+  completion_failed: 'Completion could not be confirmed',
+  unknown: 'Reason not recorded',
+};
+
+export function failurePhaseLabel(phase: string): string {
+  return FAILURE_PHASE_LABEL[phase] ?? 'Failure reason not recorded';
+}
+
+export function failureReasonLabel(reason: string): string {
+  return FAILURE_REASON_LABEL[reason] ?? 'Reason not recorded';
 }
 
 export function absoluteTime(value: string | null | undefined): string {

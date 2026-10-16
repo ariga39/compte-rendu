@@ -14,3 +14,5 @@ apps/*/wrangler.*.jsonc
 
 .svelte-kit/
 apps/dashboard/build/
+apps/dashboard/test-results/
+apps/dashboard/playwright-report/

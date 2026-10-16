@@ -4,25 +4,46 @@
 
   let { children } = $props();
 
+  const links = [
+    ['/', 'Overview'],
+    ['/history', 'History'],
+    ['/help', 'Help'],
+  ] as const;
+
   let path = $derived(page.url.pathname);
-  let isOverview = $derived(path === '/');
-  let isHistory = $derived(path === '/history');
-  let isHelp = $derived(path === '/help');
+  let contextTitle = $derived(
+    path === '/'
+      ? 'Overview'
+      : path === '/history'
+        ? 'History'
+        : path === '/help'
+          ? 'Help'
+          : path.startsWith('/jobs/')
+            ? 'Review details'
+            : 'Overview',
+  );
 </script>
 
-<div class="mx-auto max-w-[1180px] px-5 py-7 pb-16">
-  <header class="mb-11 flex flex-wrap items-center justify-between gap-x-5 gap-y-3">
-    <a class="font-extrabold tracking-wide text-ink" href="/">
-      COMPTE RENDU<small class="mt-0.5 block font-medium tracking-normal text-muted-ink">Public review ledger</small>
+<a class="skip-link" href="#content" data-testid="skip-link">Skip to content</a>
+
+<div class="app-shell">
+  <aside class="sidebar">
+    <a class="brand" href="/">
+      Compte rendu<small>Review dashboard</small>
     </a>
-    <nav class="flex flex-wrap gap-[18px]" aria-label="Primary">
-      <a href="/" aria-current={isOverview ? 'page' : undefined} class={isOverview ? 'font-bold text-ink' : ''}>Overview</a>
-      <a href="/history" aria-current={isHistory ? 'page' : undefined} class={isHistory ? 'font-bold text-ink' : ''}>History</a>
-      <a href="/help" aria-current={isHelp ? 'page' : undefined} class={isHelp ? 'font-bold text-ink' : ''}>Help</a>
+    <nav aria-label="Primary">
+      {#each links as [href, label] (href)}
+        <a class="nav-link" {href} aria-current={path === href ? 'page' : undefined}>{label}</a>
+      {/each}
     </nav>
-    <div id="announce" class="sr-only" aria-live="polite"></div>
-  </header>
-  <main id="content">
-    {@render children()}
-  </main>
+  </aside>
+  <div class="app-main">
+    <header class="contextbar">
+      <span class="context-title">{contextTitle}</span>
+      <div id="announce" class="sr-only" aria-live="polite"></div>
+    </header>
+    <main id="content" tabindex="-1">
+      {@render children()}
+    </main>
+  </div>
 </div>

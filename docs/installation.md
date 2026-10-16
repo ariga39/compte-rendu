@@ -1220,7 +1220,7 @@ identity.
 Without such an observation, a visibility change can remain visible until the
 five-minute expiry. Already disclosed information cannot be retracted. Runs
 whose source visibility was private remain protected even if the repository
-later becomes public. Missing or expired identity appears as **Protected task**;
+later becomes public. Missing or expired identity appears as **Anonymous review**;
 counts, outcome, and recorded milestones remain visible.
 
 Before rollout, privately inventory repositories with retained runs and verify
@@ -1260,7 +1260,9 @@ or publication correctness.
 
 For local browser verification, install the pinned Playwright Chromium build with
 `corepack pnpm exec playwright install chromium`, then run
-`corepack pnpm build` and `corepack pnpm test:dashboard`. CI runs the same suite. A preinstalled compatible
+`corepack pnpm build` and `corepack pnpm test:dashboard`. The browser suite uses
+TypeScript and the Playwright test runner; `corepack pnpm check` includes its strict
+type check. CI runs the same suite. A preinstalled compatible
 Chromium may be selected with `PLAYWRIGHT_CHROMIUM_PATH`; it is only a test setting.
 
 ## Update and rollback

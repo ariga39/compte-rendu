@@ -8,6 +8,8 @@
     cleanupLabel,
     cleanupNote,
     cleanupTone,
+    failurePhaseLabel,
+    failureReasonLabel,
     formatDuration,
     milestoneLabel,
     outcomeSummary,
@@ -22,7 +24,7 @@
     liveIdentity,
     mergeMilestones,
   } from '#lib/model.ts';
-  import type { DetailModel, ExecutionStage, ProcessingStage, TaskFailure } from '#lib/types.ts';
+  import type { DetailModel, ExecutionStage, ProcessingStage } from '#lib/types.ts';
 
   const runId = $derived(page.params.runId ?? '');
   const encodedRunId = $derived(encodeURIComponent(runId));
@@ -75,12 +77,9 @@
   const title = $derived(
     identity
       ? `${identity.repositoryFullName} #${identity.pullRequestNumber}`
-      : 'Protected task',
+      : 'Anonymous review',
   );
   const timeline = $derived(dash.data ? mergeMilestones(dash.data.detail) : []);
-
-  const failureNotice = (failure: TaskFailure) =>
-    `Failure category: ${failure.phase}`;
 </script>
 
 {#snippet timeFact(label: string, value: string | null | undefined)}
@@ -88,65 +87,39 @@
     <b>{label}</b>
     {#if value}
       <time datetime={value}>{absoluteTime(value)}</time>
-      <span class="text-muted-ink">({relativeTime(value)})</span>
+      <span class="muted">({relativeTime(value)})</span>
     {:else}
-      Not recorded
+      <span class="muted">Not recorded</span>
     {/if}
   </div>
 {/snippet}
 
 {#snippet textFact(label: string, value: string)}
-  <div class="fact"><b>{label}</b>{value}</div>
+  <div class="fact"><b>{label}</b><span>{value}</span></div>
 {/snippet}
 
 {#if dash.error === 'notfound'}
-  <section class="detail max-w-[760px]">
-    <span class="text-xs font-extrabold uppercase tracking-[0.16em] text-accent">Not found</span>
-    <h1 class="wrap-anywhere my-1.5 mb-4 text-[clamp(1.6rem,3.2vw,2.35rem)] font-extrabold">Page not found</h1>
-    <p class="text-muted-ink">This dashboard address does not identify a task.</p>
-    <p>
-      <a
-        class="inline-block rounded-[9px] border border-line bg-panel px-3 py-2"
-        href="/history"
-        data-back
-        data-testid="back"
-        onclick={onBack}
-      >
-        Back to history
-      </a>
-    </p>
+  <section class="detail">
+    <h1>Page not found</h1>
+    <p class="muted">This dashboard address does not identify a task.</p>
+    <a class="btn" href="/history" data-back data-testid="back" onclick={onBack}>Back to history</a>
   </section>
 {:else if dash.data}
   {#if dash.error}
-    <div role="alert" class="notice error my-[18px] rounded-xl border border-[#75464b] bg-[#111923] px-4 py-3 text-danger">
-      {dash.error === 'offline' ? 'You appear to be offline.' : 'The dashboard is temporarily unavailable.'}
-      Showing the last refresh from {dash.lastGoodAt ? new Date(dash.lastGoodAt).toISOString() : 'not yet'}.
-      <button
-        type="button"
-        class="ml-2 cursor-pointer rounded-[9px] border border-line bg-panel px-3 py-1.5 text-ink"
-        onclick={dash.refresh}
-      >
-        Retry
-      </button>
+    <div role="alert" class="notice error">
+      {dash.error === 'offline'
+        ? 'You are offline. Updates will resume when you reconnect.'
+        : 'Could not refresh reviews. Showing the last available data.'}
+      <span class="muted">Last updated: {dash.lastGoodAt ? absoluteTime(new Date(dash.lastGoodAt).toISOString()) : 'not yet'}.</span>
+      <button type="button" class="btn" onclick={dash.refresh}>Retry</button>
     </div>
   {/if}
   <section class="detail">
-    <a
-      class="inline-block rounded-[9px] border border-line bg-panel px-3 py-2"
-      href={backHref}
-      data-back
-      data-testid="back"
-      onclick={onBack}
-    >
-      ← Back to history
-    </a>
-    <span class="mt-5 block text-xs font-extrabold uppercase tracking-[0.16em] text-accent">Task detail</span>
-    <h1 class="wrap-anywhere my-1.5 mb-4 text-[clamp(1.6rem,3.2vw,2.35rem)] font-extrabold leading-tight tracking-[-0.03em]">
-      {title}
-    </h1>
-    <p class="flex flex-wrap gap-2.5">
+    <a class="btn" href={backHref} data-back data-testid="back" onclick={onBack}>← Back to history</a>
+    <h1>{title}</h1>
+    <p class="task-badges">
       <Badge tone={statusTone(dash.data.task)}>{statusLabel(dash.data.task)}</Badge>
-      <Badge tone={cleanupTone(dash.data.task.cleanup)}>{cleanupLabel(dash.data.task.cleanup)}</Badge>
+      <Badge tone={cleanupTone(dash.data.task)}>{cleanupLabel(dash.data.task)}</Badge>
     </p>
     {#if identity}
       <p>
@@ -156,73 +129,67 @@
       </p>
     {/if}
 
-    <div class="facts my-6 grid gap-2.5">
-      {@render timeFact('Received', dash.data.task.receivedAt)}
-      {@render timeFact('Claimed', dash.data.task.claimedAt)}
-      {@render timeFact('Terminal', dash.data.task.terminalAt)}
-      {@render textFact('Queue wait', formatDuration(dash.data.task.queueWaitMs))}
-      {@render textFact('Total duration', formatDuration(dash.data.task.totalDurationMs))}
-      {@render textFact(
-        'Last progress',
-        dash.data.task.lastProgressAt ? relativeTime(dash.data.task.lastProgressAt) : 'Not recorded',
-      )}
-    </div>
-
-    <h2 class="mb-3 mt-8 text-xl">Outcome</h2>
+    <h2>Status</h2>
     <p>{outcomeSummary(dash.data.task)}</p>
 
-    <h2 class="mb-3 mt-8 text-xl">Reported observations</h2>
-    <div class="facts my-6 grid gap-2.5">
-      {@render timeFact('Execution start reported', dash.data.task.executionStartedAt)}
-      {@render timeFact('Result processing observed', dash.data.task.submissionCompletedAt)}
-      {@render timeFact('Cleanup attempt finished', dash.data.task.cleanupCompletedAt)}
-    </div>
+    {#if dash.data.task.failure}
+      <div class="notice error" role="alert">
+        <strong>{failurePhaseLabel(dash.data.task.failure.phase)}</strong><br />
+        {failureReasonLabel(dash.data.task.failure.reason)}
+      </div>
+    {/if}
 
-    <h2 class="mb-3 mt-8 text-xl">Recorded milestones</h2>
+    <h2>Timeline</h2>
     {#if timeline.length}
-      <ol class="timeline m-0 list-none p-0">
+      <ol class="timeline">
         {#each timeline as milestone (milestone.stage + milestone.startedAt)}
-          <li class="my-2.5 border-l border-line pl-3.5">
+          <li>
             <strong>{milestoneLabel(milestone.stage as ExecutionStage | ProcessingStage)}</strong><br />
             <time datetime={milestone.startedAt}>{absoluteTime(milestone.startedAt)}</time>
-            <span class="text-muted-ink">({relativeTime(milestone.startedAt)})</span>
+            <span class="muted">({relativeTime(milestone.startedAt)})</span>
           </li>
         {/each}
       </ol>
     {:else}
-      <p class="text-muted-ink">Not recorded</p>
+      <p class="muted">Not recorded</p>
     {/if}
 
-    <h2 class="mb-3 mt-8 text-xl">Cleanup</h2>
-    <p class="flex flex-wrap items-center gap-2.5">
-      <Badge tone={cleanupTone(dash.data.task.cleanup)}>{cleanupLabel(dash.data.task.cleanup)}</Badge>
-      <span>{cleanupNote(dash.data.task.cleanup)}</span>
-    </p>
+    <h2>Timing</h2>
+    <div class="facts">
+      {@render timeFact('Received', dash.data.task.receivedAt)}
+      {@render timeFact('Accepted', dash.data.task.claimedAt)}
+      {@render timeFact('Finished', dash.data.task.terminalAt)}
+      {@render textFact('Time in queue', formatDuration(dash.data.task.queueWaitMs))}
+      {@render textFact('Total time', formatDuration(dash.data.task.totalDurationMs))}
+      {@render textFact(
+        'Last progress update',
+        dash.data.task.lastProgressAt ? relativeTime(dash.data.task.lastProgressAt) : 'Not recorded',
+      )}
+    </div>
 
-    {#if dash.data.task.failure}
-      <div class="notice error mt-[18px] rounded-xl border border-[#75464b] bg-[#111923] px-4 py-3" role="alert">
-        <strong>{failureNotice(dash.data.task.failure)}</strong><br />
-        {dash.data.task.failure.reason}
-      </div>
-    {/if}
+    <h2>Execution details</h2>
+    <div class="facts">
+      {@render timeFact('Execution started', dash.data.task.executionStartedAt)}
+      {@render timeFact('Result processing observed', dash.data.task.submissionCompletedAt)}
+      {@render timeFact('Cleanup attempt finished', dash.data.task.cleanupCompletedAt)}
+    </div>
+
+    <h2>Cleanup</h2>
+    <div class="cleanup-block">
+      <Badge tone={cleanupTone(dash.data.task)}>{cleanupLabel(dash.data.task)}</Badge>
+      <p class="muted">{cleanupNote(dash.data.task)}</p>
+    </div>
   </section>
 {:else if dash.loading}
-  <p class="text-muted-ink" aria-busy="true">Loading…</p>
+  <p class="muted" aria-busy="true">Loading reviews…</p>
 {:else}
-  <section class="max-w-[760px]">
-    <span class="text-xs font-extrabold uppercase tracking-[0.16em] text-accent">Unavailable</span>
-    <h1 class="wrap-anywhere my-1.5 mb-4 text-[clamp(1.6rem,3.2vw,2.35rem)] font-extrabold">
-      We could not load the dashboard.
-    </h1>
-    <p class="text-muted-ink">
-      {dash.error === 'offline' ? 'You appear to be offline.' : 'The dashboard is temporarily unavailable.'}
+  <section>
+    <h1 class="page-head">Could not load reviews</h1>
+    <p class="muted">
+      {dash.error === 'offline' ? 'You are offline.' : 'Could not load reviews right now.'}
     </p>
-    <button
-      type="button"
-      class="cursor-pointer rounded-[9px] border border-line bg-panel px-3 py-2"
-      onclick={dash.refresh}
-    >
-      Try again
-    </button>
+    <div class="toolbar">
+      <button type="button" class="btn" onclick={dash.refresh}>Try again</button>
+    </div>
   </section>
 {/if}

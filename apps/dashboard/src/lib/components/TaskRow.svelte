@@ -17,38 +17,40 @@
 
   let identity = $derived(stale ? null : liveIdentity(task, now));
   let title = $derived(
-    identity ? `${identity.repositoryFullName} #${identity.pullRequestNumber}` : 'Protected task',
+    identity ? `${identity.repositoryFullName} #${identity.pullRequestNumber}` : 'Anonymous review',
   );
 </script>
 
-<article
-  data-testid="task"
-  class="my-2.5 grid grid-cols-[minmax(0,2fr)_auto_auto_auto] items-center gap-[18px] rounded-[14px] border border-line bg-gradient-to-br from-panel to-[#111820] p-[18px] max-md:grid-cols-2 max-sm:grid-cols-1"
->
-  <div>
-    <h3 class="wrap-anywhere m-0 mb-1 text-base">
+<article data-testid="task" class="task-row">
+  <div class="task-main">
+    <h3 class="task-title">
       <a
-        class="font-semibold text-accent hover:underline"
-        href={`/jobs/${encodeURIComponent(task.runId)}`}
         data-testid="task-link"
         data-run-id={task.runId}
+        href={`/jobs/${encodeURIComponent(task.runId)}`}
       >
         {title}
       </a>
     </h3>
-    <p class="m-0 text-sm text-muted-ink">
-      {taskLabel(task)} · received {relativeTime(task.receivedAt)}
-      <span class="text-muted-ink">({absoluteTime(task.receivedAt)})</span>
+    <p class="task-meta">
+      {taskLabel(task)} ·
+      <time datetime={task.receivedAt} title={absoluteTime(task.receivedAt)} aria-label={absoluteTime(task.receivedAt)}>
+        received {relativeTime(task.receivedAt)}
+      </time>
     </p>
     {#if task.dispatch === 'claimed'}
-      <p class="m-0 text-sm text-muted-ink">{progressText(task)}</p>
+      <p class="task-meta">{progressText(task)}</p>
     {/if}
   </div>
-  <div><Badge tone={statusTone(task)}>{statusLabel(task)}</Badge></div>
-  <div><Badge tone={cleanupTone(task.cleanup)}>{cleanupLabel(task.cleanup)}</Badge></div>
-  {#if identity}
-    <div>
-      <a href={identity.pullRequestUrl} target="_blank" rel="noopener noreferrer">Pull request</a>
-    </div>
-  {/if}
+  <div class="task-badges">
+    <Badge tone={statusTone(task)}>{statusLabel(task)}</Badge>
+    <Badge tone={cleanupTone(task)}>{cleanupLabel(task)}</Badge>
+  </div>
+  <div class="task-pr-cell">
+    {#if identity}
+      <a class="task-pr" href={identity.pullRequestUrl} target="_blank" rel="noopener noreferrer">
+        Pull request
+      </a>
+    {/if}
+  </div>
 </article>

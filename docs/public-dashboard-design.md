@@ -51,6 +51,27 @@ repository, PR, SHA, Runner job ID or the currently active job.
 
 ## Pages
 
+### Presentation and language
+
+Use a compact application layout inspired by Linear: desktop sidebar, visible
+mobile navigation, flat task rows, restrained colors, and visible keyboard focus.
+Keep main pages focused on tasks, status, timestamps, filters, and actions.
+Put explanations of URL filters, refresh mechanics, and historical gaps in the
+Markdown Help page rather than adding explanatory banners to every page.
+
+User-facing labels do not rename database states. Display claimed work as
+"In progress" and a terminal timestamp as "Finished". Progress updates and page
+refresh timestamps must remain distinct. Anonymous identity does not prove a
+repository is private; it can also mean public visibility is unverified or expired.
+
+While cleanup is pending, display "Cleanup after review" for scheduled work before
+the reported cleanup stage, "Cleaning up" at that stage, and "Cleanup pending"
+after the review has ended. Normal pending cleanup is muted; failed cleanup and
+terminal pending cleanup remain visible exceptions. These labels describe recorded
+state and do not assert that a process is currently alive. Failure wording must
+preserve uncertainty: an unconfirmed publication is not proof that nothing was
+published.
+
 ### Overview and current work (`/`)
 
 The header shows the product name, last successful refresh, freshness/error
@@ -58,9 +79,9 @@ notice and manual refresh control. Four primary counts show queued work,
 claimed work (not confirmed live processes), and the published/failed outcomes among runs received
 in the last 24 hours. Label the last two cards "Received in the last 24 hours"
 and use `created_at` consistently, including for legacy runs; do not pretend
-unknown historical terminal times are known. Label queued/claimed cards "Current
-database state" so they are not mistaken for the last-24-hour cohort. Include
-anonymous tasks.
+unknown historical terminal times are known. Label current counts "Queued" and
+"In progress", with "Waiting to start" and "Accepted for processing" sublabels,
+so they remain distinct from the last-24-hour outcome cohort. Include anonymous tasks.
 Superseded is a separate outcome, not a failure. Cleanup exceptions have a
 separate alert/count and can overlap terminal outcomes; they are not added to
 an allegedly disjoint total. Counts come from SQL aggregates over all matching
@@ -75,10 +96,10 @@ A queued task can say "waiting for the previous review to clean up" only when
 Core's persisted same-PR blocker proves it; otherwise simply say "queued."
 Do not promise strict FIFO, an exact queue position, or an estimated start time.
 
-Each row has a task link, public repository/PR or "Protected task", outcome or
+Each row has a task link, public repository/PR or "Anonymous review", outcome or
 current stage, received time, elapsed/total duration where known, and cleanup
-badge. For claimed tasks, always show "Last progress report X ago", or "No
-progress report; claimed X ago". These are observations, not heartbeats: a long
+badge. For claimed tasks, show "Last progress update X ago", or an awaiting-first-update
+message with the acceptance time. These are observations, not heartbeats: a long
 model invocation can legitimately have no stage transition, and a crashed Runner
 can leave a claimed row behind. Do not show a live/healthy indicator, silently
 remove the row, or invent failure. Do not label an elapsed task age as model
@@ -152,7 +173,7 @@ Expose separate execution progress and cleanup facts:
 
 "Published" means Core durably recorded successful publication, not model exit
 0, submission, Runner success, cleanup success or a received callback. A
-claimed run without a progress report says "Claimed; awaiting progress".
+claimed run without a progress report says "Awaiting first progress update".
 If Core has a valid result but publication is unfinished, say "Processing
 result" or "Publishing" according to the persisted transition.
 
@@ -361,7 +382,8 @@ start time so a delayed response cannot acquire a new full lifetime.
 Verified-public metadata has a **five-minute maximum lifetime**. The server
 returns name and PR only if the run is eligible (public snapshot or verified
 legacy eligibility), metadata is public, and it has not expired. Otherwise it
-returns "Protected task" and an opaque task ID, with no repo/installation ID,
+returns anonymous identity and an opaque task ID; the UI labels this "Anonymous review",
+with no repo/installation ID,
 PR number/link, SHA, actor, title, evidence identifier, raw error, log or review
 content. Use the same projection for rows, detail, filters, HTML and cursors.
 Do not expose stable pseudonyms that group anonymous runs by repository.

@@ -7,8 +7,23 @@ import type {
   D1ResultLike,
 } from '../../apps/core/src/index';
 
+type SqliteBindValue = string | number | bigint | Uint8Array | null;
+
+const toSqliteBindValue = (value: unknown): SqliteBindValue => {
+  if (
+    value === null ||
+    typeof value === 'string' ||
+    typeof value === 'number' ||
+    typeof value === 'bigint' ||
+    value instanceof Uint8Array
+  ) {
+    return value;
+  }
+  throw new TypeError('unsupported SQLite bind value');
+};
+
 class SqlitePreparedStatement implements D1PreparedStatementLike {
-  private values: unknown[] = [];
+  private values: SqliteBindValue[] = [];
 
   constructor(
     private readonly database: DatabaseSync,
@@ -16,7 +31,7 @@ class SqlitePreparedStatement implements D1PreparedStatementLike {
   ) {}
 
   bind(...values: unknown[]) {
-    this.values = values;
+    this.values = values.map(toSqliteBindValue);
     return this;
   }
 
