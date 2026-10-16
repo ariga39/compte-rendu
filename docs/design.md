@@ -254,6 +254,36 @@ state. GitHub, D1, Runner, and clock adapters sit at internal seams.
 Observable dispositions are deliberately few: rejected, ignored, awaiting
 approval, scheduled, completed, or failed.
 
+### Sandbox runtime modules
+
+The Runner executes every review through a small per-job runtime interface with
+four operations: `setup`, `exec`, `copyOut`, and `destroy`. Two adapters
+implement it: the production default Docker `sbx` adapter and the NVIDIA
+OpenShell adapter. Runtime selection comes from validated startup configuration
+(`RUNNER_SANDBOX_RUNTIME`, default `sbx`); an unknown kind or an incomplete
+OpenShell configuration fails before any claim or admission. The adapters own
+runtime-specific creation, execution, file transfer, credential/egress setup and
+confirmed teardown; the Runner keeps checkout, review orchestration, evidence,
+callback, and every deadline/abort/diagnostic.
+
+A per-job runtime object is created before `setup`, so a throw during partial
+setup still has cleanup state. It exposes read-only lifecycle metadata
+(`created`, backend `id`, `name`, `runtime`, `imageRef`, `evidenceRoot`) that is
+updated the moment the sandbox resource exists; the Runner archives partial
+evidence and records the manifest's `runtime`, `image`, and sandbox id from that
+metadata. Provider names, secret placeholders, network-rule bookkeeping and
+token files stay inside each adapter's closure.
+
+OpenShell uses fixed in-sandbox paths (`/workspace/checkout`, `/workspace/config`,
+`/workspace/evidence`), attaches a pre-provisioned model provider plus a unique
+per-job GitHub provider created with the read token passed through the child
+environment only, and confirms deletion by polling `sandbox get` for the exact
+owned identity. A transport error, malformed identity, or timeout is never
+treated as deletion; the documented lost driver-operation ownership after a
+gateway crash fails closed. The Docker `sbx` adapter preserves the existing
+`shell` launcher, per-job model secret and GitHub service, scoped network
+policy, and force-confirmed cleanup commands.
+
 ### Runner Job and pull interface
 
 ```ts

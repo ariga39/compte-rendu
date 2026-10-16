@@ -313,6 +313,34 @@ build a general security platform.
   plus GitHub's one-hour expiry are sufficient for the single-repository,
   read-only token. Immediate revocation remains optional hardening.
 
+## Runtime adapter security notes (issue #158)
+
+The Runner selects a per-job sandbox runtime adapter from validated startup
+configuration. `sbx` remains the production default; `openshell` is opt-in. An
+unknown runtime kind or incomplete OpenShell configuration fails before any
+claim or admission, so a misconfigured host cannot run a review through an
+unintended backend.
+
+- **Credentials.** The model API key for OpenShell stays gateway-side in a
+  pre-provisioned provider; OpenShell never runs `MODEL_SECRET_COMMAND`. The
+  per-job GitHub read token is passed to `provider create` only through the
+  child environment (`--credential GITHUB_TOKEN`), never as an argv value, and a
+  unique provider name is derived per job. The `sbx` adapter owns a mode-0600
+  host token file that its `destroy` removes. Only the job-owned provider is
+  deleted; a pre-existing conflicting provider is never removed.
+- **Egress.** The `sbx` adapter preserves the scoped model/GitHub policy and the
+  bare `shell` launcher. OpenShell provider profiles declare explicit
+  `protocol: rest` + `enforcement: enforce` endpoints; TLS certificate
+  verification stays enabled for HTTPS or named gateways, while an explicit
+  `http://127.0.0.1:<port>` loopback endpoint is plaintext by design.
+- **Deletion.** A rejected or asynchronous deletion is never treated as
+  destruction. OpenShell confirms the exact owned identity by polling
+  `sandbox get`; transport errors, malformed identity, timeouts, and
+  truncation never count as gone. The documented lost driver-operation
+  ownership after a gateway crash fails closed rather than inventing recovery.
+- **Evidence.** The manifest records the actual runtime kind, image reference,
+  and backend sandbox id from the adapter's read-only lifecycle metadata.
+
 ## Evidence and primary sources
 
 ### Repository evidence

@@ -565,6 +565,51 @@ an absolute program path and absolute file references (for example
 longer resolve against the project or daemon working directory. Keep the helper
 and every file it reads outside writable sandbox mounts.
 
+### Sandbox runtime selection
+
+The Runner executes reviews through a per-job sandbox runtime adapter.
+`RUNNER_SANDBOX_RUNTIME` selects `sbx` (the default, unchanged production path)
+or `openshell`. An unknown value, or an incomplete OpenShell configuration,
+fails at startup before any claim or admission.
+
+OpenShell additionally requires:
+
+- `OPENSHELL_IMAGE` — the review image, for example a locally built
+  `compte-rendu-openshell:<tag>` from `apps/runner/openshell-template/Dockerfile`.
+  The Docker `sbx` template reference is never reused.
+- a gateway: `OPENSHELL_GATEWAY` (a registered name) or
+  `OPENSHELL_GATEWAY_ENDPOINT` (for example `http://127.0.0.1:18670`).
+- `OPENSHELL_MODEL_PROVIDER` — the pre-provisioned model provider name; its
+  credential lives gateway-side, so OpenShell never runs `MODEL_SECRET_COMMAND`.
+- optional `OPENSHELL_GITHUB_PROFILE` (default `cr-github`) and
+  `RUNNER_SANDBOX_CLI` (default `openshell`).
+
+TLS certificate verification stays enabled for HTTPS or named gateways;
+`OPENSHELL_GATEWAY_INSECURE` only turns verification off. An explicit
+`http://127.0.0.1:<port>` loopback endpoint is plaintext by design, not a
+verification failure. The gateway ships no provider profiles, so import the
+non-secret samples from `apps/runner/openshell-template/` before starting the
+Runner:
+
+```sh
+openshell profile import -f apps/runner/openshell-template/cr-model.yaml
+openshell profile import -f apps/runner/openshell-template/cr-github.yaml
+```
+
+Import into the same workspace the Runner operates in (default `default`) rather
+than `--global`: provider creation and the startup preflight are workspace
+scoped, and a global import is not merged into that workspace. The Runner's
+startup preflight pages `provider list --output json` and fails closed unless
+the configured model provider is present.
+
+`cr-model` declares the model credential `OPENCODE_API_KEY`, permits only
+`POST` to `opencode.ai` under `protocol: rest` + `enforcement: enforce`, and
+allows only `/usr/local/bin/opencode`. `cr-github` gives
+`/usr/local/bin/gh` read-only REST and `read-only` GraphQL to `api.github.com`
+only. The Runner creates one unique GitHub provider per job and deletes only
+that provider during cleanup. OpenShell sandboxes use the fixed in-sandbox paths
+`/workspace/checkout`, `/workspace/config`, and `/workspace/evidence`.
+
 The Runner derives its claim URL by resolving `/runner-claim` on the same
 origin as `RUNNER_CALLBACK_URL`; no separate claim URL environment variable is
 required in production. `RUNNER_CALLBACK_TOKEN` authenticates both public

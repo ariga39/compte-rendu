@@ -5662,3 +5662,582 @@ describe('Runner concurrency', () => {
     }
   });
 });
+
+describe('Runner sandbox runtime selection', () => {
+  const base = {
+    authToken: 'runner-test-token',
+    modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+    evidenceRoot: sharedEvidenceRoot,
+    process: async (): Promise<RunnerProcessResult> => ({
+      exitCode: 0,
+      stdout: '',
+      timedOut: false,
+      truncated: false,
+    }),
+  };
+
+  it('defaults to the sbx runtime when no sandbox runtime is configured', () => {
+    expect(() => createRunner(base)).not.toThrow();
+  });
+
+  it('rejects an unknown sandbox runtime before claiming or admitting work', () => {
+    const previous = process.env.RUNNER_SANDBOX_RUNTIME;
+    try {
+      process.env.RUNNER_SANDBOX_RUNTIME = 'docker';
+      expect(() => createRunner(base)).toThrow(/RUNNER_SANDBOX_RUNTIME/);
+    } finally {
+      if (previous === undefined) delete process.env.RUNNER_SANDBOX_RUNTIME;
+      else process.env.RUNNER_SANDBOX_RUNTIME = previous;
+    }
+  });
+
+  it('rejects incomplete openshell configuration before claiming or admitting work', () => {
+    expect(() => createRunner({ ...base, sandboxRuntime: 'openshell' })).toThrow(
+      /OPENSHELL_GATEWAY/,
+    );
+    expect(() =>
+      createRunner({
+        ...base,
+        sandboxRuntime: 'openshell',
+        openshell: { gatewayEndpoint: 'http://127.0.0.1:18670' },
+      }),
+    ).toThrow(/OPENSHELL_MODEL_PROVIDER/);
+    expect(() =>
+      createRunner({
+        ...base,
+        sandboxRuntime: 'openshell',
+        openshell: {
+          gatewayEndpoint: 'http://127.0.0.1:18670',
+          modelProvider: 'model-provider',
+        },
+      }),
+    ).toThrow(/OPENSHELL_IMAGE/);
+    expect(() =>
+      createRunner({
+        ...base,
+        sandboxRuntime: 'openshell',
+        openshell: { gateway: 'local' },
+      }),
+    ).toThrow(/OPENSHELL_MODEL_PROVIDER/);
+  });
+
+  it('selects the openshell adapter for complete configuration', () => {
+    for (const openshell of [
+      {
+        gatewayEndpoint: 'http://127.0.0.1:18670',
+        modelProvider: 'model-provider',
+        image: 'compte-rendu-openshell:158',
+      },
+      {
+        gateway: 'local',
+        modelProvider: 'model-provider',
+        image: 'compte-rendu-openshell:158',
+      },
+    ]) {
+      expect(() => createRunner({ ...base, sandboxRuntime: 'openshell', openshell })).not.toThrow();
+    }
+  });
+});
+
+describe('Runner OpenShell runtime lifecycle', () => {
+  const baseSha = '1111111111111111111111111111111111111111';
+  const headSha = '2222222222222222222222222222222222222222';
+  const openshell = {
+    gatewayEndpoint: 'http://127.0.0.1:18670',
+    modelProvider: 'cr158-model',
+    image: 'compte-rendu-openshell:158',
+  };
+
+  const runOpenShellReview = async (scenario: {
+    runId: string;
+    sandboxId?: string;
+    createFails?: boolean;
+    createTimesOut?: boolean;
+    uploadFails?: boolean;
+    providerCreateFails?: boolean;
+    destroyGet: 'gone' | 'transport' | 'malformed' | 'present';
+    observedId?: string;
+    conflictOwner?: boolean;
+    missingModelProvider?: boolean;
+    pagedModelProvider?: boolean;
+    malformedProviderList?: boolean;
+  }) => {
+    const resultLine = finalMarkdownJsonl();
+    const token = 'os-read-token-must-not-be-argv';
+    const commands: string[][] = [];
+    const providerEnvs: Array<NodeJS.ProcessEnv | undefined> = [];
+    const agentResult = resultLine;
+    const observedId = scenario.observedId ?? scenario.sandboxId ?? 'sbx-uuid-1';
+    let deleteIssued = false;
+    let sandboxExists = false;
+    let createdName = '';
+    let labelNonce = '';
+    let providerListCalls = 0;
+    const runner = createRunner({
+      evidenceRoot: sharedEvidenceRoot,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      sandboxRuntime: 'openshell',
+      openshell,
+      process: async (command, args, options = {}) => {
+        commands.push([...args]);
+        const ok = { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+        const head = args.findIndex((value) => value === 'sandbox' || value === 'provider');
+        const a0 = args[head];
+        const a1 = args[head + 1];
+        if (command === 'git') {
+          if (args.includes('rev-parse')) return { ...ok, stdout: `${baseSha}\n${headSha}\n` };
+          if (args.includes('merge-base')) return { ...ok, stdout: `${baseSha}\n` };
+          return ok;
+        }
+        if (command !== 'openshell') {
+          return {
+            exitCode: 1,
+            stdout: '',
+            stderr: `unexpected command ${command}`,
+            timedOut: false,
+            truncated: false,
+          };
+        }
+        if (a0 === 'provider' && a1 === 'list') {
+          providerListCalls += 1;
+          if (scenario.malformedProviderList === true) {
+            return { ...ok, stdout: 'not-json' };
+          }
+          if (scenario.pagedModelProvider === true && providerListCalls === 1) {
+            return {
+              ...ok,
+              stdout: JSON.stringify({ providers: [], next_page_token: 'page-2' }),
+            };
+          }
+          return {
+            ...ok,
+            stdout: JSON.stringify({
+              providers:
+                scenario.missingModelProvider === true
+                  ? []
+                  : [{ id: 'p-model', name: 'cr158-model' }],
+              next_page_token: '',
+            }),
+          };
+        }
+        if (a0 === 'provider' && a1 === 'get') {
+          return scenario.providerCreateFails === true
+            ? {
+                ...ok,
+                stdout: JSON.stringify({ id: 'preexisting', name: 'cr-runner-job-test-github' }),
+              }
+            : {
+                exitCode: 1,
+                stdout: '',
+                stderr: 'provider not found',
+                timedOut: false,
+                truncated: false,
+              };
+        }
+        if (a0 === 'provider' && a1 === 'create') {
+          providerEnvs.push(options.env);
+          return scenario.providerCreateFails === true
+            ? {
+                exitCode: 1,
+                stdout: '',
+                stderr: 'provider exists',
+                timedOut: false,
+                truncated: false,
+              }
+            : ok;
+        }
+        if (a0 === 'provider' && a1 === 'delete') return ok;
+        if (a0 === 'sandbox' && a1 === 'create') {
+          const memory = args[args.indexOf('--memory') + 1];
+          if (memory === undefined || !/^\d+(Mi|Gi|G|M)$/.test(memory)) {
+            return {
+              exitCode: 1,
+              stdout: '',
+              stderr: 'invalid memory unit',
+              timedOut: false,
+              truncated: false,
+            };
+          }
+          const requestedName = args[args.indexOf('--name') + 1] ?? '';
+          if (requestedName.length === 0 || requestedName.length > 19) {
+            return {
+              exitCode: 1,
+              stdout: '',
+              stderr: 'invalid sandbox name length',
+              timedOut: false,
+              truncated: false,
+            };
+          }
+          createdName = requestedName;
+          labelNonce = (args[args.indexOf('--label') + 1] ?? '').replace('cr-job-owner=', '');
+          if (scenario.createTimesOut === true) {
+            sandboxExists = true;
+            return { exitCode: 1, stdout: '', timedOut: true, truncated: false };
+          }
+          if (scenario.createFails === true) {
+            return {
+              exitCode: 1,
+              stdout: '',
+              stderr: 'create failed',
+              timedOut: false,
+              truncated: false,
+            };
+          }
+          sandboxExists = true;
+          return {
+            ...ok,
+            stdout: JSON.stringify({
+              id: observedId,
+              name: createdName,
+              labels: { 'cr-job-owner': labelNonce },
+            }),
+          };
+        }
+        if (a0 === 'sandbox' && a1 === 'get') {
+          if (!deleteIssued && !sandboxExists) {
+            return {
+              exitCode: 1,
+              stdout: '',
+              stderr: 'message sandbox not found',
+              timedOut: false,
+              truncated: false,
+            };
+          }
+          if (deleteIssued) {
+            if (scenario.destroyGet === 'transport') {
+              return {
+                exitCode: 1,
+                stdout: '',
+                stderr: 'connection refused',
+                timedOut: false,
+                truncated: false,
+              };
+            }
+            if (scenario.destroyGet === 'malformed') {
+              return { ...ok, stdout: '{"unexpected":true}' };
+            }
+            if (scenario.destroyGet === 'gone') {
+              return {
+                exitCode: 1,
+                stdout: '',
+                stderr: 'message sandbox not found',
+                timedOut: false,
+                truncated: false,
+              };
+            }
+          }
+          return {
+            ...ok,
+            stdout: JSON.stringify({
+              id: observedId,
+              name: createdName,
+              labels: {
+                'cr-job-owner': scenario.conflictOwner === true ? 'foreign-owner' : labelNonce,
+              },
+            }),
+          };
+        }
+        if (a0 === 'sandbox' && a1 === 'delete') {
+          deleteIssued = true;
+          sandboxExists = false;
+          return ok;
+        }
+        if (a0 === 'sandbox' && a1 === 'upload') {
+          return scenario.uploadFails === true
+            ? {
+                exitCode: 1,
+                stdout: '',
+                stderr: 'upload failed',
+                timedOut: false,
+                truncated: false,
+              }
+            : ok;
+        }
+        if (a0 === 'sandbox' && a1 === 'download') {
+          const source = args[head + 3];
+          const destination = args[head + 4];
+          if (source.endsWith('.json')) {
+            await writeFile(
+              destination,
+              JSON.stringify({ info: { id: 'os-session' }, messages: [] }),
+              {
+                mode: 0o600,
+              },
+            );
+          } else {
+            await mkdir(destination, { recursive: true, mode: 0o700 });
+            await writeFile(join(destination, 'opencode.db'), 'db', { mode: 0o600 });
+            await writeFile(join(destination, 'review.log'), 'log', { mode: 0o600 });
+          }
+          return ok;
+        }
+        if (a0 === 'sandbox' && a1 === 'exec') {
+          if (args.includes('--agent')) {
+            await writeFile(options.stdoutFilePath!, `${agentResult}\n`, { mode: 0o600 });
+            await writeFile(options.stderrFilePath!, 'agent stderr\n', { mode: 0o600 });
+            return { ...ok, stdout: agentResult };
+          }
+          if (args.includes('session')) return { ...ok, stdout: '[{"id":"os-session"}]' };
+          return ok;
+        }
+        return ok;
+      },
+    });
+    const submitted = await runner.handle(
+      new Request('http://runner/jobs', {
+        method: 'POST',
+        headers: { authorization: 'Bearer runner-test-token', 'content-type': 'application/json' },
+        body: JSON.stringify({
+          ...runnerJobFields,
+          runId: scenario.runId,
+          attempt: 1,
+          repositoryUrl: 'https://github.com/acme/reviewed.git',
+          baseSha,
+          headSha,
+          repositoryReadToken: token,
+        }),
+      }),
+    );
+    const { id } = (await submitted.json()) as { id: string };
+    const terminal = await waitForTerminal(runner, id);
+    let manifest: Record<string, unknown> | undefined;
+    if (terminal.evidenceId !== undefined) {
+      manifest = JSON.parse(
+        await readFile(join(sharedEvidenceRoot, terminal.evidenceId, 'manifest.json'), 'utf8'),
+      ) as Record<string, unknown>;
+    }
+    return { terminal, manifest, commands, providerEnvs, token };
+  };
+
+  it('runs a review through the OpenShell adapter with real identity and job-owned provider cleanup', async () => {
+    const run = await runOpenShellReview({ runId: 'run-158-success', destroyGet: 'gone' });
+    expect(run.terminal).toMatchObject({
+      status: 'succeeded',
+      sandbox: { cleanup: 'destroyed' },
+    });
+    expect(run.manifest).toMatchObject({
+      runtime: 'openshell',
+      image: 'compte-rendu-openshell:158',
+      sandboxId: 'sbx-uuid-1',
+    });
+    const flat = run.commands.map((args) => args.join(' '));
+    expect(flat.join(' ')).not.toContain(run.token);
+    const createArgs = run.commands.find(
+      (args) => args.includes('sandbox') && args.includes('create') && args.includes('--from'),
+    );
+    expect(createArgs).toEqual(
+      expect.arrayContaining(['--from', 'compte-rendu-openshell:158', '--provider', 'cr158-model']),
+    );
+    const agentExec = run.commands.find(
+      (args) => args.includes('sandbox') && args.includes('exec') && args.includes('--agent'),
+    );
+    expect(agentExec).toEqual(expect.arrayContaining(['--workdir', '/workspace/checkout']));
+    const providerCreate = run.commands.find(
+      (args) => args.includes('provider') && args.includes('create'),
+    );
+    expect(providerCreate).toEqual(
+      expect.arrayContaining([
+        '--name',
+        'cr-runner-job-test-github',
+        '--type',
+        'cr-github',
+        '--credential',
+        'GITHUB_TOKEN',
+      ]),
+    );
+    const providerDelete = run.commands.find(
+      (args) => args.includes('provider') && args.includes('delete'),
+    );
+    expect(providerDelete).toEqual(expect.arrayContaining(['cr-runner-job-test-github']));
+    expect(run.providerEnvs[0]?.GITHUB_TOKEN).toBe(run.token);
+  });
+
+  it('does not release cleanup when OpenShell deletion cannot be confirmed', async () => {
+    for (const destroyGet of ['transport', 'malformed'] as const) {
+      const run = await runOpenShellReview({
+        runId: `run-158-${destroyGet}`,
+        destroyGet,
+      });
+      expect(run.terminal).toMatchObject({
+        status: 'failed',
+        failure: { reason: 'cleanup' },
+        sandbox: { cleanup: 'failed' },
+      });
+    }
+
+    const previous = process.env.OPENSHELL_DELETE_TIMEOUT_MS;
+    try {
+      process.env.OPENSHELL_DELETE_TIMEOUT_MS = '100';
+      const run = await runOpenShellReview({ runId: 'run-158-present', destroyGet: 'present' });
+      expect(run.terminal).toMatchObject({
+        status: 'failed',
+        failure: { reason: 'cleanup' },
+        sandbox: { cleanup: 'failed' },
+      });
+    } finally {
+      if (previous === undefined) delete process.env.OPENSHELL_DELETE_TIMEOUT_MS;
+      else process.env.OPENSHELL_DELETE_TIMEOUT_MS = previous;
+    }
+  });
+
+  it('archives partial OpenShell evidence and confirms cleanup after a post-create setup failure', async () => {
+    const run = await runOpenShellReview({
+      runId: 'run-158-partial',
+      destroyGet: 'gone',
+      uploadFails: true,
+    });
+    expect(run.terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'agent' },
+      sandbox: { cleanup: 'destroyed' },
+    });
+    expect(run.terminal.evidenceId).toBeDefined();
+    expect(run.manifest).toMatchObject({ runtime: 'openshell', sandboxId: 'sbx-uuid-1' });
+  });
+
+  it('accepts a model provider found on a later provider-list page', async () => {
+    const run = await runOpenShellReview({
+      runId: 'run-158-paged',
+      destroyGet: 'gone',
+      pagedModelProvider: true,
+    });
+    expect(run.terminal.status).toBe('succeeded');
+    expect(run.terminal).toMatchObject({ sandbox: { cleanup: 'destroyed' } });
+  });
+
+  it('does not admit when the provider list is malformed', async () => {
+    let claims = 0;
+    const runner = createRunner({
+      evidenceRoot: sharedEvidenceRoot,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      sandboxRuntime: 'openshell',
+      openshell,
+      claimUrl: 'https://ingress.test/runner-claim',
+      claimFetch: async () => {
+        claims += 1;
+        return new Response(null, { status: 204 });
+      },
+      claimIntervalMs: 1,
+      process: async () => ({
+        exitCode: 0,
+        stdout: 'not-json',
+        timedOut: false,
+        truncated: false,
+      }),
+    });
+    const response = await runner.handle(
+      new Request('http://runner/jobs', {
+        method: 'POST',
+        headers: { authorization: 'Bearer runner-test-token', 'content-type': 'application/json' },
+        body: JSON.stringify({
+          ...runnerJobFields,
+          runId: 'run-158-malformed-preflight',
+          attempt: 1,
+          repositoryUrl: 'https://github.com/acme/reviewed.git',
+          baseSha: '1111111111111111111111111111111111111111',
+          headSha: '2222222222222222222222222222222222222222',
+        }),
+      }),
+    );
+    expect(response.status).toBe(503);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(claims).toBe(0);
+  });
+
+  it('does not claim or admit when the configured model provider is missing', async () => {
+    let claims = 0;
+    let admits = 0;
+    const runner = createRunner({
+      evidenceRoot: sharedEvidenceRoot,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      sandboxRuntime: 'openshell',
+      openshell,
+      claimUrl: 'https://ingress.test/runner-claim',
+      claimFetch: async () => {
+        claims += 1;
+        return new Response(null, { status: 204 });
+      },
+      claimIntervalMs: 1,
+      process: async (command, args) => {
+        const a1 = args[1];
+        if (args.includes('provider') && a1 === 'list') {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({ providers: [], next_page_token: '' }),
+            timedOut: false,
+            truncated: false,
+          };
+        }
+        if (args.includes('provider') && a1 === 'create') {
+          admits += 1;
+          return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+        }
+        return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+      },
+    });
+    const response = await runner.handle(
+      new Request('http://runner/jobs', {
+        method: 'POST',
+        headers: { authorization: 'Bearer runner-test-token', 'content-type': 'application/json' },
+        body: JSON.stringify({
+          ...runnerJobFields,
+          runId: 'run-158-preflight',
+          attempt: 1,
+          repositoryUrl: 'https://github.com/acme/reviewed.git',
+          baseSha: '1111111111111111111111111111111111111111',
+          headSha: '2222222222222222222222222222222222222222',
+        }),
+      }),
+    );
+    expect(response.status).toBe(503);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(claims).toBe(0);
+    expect(admits).toBe(0);
+  });
+
+  it('reconciles a timed-out create that actually created the labelled sandbox', async () => {
+    const run = await runOpenShellReview({
+      runId: 'run-158-timeout-created',
+      destroyGet: 'gone',
+      createTimesOut: true,
+    });
+    expect(run.terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'agent', cause: 'timeout' },
+      sandbox: { cleanup: 'destroyed' },
+    });
+    expect(run.terminal.evidenceId).toBeDefined();
+  });
+
+  it('refuses to delete a same-name sandbox owned by another nonce', async () => {
+    const run = await runOpenShellReview({
+      runId: 'run-158-conflict',
+      destroyGet: 'gone',
+      conflictOwner: true,
+    });
+    expect(run.terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'cleanup' },
+      sandbox: { cleanup: 'failed' },
+    });
+    expect(run.commands.some((args) => args.includes('sandbox') && args.includes('delete'))).toBe(
+      false,
+    );
+  });
+
+  it('preserves the create timeout cause and still confirms cleanup', async () => {
+    const run = await runOpenShellReview({
+      runId: 'run-158-timeout',
+      destroyGet: 'gone',
+      createTimesOut: true,
+    });
+    expect(run.terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'agent', cause: 'timeout' },
+      sandbox: { cleanup: 'destroyed' },
+    });
+  });
+});

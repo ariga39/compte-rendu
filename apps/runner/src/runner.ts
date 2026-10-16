@@ -30,8 +30,31 @@ import {
 } from '@compte-rendu/contracts';
 import prReviewSkill from '../skills/pr-review/SKILL.md?raw';
 import submitReviewTool from '../tools/submit_review.js?raw';
+import {
+  SandboxCreateError,
+  resolveSandboxRuntimeConfig,
+  type JobSandboxRuntime,
+  type RunnerDiagnostic,
+  type RunnerProcess,
+  type RunnerProcessOptions,
+  type RunnerProcessResult,
+  type SandboxCommand,
+  type SandboxRuntimeKind,
+} from './sandbox-runtime.js';
+import { createSbxRuntimeFactory } from './sandbox-runtime-sbx.js';
+import {
+  createOpenShellPreflight,
+  createOpenShellRuntimeFactory,
+} from './sandbox-runtime-openshell.js';
 
-const MODEL_ENV = 'OPENCODE_API_KEY';
+export type {
+  RunnerDiagnostic,
+  RunnerProcess,
+  RunnerProcessOptions,
+  RunnerProcessResult,
+  SandboxRuntimeKind,
+} from './sandbox-runtime.js';
+
 const MODEL_HOST = 'opencode.ai';
 const MODEL_PORT = '443';
 const OPENCODE_VERSION = '1.18.25';
@@ -43,13 +66,11 @@ const CLEANUP_COMMAND_TIMEOUT_MS = 30 * 1000;
 const ARCHIVE_COMMAND_TIMEOUT_MS = 30 * 1000;
 const ARCHIVE_PHASE_TIMEOUT_MS = 2 * 60 * 1000;
 const MAX_DIAGNOSTIC_STDERR_BYTES = 4 * 1024;
-const MAX_POLICY_JSON_BYTES = 256 * 1024;
 const MAX_AGENT_OUTPUT_BYTES = MAX_REVIEW_RESULT_BYTES;
 const MAX_REQUEST_BYTES = 64 * 1024;
 const CALLBACK_REQUEST_TIMEOUT_MS = 30 * 1000;
 const CLAIM_REQUEST_TIMEOUT_MS = 30 * 1000;
 const DEFAULT_CONCURRENCY = 1;
-const SANDBOX_EVIDENCE_ROOT = '/tmp/petit-chiba-opencode-evidence';
 const EMPTY_EVIDENCE_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 
 const RunnerConcurrency = Schema.Union([
@@ -251,42 +272,6 @@ const OpenCodeSessionExport = Schema.Struct({
   info: Schema.Struct({ id: OpenCodeSessionId }),
   messages: Schema.Array(Schema.Unknown),
 });
-const NetworkPolicyRule = Schema.Struct({
-  id: Schema.NonEmptyString,
-  resources: Schema.Array(Schema.NonEmptyString),
-  sandbox_id: Schema.optional(Schema.Union([Schema.String, Schema.Null])),
-  editable: Schema.Boolean,
-});
-const NetworkPolicyList = Schema.Struct({ rules: Schema.Array(NetworkPolicyRule) });
-
-export type RunnerProcessResult = {
-  readonly exitCode: number;
-  readonly stdout: string;
-  readonly stderr?: string;
-  readonly stderrTruncated?: boolean;
-  readonly streamError?: boolean;
-  readonly timedOut: boolean;
-  readonly truncated: boolean;
-};
-
-export type RunnerProcessOptions = {
-  readonly captureStdout?: boolean;
-  readonly captureStderr?: boolean;
-  readonly stderrRedactions?: readonly string[];
-  readonly maxBytes?: number;
-  readonly timeoutMs?: number;
-  readonly env?: NodeJS.ProcessEnv;
-  readonly stdoutFilePath?: string;
-  readonly stderrFilePath?: string;
-  readonly fileAppend?: boolean;
-  readonly onChild?: (child: ChildProcess) => void;
-};
-
-export type RunnerProcess = (
-  command: string,
-  args: readonly string[],
-  options?: RunnerProcessOptions,
-) => Promise<RunnerProcessResult>;
 
 const stop = (child: ChildProcess, signal: NodeJS.Signals = 'SIGTERM') => {
   try {
@@ -467,10 +452,8 @@ type RunnerJob = {
   sandboxAttempted: boolean;
   sandboxCreated: boolean;
   sessionIds: string[];
-  networkRules: Array<{ readonly resource: string; id?: string }>;
   diagnosticCheckoutToken: string;
-  secretPlaceholder?: string;
-  githubServiceCleanupRequired?: boolean;
+  sandboxRuntime?: JobSandboxRuntime;
   githubTokenRoot?: string;
   checkoutRoot?: string;
   configRoot?: string;
@@ -482,6 +465,16 @@ type RunnerJob = {
 
 export interface RunnerOptions {
   readonly sbxPath?: string;
+  readonly sandboxRuntime?: SandboxRuntimeKind;
+  readonly sandboxCliPath?: string;
+  readonly openshell?: {
+    readonly gateway?: string;
+    readonly gatewayEndpoint?: string;
+    readonly modelProvider?: string;
+    readonly image?: string;
+    readonly githubProfile?: string;
+    readonly insecure?: boolean;
+  };
   readonly authToken?: string;
   readonly modelSecretCommand?: string;
   readonly modelConfig?: string;
@@ -498,12 +491,6 @@ export interface RunnerOptions {
   readonly claimIntervalMs?: number;
   readonly concurrency?: number;
 }
-
-type RunnerDiagnostic = {
-  readonly stage: 'checkout' | 'sandbox' | 'cleanup';
-  readonly command: string;
-  readonly includeStderr?: boolean;
-};
 
 const authorized = (request: Request, token: string | undefined) => {
   if (token === undefined) return false;
@@ -616,17 +603,6 @@ const mergedAgentResult = (
   };
 };
 
-const networkPolicyRulesFrom = (
-  stdout: string,
-): Schema.Schema.Type<typeof NetworkPolicyList>['rules'] | undefined => {
-  try {
-    return Option.getOrUndefined(Schema.decodeUnknownOption(NetworkPolicyList)(JSON.parse(stdout)))
-      ?.rules;
-  } catch {
-    return undefined;
-  }
-};
-
 const secureEvidenceTree = async (root: string): Promise<void> => {
   await chmod(root, 0o700);
   for (const entry of await readdir(root, { withFileTypes: true })) {
@@ -673,9 +649,35 @@ const currentEpochMillis = () =>
 
 export const createRunner = (options: RunnerOptions = {}) => {
   const concurrency = resolveConcurrency(options.concurrency, process.env.RUNNER_CONCURRENCY);
+  const sandboxRuntime = resolveSandboxRuntimeConfig({
+    kind: options.sandboxRuntime ?? process.env.RUNNER_SANDBOX_RUNTIME,
+    cliPath: options.sandboxCliPath ?? process.env.RUNNER_SANDBOX_CLI,
+    openshellGateway: options.openshell?.gateway ?? process.env.OPENSHELL_GATEWAY,
+    openshellEndpoint: options.openshell?.gatewayEndpoint ?? process.env.OPENSHELL_GATEWAY_ENDPOINT,
+    openshellModelProvider:
+      options.openshell?.modelProvider ?? process.env.OPENSHELL_MODEL_PROVIDER,
+    openshellImage: options.openshell?.image ?? process.env.OPENSHELL_IMAGE,
+    openshellGithubProfile:
+      options.openshell?.githubProfile ?? process.env.OPENSHELL_GITHUB_PROFILE,
+    openshellInsecure: options.openshell?.insecure ?? process.env.OPENSHELL_GATEWAY_INSECURE,
+  });
+  if (sandboxRuntime.kind === 'openshell' && sandboxRuntime.openshell === undefined) {
+    throw new Error('OpenShell sandbox runtime configuration is incomplete');
+  }
   const sbxPath = options.sbxPath ?? process.env.SBX_BIN ?? 'sbx';
+  const sandboxPortPath =
+    options.sandboxCliPath ??
+    process.env.RUNNER_SANDBOX_CLI ??
+    (sandboxRuntime.kind === 'openshell' ? sandboxRuntime.cliPath : sbxPath);
   const authToken = options.authToken ?? process.env.RUNNER_AUTH_TOKEN;
   const modelSecretCommand = options.modelSecretCommand ?? process.env.MODEL_SECRET_COMMAND;
+  const sandboxRuntimeFactory =
+    sandboxRuntime.kind === 'openshell'
+      ? createOpenShellRuntimeFactory(sandboxRuntime.openshell!)
+      : createSbxRuntimeFactory({ modelSecretCommand });
+  const modelResolverMissing =
+    sandboxRuntime.kind === 'sbx' &&
+    (modelSecretCommand === undefined || modelSecretCommand.length === 0);
   const modelConfig = decodeReviewModelConfig(
     options.modelConfig ?? process.env.REVIEW_MODEL_CONFIG,
   );
@@ -804,7 +806,9 @@ export const createRunner = (options: RunnerOptions = {}) => {
     let result: RunnerProcessResult;
     try {
       const sandboxEnvironment =
-        command === sbxPath ? strippedSandboxEnvironment : processOptions.env;
+        command === sandboxPortPath
+          ? (processOptions.env ?? strippedSandboxEnvironment)
+          : processOptions.env;
       result = await executeProcess(command, args, {
         ...processOptions,
         env: sandboxEnvironment,
@@ -860,7 +864,10 @@ export const createRunner = (options: RunnerOptions = {}) => {
     try {
       result = await executeProcess(command, args, {
         ...processOptions,
-        env: command === sbxPath ? strippedSandboxEnvironment : processOptions.env,
+        env:
+          command === sandboxPortPath
+            ? (processOptions.env ?? strippedSandboxEnvironment)
+            : processOptions.env,
         captureStderr: processOptions.captureStderr ?? diagnostic !== undefined,
         timeoutMs: Math.max(
           1,
@@ -909,77 +916,70 @@ export const createRunner = (options: RunnerOptions = {}) => {
     if (!(await nonemptyFile(join(evidencePath, 'opencode.jsonl')))) complete = false;
     if (!(await fileExists(join(evidencePath, 'opencode.stderr')))) complete = false;
 
-    const sessions = await runArchive(
-      job,
-      sbxPath,
-      ['exec', job.sandboxName, 'opencode', 'session', 'list', '--format', 'json'],
-      deadlineAt,
-      { captureStdout: true, maxBytes: MAX_AGENT_OUTPUT_BYTES },
-    );
-    if (
-      sessions.exitCode !== 0 ||
-      sessions.timedOut ||
-      sessions.truncated ||
-      sessions.stdout.length === 0
-    ) {
+    const runtime = job.sandboxRuntime;
+    const archiveCommand: SandboxCommand = (args, diagnostic, processOptions) =>
+      runArchive(job, sandboxPortPath, args, deadlineAt, processOptions, diagnostic);
+    if (runtime === undefined) {
       complete = false;
     } else {
-      await writeFile(join(evidencePath, 'opencode-session-list.json'), sessions.stdout, {
-        mode: 0o600,
-      });
-      const sessionIds = sessionIdsFrom(sessions.stdout);
-      if (sessionIds === undefined || sessionIds.length === 0) {
+      const evidenceRoot = runtime.metadata.evidenceRoot;
+      const sessions = await runtime.exec(
+        ['opencode', 'session', 'list', '--format', 'json'],
+        archiveCommand,
+        {
+          captureStdout: true,
+          maxBytes: MAX_AGENT_OUTPUT_BYTES,
+        },
+      );
+      if (
+        sessions.exitCode !== 0 ||
+        sessions.timedOut ||
+        sessions.truncated ||
+        sessions.stdout.length === 0
+      ) {
         complete = false;
       } else {
-        job.sessionIds = sessionIds;
-        for (const sessionId of sessionIds) {
-          const exportPath = join(evidencePath, `opencode-export-${sessionId}.json`);
-          const sandboxExportPath = `${SANDBOX_EVIDENCE_ROOT}/opencode-export-${sessionId}.json`;
-          const exported = await runArchive(
-            job,
-            sbxPath,
-            [
-              'exec',
-              job.sandboxName,
-              'sh',
-              '-c',
-              `opencode export ${sessionId} > ${sandboxExportPath}`,
-            ],
-            deadlineAt,
-            {},
-          );
-          const copied = await runArchive(
-            job,
-            sbxPath,
-            ['cp', `${job.sandboxName}:${sandboxExportPath}`, exportPath],
-            deadlineAt,
-            {},
-          );
-          if (
-            exported.exitCode !== 0 ||
-            exported.timedOut ||
-            exported.streamError === true ||
-            copied.exitCode !== 0 ||
-            copied.timedOut ||
-            copied.streamError === true ||
-            !(await validSessionExport(exportPath, sessionId))
-          ) {
-            complete = false;
+        await writeFile(join(evidencePath, 'opencode-session-list.json'), sessions.stdout, {
+          mode: 0o600,
+        });
+        const sessionIds = sessionIdsFrom(sessions.stdout);
+        if (sessionIds === undefined || sessionIds.length === 0) {
+          complete = false;
+        } else {
+          job.sessionIds = sessionIds;
+          for (const sessionId of sessionIds) {
+            const exportPath = join(evidencePath, `opencode-export-${sessionId}.json`);
+            const sandboxExportPath = `${evidenceRoot}/opencode-export-${sessionId}.json`;
+            const exported = await runtime.exec(
+              ['sh', '-c', `opencode export ${sessionId} > ${sandboxExportPath}`],
+              archiveCommand,
+              {},
+            );
+            const copied = await runtime.copyOut(sandboxExportPath, exportPath, archiveCommand);
+            if (
+              exported.exitCode !== 0 ||
+              exported.timedOut ||
+              exported.streamError === true ||
+              copied.exitCode !== 0 ||
+              copied.timedOut ||
+              copied.streamError === true ||
+              !(await validSessionExport(exportPath, sessionId))
+            ) {
+              complete = false;
+            }
           }
         }
       }
-    }
-    for (const tree of ['data', 'state']) {
-      const destination = join(evidencePath, `opencode-${tree}`);
-      const copied = await runArchive(
-        job,
-        sbxPath,
-        ['cp', `${job.sandboxName}:${SANDBOX_EVIDENCE_ROOT}/${tree}`, destination],
-        deadlineAt,
-        {},
-        { stage: 'sandbox', command: `archive-opencode-${tree}`, includeStderr: true },
-      );
-      if (copied.exitCode !== 0 || copied.timedOut) complete = false;
+      for (const tree of ['data', 'state']) {
+        const destination = join(evidencePath, `opencode-${tree}`);
+        const copied = await runtime.copyOut(
+          `${evidenceRoot}/${tree}`,
+          destination,
+          archiveCommand,
+          { stage: 'sandbox', command: `archive-opencode-${tree}`, includeStderr: true },
+        );
+        if (copied.exitCode !== 0 || copied.timedOut) complete = false;
+      }
     }
     await secureEvidenceTree(evidencePath);
     const files = await evidenceFiles(evidencePath);
@@ -1172,12 +1172,12 @@ export const createRunner = (options: RunnerOptions = {}) => {
     update(job, { stage: 'cleanup' });
     const cleanupProcess = async (
       args: readonly string[],
-      diagnostic: RunnerDiagnostic,
+      diagnostic?: RunnerDiagnostic,
       processOptions: RunnerProcessOptions = {},
     ) => {
       let result: RunnerProcessResult;
       try {
-        result = await executeProcess(sbxPath, args, {
+        result = await executeProcess(sandboxPortPath, args, {
           ...processOptions,
           env: strippedSandboxEnvironment,
           captureStdout: processOptions.captureStdout ?? false,
@@ -1194,95 +1194,15 @@ export const createRunner = (options: RunnerOptions = {}) => {
       } catch {
         result = { exitCode: 1, stdout: '', timedOut: false, truncated: false };
       }
-      await recordCommand(job, diagnostic, result);
+      if (diagnostic !== undefined) await recordCommand(job, diagnostic, result);
       return result;
     };
-    const listPolicies = async (includeSource: boolean) => {
-      const listed = await cleanupProcess(
-        [
-          'policy',
-          'ls',
-          '--json',
-          ...(includeSource ? ['--source', 'local'] : []),
-          ...(!includeSource ? ['--include-inactive'] : []),
-          '--type',
-          'network',
-        ],
-        { stage: 'cleanup', command: 'inspect-network-policy', includeStderr: true },
-        { captureStdout: true, maxBytes: MAX_POLICY_JSON_BYTES },
-      );
-      if (listed.exitCode !== 0 || listed.timedOut || listed.truncated) return undefined;
-      return networkPolicyRulesFrom(listed.stdout);
-    };
-    for (const expected of job.networkRules) {
-      let matching: Schema.Schema.Type<typeof NetworkPolicyList>['rules'][number] | undefined;
-      for (let attempt = 0; attempt < 2 && matching === undefined; attempt += 1) {
-        const rules = await listPolicies(true);
-        if (rules === undefined) continue;
-        const exact = rules.find(
-          (rule) =>
-            expected.id !== undefined &&
-            rule.id === expected.id &&
-            rule.sandbox_id === job.sandboxName,
-        );
-        if (exact !== undefined) {
-          matching = exact;
-          break;
-        }
-        if (expected.id === undefined) {
-          const candidates = rules.filter(
-            (rule) =>
-              rule.editable &&
-              rule.sandbox_id === job.sandboxName &&
-              rule.resources.includes(expected.resource),
-          );
-          if (candidates.length === 1) matching = candidates[0];
-        }
-      }
-      if (matching === undefined) {
+    if (job.sandboxRuntime !== undefined) {
+      try {
+        await job.sandboxRuntime.destroy(cleanupProcess);
+      } catch {
         clean = false;
-        continue;
       }
-      const removedRule = await cleanupProcess(
-        ['policy', 'rm', 'network', '--id', matching.id, '--sandbox', job.sandboxName, '--force'],
-        { stage: 'cleanup', command: 'remove-network-policy', includeStderr: true },
-      );
-      if (removedRule.exitCode !== 0 || removedRule.timedOut) clean = false;
-    }
-    const removed = await cleanupProcess(['rm', '--force', job.sandboxName], {
-      stage: 'cleanup',
-      command: 'remove-sandbox',
-      includeStderr: true,
-    });
-    if (removed.exitCode !== 0 || removed.timedOut) clean = false;
-    const remainingPolicies = await listPolicies(false);
-    if (
-      remainingPolicies === undefined ||
-      remainingPolicies.some((rule) => rule.sandbox_id === job.sandboxName)
-    ) {
-      clean = false;
-    }
-    if (job.secretPlaceholder !== undefined) {
-      const secret = await cleanupProcess(
-        [
-          'secret',
-          'rm',
-          '--placeholder',
-          job.secretPlaceholder,
-          '--sandbox',
-          job.sandboxName,
-          '--force',
-        ],
-        { stage: 'cleanup', command: 'remove-secret', includeStderr: true },
-      );
-      if (secret.exitCode !== 0 || secret.timedOut) clean = false;
-    }
-    if (job.githubServiceCleanupRequired) {
-      const secret = await cleanupProcess(
-        ['secret', 'rm', 'github', '--sandbox', job.sandboxName, '--force'],
-        { stage: 'cleanup', command: 'remove-github-secret', includeStderr: true },
-      );
-      if (secret.exitCode !== 0 || secret.timedOut) clean = false;
     }
     if (job.checkoutRoot !== undefined) {
       try {
@@ -1478,7 +1398,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
     try {
       evidenceStartedAt = await currentIso();
       job.executionStartedAt = evidenceStartedAt;
-      if (modelSecretCommand === undefined || modelSecretCommand.length === 0) {
+      if (modelResolverMissing) {
         failure = { reason: 'agent' };
         return;
       }
@@ -1527,179 +1447,55 @@ export const createRunner = (options: RunnerOptions = {}) => {
         'utf8',
       );
 
-      const githubTokenRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-github-secret-'));
-      job.githubTokenRoot = githubTokenRoot;
-      const githubTokenPath = join(githubTokenRoot, 'github-read-token');
-      await writeFile(githubTokenPath, job.input.repositoryReadToken, { mode: 0o600 });
-
-      const placeholder = `cr-${job.id}`;
-      job.secretPlaceholder = placeholder;
+      const runtime = sandboxRuntimeFactory({
+        id: job.id,
+        name: job.sandboxName,
+        imageRef: SANDBOX_TEMPLATE,
+        cpu: '4',
+        memoryGib: 8,
+        env: [`OPENCODE_CONFIG_CONTENT=${openCodeConfig}`, 'OPENCODE_DISABLE_PROJECT_CONFIG=1'],
+        checkoutRoot: join(checkoutRoot, 'checkout'),
+        configRoot,
+        modelResource,
+        githubResource: 'api.github.com:443',
+        githubReadToken: job.input.repositoryReadToken,
+      });
+      job.sandboxRuntime = runtime;
       job.sandboxAttempted = true;
-      const secret = await runTracked(
-        job,
-        sbxPath,
-        [
-          'secret',
-          'set-custom',
-          '--sandbox',
-          job.sandboxName,
-          '--host',
-          modelHost,
-          '--env',
-          MODEL_ENV,
-          '--placeholder',
-          placeholder,
-          '--command',
-          modelSecretCommand,
-        ],
-        {},
-        { stage: 'sandbox', command: 'set-secret' },
-      );
-      if (secret.exitCode !== 0 || secret.timedOut) {
-        failure = { reason: 'agent' };
+      const setupCommand: SandboxCommand = (args, diagnostic, processOptions) =>
+        runTracked(
+          job,
+          sandboxPortPath,
+          args,
+          sandboxRuntime.kind === 'openshell'
+            ? {
+                ...processOptions,
+                env: { ...strippedSandboxEnvironment, ...processOptions?.env },
+              }
+            : processOptions,
+          diagnostic,
+        );
+      try {
+        await runtime.setup(setupCommand);
+      } catch (error) {
+        job.sandboxCreated = runtime.metadata.created;
+        executionCause =
+          error instanceof SandboxCreateError
+            ? error.timedOut
+              ? 'timeout'
+              : 'process-exit'
+            : undefined;
+        failure = {
+          reason: 'agent',
+          ...(executionCause === undefined ? {} : { cause: executionCause }),
+        };
         return;
       }
-      job.githubServiceCleanupRequired = true;
-      const githubSecret = await runTracked(
-        job,
-        sbxPath,
-        [
-          'secret',
-          'set',
-          'github',
-          '--sandbox',
-          job.sandboxName,
-          '--command',
-          `cat ${githubTokenPath}`,
-          '--refresh',
-          'on-demand',
-        ],
-        {},
-        { stage: 'sandbox', command: 'set-github-service' },
-      );
-      if (githubSecret.exitCode !== 0 || githubSecret.timedOut) {
-        failure = { reason: 'agent' };
-        return;
-      }
-      const create = await runTracked(
-        job,
-        sbxPath,
-        [
-          'create',
-          '--clone',
-          '--no-share-skills',
-          '--template',
-          SANDBOX_TEMPLATE,
-          '--name',
-          job.sandboxName,
-          '--cpus',
-          '4',
-          '--memory',
-          '8g',
-          '--env',
-          `OPENCODE_CONFIG_CONTENT=${openCodeConfig}`,
-          '--env',
-          'OPENCODE_DISABLE_PROJECT_CONFIG=1',
-          '--env',
-          `XDG_CONFIG_HOME=${configRoot}`,
-          '--env',
-          `XDG_DATA_HOME=${SANDBOX_EVIDENCE_ROOT}/data`,
-          '--env',
-          `XDG_STATE_HOME=${SANDBOX_EVIDENCE_ROOT}/state`,
-          'shell',
-          join(checkoutRoot, 'checkout'),
-          configRoot,
-        ],
-        {},
-        { stage: 'sandbox', command: 'create', includeStderr: true },
-      );
-      if (create.exitCode !== 0 || create.timedOut) {
-        executionCause = create.timedOut ? 'timeout' : 'process-exit';
-        failure = { reason: 'agent', cause: executionCause };
-        return;
-      }
-      job.sandboxCreated = true;
+      job.sandboxCreated = runtime.metadata.created;
       if (job.abortRequested) return;
-      const network = await runTracked(
-        job,
-        sbxPath,
-        ['policy', 'allow', 'network', '--sandbox', job.sandboxName, modelResource],
-        {},
-        { stage: 'sandbox', command: 'allow-network', includeStderr: true },
-      );
-      if (network.exitCode !== 0 || network.timedOut) {
-        failure = { reason: 'agent' };
-        return;
-      }
-      const modelNetworkRule: { readonly resource: string; id?: string } = {
-        resource: modelResource,
-      };
-      job.networkRules.push(modelNetworkRule);
-      const modelPolicies = await runTracked(
-        job,
-        sbxPath,
-        ['policy', 'ls', job.sandboxName, '--json', '--source', 'local', '--type', 'network'],
-        { captureStdout: true, maxBytes: MAX_POLICY_JSON_BYTES },
-        { stage: 'sandbox', command: 'inspect-network-policy', includeStderr: true },
-      );
-      const modelPolicyRules =
-        modelPolicies.exitCode === 0 && !modelPolicies.timedOut && !modelPolicies.truncated
-          ? networkPolicyRulesFrom(modelPolicies.stdout)
-          : undefined;
-      const modelMatches =
-        modelPolicyRules?.filter(
-          (rule) =>
-            rule.editable &&
-            rule.sandbox_id === job.sandboxName &&
-            rule.resources.includes(modelResource),
-        ) ?? [];
-      if (modelMatches.length !== 1) {
-        failure = { reason: 'agent' };
-        return;
-      }
-      modelNetworkRule.id = modelMatches[0].id;
-      const githubNetwork = await runTracked(
-        job,
-        sbxPath,
-        ['policy', 'allow', 'network', '--sandbox', job.sandboxName, 'api.github.com:443'],
-        {},
-        { stage: 'sandbox', command: 'allow-github-network', includeStderr: true },
-      );
-      if (githubNetwork.exitCode !== 0 || githubNetwork.timedOut) {
-        failure = { reason: 'agent' };
-        return;
-      }
-      const githubNetworkRule: { readonly resource: string; id?: string } = {
-        resource: 'api.github.com:443',
-      };
-      job.networkRules.push(githubNetworkRule);
-      const githubPolicies = await runTracked(
-        job,
-        sbxPath,
-        ['policy', 'ls', job.sandboxName, '--json', '--source', 'local', '--type', 'network'],
-        { captureStdout: true, maxBytes: MAX_POLICY_JSON_BYTES },
-        { stage: 'sandbox', command: 'inspect-github-network-policy', includeStderr: true },
-      );
-      const githubPolicyRules =
-        githubPolicies.exitCode === 0 && !githubPolicies.timedOut && !githubPolicies.truncated
-          ? networkPolicyRulesFrom(githubPolicies.stdout)
-          : undefined;
-      const githubMatches =
-        githubPolicyRules?.filter(
-          (rule) =>
-            rule.editable &&
-            rule.sandbox_id === job.sandboxName &&
-            rule.resources.includes('api.github.com:443'),
-        ) ?? [];
-      if (githubMatches.length !== 1) {
-        failure = { reason: 'agent' };
-        return;
-      }
-      githubNetworkRule.id = githubMatches[0].id;
-      const githubPreflight = await runTracked(
-        job,
-        sbxPath,
-        ['exec', job.sandboxName, 'gh', 'api', '--silent', 'installation/repositories'],
+      const githubPreflight = await runtime.exec(
+        ['gh', 'api', '--silent', 'installation/repositories'],
+        setupCommand,
         {},
         { stage: 'sandbox', command: 'github-preflight' },
       );
@@ -1709,12 +1505,8 @@ export const createRunner = (options: RunnerOptions = {}) => {
       }
       update(job, { stage: 'agent' });
       const agentBudgetDeadline = (await currentEpochMillis()) + REVIEW_ATTEMPT_BUDGET_MS;
-      agent = await runTracked(
-        job,
-        sbxPath,
+      agent = await runtime.exec(
         [
-          'exec',
-          job.sandboxName,
           'opencode',
           'run',
           '--format',
@@ -1731,6 +1523,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
             job.input.headSha,
           ),
         ],
+        setupCommand,
         {
           captureStdout: true,
           captureStderr: true,
@@ -1751,12 +1544,8 @@ export const createRunner = (options: RunnerOptions = {}) => {
         const sessionId = uniqueSessionIdFrom(agent.stdout);
         const remaining = agentBudgetDeadline - (await currentEpochMillis());
         if (sessionId !== undefined && remaining > 0) {
-          const reminder = await runTracked(
-            job,
-            sbxPath,
+          const reminder = await runtime.exec(
             [
-              'exec',
-              job.sandboxName,
               'opencode',
               'run',
               '--session',
@@ -1769,6 +1558,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
               'review',
               submitReminderPrompt,
             ],
+            setupCommand,
             {
               captureStdout: true,
               captureStderr: true,
@@ -1874,7 +1664,9 @@ export const createRunner = (options: RunnerOptions = {}) => {
           await writeManifestAtomically(join(evidencePath, 'manifest.json'), {
             jobId: job.id,
             sandboxName: job.sandboxName,
-            sandboxId: job.sandboxName,
+            sandboxId: job.sandboxRuntime?.metadata.id ?? job.sandboxName,
+            sandboxRuntimeName: job.sandboxRuntime?.metadata.name ?? job.sandboxName,
+            runtime: job.sandboxRuntime?.metadata.runtime ?? 'sbx',
             evidenceId,
             runId: job.input.runId,
             attempt: job.input.attempt,
@@ -1885,7 +1677,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
             startedAt: evidenceStartedAt,
             finishedAt: await currentIso(),
             model: modelId,
-            image: SANDBOX_TEMPLATE,
+            image: job.sandboxRuntime?.metadata.imageRef ?? SANDBOX_TEMPLATE,
             openCodeVersion: OPENCODE_VERSION,
             agent: {
               exitCode: agent?.exitCode ?? null,
@@ -2011,7 +1803,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
       sandboxAttempted: false,
       sandboxCreated: false,
       sessionIds: [],
-      networkRules: [],
       diagnosticCheckoutToken: input.repositoryReadToken,
       deadlineAt: Date.now() + REVIEW_ATTEMPT_BUDGET_MS,
     };
@@ -2019,6 +1810,27 @@ export const createRunner = (options: RunnerOptions = {}) => {
     jobsByRun.set(`${input.runId}:${input.attempt}`, job);
     void execute(job);
     return jsonResponse(202, publicState(job));
+  };
+
+  const openshellConfiguration =
+    sandboxRuntime.kind === 'openshell' ? sandboxRuntime.openshell : undefined;
+  const openshellPreflight =
+    openshellConfiguration === undefined
+      ? undefined
+      : createOpenShellPreflight(openshellConfiguration);
+  let preflightPromise: Promise<boolean> | undefined;
+  const ensurePreflight = async (): Promise<boolean> => {
+    if (openshellPreflight === undefined) return true;
+    preflightPromise ??= openshellPreflight((args, _diagnostic, options) =>
+      executeProcess(sandboxPortPath, args, {
+        env: strippedSandboxEnvironment,
+        captureStdout: options?.captureStdout ?? false,
+        captureStderr: true,
+        timeoutMs: 30 * 1000,
+        maxBytes: MAX_DIAGNOSTIC_STDERR_BYTES * 64,
+      }),
+    );
+    return preflightPromise;
   };
 
   const handle = async (request: Request): Promise<Response> => {
@@ -2033,10 +1845,13 @@ export const createRunner = (options: RunnerOptions = {}) => {
       ) {
         return jsonResponse(503, { error: 'callback unavailable' });
       }
-      if (modelSecretCommand === undefined || modelSecretCommand.length === 0) {
+      if (modelResolverMissing) {
         return jsonResponse(503, { error: 'runner unavailable' });
       }
       if (modelConfig === undefined) {
+        return jsonResponse(503, { error: 'runner unavailable' });
+      }
+      if (!(await ensurePreflight())) {
         return jsonResponse(503, { error: 'runner unavailable' });
       }
       const input = await Schema.decodeUnknownPromise(RunnerJobInput)(
@@ -2084,11 +1899,15 @@ export const createRunner = (options: RunnerOptions = {}) => {
       callbackUrl.length === 0 ||
       callbackToken === undefined ||
       callbackToken.length === 0 ||
-      modelSecretCommand === undefined ||
-      modelSecretCommand.length === 0 ||
+      modelResolverMissing ||
       modelConfig === undefined ||
       !hasCapacity()
     ) {
+      return;
+    }
+
+    if (!(await ensurePreflight())) {
+      claimPollingHalted = true;
       return;
     }
 
