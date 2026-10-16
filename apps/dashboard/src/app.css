@@ -112,6 +112,7 @@ main#content {
 }
 .stat-sub {
   display: block;
+  line-height: 1.5;
   color: #c6c6c6;
   font-size: 0.72rem;
 }
@@ -239,7 +240,7 @@ main#content {
   font-weight: 600;
   line-height: 1.5;
 }
-.timeline li {
+.timeline .bx--contained-list-item__content {
   line-height: 1.5;
 }
 
@@ -279,5 +280,24 @@ main#content {
   }
   #content {
     padding: 24px 16px 48px;
+  }
+}
+
+.stats-grid .bx--row {
+  row-gap: 16px;
+}
+.review-link {
+  display: block;
+  max-width: 24rem;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 600px) {
+  .bx--data-table th:first-child,
+  .bx--data-table td:first-child {
+    min-width: 12.5rem;
+    width: 12.5rem;
+  }
+  .review-link {
+    width: 10.5rem;
   }
 }
