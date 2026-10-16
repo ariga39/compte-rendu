@@ -74,7 +74,7 @@ export function cleanupNote(task: TaskState): string {
   if (task.status === 'scheduled') {
     return task.stage === 'cleanup'
       ? 'Resource cleanup has started; confirmation is pending.'
-      : 'Cleanup is confirmed after the review ends. This is expected while a review is in progress.';
+      : 'Cleanup is confirmed after the review ends. This is expected while a review is queued or in progress.';
   }
   return 'This review has ended, but resource cleanup has not been confirmed.';
 }
