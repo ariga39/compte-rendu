@@ -1202,7 +1202,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
         [
           'policy',
           'ls',
-          job.sandboxName,
           '--json',
           ...(includeSource ? ['--source', 'local'] : []),
           ...(!includeSource ? ['--include-inactive'] : []),
@@ -1245,7 +1244,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         continue;
       }
       const removedRule = await cleanupProcess(
-        ['policy', 'rm', 'network', '--id', matching.id, '--sandbox', job.sandboxName],
+        ['policy', 'rm', 'network', '--id', matching.id, '--sandbox', job.sandboxName, '--force'],
         { stage: 'cleanup', command: 'remove-network-policy', includeStderr: true },
       );
       if (removedRule.exitCode !== 0 || removedRule.timedOut) clean = false;

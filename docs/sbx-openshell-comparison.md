@@ -19,8 +19,9 @@ revision identity, bounded resources, retained evidence and confirmed destructio
 
 ## Compare the right versions
 
-- Deployed/project baseline: sbx **0.39.0**, pinned in installation guidance.
-- Docker's current stable release notes list **0.47.0**, dated 2026-10-05.
+- Deployed/project baseline: sbx **0.39.0** was the pre-upgrade Runner target;
+  issue #157 upgrades the Runner to **0.48.0** (`docs/installation.md`).
+- Docker's current stable release is **0.48.0**, dated 2026-10-13.
   The earlier alternatives survey was not a full current-sbx feature audit.
 - OpenShell reference: versioned **0.1.4** documentation. Do not silently borrow
   features from development builds or the 0.1.5 prerelease.
@@ -75,8 +76,12 @@ The supervisor rule is in [Architecture](https://docs.nvidia.com/openshell/v0.1.
 sbx supports [foreground daemon start](https://docs.docker.com/reference/cli/sbx/daemon/start/).
 Neither this comparison nor release notes prove why the historical daemon exited.
 
-Docker 0.45–0.47 also change CLI cleanup behavior, credential revocation and
-secret-command working directories. Upgrading sbx is a separate, smaller candidate
+Docker 0.45–0.48 also change CLI cleanup behavior, credential revocation and
+secret-command working directories. The #157 upgrade adapted the Runner only
+where the real 0.48 CLI demonstrated an incompatibility: `policy ls SANDBOX`
+now errors once the sandbox is gone, so cleanup inspects policy globally and
+filters by exact `sandbox_id`, and `policy rm network` now requires `--force`
+for unattended removal. Upgrading sbx is a separate, smaller candidate
 change that still needs compatibility checks against our pinned CLI calls. It is
 not something this research performed, nor proof the incident is fixed upstream.
 

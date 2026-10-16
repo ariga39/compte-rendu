@@ -2243,6 +2243,199 @@ describe('Runner Job HTTP interface', () => {
     ]);
   });
 
+  it('inspects policy globally after Sandbox removal when the scoped sandbox no longer exists', async () => {
+    const baseSha = '1111111111111111111111111111111111111111';
+    const headSha = '2222222222222222222222222222222222222222';
+    const resultLine = finalMarkdownJsonl();
+    const rules: Array<Record<string, unknown>> = [
+      {
+        id: 'default-deny-all',
+        resources: ['**'],
+        editable: false,
+        origin: 'local',
+        layer: 'local',
+      },
+    ];
+    let sandboxExists = true;
+    const runner = createProductionRunnerWithMergeBase({
+      evidenceRoot: sharedEvidenceRoot,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      process: async (_command, args, options = {}) => {
+        if (args[0] === 'policy' && args[1] === 'allow') {
+          const sandbox = args[args.indexOf('--sandbox') + 1];
+          const resource = args[args.length - 1];
+          rules.push({
+            id: `${sandbox}-${resource}`,
+            resources: [resource],
+            sandbox_id: sandbox,
+            editable: true,
+            origin: 'local',
+            layer: 'local',
+          });
+          return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+        }
+        if (args[0] === 'policy' && args[1] === 'ls') {
+          const scoped = args[2] !== undefined && !args[2].startsWith('--');
+          if (scoped && !sandboxExists) {
+            return { exitCode: 1, stdout: '', timedOut: false, truncated: false };
+          }
+          return {
+            exitCode: 0,
+            stdout: options.captureStdout === true ? JSON.stringify({ rules }) + '\n' : '',
+            timedOut: false,
+            truncated: false,
+          };
+        }
+        if (args[0] === 'policy' && args[1] === 'rm') {
+          const ruleId = args[args.indexOf('--id') + 1];
+          const index = rules.findIndex((rule) => rule.id === ruleId);
+          if (index >= 0) rules.splice(index, 1);
+          return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+        }
+        if (args[0] === 'rm' && args[1] === '--force') {
+          sandboxExists = false;
+          return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+        }
+        if (args[0] === 'secret' && args[1] === 'rm') {
+          return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+        }
+        await writeEvidenceFixture(args, options, resultLine);
+        return {
+          exitCode: 0,
+          stdout: args.includes('rev-parse')
+            ? `${baseSha}\n${headSha}\n`
+            : args.includes('session')
+              ? '[{"id":"absent-scope-session"}]\n'
+              : args.includes('export')
+                ? '{"session":"absent-scope-session","full":true}\n'
+                : options.captureStdout === true
+                  ? `${resultLine}\n`
+                  : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
+    });
+    const submitted = await runner.handle(
+      new Request('http://runner/jobs', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer runner-test-token',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          ...runnerJobFields,
+          runId: 'run-157-absent-scope',
+          attempt: 1,
+          repositoryUrl: 'https://github.com/acme/reviewed.git',
+          baseSha,
+          headSha,
+        }),
+      }),
+    );
+    const { id } = (await submitted.json()) as { id: string };
+    await expect(waitForTerminal(runner, id)).resolves.toMatchObject({
+      status: 'succeeded',
+      sandbox: { cleanup: 'destroyed' },
+    });
+  });
+
+  it('completes unattended cleanup only when network policy removal is forced', async () => {
+    const baseSha = '1111111111111111111111111111111111111111';
+    const headSha = '2222222222222222222222222222222222222222';
+    const resultLine = finalMarkdownJsonl();
+    const rules: Array<Record<string, unknown>> = [
+      {
+        id: 'default-deny-all',
+        resources: ['**'],
+        editable: false,
+        origin: 'local',
+        layer: 'local',
+      },
+    ];
+    const runner = createProductionRunnerWithMergeBase({
+      evidenceRoot: sharedEvidenceRoot,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      process: async (_command, args, options = {}) => {
+        if (args[0] === 'policy' && args[1] === 'allow') {
+          const sandbox = args[args.indexOf('--sandbox') + 1];
+          const resource = args[args.length - 1];
+          rules.push({
+            id: `${sandbox}-${resource}`,
+            resources: [resource],
+            sandbox_id: sandbox,
+            editable: true,
+            origin: 'local',
+            layer: 'local',
+          });
+          return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+        }
+        if (args[0] === 'policy' && args[1] === 'ls') {
+          return {
+            exitCode: 0,
+            stdout: options.captureStdout === true ? JSON.stringify({ rules }) + '\n' : '',
+            timedOut: false,
+            truncated: false,
+          };
+        }
+        if (args[0] === 'policy' && args[1] === 'rm') {
+          if (!args.includes('--force')) {
+            return { exitCode: 1, stdout: '', timedOut: false, truncated: false };
+          }
+          const ruleId = args[args.indexOf('--id') + 1];
+          const index = rules.findIndex((rule) => rule.id === ruleId);
+          if (index >= 0) rules.splice(index, 1);
+          return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+        }
+        if (args[0] === 'rm' && args[1] === '--force') {
+          return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+        }
+        if (args[0] === 'secret' && args[1] === 'rm') {
+          return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+        }
+        await writeEvidenceFixture(args, options, resultLine);
+        return {
+          exitCode: 0,
+          stdout: args.includes('rev-parse')
+            ? `${baseSha}\n${headSha}\n`
+            : args.includes('session')
+              ? '[{"id":"force-removal-session"}]\n'
+              : args.includes('export')
+                ? '{"session":"force-removal-session","full":true}\n'
+                : options.captureStdout === true
+                  ? `${resultLine}\n`
+                  : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
+    });
+    const submitted = await runner.handle(
+      new Request('http://runner/jobs', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer runner-test-token',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          ...runnerJobFields,
+          runId: 'run-157-force-removal',
+          attempt: 1,
+          repositoryUrl: 'https://github.com/acme/reviewed.git',
+          baseSha,
+          headSha,
+        }),
+      }),
+    );
+    const { id } = (await submitted.json()) as { id: string };
+    await expect(waitForTerminal(runner, id)).resolves.toMatchObject({
+      status: 'succeeded',
+      sandbox: { cleanup: 'destroyed' },
+    });
+  });
+
   it('does not remove a replacement rule when a recorded policy ID disappears', async () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
