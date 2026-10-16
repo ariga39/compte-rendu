@@ -1,4 +1,5 @@
 import { DateTime, Effect, Schema } from 'effect';
+import { GitHubRequestError, parseRetryAfterMs } from './github-http';
 
 const InstallationTokenResponse = Schema.Struct({
   token: Schema.NonEmptyString,
@@ -201,7 +202,7 @@ export const createGitHubAppTokenProvider = (
     }
     if (!response.ok) {
       if (response.body !== null) void response.body.cancel().catch(() => undefined);
-      throw new Error('GitHub App token exchange failed');
+      throw new GitHubRequestError(response.status, parseRetryAfterMs(response));
     }
 
     return responseJson(response, signal);
