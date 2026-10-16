@@ -21,7 +21,7 @@
 
 <a class="skip-link" href="#content" data-testid="skip-link">Skip to content</a>
 
-<Header>
+<Header uiShellAriaLabel="Compte rendu">
   <a class="bx--header__name" href="/">Compte rendu</a>
   <HeaderNav aria-label="Primary">
     {#each links as [href, label] (href)}
