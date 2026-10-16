@@ -1606,7 +1606,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
           `XDG_DATA_HOME=${SANDBOX_EVIDENCE_ROOT}/data`,
           '--env',
           `XDG_STATE_HOME=${SANDBOX_EVIDENCE_ROOT}/state`,
-          'opencode',
+          'shell',
           join(checkoutRoot, 'checkout'),
           configRoot,
         ],

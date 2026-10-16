@@ -85,6 +85,32 @@ for unattended removal. Upgrading sbx is a separate, smaller candidate
 change that still needs compatibility checks against our pinned CLI calls. It is
 not something this research performed, nor proof the incident is fixed upstream.
 
+### Built-in agent kits provision their own egress
+
+During verification we found a mismatch that is shipped kit behavior, not a
+0.48 regression. Selecting the built-in `opencode` agent as the launcher makes
+its agent kit declare a `permissions.network.allow` list (AI providers, package
+registries such as `registry.npmjs.org:443`, code hosts, Ubuntu archives and
+more) and apply it to the sandbox's **scoped** policy, on top of the global
+preset. The deny-all preset is not an explicit deny rule, so the kit allowances
+survive; `sbx policy check network` without `--sandbox` evaluates only the
+global policy and can therefore report denied while the sandbox can still
+connect. `sbx policy log` attributes these as `domain-allowed` with proxy
+`forward-bypass` (forward-bypass means no credential was injected, not that
+policy was bypassed). Docker documents the layering under local policy and kit
+policies.
+
+The Runner now launches the built-in `shell` agent against the same pinned
+custom template and runs `opencode`/`gh` with `sbx exec`. The `shell` kit has
+no default network allow entry, so the review sandbox's only egress is the
+Runner's explicit per-job model-host and `api.github.com:443` rules — conditional
+on the host asserting a `deny-all` default with no other global or
+organization-governance allow rules active. The primary's shell probe confirmed:
+default-deny scoped policy, `npm` denied, a scoped npm allow succeeding, and
+removal requiring `--force`.
+
+Sources: [kit layering and local presets](https://docs.docker.com/ai/sandboxes/governance/access-controls/local).
+
 ## What migration actually changes
 
 1. Build a small agent OCI image with pinned OpenCode, gh, Git and trust roots.

@@ -3328,9 +3328,10 @@ describe('Runner Job HTTP interface', () => {
     expect(createArgs).toEqual(expect.arrayContaining(['--clone', '--no-share-skills']));
     const template = 'ghcr.io/ariga39/petit-chiba-opencode:1.18.25-gh2.98.0';
     const templateIndex = createArgs?.indexOf(template) ?? -1;
-    const agentIndex = createArgs?.lastIndexOf('opencode') ?? -1;
+    const launcherIndex = createArgs?.lastIndexOf('shell') ?? -1;
     expect(templateIndex).toBeGreaterThanOrEqual(0);
-    expect(templateIndex).toBeLessThan(agentIndex);
+    expect(templateIndex).toBeLessThan(launcherIndex);
+    expect(createArgs).not.toContain('opencode');
     expect(fetchArgs).toEqual(
       expect.arrayContaining([
         `+${baseSha}:refs/remotes/origin/review-base`,

@@ -481,7 +481,7 @@ sbx create \
   --template ghcr.io/ariga39/petit-chiba-opencode:1.18.25-gh2.98.0 \
   --cpus 4 \
   --memory 8g \
-  opencode /path/to/non-sensitive-probe-workspace
+  shell /path/to/non-sensitive-probe-workspace
 sbx exec petit-chiba-template-probe opencode --version
 sbx exec petit-chiba-template-probe gh version
 sbx rm --force petit-chiba-template-probe
@@ -494,6 +494,19 @@ replace the local tag with a fully qualified registry reference plus its
 recorded digest, but registry access and a digest are optional for this
 offline path. Continue with the Runner start below only after the probe and
 cleanup succeed.
+
+The Runner also launches the `shell` built-in agent with this same pinned
+template, then runs `opencode` and `gh` inside it with `sbx exec`. This is
+deliberate: the built-in `opencode` agent kit declares its own
+`permissions.network.allow` list (AI providers, package registries, code hosts,
+Ubuntu archives and more) and applies it to the sandbox's scoped policy, so
+selecting `opencode` as the launcher auto-provisions that egress on top of the
+host default. The `shell` kit has no such default allow list, so the Runner's
+explicit per-job `policy allow` rules (the configured model host and
+`api.github.com:443`) are the only egress the review sandbox has — provided the
+host default is `deny-all` and no other global or organization-governance allow
+rules are active. This is long-standing shipped kit behavior, not a 0.48 change;
+the upgrade only made it worth verifying.
 
 The runner listens only on IPv4 loopback port `8080`. It runs as the persistent
 service below on the host that also runs the remotely managed Tunnel connector.
