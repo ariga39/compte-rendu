@@ -346,7 +346,9 @@ Subscribe the App to:
   public identity. Other repository actions do not schedule reviews.
 - Installation removal/suspension and removal of repositories from an installation
   invalidate the corresponding cached identities. These App installation events
-  are handled independently of review scheduling.
+  are handled independently of review scheduling. GitHub delivers
+  `installation` and `installation_repositories` to all Apps by default; they
+  cannot be manually subscribed or unsubscribed.
 
 Do not subscribe to push, review, status, or issue events;
 they are not part of this Worker contract. GitHub's event reference lists the

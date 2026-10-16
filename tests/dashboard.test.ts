@@ -11,6 +11,7 @@ import {
   type ReviewPublicationStateStore,
 } from '../apps/core/src/index';
 import { GitHubRequestError } from '../apps/core/src/github-review-adapter';
+import { createGitHubAppTokenProvider } from '../apps/core/src/github-app-token';
 import { refreshRepositoryMetadata } from '../apps/core/src/dashboard';
 import type { OperationalLogEvent } from '../packages/contracts/src';
 import coreWorker from '../apps/core/src/worker';
@@ -955,5 +956,71 @@ describe('public dashboard reads are DB-only', () => {
       adapter.getRepositoryMetadata!({ repositoryId: 1, installationId: 7 }),
     ).rejects.toBeInstanceOf(GitHubRequestError);
     expect(Date.now() - started).toBeLessThan(1000);
+  });
+
+  it('preserves a token-exchange throttle into the metadata refresh cooldown', async () => {
+    const database = new SqliteD1Database();
+    const store = createD1ReviewStateStore(database);
+    for (let repositoryId = 1; repositoryId <= 8; repositoryId += 1) {
+      await store.claimReview({
+        deliveryId: `d-token-throttle-${repositoryId}`,
+        job: job({ repositoryId }),
+        occurredAt: '2026-01-01T00:00:00.000Z',
+      });
+    }
+    const keyPair = await globalThis.crypto.subtle.generateKey(
+      {
+        name: 'RSASSA-PKCS1-v1_5',
+        modulusLength: 2048,
+        publicExponent: new Uint8Array([1, 0, 1]),
+        hash: 'SHA-256',
+      },
+      true,
+      ['sign', 'verify'],
+    );
+    const encodedKey = globalThis.btoa(
+      String.fromCharCode(
+        ...new Uint8Array(await globalThis.crypto.subtle.exportKey('pkcs8', keyPair.privateKey)),
+      ),
+    );
+    const privateKey = `-----BEGIN PRIVATE KEY-----\n${encodedKey.match(/.{1,64}/g)?.join('\n')}\n-----END PRIVATE KEY-----`;
+    let tokenExchanges = 0;
+    const provider = createGitHubAppTokenProvider({
+      appId: '1234567',
+      privateKey,
+      crypto: globalThis.crypto,
+      fetch: async () => {
+        tokenExchanges += 1;
+        return new Response(null, { status: 429, headers: { 'retry-after': '60' } });
+      },
+    });
+    const github = createGitHubPublicationAdapter({
+      token: (installationId, signal) => provider.getInstallationToken(installationId, signal),
+      fetch: async () => {
+        throw new Error('metadata request should not run while throttled');
+      },
+    });
+    const log = { record: async () => {} };
+    const first = await runScheduledMetadataRefresh(coreEnv(database), {
+      stateStore: store,
+      github,
+      log,
+    });
+    expect(first.dispatched).toBe(0);
+    expect(first.skipped).toBe('');
+    expect(tokenExchanges).toBeGreaterThan(0);
+    expect(tokenExchanges).toBeLessThan(8);
+    const cooldown = await store.getRefreshCooldown!();
+    expect(cooldown).toBeDefined();
+    expect(Date.parse(cooldown!)).toBeGreaterThan(Date.now());
+
+    const freshStore = createD1ReviewStateStore(database);
+    const second = await runScheduledMetadataRefresh(coreEnv(database), {
+      stateStore: freshStore,
+      github,
+      log,
+    });
+    expect(second).toEqual({ dispatched: 0, failed: 0, skipped: 'cooldown' });
+    expect(tokenExchanges).toBeLessThan(8);
   });
 });
