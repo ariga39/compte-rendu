@@ -146,7 +146,7 @@ Cloudflare Queues is not accepted for this path: avoiding another comparatively
 immature managed runtime is more valuable than its unused throughput features.
 Redis, including a hosted Cloudflare-compatible service, would also add an
 independent state system without solving a current scale problem. The
-always-on Runner can claim one eligible D1 run when idle; D1 remains the sole
+always-on Runner can claim eligible D1 runs while capacity remains; D1 remains the sole
 authority for queued, claimed, superseded, and terminal product state.
 
 ## Rating method
@@ -203,7 +203,7 @@ build a general security platform.
 
 1. **P1 — implemented: serialize work through the existing D1 state.** The D1
    run row is the durable queue item; Cloudflare Queues and Redis are not part
-   of this path. An idle Runner calls one authenticated claim endpoint. Behind
+   of this path. A Runner with available capacity calls one authenticated claim endpoint. Behind
    that small interface, Core atomically claims the oldest eligible run, skips
    superseded state, and only then mints the short-lived one-repository read
    token. D1 stores immutable run identity and state, never the token,
