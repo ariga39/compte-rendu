@@ -11,17 +11,21 @@
     "dev": "vp dev",
     "preview": "vp preview",
     "prepare": "svelte-kit sync",
-    "check": "svelte-check --tsconfig ./tsconfig.json"
+    "check": "svelte-check --tsconfig ./tsconfig.json && tsc --noEmit -p tests/tsconfig.json",
+    "check:tests": "tsc --noEmit -p tests/tsconfig.json",
+    "test:dashboard": "playwright test"
   },
   "dependencies": {
     "@compte-rendu/contracts": "workspace:*",
     "effect": "4.0.0-rc.111"
   },
   "devDependencies": {
+    "@playwright/test": "1.61.1",
     "@sveltejs/adapter-static": "4.0.0",
     "@sveltejs/kit": "3.1.0",
     "@sveltejs/vite-plugin-svelte": "7.3.1",
     "@tailwindcss/vite": "4.3.3",
+    "@types/node": "24.19.2",
     "mdsvex": "0.12.8",
     "rehype-slug": "6.0.0",
     "svelte": "5.57.2",

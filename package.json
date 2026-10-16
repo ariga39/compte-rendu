@@ -5,7 +5,7 @@
     "check": "vp check && corepack pnpm --filter @compte-rendu/dashboard check",
     "test": "vp test && corepack pnpm test:runtime",
     "test:runtime": "vitest run --config tests/runtime/vitest.config.mjs",
-    "test:dashboard": "node tests/dashboard-browser.mjs",
+    "test:dashboard": "corepack pnpm --filter @compte-rendu/dashboard test:dashboard",
     "render:wrangler": "node --experimental-strip-types scripts/render-wrangler-config.mts",
     "diagnose": "node --experimental-strip-types scripts/diagnose.mts",
     "build": "vp run --filter './apps/dashboard' --filter './apps/core' --filter './apps/ingress' --filter './apps/runner' --fail-if-no-match build"
