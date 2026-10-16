@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it, vi } from 'vitest';
@@ -6128,7 +6128,7 @@ describe('Runner OpenShell runtime lifecycle', () => {
     const runner = createRunner({
       authToken: 'test-auth',
       modelSecretCommand: 'fixture-resolver',
-      modelConfig: JSON.stringify({ id: 'opencode-go/deepseek-flash' }),
+      modelConfig: standardModelConfig,
       sandboxRuntime: 'sbx',
       concurrency: 2,
       evidenceRoot: root,
@@ -6377,5 +6377,301 @@ describe('Runner OpenShell runtime lifecycle', () => {
       failure: { reason: 'agent', cause: 'timeout' },
       sandbox: { cleanup: 'destroyed' },
     });
+  });
+});
+
+describe('Runner settings reload', () => {
+  const baseSha = '1111111111111111111111111111111111111111';
+  const headSha = '2222222222222222222222222222222222222222';
+  let prSeed = 5000;
+  const prById = new Map<string, number>();
+  const prFor = (id: string) => {
+    const existing = prById.get(id);
+    if (existing !== undefined) return existing;
+    prSeed += 1;
+    prById.set(id, prSeed);
+    return prSeed;
+  };
+  const jobBody = (id: string) =>
+    JSON.stringify({
+      ...runnerJobFields,
+      id,
+      runId: id,
+      attempt: 1,
+      pullRequestNumber: prFor(id),
+      repositoryUrl: 'https://github.com/acme/reviewed.git',
+      baseSha,
+      headSha,
+    });
+  const auth = { authorization: 'Bearer runner-test-token' };
+  const get = async (runner: ReturnType<typeof createProductionRunner>, id: string) =>
+    (
+      await runner.handle(new Request(`http://runner/jobs/${id}`, { headers: auth }))
+    ).json() as Promise<{
+      status: string;
+    }>;
+  const post = (runner: ReturnType<typeof createProductionRunner>, id: string) =>
+    runner.handle(
+      new Request('http://runner/jobs', {
+        method: 'POST',
+        headers: { ...auth, 'content-type': 'application/json' },
+        body: jobBody(id),
+      }),
+    );
+  const writeRaw = async (dir: string, content: string) => {
+    const tmp = join(dir, `settings.${crypto.randomUUID()}.tmp`);
+    await writeFile(tmp, content);
+    await rename(tmp, join(dir, 'settings.toml'));
+  };
+  const writeCap = (dir: string, value: number) => writeRaw(dir, `concurrency = ${value}\n`);
+  const captureLogs = () => {
+    const logs: string[] = [];
+    const spy = vi
+      .spyOn(console, 'log')
+      .mockImplementation((...args: unknown[]) => void logs.push(args.map(String).join(' ')));
+    return {
+      ignored: () => logs.filter((line) => line.includes('keeping last valid settings')).length,
+      reloadedTo: (cap: number) =>
+        logs.some((line) => line.includes(`runner settings reloaded concurrency=${cap}`)),
+      restore: () => spy.mockRestore(),
+    };
+  };
+  const startFixture = async (initialCap: number, extra: Record<string, unknown>) => {
+    const dir = await mkdtemp(join(tmpdir(), 'compte-rendu-settings-'));
+    const file = join(dir, 'settings.toml');
+    await writeFile(file, `concurrency = ${initialCap}\n`);
+    const callbackReleases = new Map<string, () => void>();
+    let disposed = false;
+    const runner = createRunner({
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'fixture-resolver',
+      modelConfig: standardModelConfig,
+      sandboxRuntime: 'sbx',
+      evidenceRoot: sharedEvidenceRoot,
+      settingsFile: file,
+      claimUrl: 'https://ingress.test/runner-claim',
+      claimTimeoutMs: 1_000_000,
+      claimIntervalMs: 1_000_000,
+      callbackUrl: 'https://ingress.test/runner-callback',
+      callbackToken: 'test-callback',
+      callbackTimeoutMs: 1_000_000,
+      process: async (): Promise<RunnerProcessResult> => ({
+        exitCode: 1,
+        stdout: '',
+        timedOut: false,
+        truncated: false,
+      }),
+      callbackFetch: async (_url, init) => {
+        if (disposed) return new Response(null, { status: 202 });
+        const id = (JSON.parse(init?.body as string) as { id: string }).id;
+        return new Promise<Response>((resolve) =>
+          callbackReleases.set(id, () => resolve(new Response(null, { status: 202 }))),
+        );
+      },
+      ...extra,
+    });
+    const releaseCallback = (id: string) => {
+      callbackReleases.get(id)?.();
+      callbackReleases.delete(id);
+    };
+    const releaseCallbacks = () => {
+      for (const id of callbackReleases.keys()) releaseCallback(id);
+    };
+    const close = async () => {
+      disposed = true;
+      releaseCallbacks();
+      await runner.close();
+      await rm(dir, { recursive: true, force: true });
+    };
+    return { dir, file, runner, callbackReleases, releaseCallback, releaseCallbacks, close };
+  };
+
+  it('rejects an initial missing or invalid settings file at startup', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'compte-rendu-settings-'));
+    const valid = join(dir, 'valid.toml');
+    const invalid = join(dir, 'invalid.toml');
+    const missing = join(dir, 'missing.toml');
+    await writeFile(valid, 'concurrency = 1\n');
+    await writeFile(invalid, 'concurrency = 0\n');
+    const base = (settingsFile: string) => ({
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'fixture-resolver',
+      evidenceRoot: sharedEvidenceRoot,
+      settingsFile,
+      claimFetch: async () => new Response(null, { status: 204 }),
+    });
+    try {
+      expect(() => createRunner(base(invalid))).toThrow('invalid runner settings file');
+      expect(() => createRunner(base(missing))).toThrow('invalid runner settings file');
+      const runner = createRunner(base(valid));
+      await runner.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('delivers a second claimed job when the cap rises while the runner is full', async () => {
+    const bodies = [jobBody('settings-raise-a'), jobBody('settings-raise-b')];
+    let claims = 0;
+    const h = await startFixture(1, {
+      claimFetch: async () => {
+        const body = bodies[claims++];
+        return body === undefined
+          ? new Response(null, { status: 204 })
+          : new Response(body, { status: 200 });
+      },
+    });
+    try {
+      await vi.waitFor(async () => {
+        expect((await get(h.runner, 'settings-raise-a')).status).toBe('running');
+      });
+      expect(claims).toBe(1);
+      await writeCap(h.dir, 2);
+      await vi.waitFor(async () => {
+        expect((await get(h.runner, 'settings-raise-b')).status).toBe('running');
+      });
+      expect(claims).toBe(2);
+      expect(h.callbackReleases.size).toBe(2);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('admits a reserved claim held across a cap lowering, keeps it, and refuses new work', async () => {
+    let claims = 0;
+    let releaseHeldClaim: (() => void) | undefined;
+    const h = await startFixture(3, {
+      claimIntervalMs: 20,
+      claimFetch: async () => {
+        claims += 1;
+        if (claims === 1) return new Response(jobBody('settings-lower-a'), { status: 200 });
+        if (claims === 2) {
+          return new Promise<Response>((resolve) => {
+            releaseHeldClaim = () =>
+              resolve(new Response(jobBody('settings-lower-b'), { status: 200 }));
+          });
+        }
+        return new Response(null, { status: 204 });
+      },
+    });
+    const probeFresh = async () => {
+      const id = `settings-lower-probe-${crypto.randomUUID()}`;
+      const response = await post(h.runner, id);
+      if (response.status === 409) return true;
+      await vi.waitFor(() => expect(h.callbackReleases.has(id)).toBe(true));
+      h.releaseCallback(id);
+      await vi.waitFor(async () => {
+        expect((await get(h.runner, id)).status).not.toBe('running');
+      });
+      return false;
+    };
+    try {
+      await vi.waitFor(async () => {
+        expect((await get(h.runner, 'settings-lower-a')).status).toBe('running');
+      });
+      await vi.waitFor(() => expect(claims).toBeGreaterThanOrEqual(2));
+      await writeCap(h.dir, 1);
+      await vi.waitFor(async () => expect(await probeFresh()).toBe(true));
+      releaseHeldClaim?.();
+      await vi.waitFor(async () => {
+        expect((await get(h.runner, 'settings-lower-b')).status).toBe('running');
+      });
+      expect((await get(h.runner, 'settings-lower-a')).status).toBe('running');
+      expect((await post(h.runner, 'settings-lower-after')).status).toBe(409);
+      await vi.waitFor(() => expect(h.callbackReleases.size).toBe(2));
+      h.releaseCallbacks();
+      await vi.waitFor(async () => {
+        expect((await get(h.runner, 'settings-lower-b')).status).not.toBe('running');
+      });
+      expect((await get(h.runner, 'settings-lower-b')).status).not.toBe('aborted');
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('keeps the last valid cap across invalid, deletion, and applies an atomic recreation', async () => {
+    const logs = captureLogs();
+    const h = await startFixture(2, {
+      claimFetch: async () => new Response(null, { status: 204 }),
+    });
+    try {
+      expect((await post(h.runner, 'settings-lastgood-a')).status).toBe(202);
+      expect((await post(h.runner, 'settings-lastgood-b')).status).toBe(202);
+      await vi.waitFor(async () => {
+        expect((await get(h.runner, 'settings-lastgood-a')).status).toBe('running');
+        expect((await get(h.runner, 'settings-lastgood-b')).status).toBe('running');
+      });
+      await vi.waitFor(() => expect(h.callbackReleases.size).toBe(2));
+      expect((await post(h.runner, 'settings-lastgood-c')).status).toBe(409);
+      await writeRaw(h.dir, 'concurrency = 0\n');
+      await vi.waitFor(() => expect(logs.ignored()).toBeGreaterThanOrEqual(1));
+      await writeRaw(h.dir, 'concurrency = "two"\nnot = toml =\n');
+      await vi.waitFor(() => expect(logs.ignored()).toBeGreaterThanOrEqual(2));
+      expect((await post(h.runner, 'settings-lastgood-c')).status).toBe(409);
+      await rm(h.file, { force: true });
+      await vi.waitFor(() => expect(logs.ignored()).toBeGreaterThanOrEqual(3));
+      expect((await get(h.runner, 'settings-lastgood-a')).status).toBe('running');
+      h.releaseCallback('settings-lastgood-a');
+      await vi.waitFor(async () => {
+        expect((await get(h.runner, 'settings-lastgood-a')).status).not.toBe('running');
+      });
+      expect((await post(h.runner, 'settings-lastgood-d')).status).toBe(202);
+      await vi.waitFor(async () => {
+        expect((await get(h.runner, 'settings-lastgood-d')).status).toBe('running');
+      });
+      expect((await post(h.runner, 'settings-lastgood-e')).status).toBe(409);
+      await writeCap(h.dir, 3);
+      await vi.waitFor(() => expect(logs.reloadedTo(3)).toBe(true));
+      await vi.waitFor(async () => {
+        expect((await post(h.runner, 'settings-lastgood-f')).status).toBe(202);
+      });
+    } finally {
+      logs.restore();
+      await h.close();
+    }
+  });
+
+  it('serializes simultaneous completions and a reload into a single in-flight claim', async () => {
+    const logs = captureLogs();
+    let claims = 0;
+    let pending = 0;
+    let peak = 0;
+    const heldClaims: Array<() => void> = [];
+    const bodies = [jobBody('settings-race-a'), jobBody('settings-race-b')];
+    const h = await startFixture(2, {
+      claimIntervalMs: 1,
+      claimFetch: async () => {
+        claims += 1;
+        pending += 1;
+        peak = Math.max(peak, pending);
+        if (claims <= 2) {
+          pending -= 1;
+          return new Response(bodies[claims - 1], { status: 200 });
+        }
+        return new Promise<Response>((resolve) =>
+          heldClaims.push(() => {
+            pending -= 1;
+            resolve(new Response(null, { status: 204 }));
+          }),
+        );
+      },
+    });
+    try {
+      await vi.waitFor(async () => {
+        expect((await get(h.runner, 'settings-race-a')).status).toBe('running');
+        expect((await get(h.runner, 'settings-race-b')).status).toBe('running');
+      });
+      expect(h.callbackReleases.size).toBe(2);
+      const reload = writeCap(h.dir, 3);
+      h.releaseCallbacks();
+      await reload;
+      await vi.waitFor(() => expect(logs.reloadedTo(3)).toBe(true));
+      await vi.waitFor(() => expect(claims).toBeGreaterThanOrEqual(3));
+      expect(peak).toBe(1);
+    } finally {
+      logs.restore();
+      for (const release of heldClaims.splice(0)) release();
+      await h.close();
+    }
   });
 });

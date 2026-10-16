@@ -46,6 +46,11 @@ import {
   createOpenShellPreflight,
   createOpenShellRuntimeFactory,
 } from './sandbox-runtime-openshell.js';
+import {
+  readRunnerSettingsSync,
+  watchRunnerSettings,
+  type RunnerSettingsWatcher,
+} from './runner-settings.js';
 
 export type {
   RunnerDiagnostic,
@@ -490,6 +495,7 @@ export interface RunnerOptions {
   readonly claimTimeoutMs?: number;
   readonly claimIntervalMs?: number;
   readonly concurrency?: number;
+  readonly settingsFile?: string;
 }
 
 const authorized = (request: Request, token: string | undefined) => {
@@ -648,7 +654,15 @@ const currentEpochMillis = () =>
   Effect.runPromise(DateTime.now.pipe(Effect.map(DateTime.toEpochMillis)));
 
 export const createRunner = (options: RunnerOptions = {}) => {
-  const concurrency = resolveConcurrency(options.concurrency, process.env.RUNNER_CONCURRENCY);
+  const settingsFileRaw = options.settingsFile ?? process.env.RUNNER_SETTINGS_FILE;
+  const settingsFile =
+    settingsFileRaw === undefined || settingsFileRaw.trim().length === 0
+      ? undefined
+      : settingsFileRaw.trim();
+  let effectiveConcurrency =
+    settingsFile === undefined
+      ? resolveConcurrency(options.concurrency, process.env.RUNNER_CONCURRENCY)
+      : readRunnerSettingsSync(settingsFile).concurrency;
   const sandboxRuntime = resolveSandboxRuntimeConfig({
     kind: options.sandboxRuntime ?? process.env.RUNNER_SANDBOX_RUNTIME,
     cliPath: options.sandboxCliPath ?? process.env.RUNNER_SANDBOX_CLI,
@@ -733,7 +747,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
     [...jobs.values()].filter(
       (candidate) => candidate.state.status === 'queued' || candidate.state.status === 'running',
     ).length;
-  const hasCapacity = () => activeJobCount() + (claiming ? 1 : 0) < concurrency;
+  const hasCapacity = () => activeJobCount() + (claiming ? 1 : 0) < effectiveConcurrency;
   const hasUnclearedSamePullRequest = (input: RunnerJobInputState) =>
     [...jobs.values()].some(
       (candidate) =>
@@ -1962,7 +1976,30 @@ export const createRunner = (options: RunnerOptions = {}) => {
   };
 
   requestNextJob = () => void claimNextJob();
+  let settingsWatcher: RunnerSettingsWatcher | undefined;
+  if (settingsFile !== undefined) {
+    settingsWatcher = watchRunnerSettings(settingsFile, {
+      onSettings: (next) => {
+        const previous = effectiveConcurrency;
+        effectiveConcurrency = next.concurrency;
+        void Effect.runPromise(
+          Effect.logInfo(`runner settings reloaded concurrency=${next.concurrency}`),
+        ).catch(() => undefined);
+        if (next.concurrency > previous && hasCapacity()) requestNextJob?.();
+      },
+      onError: () => {
+        void Effect.runPromise(
+          Effect.logWarning('runner settings update ignored; keeping last valid settings'),
+        ).catch(() => undefined);
+      },
+    });
+  }
   if (claimUrl !== undefined && claimUrl.length > 0) void claimNextJob();
 
-  return { handle };
+  return {
+    handle,
+    close: async () => {
+      await settingsWatcher?.close();
+    },
+  };
 };

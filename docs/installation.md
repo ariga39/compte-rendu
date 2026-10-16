@@ -659,8 +659,58 @@ one 30-minute agent budget, so `RUNNER_CONCURRENCY=2` needs roughly twice the
 CPU, memory, disk, and model throughput of the default. Prefer the smallest
 value that removes head-of-line blocking. This setting reuses the existing D1
 durable queue and adds no new queue, scheduler, or retry system. The Runner
-reads it once at startup, so change it in the environment file and restart the
-Runner to apply a new value.
+reads this environment variable once at startup. For changes without restarting,
+configure the TOML settings file below.
+
+### Reload concurrency without restarting
+
+The optional `RUNNER_SETTINGS_FILE` selects one TOML file. Its `concurrency`
+value takes precedence over `RUNNER_CONCURRENCY` (and the programmatic
+concurrency option). Without a settings file, the environment/default behavior
+above is unchanged.
+
+Create the file once, as the Runner user; keep it outside Sandbox writable
+mounts. Preserve an existing file when upgrading:
+
+```sh
+mkdir -p ~/.config/compte-rendu
+(umask 077; printf 'concurrency = 3\n' > ~/.config/compte-rendu/runner-settings.toml)
+```
+
+Add its absolute path to the existing Runner environment file:
+
+```ini
+RUNNER_SETTINGS_FILE=/home/<RUNNER_USER>/.config/compte-rendu/runner-settings.toml
+```
+
+After existing reviews finish, restart the Runner once to enable file loading.
+Subsequent edits to this TOML file reload automatically without a restart:
+
+```toml
+concurrency = 3
+```
+
+Use a positive integer; unsupported keys and invalid TOML are rejected. Save by
+atomic replacement (write a temporary file in the same directory, then rename
+it over the settings file) to avoid exposing a partially written configuration.
+The Runner uses `smol-toml` for parsing, `chokidar` for file events and editor
+replacement handling, and Effect Schema for validation.
+
+Increasing the limit wakes the claim loop. Decreasing it lets admitted Jobs and
+in-flight claims finish; new work waits until occupancy is below the new limit.
+Cleanup and terminal callbacks continue to hold their slots. A missing or
+invalid initial file prevents startup. A missing, unreadable, or invalid later
+update retains the last valid limit and records a warning; a subsequent valid
+save recovers automatically. Successful reload logs include the effective
+concurrency. Inspect them with:
+
+```sh
+journalctl --user -u <RUNNER_UNIT> -f
+```
+
+Only concurrency reloads. Changing `RUNNER_SETTINGS_FILE` itself, model settings,
+credentials, or sandbox runtime still requires restarting the Runner. An
+invalid file retained on disk must be fixed before a later restart.
 
 ### KVM permissions and the persistent Runner service
 

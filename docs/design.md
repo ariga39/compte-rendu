@@ -309,6 +309,17 @@ repository/PR work stays serialized until the prior Sandbox is confirmed
 destroyed, while unrelated pull requests progress. A fresh Runner process
 may claim a later unclaimed row even when an abandoned scheduled row retains a
 Job id.
+An optional `RUNNER_SETTINGS_FILE` selects a data-only TOML file whose positive
+integer `concurrency` overrides the startup environment value. Initial loading
+validates before admission or claim. `smol-toml` parses the file, `chokidar`
+observes saves/replacements, and Effect Schema validates each candidate before
+it replaces the effective limit. Reload failure keeps the last valid value.
+Increasing the limit wakes the existing guarded claim path; decreasing it
+preserves admitted Jobs and already reserved claims until they finish. This
+changes no same-PR, cleanup, callback, or ambiguous-claim halt behavior. The
+watcher rereads when ready, rejects stale read completions, and closes through
+`Runner.close()`. No model, credential, or runtime setting is reloaded.
+
 The shared review policy gives each Runner attempt a 30-minute agent budget and
 treats a failed Review Attempt as terminal: there is one attempt and no fresh
 attempt after failure. The optional same-session submission reminder uses at

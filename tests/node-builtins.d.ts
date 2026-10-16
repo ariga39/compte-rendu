@@ -171,3 +171,9 @@ declare class Buffer extends Uint8Array {
   static from(value: string, encoding: string): Buffer;
   toString(encoding?: string): string;
 }
+
+declare module 'node:events' {
+  export class EventEmitter<Events = Record<string, unknown[]>> {
+    on(event: string, listener: (...args: unknown[]) => void): this;
+  }
+}
