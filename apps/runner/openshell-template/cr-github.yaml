@@ -1,6 +1,6 @@
 # Non-secret OpenShell provider profile for scoped, read-only GitHub access.
 # Import into the gateway before starting the Runner:
-#   openshell profile import -f cr-github.yaml --global
+#   openshell profile import -f cr-github.yaml
 id: cr-github
 display_name: Compte rendu GitHub
 category: source_control

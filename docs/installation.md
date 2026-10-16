@@ -626,7 +626,7 @@ ExecStart=<ABSOLUTE_NODE> <REPO_ROOT>/apps/runner/dist/runner.js
 
 Alternatively, leave the base unit untouched and supply the Node-only
 `ExecStart` as a drop-in override (for example
-`/etc/systemd/system/<unit>.d/openshell.conf` with the same two lines); a
+`~/.config/systemd/user/<RUNNER_UNIT>.d/openshell.conf` with the same two lines); a
 drop-in replaces the accumulated value the same way. The gateway is started and
 supervised separately (for example by its own container or service); the Runner
 only needs `RUNNER_SANDBOX_CLI` to resolve the `openshell` binary and the
