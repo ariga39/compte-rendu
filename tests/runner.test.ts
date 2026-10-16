@@ -5761,6 +5761,8 @@ describe('Runner OpenShell runtime lifecycle', () => {
     missingModelProvider?: boolean;
     pagedModelProvider?: boolean;
     malformedProviderList?: boolean;
+    providerReconcileFails?: boolean;
+    providerReplaced?: boolean;
   }) => {
     const resultLine = finalMarkdownJsonl();
     const token = 'os-read-token-must-not-be-argv';
@@ -5773,6 +5775,9 @@ describe('Runner OpenShell runtime lifecycle', () => {
     let createdName = '';
     let labelNonce = '';
     let providerListCalls = 0;
+    let providerCreateAttempted = false;
+    let createdProviderName = '';
+    let createdProviderOwner = '';
     const runner = createRunner({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
@@ -5804,22 +5809,28 @@ describe('Runner OpenShell runtime lifecycle', () => {
           if (scenario.malformedProviderList === true) {
             return { ...ok, stdout: 'not-json' };
           }
+          if (scenario.providerReconcileFails === true && providerCreateAttempted === true) {
+            return { ...ok, stdout: 'not-json' };
+          }
           if (scenario.pagedModelProvider === true && providerListCalls === 1) {
             return {
               ...ok,
               stdout: JSON.stringify({ providers: [], next_page_token: 'page-2' }),
             };
           }
-          return {
-            ...ok,
-            stdout: JSON.stringify({
-              providers:
-                scenario.missingModelProvider === true
-                  ? []
-                  : [{ id: 'p-model', name: 'cr158-model' }],
-              next_page_token: '',
-            }),
-          };
+          const providers: Array<Record<string, unknown>> =
+            scenario.missingModelProvider === true ? [] : [{ id: 'p-model', name: 'cr158-model' }];
+          if (createdProviderName.length > 0) {
+            providers.push({
+              id: 'p-github',
+              name: createdProviderName,
+              labels: {
+                'cr-job-owner':
+                  scenario.providerReplaced === true ? 'foreign-owner' : createdProviderOwner,
+              },
+            });
+          }
+          return { ...ok, stdout: JSON.stringify({ providers, next_page_token: '' }) };
         }
         if (a0 === 'provider' && a1 === 'get') {
           return scenario.providerCreateFails === true
@@ -5836,7 +5847,13 @@ describe('Runner OpenShell runtime lifecycle', () => {
               };
         }
         if (a0 === 'provider' && a1 === 'create') {
+          providerCreateAttempted = true;
           providerEnvs.push(options.env);
+          createdProviderName = args[args.indexOf('--name') + 1] ?? '';
+          createdProviderOwner = (args[args.indexOf('--label') + 1] ?? '').replace(
+            'cr-job-owner=',
+            '',
+          );
           return scenario.providerCreateFails === true
             ? {
                 exitCode: 1,
@@ -6094,6 +6111,127 @@ describe('Runner OpenShell runtime lifecycle', () => {
     });
     expect(run.terminal.evidenceId).toBeDefined();
     expect(run.manifest).toMatchObject({ runtime: 'openshell', sandboxId: 'sbx-uuid-1' });
+  });
+
+  it('reserves only one claim when two completions release together', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'compte-rendu-claim-race-'));
+    let releaseClones: () => void = () => {};
+    const cloneGate = new Promise<void>((resolve) => {
+      releaseClones = resolve;
+    });
+    let startupDone = false;
+    let measure = false;
+    let pending = 0;
+    let peak = 0;
+    const claimReleases: Array<() => void> = [];
+    const callbackReleases: Array<() => void> = [];
+    const runner = createRunner({
+      authToken: 'test-auth',
+      modelSecretCommand: 'fixture-resolver',
+      modelConfig: JSON.stringify({ id: 'opencode-go/deepseek-flash' }),
+      sandboxRuntime: 'sbx',
+      concurrency: 2,
+      evidenceRoot: root,
+      claimUrl: 'http://claim.test/runner-claim',
+      claimIntervalMs: 1_000_000_000,
+      claimTimeoutMs: 1_000,
+      callbackUrl: 'http://callback.test/runner-callback',
+      callbackToken: 'test-callback',
+      claimFetch: async () => {
+        if (!measure) {
+          startupDone = true;
+          return new Response(null, { status: 204 });
+        }
+        pending += 1;
+        peak = Math.max(peak, pending);
+        return new Promise<Response>((resolve) =>
+          claimReleases.push(() => {
+            pending -= 1;
+            resolve(new Response(null, { status: 204 }));
+          }),
+        );
+      },
+      callbackFetch: async () =>
+        new Promise<Response>((resolve) =>
+          callbackReleases.push(() => resolve(new Response(null, { status: 202 }))),
+        ),
+      process: async (_command, args) => {
+        if (args.includes('clone')) await cloneGate;
+        return { exitCode: 1, stdout: '', timedOut: false, truncated: false };
+      },
+    });
+    try {
+      for (let i = 0; i < 200 && !startupDone; i += 1)
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      expect(startupDone).toBe(true);
+      const post = (n: number) =>
+        runner.handle(
+          new Request('http://runner/jobs', {
+            method: 'POST',
+            headers: { authorization: 'Bearer test-auth', 'content-type': 'application/json' },
+            body: JSON.stringify({
+              id: `claims-${n}`,
+              runId: `claims-${n}`,
+              attempt: 1,
+              repositoryName: 'acme/repo',
+              pullRequestNumber: n,
+              repositoryUrl: 'https://github.com/acme/repo.git',
+              repositoryReadToken: 'fixture-token',
+              baseSha: '1'.repeat(40),
+              headSha: '2'.repeat(40),
+            }),
+          }),
+        );
+      const admissions = await Promise.all([post(1), post(2)]);
+      expect(admissions.map((response) => response.status)).toEqual([202, 202]);
+      releaseClones();
+      for (let i = 0; i < 200 && callbackReleases.length < 2; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      expect(callbackReleases).toHaveLength(2);
+      measure = true;
+      for (const release of callbackReleases) release();
+      for (let i = 0; i < 200 && peak < 2; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      expect(peak).toBe(1);
+    } finally {
+      for (const release of claimReleases) release();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed and keeps an unresolved provider after an ambiguous create', async () => {
+    const run = await runOpenShellReview({
+      runId: 'run-158-ambiguous-provider',
+      destroyGet: 'gone',
+      providerCreateFails: true,
+      providerReconcileFails: true,
+    });
+    expect(run.terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'cleanup' },
+      sandbox: { cleanup: 'failed' },
+    });
+    expect(run.commands.some((args) => args.includes('provider') && args.includes('delete'))).toBe(
+      false,
+    );
+  });
+
+  it('never deletes a same-name provider replaced by a foreign record', async () => {
+    const run = await runOpenShellReview({
+      runId: 'run-158-provider-replaced',
+      destroyGet: 'gone',
+      providerReplaced: true,
+    });
+    expect(run.terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'cleanup' },
+      sandbox: { cleanup: 'failed' },
+    });
+    expect(run.commands.some((args) => args.includes('provider') && args.includes('delete'))).toBe(
+      false,
+    );
   });
 
   it('accepts a model provider found on a later provider-list page', async () => {
