@@ -985,9 +985,20 @@ test('primary navigation is operable by keyboard', async ({ page, harness, base 
 });
 
 test('history renders a semantic table with named columns', async ({ page, harness, base }) => {
+  await page.clock.install({ time: new Date(NOW) });
   harness.setHandler((url, request) =>
     url.pathname === '/api/jobs' && url.search === ''
-      ? ok(historyPage([task({ runId: 'h-1' })]))
+      ? ok(
+          historyPage([
+            task({
+              runId: 'h-1',
+              identity: {
+                ...publicIdentity,
+                repositoryFullName: `acme/${'repository'.repeat(10)}`,
+              },
+            }),
+          ]),
+        )
       : defaultOverviewHandler(url, request),
   );
   await page.goto(`${base}/history`);
@@ -1001,6 +1012,9 @@ test('history renders a semantic table with named columns', async ({ page, harne
     'Pull request',
   ]);
   await expect(page.locator('[data-testid="task"]').first().locator('td')).toHaveCount(5);
+  for (const header of await page.getByRole('columnheader').all()) {
+    await expect(header).toBeInViewport({ ratio: 1 });
+  }
 });
 
 test('dashboard uses the IBM Plex Mono family across text and controls', async ({

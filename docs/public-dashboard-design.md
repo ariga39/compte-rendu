@@ -148,7 +148,7 @@ Runner. Returning to the list preserves the user's filter and scroll position.
 
 ### Presentation and accessibility
 
-Use SvelteKit file-based routes and Svelte components with Tailwind CSS in
+Use SvelteKit file-based routes and Carbon Svelte components with IBM Plex Mono in
 `apps/dashboard`. Build a client-rendered static shell with `adapter-static`;
 the existing Ingress Worker serves it and its assets through the `ASSETS`
 binding. No additional server or deployment service is needed. Components
