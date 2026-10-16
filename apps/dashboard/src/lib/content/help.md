@@ -18,7 +18,7 @@ How to read this dashboard. It is read-only and reflects persisted review state;
 ## Overview counts
 
 - **Queued**: waiting to be claimed.
-- **Claimed**: accepted and taken by a worker, including preparation and archiving. It is not a count of model calls.
+- **Claimed**: accepted for processing, including preparation, review, archiving, and result publication. It is not a count of model calls.
 - **Published** and **Failed** count work received (created) in the last 24 hours that ended with that outcome, not terminal events that occurred in the last 24 hours.
 
 Queued and Claimed describe the current database state.
@@ -73,11 +73,13 @@ Times are observations from persisted state, not exact live measurements. Older 
 
 ## Updates and refresh
 
+Overview, history, and task detail pages refresh automatically. This Help page is a static guide.
+
 - While work is active, the page refreshes about every **15 seconds**.
 - When nothing is active, it refreshes about every **60 seconds**.
 - After errors it waits longer before retrying.
 - Automatic refresh pauses while the tab is hidden or the device is offline, and resumes on return.
-- A manual refresh is always available.
+- Use **Refresh** on a data page to request an update. Retry delays and offline pauses still apply.
 
 The data comes from stored review state and is read-only. A refresh updates the page without changing any review.
 
