@@ -1,6 +1,6 @@
 # Non-secret OpenShell provider profile for the review model endpoint.
 # Import into the gateway before starting the Runner:
-#   openshell profile import -f cr-model.yaml --global
+#   openshell profile import -f cr-model.yaml
 id: cr-model
 display_name: Compte rendu model
 category: inference
