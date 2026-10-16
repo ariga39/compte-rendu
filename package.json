@@ -2,16 +2,18 @@
   "name": "compte-rendu",
   "private": true,
   "scripts": {
-    "check": "vp check",
+    "check": "vp check && corepack pnpm --filter @compte-rendu/dashboard check",
     "test": "vp test && corepack pnpm test:runtime",
     "test:runtime": "vitest run --config tests/runtime/vitest.config.mjs",
+    "test:dashboard": "node tests/dashboard-browser.mjs",
     "render:wrangler": "node --experimental-strip-types scripts/render-wrangler-config.mts",
     "diagnose": "node --experimental-strip-types scripts/diagnose.mts",
-    "build": "vp run --filter './apps/core' --filter './apps/ingress' --filter './apps/runner' --fail-if-no-match build"
+    "build": "vp run --filter './apps/dashboard' --filter './apps/core' --filter './apps/ingress' --filter './apps/runner' --fail-if-no-match build"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "0.22.0",
     "effect": "4.0.0-rc.111",
+    "playwright": "1.61.1",
     "vite-plus": "0.3.0",
     "vitest": "4.1.11"
   },

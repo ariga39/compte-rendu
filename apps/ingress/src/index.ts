@@ -1,5 +1,6 @@
-import { Effect, Schema } from 'effect';
+import { Effect, Option, Schema } from 'effect';
 import {
+  MetadataInvalidationEvent,
   ReviewEvent,
   GitHubSha,
   MAX_RUNNER_CALLBACK_BYTES,
@@ -17,9 +18,19 @@ export const MAX_WEBHOOK_BYTES = 256 * 1024;
 
 export { createCloudflareOperationalLog } from './operational-log';
 
-const supportedEvents = ['pull_request', 'issue_comment', 'check_run', 'check_suite'] as const;
+const supportedEvents = [
+  'pull_request',
+  'issue_comment',
+  'check_run',
+  'check_suite',
+  'repository',
+  'installation',
+  'installation_repositories',
+] as const;
 const runnerCallbackPath = '/runner-callback';
 const runnerClaimPath = '/runner-claim';
+const runnerProgressPath = '/runner-progress';
+const MAX_RUNNER_PROGRESS_BYTES = 16 * 1024;
 const supportedPullRequestActions = [
   'opened',
   'reopened',
@@ -91,6 +102,32 @@ const CheckSuiteRerequestWebhook = Schema.Struct({
   sender: Schema.Struct({ login: Schema.NonEmptyString }),
 });
 
+const PullRequestObservationWebhook = Schema.Struct({
+  action: Schema.String,
+  installation: Schema.Struct({ id: Schema.Int }),
+  repository: Schema.Struct({
+    id: Schema.Int,
+    visibility: Schema.Literals(['private', 'public']),
+  }),
+});
+
+const RepositoryVisibilityWebhook = Schema.Struct({
+  action: Schema.String,
+  installation: Schema.Struct({ id: Schema.Int }),
+  repository: Schema.Struct({ id: Schema.Int }),
+});
+
+const InstallationRepositoriesWebhook = Schema.Struct({
+  action: Schema.String,
+  installation: Schema.Struct({ id: Schema.Int }),
+  repositories_removed: Schema.optional(Schema.Array(Schema.Struct({ id: Schema.Int }))),
+});
+
+const InstallationWebhook = Schema.Struct({
+  action: Schema.String,
+  installation: Schema.Struct({ id: Schema.Int }),
+});
+
 const Signature = Schema.String.check(Schema.isPattern(new RegExp('^sha256=[0-9a-f]{64}$', 'i')));
 
 export interface IngressDependencies {
@@ -99,6 +136,7 @@ export interface IngressDependencies {
   readonly allowedInstallationIds: unknown;
   readonly allowedBotAuthorIds?: unknown;
   readonly core: CoreServiceBinding;
+  readonly assets?: CoreServiceBinding;
   readonly runnerCallbackToken?: string;
   readonly log?: OperationalLog;
 }
@@ -108,6 +146,7 @@ export interface IngressEnv {
   readonly ALLOWED_INSTALLATION_IDS: string;
   readonly ALLOWED_BOT_AUTHOR_IDS?: string;
   readonly CORE: CoreServiceBinding;
+  readonly ASSETS?: CoreServiceBinding;
   readonly RUNNER_CALLBACK_TOKEN?: string;
 }
 
@@ -121,7 +160,7 @@ class InvalidWebhook extends Schema.TaggedError<InvalidWebhook>()('InvalidWebhoo
 class CoreUnavailable extends Schema.TaggedError<CoreUnavailable>()('CoreUnavailable', {
   message: Schema.String,
   deliveryId: Schema.NonEmptyString,
-  event: Schema.Literals(['pull_request', 'issue_comment', 'check_run', 'check_suite']),
+  event: Schema.Literals(['pull_request', 'issue_comment', 'check_run', 'check_suite', 'metadata']),
 }) {}
 
 class InvalidAdmissionConfiguration extends Schema.TaggedError<InvalidAdmissionConfiguration>()(
@@ -251,7 +290,7 @@ const normalizeCheckSuiteRerequest = (
 
 const checkInstallation = (
   deliveryId: string,
-  event: NormalizedReviewEvent['event'],
+  event: NormalizedReviewEvent['event'] | 'metadata',
   installationId: number,
   dependencies: IngressDependencies,
 ) =>
@@ -321,6 +360,43 @@ const processWebhook = (request: Request, dependencies: IngressDependencies) =>
       Effect.mapError(() => invalidWebhook('Webhook action is missing')),
     );
     if (request.headers.get('x-github-event') === 'pull_request') {
+      const observation = yield* Schema.decodeUnknownEffect(PullRequestObservationWebhook)(
+        decodedJson,
+      ).pipe(Effect.mapError(() => invalidWebhook('Pull request webhook is malformed')));
+      const optionalDeliveryId = Schema.decodeUnknownOption(Schema.NonEmptyString)(
+        request.headers.get('x-github-delivery'),
+      );
+      const deliveryIdForObservation = Option.getOrUndefined(optionalDeliveryId);
+      const observePrivate = (deliveryId: string) =>
+        Effect.gen(function* () {
+          if (observation.repository.visibility !== 'private') return;
+          yield* forwardMetadataInvalidation(
+            {
+              deliveryId,
+              reason: 'repository_private',
+              installationId: observation.installation.id,
+              repositoryIds: [observation.repository.id],
+              visibility: 'private',
+            },
+            dependencies,
+          );
+        });
+
+      if (
+        deliveryIdForObservation !== undefined &&
+        !(yield* checkInstallation(
+          deliveryIdForObservation,
+          'pull_request',
+          observation.installation.id,
+          dependencies,
+        ))
+      ) {
+        return 'ignored' as const;
+      }
+      if (deliveryIdForObservation !== undefined) {
+        yield* observePrivate(deliveryIdForObservation);
+      }
+
       if (
         !supportedPullRequestActions.includes(
           action.action as (typeof supportedPullRequestActions)[number],
@@ -329,9 +405,10 @@ const processWebhook = (request: Request, dependencies: IngressDependencies) =>
         yield* recordOperationalLog(dependencies.log ?? createCloudflareOperationalLog(), {
           phase: 'ingress',
           outcome: 'ignored',
-          deliveryId: sanitizeOperationalLogIdentifier(
-            request.headers.get('x-github-delivery') ?? '',
-          ),
+          deliveryId:
+            deliveryIdForObservation === undefined
+              ? undefined
+              : sanitizeOperationalLogIdentifier(deliveryIdForObservation),
           event: 'pull_request',
           reason: 'unsupported_action',
         });
@@ -344,16 +421,6 @@ const processWebhook = (request: Request, dependencies: IngressDependencies) =>
       const payload = yield* Schema.decodeUnknownEffect(PullRequestWebhook)(decodedJson).pipe(
         Effect.mapError(() => invalidWebhook('Pull request webhook is malformed')),
       );
-      if (
-        !(yield* checkInstallation(
-          deliveryId,
-          'pull_request',
-          payload.installation.id,
-          dependencies,
-        ))
-      ) {
-        return 'ignored' as const;
-      }
       if (
         payload.pull_request.user.type === 'Bot' &&
         !(yield* isAllowedBotAuthor(payload.pull_request.user.id, dependencies))
@@ -471,7 +538,153 @@ const processWebhook = (request: Request, dependencies: IngressDependencies) =>
       return yield* forwardEvent(normalized, dependencies);
     }
 
+    const deliveryIdForMetadata = () =>
+      Schema.decodeUnknownEffect(Schema.NonEmptyString)(
+        request.headers.get('x-github-delivery'),
+      ).pipe(Effect.mapError(() => invalidWebhook('Webhook delivery id is missing')));
+
+    const ignoreMetadataAction = (deliveryId: string) =>
+      recordOperationalLog(dependencies.log ?? createCloudflareOperationalLog(), {
+        phase: 'ingress',
+        outcome: 'ignored',
+        deliveryId: sanitizeOperationalLogIdentifier(deliveryId),
+        event: 'metadata',
+        reason: 'unsupported_action',
+      });
+
+    if (githubEvent === 'repository') {
+      const deliveryId = yield* deliveryIdForMetadata();
+      const payload = yield* Schema.decodeUnknownEffect(RepositoryVisibilityWebhook)(
+        decodedJson,
+      ).pipe(Effect.mapError(() => invalidWebhook('Repository webhook is malformed')));
+      if (
+        !(yield* checkInstallation(deliveryId, 'metadata', payload.installation.id, dependencies))
+      ) {
+        return 'ignored' as const;
+      }
+      if (!['privatized', 'deleted', 'transferred'].includes(payload.action)) {
+        yield* ignoreMetadataAction(deliveryId);
+        return 'ignored' as const;
+      }
+      const isPrivate = payload.action === 'privatized';
+      return yield* forwardMetadataInvalidation(
+        {
+          deliveryId,
+          reason: isPrivate ? 'repository_private' : 'repository_removed',
+          installationId: payload.installation.id,
+          repositoryIds: [payload.repository.id],
+          visibility: isPrivate ? 'private' : 'unknown',
+        },
+        dependencies,
+      );
+    }
+
+    if (githubEvent === 'installation_repositories') {
+      const deliveryId = yield* deliveryIdForMetadata();
+      const payload = yield* Schema.decodeUnknownEffect(InstallationRepositoriesWebhook)(
+        decodedJson,
+      ).pipe(
+        Effect.mapError(() => invalidWebhook('Installation repositories webhook is malformed')),
+      );
+      if (
+        !(yield* checkInstallation(deliveryId, 'metadata', payload.installation.id, dependencies))
+      ) {
+        return 'ignored' as const;
+      }
+      if (payload.action !== 'removed') {
+        yield* ignoreMetadataAction(deliveryId);
+        return 'ignored' as const;
+      }
+      return yield* forwardMetadataInvalidation(
+        {
+          deliveryId,
+          reason: 'repository_removed',
+          installationId: payload.installation.id,
+          repositoryIds: (payload.repositories_removed ?? []).map((repository) => repository.id),
+          visibility: 'unknown',
+        },
+        dependencies,
+      );
+    }
+
+    if (githubEvent === 'installation') {
+      const deliveryId = yield* deliveryIdForMetadata();
+      const payload = yield* Schema.decodeUnknownEffect(InstallationWebhook)(decodedJson).pipe(
+        Effect.mapError(() => invalidWebhook('Installation webhook is malformed')),
+      );
+      if (
+        !(yield* checkInstallation(deliveryId, 'metadata', payload.installation.id, dependencies))
+      ) {
+        return 'ignored' as const;
+      }
+      if (!['deleted', 'suspend'].includes(payload.action)) {
+        yield* ignoreMetadataAction(deliveryId);
+        return 'ignored' as const;
+      }
+      return yield* forwardMetadataInvalidation(
+        {
+          deliveryId,
+          reason: 'installation_removed',
+          installationId: payload.installation.id,
+          repositoryIds: [],
+          visibility: 'unknown',
+        },
+        dependencies,
+      );
+    }
+
     return 'ignored' as const;
+  });
+
+type MetadataInvalidationInput = Omit<typeof MetadataInvalidationEvent.Type, 'event'>;
+
+const forwardMetadataInvalidation = (
+  event: MetadataInvalidationInput,
+  dependencies: IngressDependencies,
+) =>
+  Effect.gen(function* () {
+    const decoded = yield* Schema.decodeUnknownEffect(MetadataInvalidationEvent)({
+      ...event,
+      event: 'metadata',
+    }).pipe(Effect.mapError(() => invalidWebhook('Metadata invalidation is invalid')));
+    const coreResponse = yield* Effect.tryPromise({
+      try: () =>
+        Promise.resolve(
+          dependencies.core.fetch(
+            new Request('https://core.internal/metadata-events', {
+              method: 'POST',
+              headers: {
+                'content-type': 'application/json',
+                'x-compte-rendu-delivery': decoded.deliveryId,
+              },
+              body: JSON.stringify(decoded),
+            }),
+          ),
+        ),
+      catch: () =>
+        new CoreUnavailable({
+          message: 'Core service failed',
+          deliveryId: event.deliveryId,
+          event: 'metadata',
+        }),
+    });
+
+    if (!coreResponse.ok) {
+      return yield* new CoreUnavailable({
+        message: `Core service returned ${coreResponse.status}`,
+        deliveryId: event.deliveryId,
+        event: 'metadata',
+      });
+    }
+
+    yield* recordOperationalLog(dependencies.log ?? createCloudflareOperationalLog(), {
+      phase: 'ingress',
+      outcome: 'accepted',
+      deliveryId: sanitizeOperationalLogIdentifier(event.deliveryId) ?? 'redacted',
+      event: 'metadata',
+    });
+
+    return 'accepted' as const;
   });
 
 const forwardEvent = (event: NormalizedReviewEvent, dependencies: IngressDependencies) =>
@@ -575,9 +788,77 @@ const forwardRunnerClaim = async (request: Request, dependencies: IngressDepende
   });
 };
 
+const isPublicReadPath = (path: string) =>
+  path === '/api/dashboard' || path === '/api/jobs' || path.startsWith('/api/jobs/');
+
+const forwardPublicRead = async (request: Request, dependencies: IngressDependencies) => {
+  const url = new URL(request.url);
+  const forwarded = await dependencies.core.fetch(
+    new Request(`https://core.internal${url.pathname}${url.search}`, {
+      method: 'GET',
+      headers: { accept: 'application/json' },
+    }),
+  );
+  return new Response(await forwarded.arrayBuffer(), {
+    status: forwarded.status,
+    headers: forwarded.headers,
+  });
+};
+
+const forwardRunnerProgress = async (request: Request, dependencies: IngressDependencies) => {
+  if (
+    dependencies.runnerCallbackToken === undefined ||
+    request.headers.get('authorization') !== `Bearer ${dependencies.runnerCallbackToken}`
+  ) {
+    return new Response(null, { status: 401 });
+  }
+  const body = await request.arrayBuffer();
+  if (body.byteLength > MAX_RUNNER_PROGRESS_BYTES) return new Response(null, { status: 413 });
+  const forwarded = await dependencies.core.fetch(
+    new Request('https://core.internal/runner-progress', {
+      method: 'POST',
+      headers: {
+        'content-type': request.headers.get('content-type') ?? 'application/json',
+        'x-compte-rendu-runner-progress': 'verified',
+      },
+      body,
+    }),
+  );
+  return new Response(null, { status: forwarded.status });
+};
+
 export function createIngressWorker(dependencies: IngressDependencies): WorkerEntrypoint {
   return {
     fetch: async (request) => {
+      if (request.method === 'GET') {
+        const path = new URL(request.url).pathname;
+        const isPage = path === '/' || path === '/history' || path.startsWith('/jobs/');
+        if (isPage || path.startsWith('/_app/')) {
+          try {
+            if (dependencies.assets === undefined) return new Response(null, { status: 503 });
+            const assetUrl = new URL(request.url);
+            if (isPage) {
+              assetUrl.pathname = '/index.html';
+              assetUrl.search = '';
+            }
+            const asset = await dependencies.assets.fetch(new Request(assetUrl, request));
+            if (!isPage) return asset;
+            const headers = new Headers(asset.headers);
+            headers.set('cache-control', 'no-store');
+            return new Response(asset.body, { status: asset.status, headers });
+          } catch {
+            return new Response(null, { status: 503 });
+          }
+        }
+        if (isPublicReadPath(path)) {
+          try {
+            return await forwardPublicRead(request, dependencies);
+          } catch {
+            return new Response(null, { status: 503, headers: { 'cache-control': 'no-store' } });
+          }
+        }
+      }
+
       if (request.method !== 'POST') {
         return new Response(null, { status: 405 });
       }
@@ -593,6 +874,14 @@ export function createIngressWorker(dependencies: IngressDependencies): WorkerEn
       if (new URL(request.url).pathname === runnerClaimPath) {
         try {
           return await forwardRunnerClaim(request, dependencies);
+        } catch {
+          return new Response(null, { status: 503 });
+        }
+      }
+
+      if (new URL(request.url).pathname === runnerProgressPath) {
+        try {
+          return await forwardRunnerProgress(request, dependencies);
         } catch {
           return new Response(null, { status: 503 });
         }
@@ -662,6 +951,7 @@ const ingress: WorkerEntrypoint<IngressEnv> = {
       allowedInstallationIds: env.ALLOWED_INSTALLATION_IDS,
       allowedBotAuthorIds: env.ALLOWED_BOT_AUTHOR_IDS,
       core: env.CORE,
+      assets: env.ASSETS,
       runnerCallbackToken: env.RUNNER_CALLBACK_TOKEN,
     }).fetch(request);
   },

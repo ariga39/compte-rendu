@@ -16,8 +16,10 @@ const allowedBotAuthorIds = '[12345]';
 
 type WranglerConfig = {
   workers_dev?: boolean;
+  assets?: { directory: string; binding: string; run_worker_first: boolean; html_handling: string };
   vars?: {
     GITHUB_APP_ID?: string;
+    DASHBOARD_ORIGIN?: string;
     ALLOWED_INSTALLATION_IDS?: string;
     ALLOWED_BOT_AUTHOR_IDS?: string;
     POSTHOG_ENABLED?: string;
@@ -34,6 +36,7 @@ type WranglerConfig = {
     new_sqlite_classes?: readonly string[];
     deleted_classes?: readonly string[];
   }[];
+  triggers?: { crons?: readonly string[] };
   containers?: unknown;
   durable_objects?: unknown;
 };
@@ -352,14 +355,24 @@ describe('Wrangler deployment tooling', () => {
     ];
     const tracked = parseConfig('apps/core/wrangler.jsonc');
     expect(tracked.migrations).toEqual(expectedMigrations);
+    expect(tracked.triggers).toEqual({ crons: ['* * * * *'] });
+    expect(tracked.vars?.DASHBOARD_ORIGIN).toBe('');
     expect(tracked.containers).toBeUndefined();
     expect(tracked.durable_objects).toBeUndefined();
 
     withDeploymentFixture(({ run, read }) => {
       run('retired-objects');
       const rendered = parseConfigText(read('retired-objects').core);
+      expect(parseConfigText(read('retired-objects').ingress).assets).toEqual({
+        directory: '../dashboard/build',
+        binding: 'ASSETS',
+        run_worker_first: true,
+        html_handling: 'none',
+      });
 
       expect(rendered.migrations).toEqual(expectedMigrations);
+      expect(rendered.triggers).toEqual({ crons: ['* * * * *'] });
+      expect(rendered.vars?.DASHBOARD_ORIGIN).toBe('');
       expect(rendered.containers).toBeUndefined();
       expect(rendered.durable_objects).toBeUndefined();
     });

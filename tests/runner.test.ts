@@ -156,6 +156,7 @@ const createProductionRunnerWithMergeBase = (
     modelConfig: options.modelConfig ?? standardModelConfig,
     callbackUrl: options.callbackUrl ?? 'https://ingress.test/runner-callback',
     callbackToken: options.callbackToken ?? 'callback-token',
+    progressFetch: options.progressFetch ?? (async () => new Response(null, { status: 202 })),
     callbackFetch: options.callbackFetch ?? (async () => new Response(null, { status: 202 })),
   };
   return options.process === undefined
@@ -175,6 +176,8 @@ const createRunner = (options: TestRunnerOptions = {}) => {
     modelConfig: productionOptions.modelConfig ?? standardModelConfig,
     callbackUrl: productionOptions.callbackUrl ?? 'https://ingress.test/runner-callback',
     callbackToken: productionOptions.callbackToken ?? 'callback-token',
+    progressFetch:
+      productionOptions.progressFetch ?? (async () => new Response(null, { status: 202 })),
     callbackFetch:
       productionOptions.callbackFetch ?? (async () => new Response(null, { status: 202 })),
   };
@@ -285,6 +288,9 @@ const runAgentScenario = async (scenario: {
   create?: { readonly exitCode?: number; readonly timedOut?: boolean };
   sandboxRemovalFailure?: boolean;
   callbackRequests?: Request[];
+  progressFetch?: typeof fetch;
+  agentGate?: Promise<void>;
+  onAgentStart?: () => void;
   callbackStatuses?: readonly number[];
   callbackHangs?: boolean;
   callbackTimeoutMs?: number;
@@ -303,6 +309,7 @@ const runAgentScenario = async (scenario: {
     authToken: 'runner-test-token',
     modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
     modelConfig: scenario.modelConfig,
+    progressFetch: scenario.progressFetch,
     callbackUrl:
       scenario.callbackRequests === undefined ? undefined : 'https://ingress.test/runner-callback',
     callbackToken: scenario.callbackRequests === undefined ? undefined : 'callback-token',
@@ -331,6 +338,8 @@ const runAgentScenario = async (scenario: {
       }
       const isAgent = args[0] === 'exec' && args.includes('--agent');
       if (isAgent) {
+        scenario.onAgentStart?.();
+        await scenario.agentGate;
         agentInvoked = true;
         agentArgs = args;
       }
@@ -1078,7 +1087,9 @@ describe('Runner Job HTTP interface', () => {
         },
       });
       expect(callback.evidence).not.toHaveProperty('opencodeExport');
-      expect(new TextEncoder().encode(JSON.stringify(callback)).byteLength).toBeLessThan(1024);
+      // The bounded lifecycle snapshot is retained even when evidence exceeds the callback limit.
+      expect(callback).toMatchObject({ lifecycle: { stage: 'cleanup', sequence: 5 } });
+      expect(new TextEncoder().encode(JSON.stringify(callback)).byteLength).toBeLessThan(2048);
       await expect(
         readFile(
           join(
@@ -6673,5 +6684,211 @@ describe('Runner settings reload', () => {
       for (const release of heldClaims.splice(0)) release();
       await h.close();
     }
+  });
+});
+
+describe('Runner persisted lifecycle reporting', () => {
+  it('keeps cleanup and terminal delivery independent of a stalled progress request', async () => {
+    const reports: Array<{ url: string; authorization: string | null; body: unknown }> = [];
+    const terminals: unknown[] = [];
+    let progressSignal: AbortSignal | null | undefined;
+    const runner = createRunner({
+      authToken: 'runner-test-token',
+      modelSecretCommand: '/usr/bin/false',
+      evidenceRoot: sharedEvidenceRoot,
+      progressFetch: async (url, init) => {
+        progressSignal = init?.signal;
+        reports.push({
+          url: new Request(url, init).url,
+          authorization: new Headers(init?.headers).get('authorization'),
+          body: await new Request('https://ingress.test', init).json(),
+        });
+        return new Promise<Response>(() => {});
+      },
+      callbackFetch: async (_url, init) => {
+        terminals.push(await new Request('https://ingress.test', init).json());
+        return new Response(null, { status: 202 });
+      },
+      process: async () => ({ exitCode: 1, stdout: '', timedOut: false, truncated: false }),
+    });
+    try {
+      const response = await runner.handle(
+        new Request('http://runner/jobs', {
+          method: 'POST',
+          headers: {
+            authorization: 'Bearer runner-test-token',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            ...runnerJobFields,
+            id: 'progress-stalled',
+            runId: 'progress-stalled-run',
+            attempt: 1,
+            repositoryUrl: 'https://github.com/acme/reviewed.git',
+            baseSha: '1'.repeat(40),
+            headSha: '2'.repeat(40),
+          }),
+        }),
+      );
+      expect(response.status).toBe(202);
+      await expect(waitForTerminal(runner, 'progress-stalled')).resolves.toMatchObject({
+        status: 'failed',
+        sandbox: { cleanup: 'destroyed' },
+      });
+      expect(reports).toEqual([
+        {
+          url: 'https://ingress.test/runner-progress',
+          authorization: 'Bearer callback-token',
+          body: {
+            id: 'progress-stalled',
+            runId: 'progress-stalled-run',
+            attempt: 1,
+            sequence: 1,
+            stage: 'checkout',
+            milestones: [{ stage: 'checkout', startedAt: expect.any(String) }],
+          },
+        },
+      ]);
+      expect(terminals).toEqual([
+        expect.objectContaining({
+          failure: { reason: 'checkout' },
+          lifecycle: {
+            sequence: 2,
+            stage: 'cleanup',
+            milestones: [
+              { stage: 'checkout', startedAt: expect.any(String) },
+              { stage: 'cleanup', startedAt: expect.any(String) },
+            ],
+          },
+        }),
+      ]);
+      expect(progressSignal?.aborted).toBe(true);
+    } finally {
+      await runner.close();
+    }
+  });
+});
+
+describe('Runner lifecycle recovery', () => {
+  it('retains all execution milestones in the terminal callback when progress transport fails', async () => {
+    const callbacks: Request[] = [];
+    const reports: unknown[] = [];
+    const scenario = await runAgentScenario({
+      runId: 'run-progress-complete',
+      output: finalMarkdownJsonl(),
+      callbackRequests: callbacks,
+      progressFetch: async (_url, init) => {
+        reports.push(await new Request('https://ingress.test', init).json());
+        throw new Error('offline');
+      },
+    });
+    expect(scenario.terminal).toMatchObject({
+      status: 'succeeded',
+      sandbox: { cleanup: 'destroyed' },
+    });
+    expect(callbacks).toHaveLength(1);
+    const callback = await callbacks[0].json();
+    expect(callback.lifecycle).toEqual({
+      sequence: 5,
+      stage: 'cleanup',
+      milestones: [
+        { stage: 'checkout', startedAt: expect.any(String) },
+        { stage: 'sandbox', startedAt: expect.any(String) },
+        { stage: 'agent', startedAt: expect.any(String) },
+        { stage: 'evidence', startedAt: expect.any(String) },
+        { stage: 'cleanup', startedAt: expect.any(String) },
+      ],
+    });
+    expect(reports).toContainEqual(expect.objectContaining({ stage: 'agent' }));
+    expect(JSON.stringify(reports)).not.toContain('github-read-token');
+    expect(JSON.stringify(reports)).not.toContain('acme/reviewed');
+  });
+});
+
+describe('Runner progress coalescing', () => {
+  it('sends the newest cumulative stage after a slow report without parallel delivery', async () => {
+    let releaseProgress = () => {};
+    const progressGate = new Promise<void>((resolve) => {
+      releaseProgress = resolve;
+    });
+    let releaseAgent = () => {};
+    const agentGate = new Promise<void>((resolve) => {
+      releaseAgent = resolve;
+    });
+    let agentStarted = false;
+    let active = 0;
+    let peak = 0;
+    const reports: Array<{
+      stage: string;
+      milestones: Array<{ stage: string; startedAt: string }>;
+    }> = [];
+    const pending = runAgentScenario({
+      runId: 'run-progress-coalescing',
+      output: finalMarkdownJsonl(),
+      agentGate,
+      onAgentStart: () => {
+        agentStarted = true;
+      },
+      progressFetch: async (_url, init) => {
+        active += 1;
+        peak = Math.max(peak, active);
+        const report = await new Request('https://ingress.test', init).json();
+        reports.push(report);
+        try {
+          if (report.stage === 'checkout') await progressGate;
+        } finally {
+          active -= 1;
+        }
+        return new Response(null, { status: 202 });
+      },
+    });
+    try {
+      await vi.waitFor(() => expect(agentStarted).toBe(true));
+      expect(reports.map((report) => report.stage)).toEqual(['checkout']);
+      releaseProgress();
+      await vi.waitFor(() =>
+        expect(reports.map((report) => report.stage)).toEqual(['checkout', 'agent']),
+      );
+      expect(reports[1].milestones).toEqual([
+        reports[0].milestones[0],
+        { stage: 'sandbox', startedAt: expect.any(String) },
+        { stage: 'agent', startedAt: expect.any(String) },
+      ]);
+      releaseAgent();
+      expect((await pending).terminal.status).toBe('succeeded');
+      expect(peak).toBe(1);
+    } finally {
+      releaseProgress();
+      releaseAgent();
+      await pending;
+    }
+  });
+});
+
+describe('Runner progress response disposal', () => {
+  it('cancels an unread progress body without holding terminal delivery', async () => {
+    let cancelled = false;
+    let signal: AbortSignal | null | undefined;
+    const callbacks: Request[] = [];
+    const result = await runAgentScenario({
+      runId: 'run-progress-response-body',
+      output: finalMarkdownJsonl(),
+      callbackRequests: callbacks,
+      progressFetch: async (_url, init) => {
+        signal = init?.signal;
+        return new Response(
+          new ReadableStream({
+            cancel() {
+              cancelled = true;
+              return new Promise<void>(() => {});
+            },
+          }),
+        );
+      },
+    });
+    expect(result.terminal.status).toBe('succeeded');
+    expect(callbacks).toHaveLength(1);
+    expect(cancelled).toBe(true);
+    expect(signal?.aborted).toBe(true);
   });
 });

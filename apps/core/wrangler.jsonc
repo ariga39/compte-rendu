@@ -4,8 +4,12 @@
   "main": "src/worker.ts",
   "compatibility_date": "2026-08-25",
   "workers_dev": false,
+  "triggers": {
+    "crons": ["* * * * *"],
+  },
   "vars": {
     "GITHUB_APP_ID": "REPLACE_WITH_GITHUB_APP_ID",
+    "DASHBOARD_ORIGIN": "",
     "POSTHOG_ENABLED": "false",
     "POSTHOG_PROJECT_API_KEY": "",
     "POSTHOG_HOST": "",

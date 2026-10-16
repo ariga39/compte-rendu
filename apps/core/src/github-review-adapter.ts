@@ -12,6 +12,11 @@ const RepositoryClone = Schema.Struct({
   ),
 });
 
+const RepositoryMetadataResponse = Schema.Struct({
+  full_name: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/)),
+  visibility: Schema.Literals(['public', 'private']),
+});
+
 const PullRequest = Schema.Struct({
   head: Schema.Struct({ sha: GitHubSha }),
 });
@@ -60,6 +65,9 @@ const failureMarkerPattern = /<!-- compte-rendu:failure:run:[^>]+ -->/;
 const CheckRun = Schema.Struct({
   id: Schema.Int,
   external_id: Schema.optional(Schema.NullOr(Schema.String)),
+  output: Schema.optional(
+    Schema.NullOr(Schema.Struct({ title: Schema.String, summary: Schema.String })),
+  ),
 });
 
 const CheckRuns = Schema.Struct({
@@ -68,14 +76,27 @@ const CheckRuns = Schema.Struct({
 const checkName = 'Petit Chiba Review';
 
 class MarkerLookupFailed extends Error {}
-class GitHubNotFoundError extends Error {}
+export class GitHubRequestError extends Error {
+  constructor(
+    readonly status: number,
+    readonly retryAfterMs?: number,
+  ) {
+    super(`GitHub request failed with ${status}`);
+  }
+}
+export class GitHubNotFoundError extends GitHubRequestError {
+  constructor() {
+    super(404);
+  }
+}
 
-type TokenProvider = string | ((installationId: number) => Promise<string>);
+type TokenProvider = string | ((installationId: number, signal?: AbortSignal) => Promise<string>);
 
 export interface GitHubPublicationAdapterOptions {
   readonly token: TokenProvider;
   readonly fetch?: typeof fetch;
   readonly apiBaseUrl?: string;
+  readonly dashboardOrigin?: string;
 }
 
 export const createGitHubPublicationAdapter = (
@@ -83,14 +104,60 @@ export const createGitHubPublicationAdapter = (
 ): GitHubAdapter => {
   const fetcher = options.fetch ?? globalThis.fetch;
   const apiBaseUrl = (options.apiBaseUrl ?? 'https://api.github.com').replace(/\/$/, '');
+  const dashboardOrigin = options.dashboardOrigin?.trim();
+  if (dashboardOrigin) {
+    const parsed = new URL(dashboardOrigin);
+    if (
+      parsed.protocol !== 'https:' ||
+      parsed.username ||
+      parsed.password ||
+      parsed.pathname !== '/' ||
+      parsed.search ||
+      parsed.hash
+    ) {
+      throw new Error('DASHBOARD_ORIGIN must be an HTTPS origin');
+    }
+  }
+  const checkLink = (runId: string, output: { title: string; summary: string }) => {
+    if (!dashboardOrigin) return { output };
+    const detailsUrl = new URL(`/jobs/${encodeURIComponent(runId)}`, dashboardOrigin).href;
+    return {
+      details_url: detailsUrl,
+      output: {
+        ...output,
+        summary: output.summary.includes(detailsUrl)
+          ? output.summary
+          : `${output.summary}\n\n[View review task](${detailsUrl})`,
+      },
+    };
+  };
+
+  const retryAfterMs = (response: Response): number | undefined => {
+    const header = response.headers.get('retry-after');
+    if (header !== null) {
+      const seconds = Number(header);
+      if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+      const date = Date.parse(header);
+      if (!Number.isNaN(date)) return Math.max(0, date - Date.now());
+    }
+    const reset = response.headers.get('x-ratelimit-reset');
+    if ((response.status === 403 || response.status === 429) && reset !== null) {
+      const epochSeconds = Number(reset);
+      if (Number.isFinite(epochSeconds)) return Math.max(0, epochSeconds * 1000 - Date.now());
+    }
+    return undefined;
+  };
 
   const requestJson = async (
     installationId: number,
     path: string,
-    init: Pick<RequestInit, 'body' | 'method'> = { method: 'GET' },
+    init: Pick<RequestInit, 'body' | 'method'> & { signal?: AbortSignal } = { method: 'GET' },
   ): Promise<unknown> => {
     const token =
-      typeof options.token === 'function' ? await options.token(installationId) : options.token;
+      typeof options.token === 'function'
+        ? await options.token(installationId, init.signal)
+        : options.token;
+    if (init.signal?.aborted) throw new DOMException('aborted', 'AbortError');
     const response = await fetcher(`${apiBaseUrl}${path}`, {
       ...init,
       headers: {
@@ -101,8 +168,11 @@ export const createGitHubPublicationAdapter = (
         'user-agent': 'compte-rendu-core',
       },
     });
-    if (response.status === 404) throw new GitHubNotFoundError('GitHub resource not found');
-    if (!response.ok) throw new Error(`GitHub request failed with ${response.status}`);
+    if (!response.ok) {
+      if (response.body !== null) void response.body.cancel().catch(() => undefined);
+      if (response.status === 404) throw new GitHubNotFoundError();
+      throw new GitHubRequestError(response.status, retryAfterMs(response));
+    }
     return response.json();
   };
 
@@ -303,8 +373,29 @@ export const createGitHubPublicationAdapter = (
     },
     createCheckRun: async ({ repositoryId, installationId, headSha, runId }) => {
       const lookup = () => findCheckRun({ repositoryId, installationId, headSha, runId });
+      const recover = async (check: typeof CheckRun.Type) => {
+        if (dashboardOrigin) {
+          await requestJson(
+            installationId,
+            `/repos/${await repositoryName(repositoryId, installationId)}/check-runs/${check.id}`,
+            {
+              method: 'PATCH',
+              body: JSON.stringify(
+                checkLink(
+                  runId,
+                  check.output ?? {
+                    title: 'Review task',
+                    summary: 'View the recorded review status.',
+                  },
+                ),
+              ),
+            },
+          );
+        }
+        return { id: check.id };
+      };
       const existing = await lookup();
-      if (existing !== undefined) return { id: existing.id };
+      if (existing !== undefined) return recover(existing);
       try {
         const value = await requestJson(
           installationId,
@@ -316,10 +407,10 @@ export const createGitHubPublicationAdapter = (
               head_sha: headSha,
               status: 'queued',
               external_id: runId,
-              output: {
+              ...checkLink(runId, {
                 title: 'Review queued',
                 summary: 'Waiting for an available review runner.',
-              },
+              }),
             }),
           },
         );
@@ -327,12 +418,12 @@ export const createGitHubPublicationAdapter = (
         return { id: check.id };
       } catch (error) {
         const recovered = await lookup();
-        if (recovered !== undefined) return { id: recovered.id };
+        if (recovered !== undefined) return recover(recovered);
         throw error;
       }
     },
     findCheckRunForSuite,
-    updateCheckRun: async ({ repositoryId, installationId, checkRunId, status }) => {
+    updateCheckRun: async ({ repositoryId, installationId, checkRunId, runId, status }) => {
       const payload =
         status === 'in_progress'
           ? {
@@ -365,12 +456,22 @@ export const createGitHubPublicationAdapter = (
       await requestJson(
         installationId,
         `/repos/${await repositoryName(repositoryId, installationId)}/check-runs/${checkRunId}`,
-        { method: 'PATCH', body: JSON.stringify(payload) },
+        {
+          method: 'PATCH',
+          body: JSON.stringify({ ...payload, ...checkLink(runId, payload.output) }),
+        },
       );
     },
     getRepositoryUrl: async ({ repositoryId, installationId }) => {
       const value = await requestJson(installationId, `/repositories/${repositoryId}`);
       return (await Schema.decodeUnknownPromise(RepositoryClone)(value)).clone_url;
+    },
+    getRepositoryMetadata: async ({ repositoryId, installationId, signal }) => {
+      const value = await requestJson(installationId, `/repositories/${repositoryId}`, {
+        method: 'GET',
+        ...(signal === undefined ? {} : { signal }),
+      });
+      return await Schema.decodeUnknownPromise(RepositoryMetadataResponse)(value);
     },
     loadReviewTarget: async ({ repositoryId, pullRequestNumber, installationId }) => {
       const pullRequestValue = await requestJson(

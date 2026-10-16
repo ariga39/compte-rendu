@@ -1029,7 +1029,11 @@ describe('Core Worker', () => {
     `);
 
     try {
-      database.applyMigrations(['0006_review_check_runs.sql', '0008_runner_cleanup.sql']);
+      database.applyMigrations([
+        '0006_review_check_runs.sql',
+        '0008_runner_cleanup.sql',
+        '0009_dashboard_lifecycle.sql',
+      ]);
       const migratedStore = createD1ReviewStateStore(database);
       if (migratedStore.claimNextJob === undefined) throw new Error('claim route is unavailable');
       await expect(
@@ -1100,6 +1104,7 @@ describe('Core Worker', () => {
       await Promise.all(backgroundTasks);
       expect(checkUpdates).toEqual([
         {
+          runId: expect.any(String),
           repositoryId: eligibleEvent.repositoryId,
           installationId: eligibleEvent.installationId,
           checkRunId: 321,
@@ -1181,6 +1186,7 @@ describe('Core Worker', () => {
       await Promise.all(backgroundTasks);
       expect(checkUpdates).toEqual([
         {
+          runId: claimed.runId,
           repositoryId: eligibleEvent.repositoryId,
           installationId: eligibleEvent.installationId,
           checkRunId: 322,
@@ -1345,6 +1351,7 @@ describe('Core Worker', () => {
       await Promise.all(backgroundTasks);
       expect(checkUpdates).toEqual([
         {
+          runId: claimed.runId,
           repositoryId: eligibleEvent.repositoryId,
           installationId: eligibleEvent.installationId,
           checkRunId: 323,
@@ -1407,6 +1414,7 @@ describe('Core Worker', () => {
       await Promise.all(backgroundTasks);
       expect(checkUpdates).toEqual([
         {
+          runId: expect.any(String),
           repositoryId: eligibleEvent.repositoryId,
           installationId: eligibleEvent.installationId,
           checkRunId: 324,
@@ -1573,6 +1581,7 @@ describe('Core Worker', () => {
       expect(checkRequests).toHaveLength(2);
       expect(checkUpdates).toEqual([
         {
+          runId: claimed.runId,
           repositoryId: eligibleEvent.repositoryId,
           installationId: eligibleEvent.installationId,
           checkRunId: 321,
@@ -1627,6 +1636,7 @@ describe('Core Worker', () => {
       ).toBe(200);
       expect(updates).toEqual([
         {
+          runId: expect.any(String),
           repositoryId: 11,
           installationId: 7,
           checkRunId: 321,
@@ -1993,6 +2003,7 @@ describe('Core Worker', () => {
         'superseded',
       );
       expect(checkUpdates).toContainEqual({
+        runId: oldRunId,
         repositoryId: 11,
         installationId: 7,
         checkRunId: 321,
@@ -2048,6 +2059,7 @@ describe('Core Worker', () => {
       }
       expect(updates).toEqual([
         {
+          runId: expect.any(String),
           repositoryId: 11,
           installationId: 7,
           checkRunId: 321,
@@ -2533,6 +2545,7 @@ describe('Core Worker', () => {
       ]);
       expect(checkUpdates).toEqual([
         {
+          runId: claimed.runId,
           repositoryId: 11,
           installationId: 7,
           checkRunId: 321,
@@ -2970,6 +2983,7 @@ describe('Core Worker', () => {
       ]);
       expect(checkUpdates).toEqual([
         {
+          runId: claimed.runId,
           repositoryId: 11,
           installationId: 7,
           checkRunId: 321,
@@ -3260,6 +3274,7 @@ describe('Core Worker', () => {
     await expect(github.createCheckRun?.(createInput)).resolves.toEqual({ id: 321 });
     for (const status of ['in_progress', 'success', 'failure', 'cancelled'] as const) {
       await github.updateCheckRun?.({
+        runId: 'run-1',
         repositoryId: 11,
         installationId: 7,
         checkRunId: 321,

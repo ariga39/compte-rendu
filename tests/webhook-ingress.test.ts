@@ -347,11 +347,25 @@ describe('Webhook ingress', () => {
         phase: 'ingress',
         outcome: 'accepted',
         deliveryId: 'delivery-1',
+        event: 'metadata',
+      },
+      {
+        phase: 'ingress',
+        outcome: 'accepted',
+        deliveryId: 'delivery-1',
         event: 'pull_request',
       },
     ]);
-    expect(forwarded).toHaveLength(1);
+    expect(forwarded).toHaveLength(2);
     expect(await forwarded[0].clone().json()).toEqual({
+      deliveryId: 'delivery-1',
+      event: 'metadata',
+      reason: 'repository_private',
+      installationId: 7,
+      repositoryIds: [11],
+      visibility: 'private',
+    });
+    expect(await forwarded[1].clone().json()).toEqual({
       deliveryId: 'delivery-1',
       event: 'pull_request',
       action: 'opened',
@@ -390,7 +404,7 @@ describe('Webhook ingress', () => {
     );
 
     expect(response.status).toBe(202);
-    expect(forwarded).toHaveLength(1);
+    expect(forwarded).toHaveLength(2);
   });
   it('ignores an automatic pull request authored by a GitHub Bot', async () => {
     const forwarded: Request[] = [];
@@ -418,8 +432,14 @@ describe('Webhook ingress', () => {
     );
 
     expect(response.status).toBe(204);
-    expect(forwarded).toHaveLength(0);
+    expect(forwarded).toHaveLength(1);
     expect(events).toEqual([
+      {
+        phase: 'ingress',
+        outcome: 'accepted',
+        deliveryId: 'delivery-1',
+        event: 'metadata',
+      },
       {
         phase: 'ingress',
         outcome: 'ignored',
@@ -456,7 +476,7 @@ describe('Webhook ingress', () => {
     );
 
     expect(response.status).toBe(202);
-    expect(forwarded).toHaveLength(1);
+    expect(forwarded).toHaveLength(2);
   });
   it('fails closed for Bot pull requests with null or missing author IDs', async () => {
     const forwarded: Request[] = [];
@@ -487,7 +507,7 @@ describe('Webhook ingress', () => {
       expect(response.status).toBe(204);
     }
 
-    expect(forwarded).toHaveLength(0);
+    expect(forwarded).toHaveLength(2);
   });
   it('ignores an allowlisted Bot author from an unapproved installation before contacting core', async () => {
     const forwarded: Request[] = [];
@@ -589,7 +609,7 @@ describe('Webhook ingress', () => {
 
       expect(botResponse.status).toBe(204);
       expect(humanResponse.status).toBe(202);
-      expect(forwarded).toHaveLength(1);
+      expect(forwarded).toHaveLength(3);
     }
   });
   it('keeps the accepted response when operational logging fails', async () => {
@@ -687,7 +707,7 @@ describe('Webhook ingress', () => {
     expect(forwarded).toHaveLength(0);
   });
 
-  it('rejects a pull request with an empty or malformed SHA without contacting core', async () => {
+  it('rejects a pull request with an empty or malformed SHA without scheduling a review', async () => {
     const forwarded: Request[] = [];
     const worker = createIngressWorker({
       secret,
@@ -714,7 +734,7 @@ describe('Webhook ingress', () => {
       expect(response.status).toBe(400);
     }
 
-    expect(forwarded).toHaveLength(0);
+    expect(forwarded).toHaveLength(2);
   });
   it('ignores an unsupported GitHub event without contacting core', async () => {
     const forwarded: Request[] = [];
@@ -765,8 +785,14 @@ describe('Webhook ingress', () => {
     const response = await worker.fetch(await signedRequest({ ...payload, action: 'closed' }));
 
     expect(response.status).toBe(204);
-    expect(forwarded).toHaveLength(0);
+    expect(forwarded).toHaveLength(1);
     expect(events).toEqual([
+      {
+        phase: 'ingress',
+        outcome: 'accepted',
+        deliveryId: 'delivery-1',
+        event: 'metadata',
+      },
       {
         phase: 'ingress',
         outcome: 'ignored',
@@ -876,7 +902,7 @@ describe('Webhook ingress', () => {
         phase: 'ingress',
         outcome: 'retryable',
         deliveryId: 'delivery-1',
-        event: 'pull_request',
+        event: 'metadata',
         reason: 'core_unavailable',
       },
     ]);

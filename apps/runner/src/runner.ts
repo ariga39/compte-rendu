@@ -23,6 +23,8 @@ import {
   RunnerFailureCause,
   RunnerJobInput,
   RunnerResultCallback,
+  type RunnerProgressSnapshot,
+  type RunnerProgressStage,
   sanitizeOperationalLogEvent,
   type OperationalLog,
   type OperationalLogEvent,
@@ -466,6 +468,10 @@ type RunnerJob = {
   executionStartedAt?: string;
   submissionCompletedAt?: string;
   cleanupCompletedAt?: string;
+  lifecycle?: RunnerProgressSnapshot;
+  pendingProgress?: RunnerProgressSnapshot;
+  progressController?: AbortController;
+  progressStopped: boolean;
 };
 
 export interface RunnerOptions {
@@ -489,6 +495,7 @@ export interface RunnerOptions {
   readonly callbackUrl?: string;
   readonly callbackToken?: string;
   readonly callbackFetch?: typeof fetch;
+  readonly progressFetch?: typeof fetch;
   readonly callbackTimeoutMs?: number;
   readonly claimUrl?: string;
   readonly claimFetch?: typeof fetch;
@@ -716,6 +723,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
   const callbackUrl = options.callbackUrl ?? process.env.RUNNER_CALLBACK_URL;
   const callbackToken = options.callbackToken ?? process.env.RUNNER_CALLBACK_TOKEN;
   const callbackFetch = options.callbackFetch ?? globalThis.fetch;
+  const progressFetch = options.progressFetch ?? globalThis.fetch;
   const callbackTimeoutMs = options.callbackTimeoutMs ?? CALLBACK_REQUEST_TIMEOUT_MS;
   const claimUrl =
     options.claimUrl ??
@@ -755,6 +763,67 @@ export const createRunner = (options: RunnerOptions = {}) => {
         candidate.input.repositoryName === input.repositoryName &&
         candidate.input.pullRequestNumber === input.pullRequestNumber,
     );
+
+  const sendProgress = async (job: RunnerJob) => {
+    if (
+      job.progressStopped ||
+      job.progressController !== undefined ||
+      callbackUrl === undefined ||
+      callbackToken === undefined
+    )
+      return;
+    const snapshot = job.pendingProgress;
+    if (snapshot === undefined) return;
+    job.pendingProgress = undefined;
+    const controller = new AbortController();
+    job.progressController = controller;
+    const timeout = setTimeout(() => controller.abort(), 2_000);
+    try {
+      await Promise.race([
+        progressFetch(new URL('/runner-progress', callbackUrl).toString(), {
+          method: 'POST',
+          headers: { authorization: `Bearer ${callbackToken}`, 'content-type': 'application/json' },
+          body: JSON.stringify({
+            id: job.id,
+            runId: job.input.runId,
+            attempt: job.input.attempt,
+            ...snapshot,
+          }),
+          signal: controller.signal,
+        }).then(async (response) => {
+          await response.body?.cancel();
+        }),
+        new Promise<void>((resolve) =>
+          controller.signal.addEventListener('abort', () => resolve(), { once: true }),
+        ),
+      ]);
+    } catch {
+      // Progress is best effort; the terminal callback carries the cumulative snapshot.
+    } finally {
+      clearTimeout(timeout);
+      job.progressController = undefined;
+      if (!job.progressStopped && job.pendingProgress !== undefined) void sendProgress(job);
+    }
+  };
+
+  const reportStage = (job: RunnerJob, stage: RunnerProgressStage) => {
+    if (job.progressStopped || job.lifecycle?.milestones.some((entry) => entry.stage === stage))
+      return;
+    const snapshot: RunnerProgressSnapshot = {
+      sequence: (job.lifecycle?.sequence ?? 0) + 1,
+      stage,
+      milestones: [
+        ...(job.lifecycle?.milestones ?? []),
+        {
+          stage,
+          startedAt: DateTime.formatIso(DateTime.nowUnsafe()),
+        },
+      ],
+    };
+    job.lifecycle = snapshot;
+    job.pendingProgress = snapshot;
+    void sendProgress(job);
+  };
 
   const update = (job: RunnerJob, state: Partial<RunnerJobState>) => {
     Object.assign(job.state, state);
@@ -1157,6 +1226,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
   };
 
   const cleanup = async (job: RunnerJob) => {
+    reportStage(job, 'cleanup');
     let clean = true;
     if (!job.sandboxAttempted) {
       if (job.checkoutRoot !== undefined) {
@@ -1299,6 +1369,9 @@ export const createRunner = (options: RunnerOptions = {}) => {
     failure: RunnerJobState['failure'],
     result: RunnerJobState['result'],
   ): Promise<boolean> => {
+    job.progressStopped = true;
+    job.pendingProgress = undefined;
+    job.progressController?.abort();
     if (callbackUrl === undefined || callbackToken === undefined) return false;
     if (status !== 'succeeded' && status !== 'failed' && status !== 'aborted') return false;
     const callback = {
@@ -1307,6 +1380,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       attempt: job.input.attempt,
       status,
       stage: job.state.stage,
+      lifecycle: job.lifecycle,
       sandbox: job.state.sandbox,
       evidence: await callbackEvidence(evidencePath, job, result !== undefined),
       timestamps: {
@@ -1359,6 +1433,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
               opencodeStderr: { content: '', size: 0, sha256: EMPTY_EVIDENCE_SHA256 },
             },
             timestamps: callback.timestamps,
+            lifecycle: callback.lifecycle,
             failure: { reason: 'evidence' },
           }),
         )
@@ -1437,6 +1512,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       });
       if (job.abortRequested) return;
       update(job, { status: 'running', stage: 'checkout' });
+      reportStage(job, 'checkout');
       const checkoutRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-review-'));
       job.checkoutRoot = checkoutRoot;
       const mergeBaseSha = await prepareCheckout(job, checkoutRoot);
@@ -1476,6 +1552,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       });
       job.sandboxRuntime = runtime;
       job.sandboxAttempted = true;
+      reportStage(job, 'sandbox');
       const setupCommand: SandboxCommand = (args, diagnostic, processOptions) =>
         runTracked(
           job,
@@ -1518,6 +1595,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         return;
       }
       update(job, { stage: 'agent' });
+      reportStage(job, 'agent');
       const agentBudgetDeadline = (await currentEpochMillis()) + REVIEW_ATTEMPT_BUDGET_MS;
       agent = await runtime.exec(
         [
@@ -1597,6 +1675,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       failure = { reason: 'agent' };
     } finally {
       if (evidenceReady && job.sandboxCreated) {
+        reportStage(job, 'evidence');
         try {
           evidenceComplete = await archiveEvidence(
             job,
@@ -1814,6 +1893,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       done,
       resolveDone,
       abortRequested: contradictsSamePullRequest,
+      progressStopped: false,
       sandboxAttempted: false,
       sandboxCreated: false,
       sessionIds: [],

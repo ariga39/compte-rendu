@@ -1,9 +1,13 @@
 import { DateTime, Effect, Option, Schema } from 'effect';
 import {
   MAX_RUNNER_CALLBACK_BYTES,
+  type PublicTaskFailure,
+  MetadataInvalidationEvent,
   ReviewEvent,
   RunnerJobInput,
+  RunnerProgressReport,
   RunnerResultCallback,
+  sanitizeOperationalLogEvent,
 } from '@compte-rendu/contracts';
 import {
   createD1ReviewStateStore,
@@ -24,11 +28,18 @@ import { createCloudflareOperationalLog } from './operational-log';
 import { createPostHogLifecycleLog } from './posthog';
 import type { OperationalLog } from '@compte-rendu/contracts';
 import { formatReviewFailureComment } from './review-publication-format';
+import {
+  handleDashboardRequest,
+  refreshRepositoryMetadata,
+  validateProgressSnapshot,
+  type RefreshSummary,
+} from './dashboard';
 
 export interface CoreWorkerEnv extends Partial<CoreEnv> {
   readonly REVIEW_DB: D1DatabaseLike;
   readonly GITHUB_APP_ID: string;
   readonly GITHUB_APP_PRIVATE_KEY: string;
+  readonly DASHBOARD_ORIGIN?: string;
   readonly EVIDENCE_BUCKET?: R2BucketLike;
   readonly POSTHOG_ENABLED?: string;
   readonly POSTHOG_PROJECT_API_KEY?: string;
@@ -53,8 +64,11 @@ export interface CoreWorkerDependencies {
 }
 
 const reviewEventsPath = '/review-events';
+const metadataEventsPath = '/metadata-events';
 const runnerClaimsPath = '/runner-claims';
 const runnerResultsPath = '/runner-results';
+const runnerProgressPath = '/runner-progress';
+const MAX_PROGRESS_BYTES = 16 * 1024;
 const epochMilliseconds = (value: string) => {
   const parsed = DateTime.make(value);
   return Option.isSome(parsed) ? parsed.value.epochMilliseconds : undefined;
@@ -187,6 +201,7 @@ export const createCoreWorker = (
     dependencies.github ??
     createGitHubPublicationAdapter({
       token: tokenProvider.getInstallationToken,
+      dashboardOrigin: env.DASHBOARD_ORIGIN,
     });
   const stateStore = dependencies.stateStore ?? createD1ReviewStateStore(env.REVIEW_DB);
   const runner =
@@ -296,6 +311,7 @@ export const createCoreWorker = (
     runId: string,
     occurredAt: string,
     releaseRunnerClaim?: { jobId: string; attempt: number },
+    failure?: PublicTaskFailure,
   ) => {
     const notificationClaimed =
       (outcome.status === 'scheduled' || outcome.status === 'failed') &&
@@ -306,6 +322,7 @@ export const createCoreWorker = (
       runId,
       occurredAt,
       ...(releaseRunnerClaim === undefined ? {} : { releaseRunnerClaim }),
+      ...(failure === undefined ? {} : { failure }),
     });
     if (
       (outcome.status === 'scheduled' || outcome.status === 'superseded') &&
@@ -329,6 +346,7 @@ export const createCoreWorker = (
     ) {
       await github
         .updateCheckRun({
+          runId,
           repositoryId: outcome.repositoryId,
           installationId: outcome.installationId,
           checkRunId: outcome.checkRunId,
@@ -375,12 +393,55 @@ export const createCoreWorker = (
     if (outcome.runnerJobId !== callback.id || outcome.runnerAttempt !== callback.attempt) {
       return new Response(null, { status: 409 });
     }
+    await stateStore.recordResultReceived?.({
+      runId: callback.runId,
+      jobId: callback.id,
+      attempt: callback.attempt,
+      occurredAt: await Effect.runPromise(DateTime.now.pipe(Effect.map(DateTime.formatIso))),
+    });
+    if (
+      callback.lifecycle !== undefined &&
+      validateProgressSnapshot(callback.lifecycle) &&
+      stateStore.recordTerminalLifecycle !== undefined
+    ) {
+      const lifecycleAt = await Effect.runPromise(
+        DateTime.now.pipe(Effect.map(DateTime.formatIso)),
+      );
+      await stateStore
+        .recordTerminalLifecycle({
+          runId: callback.runId,
+          jobId: callback.id,
+          attempt: callback.attempt,
+          receivedAt: lifecycleAt,
+          sequence: callback.lifecycle.sequence,
+          stage: callback.lifecycle.stage,
+          milestones: callback.lifecycle.milestones,
+        })
+        .catch(() => false);
+    }
     if (outcome.status === 'completed') {
       return new Response(null, { status: outcome.evidence === undefined ? 409 : 202 });
     }
     const markCallbackFailed = async () => {
       const occurredAt = await Effect.runPromise(DateTime.now.pipe(Effect.map(DateTime.formatIso)));
-      await markRunFailed(outcome, callback.runId, occurredAt);
+      const reason =
+        callback.status === 'failed'
+          ? callback.failure.reason === 'invalid-output'
+            ? 'invalid_output'
+            : callback.failure.reason
+          : callback.status === 'succeeded'
+            ? 'evidence'
+            : 'unknown';
+      const failure: PublicTaskFailure = {
+        reason,
+        phase:
+          reason === 'invalid_output'
+            ? 'output_validation'
+            : reason === 'timeout' || reason === 'unknown'
+              ? 'unknown'
+              : reason,
+      };
+      await markRunFailed(outcome, callback.runId, occurredAt, undefined, failure);
     };
     const clearRunnerJob = async () => {
       if (callback.sandbox.cleanup !== 'destroyed') return;
@@ -480,6 +541,7 @@ export const createCoreWorker = (
       ) {
         await github
           .updateCheckRun({
+            runId: callback.runId,
             repositoryId: finalOutcome.repositoryId,
             installationId: finalOutcome.installationId,
             checkRunId: finalOutcome.checkRunId,
@@ -495,6 +557,71 @@ export const createCoreWorker = (
     await recordFinishedLifecycle(lifecycleLog, outcome, terminal, callback);
     await clearRunnerJob();
     return new Response(null, { status: 202 });
+  };
+
+  const handleMetadataInvalidation = async (request: Request): Promise<Response> => {
+    const body = await request.arrayBuffer();
+    if (body.byteLength > 16 * 1024) return new Response(null, { status: 413 });
+    let event: typeof MetadataInvalidationEvent.Type;
+    try {
+      event = await Schema.decodeUnknownPromise(Schema.fromJsonString(MetadataInvalidationEvent), {
+        onExcessProperty: 'error',
+      })(new TextDecoder().decode(body));
+    } catch {
+      return new Response(null, { status: 400 });
+    }
+    if (stateStore.invalidateRepositoryMetadataBatch === undefined) {
+      return new Response(null, { status: 503 });
+    }
+    const observedAt = await Effect.runPromise(DateTime.now.pipe(Effect.map(DateTime.formatIso)));
+    await stateStore.invalidateRepositoryMetadataBatch({
+      installationId: event.installationId,
+      repositoryIds: event.repositoryIds,
+      visibility: event.visibility,
+      updatedAt: observedAt,
+      nextRefreshAt: observedAt,
+    });
+    return new Response(null, { status: 202 });
+  };
+
+  const handleRunnerProgress = async (request: Request): Promise<Response> => {
+    if (request.headers.get('x-compte-rendu-runner-progress') !== 'verified') {
+      return new Response(null, { status: 401 });
+    }
+    const body = await request.arrayBuffer();
+    if (body.byteLength > MAX_PROGRESS_BYTES) return new Response(null, { status: 413 });
+    let report: typeof RunnerProgressReport.Type;
+    try {
+      report = await Schema.decodeUnknownPromise(Schema.fromJsonString(RunnerProgressReport), {
+        onExcessProperty: 'error',
+      })(new TextDecoder().decode(body));
+    } catch {
+      return new Response(null, { status: 400 });
+    }
+    if (!validateProgressSnapshot(report)) return new Response(null, { status: 400 });
+    if (stateStore.recordProgress === undefined) return new Response(null, { status: 503 });
+    const occurredAt = await Effect.runPromise(DateTime.now.pipe(Effect.map(DateTime.formatIso)));
+    const recorded = await stateStore
+      .recordProgress({
+        runId: report.runId,
+        jobId: report.id,
+        attempt: report.attempt,
+        receivedAt: occurredAt,
+        sequence: report.sequence,
+        stage: report.stage,
+        milestones: report.milestones,
+      })
+      .catch(() => false);
+    if (recorded) return new Response(null, { status: 202 });
+    const outcome = await stateStore.getRunOutcome(report.runId).catch(() => undefined);
+    if (
+      outcome === undefined ||
+      outcome.runnerJobId !== report.id ||
+      outcome.runnerAttempt !== report.attempt
+    ) {
+      return new Response(null, { status: 409 });
+    }
+    return new Response(null, { status: 204 });
   };
 
   const handleRunnerClaim = async (
@@ -576,6 +703,7 @@ export const createCoreWorker = (
       if (current.checkRunId !== undefined && github.updateCheckRun !== undefined) {
         await github
           .updateCheckRun({
+            runId: claim.runId,
             repositoryId: current.repositoryId,
             installationId: current.installationId,
             checkRunId: current.checkRunId,
@@ -595,10 +723,11 @@ export const createCoreWorker = (
       ) {
         return new Response(null, { status: 204 });
       }
+      const failedAt = await Effect.runPromise(DateTime.now.pipe(Effect.map(DateTime.formatIso)));
       if (current === undefined) {
-        await stateStore.markSchedulingFailed({ runId: claim.runId, occurredAt });
+        await stateStore.markSchedulingFailed({ runId: claim.runId, occurredAt: failedAt });
       } else {
-        await markRunFailed(current, claim.runId, occurredAt, {
+        await markRunFailed(current, claim.runId, failedAt, {
           jobId: claim.jobId,
           attempt: claim.attempt,
         });
@@ -638,6 +767,34 @@ export const createCoreWorker = (
           return new Response(null, { status: 503 });
         }
       }
+      if (request.method === 'POST' && new URL(request.url).pathname === runnerProgressPath) {
+        try {
+          return await handleRunnerProgress(request);
+        } catch {
+          return new Response(null, { status: 503 });
+        }
+      }
+      if (request.method === 'POST' && new URL(request.url).pathname === metadataEventsPath) {
+        try {
+          return await handleMetadataInvalidation(request);
+        } catch {
+          return new Response(null, { status: 503 });
+        }
+      }
+      if (request.method === 'GET') {
+        try {
+          const dashboardResponse = await handleDashboardRequest(request, { stateStore });
+          if (dashboardResponse !== undefined) return dashboardResponse;
+        } catch {
+          const path = new URL(request.url).pathname;
+          if (path === '/api/dashboard' || path === '/api/jobs' || path.startsWith('/api/jobs/')) {
+            return new Response(null, {
+              status: 503,
+              headers: { 'cache-control': 'no-store' },
+            });
+          }
+        }
+      }
       if (request.method !== 'POST' || new URL(request.url).pathname !== reviewEventsPath) {
         return new Response(null, { status: 404 });
       }
@@ -657,6 +814,25 @@ export const createCoreWorker = (
       );
       if (event === undefined) return new Response(null, { status: 400 });
 
+      if (
+        event.event === 'pull_request' &&
+        event.repositoryVisibility === 'private' &&
+        stateStore.invalidateRepositoryMetadata !== undefined
+      ) {
+        const observedAt = await Effect.runPromise(
+          DateTime.now.pipe(Effect.map(DateTime.formatIso)),
+        );
+        await stateStore
+          .invalidateRepositoryMetadata({
+            installationId: event.installationId,
+            repositoryId: event.repositoryId,
+            visibility: 'private',
+            updatedAt: observedAt,
+            nextRefreshAt: observedAt,
+          })
+          .catch(() => false);
+      }
+
       try {
         const eventCoordinator = createCoordinator(
           lifecycleLog,
@@ -669,4 +845,29 @@ export const createCoreWorker = (
       }
     },
   };
+};
+
+export const runScheduledMetadataRefresh = async (
+  env: CoreWorkerEnv,
+  dependencies: CoreWorkerDependencies = {},
+): Promise<RefreshSummary> => {
+  const tokenProvider = createGitHubAppTokenProvider({
+    appId: env.GITHUB_APP_ID,
+    privateKey: env.GITHUB_APP_PRIVATE_KEY,
+    crypto: globalThis.crypto,
+  });
+  const github =
+    dependencies.github ??
+    createGitHubPublicationAdapter({ token: tokenProvider.getInstallationToken });
+  const stateStore = dependencies.stateStore ?? createD1ReviewStateStore(env.REVIEW_DB);
+  const log = dependencies.log ?? createCloudflareOperationalLog();
+  const summary = await refreshRepositoryMetadata({ stateStore, github });
+  try {
+    await log.record(
+      sanitizeOperationalLogEvent({ phase: 'core', outcome: 'metadata_refresh', ...summary }),
+    );
+  } catch {
+    // aggregate refresh facts are best-effort
+  }
+  return summary;
 };
