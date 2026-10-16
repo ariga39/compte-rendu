@@ -167,8 +167,8 @@ controlled failures and races without changing the public observations.
 
 ### Dashboard frontend
 
-The public dashboard uses SvelteKit file routes and Svelte components with
-Tailwind CSS in `apps/dashboard`. Its static client build is served by the
+The public dashboard uses SvelteKit file routes and Carbon Svelte components in
+`apps/dashboard`, with self-hosted IBM Plex Mono throughout. Its static client build is served by the
 existing Ingress Worker through `ASSETS`; Core remains the only source of public
 task data. No task identities are rendered into build artifacts. Browser
 behavior tests exercise the built frontend, including automatic refresh,

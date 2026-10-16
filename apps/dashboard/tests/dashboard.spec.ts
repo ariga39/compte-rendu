@@ -647,11 +647,19 @@ test('browsing makes no requests to external hosts', async ({ page, harness, bas
   page.on('request', (request) => {
     if (new URL(request.url()).hostname !== '127.0.0.1') external.push(request.url());
   });
-  harness.setHandler(defaultOverviewHandler);
+  harness.setHandler((url, request) =>
+    url.pathname.startsWith('/api/jobs/')
+      ? ok(detailData(task({ runId: 'run-9' })))
+      : defaultOverviewHandler(url, request),
+  );
   await page.goto(`${base}/`);
   await page.waitForSelector('[data-testid="stats"]');
   await page.goto(`${base}/history`);
   await page.waitForSelector('[data-testid="task"], .empty');
+  await page.goto(`${base}/help`);
+  await page.waitForSelector('#overview-counts');
+  await page.goto(`${base}/jobs/run-9`);
+  await page.waitForSelector('.detail');
   expect(external).toEqual([]);
 });
 
@@ -871,20 +879,25 @@ test('back from a task returns to the same-page filtered history', async ({
 
 test('back from a task restores the history scroll position', async ({ page, harness, base }) => {
   const many: PublicTaskState[] = [];
-  for (let index = 0; index < 40; index += 1) many.push(task({ runId: `h-${index}` }));
+  for (let index = 0; index < 80; index += 1) many.push(task({ runId: `h-${index}` }));
   harness.setHandler((url) => {
     if (url.pathname.startsWith('/api/jobs/')) return ok(detailData(task({ runId: 'run-9' })));
     return ok(historyPage(many));
   });
   await page.goto(`${base}/history`);
   await page.waitForSelector('[data-testid="task"]');
-  await page.evaluate(() => window.scrollTo(0, 700));
-  await page.click('[data-testid="task-link"][data-run-id="h-8"]');
+  const link = page.locator('[data-testid="task-link"][data-run-id="h-40"]');
+  await link.scrollIntoViewIfNeeded();
+  const captured = await page.evaluate(() => window.scrollY);
+  expect(captured).toBeGreaterThan(0);
+  await link.click();
   await page.waitForSelector('.detail');
   await page.click('[data-back]');
   await page.waitForFunction(() => location.pathname === '/history');
   await page.waitForSelector('[data-testid="task"]');
-  await page.waitForFunction(() => window.scrollY > 400, null, { timeout: 4000 });
+  await page.waitForFunction((y) => Math.abs(window.scrollY - y) <= 80, captured, {
+    timeout: 4000,
+  });
 });
 
 test('resuming a detail page does not restore identity without a fresh public response', async ({
@@ -966,5 +979,88 @@ test('primary navigation is operable by keyboard', async ({ page, harness, base 
   await page.waitForFunction(() => location.pathname === '/history');
   await page.waitForSelector('[data-testid="apply"]');
   await page.setViewportSize({ width: 360, height: 640 });
-  expect(await page.locator('nav a[href="/history"]').isVisible()).toBe(true);
+  for (const href of ['/', '/history', '/help']) {
+    await expect(page.locator(`nav a[href="${href}"]`)).toBeInViewport({ ratio: 1 });
+  }
+});
+
+test('history renders a semantic table with named columns', async ({ page, harness, base }) => {
+  harness.setHandler((url, request) =>
+    url.pathname === '/api/jobs' && url.search === ''
+      ? ok(historyPage([task({ runId: 'h-1' })]))
+      : defaultOverviewHandler(url, request),
+  );
+  await page.goto(`${base}/history`);
+  await page.waitForSelector('[data-testid="task"]');
+  await expect(page.locator('table')).toHaveCount(1);
+  expect(await page.locator('thead th').allTextContents()).toEqual([
+    'Review',
+    'Status',
+    'Cleanup',
+    'Received',
+    'Pull request',
+  ]);
+  await expect(page.locator('[data-testid="task"]').first().locator('td')).toHaveCount(5);
+});
+
+test('dashboard uses the IBM Plex Mono family across text and controls', async ({
+  page,
+  harness,
+  base,
+}) => {
+  const fontHandler: ApiHandler = (url, request) =>
+    url.pathname.startsWith('/api/jobs/')
+      ? ok(detailData(task({ runId: 'run-9' })))
+      : defaultOverviewHandler(url, request);
+  harness.setHandler(fontHandler);
+  const fontState = () =>
+    page.evaluate(async () => {
+      const faces = await document.fonts.load('16px "IBM Plex Mono"', 'Ag');
+      const firstFamily = (el: Element | null) => {
+        if (!el) return null;
+        const raw = getComputedStyle(el).fontFamily;
+        return raw
+          .split(',')[0]
+          .trim()
+          .replace(/^["']|["']$/g, '');
+      };
+      const code = document.querySelector('code, pre');
+      return {
+        loaded: faces.length > 0 && faces.every((face) => face.status === 'loaded'),
+        body: firstFamily(document.body),
+        h1: firstFamily(document.querySelector('h1')),
+        button: firstFamily(document.querySelector('button')),
+        select: firstFamily(document.querySelector('select')),
+        dateInput: firstFamily(document.querySelector('input[name="from"]')),
+        code: firstFamily(code),
+        strong: firstFamily(document.querySelector('strong')),
+      };
+    });
+
+  await page.goto(`${base}/`);
+  await page.waitForSelector('[data-testid="stats"]');
+  const overview = await fontState();
+  expect(overview.loaded).toBe(true);
+  expect(overview.body).toBe('IBM Plex Mono');
+  expect(overview.h1).toBe('IBM Plex Mono');
+  expect(overview.button).toBe('IBM Plex Mono');
+
+  await page.goto(`${base}/history`);
+  await page.waitForSelector('[data-testid="apply"]');
+  const history = await fontState();
+  expect(history.select).toBe('IBM Plex Mono');
+  expect(history.dateInput).toBe('IBM Plex Mono');
+  expect(history.button).toBe('IBM Plex Mono');
+
+  await page.goto(`${base}/help`);
+  await page.waitForSelector('#overview-counts');
+  const help = await fontState();
+  expect(help.h1).toBe('IBM Plex Mono');
+  expect(help.strong).toBe('IBM Plex Mono');
+  if (help.code) expect(help.code).toBe('IBM Plex Mono');
+
+  await page.goto(`${base}/jobs/run-9`);
+  await page.waitForSelector('.detail');
+  const detail = await fontState();
+  expect(detail.h1).toBe('IBM Plex Mono');
 });

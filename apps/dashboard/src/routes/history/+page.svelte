@@ -1,7 +1,8 @@
 <script lang="ts">
   import { afterNavigate, beforeNavigate, goto } from '$app/navigation';
   import { page } from '$app/state';
-  import TaskRow from '#lib/components/TaskRow.svelte';
+  import { Button, Select, SelectItem } from 'carbon-components-svelte';
+  import TaskTable from '#lib/components/TaskTable.svelte';
   import Toolbar from '#lib/components/Toolbar.svelte';
   import { createDashboard, createExpiryClock } from '#lib/dashboard.svelte.ts';
   import {
@@ -51,13 +52,7 @@
 
   const clock = createExpiryClock();
 
-  let draft = $state({
-    view: 'history' as View,
-    status: 'all' as StatusFilter,
-    cleanup: 'all' as CleanupFilter,
-    from: '',
-    to: '',
-  });
+  let draft = $state({ view: 'history', status: 'all', cleanup: 'all', from: '', to: '' });
 
   $effect(() => {
     const model = dash.data;
@@ -88,9 +83,9 @@
   function apply() {
     const query = buildFilterQuery(
       {
-        view: draft.view,
-        status: draft.status,
-        cleanup: draft.cleanup,
+        view: draft.view as View,
+        status: draft.status as StatusFilter,
+        cleanup: draft.cleanup as CleanupFilter,
         from: dateBound(draft.from || null, 'start'),
         to: dateBound(draft.to || null, 'end'),
         fromDate: null,
@@ -117,43 +112,34 @@
 </header>
 
 <section class="filter-bar">
-  <label class="field">
-    View
-    <select name="view" bind:value={draft.view} class="input">
-      <option value="history">All history</option>
-      <option value="current">Current work</option>
-      <option value="cleanup">Cleanup attention</option>
-    </select>
-  </label>
-  <label class="field">
-    Outcome
-    <select name="status" bind:value={draft.status} class="input">
-      <option value="all">All outcomes</option>
-      <option value="active">Queued or in progress</option>
-      <option value="published">Published</option>
-      <option value="failed">Failed</option>
-      <option value="superseded">Superseded</option>
-    </select>
-  </label>
-  <label class="field">
-    Cleanup
-    <select name="cleanup" bind:value={draft.cleanup} class="input">
-      <option value="all">All cleanup</option>
-      <option value="pending">Pending</option>
-      <option value="destroyed">Cleaned up</option>
-      <option value="failed">Failed</option>
-      <option value="unknown">Not recorded</option>
-    </select>
-  </label>
-  <label class="field">
-    From (UTC)
-    <input type="date" name="from" bind:value={draft.from} class="input" />
-  </label>
-  <label class="field">
-    To (UTC)
-    <input type="date" name="to" bind:value={draft.to} class="input" />
-  </label>
-  <button type="button" data-testid="apply" class="btn" onclick={apply}>Apply filters</button>
+  <Select name="view" bind:selected={draft.view} labelText="View">
+    <SelectItem value="history" text="All history" />
+    <SelectItem value="current" text="Current reviews" />
+    <SelectItem value="cleanup" text="Cleanup attention" />
+  </Select>
+  <Select name="status" bind:selected={draft.status} labelText="Outcome">
+    <SelectItem value="all" text="All outcomes" />
+    <SelectItem value="active" text="Queued or in progress" />
+    <SelectItem value="published" text="Published" />
+    <SelectItem value="failed" text="Failed" />
+    <SelectItem value="superseded" text="Superseded" />
+  </Select>
+  <Select name="cleanup" bind:selected={draft.cleanup} labelText="Cleanup">
+    <SelectItem value="all" text="All cleanup" />
+    <SelectItem value="pending" text="Pending" />
+    <SelectItem value="destroyed" text="Cleaned up" />
+    <SelectItem value="failed" text="Failed" />
+    <SelectItem value="unknown" text="Not recorded" />
+  </Select>
+  <div class="bx--form-item">
+    <label class="bx--label" for="filter-from">From (UTC)</label>
+    <input id="filter-from" class="bx--text-input" type="date" name="from" bind:value={draft.from} />
+  </div>
+  <div class="bx--form-item">
+    <label class="bx--label" for="filter-to">To (UTC)</label>
+    <input id="filter-to" class="bx--text-input" type="date" name="to" bind:value={draft.to} />
+  </div>
+  <Button size="small" data-testid="apply" on:click={apply}>Apply filters</Button>
 </section>
 
 {#if dash.error}
@@ -162,7 +148,7 @@
       ? 'You are offline. Updates will resume when you reconnect.'
       : 'Could not refresh reviews. Showing the last available data.'}
     <span class="muted">Last updated: {dash.lastGoodAt ? absoluteTime(new Date(dash.lastGoodAt).toISOString()) : 'not yet'}.</span>
-    <button type="button" class="btn" onclick={dash.refresh}>Retry</button>
+    <Button size="small" on:click={dash.refresh}>Retry</Button>
   </div>
 {/if}
 
@@ -170,28 +156,25 @@
   <Toolbar lastGoodAt={dash.lastGoodAt} onRefresh={dash.refresh} />
   <section>
     {#if dash.data.page.tasks.length}
-      {#each dash.data.page.tasks as task (task.runId)}
-        <TaskRow {task} now={clock.now} stale={dash.error !== null} />
-      {/each}
+      <TaskTable tasks={dash.data.page.tasks} now={clock.now} stale={dash.error !== null} />
     {:else}
       <div class="empty">No reviews match these filters.</div>
     {/if}
   </section>
   <div class="toolbar">
     {#if dash.data.page.nextCursor}
-      <button
-        type="button"
+      <Button
+        size="small"
         data-testid="next-page"
-        class="btn"
-        onclick={() => older(dash.data?.page.nextCursor ?? '')}
+        on:click={() => older(dash.data?.page.nextCursor ?? '')}
       >
         Older runs
-      </button>
+      </Button>
     {:else}
       <span class="muted">End of history</span>
     {/if}
     {#if filters.cursor}
-      <button type="button" data-testid="back-to-latest" class="btn" onclick={latest}>Back to latest</button>
+      <Button size="small" data-testid="back-to-latest" on:click={latest}>Back to latest</Button>
     {/if}
   </div>
 {:else if dash.loading}
@@ -203,7 +186,7 @@
       {dash.error === 'offline' ? 'You are offline.' : 'Could not load reviews right now.'}
     </p>
     <div class="toolbar">
-      <button type="button" class="btn" onclick={dash.refresh}>Try again</button>
+      <Button size="small" on:click={dash.refresh}>Try again</Button>
     </div>
   </section>
 {/if}

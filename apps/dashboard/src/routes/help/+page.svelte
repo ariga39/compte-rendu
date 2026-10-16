@@ -6,42 +6,46 @@
   <title>Help | Compte rendu</title>
 </svelte:head>
 
-<article class="help mx-auto max-w-[860px]">
+<article class="help">
   <Help />
 </article>
 
 <style>
+  .help {
+    max-width: 860px;
+    margin: 0 auto;
+    color: #f4f4f4;
+  }
   .help :global(h1) {
-    font-size: clamp(1.6rem, 3.2vw, 2.35rem);
-    font-weight: 800;
-    letter-spacing: -0.03em;
-    margin: 6px 0 16px;
+    font-size: 1.4rem;
+    font-weight: 600;
+    margin: 0 0 16px;
   }
   .help :global(h2) {
-    font-size: 1.25rem;
-    font-weight: 700;
-    margin: 2.25rem 0 0.75rem;
-    scroll-margin-top: 1.5rem;
+    font-size: 1.1rem;
+    font-weight: 600;
+    margin: 28px 0 8px;
+    scroll-margin-top: 4rem;
   }
   .help :global(p) {
-    color: var(--color-muted-ink);
-    margin: 0 0 0.75rem;
+    color: #c6c6c6;
+    margin: 0 0 12px;
     overflow-wrap: anywhere;
   }
   .help :global(ul) {
     list-style: disc;
-    padding-left: 1.25rem;
-    margin: 0.75rem 0;
-    color: var(--color-muted-ink);
+    padding-left: 20px;
+    margin: 12px 0;
+    color: #c6c6c6;
   }
   .help :global(li) {
-    margin: 0.25rem 0;
+    margin: 4px 0;
     overflow-wrap: anywhere;
   }
   .help :global(a) {
-    color: var(--color-accent);
+    color: #78a9ff;
   }
   .help :global(strong) {
-    color: var(--color-ink);
+    color: #f4f4f4;
   }
 </style>

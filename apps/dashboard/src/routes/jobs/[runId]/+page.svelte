@@ -1,6 +1,14 @@
 <script lang="ts">
   import { afterNavigate } from '$app/navigation';
   import { page } from '$app/state';
+  import {
+    Button,
+    ContainedList,
+    ContainedListItem,
+    StructuredList,
+    StructuredListCell,
+    StructuredListRow,
+  } from 'carbon-components-svelte';
   import Badge from '#lib/components/Badge.svelte';
   import { createDashboard, createExpiryClock } from '#lib/dashboard.svelte.ts';
   import {
@@ -83,26 +91,33 @@
 </script>
 
 {#snippet timeFact(label: string, value: string | null | undefined)}
-  <div class="fact">
-    <b>{label}</b>
-    {#if value}
-      <time datetime={value}>{absoluteTime(value)}</time>
-      <span class="muted">({relativeTime(value)})</span>
-    {:else}
-      <span class="muted">Not recorded</span>
-    {/if}
-  </div>
+  <StructuredListRow class="fact">
+    <StructuredListCell><b>{label}</b></StructuredListCell>
+    <StructuredListCell>
+      {#if value}
+        <time datetime={value}>{absoluteTime(value)}</time>
+        <span class="muted">({relativeTime(value)})</span>
+      {:else}
+        <span class="muted">Not recorded</span>
+      {/if}
+    </StructuredListCell>
+  </StructuredListRow>
 {/snippet}
 
 {#snippet textFact(label: string, value: string)}
-  <div class="fact"><b>{label}</b><span>{value}</span></div>
+  <StructuredListRow class="fact">
+    <StructuredListCell><b>{label}</b></StructuredListCell>
+    <StructuredListCell><span>{value}</span></StructuredListCell>
+  </StructuredListRow>
 {/snippet}
 
 {#if dash.error === 'notfound'}
   <section class="detail">
     <h1>Page not found</h1>
     <p class="muted">This dashboard address does not identify a task.</p>
-    <a class="btn" href="/history" data-back data-testid="back" onclick={onBack}>Back to history</a>
+    <a class="bx--btn bx--btn--tertiary" href="/history" data-back data-testid="back" onclick={onBack}>
+      Back to history
+    </a>
   </section>
 {:else if dash.data}
   {#if dash.error}
@@ -111,13 +126,15 @@
         ? 'You are offline. Updates will resume when you reconnect.'
         : 'Could not refresh reviews. Showing the last available data.'}
       <span class="muted">Last updated: {dash.lastGoodAt ? absoluteTime(new Date(dash.lastGoodAt).toISOString()) : 'not yet'}.</span>
-      <button type="button" class="btn" onclick={dash.refresh}>Retry</button>
+      <Button size="small" on:click={dash.refresh}>Retry</Button>
     </div>
   {/if}
   <section class="detail">
-    <a class="btn" href={backHref} data-back data-testid="back" onclick={onBack}>← Back to history</a>
+    <a class="bx--btn bx--btn--tertiary" href={backHref} data-back data-testid="back" onclick={onBack}>
+      ← Back to history
+    </a>
     <h1>{title}</h1>
-    <p class="task-badges">
+    <p>
       <Badge tone={statusTone(dash.data.task)}>{statusLabel(dash.data.task)}</Badge>
       <Badge tone={cleanupTone(dash.data.task)}>{cleanupLabel(dash.data.task)}</Badge>
     </p>
@@ -141,21 +158,23 @@
 
     <h2>Timeline</h2>
     {#if timeline.length}
-      <ol class="timeline">
-        {#each timeline as milestone (milestone.stage + milestone.startedAt)}
-          <li>
-            <strong>{milestoneLabel(milestone.stage as ExecutionStage | ProcessingStage)}</strong><br />
-            <time datetime={milestone.startedAt}>{absoluteTime(milestone.startedAt)}</time>
-            <span class="muted">({relativeTime(milestone.startedAt)})</span>
-          </li>
-        {/each}
-      </ol>
+      <div class="timeline">
+        <ContainedList labelText="Timeline" hideLabel>
+          {#each timeline as milestone (milestone.stage + milestone.startedAt)}
+            <ContainedListItem>
+              <strong>{milestoneLabel(milestone.stage as ExecutionStage | ProcessingStage)}</strong><br />
+              <time datetime={milestone.startedAt}>{absoluteTime(milestone.startedAt)}</time>
+              <span class="muted">({relativeTime(milestone.startedAt)})</span>
+            </ContainedListItem>
+          {/each}
+        </ContainedList>
+      </div>
     {:else}
       <p class="muted">Not recorded</p>
     {/if}
 
     <h2>Timing</h2>
-    <div class="facts">
+    <StructuredList>
       {@render timeFact('Received', dash.data.task.receivedAt)}
       {@render timeFact('Accepted', dash.data.task.claimedAt)}
       {@render timeFact('Finished', dash.data.task.terminalAt)}
@@ -165,14 +184,14 @@
         'Last progress update',
         dash.data.task.lastProgressAt ? relativeTime(dash.data.task.lastProgressAt) : 'Not recorded',
       )}
-    </div>
+    </StructuredList>
 
     <h2>Execution details</h2>
-    <div class="facts">
+    <StructuredList>
       {@render timeFact('Execution started', dash.data.task.executionStartedAt)}
       {@render timeFact('Result processing observed', dash.data.task.submissionCompletedAt)}
       {@render timeFact('Cleanup attempt finished', dash.data.task.cleanupCompletedAt)}
-    </div>
+    </StructuredList>
 
     <h2>Cleanup</h2>
     <div class="cleanup-block">
@@ -188,8 +207,6 @@
     <p class="muted">
       {dash.error === 'offline' ? 'You are offline.' : 'Could not load reviews right now.'}
     </p>
-    <div class="toolbar">
-      <button type="button" class="btn" onclick={dash.refresh}>Try again</button>
-    </div>
+    <Button size="small" on:click={dash.refresh}>Try again</Button>
   </section>
 {/if}
