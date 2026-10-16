@@ -1,0 +1,20 @@
+# Non-secret OpenShell provider profile for the review model endpoint.
+# Import into the gateway before starting the Runner:
+#   openshell profile import -f cr-model.yaml --global
+id: cr-model
+display_name: Compte rendu model
+category: inference
+credentials:
+  - name: api_key
+    env_vars: [OPENCODE_API_KEY]
+    required: true
+    auth_style: bearer
+    header_name: authorization
+endpoints:
+  - host: opencode.ai
+    port: 443
+    protocol: rest
+    enforcement: enforce
+    rules:
+      - allow: { method: POST, path: '**' }
+binaries: [/usr/local/bin/opencode]

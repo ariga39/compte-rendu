@@ -1,0 +1,25 @@
+# Non-secret OpenShell provider profile for scoped, read-only GitHub access.
+# Import into the gateway before starting the Runner:
+#   openshell profile import -f cr-github.yaml --global
+id: cr-github
+display_name: Compte rendu GitHub
+category: source_control
+credentials:
+  - name: api_token
+    env_vars: [GITHUB_TOKEN, GH_TOKEN]
+    required: true
+    auth_style: bearer
+    header_name: authorization
+endpoints:
+  - host: api.github.com
+    port: 443
+    path: /graphql
+    protocol: graphql
+    access: read-only
+    enforcement: enforce
+  - host: api.github.com
+    port: 443
+    protocol: rest
+    access: read-only
+    enforcement: enforce
+binaries: [/usr/local/bin/gh]
