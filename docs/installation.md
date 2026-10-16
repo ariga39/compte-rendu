@@ -770,7 +770,16 @@ uses the temporary invocation described above.
    active delivery replay from creating a second Check while allowing a later
    replay to recover an interrupted setup. The one-minute lease exceeds
    Cloudflare's 30-second post-response `waitUntil()` execution limit, so an
-   expired owner is no longer running. D1 migration files are versioned and
+   expired owner is no longer running.
+   `0008_runner_cleanup.sql` adds a nullable `runner_cleanup_status` column so a
+   claimed run records whether Docker Sandbox cleanup is `pending`, `destroyed`,
+   or `failed`. Claims and recorded Runner jobs start as `pending`; a validated
+   callback records its outcome. A same-pull-request replacement waits while the
+   prior claimed run is still scheduled/superseded or its cleanup is
+   `pending`/`failed`, so a failed cleanup keeps blocking until a later
+   destroyed confirmation arrives. Historical rows added before this migration
+   keep a null value and retain the previous behavior; there is no backfill or
+   recovery framework. D1 migration files are versioned and
    applied in order; see
    [D1 migrations](https://developers.cloudflare.com/d1/reference/migrations/).
 

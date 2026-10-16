@@ -8,7 +8,7 @@ import type {
   ReviewStateStore,
   ReviewStoredStatus,
 } from './index';
-import type { ReviewEvidenceMetadata } from './index';
+import type { ReviewEvidenceMetadata, RunnerCleanupStatus } from './index';
 
 export interface D1ResultLike {
   readonly meta: {
@@ -475,7 +475,7 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
     const row = await database
       .prepare(
         `UPDATE review_runs
-         SET runner_job_id = ?, runner_attempt = ?, updated_at = ?
+         SET runner_job_id = ?, runner_attempt = ?, runner_cleanup_status = 'pending', updated_at = ?
          WHERE run_id = (
            SELECT run_id FROM review_runs
            WHERE status = 'scheduled' AND runner_job_id IS NULL
@@ -484,8 +484,11 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
                WHERE active.installation_id = review_runs.installation_id
                  AND active.repository_id = review_runs.repository_id
                  AND active.pull_request_number = review_runs.pull_request_number
-                 AND active.status IN ('scheduled', 'superseded')
                  AND active.runner_job_id IS NOT NULL
+                 AND (
+                   active.status IN ('scheduled', 'superseded')
+                   OR active.runner_cleanup_status IN ('pending', 'failed')
+                 )
              )
            ORDER BY created_at ASC, rowid ASC
            LIMIT 1
@@ -514,14 +517,25 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
     };
   },
 
-  markSchedulingFailed: async ({ runId, occurredAt }) => {
-    await database.batch([
+  markSchedulingFailed: async ({ runId, occurredAt, releaseRunnerClaim }) => {
+    const statements: D1PreparedStatementLike[] = [
       database
         .prepare(
           `UPDATE review_runs SET status = 'failed', updated_at = ?
            WHERE run_id = ? AND status = 'scheduled'`,
         )
         .bind(occurredAt, runId),
+      ...(releaseRunnerClaim === undefined
+        ? []
+        : [
+            database
+              .prepare(
+                `UPDATE review_runs
+                 SET runner_job_id = NULL, runner_attempt = NULL, runner_cleanup_status = NULL
+                 WHERE run_id = ? AND runner_job_id = ? AND runner_attempt = ?`,
+              )
+              .bind(runId, releaseRunnerClaim.jobId, releaseRunnerClaim.attempt),
+          ]),
       database
         .prepare(
           `UPDATE deliveries SET status = 'failed', updated_at = ?
@@ -530,17 +544,27 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
            ) AND status = 'scheduled'`,
         )
         .bind(occurredAt, runId),
-    ]);
+    ];
+    await database.batch(statements);
   },
 
-  recordEvidence: async ({ runId, evidence }) => {
+  recordEvidence: async ({
+    runId,
+    evidence,
+    sandboxCleanup,
+  }: {
+    runId: string;
+    evidence: ReviewEvidenceMetadata;
+    sandboxCleanup?: RunnerCleanupStatus;
+  }) => {
     const result = await database
       .prepare(
         `UPDATE review_runs SET
            evidence_key = ?, evidence_status = ?, evidence_size = ?,
            evidence_sha256 = ?, evidence_uploaded_at = ?,
            execution_started_at = ?, submission_completed_at = ?,
-           cleanup_completed_at = ?
+           cleanup_completed_at = ?,
+           runner_cleanup_status = COALESCE(?, runner_cleanup_status)
          WHERE run_id = ? AND (
            evidence_key IS NULL OR evidence_key = ?
          )`,
@@ -554,6 +578,7 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
         evidence.executionStartedAt ?? null,
         evidence.submissionCompletedAt ?? null,
         evidence.cleanupCompletedAt ?? null,
+        sandboxCleanup ?? null,
         runId,
         evidence.key,
       )
@@ -564,7 +589,7 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
   recordRunnerJob: async ({ runId, jobId, attempt }) => {
     const result = await database
       .prepare(
-        `UPDATE review_runs SET runner_job_id = ?, runner_attempt = ?
+        `UPDATE review_runs SET runner_job_id = ?, runner_attempt = ?, runner_cleanup_status = 'pending'
          WHERE run_id = ? AND status = 'scheduled'
            AND (runner_job_id IS NULL OR runner_job_id = ?)
            AND (runner_attempt IS NULL OR runner_attempt = ?)`,

@@ -5132,39 +5132,275 @@ describe('Runner concurrency', () => {
     }
   });
 
-  it('fails a contradictory same-pull-request claim and direct admission closed until cleanup, then admits the replacement', async () => {
-    const evidenceRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-runner-claim-same-pr-'));
-    const active = independentJob(42, 'run-claim-same-pr-active');
-    const contradictory = independentJob(42, 'run-claim-same-pr-claim');
-    const direct = independentJob(42, 'run-claim-same-pr-direct');
-    let claims = 0;
-    let contradictoryOffered!: () => void;
-    const contradictoryObserved = new Promise<void>((resolve) => {
-      contradictoryOffered = resolve;
+  it('keeps blocking a same-pull-request admission after a terminal failed cleanup while unrelated work proceeds', async () => {
+    const evidenceRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-runner-terminal-cleanup-'));
+    const failing = independentJob(42, 'run-terminal-cleanup-failing');
+    const replacement = independentJob(42, 'run-terminal-cleanup-replacement');
+    const unrelated = independentJob(43, 'run-terminal-cleanup-unrelated');
+    const runner = createRunner({
+      concurrency: 2,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      evidenceRoot,
+      process: async (_command, args, options = {}) => {
+        await writeEvidenceFixture(args, options, finalMarkdownJsonl());
+        return {
+          exitCode:
+            args[0] === 'rm' && args[1] === '--force' && args[2] === `compte-rendu-${failing.id}`
+              ? 1
+              : 0,
+          stdout: args.includes('rev-parse')
+            ? `${baseSha}\n${headSha}\n`
+            : args.includes('session')
+              ? '[{"id":"concurrency-session"}]\n'
+              : options.captureStdout === true
+                ? `${finalMarkdownJsonl()}\n`
+                : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
     });
-    let releaseAgent: (() => void) | undefined;
-    const gate = new Promise<void>((resolve) => {
-      releaseAgent = resolve;
+    const post = (job: Record<string, unknown>) =>
+      runner.handle(
+        new Request('http://runner/jobs', {
+          method: 'POST',
+          headers: {
+            authorization: 'Bearer runner-test-token',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify(job),
+        }),
+      );
+
+    try {
+      expect((await post(failing)).status).toBe(202);
+      expect(await waitForTerminal(runner, failing.id)).toMatchObject({
+        status: 'failed',
+        sandbox: { cleanup: 'failed' },
+      });
+
+      expect((await post(replacement)).status).toBe(409);
+      expect((await post(unrelated)).status).toBe(202);
+      expect((await waitForTerminal(runner, unrelated.id)).status).toBe('succeeded');
+    } finally {
+      await rm(evidenceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps an oversized-callback job occupying its slot until callback transport completes', async () => {
+    const evidenceRoot = await mkdtemp(
+      join(tmpdir(), 'compte-rendu-runner-oversized-concurrency-'),
+    );
+    const jobA = independentJob(42, 'run-oversized-a');
+    const jobB = independentJob(43, 'run-oversized-b');
+    const jobC = independentJob(44, 'run-oversized-c');
+    const jobD = independentJob(45, 'run-oversized-d');
+    const sandboxA = `compte-rendu-${jobA.id}`;
+    const bigExport = JSON.stringify({
+      info: { id: 'oversized-session' },
+      messages: [
+        { id: 'message-1', parts: [{ type: 'text', text: 'x'.repeat(25 * 1024 * 1024) }] },
+      ],
+    });
+    let callbacks = 0;
+    let firstCallbackStarted!: () => void;
+    const firstCallbackObserved = new Promise<void>((resolve) => {
+      firstCallbackStarted = resolve;
+    });
+    let releaseA: (() => void) | undefined;
+    const callbackGate = new Promise<void>((resolve) => {
+      releaseA = resolve;
+    });
+    let releaseB: (() => void) | undefined;
+    const gateB = new Promise<void>((resolve) => {
+      releaseB = resolve;
+    });
+    let releaseC: (() => void) | undefined;
+    const gateC = new Promise<void>((resolve) => {
+      releaseC = resolve;
+    });
+    let bAgentStarted!: () => void;
+    const bAgentObserved = new Promise<void>((resolve) => {
+      bAgentStarted = resolve;
+    });
+    let cAgentStarted!: () => void;
+    const cAgentObserved = new Promise<void>((resolve) => {
+      cAgentStarted = resolve;
     });
     const runner = createRunner({
       concurrency: 2,
       authToken: 'runner-test-token',
       modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       evidenceRoot,
+      callbackUrl: 'https://ingress.test/runner-callback',
+      callbackToken: 'callback-token',
+      callbackFetch: async () => {
+        callbacks += 1;
+        if (callbacks === 1) {
+          firstCallbackStarted();
+          await callbackGate;
+        }
+        return new Response(null, { status: 202 });
+      },
+      process: async (_command, args, options = {}) => {
+        const sandbox = args.find((value) => value.startsWith('compte-rendu-'));
+        if (args[0] === 'exec' && args.includes('--agent')) {
+          if (sandbox === `compte-rendu-${jobB.id}`) {
+            bAgentStarted();
+            await gateB;
+          } else if (sandbox === `compte-rendu-${jobC.id}`) {
+            cAgentStarted();
+            await gateC;
+          }
+          await writeFile(options.stdoutFilePath!, `${finalMarkdownJsonl()}\n`, { mode: 0o600 });
+          await writeFile(options.stderrFilePath!, '', { mode: 0o600 });
+        }
+        if (args[0] === 'cp') {
+          const source = args[1];
+          const destination = args[2];
+          if (source.endsWith('opencode-export-oversized-session.json')) {
+            await writeFile(destination, bigExport, { mode: 0o600 });
+          } else if (source.includes('opencode-export-')) {
+            const sessionId = source.match(/opencode-export-([A-Za-z0-9._:-]+)\.json$/)?.[1];
+            await writeFile(
+              destination,
+              JSON.stringify({ info: { id: sessionId }, messages: [] }),
+              { mode: 0o600 },
+            );
+          } else {
+            await mkdir(destination, { recursive: true, mode: 0o700 });
+            await writeFile(join(destination, 'opencode.db'), 'db', { mode: 0o600 });
+            await writeFile(join(destination, 'review.log'), 'log', { mode: 0o600 });
+          }
+        }
+        const sessionId = sandbox === sandboxA ? 'oversized-session' : 'concurrency-session';
+        return {
+          exitCode: 0,
+          stdout: args.includes('rev-parse')
+            ? `${baseSha}\n${headSha}\n`
+            : args.includes('session')
+              ? `[{"id":"${sessionId}"}]\n`
+              : args.includes('--agent')
+                ? `${finalMarkdownJsonl()}\n`
+                : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
+    });
+    const post = (job: Record<string, unknown>) =>
+      runner.handle(
+        new Request('http://runner/jobs', {
+          method: 'POST',
+          headers: {
+            authorization: 'Bearer runner-test-token',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify(job),
+        }),
+      );
+
+    try {
+      expect((await post(jobA)).status).toBe(202);
+      await Promise.race([
+        firstCallbackObserved,
+        new Promise((_resolve, reject) =>
+          setTimeout(() => reject(new Error('oversized callback was not reached')), 3_000),
+        ),
+      ]);
+
+      expect((await post(jobB)).status).toBe(202);
+      await bAgentObserved;
+      expect((await post(jobC)).status).toBe(409);
+
+      releaseB?.();
+      expect((await waitForTerminal(runner, jobB.id)).status).toBe('succeeded');
+
+      expect((await post(jobC)).status).toBe(202);
+      await cAgentObserved;
+      expect((await post(jobD)).status).toBe(409);
+
+      releaseA?.();
+      expect((await waitForTerminal(runner, jobA.id)).status).toBe('failed');
+      expect((await post(jobD)).status).toBe(202);
+
+      releaseC?.();
+      expect((await waitForTerminal(runner, jobC.id)).status).toBe('succeeded');
+      expect((await waitForTerminal(runner, jobD.id)).status).toBe('succeeded');
+    } finally {
+      releaseA?.();
+      releaseB?.();
+      releaseC?.();
+      await Promise.all(
+        [jobA, jobB, jobC, jobD].map((job) =>
+          waitForTerminal(runner, job.id).catch(() => undefined),
+        ),
+      );
+      await rm(evidenceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('aborts a contradictory same-pull-request claim with a terminal callback while unrelated work progresses', async () => {
+    const evidenceRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-runner-abort-claim-'));
+    const existing = independentJob(42, 'run-abort-existing');
+    const contradictory = independentJob(42, 'run-abort-claim');
+    const unrelated = independentJob(43, 'run-abort-unrelated');
+    let allowClaims = false;
+    let claims = 0;
+    let clones = 0;
+    const createdSandboxes: string[] = [];
+    const callbackBodies: Array<{ runId: string; status: string }> = [];
+    let agentsStarted = 0;
+    let firstAgentStarted!: () => void;
+    const firstAgentObserved = new Promise<void>((resolve) => {
+      firstAgentStarted = resolve;
+    });
+    let releaseAgents: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      releaseAgents = resolve;
+    });
+    let contradictoryCallback!: () => void;
+    const contradictoryCallbackObserved = new Promise<void>((resolve) => {
+      contradictoryCallback = resolve;
+    });
+    const runner = createRunner({
+      concurrency: 2,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      evidenceRoot,
+      callbackUrl: 'https://ingress.test/runner-callback',
+      callbackToken: 'callback-token',
       claimUrl: 'https://ingress.test/runner-claim',
       claimIntervalMs: 1,
       claimFetch: async () => {
+        if (!allowClaims) return new Response(null, { status: 204 });
         claims += 1;
-        if (claims === 1) return Response.json(active);
-        if (claims === 2) {
-          contradictoryOffered();
-          return Response.json(contradictory);
-        }
+        if (claims === 1) return Response.json(contradictory);
+        if (claims === 2) return Response.json(unrelated);
         return new Response(null, { status: 204 });
       },
-      process: async (_command, args, options = {}) => {
+      callbackFetch: async (_input, init) => {
+        const rawBody = init?.body;
+        const body = JSON.parse(typeof rawBody === 'string' ? rawBody : '{}') as {
+          runId: string;
+          status: string;
+        };
+        callbackBodies.push({ runId: body.runId, status: body.status });
+        if (body.runId === contradictory.runId && body.status === 'aborted') {
+          contradictoryCallback();
+        }
+        return new Response(null, { status: 202 });
+      },
+      process: async (command, args, options = {}) => {
+        if (command === 'git' && args.includes('clone')) clones += 1;
+        if (args[0] === 'create') createdSandboxes.push(args[args.indexOf('--name') + 1]);
         if (args[0] === 'exec' && args.includes('--agent')) {
-          await gate;
+          agentsStarted += 1;
+          if (agentsStarted === 1) {
+            firstAgentStarted();
+            await gate;
+          }
           await writeEvidenceFixture(args, options, finalMarkdownJsonl());
           return {
             exitCode: 0,
@@ -5199,30 +5435,35 @@ describe('Runner concurrency', () => {
       );
 
     try {
+      expect((await post(existing)).status).toBe(202);
       await Promise.race([
-        contradictoryObserved,
+        firstAgentObserved,
         new Promise((_resolve, reject) =>
-          setTimeout(() => reject(new Error('contradictory claim was not offered')), 2_000),
+          setTimeout(() => reject(new Error('existing review did not start')), 2_000),
         ),
       ]);
-      expect(
-        (
-          await runner.handle(
-            new Request(`http://runner/jobs/${contradictory.id}`, {
-              headers: { authorization: 'Bearer runner-test-token' },
-            }),
-          )
-        ).status,
-      ).toBe(404);
-      expect((await post(direct)).status).toBe(409);
+      allowClaims = true;
 
-      releaseAgent?.();
-      expect((await waitForTerminal(runner, active.id)).status).toBe('succeeded');
+      await Promise.race([
+        contradictoryCallbackObserved,
+        new Promise((_resolve, reject) =>
+          setTimeout(
+            () => reject(new Error('no aborted callback for the contradictory claim')),
+            2_000,
+          ),
+        ),
+      ]);
+      expect((await waitForTerminal(runner, unrelated.id)).status).toBe('succeeded');
 
-      expect((await post(contradictory)).status).toBe(202);
-      expect((await waitForTerminal(runner, contradictory.id)).status).toBe('succeeded');
+      expect(createdSandboxes).not.toContain(`compte-rendu-${contradictory.id}`);
+      expect(clones).toBe(2);
+      expect(callbackBodies).toContainEqual({
+        runId: contradictory.runId,
+        status: 'aborted',
+      });
     } finally {
-      releaseAgent?.();
+      releaseAgents?.();
+      await waitForTerminal(runner, existing.id).catch(() => undefined);
       await rm(evidenceRoot, { recursive: true, force: true });
     }
   });

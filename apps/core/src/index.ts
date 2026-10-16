@@ -57,6 +57,7 @@ export type ReviewDisposition =
 export type ReviewRunStatus = 'scheduled' | 'failed' | 'completed' | 'superseded';
 export type ReviewStoredStatus = ReviewDisposition | ReviewRunStatus | 'claiming';
 export type ReviewCheckSetupStatus = 'pending' | 'ready' | 'failed';
+export type RunnerCleanupStatus = 'pending' | 'destroyed' | 'failed';
 const CoreLifecycleIdentifier = Schema.String.pipe(
   Schema.check(Schema.isPattern(/^[A-Za-z0-9._:-]{1,128}$/)),
 );
@@ -222,12 +223,20 @@ export interface ReviewStateStore {
     | { kind: 'claimed'; runId: string; jobId: string; attempt: number; job: ReviewJob }
     | { kind: 'empty' }
   >;
-  markSchedulingFailed(input: { runId: string; occurredAt: string }): Promise<void>;
+  markSchedulingFailed(input: {
+    runId: string;
+    occurredAt: string;
+    releaseRunnerClaim?: { jobId: string; attempt: number };
+  }): Promise<void>;
   recordDelivery: (input: ReviewDeliveryRecord) => Promise<void>;
 }
 
 export interface ReviewStateQueries {
-  recordEvidence(input: { runId: string; evidence: ReviewEvidenceMetadata }): Promise<boolean>;
+  recordEvidence(input: {
+    runId: string;
+    evidence: ReviewEvidenceMetadata;
+    sandboxCleanup?: RunnerCleanupStatus;
+  }): Promise<boolean>;
   recordRunnerJob(input: { runId: string; jobId: string; attempt: number }): Promise<boolean>;
   clearRunnerJob?(input: { runId: string; jobId: string }): Promise<boolean>;
   claimCheckSetup?(input: {
@@ -1547,6 +1556,7 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
       updatedAt: string;
       runnerJobId?: string;
       runnerAttempt?: number;
+      runnerCleanupStatus?: RunnerCleanupStatus;
       evidence?: ReviewEvidenceMetadata;
       checkRunId?: number;
       checkSetupStatus: 'pending' | 'ready' | 'failed';
@@ -1734,8 +1744,11 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
         [...runs.values()].some(
           (active) =>
             active.runId !== candidate.runId &&
-            (active.status === 'scheduled' || active.status === 'superseded') &&
             active.runnerJobId !== undefined &&
+            (active.status === 'scheduled' ||
+              active.status === 'superseded' ||
+              active.runnerCleanupStatus === 'pending' ||
+              active.runnerCleanupStatus === 'failed') &&
             active.job.installationId === candidate.job.installationId &&
             active.job.repositoryId === candidate.job.repositoryId &&
             active.job.pullRequestNumber === candidate.job.pullRequestNumber,
@@ -1749,22 +1762,34 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
       if (run === undefined) return { kind: 'empty' as const };
       run.runnerJobId = jobId;
       run.runnerAttempt = attempt;
+      run.runnerCleanupStatus = 'pending';
       run.updatedAt = occurredAt;
       return { kind: 'claimed' as const, runId: run.runId, jobId, attempt, job: run.job };
     },
-    markSchedulingFailed: async ({ runId, occurredAt }) => {
+    markSchedulingFailed: async ({ runId, occurredAt, releaseRunnerClaim }) => {
       const run = runs.get(runId);
-      if (run !== undefined && run.status === 'scheduled') {
+      if (run === undefined) return;
+      if (run.status === 'scheduled') {
         run.status = 'failed';
         run.updatedAt = occurredAt;
         setDeliveryStatus(run.deliveryId, 'failed', occurredAt);
       }
+      if (
+        releaseRunnerClaim !== undefined &&
+        run.runnerJobId === releaseRunnerClaim.jobId &&
+        run.runnerAttempt === releaseRunnerClaim.attempt
+      ) {
+        run.runnerJobId = undefined;
+        run.runnerAttempt = undefined;
+        run.runnerCleanupStatus = undefined;
+      }
     },
-    recordEvidence: async ({ runId, evidence }) => {
+    recordEvidence: async ({ runId, evidence, sandboxCleanup }) => {
       const run = runs.get(runId);
       if (run === undefined) return false;
       if (run.evidence !== undefined && run.evidence.key !== evidence.key) return false;
       run.evidence = evidence;
+      if (sandboxCleanup !== undefined) run.runnerCleanupStatus = sandboxCleanup;
       return true;
     },
     recordRunnerJob: async ({ runId, jobId, attempt }) => {
@@ -1774,6 +1799,7 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
       if (run.runnerAttempt !== undefined && run.runnerAttempt !== attempt) return false;
       run.runnerJobId = jobId;
       run.runnerAttempt = attempt;
+      run.runnerCleanupStatus = 'pending';
       return true;
     },
     clearRunnerJob: async ({ runId, jobId }) => {
