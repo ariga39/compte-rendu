@@ -1015,7 +1015,7 @@ test('help page is reachable from the primary nav, survives a reload and anchors
   await page.waitForFunction(() => location.pathname === '/help');
   await page.waitForSelector('#overview-counts');
   assert.equal(await page.locator('nav a[href="/help"]').getAttribute('aria-current'), 'page');
-  await page.click('nav[aria-label="On this page"] a[href="#cleanup-attention"]');
+  await page.click('a[href="#cleanup-attention"]');
   await page.waitForFunction(() => location.hash === '#cleanup-attention');
   assert.equal(await page.locator('#cleanup-attention').isVisible(), true);
   await page.goto(`${base}/help`);

@@ -1183,7 +1183,8 @@ workerd capture per request and registers it with `waitUntil()`.
 ## Public dashboard
 
 The existing Ingress serves `/`, `/history`, `/help`, and `/jobs/<RUN_ID>`. The Help
-page explains navigation, task states, cleanup, refresh, and privacy. Its public
+page explains navigation, task states, cleanup, refresh, and privacy. Its source is
+`apps/dashboard/src/lib/content/help.md`, compiled into the page by mdsvex at build time. Its public
 read APIs use only D1 through Core. Opening or refreshing these pages never
 queries GitHub or the Runner. The pages expose operational status and recorded
 milestones, not review bodies, evidence, logs, credentials, or administrative
