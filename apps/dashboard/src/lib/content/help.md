@@ -79,7 +79,7 @@ Overview, history, and task detail pages refresh automatically. This Help page i
 - When nothing is active, it refreshes about every **60 seconds**.
 - After errors it waits longer before retrying.
 - Automatic refresh pauses while the tab is hidden or the device is offline, and resumes on return.
-- Use **Refresh** on a data page to request an update. Retry delays and offline pauses still apply.
+- Use **Refresh now** on Overview or History to request an update. Retry delays and offline pauses still apply.
 
 The data comes from stored review state and is read-only. A refresh updates the page without changing any review.
 
