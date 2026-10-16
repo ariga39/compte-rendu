@@ -6,7 +6,12 @@ export default defineConfig({
     exclude: ['tests/runtime/**'],
   },
   lint: {
-    ignorePatterns: ['dist/**', 'node_modules/**'],
+    ignorePatterns: [
+      'dist/**',
+      'node_modules/**',
+      'apps/dashboard/.svelte-kit/**',
+      'apps/dashboard/build/**',
+    ],
     options: {
       typeAware: true,
       typeCheck: true,

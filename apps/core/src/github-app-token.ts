@@ -95,13 +95,39 @@ export interface GitHubAppTokenProviderOptions {
 }
 
 export interface GitHubAppTokenProvider {
-  readonly getInstallationToken: (installationId: number) => Promise<string>;
+  readonly getInstallationToken: (installationId: number, signal?: AbortSignal) => Promise<string>;
   readonly getReadInstallationToken: (
     installationId: number,
     repositoryId: number,
+    signal?: AbortSignal,
   ) => Promise<{ readonly token: string; readonly expiresAt: string }>;
   readonly revokeInstallationToken: (token: string) => Promise<void>;
 }
+
+const responseJson = (response: Response, signal?: AbortSignal): Promise<unknown> => {
+  if (signal === undefined) return response.json();
+  if (signal.aborted) {
+    void response.body?.cancel().catch(() => undefined);
+    return Promise.reject(new Error('GitHub App token exchange aborted'));
+  }
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      void response.body?.cancel().catch(() => undefined);
+      reject(new Error('GitHub App token exchange aborted'));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    response.json().then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (cause: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(cause);
+      },
+    );
+  });
+};
 
 export const createGitHubAppTokenProvider = (
   options: GitHubAppTokenProviderOptions,
@@ -126,7 +152,7 @@ export const createGitHubAppTokenProvider = (
     }
   };
 
-  const exchange = async (installationId: number, body?: unknown) => {
+  const exchange = async (installationId: number, body?: unknown, signal?: AbortSignal) => {
     const appId = Number(options.appId);
     if (!Number.isSafeInteger(appId) || appId < 1) {
       throw new Error('GitHub App ID is invalid');
@@ -164,32 +190,46 @@ export const createGitHubAppTokenProvider = (
           'x-github-api-version': '2022-11-28',
         },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        ...(signal === undefined ? {} : { signal }),
       });
     } catch {
       throw new Error('GitHub App token exchange failed');
     }
-    if (!response.ok) throw new Error('GitHub App token exchange failed');
+    if (signal?.aborted) {
+      void response.body?.cancel().catch(() => undefined);
+      throw new Error('GitHub App token exchange aborted');
+    }
+    if (!response.ok) {
+      if (response.body !== null) void response.body.cancel().catch(() => undefined);
+      throw new Error('GitHub App token exchange failed');
+    }
 
-    return response.json();
+    return responseJson(response, signal);
   };
 
   return {
-    getInstallationToken: async (installationId) => {
-      const value = await exchange(installationId);
+    getInstallationToken: async (installationId, signal) => {
+      const value = await exchange(installationId, undefined, signal);
       try {
         return (await Schema.decodeUnknownPromise(InstallationTokenResponse)(value)).token;
       } catch {
         throw new Error('GitHub App token response is invalid');
       }
     },
-    getReadInstallationToken: async (installationId, repositoryId) => {
+    getReadInstallationToken: async (installationId, repositoryId, signal) => {
       if (!Number.isSafeInteger(repositoryId) || repositoryId < 1) {
         throw new Error('GitHub repository ID is invalid');
       }
-      const value = await exchange(installationId, {
-        repository_ids: [repositoryId],
-        permissions: Object.fromEntries(readPermissions.map((permission) => [permission, 'read'])),
-      });
+      const value = await exchange(
+        installationId,
+        {
+          repository_ids: [repositoryId],
+          permissions: Object.fromEntries(
+            readPermissions.map((permission) => [permission, 'read']),
+          ),
+        },
+        signal,
+      );
       let decoded: typeof ReadInstallationTokenResponse.Type;
       try {
         decoded = await Schema.decodeUnknownPromise(ReadInstallationTokenResponse)(value);

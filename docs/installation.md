@@ -12,14 +12,14 @@ from another installation.
 
 The repository deploys these resources:
 
-| Resource           | Configuration name                                                       | Purpose                                                                                                            |
-| ------------------ | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
-| Public Worker      | `<INSTANCE_NAME>-ingress`                                                | Receives GitHub webhooks and authenticated Runner claim/callback requests. `workers_dev` is enabled.               |
-| Private Worker     | `<INSTANCE_NAME>-core`                                                   | Owns authorization, GitHub API calls, orchestration, and run state. `workers_dev` is disabled.                     |
-| Service binding    | `CORE` → `<INSTANCE_NAME>-core`                                          | Lets ingress call core without a public core URL.                                                                  |
-| D1 database        | `<INSTANCE_NAME>-review-state`, binding `REVIEW_DB`                      | Stores delivery, approval, and run state.                                                                          |
-| R2 evidence bucket | `<INSTANCE_NAME>-review-evidence`, binding `EVIDENCE_BUCKET`             | Private bucket storing one bounded JSON evidence bundle per Job; lifecycle expiration is configured at deployment. |
-| Runner Job service | Self-hosted runner reached through the core `RUNNER` VPC Service binding | Owns one authenticated asynchronous review attempt and fresh Docker Sandbox cleanup.                               |
+| Resource           | Configuration name                                                       | Purpose                                                                                                                                       |
+| ------------------ | ------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| Public Worker      | `<INSTANCE_NAME>-ingress`                                                | Serves the public dashboard and receives GitHub webhooks and authenticated Runner claim/callback/progress requests. `workers_dev` is enabled. |
+| Private Worker     | `<INSTANCE_NAME>-core`                                                   | Owns authorization, GitHub API calls, orchestration, and run state. `workers_dev` is disabled.                                                |
+| Service binding    | `CORE` → `<INSTANCE_NAME>-core`                                          | Lets ingress call core without a public core URL.                                                                                             |
+| D1 database        | `<INSTANCE_NAME>-review-state`, binding `REVIEW_DB`                      | Stores delivery, approval, and run state.                                                                                                     |
+| R2 evidence bucket | `<INSTANCE_NAME>-review-evidence`, binding `EVIDENCE_BUCKET`             | Private bucket storing one bounded JSON evidence bundle per Job; lifecycle expiration is configured at deployment.                            |
+| Runner Job service | Self-hosted runner reached through the core `RUNNER` VPC Service binding | Owns one authenticated asynchronous review attempt and fresh Docker Sandbox cleanup.                                                          |
 
 The request path is:
 
@@ -94,7 +94,7 @@ with an enabled JSON object. The project API key is a non-secret ingestion key;
 never provide a PostHog Personal API key. For example:
 
 ```sh
-corepack pnpm render:wrangler petit-chiba <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '[156518087]' '[]' \
+corepack pnpm render:wrangler petit-chiba <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '[]' \
   '{"enabled":true,"projectApiKey":"phc_<PROJECT_KEY>","host":"https://us.i.posthog.com","deployment":"petit-chiba","environment":"production"}'
 ```
 
@@ -342,7 +342,13 @@ Subscribe the App to:
   installation. Other Check lifecycle actions and custom requested actions
   are ignored.
 
-Do not subscribe to push, review, status, issue, or repository events;
+- `Repository`: `privatized`, `deleted`, and `transferred` invalidate retained
+  public identity. Other repository actions do not schedule reviews.
+- Installation removal/suspension and removal of repositories from an installation
+  invalidate the corresponding cached identities. These App installation events
+  are handled independently of review scheduling.
+
+Do not subscribe to push, review, status, or issue events;
 they are not part of this Worker contract. GitHub's event reference lists the
 available event actions:
 [Webhook events and payloads](https://docs.github.com/en/webhooks/webhook-events-and-payloads).
@@ -1171,6 +1177,87 @@ workerd capture per request and registers it with `waitUntil()`.
 | No review is published                | Publication reason, current PR head SHA, and Pull requests write permission              | If the head changed, issue a new review command. If publication is uncertain, check the existing review marker before retrying.                        |
 | Public fork PR does nothing           | Comment body and commenter permission                                                    | Use the exact `/ai-review` command from a maintainer with `write`, `maintain`, or `admin`; a new head needs a new command.                             |
 | Bot-authored PR does nothing          | Pull request author type, numeric author ID, and `ALLOWED_BOT_AUTHOR_IDS`                | Automatic Bot PRs are ignored unless their positive numeric author ID is configured; use exact `/ai-review` from a maintainer when a review is useful. |
+
+## Public dashboard
+
+The existing Ingress serves `/`, `/history`, and `/jobs/<RUN_ID>`. Its public
+read APIs use only D1 through Core. Opening or refreshing these pages never
+queries GitHub or the Runner. The pages expose operational status and recorded
+milestones, not review bodies, evidence, logs, credentials, or administrative
+controls. A claimed row is a durable assignment, not proof of a live process.
+
+Set the optional Core variable `DASHBOARD_ORIGIN` to the canonical HTTPS origin
+of the deployed Ingress, without a path, query, or fragment. Enable it only after
+the page and API routes are available. New and recovered product Check Runs use
+this origin for their permanent `/jobs/<RUN_ID>` details link. An empty value
+omits the link. GitHub retains its own Check page; this does not change links
+on unrelated Actions jobs or other Apps' checks.
+
+### Repository identity and background refresh
+
+Apply `0009_dashboard_lifecycle.sql` before deploying the updated Workers.
+Run `corepack pnpm build` before deploying Ingress: the SvelteKit dashboard
+workspace emits `apps/dashboard/build`, served by the existing Ingress `ASSETS`
+binding. Keep the `assets` block when updating an existing generated Wrangler
+config. `run_worker_first: true` preserves API, webhook and authenticated Runner
+routing; Ingress explicitly serves the static page shell for dashboard routes.
+The build contains no repository or task data; browsers read the public Core
+API through Ingress.
+Keep the Core Cron Trigger `* * * * *` in the deployment-specific Wrangler
+configuration as well as the tracked template. The scheduled handler refreshes
+shared repository metadata independently of dashboard traffic. It checks due
+repositories in bounded batches with a two-minute target interval. Public
+identity expires after five minutes; failed refreshes never extend that lifetime.
+The UI also removes expired identity and clears names and links on refresh errors.
+
+Enable the Repository webhook subscription above for prompt visibility-change
+notifications. A repository observed as private or inaccessible loses its public
+identity.
+Without such an observation, a visibility change can remain visible until the
+five-minute expiry. Already disclosed information cannot be retracted. Runs
+whose source visibility was private remain protected even if the repository
+later becomes public. Missing or expired identity appears as **Protected task**;
+counts, outcome, and recorded milestones remain visible.
+
+Before rollout, privately inventory repositories with retained runs and verify
+that background throughput and the installation's remaining GitHub quota can
+sustain the refresh interval. Do not put that inventory, repository names,
+installation IDs, quota samples, or production measurements in public repository
+documents. Keep operator evidence outside the checkout with restricted access.
+Cloudflare's [Worker limits](https://developers.cloudflare.com/workers/platform/limits/)
+apply to scheduled invocations too; account for token requests, metadata requests,
+and database operations when measuring capacity.
+
+For historical enrichment, verify each distinct retained repository through the
+correct GitHub App installation. Record currently verified public identity and
+legacy eligibility separately from the original source snapshot. Restrict this
+operation to missing legacy eligibility; never replace a known private snapshot
+or assume every historical repository was public. Unresolved repositories remain
+anonymous. Do not backfill missing lifecycle timestamps, stages, or outcomes.
+Repeatable enrichment must leave already recorded provenance and all review data
+intact. Retain only aggregate completion counts in private rollout records.
+
+### Compatible rollout and acceptance
+
+Deploy additive D1 migrations, then Core and Ingress, before updating the Runner.
+Older terminal callbacks remain accepted; their missing stage data is shown as
+not recorded. Drain active Runner work before its restart, preserving runtime,
+model, credentials, and configured concurrency. Runner stage reporting is bounded
+and best effort; terminal callbacks carry cumulative milestones for recovery.
+
+Verify overview, filtered history, pagination, an existing task deep link, neutral
+missing-task handling, and an unavailable database response. Inspect complete
+JSON responses as well as rendered HTML for anonymous tasks. Confirm that page
+refreshes cause no GitHub or Runner calls, and that the metadata Cron completes
+its refresh cycle. Check public identity expiry during refresh failure, browser
+resume, and offline operation. Validate a new product Check's own run URL when a
+normal review occurs; do not treat a browser screenshot as proof of lifecycle
+or publication correctness.
+
+For local browser verification, install the pinned Playwright Chromium build with
+`corepack pnpm exec playwright install chromium`, then run
+`corepack pnpm build` and `corepack pnpm test:dashboard`. CI runs the same suite. A preinstalled compatible
+Chromium may be selected with `PLAYWRIGHT_CHROMIUM_PATH`; it is only a test setting.
 
 ## Update and rollback
 

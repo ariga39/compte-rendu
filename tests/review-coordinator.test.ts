@@ -1182,6 +1182,7 @@ describe('Review coordinator', () => {
         baseSha: '1111111111111111111111111111111111111111',
         headSha: '2222222222222222222222222222222222222222',
         trigger: 'automatic',
+        repositoryVisibility: 'private',
       },
     ]);
   });
@@ -1234,6 +1235,7 @@ describe('Review coordinator', () => {
         baseSha: '3333333333333333333333333333333333333333',
         headSha: '4444444444444444444444444444444444444444',
         trigger: 'manual',
+        repositoryVisibility: 'public',
       },
     ]);
     expect(reactions).toEqual([
@@ -1380,6 +1382,7 @@ describe('Review coordinator', () => {
           baseSha: '1111111111111111111111111111111111111111',
           headSha: '3333333333333333333333333333333333333333',
           trigger: 'manual',
+          repositoryVisibility: 'public',
         },
         runId: expect.any(String),
       },

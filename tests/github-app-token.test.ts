@@ -202,4 +202,37 @@ describe('GitHub App token provider', () => {
     await expect(provider.getInstallationToken(7)).rejects.toThrow('GitHub App ID is invalid');
     expect(fetchAttempts).toBe(0);
   });
+
+  it('honours an aborted signal while acquiring an installation token', async () => {
+    const keyPair = await globalThis.crypto.subtle.generateKey(
+      {
+        name: 'RSASSA-PKCS1-v1_5',
+        modulusLength: 2048,
+        publicExponent: new Uint8Array([1, 0, 1]),
+        hash: 'SHA-256',
+      },
+      true,
+      ['sign', 'verify'],
+    );
+    const privateKey = pemFromDer(
+      await globalThis.crypto.subtle.exportKey('pkcs8', keyPair.privateKey),
+    );
+    const controller = new AbortController();
+    let observed: AbortSignal | null | undefined;
+    const provider = createGitHubAppTokenProvider({
+      appId: '1234567',
+      privateKey,
+      crypto: globalThis.crypto,
+      fetch: async (_input, init) => {
+        observed = init?.signal;
+        return new Response(new ReadableStream({ start() {} }), { status: 200 });
+      },
+    });
+    const started = Date.now();
+    const pending = provider.getInstallationToken(7, controller.signal);
+    setTimeout(() => controller.abort(), 20);
+    await expect(pending).rejects.toThrow();
+    expect(observed).toBe(controller.signal);
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
 });

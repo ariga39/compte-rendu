@@ -11,3 +11,6 @@ apps/*/wrangler.*.jsonc
 .env
 .env.*
 !.env.example
+
+.svelte-kit/
+apps/dashboard/build/

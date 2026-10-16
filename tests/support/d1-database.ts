@@ -28,6 +28,13 @@ class SqlitePreparedStatement implements D1PreparedStatementLike {
   async first<T>(): Promise<T | null> {
     return (this.database.prepare(this.sql).get(...this.values) as T | undefined) ?? null;
   }
+
+  async all<T>(): Promise<{ readonly results: readonly T[] }> {
+    const statement = this.database.prepare(this.sql) as unknown as {
+      all: (...values: unknown[]) => unknown[];
+    };
+    return { results: statement.all(...this.values) as T[] };
+  }
 }
 
 export class SqliteD1Database implements D1DatabaseLike {
@@ -44,6 +51,7 @@ export class SqliteD1Database implements D1DatabaseLike {
       '0006_review_check_runs.sql',
       '0007_check_setup_lease.sql',
       '0008_runner_cleanup.sql',
+      '0009_dashboard_lifecycle.sql',
     ],
   ) {
     this.applyMigrations(migrationNames);

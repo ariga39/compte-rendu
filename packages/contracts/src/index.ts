@@ -158,6 +158,42 @@ const CallbackSandbox = Schema.Struct({
   cleanup: Schema.Literals(['pending', 'destroyed', 'failed']),
 });
 
+export const RunnerProgressStage = Schema.Literals([
+  'checkout',
+  'sandbox',
+  'agent',
+  'evidence',
+  'cleanup',
+]);
+export type RunnerProgressStage = typeof RunnerProgressStage.Type;
+
+export const RunnerProgressMilestone = Schema.Struct({
+  stage: RunnerProgressStage,
+  startedAt: Schema.NonEmptyString,
+});
+export type RunnerProgressMilestone = typeof RunnerProgressMilestone.Type;
+
+export const RunnerProgressMilestones = Schema.Array(RunnerProgressMilestone).pipe(
+  Schema.check(Schema.isMaxLength(5)),
+);
+
+export const RunnerProgressSnapshot = Schema.Struct({
+  sequence: Schema.Int.check(Schema.isGreaterThan(0)),
+  stage: RunnerProgressStage,
+  milestones: RunnerProgressMilestones,
+});
+export type RunnerProgressSnapshot = typeof RunnerProgressSnapshot.Type;
+
+export const RunnerProgressReport = Schema.Struct({
+  runId: Schema.NonEmptyString,
+  id: Schema.NonEmptyString,
+  attempt: Schema.Int,
+  sequence: Schema.Int.check(Schema.isGreaterThan(0)),
+  stage: RunnerProgressStage,
+  milestones: RunnerProgressMilestones,
+});
+export type RunnerProgressReport = typeof RunnerProgressReport.Type;
+
 const SuccessfulRunnerResultCallback = Schema.Struct({
   ...CallbackIdentity,
   status: Schema.Literal('succeeded'),
@@ -165,6 +201,7 @@ const SuccessfulRunnerResultCallback = Schema.Struct({
   timestamps: CallbackTimestamps,
   sandbox: Schema.Struct({ cleanup: Schema.Literal('destroyed') }),
   result: ReviewResult,
+  lifecycle: Schema.optional(RunnerProgressSnapshot),
 });
 const FailedRunnerResultCallback = Schema.Struct({
   ...CallbackIdentity,
@@ -173,6 +210,7 @@ const FailedRunnerResultCallback = Schema.Struct({
   timestamps: PartialCallbackTimestamps,
   sandbox: CallbackSandbox,
   failure: CallbackFailure,
+  lifecycle: Schema.optional(RunnerProgressSnapshot),
 });
 const AbortedRunnerResultCallback = Schema.Struct({
   ...CallbackIdentity,
@@ -180,6 +218,7 @@ const AbortedRunnerResultCallback = Schema.Struct({
   evidence: IncompleteRunnerEvidence,
   timestamps: PartialCallbackTimestamps,
   sandbox: CallbackSandbox,
+  lifecycle: Schema.optional(RunnerProgressSnapshot),
 });
 
 export const RunnerResultCallback = Schema.Union([
@@ -263,6 +302,23 @@ export const ReviewEvent = Schema.Union([
   CheckSuiteRerequestedEvent,
 ]);
 
+export const MetadataInvalidationReasons = [
+  'repository_private',
+  'repository_removed',
+  'installation_removed',
+] as const;
+
+export const MetadataInvalidationEvent = Schema.Struct({
+  deliveryId: Schema.String,
+  event: Schema.Literal('metadata'),
+  reason: Schema.Literals(MetadataInvalidationReasons),
+  installationId: Schema.Int,
+  repositoryIds: Schema.Array(Schema.Int),
+  visibility: Schema.Literals(['private', 'unknown']),
+});
+
+export type MetadataInvalidationEvent = typeof MetadataInvalidationEvent.Type;
+
 export type ReviewEventName = ReviewEvent['event'];
 
 export type ReviewEvent = typeof ReviewEvent.Type;
@@ -273,7 +329,7 @@ export type OperationalLogEvent =
       readonly phase: 'ingress';
       readonly outcome: 'accepted';
       readonly deliveryId: string;
-      readonly event: ReviewEventName;
+      readonly event: ReviewEventName | 'metadata';
     }
   | {
       readonly phase: 'ingress';
@@ -284,7 +340,7 @@ export type OperationalLogEvent =
       readonly phase: 'ingress';
       readonly outcome: 'ignored';
       readonly deliveryId?: string;
-      readonly event?: ReviewEventName;
+      readonly event?: ReviewEventName | 'metadata';
       readonly reason:
         | 'unsupported_event'
         | 'unsupported_action'
@@ -296,7 +352,7 @@ export type OperationalLogEvent =
       readonly phase: 'ingress';
       readonly outcome: 'retryable';
       readonly deliveryId?: string;
-      readonly event?: ReviewEventName;
+      readonly event?: ReviewEventName | 'metadata';
       readonly reason: 'core_unavailable';
     }
   | {
@@ -304,6 +360,13 @@ export type OperationalLogEvent =
       readonly outcome: 'scheduled';
       readonly deliveryId: string;
       readonly runId: string;
+    }
+  | {
+      readonly phase: 'core';
+      readonly outcome: 'metadata_refresh';
+      readonly dispatched: number;
+      readonly failed: number;
+      readonly skipped: 'unavailable' | 'cooldown' | '';
     }
   | {
       readonly phase: 'core';
@@ -360,6 +423,7 @@ export const sanitizeOperationalLogEvent = (event: OperationalLogEvent): Operati
   }
 
   if (event.phase === 'core') {
+    if (event.outcome === 'metadata_refresh') return event;
     return event.outcome === 'scheduled'
       ? {
           ...event,
@@ -386,3 +450,128 @@ export const sanitizeOperationalLogEvent = (event: OperationalLogEvent): Operati
 export interface OperationalLog {
   readonly record: (event: OperationalLogEvent) => void | Promise<void>;
 }
+
+export const PublicExecutionStage = Schema.Literals([
+  'checkout',
+  'sandbox',
+  'agent',
+  'evidence',
+  'cleanup',
+]);
+export type PublicExecutionStage = typeof PublicExecutionStage.Type;
+
+export const PublicCleanupStatus = Schema.Literals(['pending', 'destroyed', 'failed', 'unknown']);
+export type PublicCleanupStatus = typeof PublicCleanupStatus.Type;
+
+export const PublicTaskStatus = Schema.Literals(['scheduled', 'completed', 'failed', 'superseded']);
+export type PublicTaskStatus = typeof PublicTaskStatus.Type;
+
+export const PublicTaskDispatch = Schema.NullOr(Schema.Literals(['queued', 'claimed']));
+export type PublicTaskDispatch = typeof PublicTaskDispatch.Type;
+
+export const PublicTaskIdentity = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal('public'),
+    repositoryFullName: Schema.NonEmptyString,
+    pullRequestNumber: Schema.Int,
+    pullRequestUrl: Schema.NonEmptyString,
+    expiresAt: Schema.NonEmptyString,
+  }),
+  Schema.Struct({ kind: Schema.Literal('anonymous') }),
+]);
+export type PublicTaskIdentity = typeof PublicTaskIdentity.Type;
+
+export const PublicTaskFailure = Schema.Struct({
+  phase: Schema.Literals([
+    'scheduling',
+    'checkout',
+    'sandbox',
+    'agent',
+    'output_validation',
+    'evidence',
+    'callback',
+    'publication',
+    'cleanup',
+    'unknown',
+  ]),
+  reason: Schema.Literals([
+    'checkout',
+    'sandbox',
+    'agent',
+    'timeout',
+    'invalid_output',
+    'evidence',
+    'cleanup',
+    'callback',
+    'marker_lookup_failed',
+    'publication_uncertain',
+    'completion_failed',
+    'unknown',
+  ]),
+});
+export type PublicTaskFailure = typeof PublicTaskFailure.Type;
+
+export const PublicProcessing = Schema.NullOr(Schema.Literals(['received', 'publishing']));
+export type PublicProcessing = typeof PublicProcessing.Type;
+
+export const PublicTaskState = Schema.Struct({
+  runId: Schema.NonEmptyString,
+  status: PublicTaskStatus,
+  dispatch: PublicTaskDispatch,
+  stage: Schema.NullOr(PublicExecutionStage),
+  processing: PublicProcessing,
+  identity: PublicTaskIdentity,
+  receivedAt: Schema.NonEmptyString,
+  claimedAt: Schema.NullOr(Schema.NonEmptyString),
+  terminalAt: Schema.NullOr(Schema.NonEmptyString),
+  executionStartedAt: Schema.NullOr(Schema.NonEmptyString),
+  submissionCompletedAt: Schema.NullOr(Schema.NonEmptyString),
+  cleanupCompletedAt: Schema.NullOr(Schema.NonEmptyString),
+
+  resultReceivedAt: Schema.NullOr(Schema.NonEmptyString),
+  publicationStartedAt: Schema.NullOr(Schema.NonEmptyString),
+  lastProgressAt: Schema.NullOr(Schema.NonEmptyString),
+  queueWaitMs: Schema.NullOr(Schema.Int),
+  totalDurationMs: Schema.NullOr(Schema.Int),
+  cleanup: PublicCleanupStatus,
+  failure: Schema.NullOr(PublicTaskFailure),
+});
+export type PublicTaskState = typeof PublicTaskState.Type;
+
+export const PublicOverview = Schema.Struct({
+  generatedAt: Schema.NonEmptyString,
+  counts: Schema.Struct({
+    queued: Schema.Int,
+    claimed: Schema.Int,
+    publishedLast24h: Schema.Int,
+    failedLast24h: Schema.Int,
+  }),
+  cleanupAttention: Schema.Int,
+});
+export type PublicOverview = typeof PublicOverview.Type;
+
+export const PublicHistoryPage = Schema.Struct({
+  generatedAt: Schema.NonEmptyString,
+  tasks: Schema.Array(PublicTaskState),
+  nextCursor: Schema.NullOr(Schema.NonEmptyString),
+});
+export type PublicHistoryPage = typeof PublicHistoryPage.Type;
+
+export const PublicMilestone = Schema.Struct({
+  stage: PublicExecutionStage,
+  startedAt: Schema.NonEmptyString,
+});
+export type PublicMilestone = typeof PublicMilestone.Type;
+
+export const PublicTaskDetail = Schema.Struct({
+  generatedAt: Schema.NonEmptyString,
+  task: PublicTaskState,
+  milestones: Schema.Array(PublicMilestone),
+  processingMilestones: Schema.Array(
+    Schema.Struct({
+      stage: Schema.Literals(['received', 'publishing']),
+      startedAt: Schema.NonEmptyString,
+    }),
+  ),
+});
+export type PublicTaskDetail = typeof PublicTaskDetail.Type;

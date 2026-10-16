@@ -34,7 +34,8 @@ Included:
 - one GitHub Check Run showing queued, running, and terminal review state;
 - a visible terminal notification: the Review itself on success or one pull
   request comment when the Review fails;
-- D1 run history and delivery deduplication; and
+- D1 run history and delivery deduplication;
+- a public read-only dashboard with protected repository identities; and
 - runner-owned Sandbox cleanup for each attempt.
 
 Deferred:
@@ -147,6 +148,31 @@ with no inline finding projection. Review guidance may suggest up to five
 high-confidence actionable findings when present and a clear conclusion when
 none are found; this is guidance for the human-readable review, not a JSON
 schema. It never publishes `APPROVE` or `REQUEST_CHANGES` in v1.
+
+## Public dashboard
+
+The [dashboard design](public-dashboard-design.md) defines the public read model,
+privacy projection, lifecycle reporting, and refresh behavior. Existing Ingress
+serves the UI; Core reads D1 and returns only the public projection. Neither
+page reads nor browser refreshes call GitHub or Runner. Repository metadata is
+maintained independently by Core's scheduled handler. Execution progress is
+reported by the owned Runner job; product outcome and cleanup remain distinct.
+
+The approved dashboard test seams are public Worker HTTP requests (including a
+fresh Worker against the same D1 database), authenticated Runner progress and
+terminal callbacks, and browser-visible interactions. The existing store query
+seam may arrange and observe persisted runs; tests do not assert private SQL
+columns or helper call order. Clock and external GitHub/process adapters provide
+controlled failures and races without changing the public observations.
+
+### Dashboard frontend
+
+The public dashboard uses SvelteKit file routes and Svelte components with
+Tailwind CSS in `apps/dashboard`. Its static client build is served by the
+existing Ingress Worker through `ASSETS`; Core remains the only source of public
+task data. No task identities are rendered into build artifacts. Browser
+behavior tests exercise the built frontend, including automatic refresh,
+identity expiry, history navigation and anonymous task detail.
 
 ## Deployment shape
 

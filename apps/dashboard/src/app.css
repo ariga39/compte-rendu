@@ -1,0 +1,66 @@
+@import 'tailwindcss';
+
+@theme {
+  --color-bg: #0d1117;
+  --color-panel: #151c26;
+  --color-panel-2: #1b2532;
+  --color-ink: #edf3f8;
+  --color-muted-ink: #9aaabd;
+  --color-line: #2a3848;
+  --color-accent: #6ee7c8;
+  --color-blue: #86b7ff;
+  --color-danger: #ff9b9b;
+  --color-warn: #ffd27a;
+  --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+@layer base {
+  html {
+    color-scheme: dark;
+  }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: radial-gradient(circle at 80% -10%, #173149 0, transparent 40%), var(--color-bg);
+    color: var(--color-ink);
+    font: 15px/1.5 var(--font-sans);
+  }
+  a {
+    color: var(--color-accent);
+    text-decoration: none;
+  }
+  a:hover {
+    text-decoration: underline;
+  }
+  .facts {
+    display: grid;
+    gap: 10px;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  }
+  .fact {
+    display: grid;
+    gap: 4px;
+    padding: 14px;
+    background: var(--color-panel);
+    border: 1px solid var(--color-line);
+    border-radius: 10px;
+  }
+  .fact b {
+    display: block;
+    font-size: 0.78rem;
+    color: var(--color-muted-ink);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+}

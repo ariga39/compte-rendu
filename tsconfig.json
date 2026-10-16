@@ -15,5 +15,6 @@
     "scripts/**/*.mts",
     "tests/**/*.ts",
     "vite.config.ts"
-  ]
+  ],
+  "exclude": ["node_modules", "apps/dashboard"]
 }
