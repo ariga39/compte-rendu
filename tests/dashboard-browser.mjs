@@ -1003,6 +1003,44 @@ test('resuming a detail page does not restore identity without a fresh public re
   assert.ok(!text.includes('acme/widgets'));
 });
 
+test('help page is reachable from the primary nav, survives a reload and anchors work', async ({
+  page,
+  harness,
+  base,
+}) => {
+  harness.setHandler(defaultOverviewHandler);
+  await page.goto(`${base}/`);
+  await page.waitForSelector('[data-testid="stats"]');
+  await page.click('nav a[href="/help"]');
+  await page.waitForFunction(() => location.pathname === '/help');
+  await page.waitForSelector('#overview-counts');
+  assert.equal(await page.locator('nav a[href="/help"]').getAttribute('aria-current'), 'page');
+  await page.click('nav[aria-label="On this page"] a[href="#cleanup-attention"]');
+  await page.waitForFunction(() => location.hash === '#cleanup-attention');
+  assert.equal(await page.locator('#cleanup-attention').isVisible(), true);
+  await page.goto(`${base}/help`);
+  await page.waitForSelector('#overview-counts');
+  assert.equal(await page.locator('nav a[href="/help"]').getAttribute('aria-current'), 'page');
+});
+
+test('help page is usable on a narrow viewport without horizontal overflow', async ({
+  page,
+  harness,
+  base,
+}) => {
+  harness.setHandler(defaultOverviewHandler);
+  await page.setViewportSize({ width: 360, height: 640 });
+  await page.goto(`${base}/help`);
+  await page.waitForSelector('#overview-counts');
+  const overflow = await page.evaluate(
+    () => document.documentElement.scrollWidth - window.innerWidth,
+  );
+  assert.ok(overflow <= 1, `horizontal overflow=${overflow}`);
+  assert.equal(await page.locator('nav a[href="/help"]').isVisible(), true);
+  await page.click('nav a[href="/help"]');
+  await page.waitForFunction(() => location.pathname === '/help');
+});
+
 try {
   await access(join(BUILD, 'index.html'));
 } catch {

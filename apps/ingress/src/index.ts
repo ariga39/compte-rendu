@@ -832,7 +832,8 @@ export function createIngressWorker(dependencies: IngressDependencies): WorkerEn
     fetch: async (request) => {
       if (request.method === 'GET') {
         const path = new URL(request.url).pathname;
-        const isPage = path === '/' || path === '/history' || path.startsWith('/jobs/');
+        const isPage =
+          path === '/' || path === '/history' || path === '/help' || path.startsWith('/jobs/');
         if (isPage || path.startsWith('/_app/')) {
           try {
             if (dependencies.assets === undefined) return new Response(null, { status: 503 });

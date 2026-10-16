@@ -415,6 +415,10 @@ describe('public dashboard reads are DB-only', () => {
     expect(history.status).toBe(200);
     expect(history.headers.get('content-type')).toContain('text/html');
     expect(history.headers.get('cache-control')).toBe('no-store');
+    const help = await ingress.fetch(new Request('https://ingress.test/help'));
+    expect(help.status).toBe(200);
+    expect(help.headers.get('content-type')).toContain('text/html');
+    expect(help.headers.get('cache-control')).toBe('no-store');
     const asset = await ingress.fetch(new Request('https://ingress.test/_app/immutable/app.js'));
     expect(asset.headers.get('content-type')).toBe('text/javascript');
     expect(await asset.text()).toBe('export {};');
