@@ -3,6 +3,7 @@ packages:
   - packages/*
 
 allowBuilds:
+  carbon-components-svelte: false
   esbuild: true
   msgpackr-extract: false
   workerd: true

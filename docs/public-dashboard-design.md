@@ -53,8 +53,13 @@ repository, PR, SHA, Runner job ID or the currently active job.
 
 ### Presentation and language
 
-Use a compact application layout inspired by Linear: desktop sidebar, visible
-mobile navigation, flat task rows, restrained colors, and visible keyboard focus.
+Use IBM Carbon's components and layout conventions, with IBM Plex Mono for all
+dashboard text, including headings, controls, tables, and Markdown Help. Serve
+font assets from the dashboard's own origin. Use the installed Carbon Svelte
+version's APIs and styles rather than assuming parity with newer React examples.
+Keep navigation usable on desktop and mobile, use named table columns for review
+lists, and retain visible keyboard focus. Follow Carbon's spacing, density, and
+theme conventions consistently rather than combining multiple design systems.
 Keep main pages focused on tasks, status, timestamps, filters, and actions.
 Put explanations of URL filters, refresh mechanics, and historical gaps in the
 Markdown Help page rather than adding explanatory banners to every page.

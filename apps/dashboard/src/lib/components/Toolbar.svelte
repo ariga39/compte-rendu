@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { Button } from 'carbon-components-svelte';
   import { absoluteTime } from '#lib/format.ts';
 
   let { lastGoodAt, onRefresh }: { lastGoodAt: number; onRefresh: () => void } = $props();
@@ -8,5 +9,5 @@
   <span data-testid="last-refresh" class="muted">
     Last updated: {lastGoodAt ? absoluteTime(new Date(lastGoodAt).toISOString()) : 'not yet'}
   </span>
-  <button type="button" data-testid="refresh" class="btn" onclick={onRefresh}>Refresh now</button>
+  <Button size="small" data-testid="refresh" on:click={onRefresh}>Refresh now</Button>
 </div>

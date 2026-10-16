@@ -1,5 +1,11 @@
 <script lang="ts">
+  import 'carbon-components-svelte/css/g100.css';
+  import '@fontsource/ibm-plex-mono/400.css';
+  import '@fontsource/ibm-plex-mono/500.css';
+  import '@fontsource/ibm-plex-mono/600.css';
+  import '@fontsource/ibm-plex-mono/700.css';
   import '../app.css';
+  import { Content, Header, HeaderNav, HeaderNavItem } from 'carbon-components-svelte';
   import { page } from '$app/state';
 
   let { children } = $props();
@@ -11,39 +17,20 @@
   ] as const;
 
   let path = $derived(page.url.pathname);
-  let contextTitle = $derived(
-    path === '/'
-      ? 'Overview'
-      : path === '/history'
-        ? 'History'
-        : path === '/help'
-          ? 'Help'
-          : path.startsWith('/jobs/')
-            ? 'Review details'
-            : 'Overview',
-  );
 </script>
 
 <a class="skip-link" href="#content" data-testid="skip-link">Skip to content</a>
 
-<div class="app-shell">
-  <aside class="sidebar">
-    <a class="brand" href="/">
-      Compte rendu<small>Review dashboard</small>
-    </a>
-    <nav aria-label="Primary">
-      {#each links as [href, label] (href)}
-        <a class="nav-link" {href} aria-current={path === href ? 'page' : undefined}>{label}</a>
-      {/each}
-    </nav>
-  </aside>
-  <div class="app-main">
-    <header class="contextbar">
-      <span class="context-title">{contextTitle}</span>
-      <div id="announce" class="sr-only" aria-live="polite"></div>
-    </header>
-    <main id="content" tabindex="-1">
-      {@render children()}
-    </main>
-  </div>
-</div>
+<Header>
+  <a class="bx--header__name" href="/">Compte rendu</a>
+  <HeaderNav aria-label="Primary">
+    {#each links as [href, label] (href)}
+      <HeaderNavItem {href} text={label} isSelected={path === href} />
+    {/each}
+  </HeaderNav>
+  <div id="announce" class="sr-only" aria-live="polite"></div>
+</Header>
+
+<Content id="content" tabindex={-1}>
+  {@render children()}
+</Content>
