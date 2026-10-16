@@ -26,6 +26,7 @@ const PullRequestDetails = Schema.Struct({
   draft: Schema.Boolean,
   base: Schema.Struct({
     sha: GitHubSha,
+    ref: Schema.optional(Schema.NonEmptyString),
     repo: Schema.Struct({
       id: Schema.Int,
       visibility: Schema.Literals(['private', 'public']),
@@ -33,6 +34,7 @@ const PullRequestDetails = Schema.Struct({
   }),
   head: Schema.Struct({
     sha: GitHubSha,
+    ref: Schema.optional(Schema.NonEmptyString),
     repo: Schema.Struct({ id: Schema.Int }),
   }),
 });
@@ -294,6 +296,8 @@ export const createGitHubPublicationAdapter = (
           draft: pullRequest.draft,
           baseSha: pullRequest.base.sha,
           headSha: pullRequest.head.sha,
+          ...(pullRequest.base.ref === undefined ? {} : { baseRef: pullRequest.base.ref }),
+          ...(pullRequest.head.ref === undefined ? {} : { headRef: pullRequest.head.ref }),
         };
       } catch (error) {
         if (error instanceof GitHubNotFoundError) return undefined;

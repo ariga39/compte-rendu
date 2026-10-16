@@ -472,7 +472,8 @@ D1 stores only queryable product state:
 
 - GitHub delivery ID and processing result;
 - installation and repository IDs;
-- PR number, base SHA, head SHA, trigger, status, and timestamps;
+- PR number, base SHA, head SHA, base ref, head ref, trigger, status, and
+  timestamps;
 - maintainer approval bound to repository, PR number, and head SHA; and
 - review completion state needed for idempotency.
 - evidence object key, status, size, SHA-256, and execution/submission/cleanup

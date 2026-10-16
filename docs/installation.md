@@ -1200,6 +1200,9 @@ on unrelated Actions jobs or other Apps' checks.
 ### Repository identity and background refresh
 
 Apply `0009_dashboard_lifecycle.sql` before deploying the updated Workers.
+Apply the additive `0010_review_branch_refs.sql` before or with the updated
+Core; older Ingress payloads without branch names still admit and record null
+refs. Existing runs keep null refs and display the recorded head commit only.
 Run `corepack pnpm build` before deploying Ingress: the SvelteKit dashboard
 workspace emits `apps/dashboard/build`, served by the existing Ingress `ASSETS`
 binding. Keep the `assets` block when updating an existing generated Wrangler

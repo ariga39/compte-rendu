@@ -45,6 +45,8 @@ export const ReviewJob = Schema.Struct({
   trigger: ReviewTrigger,
   commentId: Schema.optional(Schema.Int),
   repositoryVisibility: Schema.optional(Schema.Literals(['private', 'public'])),
+  baseRef: Schema.optional(Schema.NonEmptyString),
+  headRef: Schema.optional(Schema.NonEmptyString),
 });
 
 export type ReviewJob = typeof ReviewJob.Type;
@@ -186,6 +188,10 @@ export interface PublicRunRow {
   installationId: number;
   repositoryId: number;
   pullRequestNumber: number;
+  baseSha: GitHubShaValue | null;
+  headSha: GitHubShaValue | null;
+  baseRef: string | null;
+  headRef: string | null;
   createdAt: string;
   claimedAt: string | null;
   terminalAt: string | null;
@@ -555,6 +561,8 @@ const jobForEvent = (
   headSha: event.headSha,
   trigger,
   repositoryVisibility: event.repositoryVisibility,
+  baseRef: event.baseRef,
+  headRef: event.headRef,
 });
 
 const currentIso = DateTime.now.pipe(Effect.map(DateTime.formatIso));
@@ -1492,6 +1500,8 @@ const jobForManualFacts = (intent: ManualIntent, facts: PullRequestFactsType): R
   trigger: 'manual',
   ...(intent.commentId === undefined ? {} : { commentId: intent.commentId }),
   repositoryVisibility: facts.repositoryVisibility,
+  baseRef: facts.baseRef,
+  headRef: facts.headRef,
 });
 
 const SuiteCheckRunCandidates = Schema.Struct({

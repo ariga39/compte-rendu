@@ -380,6 +380,38 @@ describe('Webhook ingress', () => {
       headSha: '2222222222222222222222222222222222222222',
     });
   });
+  it('forwards normalized branch refs when the webhook supplies them', async () => {
+    const forwarded: Request[] = [];
+    const worker = createIngressWorker({
+      secret,
+      crypto: globalThis.crypto,
+      core: {
+        fetch: async (request) => {
+          forwarded.push(request);
+          return new Response(null, { status: 202 });
+        },
+      },
+    });
+
+    const response = await worker.fetch(
+      await signedRequest({
+        ...payload,
+        pull_request: {
+          ...payload.pull_request,
+          base: { ...payload.pull_request.base, ref: 'main' },
+          head: { ...payload.pull_request.head, ref: 'feature/drawer' },
+        },
+      }),
+    );
+
+    expect(response.status).toBe(202);
+    const event = await forwarded[forwarded.length - 1]!.clone().json();
+    expect(event).toMatchObject({
+      event: 'pull_request',
+      baseRef: 'main',
+      headRef: 'feature/drawer',
+    });
+  });
   it('preserves human pull request handling when the author ID is explicitly null', async () => {
     const forwarded: Request[] = [];
     const worker = createIngressWorker({

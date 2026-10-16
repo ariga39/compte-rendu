@@ -115,6 +115,103 @@ describe('public dashboard reads are DB-only', () => {
     expect(JSON.stringify(page)).not.toContain('repositoryId');
   });
 
+  it('persists admission branch refs and exposes them only through public identity', async () => {
+    const database = new SqliteD1Database();
+    const store = createD1ReviewStateStore(database);
+    const worker = createCoreWorker(coreEnv(database), { github: {} });
+    const post = (body: unknown) =>
+      worker.fetch(
+        new Request('https://core.internal/review-events', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        }),
+      );
+    const event = (overrides: Record<string, unknown>) => ({
+      deliveryId: 'd-refs',
+      event: 'pull_request',
+      action: 'opened',
+      pullRequestNumber: 42,
+      installationId: 7,
+      draft: false,
+      baseSha: '1'.repeat(40),
+      headSha: '2'.repeat(40),
+      baseRef: 'main',
+      headRef: 'feature/drawer',
+      ...overrides,
+    });
+    expect(
+      (
+        await post(
+          event({
+            deliveryId: 'd-refs-public',
+            repositoryId: 500,
+            repositoryVisibility: 'public',
+            baseRepositoryId: 500,
+            headRepositoryId: 500,
+          }),
+        )
+      ).status,
+    ).toBe(202);
+    expect(
+      (
+        await post(
+          event({
+            deliveryId: 'd-refs-private',
+            pullRequestNumber: 43,
+            repositoryId: 501,
+            repositoryVisibility: 'private',
+            baseRepositoryId: 501,
+            headRepositoryId: 599,
+            headRef: 'feature/secret',
+          }),
+        )
+      ).status,
+    ).toBe(202);
+    const queue = createD1ReviewStateStore(database);
+    const claims = [];
+    for (const jobId of ['branch-claim-1', 'branch-claim-2']) {
+      claims.push(
+        await queue.claimNextJob!({ jobId, attempt: 1, occurredAt: new Date().toISOString() }),
+      );
+    }
+    const privateClaim = claims.find(
+      (claim) => claim.kind === 'claimed' && claim.job.repositoryId === 501,
+    );
+    expect(privateClaim).toMatchObject({
+      kind: 'claimed',
+      job: { baseRef: 'main', headRef: 'feature/secret' },
+    });
+
+    await verifyMetadata(store, 7, 500, 'public');
+    await verifyMetadata(store, 7, 501, 'public');
+
+    const reader = createCoreWorker(coreEnv(database));
+    const page = await asJson<{
+      tasks: { runId: string; identity: Record<string, unknown> }[];
+    }>(await get(reader, '/api/jobs'));
+    const publicTask = page.tasks.find((task) => task.identity.kind === 'public');
+    const privateTask = page.tasks.find((task) => task.identity.kind === 'anonymous');
+    expect(publicTask?.identity).toMatchObject({
+      kind: 'public',
+      baseRef: 'main',
+      headRef: 'feature/drawer',
+      baseSha: '1'.repeat(40),
+      headSha: '2'.repeat(40),
+    });
+    expect(privateTask).toBeDefined();
+
+    const detail = await asJson<{ task: { identity: Record<string, unknown> } }>(
+      await get(reader, `/api/jobs/${publicTask?.runId}`),
+    );
+    expect(detail.task.identity).toMatchObject({ headRef: 'feature/drawer' });
+    const privateDetail = await asJson<{ task: { identity: Record<string, unknown> } }>(
+      await get(reader, `/api/jobs/${privateTask?.runId}`),
+    );
+    expect(privateDetail.task.identity).toEqual({ kind: 'anonymous' });
+    expect(JSON.stringify(privateDetail)).not.toContain('feature/secret');
+  });
+
   it('persists claimed and terminal timestamps readable by a fresh worker', async () => {
     const database = new SqliteD1Database();
     const store = createD1ReviewStateStore(database);
