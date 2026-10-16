@@ -42,7 +42,7 @@ Cleanup follows the review and is not an error. Cleanup is shown on a review's p
 - **From (UTC)** and **To (UTC)** are dates in UTC and each includes the whole selected day.
 - Choose your filters, then select **Apply filters**. A changed date does not apply until you select it.
 - **Older runs** loads the next page and **Back to latest** returns to the newest page.
-- Select a review to open its details.
+- Select a review to open its details beside the list, so you can keep browsing and switch reviews. **Open full page** opens the review's own shareable address. On a narrow screen the details fill the screen with **Previous** and **Next** to switch quickly. Use your browser Back button or **Close** to return to the list; the list keeps its filters, page and position.
 
 Reviews are listed newest first, and filters stay in the page address so a filtered view can be shared or reloaded. Changing a filter returns to the latest page. Older pages keep the same position, and a review can leave a status filter after it ends.
 
@@ -52,6 +52,7 @@ Reviews are listed newest first, and filters stay in the page address so a filte
 - **Time in queue** and **Total time** are shown when both endpoints were recorded.
 - **Last progress update** is the most recent progress report, when there is one.
 - **Status** summarises the review. **Timeline** lists the stages that were recorded, in order: **Fetching code**, **Preparing environment**, **Reviewing**, **Saving run records**, and **Finishing up**, followed by **Result received** and **Publishing** for result processing.
+- **Revision** shows **Source branch** and **Target branch** (the reviewed head branch and its target base branch), then the **Reviewed commit** and **Base commit** SHAs. Branch names are shown only for a confirmed-public review, are captured when the review is admitted, and say **Not recorded** when they were not captured — they are never looked up or guessed later.
 - **Technical details** (collapsed by default) contains the runner observations — **Runner execution started**, **Result checks started**, and **Cleanup attempt finished** — and the cleanup result. A recorded observation does not guarantee a successful outcome.
 
 Stages that never ran are skipped. Missing history is shown as not recorded and is not filled in later.
@@ -78,7 +79,7 @@ Times are the latest recorded observations, not live guarantees. Older reviews m
 
 ## Anonymous reviews
 
-A review from a repository confirmed public shows its repository and pull request. A private repository, or one whose visibility has not been verified, is shown as **Anonymous review** with no repository details. This does not guarantee the repository is private. Public identity is time-limited and may become anonymous again.
+A review from a repository confirmed public shows its repository, pull request, branch names and commits. A private repository, or one whose visibility has not been verified, is shown as **Anonymous review** with no repository, branch or commit details. This does not guarantee the repository is private. Public identity is time-limited and may become anonymous again.
 
 ## GitHub Check link
 

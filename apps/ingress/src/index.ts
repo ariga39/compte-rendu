@@ -59,10 +59,12 @@ const PullRequestWebhook = Schema.Struct({
     user: Schema.Struct({ type: Schema.String, id: Schema.optional(Schema.NullOr(Schema.Int)) }),
     base: Schema.Struct({
       sha: GitHubSha,
+      ref: Schema.optional(Schema.NonEmptyString),
       repo: Schema.Struct({ id: Schema.Int }),
     }),
     head: Schema.Struct({
       sha: GitHubSha,
+      ref: Schema.optional(Schema.NonEmptyString),
       repo: Schema.Struct({ id: Schema.Int }),
     }),
   }),
@@ -244,6 +246,12 @@ const normalizePullRequest = (
   draft: payload.pull_request.draft,
   baseSha: payload.pull_request.base.sha,
   headSha: payload.pull_request.head.sha,
+  ...(payload.pull_request.base.ref === undefined
+    ? {}
+    : { baseRef: payload.pull_request.base.ref }),
+  ...(payload.pull_request.head.ref === undefined
+    ? {}
+    : { headRef: payload.pull_request.head.ref }),
 });
 
 const normalizeIssueComment = (

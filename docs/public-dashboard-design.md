@@ -126,6 +126,12 @@ recorded timeline, received/assigned/finished times, queue wait and total durati
 when endpoints exist. Assignment is not proof that execution started. Public
 tasks link to their GitHub PR; do not fabricate a published review URL.
 
+For public identity, show the recorded revision: **Source branch** (head) and
+**Target branch** (base), then the **Reviewed commit** (head SHA) and **Base
+commit**. A branch name not recorded at admission says Not recorded; never fetch
+or invent it. These facts are withheld entirely for anonymous identity, exactly
+like the repository name and PR link.
+
 Use shared phase labels: Fetching code, Preparing environment, Reviewing,
 Saving run records, Finishing up, Processing result and Publishing. The timeline
 shows recorded milestones, not percentage progress. Missing records say Not
@@ -144,6 +150,26 @@ A missing task has a neutral 404 page. Initial load failure must not claim old
 data is visible. Refresh failure with retained data shows its freshness notice.
 Use Retry for failed loads and Refresh now for deliberate refresh. Returning to
 history preserves visible filters and scroll position.
+
+### List and detail navigation
+
+Selecting a review in Overview or History opens its detail beside the list
+rather than replacing it. Desktop uses a nonmodal side panel (role `region`) so
+the list stays directly clickable and the selected row stays visible; the list
+drops its Received and Pull request columns while the panel is open because the
+panel shows those facts. Narrow or intermediate widths where both cannot fit use
+a full-screen panel (role `dialog`, focus contained) with explicit previous and
+next controls so switching does not require closing. Mobile shows its own
+Refresh now and Last updated in the panel because the shared header is covered.
+
+Selection is client state, not a new route: the panel uses shallow history
+(`pushState` for the first open, `replaceState` for later switches) so the
+canonical list URL keeps its filters and page, Back closes the panel, Forward
+reopens the last selection, and Close or Escape returns focus to the selected
+row without moving the list. While a panel is open, the shared refresh control
+targets the panel; when it closes, refresh returns to the list. A **Open full
+page** link keeps the permanent `/jobs/<opaque-run-id>` URL shareable. Plain
+clicks open the panel; modified clicks and new-tab keep the full-page link.
 
 ### Presentation and accessibility
 
@@ -184,15 +210,16 @@ result" or "Publishing" according to the persisted transition.
 Add the following data where the current schema cannot provide it. Names are
 logical; keep migrations aligned with repository naming conventions:
 
-| Data                                                          | Purpose and write rule                                                                        |
-| ------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| `claimed_at`                                                  | First successful claim time for the recorded attempt, written in the atomic claim             |
-| `terminal_at`                                                 | First product-terminal transition time, immutable under duplicate callbacks and later cleanup |
-| `progress_sequence`, `progress_stage`, `progress_received_at` | Latest accepted Runner snapshot for the exact current run/job/attempt                         |
-| `progress_milestones`                                         | One optional start per stage in the explicit execution-stage enum below; no raw event log     |
-| `result_received_at`, `publication_started_at`                | Core processing milestones at actual accepted transitions                                     |
-| `failure_phase`, `failure_reason`                             | Optional finite sanitized categories when a failure is known                                  |
-| Visibility/provenance fields                                  | New source snapshot and separately verified legacy eligibility described below                |
+| Data                                                          | Purpose and write rule                                                                                                                                                      |
+| ------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `claimed_at`                                                  | First successful claim time for the recorded attempt, written in the atomic claim                                                                                           |
+| `terminal_at`                                                 | First product-terminal transition time, immutable under duplicate callbacks and later cleanup                                                                               |
+| `progress_sequence`, `progress_stage`, `progress_received_at` | Latest accepted Runner snapshot for the exact current run/job/attempt                                                                                                       |
+| `progress_milestones`                                         | One optional start per stage in the explicit execution-stage enum below; no raw event log                                                                                   |
+| Branch ref snapshots (`base_ref`, `head_ref`)                 | Nullable source/target branch names captured at admission from the validated automatic event or manual/Check-rerun PR facts; additive and never fetched or backfilled later |
+| `result_received_at`, `publication_started_at`                | Core processing milestones at actual accepted transitions                                                                                                                   |
+| `failure_phase`, `failure_reason`                             | Optional finite sanitized categories when a failure is known                                                                                                                |
+| Visibility/provenance fields                                  | New source snapshot and separately verified legacy eligibility described below                                                                                              |
 
 The execution-stage wire enum is exactly `checkout | sandbox | agent | evidence |
 cleanup`. Labels are "Checkout", "Preparing sandbox", "Reviewing", "Archiving
@@ -384,12 +411,13 @@ start time so a delayed response cannot acquire a new full lifetime.
 ### Disclosure freshness is explicit
 
 Verified-public metadata has a **five-minute maximum lifetime**. The server
-returns name and PR only if the run is eligible (public snapshot or verified
-legacy eligibility), metadata is public, and it has not expired. Otherwise it
+returns name, PR number/link, branch refs and base/head SHAs only if the run is
+eligible (public snapshot or verified legacy eligibility), metadata is public,
+and it has not expired. Otherwise it
 returns anonymous identity and an opaque task ID; the UI labels this "Anonymous review",
 with no repo/installation ID,
-PR number/link, SHA, actor, title, evidence identifier, raw error, log or review
-content. Use the same projection for rows, detail, filters, HTML and cursors.
+PR number/link, SHA, branch name, actor, title, evidence identifier, raw error, log
+or review content. Use the same projection for rows, detail, filters, HTML and cursors.
 Do not expose stable pseudonyms that group anonymous runs by repository.
 
 This is bounded-staleness disclosure, not synchronous GitHub authorization.

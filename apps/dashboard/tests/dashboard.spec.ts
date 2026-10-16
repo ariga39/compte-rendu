@@ -62,6 +62,10 @@ const publicIdentity: Extract<PublicTaskIdentity, { kind: 'public' }> = {
   pullRequestNumber: 7,
   pullRequestUrl: 'https://github.com/acme/widgets/pull/7',
   expiresAt: '2026-10-16T12:05:00.000Z',
+  baseRef: 'main',
+  headRef: 'feature/widgets',
+  baseSha: '1'.repeat(40),
+  headSha: '2'.repeat(40),
 };
 
 const defaultOverviewHandler: ApiHandler = (url) => {
@@ -606,6 +610,10 @@ test('hostile route and task fields cannot inject markup or run scripts', async 
               pullRequestNumber: 1,
               pullRequestUrl: 'https://github.com/x/y/pull/1',
               expiresAt: '2026-10-16T12:05:00.000Z',
+              baseRef: null,
+              headRef: null,
+              baseSha: null,
+              headSha: null,
             },
           }),
         ]),
@@ -859,6 +867,8 @@ test('back from a task returns to the same-page filtered history', async ({
   await page.goto(`${base}/history?status=failed`);
   await page.waitForSelector('[data-testid="task-link"]');
   await page.click('[data-testid="task-link"]');
+  await page.click('[data-testid="open-full-page"]');
+  await page.waitForFunction(() => location.pathname.startsWith('/jobs/'));
   await page.waitForSelector('.detail');
   expect(await page.locator('[data-back]').getAttribute('href')).toBe('/history?status=failed');
   await page.click('[data-back]');
@@ -882,6 +892,8 @@ test('back from a task restores the history scroll position', async ({ page, har
   const captured = await page.evaluate(() => window.scrollY);
   expect(captured).toBeGreaterThan(0);
   await link.click();
+  await page.click('[data-testid="open-full-page"]');
+  await page.waitForFunction(() => location.pathname.startsWith('/jobs/'));
   await page.waitForSelector('.detail');
   await page.click('[data-back]');
   await page.waitForFunction(() => location.pathname === '/history');
@@ -1114,6 +1126,10 @@ test('history keeps a readable review column on narrow screens', async ({
                 pullRequestUrl:
                   'https://github.com/example/very-long-repository-name-here/pull/12345',
                 expiresAt: '2026-10-16T12:05:00.000Z',
+                baseRef: 'main',
+                headRef: 'a-very-long-feature-branch-name-here',
+                baseSha: '1'.repeat(40),
+                headSha: '2'.repeat(40),
               },
             }),
           ]),

@@ -1033,6 +1033,7 @@ describe('Core Worker', () => {
         '0006_review_check_runs.sql',
         '0008_runner_cleanup.sql',
         '0009_dashboard_lifecycle.sql',
+        '0010_review_branch_refs.sql',
       ]);
       const migratedStore = createD1ReviewStateStore(database);
       if (migratedStore.claimNextJob === undefined) throw new Error('claim route is unavailable');

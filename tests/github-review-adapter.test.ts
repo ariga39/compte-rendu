@@ -61,3 +61,32 @@ describe('per-run dashboard Check links', () => {
     }
   });
 });
+
+describe('pull request facts branch refs', () => {
+  it('captures the source and target branch names from GitHub', async () => {
+    const remote: typeof fetch = async (input, init) => {
+      const request = new Request(input, init);
+      const path = new URL(request.url).pathname;
+      if (path === '/repositories/11') return Response.json({ full_name: 'example/repo' });
+      if (path === '/repos/example/repo/pulls/42')
+        return Response.json({
+          draft: false,
+          base: {
+            sha: '1'.repeat(40),
+            ref: 'main',
+            repo: { id: 11, visibility: 'public' },
+          },
+          head: {
+            sha: '2'.repeat(40),
+            ref: 'feature/drawer',
+            repo: { id: 99 },
+          },
+        });
+      return new Response(null, { status: 404 });
+    };
+    const github = createGitHubPublicationAdapter({ token: 'test-token', fetch: remote });
+    expect(
+      await github.getPullRequest!({ repositoryId: 11, pullRequestNumber: 42, installationId: 7 }),
+    ).toMatchObject({ baseRef: 'main', headRef: 'feature/drawer' });
+  });
+});

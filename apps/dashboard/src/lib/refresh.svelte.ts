@@ -1,8 +1,15 @@
 import { getContext, setContext } from 'svelte';
+import { SvelteMap } from 'svelte/reactivity';
+
+export interface RefreshRegistration {
+  lastGoodAt: number;
+  refresh: () => void;
+  priority: number;
+}
 
 export interface RefreshHandle {
-  set: (lastGoodAt: number, refresh: () => void) => void;
-  clear: () => void;
+  register: (owner: symbol, registration: RefreshRegistration) => void;
+  unregister: (owner: symbol) => void;
 }
 
 export interface RefreshState {
@@ -14,31 +21,29 @@ export interface RefreshState {
 const KEY = Symbol('dashboard:refresh-controls');
 
 export function createRefreshState(): { state: RefreshState; handle: RefreshHandle } {
-  let active = $state(false);
-  let lastGoodAt = $state(0);
-  let refresh = () => {};
+  const registrations = new SvelteMap<symbol, RefreshRegistration>();
+  const current = $derived(
+    [...registrations.values()].sort((left, right) => right.priority - left.priority)[0] ?? null,
+  );
 
   const handle: RefreshHandle = {
-    set(nextLastGoodAt, nextRefresh) {
-      lastGoodAt = nextLastGoodAt;
-      refresh = nextRefresh;
-      active = true;
+    register(owner, registration) {
+      registrations.set(owner, registration);
     },
-    clear() {
-      active = false;
-      refresh = () => {};
+    unregister(owner) {
+      registrations.delete(owner);
     },
   };
 
   const state: RefreshState = {
     get active() {
-      return active;
+      return current !== null;
     },
     get lastGoodAt() {
-      return lastGoodAt;
+      return current?.lastGoodAt ?? 0;
     },
     refresh() {
-      refresh();
+      current?.refresh();
     },
   };
 

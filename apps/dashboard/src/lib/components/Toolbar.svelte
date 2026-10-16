@@ -2,13 +2,18 @@
   import { onDestroy } from 'svelte';
   import { useRefresh } from '#lib/refresh.svelte.ts';
 
-  let { lastGoodAt, onRefresh }: { lastGoodAt: number; onRefresh: () => void } = $props();
+  let {
+    lastGoodAt,
+    onRefresh,
+    priority = 0,
+  }: { lastGoodAt: number; onRefresh: () => void; priority?: number } = $props();
 
   const handle = useRefresh();
+  const owner = Symbol('refresh-toolbar');
 
   $effect(() => {
-    handle?.set(lastGoodAt, onRefresh);
+    handle?.register(owner, { lastGoodAt, refresh: onRefresh, priority });
   });
 
-  onDestroy(() => handle?.clear());
+  onDestroy(() => handle?.unregister(owner));
 </script>

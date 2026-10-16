@@ -85,6 +85,8 @@ interface ClaimRow {
   runner_job_id: string;
   runner_attempt: number;
   repository_visibility_snapshot?: 'private' | 'public' | null;
+  base_ref?: string | null;
+  head_ref?: string | null;
 }
 
 interface ActiveRunnerRow {
@@ -187,6 +189,10 @@ interface PublicRunDbRow {
   installation_id: number;
   repository_id: number;
   pull_request_number: number;
+  base_sha: string | null;
+  head_sha: string | null;
+  base_ref: string | null;
+  head_ref: string | null;
   created_at: string;
   claimed_at: string | null;
   terminal_at: string | null;
@@ -218,6 +224,10 @@ const mapPublicRun = (row: PublicRunDbRow): PublicRunRow => ({
   installationId: row.installation_id,
   repositoryId: row.repository_id,
   pullRequestNumber: row.pull_request_number,
+  baseSha: row.base_sha,
+  headSha: row.head_sha,
+  baseRef: row.base_ref,
+  headRef: row.head_ref,
   createdAt: row.created_at,
   claimedAt: row.claimed_at,
   terminalAt: row.terminal_at,
@@ -269,6 +279,7 @@ const mapMetadataRow = (row: MetadataDbRow): RepositoryMetadataRow => ({
 
 const publicRunColumns = `
   r.run_id, r.status, r.installation_id, r.repository_id, r.pull_request_number,
+  r.base_sha, r.head_sha, r.base_ref, r.head_ref,
   r.created_at, r.claimed_at, r.terminal_at, r.result_received_at, r.publication_started_at, r.runner_job_id, r.failure_phase, r.failure_reason,
   r.evidence_status, r.runner_cleanup_status, r.publication_claimed_at,
   r.progress_stage, r.progress_received_at, r.progress_milestones,
@@ -561,8 +572,8 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
             (run_id, delivery_id, installation_id, repository_id,
              pull_request_number, base_sha, head_sha, trigger,
              status, created_at, updated_at, comment_id, check_setup_status,
-             repository_visibility_snapshot)
-           SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, 'pending', ?
+             repository_visibility_snapshot, base_ref, head_ref)
+           SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, 'pending', ?, ?, ?
            WHERE EXISTS (
              SELECT 1 FROM deliveries
              WHERE delivery_id = ? AND status = 'claiming'
@@ -602,6 +613,8 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
           occurredAt,
           job.commentId ?? null,
           job.repositoryVisibility ?? null,
+          job.baseRef ?? null,
+          job.headRef ?? null,
           deliveryId,
           job.repositoryId,
           job.pullRequestNumber,
@@ -815,7 +828,7 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
          )
          RETURNING run_id, installation_id, repository_id, pull_request_number,
            base_sha, head_sha, trigger, comment_id, runner_job_id, runner_attempt,
-           repository_visibility_snapshot`,
+           repository_visibility_snapshot, base_ref, head_ref`,
       )
       .bind(jobId, attempt, occurredAt, occurredAt)
       .first<ClaimRow>();
@@ -837,6 +850,8 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
         ...(row.repository_visibility_snapshot == null
           ? {}
           : { repositoryVisibility: row.repository_visibility_snapshot }),
+        ...(row.base_ref == null ? {} : { baseRef: row.base_ref }),
+        ...(row.head_ref == null ? {} : { headRef: row.head_ref }),
       },
     };
   },

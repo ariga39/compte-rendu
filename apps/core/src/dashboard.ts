@@ -89,6 +89,10 @@ export const projectPublicTask = (row: PublicRunRow, now: string): PublicTaskSta
         pullRequestNumber: row.pullRequestNumber,
         pullRequestUrl: `https://github.com/${row.repositoryFullName}/pull/${row.pullRequestNumber}`,
         expiresAt: row.identityExpiresAt as string,
+        baseRef: row.baseRef,
+        headRef: row.headRef,
+        baseSha: row.baseSha,
+        headSha: row.headSha,
       }
     : { kind: 'anonymous' };
   return {

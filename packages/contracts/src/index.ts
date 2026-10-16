@@ -245,6 +245,8 @@ export const PullRequestFacts = Schema.Struct({
   draft: Schema.Boolean,
   baseSha: GitHubSha,
   headSha: GitHubSha,
+  baseRef: Schema.optional(Schema.NonEmptyString),
+  headRef: Schema.optional(Schema.NonEmptyString),
 });
 
 const PullRequestReviewEvent = Schema.Struct({
@@ -260,6 +262,8 @@ const PullRequestReviewEvent = Schema.Struct({
   draft: Schema.Boolean,
   baseSha: GitHubSha,
   headSha: GitHubSha,
+  baseRef: Schema.optional(Schema.NonEmptyString),
+  headRef: Schema.optional(Schema.NonEmptyString),
 });
 
 const IssueCommentReviewEvent = Schema.Struct({
@@ -476,6 +480,10 @@ export const PublicTaskIdentity = Schema.Union([
     pullRequestNumber: Schema.Int,
     pullRequestUrl: Schema.NonEmptyString,
     expiresAt: Schema.NonEmptyString,
+    baseRef: Schema.NullOr(Schema.NonEmptyString),
+    headRef: Schema.NullOr(Schema.NonEmptyString),
+    baseSha: Schema.NullOr(GitHubSha),
+    headSha: Schema.NullOr(GitHubSha),
   }),
   Schema.Struct({ kind: Schema.Literal('anonymous') }),
 ]);
