@@ -1,8 +1,13 @@
-import type { CleanupFilter, Filters, StatusFilter, View } from './types';
+import type { Filters, StatusFilter } from './types.ts';
 
-export const VIEWS: View[] = ['history', 'current', 'cleanup'];
-export const STATUSES: StatusFilter[] = ['all', 'active', 'published', 'failed', 'superseded'];
-export const CLEANUPS: CleanupFilter[] = ['all', 'pending', 'destroyed', 'failed', 'unknown'];
+export const STATUSES: StatusFilter[] = [
+  'all',
+  'queued',
+  'in_progress',
+  'published',
+  'failed',
+  'superseded',
+];
 
 export function dateBound(value: string | null, edge: 'start' | 'end'): string | null {
   if (!value) return null;
@@ -22,28 +27,31 @@ export function dateOnly(value: string | null): string | null {
 
 export function readFilters(search: string): Filters {
   const params = new URLSearchParams(search);
-  const rawView = params.get('view');
   const rawStatus = params.get('status');
+  const rawView = params.get('view');
   const rawCleanup = params.get('cleanup');
   const rawFrom = params.get('from');
   const rawTo = params.get('to');
+  const status: StatusFilter = STATUSES.includes(rawStatus as StatusFilter)
+    ? (rawStatus as StatusFilter)
+    : 'all';
+  const removedScope =
+    rawStatus === 'active' ||
+    (rawView !== null && rawView !== 'history') ||
+    (rawCleanup !== null && rawCleanup !== 'all');
   return {
-    view: VIEWS.includes(rawView as View) ? (rawView as View) : 'history',
-    status: STATUSES.includes(rawStatus as StatusFilter) ? (rawStatus as StatusFilter) : 'all',
-    cleanup: CLEANUPS.includes(rawCleanup as CleanupFilter) ? (rawCleanup as CleanupFilter) : 'all',
+    status,
     from: dateBound(rawFrom, 'start'),
     to: dateBound(rawTo, 'end'),
     fromDate: dateOnly(rawFrom),
     toDate: dateOnly(rawTo),
-    cursor: params.get('cursor') || null,
+    cursor: removedScope ? null : params.get('cursor') || null,
   };
 }
 
 export function buildFilterQuery(filters: Filters, includeCursor: boolean): string {
   const params = new URLSearchParams();
-  if (filters.view !== 'history') params.set('view', filters.view);
   if (filters.status !== 'all') params.set('status', filters.status);
-  if (filters.cleanup !== 'all') params.set('cleanup', filters.cleanup);
   if (filters.from) params.set('from', filters.from);
   if (filters.to) params.set('to', filters.to);
   if (includeCursor && filters.cursor) params.set('cursor', filters.cursor);

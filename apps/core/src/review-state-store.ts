@@ -336,6 +336,8 @@ const progressStageIndex = (stage: string | null): number =>
 const statusFilterValue = (status: PublicRunFilter['status']): ReviewRunStatus | undefined => {
   switch (status) {
     case 'active':
+    case 'queued':
+    case 'in_progress':
       return 'scheduled';
     case 'published':
       return 'completed';
@@ -362,6 +364,8 @@ const buildPublicRunWhere = (
     clauses.push('r.status = ?');
     params.push(status);
   }
+  if (filter.status === 'queued') clauses.push('r.runner_job_id IS NULL');
+  if (filter.status === 'in_progress') clauses.push('r.runner_job_id IS NOT NULL');
   if (view === 'current') {
     clauses.push(`r.status = 'scheduled'`);
   }

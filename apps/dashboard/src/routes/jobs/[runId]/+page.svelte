@@ -2,6 +2,8 @@
   import { afterNavigate } from '$app/navigation';
   import { page } from '$app/state';
   import {
+    Accordion,
+    AccordionItem,
     Button,
     ContainedList,
     ContainedListItem,
@@ -10,6 +12,7 @@
     StructuredListRow,
   } from 'carbon-components-svelte';
   import Badge from '#lib/components/Badge.svelte';
+  import Toolbar from '#lib/components/Toolbar.svelte';
   import { createDashboard, createExpiryClock } from '#lib/dashboard.svelte.ts';
   import {
     absoluteTime,
@@ -129,6 +132,7 @@
       <Button size="small" on:click={dash.refresh}>Retry</Button>
     </div>
   {/if}
+  <Toolbar lastGoodAt={dash.lastGoodAt} onRefresh={dash.refresh} />
   <section class="detail">
     <a class="bx--btn bx--btn--tertiary" href={backHref} data-back data-testid="back" onclick={onBack}>
       ← Back to history
@@ -136,7 +140,6 @@
     <h1>{title}</h1>
     <p>
       <Badge tone={statusTone(dash.data.task)}>{statusLabel(dash.data.task)}</Badge>
-      <Badge tone={cleanupTone(dash.data.task)}>{cleanupLabel(dash.data.task)}</Badge>
     </p>
     {#if identity}
       <p>
@@ -176,7 +179,7 @@
     <h2>Timing</h2>
     <StructuredList>
       {@render timeFact('Received', dash.data.task.receivedAt)}
-      {@render timeFact('Accepted', dash.data.task.claimedAt)}
+      {@render timeFact('Assigned', dash.data.task.claimedAt)}
       {@render timeFact('Finished', dash.data.task.terminalAt)}
       {@render textFact('Time in queue', formatDuration(dash.data.task.queueWaitMs))}
       {@render textFact('Total time', formatDuration(dash.data.task.totalDurationMs))}
@@ -186,18 +189,21 @@
       )}
     </StructuredList>
 
-    <h2>Execution details</h2>
-    <StructuredList>
-      {@render timeFact('Execution started', dash.data.task.executionStartedAt)}
-      {@render timeFact('Result processing observed', dash.data.task.submissionCompletedAt)}
-      {@render timeFact('Cleanup attempt finished', dash.data.task.cleanupCompletedAt)}
-    </StructuredList>
-
-    <h2>Cleanup</h2>
-    <div class="cleanup-block">
-      <Badge tone={cleanupTone(dash.data.task)}>{cleanupLabel(dash.data.task)}</Badge>
-      <p class="muted">{cleanupNote(dash.data.task)}</p>
-    </div>
+    <Accordion>
+      <AccordionItem title="Technical details">
+        <h3>Execution details</h3>
+        <StructuredList>
+          {@render timeFact('Runner execution started', dash.data.task.executionStartedAt)}
+          {@render timeFact('Result checks started', dash.data.task.submissionCompletedAt)}
+          {@render timeFact('Cleanup attempt finished', dash.data.task.cleanupCompletedAt)}
+        </StructuredList>
+        <h3>Cleanup</h3>
+        <div class="cleanup-block">
+          <Badge tone={cleanupTone(dash.data.task)}>{cleanupLabel(dash.data.task)}</Badge>
+          <p class="muted">{cleanupNote(dash.data.task)}</p>
+        </div>
+      </AccordionItem>
+    </Accordion>
   </section>
 {:else if dash.loading}
   <p class="muted" aria-busy="true">Loading reviews…</p>

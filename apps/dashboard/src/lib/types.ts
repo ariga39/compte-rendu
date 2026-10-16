@@ -30,14 +30,10 @@ export type TaskDetail = PublicTaskDetail;
 
 export type ProcessingStage = 'received' | 'publishing';
 
-export type View = 'history' | 'current' | 'cleanup';
-export type StatusFilter = 'all' | 'active' | 'published' | 'failed' | 'superseded';
-export type CleanupFilter = 'all' | 'pending' | 'destroyed' | 'failed' | 'unknown';
+export type StatusFilter = 'all' | 'queued' | 'in_progress' | 'published' | 'failed' | 'superseded';
 
 export interface Filters {
-  view: View;
   status: StatusFilter;
-  cleanup: CleanupFilter;
   from: string | null;
   to: string | null;
   fromDate: string | null;
@@ -55,7 +51,6 @@ export interface OverviewModel {
   kind: 'overview';
   overview: Overview;
   current: { tasks: DatedTask[]; nextCursor: string | null };
-  cleanup: { tasks: DatedTask[]; nextCursor: string | null };
 }
 
 export interface HistoryModel {

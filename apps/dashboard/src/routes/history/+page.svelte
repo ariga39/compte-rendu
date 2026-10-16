@@ -15,7 +15,7 @@
   import { absoluteTime } from '#lib/format.ts';
   import { historyScroll } from '#lib/history-scroll.ts';
   import { buildHistory, historyActive, identityDeadline } from '#lib/model.ts';
-  import type { CleanupFilter, HistoryModel, StatusFilter, View } from '#lib/types.ts';
+  import type { HistoryModel, StatusFilter } from '#lib/types.ts';
 
   let search = $derived(page.url.search);
   let filters = $derived(readFilters(search));
@@ -52,7 +52,7 @@
 
   const clock = createExpiryClock();
 
-  let draft = $state({ view: 'history', status: 'all', cleanup: 'all', from: '', to: '' });
+  let draft = $state({ status: 'all', from: '', to: '' });
 
   $effect(() => {
     const model = dash.data;
@@ -65,9 +65,7 @@
 
   $effect(() => {
     draft = {
-      view: filters.view,
       status: filters.status,
-      cleanup: filters.cleanup,
       from: filters.fromDate ?? '',
       to: filters.toDate ?? '',
     };
@@ -83,9 +81,7 @@
   function apply() {
     const query = buildFilterQuery(
       {
-        view: draft.view as View,
         status: draft.status as StatusFilter,
-        cleanup: draft.cleanup as CleanupFilter,
         from: dateBound(draft.from || null, 'start'),
         to: dateBound(draft.to || null, 'end'),
         fromDate: null,
@@ -109,27 +105,19 @@
 
 <header class="page-head">
   <h1>Review history</h1>
+  {#if dash.data}
+    <Toolbar lastGoodAt={dash.lastGoodAt} onRefresh={dash.refresh} />
+  {/if}
 </header>
 
 <section class="filter-bar">
-  <Select name="view" bind:selected={draft.view} labelText="View">
-    <SelectItem value="history" text="All history" />
-    <SelectItem value="current" text="Current reviews" />
-    <SelectItem value="cleanup" text="Cleanup attention" />
-  </Select>
-  <Select name="status" bind:selected={draft.status} labelText="Outcome">
-    <SelectItem value="all" text="All outcomes" />
-    <SelectItem value="active" text="Queued or in progress" />
+  <Select name="status" bind:selected={draft.status} labelText="Status">
+    <SelectItem value="all" text="All statuses" />
+    <SelectItem value="queued" text="Queued" />
+    <SelectItem value="in_progress" text="In progress" />
     <SelectItem value="published" text="Published" />
     <SelectItem value="failed" text="Failed" />
     <SelectItem value="superseded" text="Superseded" />
-  </Select>
-  <Select name="cleanup" bind:selected={draft.cleanup} labelText="Cleanup">
-    <SelectItem value="all" text="All cleanup" />
-    <SelectItem value="pending" text="Pending" />
-    <SelectItem value="destroyed" text="Cleaned up" />
-    <SelectItem value="failed" text="Failed" />
-    <SelectItem value="unknown" text="Not recorded" />
   </Select>
   <div class="bx--form-item">
     <label class="bx--label" for="filter-from">From (UTC)</label>
@@ -139,10 +127,10 @@
     <label class="bx--label" for="filter-to">To (UTC)</label>
     <input id="filter-to" class="bx--text-input" type="date" name="to" bind:value={draft.to} />
   </div>
-  <Button size="small" data-testid="apply" on:click={apply}>Apply filters</Button>
+  <Button size="field" data-testid="apply" on:click={apply}>Apply filters</Button>
 </section>
 
-{#if dash.error}
+{#if dash.error && dash.data}
   <div role="alert" data-testid="error-notice" class="notice error">
     {dash.error === 'offline'
       ? 'You are offline. Updates will resume when you reconnect.'
@@ -153,7 +141,6 @@
 {/if}
 
 {#if dash.data}
-  <Toolbar lastGoodAt={dash.lastGoodAt} onRefresh={dash.refresh} />
   <section>
     {#if dash.data.page.tasks.length}
       <TaskTable tasks={dash.data.page.tasks} now={clock.now} stale={dash.error !== null} />
@@ -186,7 +173,7 @@
       {dash.error === 'offline' ? 'You are offline.' : 'Could not load reviews right now.'}
     </p>
     <div class="toolbar">
-      <Button size="small" on:click={dash.refresh}>Try again</Button>
+      <Button size="small" on:click={dash.refresh}>Retry</Button>
     </div>
   </section>
 {/if}

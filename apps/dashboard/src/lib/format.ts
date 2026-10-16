@@ -8,11 +8,11 @@ export const STATUS_LABEL: Record<string, string> = {
 };
 
 export const STAGE_LABEL: Record<string, string> = {
-  checkout: 'Checkout',
-  sandbox: 'Preparing sandbox',
+  checkout: 'Fetching code',
+  sandbox: 'Preparing environment',
   agent: 'Reviewing',
-  evidence: 'Archiving evidence',
-  cleanup: 'Cleaning up',
+  evidence: 'Saving run records',
+  cleanup: 'Finishing up',
 };
 
 export const PROCESSING_STAGE_LABEL: Record<string, string> = {
@@ -30,18 +30,18 @@ export type BadgeTone = 'info' | 'good' | 'bad' | 'warn' | 'muted';
 export const STATUS_TONE: Record<string, BadgeTone> = {
   completed: 'good',
   failed: 'bad',
-  superseded: 'warn',
+  superseded: 'muted',
   scheduled: 'info',
 };
 
 export function milestoneLabel(stage: ExecutionStage | ProcessingStage): string {
-  return STAGE_LABEL[stage] ?? PROCESSING_STAGE_LABEL[stage] ?? stage;
+  return STAGE_LABEL[stage] ?? PROCESSING_STAGE_LABEL[stage] ?? 'Not recorded';
 }
 
 export function statusLabel(task: TaskState): string {
   if (task.dispatch === 'claimed') return 'In progress';
   if (task.dispatch === 'queued') return 'Queued';
-  return STATUS_LABEL[task.status] ?? task.status;
+  return STATUS_LABEL[task.status] ?? 'Not recorded';
 }
 
 export function statusTone(task: TaskState): BadgeTone {
@@ -82,62 +82,74 @@ export function cleanupNote(task: TaskState): string {
 export function taskLabel(task: TaskState): string {
   if (task.processing) return PROCESSING_LABEL[task.processing] ?? 'Processing result';
   if (task.dispatch === 'claimed') {
-    return task.stage ? (STAGE_LABEL[task.stage] ?? task.stage) : 'In progress';
+    return task.stage ? (STAGE_LABEL[task.stage] ?? 'Not recorded') : 'In progress';
   }
   if (task.dispatch === 'queued') return 'Queued';
-  return STATUS_LABEL[task.status] ?? task.status;
+  return STATUS_LABEL[task.status] ?? 'Not recorded';
 }
 
 export function progressText(task: TaskState): string {
   return task.lastProgressAt
     ? `Last progress update ${relativeTime(task.lastProgressAt)}`
-    : `Awaiting first update · accepted ${relativeTime(task.claimedAt)}`;
+    : `Awaiting first update · assigned ${relativeTime(task.claimedAt)}`;
+}
+
+export function statusDetail(task: TaskState): string | null {
+  if (task.processing === 'publishing') return 'Publishing';
+  if (task.processing === 'received') return 'Processing result';
+  if (task.dispatch === 'queued') return 'Waiting to start';
+  if (task.dispatch === 'claimed') {
+    const stage = task.stage ? `${STAGE_LABEL[task.stage] ?? task.stage} · ` : '';
+    return `${stage}${progressText(task)}`;
+  }
+  return null;
 }
 
 export function outcomeSummary(task: TaskState): string {
   if (task.processing) return PROCESSING_LABEL[task.processing] ?? 'Processing result';
   if (task.dispatch === 'claimed') {
     return task.stage
-      ? `In progress: ${STAGE_LABEL[task.stage] ?? task.stage}.`
+      ? `In progress: ${STAGE_LABEL[task.stage] ?? 'Not recorded'}.`
       : 'In progress; awaiting first progress update.';
   }
   if (task.dispatch === 'queued') return 'Waiting to start.';
   if (task.status === 'completed') return 'Review published to GitHub.';
-  if (task.status === 'failed') return 'Review ended with an error.';
+  if (task.status === 'failed') return 'Did not finish successfully.';
   if (task.status === 'superseded') return 'A newer revision replaced this review.';
   return STATUS_LABEL[task.status] ?? 'Not recorded';
 }
 
 export const FAILURE_PHASE_LABEL: Record<string, string> = {
-  scheduling: 'Scheduling',
-  checkout: 'Checkout',
-  sandbox: 'Sandbox preparation',
-  agent: 'Review',
-  output_validation: 'Output validation',
-  evidence: 'Evidence handling',
-  callback: 'Result callback',
-  publication: 'GitHub publication',
-  cleanup: 'Cleanup',
-  unknown: 'Failure reason not recorded',
+  scheduling: 'Scheduling review',
+  checkout: 'Fetching code',
+  sandbox: 'Preparing environment',
+  agent: 'Reviewing',
+  output_validation: 'Checking result',
+  evidence: 'Saving run records',
+  callback: 'Delivering result',
+  publication: 'Publishing',
+  cleanup: 'Finishing up',
+  unknown: 'Not recorded',
 };
 
 export const FAILURE_REASON_LABEL: Record<string, string> = {
-  checkout: 'Checkout could not be completed',
-  sandbox: 'The sandbox could not be prepared',
+  checkout: 'Could not fetch the code',
+  sandbox: 'Could not prepare the review environment',
   agent: 'The review agent did not complete',
   timeout: 'The review timed out',
   invalid_output: 'The submitted output was not valid',
-  evidence: 'Evidence could not be stored',
-  cleanup: 'Cleanup could not be completed',
+  evidence: 'Could not save the run records',
+  cleanup: 'Could not remove the review environment',
   callback: 'The result could not be delivered',
   marker_lookup_failed: 'Could not verify an earlier publication',
-  publication_uncertain: 'Publication could not be confirmed',
+  publication_uncertain:
+    'Publication could not be confirmed; the review may still have been posted.',
   completion_failed: 'Completion could not be confirmed',
   unknown: 'Reason not recorded',
 };
 
 export function failurePhaseLabel(phase: string): string {
-  return FAILURE_PHASE_LABEL[phase] ?? 'Failure reason not recorded';
+  return FAILURE_PHASE_LABEL[phase] ?? 'Not recorded';
 }
 
 export function failureReasonLabel(reason: string): string {

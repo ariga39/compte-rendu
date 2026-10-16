@@ -82,7 +82,6 @@ export function isTaskActive(task: TaskState): boolean {
 export function buildOverview(results: ApiResult[], timing: Timing): OverviewModel {
   const overview = decodeOverview(results[0]?.data);
   const current = decodeHistoryPage(results[1]?.data);
-  const cleanup = decodeHistoryPage(results[2]?.data);
   return {
     kind: 'overview',
     overview,
@@ -90,15 +89,11 @@ export function buildOverview(results: ApiResult[], timing: Timing): OverviewMod
       tasks: decorateTasks(current.tasks, current.generatedAt, timing),
       nextCursor: current.nextCursor,
     },
-    cleanup: {
-      tasks: decorateTasks(cleanup.tasks, cleanup.generatedAt, timing),
-      nextCursor: cleanup.nextCursor,
-    },
   };
 }
 
 export function overviewActive(model: OverviewModel): boolean {
-  return model.current.tasks.some(isTaskActive) || model.cleanup.tasks.length > 0;
+  return model.current.tasks.some(isTaskActive);
 }
 
 export function buildHistory(results: ApiResult[], timing: Timing): HistoryModel {

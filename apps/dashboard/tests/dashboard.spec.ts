@@ -112,14 +112,14 @@ test('overview requests its read-only endpoints and renders counts and lists', a
   const requested = harness.state.requests.slice();
   expect(requested).toContain('/api/dashboard');
   expect(requested).toContain('/api/jobs?view=current');
-  expect(requested).toContain('/api/jobs?view=cleanup');
+  expect(requested).not.toContain('/api/jobs?view=cleanup');
   expect(await page.locator('[data-testid="stat"] strong').first().textContent()).toBe('2');
   const text = await page.locator('#content').textContent();
   expect(text).toContain('Anonymous review');
-  expect(text).toContain('Cleanup needs attention');
+  expect(text).not.toContain('Cleanup needs attention');
 });
 
-test('overview links truncated lists to the matching filtered history view', async ({
+test('overview links truncated current work to a status-filtered history view', async ({
   page,
   harness,
   base,
@@ -130,27 +130,14 @@ test('overview links truncated lists to the matching filtered history view', asy
       return ok(overviewData({ queued: 25, claimed: 0, publishedLast24h: 0, failedLast24h: 0 }, 2));
     }
     if (url.searchParams.get('view') === 'current') return ok(historyPage(current25, 'CUR-CURSOR'));
-    if (url.searchParams.get('view') === 'cleanup') {
-      return ok(historyPage([task({ runId: 'c-1' })], 'CLN-CURSOR'));
-    }
-    return ok(historyPage([]));
+    return ok(historyPage(current25, 'CUR-CURSOR'));
   });
   await page.goto(`${base}/`);
   await page.waitForSelector('[data-testid="view-all-current"]');
   await page.click('[data-testid="view-all-current"]');
-  await page.waitForFunction(
-    () => location.pathname === '/history' && location.search.includes('view=current'),
-  );
+  await page.waitForFunction(() => location.pathname === '/history' && location.search === '');
   await page.waitForSelector('[data-testid="next-page"]');
-  expect(harness.state.requests[harness.state.requests.length - 1]).toBe('/api/jobs?view=current');
-  await page.goto(`${base}/`);
-  await page.waitForSelector('[data-testid="view-all-cleanup"]');
-  await page.click('[data-testid="view-all-cleanup"]');
-  await page.waitForFunction(
-    () => location.pathname === '/history' && location.search.includes('view=cleanup'),
-  );
-  await page.waitForSelector('[data-testid="next-page"]');
-  expect(harness.state.requests[harness.state.requests.length - 1]).toBe('/api/jobs?view=cleanup');
+  expect(harness.state.requests[harness.state.requests.length - 1]).toBe('/api/jobs');
 });
 
 test('a same-day date filter includes the whole UTC day', async ({ page, harness, base }) => {
@@ -241,7 +228,7 @@ test('a failed refresh backs off before the next attempt', async ({ page, harnes
   harness.setHandler(() => ({ status: 503 }));
   await page.clock.install();
   await page.goto(`${base}/`);
-  await page.waitForSelector('[data-testid="error-notice"]');
+  await page.getByRole('button', { name: 'Retry' }).waitFor();
   const count = harness.state.requests.length;
   await page.clock.fastForward(20000);
   expect(harness.state.requests.length).toBe(count);
@@ -257,7 +244,7 @@ test('a longer Retry-After deadline is honoured over the backoff', async ({
   harness.setHandler(() => ({ status: 429, retryAfter: 60 }));
   await page.clock.install();
   await page.goto(`${base}/`);
-  await page.waitForSelector('[data-testid="error-notice"]');
+  await page.getByRole('button', { name: 'Retry' }).waitFor();
   const count = harness.state.requests.length;
   await page.clock.fastForward(35000);
   expect(harness.state.requests.length).toBe(count);
@@ -274,9 +261,9 @@ test('navigation cancels the previous in-flight request', async ({ page, harness
     promise: gate.then(() => ok(historyPage([task({ runId: 'x' })]))),
   }));
   await page.goto(`${base}/`);
-  await harness.waitFor(() => harness.state.requests.length >= 3);
+  await harness.waitFor(() => harness.state.requests.length >= 2);
   await page.click('nav a[href="/history"]');
-  await harness.waitFor(() => harness.state.aborted >= 3, 5000);
+  await harness.waitFor(() => harness.state.aborted >= 2, 5000);
   expect(harness.state.active).toBeLessThanOrEqual(3);
   release();
 });
@@ -291,11 +278,11 @@ test('a failed overview request aborts its stalled siblings and the next refresh
     return { promise: new Promise<ApiPayload>(() => undefined) };
   });
   await page.goto(`${base}/`);
-  await page.waitForSelector('[data-testid="error-notice"]');
+  await page.getByRole('button', { name: 'Retry' }).waitFor();
   await harness.waitFor(() => harness.state.aborted >= 2, 4000);
   const afterFailure = harness.state.requests.length;
   harness.setHandler(defaultOverviewHandler);
-  await page.click('[data-testid="error-notice"] button');
+  await page.getByRole('button', { name: 'Retry' }).click();
   await page.waitForSelector('[data-testid="stats"]');
   expect(harness.state.requests.length).toBeGreaterThan(afterFailure);
   expect(harness.state.active).toBeLessThanOrEqual(3);
@@ -316,10 +303,10 @@ test('repeated manual refresh clicks stay single-flight', async ({ page, harness
     ),
   }));
   await page.click('[data-testid="refresh"]');
-  await harness.waitFor(() => harness.state.requests.length >= afterInitial + 3);
+  await harness.waitFor(() => harness.state.requests.length >= afterInitial + 2);
   await page.click('[data-testid="refresh"]');
   await sleep(200);
-  expect(harness.state.requests.length).toBe(afterInitial + 3);
+  expect(harness.state.requests.length).toBe(afterInitial + 2);
   release();
 });
 
@@ -331,13 +318,9 @@ test('a request beyond the 15s browser timeout surfaces an error', async ({
   harness.setHandler(() => ({ promise: new Promise<ApiPayload>(() => undefined) }));
   await page.clock.install();
   await page.goto(`${base}/`);
-  await harness.waitFor(() => harness.state.requests.length >= 3, 4000);
+  await harness.waitFor(() => harness.state.requests.length >= 2, 4000);
   await page.clock.runFor(16000);
-  await expect
-    .poll(() => page.locator('[data-testid="error-notice"]').count(), {
-      timeout: 4000,
-    })
-    .toBe(1);
+  await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible({ timeout: 4000 });
 });
 
 test('returning from a hidden tab refreshes immediately', async ({ page, harness, base }) => {
@@ -691,8 +674,8 @@ test('detail renders milestones, failure category and the public PR link', async
   await page.waitForSelector('.timeline');
   const text = await page.locator('#content').textContent();
   expect(text).toContain('acme/widgets #7');
-  expect(text).toContain('Checkout');
-  expect(text).toContain('Checkout could not be completed');
+  expect(text).toContain('Fetching code');
+  expect(text).toContain('Could not fetch the code');
   expect(await page.locator('.timeline li strong').first().textContent()).toBe('Reviewing');
   expect(await page.locator('.detail a[target="_blank"]').getAttribute('href')).toBe(
     'https://github.com/acme/widgets/pull/7',
@@ -747,7 +730,7 @@ test('detail shows DB processing milestones and neutral legacy observations', as
   await page.goto(`${base}/jobs/run-sup`);
   await page.waitForSelector('.timeline');
   const labels = await page.locator('.timeline li strong').allTextContents();
-  expect(labels).toEqual(['Checkout', 'Result received', 'Publishing']);
+  expect(labels).toEqual(['Fetching code', 'Result received', 'Publishing']);
   expect(
     await page
       .locator('.fact', { hasText: 'Cleanup attempt finished' })
@@ -757,57 +740,65 @@ test('detail shows DB processing milestones and neutral legacy observations', as
   const text = await page.locator('#content').textContent();
   expect(text).toContain('Cleanup failed');
   expect(text).not.toContain('Cleaned up');
-  expect(text).toContain('Result processing observed');
+  expect(text).toContain('Result checks started');
   expect(text).not.toContain('Submission finished reported');
 });
 
-test('cleanup state is labelled per review stage', async ({ page, harness, base }) => {
-  harness.setHandler(() =>
-    ok(
-      historyPage([
-        task({
-          runId: 'active-pending',
-          status: 'scheduled',
-          dispatch: 'claimed',
-          claimedAt: NOW,
-          stage: 'agent',
-          cleanup: 'pending',
-        }),
-        task({
-          runId: 'cleanup-stage',
-          status: 'scheduled',
-          dispatch: 'claimed',
-          claimedAt: NOW,
-          stage: 'cleanup',
-          cleanup: 'pending',
-        }),
-        task({
-          runId: 'terminal-pending',
-          status: 'completed',
-          dispatch: null,
-          cleanup: 'pending',
-        }),
-        task({
-          runId: 'terminal-unknown',
-          status: 'completed',
-          dispatch: null,
-          cleanup: 'unknown',
-        }),
-      ]),
-    ),
-  );
-  await page.goto(`${base}/history`);
-  await page.waitForSelector('[data-testid="task-link"][data-run-id="active-pending"]');
-  const rowText = async (runId: string) =>
-    page
-      .locator('[data-testid="task"]', {
-        has: page.locator(`[data-testid="task-link"][data-run-id="${runId}"]`),
-      })
-      .textContent();
-  expect(await rowText('active-pending')).toContain('Cleanup after review');
-  expect(await rowText('cleanup-stage')).toContain('Cleaning up');
-  expect(await rowText('terminal-pending')).toContain('Cleanup pending');
-  expect(await rowText('terminal-unknown')).toContain('Cleanup not recorded');
+test('detail shows cleanup state in technical details', async ({ page, harness, base }) => {
+  const cases: Array<{ value: PublicTaskState; label: string }> = [
+    {
+      value: task({
+        runId: 'r',
+        dispatch: 'claimed',
+        claimedAt: NOW,
+        stage: 'agent',
+        cleanup: 'pending',
+      }),
+      label: 'Cleanup after review',
+    },
+    {
+      value: task({
+        runId: 'r',
+        dispatch: 'claimed',
+        claimedAt: NOW,
+        stage: 'cleanup',
+        cleanup: 'pending',
+      }),
+      label: 'Cleaning up',
+    },
+    {
+      value: task({
+        runId: 'r',
+        status: 'completed',
+        dispatch: null,
+        terminalAt: NOW,
+        cleanup: 'pending',
+      }),
+      label: 'Cleanup pending',
+    },
+    {
+      value: task({
+        runId: 'r',
+        status: 'completed',
+        dispatch: null,
+        terminalAt: NOW,
+        cleanup: 'unknown',
+      }),
+      label: 'Cleanup not recorded',
+    },
+  ];
+  for (const item of cases) {
+    harness.setHandler((url, request) =>
+      url.pathname.startsWith('/api/jobs/')
+        ? ok(detailData(item.value, [], []))
+        : defaultOverviewHandler(url, request),
+    );
+    await page.goto(`${base}/jobs/r`);
+    await page.waitForSelector('.detail');
+    await page.locator('.bx--accordion__heading').click();
+    await page.waitForSelector('.cleanup-block');
+    expect(await page.locator('.cleanup-block').textContent()).toContain(item.label);
+  }
 });
 
 test('detail timeline falls back to DB processing timestamps when the milestone array is empty', async ({
@@ -938,9 +929,9 @@ test('help page is reachable from the primary nav, survives a reload and anchors
   await page.waitForFunction(() => location.pathname === '/help');
   await page.waitForSelector('#overview-counts');
   expect(await page.locator('nav a[href="/help"]').getAttribute('aria-current')).toBe('page');
-  await page.click('a[href="#cleanup-attention"]');
-  await page.waitForFunction(() => location.hash === '#cleanup-attention');
-  expect(await page.locator('#cleanup-attention').isVisible()).toBe(true);
+  await page.click('a[href="#technical-details"]');
+  await page.waitForFunction(() => location.hash === '#technical-details');
+  expect(await page.locator('#technical-details').isVisible()).toBe(true);
   await page.goto(`${base}/help`);
   await page.waitForSelector('#overview-counts');
   expect(await page.locator('nav a[href="/help"]').getAttribute('aria-current')).toBe('page');
@@ -984,6 +975,165 @@ test('primary navigation is operable by keyboard', async ({ page, harness, base 
   }
 });
 
+test('footer links the deployed commit', async ({ page, harness, base }) => {
+  harness.setHandler(defaultOverviewHandler);
+  await page.goto(`${base}/`);
+  await page.waitForSelector('[data-testid="stats"]');
+  const link = page.locator('[data-testid="commit-link"]');
+  await expect(link).toBeVisible();
+  expect(await link.getAttribute('href')).toMatch(
+    /^https:\/\/github\.com\/ariga39\/compte-rendu\/commit\/[0-9a-f]{40}$/,
+  );
+  expect((await link.textContent())?.trim().length).toBe(7);
+});
+
+test('top-banner refresh follows the current data page and hides on Help', async ({
+  page,
+  harness,
+  base,
+}) => {
+  harness.setHandler((url, request) =>
+    url.pathname.startsWith('/api/jobs/')
+      ? ok(detailData(task({ runId: 'run-9' })))
+      : url.pathname === '/api/jobs' && url.search === ''
+        ? ok(historyPage([task({ runId: 'run-9' })]))
+        : defaultOverviewHandler(url, request),
+  );
+  const bannerRefresh = page.locator('.header-refresh [data-testid="refresh"]');
+  await page.goto(`${base}/`);
+  await page.waitForSelector('[data-testid="stats"]');
+  await expect(bannerRefresh).toBeVisible();
+  const overviewRequests = harness.state.requests.length;
+  await bannerRefresh.click();
+  await harness.waitFor(() => harness.state.requests.length > overviewRequests);
+  expect(harness.state.requests.slice(overviewRequests)).toContain('/api/dashboard');
+
+  await page.click('nav a[href="/history"]');
+  await page.waitForFunction(() => location.pathname === '/history');
+  await page.waitForSelector('[data-testid="task"]');
+  const historyRequests = harness.state.requests.length;
+  await bannerRefresh.click();
+  await harness.waitFor(() => harness.state.requests.length > historyRequests);
+  expect(harness.state.requests.at(-1)).toBe('/api/jobs');
+
+  await page.click('[data-testid="task-link"]');
+  await page.waitForSelector('.detail');
+  await expect(bannerRefresh).toBeVisible();
+  const detailRequests = harness.state.requests.length;
+  await bannerRefresh.focus();
+  await page.keyboard.press('Enter');
+  await harness.waitFor(() => harness.state.requests.length > detailRequests);
+  expect(harness.state.requests.at(-1)).toBe('/api/jobs/run-9');
+  await expect(bannerRefresh).toBeFocused();
+
+  await page.click('nav a[href="/help"]');
+  await page.waitForSelector('#overview-counts');
+  await expect(page.locator('.header-refresh')).toHaveCount(0);
+
+  await page.click('nav a[href="/"]');
+  await page.waitForSelector('[data-testid="stats"]');
+  await expect(bannerRefresh).toBeVisible();
+});
+
+test('history controls align and table rows are readable', async ({ page, harness, base }) => {
+  harness.setHandler((url, request) =>
+    url.pathname === '/api/jobs' && url.search === ''
+      ? ok(
+          historyPage([
+            task({ runId: 'h-1', dispatch: 'claimed', claimedAt: NOW }),
+            task({ runId: 'h-2', dispatch: 'claimed', claimedAt: NOW }),
+          ]),
+        )
+      : defaultOverviewHandler(url, request),
+  );
+  await page.goto(`${base}/history`);
+  await page.waitForSelector('[data-testid="apply"]');
+  const apply = await page.locator('[data-testid="apply"]').boundingBox();
+  const select = await page.locator('select[name="status"]').boundingBox();
+  expect(apply).not.toBeNull();
+  expect(select).not.toBeNull();
+  expect(Math.abs((apply?.height ?? 0) - (select?.height ?? 0))).toBeLessThanOrEqual(2);
+  expect(apply?.height ?? 0).toBeGreaterThanOrEqual(38);
+  const rows = page.locator('[data-testid="task"]');
+  const first = await rows.nth(0).boundingBox();
+  const second = await rows.nth(1).boundingBox();
+  expect(first?.height ?? 0).toBeGreaterThanOrEqual(60);
+  expect(second?.y ?? 0).toBeGreaterThanOrEqual((first?.y ?? 0) + (first?.height ?? 0));
+});
+
+test('result processing takes precedence over the last execution stage', async ({
+  page,
+  harness,
+  base,
+}) => {
+  harness.setHandler((url, request) =>
+    url.pathname === '/api/jobs' && url.search === ''
+      ? ok(
+          historyPage([
+            task({
+              runId: 'h-1',
+              dispatch: 'claimed',
+              claimedAt: NOW,
+              stage: 'cleanup',
+              processing: 'publishing',
+              cleanup: 'pending',
+            }),
+          ]),
+        )
+      : defaultOverviewHandler(url, request),
+  );
+  await page.goto(`${base}/history`);
+  await page.waitForSelector('[data-testid="task"]');
+  const status = await page
+    .locator('[data-testid="task"]')
+    .first()
+    .locator('td')
+    .nth(1)
+    .textContent();
+  expect(status).toContain('Publishing');
+  expect(status).not.toContain('Finishing up');
+});
+
+test('history keeps a readable review column on narrow screens', async ({
+  page,
+  harness,
+  base,
+}) => {
+  harness.setHandler((url, request) =>
+    url.pathname === '/api/jobs' && url.search === ''
+      ? ok(
+          historyPage([
+            task({
+              runId: 'h-1',
+              dispatch: 'claimed',
+              claimedAt: NOW,
+              identity: {
+                kind: 'public',
+                repositoryFullName: 'example/very-long-repository-name-here',
+                pullRequestNumber: 12345,
+                pullRequestUrl:
+                  'https://github.com/example/very-long-repository-name-here/pull/12345',
+                expiresAt: '2026-10-16T12:05:00.000Z',
+              },
+            }),
+          ]),
+        )
+      : defaultOverviewHandler(url, request),
+  );
+  await page.setViewportSize({ width: 360, height: 640 });
+  await page.goto(`${base}/history`);
+  await page.waitForSelector('[data-testid="task"]');
+  const cell = page.locator('[data-testid="task"]').first().locator('td').first();
+  const cellBox = await cell.boundingBox();
+  expect(cellBox?.width ?? 0).toBeGreaterThanOrEqual(200);
+  const titleBox = await page.locator('[data-testid="task-link"]').boundingBox();
+  expect(titleBox?.width ?? 0).toBeGreaterThanOrEqual(120);
+  const overflow = await page.evaluate(
+    () => document.documentElement.scrollWidth - window.innerWidth,
+  );
+  expect(overflow).toBeLessThanOrEqual(1);
+});
+
 test('history renders a semantic table with named columns', async ({ page, harness, base }) => {
   await page.clock.install({ time: new Date(NOW) });
   harness.setHandler((url, request) =>
@@ -1007,11 +1157,10 @@ test('history renders a semantic table with named columns', async ({ page, harne
   expect(await page.locator('thead th').allTextContents()).toEqual([
     'Review',
     'Status',
-    'Cleanup',
     'Received',
     'Pull request',
   ]);
-  await expect(page.locator('[data-testid="task"]').first().locator('td')).toHaveCount(5);
+  await expect(page.locator('[data-testid="task"]').first().locator('td')).toHaveCount(4);
   for (const header of await page.getByRole('columnheader').all()) {
     await expect(header).toBeInViewport({ ratio: 1 });
   }

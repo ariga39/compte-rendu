@@ -8,16 +8,7 @@
     TableHeader,
     TableRow,
   } from 'carbon-components-svelte';
-  import {
-    absoluteTime,
-    cleanupLabel,
-    cleanupTone,
-    progressText,
-    relativeTime,
-    statusLabel,
-    statusTone,
-    taskLabel,
-  } from '#lib/format.ts';
+  import { absoluteTime, relativeTime, statusDetail, statusLabel, statusTone } from '#lib/format.ts';
   import { liveIdentity } from '#lib/model.ts';
   import type { DatedTask, PublicIdentity } from '#lib/types.ts';
   import Badge from './Badge.svelte';
@@ -35,12 +26,11 @@
 </script>
 
 <TableContainer>
-  <Table>
+  <Table size="tall">
     <TableHead>
       <TableRow>
         <TableHeader>Review</TableHeader>
         <TableHeader>Status</TableHeader>
-        <TableHeader>Cleanup</TableHeader>
         <TableHeader>Received</TableHeader>
         <TableHeader>Pull request</TableHeader>
       </TableRow>
@@ -50,21 +40,20 @@
         <TableRow data-testid="task">
           <TableCell>
             <a
-              class="review-link"
+              class="task-link"
               data-testid="task-link"
               data-run-id={task.runId}
               href={`/jobs/${encodeURIComponent(task.runId)}`}
             >
               {titleOf(task)}
             </a>
-            <p class="task-meta">
-              {taskLabel(task)} · {task.dispatch === 'claimed'
-                ? progressText(task)
-                : `received ${relativeTime(task.receivedAt)}`}
-            </p>
           </TableCell>
-          <TableCell><Badge tone={statusTone(task)}>{statusLabel(task)}</Badge></TableCell>
-          <TableCell><Badge tone={cleanupTone(task)}>{cleanupLabel(task)}</Badge></TableCell>
+          <TableCell>
+            <Badge tone={statusTone(task)}>{statusLabel(task)}</Badge>
+            {#if statusDetail(task)}
+              <p class="task-meta">{statusDetail(task)}</p>
+            {/if}
+          </TableCell>
           <TableCell>
             <time datetime={task.receivedAt} title={absoluteTime(task.receivedAt)}>
               {relativeTime(task.receivedAt)}
@@ -80,6 +69,8 @@
               >
                 Pull request
               </a>
+            {:else}
+              —
             {/if}
           </TableCell>
         </TableRow>
@@ -87,11 +78,3 @@
     </TableBody>
   </Table>
 </TableContainer>
-
-<style>
-  .review-link {
-    display: block;
-    max-width: 24rem;
-    overflow-wrap: anywhere;
-  }
-</style>
