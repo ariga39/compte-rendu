@@ -43,7 +43,7 @@
 
 {#if dash.data}
   <Toolbar lastGoodAt={dash.lastGoodAt} onRefresh={dash.refresh} />
-  <section data-testid="stats">
+  <section class="stats-grid" data-testid="stats">
     <Grid>
       <Row>
         <Column sm={2} md={2} lg={4}>
