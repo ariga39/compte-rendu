@@ -495,6 +495,7 @@ MODEL_SECRET_COMMAND=<host-secret-resolver-command>
 RUNNER_AUTH_TOKEN=<runner-application-token>
 RUNNER_CALLBACK_URL=https://<INGRESS_HOST>/runner-callback
 RUNNER_CALLBACK_TOKEN=<static-runner-callback-token>
+RUNNER_CONCURRENCY=1
 ```
 
 Confirm the file is still mode `0600` after editing; never commit it. The
@@ -532,6 +533,22 @@ origin as `RUNNER_CALLBACK_URL`; no separate claim URL environment variable is
 required in production. `RUNNER_CALLBACK_TOKEN` authenticates both public
 Runner routes; keep it identical to the ingress secret and do not create a
 second claim bearer.
+
+`RUNNER_CONCURRENCY` is an optional positive integer that bounds how many
+independent review Jobs the Runner executes at once; it defaults to `1`, which
+preserves the previous serialized behavior. Set it to `2` or higher to overlap
+reviews for different pull requests. Same repository/PR work is always
+serialized until the prior Sandbox is confirmed destroyed, and a slot is held
+through evidence archival, Sandbox cleanup, and the terminal callback. An
+empty, zero, negative, fractional, or non-numeric value is rejected before
+the Runner claims or admits any work. Size the host for the chosen value: each
+concurrent review runs its own Sandbox with `--cpus 4` and `--memory 8g` plus
+one 30-minute agent budget, so `RUNNER_CONCURRENCY=2` needs roughly twice the
+CPU, memory, disk, and model throughput of the default. Prefer the smallest
+value that removes head-of-line blocking. This setting reuses the existing D1
+durable queue and adds no new queue, scheduler, or retry system. The Runner
+reads it once at startup, so change it in the environment file and restart the
+Runner to apply a new value.
 
 ### KVM permissions and the persistent Runner service
 

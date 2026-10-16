@@ -268,8 +268,14 @@ only then resolves the repository URL and mints the scoped read token. A job
 is one immutable review attempt; the Runner reports terminal status through the
 callback after validation and Docker Sandbox cleanup. Core does not run a
 generic scheduler, use Cloudflare Queues/Redis, or reconcile orphaned rows.
-The Runner polls only while idle and starts at most one active Job; it asks
-for the next Job only after terminal cleanup/callback. A fresh Runner process
+The Runner fills available slots up to the configured positive-integer
+`RUNNER_CONCURRENCY` (default 1; an invalid setting fails before any claim or
+admission). It runs independent pull-request reviews in parallel, keeps each
+slot occupied through evidence archival, Sandbox cleanup, and the terminal
+callback, and asks for the next Job only while capacity remains; a slot
+reserved by an in-flight claim cannot be taken by a direct admission. Same
+repository/PR work stays serialized until the prior Sandbox is confirmed
+destroyed, while unrelated pull requests progress. A fresh Runner process
 may claim a later unclaimed row even when an abandoned scheduled row retains a
 Job id.
 The shared review policy gives each Runner attempt a 30-minute agent budget and

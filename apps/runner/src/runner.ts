@@ -48,8 +48,24 @@ const MAX_AGENT_OUTPUT_BYTES = MAX_REVIEW_RESULT_BYTES;
 const MAX_REQUEST_BYTES = 64 * 1024;
 const CALLBACK_REQUEST_TIMEOUT_MS = 30 * 1000;
 const CLAIM_REQUEST_TIMEOUT_MS = 30 * 1000;
+const DEFAULT_CONCURRENCY = 1;
 const SANDBOX_EVIDENCE_ROOT = '/tmp/petit-chiba-opencode-evidence';
 const EMPTY_EVIDENCE_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+
+const RunnerConcurrency = Schema.Union([
+  Schema.Int.check(Schema.isGreaterThan(0)),
+  Schema.NumberFromString.check(Schema.isInt(), Schema.isGreaterThan(0)),
+]);
+
+const resolveConcurrency = (option: number | undefined, env: string | undefined): number => {
+  const decoded = Schema.decodeUnknownOption(RunnerConcurrency)(
+    option ?? env ?? DEFAULT_CONCURRENCY,
+  );
+  if (Option.isNone(decoded)) {
+    throw new Error('RUNNER_CONCURRENCY must be a positive integer');
+  }
+  return decoded.value;
+};
 
 const ReviewModelDefinition = Schema.Struct({
   name: Schema.optional(Schema.NonEmptyString),
@@ -480,6 +496,7 @@ export interface RunnerOptions {
   readonly claimFetch?: typeof fetch;
   readonly claimTimeoutMs?: number;
   readonly claimIntervalMs?: number;
+  readonly concurrency?: number;
 }
 
 type RunnerDiagnostic = {
@@ -655,6 +672,7 @@ const currentEpochMillis = () =>
   Effect.runPromise(DateTime.now.pipe(Effect.map(DateTime.toEpochMillis)));
 
 export const createRunner = (options: RunnerOptions = {}) => {
+  const concurrency = resolveConcurrency(options.concurrency, process.env.RUNNER_CONCURRENCY);
   const sbxPath = options.sbxPath ?? process.env.SBX_BIN ?? 'sbx';
   const authToken = options.authToken ?? process.env.RUNNER_AUTH_TOKEN;
   const modelSecretCommand = options.modelSecretCommand ?? process.env.MODEL_SECRET_COMMAND;
@@ -709,9 +727,18 @@ export const createRunner = (options: RunnerOptions = {}) => {
   let claiming = false;
   let claimPollingHalted = false;
   let requestNextJob: (() => void) | undefined;
-  const hasActiveJob = () =>
-    [...jobs.values()].some(
+  const activeJobCount = () =>
+    [...jobs.values()].filter(
       (candidate) => candidate.state.status === 'queued' || candidate.state.status === 'running',
+    ).length;
+  const hasCapacity = () => activeJobCount() + (claiming ? 1 : 0) < concurrency;
+  const hasUnclearedSamePullRequest = (input: RunnerJobInputState) =>
+    [...jobs.values()].some(
+      (candidate) =>
+        (candidate.state.status === 'queued' || candidate.state.status === 'running') &&
+        candidate.state.sandbox.cleanup !== 'destroyed' &&
+        candidate.input.repositoryName === input.repositoryName &&
+        candidate.input.pullRequestNumber === input.pullRequestNumber,
     );
 
   const update = (job: RunnerJob, state: Partial<RunnerJobState>) => {
@@ -1940,6 +1967,65 @@ export const createRunner = (options: RunnerOptions = {}) => {
 
   const publicState = (job: RunnerJob) => ({ ...job.state });
 
+  const admitJob = async (input: RunnerJobInputState, claimed: boolean): Promise<Response> => {
+    const sameInput = (job: RunnerJob) =>
+      job.input.id === input.id &&
+      job.input.runId === input.runId &&
+      job.input.attempt === input.attempt &&
+      job.input.repositoryUrl === input.repositoryUrl &&
+      job.input.repositoryName === input.repositoryName &&
+      job.input.pullRequestNumber === input.pullRequestNumber &&
+      job.input.baseSha === input.baseSha &&
+      job.input.headSha === input.headSha &&
+      job.input.repositoryReadToken === input.repositoryReadToken;
+    const existingById = jobs.get(input.id);
+    if (existingById !== undefined) {
+      return jsonResponse(sameInput(existingById) ? 202 : 409, publicState(existingById));
+    }
+    const existing = jobsByRun.get(`${input.runId}:${input.attempt}`);
+    if (existing !== undefined) return jsonResponse(409, publicState(existing));
+    if (!claimed && !hasCapacity()) {
+      return jsonResponse(409, { error: 'runner is busy' });
+    }
+    if (hasUnclearedSamePullRequest(input)) {
+      return jsonResponse(409, { error: 'runner is busy' });
+    }
+    let resolveDone = () => {};
+    const done = new Promise<void>((resolve) => {
+      resolveDone = resolve;
+    });
+    const id = input.id;
+    const evidenceId = randomUUID();
+    const job: RunnerJob = {
+      state: {
+        id,
+        runId: input.runId,
+        attempt: input.attempt,
+        evidenceId,
+        evidence: { id: evidenceId, status: 'pending' },
+        status: 'queued',
+        stage: 'admission',
+        sandbox: { cleanup: 'pending' },
+      },
+      input: { ...input },
+      id,
+      sandboxName: `compte-rendu-${id}`,
+      done,
+      resolveDone,
+      abortRequested: false,
+      sandboxAttempted: false,
+      sandboxCreated: false,
+      sessionIds: [],
+      networkRules: [],
+      diagnosticCheckoutToken: input.repositoryReadToken,
+      deadlineAt: Date.now() + REVIEW_ATTEMPT_BUDGET_MS,
+    };
+    jobs.set(id, job);
+    jobsByRun.set(`${input.runId}:${input.attempt}`, job);
+    void execute(job);
+    return jsonResponse(202, publicState(job));
+  };
+
   const handle = async (request: Request): Promise<Response> => {
     if (!authorized(request, authToken)) return jsonResponse(401, { error: 'unauthorized' });
     const path = new URL(request.url).pathname;
@@ -1962,59 +2048,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         await readJson(request),
       ).catch(() => undefined);
       if (input === undefined) return jsonResponse(400, { error: 'invalid job' });
-      const sameInput = (job: RunnerJob) =>
-        job.input.id === input.id &&
-        job.input.runId === input.runId &&
-        job.input.attempt === input.attempt &&
-        job.input.repositoryUrl === input.repositoryUrl &&
-        job.input.repositoryName === input.repositoryName &&
-        job.input.pullRequestNumber === input.pullRequestNumber &&
-        job.input.baseSha === input.baseSha &&
-        job.input.headSha === input.headSha &&
-        job.input.repositoryReadToken === input.repositoryReadToken;
-      const existingById = jobs.get(input.id);
-      if (existingById !== undefined) {
-        return jsonResponse(sameInput(existingById) ? 202 : 409, publicState(existingById));
-      }
-      const existing = jobsByRun.get(`${input.runId}:${input.attempt}`);
-      if (existing !== undefined) return jsonResponse(409, publicState(existing));
-      if (hasActiveJob()) {
-        return jsonResponse(409, { error: 'runner is busy' });
-      }
-      let resolveDone = () => {};
-      const done = new Promise<void>((resolve) => {
-        resolveDone = resolve;
-      });
-      const id = input.id;
-      const evidenceId = randomUUID();
-      const job: RunnerJob = {
-        state: {
-          id,
-          runId: input.runId,
-          attempt: input.attempt,
-          evidenceId,
-          evidence: { id: evidenceId, status: 'pending' },
-          status: 'queued',
-          stage: 'admission',
-          sandbox: { cleanup: 'pending' },
-        },
-        input: { ...input },
-        id,
-        sandboxName: `compte-rendu-${id}`,
-        done,
-        resolveDone,
-        abortRequested: false,
-        sandboxAttempted: false,
-        sandboxCreated: false,
-        sessionIds: [],
-        networkRules: [],
-        diagnosticCheckoutToken: input.repositoryReadToken,
-        deadlineAt: Date.now() + REVIEW_ATTEMPT_BUDGET_MS,
-      };
-      jobs.set(id, job);
-      jobsByRun.set(`${input.runId}:${input.attempt}`, job);
-      void execute(job);
-      return jsonResponse(202, publicState(job));
+      return admitJob(input, false);
     }
     const match = /^\/jobs\/([^/]+)$/.exec(path);
     if (match === null) return jsonResponse(404, { error: 'not found' });
@@ -2058,13 +2092,14 @@ export const createRunner = (options: RunnerOptions = {}) => {
       modelSecretCommand === undefined ||
       modelSecretCommand.length === 0 ||
       modelConfig === undefined ||
-      hasActiveJob()
+      !hasCapacity()
     ) {
       return;
     }
 
     claiming = true;
     let continuePolling = true;
+    let admittedJob = false;
     const controller = new AbortController();
     let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -2088,26 +2123,24 @@ export const createRunner = (options: RunnerOptions = {}) => {
       if (response.status === 200) {
         continuePolling = false;
         claimPollingHalted = true;
-        const input = await Schema.decodeUnknownPromise(RunnerJobInput)(await response.json());
-        const admitted = await handle(
-          new Request('http://runner.internal/jobs', {
-            method: 'POST',
-            headers: {
-              authorization: `Bearer ${authToken ?? ''}`,
-              'content-type': 'application/json',
-            },
-            body: JSON.stringify(input),
-          }),
+        const body = await response.arrayBuffer();
+        if (body.byteLength > MAX_REQUEST_BYTES) {
+          throw new Error('Claimed Runner Job exceeded the request bound');
+        }
+        const input = await Schema.decodeUnknownPromise(RunnerJobInput)(
+          JSON.parse(new TextDecoder().decode(body)),
         );
+        const admitted = await admitJob(input, true);
         if (admitted.status !== 202) throw new Error('Claimed Runner Job could not be admitted');
         claimPollingHalted = false;
+        admittedJob = true;
       }
     } catch {
       // The next idle poll is the bounded transport retry for claim availability.
     } finally {
       if (timeout !== undefined) clearTimeout(timeout);
       claiming = false;
-      if (continuePolling && !hasActiveJob()) {
+      if ((continuePolling || admittedJob) && hasCapacity()) {
         scheduleClaim();
       }
     }

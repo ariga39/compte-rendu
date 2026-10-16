@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { gunzipSync } from 'node:zlib';
 import { createCoreWorker } from '../apps/core/src/core-worker';
 import { createD1ReviewStateStore, createInMemoryReviewStateStore } from '../apps/core/src/index';
+import type { ReviewJob } from '../apps/core/src/index';
 import { createGitHubPublicationAdapter } from '../apps/core/src/github-review-adapter';
 import type { ReviewEvent } from '../packages/contracts/src';
 import type { OperationalLogEvent } from '../packages/contracts/src';
@@ -3909,5 +3910,93 @@ describe('Core Worker', () => {
     expect(requests).toContain(
       '/repos/acme/reviewed/check-suites/555/check-runs?check_name=Petit%20Chiba%20Review&filter=latest&per_page=100',
     );
+  });
+});
+
+describe('Runner claim serialization', () => {
+  const oldHead = '2222222222222222222222222222222222222222';
+  const newHead = '3333333333333333333333333333333333333333';
+  const claimJob = (pullRequestNumber: number, headSha: string): ReviewJob => ({
+    repositoryId: 11,
+    pullRequestNumber,
+    installationId: 7,
+    baseSha: '1111111111111111111111111111111111111111',
+    headSha,
+    trigger: 'automatic',
+  });
+
+  const exerciseSamePullRequestExclusion = async (
+    store: ReturnType<typeof createInMemoryReviewStateStore>,
+  ) => {
+    if (store.claimNextJob === undefined) throw new Error('claim is unavailable');
+    const initial = await store.claimReview({
+      deliveryId: 'delivery-serial-old',
+      job: claimJob(42, oldHead),
+      occurredAt: '2026-09-01T00:00:00.000Z',
+    });
+    if (initial.kind !== 'claimed') throw new Error('initial run was not admitted');
+    expect(
+      await store.claimNextJob({
+        jobId: 'job-old',
+        attempt: 1,
+        occurredAt: '2026-09-01T00:00:01.000Z',
+      }),
+    ).toMatchObject({ kind: 'claimed', job: { pullRequestNumber: 42 } });
+
+    const replacement = await store.claimReview({
+      deliveryId: 'delivery-serial-new',
+      job: claimJob(42, newHead),
+      occurredAt: '2026-09-01T00:00:02.000Z',
+    });
+    if (replacement.kind !== 'claimed') throw new Error('replacement run was not admitted');
+
+    expect(
+      await store.claimNextJob({
+        jobId: 'job-replacement',
+        attempt: 1,
+        occurredAt: '2026-09-01T00:00:03.000Z',
+      }),
+    ).toEqual({ kind: 'empty' });
+
+    const unrelated = await store.claimReview({
+      deliveryId: 'delivery-serial-unrelated',
+      job: claimJob(43, oldHead),
+      occurredAt: '2026-09-01T00:00:04.000Z',
+    });
+    if (unrelated.kind !== 'claimed') throw new Error('unrelated run was not admitted');
+    expect(
+      await store.claimNextJob({
+        jobId: 'job-unrelated',
+        attempt: 1,
+        occurredAt: '2026-09-01T00:00:05.000Z',
+      }),
+    ).toMatchObject({ kind: 'claimed', job: { pullRequestNumber: 43 } });
+
+    await store.markRunSuperseded({
+      runId: initial.runId,
+      occurredAt: '2026-09-01T00:00:06.000Z',
+    });
+    await store.clearRunnerJob?.({ runId: initial.runId, jobId: 'job-old' });
+    expect(
+      await store.claimNextJob({
+        jobId: 'job-replacement',
+        attempt: 1,
+        occurredAt: '2026-09-01T00:00:07.000Z',
+      }),
+    ).toMatchObject({ kind: 'claimed', job: { pullRequestNumber: 42, headSha: newHead } });
+  };
+
+  it('serializes same-pull-request claims until destruction while unrelated runs progress', async () => {
+    const database = new SqliteD1Database();
+    try {
+      await exerciseSamePullRequestExclusion(createD1ReviewStateStore(database));
+    } finally {
+      database.close();
+    }
+  });
+
+  it('applies the same exclusion in the in-memory store', async () => {
+    const store = createInMemoryReviewStateStore();
+    await exerciseSamePullRequestExclusion(store);
   });
 });

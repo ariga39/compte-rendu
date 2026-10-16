@@ -1730,10 +1730,21 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
       };
     },
     claimNextJob: async ({ jobId, attempt, occurredAt }) => {
+      const activeSamePullRequest = (candidate: { runId: string; job: ReviewJob }) =>
+        [...runs.values()].some(
+          (active) =>
+            active.runId !== candidate.runId &&
+            (active.status === 'scheduled' || active.status === 'superseded') &&
+            active.runnerJobId !== undefined &&
+            active.job.installationId === candidate.job.installationId &&
+            active.job.repositoryId === candidate.job.repositoryId &&
+            active.job.pullRequestNumber === candidate.job.pullRequestNumber,
+        );
       const run = [...runs.values()]
         .filter(
           (candidate) => candidate.status === 'scheduled' && candidate.runnerJobId === undefined,
         )
+        .filter((candidate) => !activeSamePullRequest(candidate))
         .sort((left, right) => left.createdAt.localeCompare(right.createdAt))[0];
       if (run === undefined) return { kind: 'empty' as const };
       run.runnerJobId = jobId;

@@ -484,7 +484,6 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
                WHERE active.installation_id = review_runs.installation_id
                  AND active.repository_id = review_runs.repository_id
                  AND active.pull_request_number = review_runs.pull_request_number
-                 AND active.head_sha <> review_runs.head_sha
                  AND active.status IN ('scheduled', 'superseded')
                  AND active.runner_job_id IS NOT NULL
              )
