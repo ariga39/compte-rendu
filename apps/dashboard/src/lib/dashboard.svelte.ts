@@ -1,4 +1,6 @@
-import { fetchJson, PollError, type ApiResult } from './api';
+import { createQuery } from '@tanstack/svelte-query';
+import { fetchJson, NotFoundError, PollError, type ApiResult } from './api';
+import { isPageVisible } from './query.svelte';
 
 export type DashboardError = 'unavailable' | 'offline' | 'notfound' | null;
 
@@ -24,159 +26,123 @@ const REQUEST_TIMEOUT_MS = 15000;
 const MAX_BACKOFF_MS = 300000;
 
 export function createDashboard<T>(options: DashboardOptions<T>): Dashboard<T> {
-  let data = $state<T | null>(null);
-  let error = $state<DashboardError>(null);
-  let lastGoodAt = $state(0);
-  let loading = $state(true);
-
-  let controller: AbortController | null = null;
-  let timer: ReturnType<typeof setTimeout> | null = null;
+  let statsKey = '';
+  let settledKey = '';
   let failures = 0;
   let nextAllowedAt = 0;
-  let generation = 0;
 
-  function clearTimer() {
-    if (timer) {
-      clearTimeout(timer);
-      timer = null;
-    }
+  function beginAttempt(key: string) {
+    if (statsKey === key) return;
+    statsKey = key;
+    failures = 0;
+    nextAllowedAt = 0;
   }
 
-  function abort() {
-    if (controller) {
-      controller.abort();
-      controller = null;
-    }
-  }
-
-  function cleanup() {
-    generation += 1;
-    abort();
-    clearTimer();
-  }
-
-  function pause() {
-    return document.hidden || navigator.onLine === false;
-  }
-
-  function schedule(active: boolean) {
-    clearTimer();
-    if (pause()) return;
-    const base =
-      failures > 0
-        ? Math.min(MAX_BACKOFF_MS, 30000 * 2 ** (failures - 1))
-        : active
-          ? POLL_ACTIVE_MS
-          : POLL_IDLE_MS;
-    let delay = base + base * Math.random() * 0.1;
-    if (nextAllowedAt) delay = Math.max(delay, nextAllowedAt - Date.now());
-    timer = setTimeout(() => void run(), Math.max(0, delay));
-  }
-
-  async function run() {
-    clearTimer();
-    if (pause()) return;
-    if (controller) return;
-    if (nextAllowedAt && Date.now() < nextAllowedAt) {
-      schedule(false);
-      return;
-    }
-    const local = new AbortController();
-    controller = local;
-    let timedOut = false;
-    const timeout = setTimeout(() => {
-      timedOut = true;
-      local.abort();
-    }, REQUEST_TIMEOUT_MS);
-    const localGeneration = ++generation;
-    const dispatchAt = performance.now();
-    try {
-      const results = await Promise.all(options.urls().map((url) => fetchJson(url, local.signal)));
-      if (localGeneration !== generation) return;
-      const observedAt = performance.now();
-      controller = null;
-      clearTimeout(timeout);
-      const failed = results.filter((result) => !result.ok);
-      if (failed.length) {
-        if (options.detail && results[0]?.status === 404) {
-          data = null;
-          error = 'notfound';
-          loading = false;
-          return;
+  const query = createQuery<T>(() => {
+    const key = options.key();
+    return {
+      queryKey: ['dashboard', key],
+      enabled: isPageVisible() || settledKey === key,
+      queryFn: async ({ signal }) => {
+        beginAttempt(key);
+        const urls = options.urls();
+        const dispatchAt = performance.now();
+        const controller = new AbortController();
+        const onAbort = () => controller.abort(signal.reason);
+        if (signal.aborted) onAbort();
+        else signal.addEventListener('abort', onAbort, { once: true });
+        let timedOut = false;
+        const timeout = setTimeout(() => {
+          timedOut = true;
+          controller.abort(new Error('request-timeout'));
+        }, REQUEST_TIMEOUT_MS);
+        let countedFailure = false;
+        try {
+          const results = await Promise.all(urls.map((url) => fetchJson(url, controller.signal)));
+          const observedAt = performance.now();
+          const failed = results.filter((result) => !result.ok);
+          if (failed.length) {
+            if (options.detail && results[0]?.status === 404) throw new NotFoundError();
+            const retryAfterMs = failed.reduce(
+              (max, result) => Math.max(max, result.retryAfterMs),
+              0,
+            );
+            if (options.key() === key) {
+              settledKey = key;
+              failures += 1;
+              countedFailure = true;
+              if (retryAfterMs) nextAllowedAt = Date.now() + retryAfterMs;
+            }
+            throw new PollError(retryAfterMs);
+          }
+          const candidate = options.build(results, { dispatchAt, observedAt });
+          if (options.key() === key) {
+            settledKey = key;
+            failures = 0;
+            nextAllowedAt = 0;
+          }
+          return candidate;
+        } catch (caught) {
+          controller.abort(caught);
+          const cancelled = signal.aborted && !timedOut;
+          if (!cancelled && options.key() === key) {
+            settledKey = key;
+            if (!countedFailure && !(caught instanceof NotFoundError)) failures += 1;
+          }
+          throw caught;
+        } finally {
+          clearTimeout(timeout);
+          signal.removeEventListener('abort', onAbort);
         }
-        const retryAfterMs = failed.reduce((max, result) => Math.max(max, result.retryAfterMs), 0);
-        throw new PollError(retryAfterMs);
-      }
-      const candidate = options.build(results, { dispatchAt, observedAt });
-      failures = 0;
-      nextAllowedAt = 0;
-      lastGoodAt = Date.now();
-      error = null;
-      loading = false;
-      data = candidate;
-      schedule(options.isActive(candidate));
-    } catch (caught) {
-      if (localGeneration !== generation) return;
-      controller = null;
-      clearTimeout(timeout);
-      const cancelled = local.signal.aborted && !timedOut;
-      local.abort();
-      if (cancelled) return;
-      failures += 1;
-      if (caught instanceof PollError && caught.retryAfterMs) {
-        nextAllowedAt = Date.now() + caught.retryAfterMs;
-      }
-      error = navigator.onLine === false ? 'offline' : 'unavailable';
-      loading = false;
-      schedule(false);
-    }
-  }
-
-  function refresh() {
-    void run();
-  }
-
-  $effect(() => {
-    options.key();
-    options.urls();
-    cleanup();
-    data = null;
-    error = null;
-    loading = true;
-    void run();
-    return cleanup;
-  });
-
-  $effect(() => {
-    const onVisible = () => {
-      if (!document.hidden) void run();
-    };
-    const onOnline = () => void run();
-    const onOffline = () => cleanup();
-    document.addEventListener('visibilitychange', onVisible);
-    window.addEventListener('online', onOnline);
-    window.addEventListener('offline', onOffline);
-    return () => {
-      document.removeEventListener('visibilitychange', onVisible);
-      window.removeEventListener('online', onOnline);
-      window.removeEventListener('offline', onOffline);
+      },
+      retry: false,
+      staleTime: 0,
+      gcTime: 0,
+      refetchIntervalInBackground: false,
+      refetchInterval: (activeQuery) => {
+        if (activeQuery.state.error instanceof NotFoundError) return false;
+        const currentFailures = statsKey === options.key() ? failures : 0;
+        let base = POLL_IDLE_MS;
+        if (currentFailures > 0)
+          base = Math.min(MAX_BACKOFF_MS, 30000 * 2 ** (currentFailures - 1));
+        else if (activeQuery.state.data !== undefined && options.isActive(activeQuery.state.data))
+          base = POLL_ACTIVE_MS;
+        let delay = base + base * Math.random() * 0.1;
+        const remaining = statsKey === options.key() ? nextAllowedAt - Date.now() : 0;
+        if (remaining > 0) delay = Math.max(delay, remaining);
+        return delay;
+      },
+      refetchOnWindowFocus: (activeQuery) =>
+        isPageVisible() &&
+        !(activeQuery.state.error instanceof NotFoundError) &&
+        !(options.key() === key && Date.now() < nextAllowedAt),
+      refetchOnReconnect: (activeQuery) =>
+        isPageVisible() &&
+        !(activeQuery.state.error instanceof NotFoundError) &&
+        !(options.key() === key && Date.now() < nextAllowedAt),
     };
   });
 
   return {
     get data() {
-      return data;
+      return query.error instanceof NotFoundError ? null : (query.data ?? null);
     },
     get error() {
-      return error;
+      if (query.error instanceof NotFoundError) return 'notfound';
+      if (!query.error) return null;
+      return navigator.onLine === false ? 'offline' : 'unavailable';
     },
     get lastGoodAt() {
-      return lastGoodAt;
+      return query.dataUpdatedAt;
     },
     get loading() {
-      return loading;
+      return query.isPending;
     },
-    refresh,
+    refresh() {
+      if (document.hidden || navigator.onLine === false) return;
+      if (statsKey === options.key() && Date.now() < nextAllowedAt) return;
+      void query.refetch({ cancelRefetch: false });
+    },
   };
 }
 
