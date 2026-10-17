@@ -318,6 +318,13 @@ state only in memory and do not add ETag/revision counters, websocket or SSE
 infrastructure. Adaptive polling is sufficient for the expected small pages;
 conditional requests can be evaluated later if transfer cost is measured.
 
+The browser implements this with TanStack Svelte Query as the in-memory query
+lifecycle: `refetchInterval` carries the adaptive schedule and failure backoff,
+focus handling observes both `visibilitychange` and window focus, foreground
+reconnect and focus refetches honour `Retry-After` and terminal states, and
+`gcTime` is zero so no response outlives the page that requested it. Manual
+refresh and navigation reuse that lifecycle rather than a separate scheduler.
+
 ## Repository metadata and disclosure
 
 ### Persist identity once, share it across runs

@@ -5,12 +5,24 @@
   import '@fontsource/ibm-plex-mono/600.css';
   import '@fontsource/ibm-plex-mono/700.css';
   import '../app.css';
+  import { QueryClientProvider, onlineManager } from '@tanstack/svelte-query';
   import { Button, Content, Header, HeaderNav, HeaderNavItem } from 'carbon-components-svelte';
   import { page } from '$app/state';
   import { absoluteTime } from '#lib/format.ts';
+  import { createDashboardQueryClient, installFocusTracking } from '#lib/query.svelte.ts';
   import { createRefreshState, provideRefresh } from '#lib/refresh.svelte.ts';
 
   let { children } = $props();
+
+  installFocusTracking();
+  const queryClient = createDashboardQueryClient();
+
+  $effect(() => {
+    const unsubscribe = onlineManager.subscribe((online) => {
+      if (!online) void queryClient.cancelQueries({ queryKey: ['dashboard'] });
+    });
+    return unsubscribe;
+  });
 
   const links = [
     ['/', 'Overview'],
@@ -54,7 +66,9 @@
 </Header>
 
 <Content id="content" tabindex={-1}>
-  {@render children()}
+  <QueryClientProvider client={queryClient}>
+    {@render children()}
+  </QueryClientProvider>
 </Content>
 
 <footer class="app-footer">

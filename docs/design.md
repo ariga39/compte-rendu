@@ -172,7 +172,11 @@ The public dashboard uses SvelteKit file routes and Carbon Svelte components in
 existing Ingress Worker through `ASSETS`; Core remains the only source of public
 task data. No task identities are rendered into build artifacts. Browser
 behavior tests exercise the built frontend, including automatic refresh,
-identity expiry, history navigation and anonymous task detail.
+identity expiry, history navigation and anonymous task detail. The client query
+lifecycle (polling schedule, focus/visibility/reconnect refresh, cancellation,
+failure backoff and in-memory cache eviction) is owned by TanStack Svelte Query;
+responses are never persisted and the cache is discarded once a page is
+unobserved.
 
 ## Deployment shape
 
