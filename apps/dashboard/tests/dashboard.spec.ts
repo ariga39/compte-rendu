@@ -6,11 +6,25 @@ import type {
   PublicTaskIdentity,
   PublicTaskState,
 } from '@compte-rendu/contracts';
+import type { Page } from '@playwright/test';
 import { expect, test, type ApiHandler, type ApiPayload } from './fixtures';
 
 const NOW = '2026-10-16T12:00:00.000Z';
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+const reconnect = (page: Page) =>
+  page.evaluate(() => {
+    Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => false });
+    window.dispatchEvent(new Event('offline'));
+    Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => true });
+    window.dispatchEvent(new Event('online'));
+  });
+const setVisibility = (page: Page, state: 'hidden' | 'visible') =>
+  page.evaluate((next) => {
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => next === 'hidden' });
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => next });
+    document.dispatchEvent(new Event('visibilitychange'));
+  }, state);
 const ok = (json: unknown): ApiPayload => ({ status: 200, json });
 
 const overviewData = (
@@ -256,6 +270,176 @@ test('a longer Retry-After deadline is honoured over the backoff', async ({
   await harness.waitFor(() => harness.state.requests.length > count, 4000);
 });
 
+test('consecutive failures keep backing off beyond 30 seconds', async ({ page, harness, base }) => {
+  harness.setHandler(() => ({ status: 503 }));
+  await page.clock.install();
+  await page.goto(`${base}/`);
+  await page.getByRole('button', { name: 'Retry' }).waitFor();
+  const initialRequests = harness.state.requests.length;
+  const initialSettled = harness.state.settled;
+
+  // Jitter only lengthens the 30s base delay, so no retry can arrive by 25s.
+  await page.clock.runFor(25000);
+  expect(harness.state.requests.length).toBe(initialRequests);
+
+  // Advance in bounded steps until the first retry's responses complete.
+  let firstRetry = false;
+  for (let step = 0; step < 10 && !firstRetry; step += 1) {
+    await page.clock.runFor(1000);
+    firstRetry = harness.state.settled > initialSettled;
+  }
+  expect(firstRetry).toBe(true);
+  const afterFirstRetry = harness.state.requests.length;
+  const afterFirstRetrySettled = harness.state.settled;
+  expect(afterFirstRetry).toBeGreaterThan(initialRequests);
+
+  // The second backoff starts at 60s; jitter only lengthens it, so no request
+  // may arrive before 60s of virtual time have elapsed.
+  for (let step = 0; step < 59; step += 1) {
+    await page.clock.runFor(1000);
+    expect(harness.state.requests.length).toBe(afterFirstRetry);
+  }
+
+  // The retry then arrives within the bounded 10% jitter window.
+  let secondRetry = false;
+  for (let step = 0; step < 15 && !secondRetry; step += 1) {
+    await page.clock.runFor(1000);
+    secondRetry = harness.state.settled > afterFirstRetrySettled;
+  }
+  expect(secondRetry).toBe(true);
+});
+
+test('a manual refresh is ignored while the tab is hidden', async ({ page, harness, base }) => {
+  harness.setHandler(() => ok(historyPage([task({ runId: 'h-1' })])));
+  await page.goto(`${base}/history`);
+  await page.waitForSelector('[data-testid="task"]');
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  const before = harness.state.requests.length;
+  await page.evaluate(() =>
+    document.querySelector<HTMLElement>('[data-testid="refresh"]')?.click(),
+  );
+  await sleep(300);
+  expect(harness.state.requests.length).toBe(before);
+});
+
+test('loading a route while the tab is hidden defers requests until visible', async ({
+  page,
+  harness,
+  base,
+}) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+  });
+  harness.setHandler(() => ok(historyPage([task({ runId: 'h-1' })])));
+  await page.goto(`${base}/history`);
+  await sleep(500);
+  expect(harness.state.requests).toEqual([]);
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'visible',
+    });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await harness.waitFor(() => harness.state.requests.length > 0);
+  await page.waitForSelector('[data-testid="task"]');
+});
+
+test('returning to a visible tab before Retry-After does not request', async ({
+  page,
+  harness,
+  base,
+}) => {
+  harness.setHandler(() => ({ status: 429, retryAfter: 60 }));
+  await page.clock.install();
+  await page.goto(`${base}/history`);
+  await page.getByRole('button', { name: 'Retry' }).waitFor();
+  const count = harness.state.requests.length;
+  await setVisibility(page, 'hidden');
+  await setVisibility(page, 'visible');
+  await page.clock.runFor(1000);
+  expect(harness.state.requests.length).toBe(count);
+  await page.clock.fastForward(65000);
+  await harness.waitFor(() => harness.state.requests.length > count, 4000);
+});
+
+test('returning to a visible tab after a terminal 404 does not request', async ({
+  page,
+  harness,
+  base,
+}) => {
+  harness.setHandler(() => ({ status: 404 }));
+  await page.goto(`${base}/jobs/missing-run`);
+  await page.waitForSelector('text=Page not found');
+  const count = harness.state.requests.length;
+  await setVisibility(page, 'hidden');
+  await setVisibility(page, 'visible');
+  await page.waitForTimeout(400);
+  expect(harness.state.requests.length).toBe(count);
+});
+
+test('reconnecting while hidden does not request until visible', async ({
+  page,
+  harness,
+  base,
+}) => {
+  harness.setHandler(() => ok(historyPage([task({ runId: 'h-1' })])));
+  await page.goto(`${base}/history`);
+  await page.waitForSelector('[data-testid="task"]');
+  await setVisibility(page, 'hidden');
+  const count = harness.state.requests.length;
+  await page.evaluate(() => {
+    Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => false });
+    window.dispatchEvent(new Event('offline'));
+    Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => true });
+    window.dispatchEvent(new Event('online'));
+  });
+  await page.waitForTimeout(400);
+  expect(harness.state.requests.length).toBe(count);
+  await setVisibility(page, 'visible');
+  await harness.waitFor(() => harness.state.requests.length > count);
+});
+
+test('loading offline defers requests until reconnect', async ({ page, harness, base }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => false });
+  });
+  harness.setHandler(() => ok(historyPage([task({ runId: 'h-1' })])));
+  await page.goto(`${base}/history`);
+  await page.waitForTimeout(500);
+  expect(harness.state.requests).toEqual([]);
+  await page.evaluate(() => {
+    Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => true });
+    window.dispatchEvent(new Event('online'));
+  });
+  await harness.waitFor(() => harness.state.requests.length > 0);
+  await page.waitForSelector('[data-testid="task"]');
+});
+
+test('going offline cancels the in-flight request', async ({ page, harness, base }) => {
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  harness.setHandler(() => ({
+    promise: gate.then(() => ok(historyPage([task({ runId: 'x' })]))),
+  }));
+  await page.goto(`${base}/history`);
+  await harness.waitFor(() => harness.state.active >= 1);
+  await page.evaluate(() => {
+    Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => false });
+    window.dispatchEvent(new Event('offline'));
+  });
+  await harness.waitFor(() => harness.state.aborted >= 1, 4000);
+  release();
+});
+
 test('navigation cancels the previous in-flight request', async ({ page, harness, base }) => {
   let release: () => void = () => undefined;
   const gate = new Promise<void>((resolve) => {
@@ -335,10 +519,37 @@ test('returning from a hidden tab refreshes immediately', async ({ page, harness
   harness.setHandler(() => ok(historyPage([task({ runId: 'h-1' }), task({ runId: 'h-2' })])));
   await page.evaluate(() => {
     Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
     document.dispatchEvent(new Event('visibilitychange'));
     Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'visible',
+    });
     document.dispatchEvent(new Event('visibilitychange'));
   });
+  await harness.waitFor(() => harness.state.settled > before);
+  await page.waitForSelector('[data-testid="task-link"][data-run-id="h-2"]');
+});
+
+test('window focus while the tab is visible refreshes immediately', async ({
+  page,
+  harness,
+  base,
+}) => {
+  harness.setHandler(() => ok(historyPage([task({ runId: 'h-1' })])));
+  await page.goto(`${base}/history`);
+  await page.waitForSelector('[data-testid="task"]');
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'visible',
+    });
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
+  });
+  const before = harness.state.settled;
+  harness.setHandler(() => ok(historyPage([task({ runId: 'h-1' }), task({ runId: 'h-2' })])));
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
   await harness.waitFor(() => harness.state.settled > before);
   await page.waitForSelector('[data-testid="task-link"][data-run-id="h-2"]');
 });
@@ -354,7 +565,7 @@ test('a data refresh keeps focus on the focused filter control', async ({
   await page.focus('select[name="status"]');
   const before = harness.state.settled;
   harness.setHandler(() => ok(historyPage([task({ runId: 'h-1' }), task({ runId: 'h-2' })])));
-  await page.evaluate(() => window.dispatchEvent(new Event('online')));
+  await reconnect(page);
   await harness.waitFor(() => harness.state.settled > before);
   await page.waitForSelector('[data-testid="task-link"][data-run-id="h-2"]');
   expect(await page.evaluate(() => document.activeElement?.getAttribute('name'))).toBe('status');
@@ -367,7 +578,7 @@ test('a data refresh preserves unapplied draft filter values', async ({ page, ha
   await page.selectOption('select[name="status"]', 'failed');
   const before = harness.state.settled;
   harness.setHandler(() => ok(historyPage([task({ runId: 'h-1' }), task({ runId: 'h-2' })])));
-  await page.evaluate(() => window.dispatchEvent(new Event('online')));
+  await reconnect(page);
   await harness.waitFor(() => harness.state.settled > before);
   await page.waitForSelector('[data-testid="task-link"][data-run-id="h-2"]');
   expect(await page.locator('select[name="status"]').inputValue()).toBe('failed');
@@ -381,7 +592,7 @@ test('a data refresh keeps keyboard focus on the task link', async ({ page, harn
   await page.focus('[data-testid="task-link"]');
   const before = harness.state.settled;
   harness.setHandler(() => ok(historyPage([task({ runId: 'h-1' }), task({ runId: 'h-2' })])));
-  await page.evaluate(() => window.dispatchEvent(new Event('online')));
+  await reconnect(page);
   await harness.waitFor(() => harness.state.settled > before);
   await page.waitForSelector('[data-testid="task-link"][data-run-id="h-2"]');
   const href = await page.evaluate(() => document.activeElement?.getAttribute('href'));
@@ -397,7 +608,7 @@ test('a data refresh keeps the scroll position', async ({ page, harness, base })
   await page.evaluate(() => window.scrollTo(0, 600));
   const before = harness.state.settled;
   harness.setHandler(() => ok(historyPage([...many, task({ runId: 'h-40' })])));
-  await page.evaluate(() => window.dispatchEvent(new Event('online')));
+  await reconnect(page);
   await harness.waitFor(() => harness.state.settled > before);
   await page.waitForSelector('[data-testid="task-link"][data-run-id="h-40"]');
   expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(300);
@@ -875,9 +1086,9 @@ test('back from a task returns to the same-page filtered history', async ({
   await page.waitForFunction(
     () => location.pathname === '/history' && location.search.includes('status=failed'),
   );
-  expect(harness.state.requests[harness.state.requests.length - 1]).toBe('/api/jobs?status=failed');
+  await page.waitForSelector('[data-testid="task-link"]');
+  expect(harness.state.requests).toContain('/api/jobs?status=failed');
 });
-
 test('back from a task restores the history scroll position', async ({ page, harness, base }) => {
   const many: PublicTaskState[] = [];
   for (let index = 0; index < 80; index += 1) many.push(task({ runId: `h-${index}` }));
@@ -915,11 +1126,16 @@ test('resuming a detail page does not restore identity without a fresh public re
   const before = harness.state.settled;
   await page.evaluate(() => {
     Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
     document.dispatchEvent(new Event('visibilitychange'));
   });
   harness.setHandler(() => ({ status: 503 }));
   await page.evaluate(() => {
     Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'visible',
+    });
     document.dispatchEvent(new Event('visibilitychange'));
   });
   await harness.waitFor(() => harness.state.settled > before);
