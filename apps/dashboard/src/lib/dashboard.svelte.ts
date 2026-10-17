@@ -29,12 +29,14 @@ export function createDashboard<T>(options: DashboardOptions<T>): Dashboard<T> {
   let statsKey = '';
   let settledKey = '';
   let failures = 0;
+  let jitter = 0;
   let nextAllowedAt = 0;
 
   function beginAttempt(key: string) {
     if (statsKey === key) return;
     statsKey = key;
     failures = 0;
+    jitter = 0;
     nextAllowedAt = 0;
   }
 
@@ -70,6 +72,7 @@ export function createDashboard<T>(options: DashboardOptions<T>): Dashboard<T> {
             if (options.key() === key) {
               settledKey = key;
               failures += 1;
+              jitter = Math.random() * 0.1;
               countedFailure = true;
               if (retryAfterMs) nextAllowedAt = Date.now() + retryAfterMs;
             }
@@ -79,6 +82,7 @@ export function createDashboard<T>(options: DashboardOptions<T>): Dashboard<T> {
           if (options.key() === key) {
             settledKey = key;
             failures = 0;
+            jitter = Math.random() * 0.1;
             nextAllowedAt = 0;
           }
           return candidate;
@@ -87,7 +91,10 @@ export function createDashboard<T>(options: DashboardOptions<T>): Dashboard<T> {
           const cancelled = signal.aborted && !timedOut;
           if (!cancelled && options.key() === key) {
             settledKey = key;
-            if (!countedFailure && !(caught instanceof NotFoundError)) failures += 1;
+            if (!countedFailure) {
+              jitter = Math.random() * 0.1;
+              if (!(caught instanceof NotFoundError)) failures += 1;
+            }
           }
           throw caught;
         } finally {
@@ -107,7 +114,7 @@ export function createDashboard<T>(options: DashboardOptions<T>): Dashboard<T> {
           base = Math.min(MAX_BACKOFF_MS, 30000 * 2 ** (currentFailures - 1));
         else if (activeQuery.state.data !== undefined && options.isActive(activeQuery.state.data))
           base = POLL_ACTIVE_MS;
-        let delay = base + base * Math.random() * 0.1;
+        let delay = base + base * jitter;
         const remaining = statsKey === options.key() ? nextAllowedAt - Date.now() : 0;
         if (remaining > 0) delay = Math.max(delay, remaining);
         return delay;

@@ -275,17 +275,38 @@ test('consecutive failures keep backing off beyond 30 seconds', async ({ page, h
   await page.clock.install();
   await page.goto(`${base}/`);
   await page.getByRole('button', { name: 'Retry' }).waitFor();
-  const count = harness.state.requests.length;
-  const settled = harness.state.settled;
-  await page.clock.fastForward(20000);
-  expect(harness.state.requests.length).toBe(count);
-  await page.clock.fastForward(20000);
-  await harness.waitFor(() => harness.state.settled > settled, 4000);
+  const initialRequests = harness.state.requests.length;
+  const initialSettled = harness.state.settled;
+
+  // Jitter only lengthens the 30s base delay, so no retry can arrive by 25s.
+  await page.clock.runFor(25000);
+  expect(harness.state.requests.length).toBe(initialRequests);
+
+  // Advance in bounded steps until the first retry's responses complete.
+  let firstRetry = false;
+  for (let step = 0; step < 10 && !firstRetry; step += 1) {
+    await page.clock.runFor(1000);
+    firstRetry = harness.state.settled > initialSettled;
+  }
+  expect(firstRetry).toBe(true);
   const afterFirstRetry = harness.state.requests.length;
-  await page.clock.fastForward(50000);
-  expect(harness.state.requests.length).toBe(afterFirstRetry);
-  await page.clock.fastForward(20000);
-  await harness.waitFor(() => harness.state.requests.length > afterFirstRetry, 4000);
+  const afterFirstRetrySettled = harness.state.settled;
+  expect(afterFirstRetry).toBeGreaterThan(initialRequests);
+
+  // The second backoff starts at 60s; jitter only lengthens it, so no request
+  // may arrive before 60s of virtual time have elapsed.
+  for (let step = 0; step < 59; step += 1) {
+    await page.clock.runFor(1000);
+    expect(harness.state.requests.length).toBe(afterFirstRetry);
+  }
+
+  // The retry then arrives within the bounded 10% jitter window.
+  let secondRetry = false;
+  for (let step = 0; step < 15 && !secondRetry; step += 1) {
+    await page.clock.runFor(1000);
+    secondRetry = harness.state.settled > afterFirstRetrySettled;
+  }
+  expect(secondRetry).toBe(true);
 });
 
 test('a manual refresh is ignored while the tab is hidden', async ({ page, harness, base }) => {
