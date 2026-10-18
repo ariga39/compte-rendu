@@ -1,7 +1,7 @@
 # External LLM service design
 
-Decision date: 2026-10-18. **Standalone service implemented; integration and
-production rollout pending.** See [service setup and current scope](llm-service.md).
+Decision date: 2026-10-18. **Standalone service and sbx Runner integration
+implemented; production rollout pending.** See [service setup and current scope](llm-service.md).
 This service precedes multi-model review. Earlier provider probes establish only
 narrow protocol compatibility, not production acceptance.
 

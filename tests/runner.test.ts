@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { createServer, request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it, vi } from 'vitest';
@@ -281,8 +282,12 @@ afterAll(async () => {
   await rm(sharedEvidenceRoot, { recursive: true, force: true });
 });
 
-const waitForTerminal = async (runner: ReturnType<typeof createRunner>, jobId: string) => {
-  for (let attempt = 0; attempt < 50; attempt += 1) {
+const waitForTerminal = async (
+  runner: ReturnType<typeof createRunner>,
+  jobId: string,
+  attempts = 50,
+) => {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     const response = await runner.handle(
       new Request(`http://runner/jobs/${jobId}`, {
         headers: { authorization: 'Bearer runner-test-token' },
@@ -293,7 +298,8 @@ const waitForTerminal = async (runner: ReturnType<typeof createRunner>, jobId: s
       evidenceId?: string;
       evidence?: { id: string; status: string };
     };
-    if (state.status === 'succeeded' || state.status === 'failed') return state;
+    if (state.status === 'succeeded' || state.status === 'failed' || state.status === 'aborted')
+      return state;
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error('Runner Job did not reach a terminal state');
@@ -312,12 +318,17 @@ const runAgentScenario = async (scenario: {
   callbackRequests?: Request[];
   progressFetch?: typeof fetch;
   agentGate?: Promise<void>;
-  onAgentStart?: () => void;
+  onAgentStart?: () => void | Promise<void>;
+  onModelSecret?: (args: readonly string[]) => Promise<void>;
   callbackStatuses?: readonly number[];
   callbackHangs?: boolean;
   callbackTimeoutMs?: number;
   modelConfig?: string;
+  llmServiceSocket?: string;
   sessionExport?: string;
+  evidenceRoot?: string;
+  onRunner?: (runner: ReturnType<typeof createRunner>) => void;
+  terminalAttempts?: number;
 }) => {
   const baseSha = '1111111111111111111111111111111111111111';
   const headSha = '2222222222222222222222222222222222222222';
@@ -328,9 +339,10 @@ const runAgentScenario = async (scenario: {
   const allowedResources: string[] = [];
   const removedRuleIds: string[] = [];
   const runner = createRunner({
-    evidenceRoot: sharedEvidenceRoot,
+    evidenceRoot: scenario.evidenceRoot ?? sharedEvidenceRoot,
     authToken: 'runner-test-token',
     modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+    llmServiceSocket: scenario.llmServiceSocket,
     modelConfig: scenario.modelConfig,
     progressFetch: scenario.progressFetch,
     callbackUrl:
@@ -359,7 +371,10 @@ const runAgentScenario = async (scenario: {
         await writeFile(args[2], scenario.sessionExport, { mode: 0o600 });
       }
       if (args[0] === 'create') createArgs = args;
-      if (args[0] === 'secret' && args[1] === 'set-custom') secretArgs = args;
+      if (args[0] === 'secret' && args[1] === 'set-custom') {
+        secretArgs = args;
+        await scenario.onModelSecret?.(args);
+      }
       if (args[0] === 'policy' && args[1] === 'allow') {
         allowedResources.push(args[args.length - 1]);
       }
@@ -368,7 +383,7 @@ const runAgentScenario = async (scenario: {
       }
       const isAgent = args[0] === 'exec' && args.includes('--agent');
       if (isAgent) {
-        scenario.onAgentStart?.();
+        await scenario.onAgentStart?.();
         await scenario.agentGate;
         agentInvoked = true;
         agentArgs = args;
@@ -403,6 +418,7 @@ const runAgentScenario = async (scenario: {
       };
     },
   });
+  scenario.onRunner?.(runner);
   const submitted = await runner.handle(
     new Request('http://runner/jobs', {
       method: 'POST',
@@ -422,11 +438,15 @@ const runAgentScenario = async (scenario: {
   );
   const { id } = (await submitted.json()) as { id: string };
   const terminalStartedAt = performance.now();
-  const terminal = await waitForTerminal(runner, id);
+  const terminal = await waitForTerminal(runner, id, scenario.terminalAttempts);
   const terminalDurationMs = performance.now() - terminalStartedAt;
   const manifest = JSON.parse(
     await readFile(
-      join(sharedEvidenceRoot, terminal.evidenceId as string, 'manifest.json'),
+      join(
+        scenario.evidenceRoot ?? sharedEvidenceRoot,
+        terminal.evidenceId as string,
+        'manifest.json',
+      ),
       'utf8',
     ),
   );
@@ -7053,5 +7073,487 @@ describe('Runner progress response disposal', () => {
     expect(callbacks).toHaveLength(1);
     expect(cancelled).toBe(true);
     expect(signal?.aborted).toBe(true);
+  });
+});
+
+describe('Runner LLM service mode', () => {
+  it.each([
+    'https://models.example/v1',
+    'http://localhost:8090/v1',
+    'http://host.docker.internal:8090/other',
+  ])('rejects a service endpoint outside the supported local transport: %s', (baseUrl) => {
+    expect(() =>
+      createRunner({
+        llmServiceSocket: '/tmp/control.sock',
+        modelConfig: JSON.stringify({
+          id: 'opencode-go/review',
+          baseUrl,
+          definition: { name: 'Review' },
+        }),
+      }),
+    ).toThrow();
+  });
+  it('rejects a relative control socket and OpenShell service mode before admission', () => {
+    expect(() => createRunner({ llmServiceSocket: 'control.sock' })).toThrow(
+      'absolute Unix socket',
+    );
+    expect(() =>
+      createRunner({
+        llmServiceSocket: '/tmp/control.sock',
+        sandboxRuntime: 'openshell',
+        openshell: { gateway: 'review', modelProvider: 'review', image: 'review:test' },
+      }),
+    ).toThrow('does not support');
+  });
+
+  it('issues a job grant, injects it through the sbx token file, revokes it, and leaves no usable token behind', async () => {
+    const controlRoot = await mkdtemp(join(tmpdir(), 'cr-llm-control-'));
+    const socketPath = join(controlRoot, 'control.sock');
+    const issued: Array<{ jobId: string; routes: string[]; token: string }> = [];
+    const revoked: string[] = [];
+    const active = new Map<string, string>();
+    let counter = 0;
+
+    const unixPost = (path: string, payload: unknown, headers: Record<string, string> = {}) =>
+      new Promise<{ status: number; body: string }>((resolve, reject) => {
+        const body = JSON.stringify(payload);
+        const call = request(
+          {
+            socketPath,
+            path,
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              'content-length': String(new TextEncoder().encode(body).byteLength),
+              ...headers,
+            },
+          },
+          async (response) => {
+            const chunks: Buffer[] = [];
+            for await (const chunk of response) {
+              chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+            }
+            resolve({
+              status: response.statusCode ?? 0,
+              body: Buffer.concat(chunks).toString('utf8'),
+            });
+          },
+        );
+        call.on('error', reject);
+        call.end(body);
+      });
+
+    const server = createServer(async (incoming, outgoing) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of incoming) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      }
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>;
+      if (incoming.method === 'POST' && incoming.url === '/grants') {
+        const jobId = String(body.jobId);
+        const routes = body.routes as string[];
+        const token = `grant-token-${(counter += 1)}`;
+        active.set(token, jobId);
+        issued.push({ jobId, routes, token });
+        outgoing.writeHead(201, { 'content-type': 'application/json' });
+        outgoing.end(
+          JSON.stringify({
+            token,
+            expiresAt: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
+          }),
+        );
+        return;
+      }
+      if (incoming.method === 'POST' && incoming.url === '/grants/revoke') {
+        const jobId = String(body.jobId);
+        revoked.push(jobId);
+        for (const [token, owner] of active) if (owner === jobId) active.delete(token);
+        outgoing.writeHead(204);
+        outgoing.end();
+        return;
+      }
+      if (incoming.method === 'POST' && incoming.url === '/v1/chat/completions') {
+        const authorization = incoming.headers.authorization;
+        const token =
+          typeof authorization === 'string' ? authorization.replace(/^Bearer /, '') : '';
+        outgoing.writeHead(active.has(token) ? 200 : 401, { 'content-type': 'application/json' });
+        outgoing.end(JSON.stringify({ usable: active.has(token) }));
+        return;
+      }
+      outgoing.writeHead(404);
+      outgoing.end();
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(socketPath, resolve);
+    });
+
+    try {
+      const serviceModelConfig = JSON.stringify({
+        id: 'opencode-go/deepseek-review',
+        baseUrl: 'http://host.docker.internal:32773/v1',
+        definition: {
+          name: 'DeepSeek Review',
+          reasoning: true,
+          limit: { context: 1000000, output: 384000 },
+        },
+      });
+      let injectedToken = '';
+      let usableDuringReview = false;
+      const scenario = await runAgentScenario({
+        runId: 'run-llm-service-success',
+        output: finalMarkdownJsonl(),
+        callbackRequests: [],
+        modelConfig: serviceModelConfig,
+        llmServiceSocket: socketPath,
+        onModelSecret: async (args) => {
+          const command = args[args.indexOf('--command') + 1];
+          const path = command.slice("/usr/bin/cat '".length, -1);
+          injectedToken = await readFile(path, 'utf8');
+        },
+        onAgentStart: async () => {
+          usableDuringReview =
+            (
+              await unixPost(
+                '/v1/chat/completions',
+                {},
+                { authorization: `Bearer ${injectedToken}` },
+              )
+            ).status === 200;
+        },
+      });
+
+      expect(scenario.terminal).toMatchObject({
+        status: 'succeeded',
+        sandbox: { cleanup: 'destroyed' },
+      });
+      const jobId = runnerJobFields.id;
+      expect(usableDuringReview).toBe(true);
+      expect(issued).toHaveLength(1);
+      expect(issued[0]).toMatchObject({ jobId, routes: ['deepseek-review'] });
+      expect(revoked).toEqual([jobId]);
+
+      const token = issued[0].token;
+      const secretArgs = scenario.secretArgs ?? [];
+      const command = secretArgs[secretArgs.indexOf('--command') + 1];
+      expect(command).toMatch(/^\/usr\/bin\/cat '/);
+      expect(secretArgs[secretArgs.indexOf('--host') + 1]).toBe('localhost');
+      const tokenPath = command.slice("/usr/bin/cat '".length, -1);
+      expect(command).not.toContain(token);
+      expect((scenario.createArgs ?? []).join(' ')).not.toContain(token);
+      expect((scenario.agentArgs ?? []).join(' ')).not.toContain(token);
+
+      const evidence = join(sharedEvidenceRoot, scenario.terminal.evidenceId as string);
+      expect(await readTextTree(evidence)).not.toContain(token);
+      const tokenFileExists = await stat(tokenPath).then(
+        () => true,
+        () => false,
+      );
+      expect(tokenFileExists).toBe(false);
+
+      const inference = await unixPost(
+        '/v1/chat/completions',
+        {},
+        {
+          authorization: `Bearer ${token}`,
+        },
+      );
+      expect(inference.status).toBe(401);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(controlRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('Runner LLM token output', () => {
+  it('does not publish or retain a review that unexpectedly contains its host grant', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-llm-leak-'));
+    const socketPath = join(root, 'control.sock');
+    const token = 'unexpected-host-grant-value';
+    const server = createServer((incoming, outgoing) => {
+      outgoing.writeHead(incoming.url === '/grants' ? 201 : 204, {
+        'content-type': 'application/json',
+      });
+      outgoing.end(
+        incoming.url === '/grants'
+          ? JSON.stringify({ token, expiresAt: new Date(Date.now() + 7200000).toISOString() })
+          : undefined,
+      );
+    });
+    await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+    const callbacks: Request[] = [];
+    try {
+      const scenario = await runAgentScenario({
+        runId: 'run-llm-leaked-review',
+        output: finalMarkdownJsonl(`## Review:\n${token}`),
+        sessionExport: JSON.stringify({
+          ...JSON.parse(sessionExportJson('scenario-session')),
+          diagnostic: token,
+        }),
+        callbackRequests: callbacks,
+        modelConfig: JSON.stringify({
+          id: 'opencode-go/deepseek-review',
+          baseUrl: 'http://host.docker.internal:18089/v1',
+          definition: { name: 'Review' },
+        }),
+        llmServiceSocket: socketPath,
+      });
+      expect(scenario.terminal).toMatchObject({
+        status: 'failed',
+        sandbox: { cleanup: 'destroyed' },
+      });
+      expect(scenario.terminal).not.toHaveProperty('result');
+      expect(callbacks).toHaveLength(1);
+      const callback = await callbacks[0].json();
+      expect(callback).toMatchObject({ status: 'failed' });
+      expect(callback.result).toBeUndefined();
+      expect(JSON.stringify(callback)).not.toContain(token);
+      expect(
+        Buffer.from(callback.evidence.opencodeExport.content.content, 'base64').toString('utf8'),
+      ).not.toContain(token);
+      expect(
+        await readTextTree(join(sharedEvidenceRoot, scenario.terminal.evidenceId as string)),
+      ).not.toContain(token);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('Runner LLM lifecycle failures', () => {
+  const modelConfig = JSON.stringify({
+    id: 'opencode-go/deepseek-review',
+    baseUrl: 'http://host.docker.internal:18089/v1',
+    definition: { name: 'Review' },
+  });
+  const fixture = async (issue: 'normal' | 'malformed' | 'short' = 'normal') => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-llm-life-'));
+    const socket = join(root, 'control.sock');
+    const token = 'lifecycle-test-grant';
+    let usable = false;
+    let rejectRevoke = false;
+    const server = createServer(async (incoming, outgoing) => {
+      for await (const _chunk of incoming) {
+        /* consume request */
+      }
+      if (incoming.url === '/grants') {
+        usable = true;
+        outgoing.writeHead(201, { 'content-type': 'application/json' });
+        outgoing.end(
+          issue === 'malformed'
+            ? '{'
+            : JSON.stringify({
+                token,
+                expiresAt: new Date(
+                  Date.now() + (issue === 'short' ? 1000 : 7200000),
+                ).toISOString(),
+              }),
+        );
+      } else if (incoming.url === '/grants/revoke') {
+        if (!rejectRevoke) usable = false;
+        outgoing.writeHead(rejectRevoke ? 503 : 204);
+        outgoing.end();
+      } else {
+        outgoing.writeHead(usable ? 200 : 401);
+        outgoing.end();
+      }
+    });
+    await new Promise<void>((resolve) => server.listen(socket, resolve));
+    return {
+      root,
+      socket,
+      token,
+      rejectRevoke: (value: boolean) => {
+        rejectRevoke = value;
+      },
+      inferenceStatus: () =>
+        new Promise<number>((resolve, reject) => {
+          const req = request(
+            {
+              socketPath: socket,
+              path: '/v1/chat/completions',
+              method: 'POST',
+              headers: { authorization: `Bearer ${token}` },
+            },
+            (res) => {
+              resolve(res.statusCode ?? 0);
+            },
+          );
+          req.on('error', reject);
+          req.end();
+        }),
+      close: async () => {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        await rm(root, { recursive: true, force: true });
+      },
+    };
+  };
+  it.each(['malformed', 'short'] as const)(
+    'revokes an unusable %s issuance without starting the agent',
+    async (issue) => {
+      const f = await fixture(issue);
+      try {
+        const result = await runAgentScenario({
+          runId: `llm-${issue}`,
+          output: finalMarkdownJsonl(),
+          llmServiceSocket: f.socket,
+          modelConfig,
+          evidenceRoot: join(f.root, 'evidence'),
+          callbackRequests: [],
+        });
+        expect(result.terminal).toMatchObject({
+          status: 'failed',
+          sandbox: { cleanup: 'destroyed' },
+        });
+        expect(result.agentInvoked).toBe(false);
+        expect(await f.inferenceStatus()).toBe(401);
+      } finally {
+        await f.close();
+      }
+    },
+  );
+  it('fails without a vote when revocation is unavailable, then recovers before a fresh Runner can claim', async () => {
+    const f = await fixture();
+    f.rejectRevoke(true);
+    const evidenceRoot = join(f.root, 'evidence');
+    const callbacks: Request[] = [];
+    let restarted: ReturnType<typeof createRunner> | undefined;
+    try {
+      const result = await runAgentScenario({
+        runId: 'llm-revoke-failed',
+        output: finalMarkdownJsonl(),
+        llmServiceSocket: f.socket,
+        modelConfig,
+        evidenceRoot,
+        callbackRequests: callbacks,
+      });
+      expect(result.terminal).toMatchObject({
+        status: 'failed',
+        sandbox: { cleanup: 'destroyed' },
+      });
+      expect(result.terminal).not.toHaveProperty('result');
+      expect((await callbacks[0].json()).result).toBeUndefined();
+      expect(await f.inferenceStatus()).toBe(200);
+      let unexpectedClaim = false;
+      const blocked = createRunner({
+        authToken: 'runner-test-token',
+        evidenceRoot,
+        modelConfig,
+        llmServiceSocket: f.socket,
+        claimFetch: async () => {
+          unexpectedClaim = true;
+          return new Response(null, { status: 204 });
+        },
+      });
+      try {
+        const admission = await blocked.handle(
+          new Request('http://runner/jobs', {
+            method: 'POST',
+            headers: {
+              authorization: 'Bearer runner-test-token',
+              'content-type': 'application/json',
+            },
+            body: JSON.stringify({
+              ...runnerJobFields,
+              runId: 'blocked-recovery',
+              attempt: 1,
+              repositoryUrl: 'https://github.com/acme/reviewed.git',
+              baseSha: '1111111111111111111111111111111111111111',
+              headSha: '2222222222222222222222222222222222222222',
+            }),
+          }),
+        );
+        expect(admission.status).toBe(503);
+        expect(unexpectedClaim).toBe(false);
+        expect(await f.inferenceStatus()).toBe(200);
+      } finally {
+        await blocked.close();
+      }
+      f.rejectRevoke(false);
+      let claimedWithRevokedGrant = false;
+      restarted = createRunner({
+        authToken: 'runner-test-token',
+        evidenceRoot,
+        modelConfig,
+        llmServiceSocket: f.socket,
+        claimIntervalMs: 60000,
+        claimFetch: async () => {
+          claimedWithRevokedGrant = (await f.inferenceStatus()) === 401;
+          return new Response(null, { status: 204 });
+        },
+      });
+      await vi.waitFor(() => expect(claimedWithRevokedGrant).toBe(true));
+    } finally {
+      await restarted?.close();
+      await f.close();
+    }
+  });
+  it('preserves cleanup failure when grant revocation also fails', async () => {
+    const f = await fixture();
+    f.rejectRevoke(true);
+    try {
+      const result = await runAgentScenario({
+        runId: 'llm-revoke-cleanup-failed',
+        output: finalMarkdownJsonl(),
+        llmServiceSocket: f.socket,
+        modelConfig,
+        evidenceRoot: join(f.root, 'evidence'),
+        cleanupFailure: true,
+      });
+      expect(result.terminal).toMatchObject({
+        status: 'failed',
+        failure: { reason: 'cleanup' },
+        sandbox: { cleanup: 'failed' },
+      });
+      expect(result.manifest.terminal).toMatchObject({ status: 'failed', reason: 'cleanup' });
+    } finally {
+      await f.close();
+    }
+  });
+  it('revokes immediately on DELETE while the agent process has not exited', async () => {
+    const f = await fixture();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let started = false;
+    let runner: ReturnType<typeof createRunner> | undefined;
+    const scenario = runAgentScenario({
+      runId: 'llm-cancel',
+      terminalAttempts: 400,
+      output: finalMarkdownJsonl(),
+      llmServiceSocket: f.socket,
+      modelConfig,
+      evidenceRoot: join(f.root, 'evidence'),
+      callbackRequests: [],
+      agentGate: gate,
+      onAgentStart: () => {
+        started = true;
+      },
+      onRunner: (r) => {
+        runner = r;
+      },
+    });
+    let cancelled: Promise<Response> | undefined;
+    try {
+      await vi.waitFor(() => expect(started).toBe(true));
+      expect(await f.inferenceStatus()).toBe(200);
+      cancelled = runner!.handle(
+        new Request(`http://runner/jobs/${runnerJobFields.id}`, {
+          method: 'DELETE',
+          headers: { authorization: 'Bearer runner-test-token' },
+        }),
+      );
+      await vi.waitFor(async () => expect(await f.inferenceStatus()).toBe(401));
+    } finally {
+      release();
+      await cancelled;
+      const done = await scenario;
+      expect(done.terminal).toMatchObject({ status: 'aborted', sandbox: { cleanup: 'destroyed' } });
+      await runner?.close();
+      await f.close();
+    }
   });
 });

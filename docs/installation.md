@@ -14,12 +14,11 @@ The [LLM service deployment guide](llm-service.md) covers the new standalone
 host service: credential preparation, TOML routes, subscription login, systemd
 startup, and listener checks. Deploy it independently of the Runner.
 
-**The current Runner does not yet consume this service.** It still uses the
-model configuration and credential paths below. Installing the LLM service does
-not switch review traffic, and changing `REVIEW_MODEL_CONFIG.baseUrl` alone is
-not a supported migration: Runner must first implement per-job grant issuance,
-revocation, and protected Sandbox access. The guide lists the
-[required integration work](llm-service.md#connecting-the-runner).
+For an sbx Runner, follow [Connecting an sbx Runner](llm-service.md#connecting-an-sbx-runner)
+to configure the private control socket, route alias and local inference URL.
+Changing `REVIEW_MODEL_CONFIG.baseUrl` alone is insufficient: service mode must
+also manage per-job grant issuance and revocation. OpenShell continues to use
+its gateway model provider; this service integration does not yet support it.
 
 ## What is deployed
 

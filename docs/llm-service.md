@@ -2,7 +2,7 @@
 
 The standalone Node service is the first implementation slice of the
 [external LLM service design](llm-service-design.md). It supplies authenticated
-inference and job grants; Runner/Sandbox wiring is a subsequent integration slice.
+inference and job grants. The sbx Runner can use it through the integration below.
 It does not automatically change either deployed review instance.
 
 ## Build and configuration
@@ -174,30 +174,89 @@ For a binary update, build the selected revision with its locked dependencies
 before restarting. Keep the previous revision and configuration for rollback;
 rolling back also invalidates grants and does not resume interrupted jobs.
 
-## Connecting the Runner
+## Connecting an sbx Runner
 
-There is currently no Runner setting for the LLM service control socket or grant
-lifecycle. `LLM_SERVICE_CONFIG` belongs to the LLM service process only. Keep the
-existing Runner model setup until the following integration is implemented and
-verified:
+This integration uses OpenCode's Chat Completions provider with the `sbx`
+runtime. Codex/Responses and OpenShell service integration are separate work;
+configuring this mode with OpenShell is rejected rather than using its shared
+upstream provider.
 
-1. After claiming a job, Runner requests one grant for its frozen route allowlist
-   and checks that the job deadline fits within the grant's two-hour expiry.
-2. The Sandbox receives that grant through its credential mechanism, with its
-   agent endpoint pointing at a protected, reachable service address. Sandbox
-   `127.0.0.1` is not host loopback. Do not expose the listener publicly or reuse
-   the upstream API key as a job token.
-3. Runner revokes the grant on every completion/cancellation/setup-failure path,
-   independently of evidence export and Sandbox destruction. A failed grant or
-   service call must not fall back to direct upstream access.
-4. Validate sbx first, then OpenShell's per-job model provider. Confirm real tool
-   turns, credential redaction, cancellation and final review publication before
-   migrating an instance. Real subscription login/refresh remains a separate gate.
+Install and check the LLM service first. Then configure the Runner's existing
+private environment file (systemd `EnvironmentFile` syntax, one-line JSON):
 
-This is an implementation dependency, not an operator action that can be achieved
-by changing `MODEL_SECRET_COMMAND` or `REVIEW_MODEL_CONFIG` today. The existing
-[Runner installation](installation.md#first-installation) remains the supported
-production path until that integration lands.
+```dotenv
+RUNNER_LLM_SERVICE_SOCKET=/run/user/1000/compte-rendu-llm/control.sock
+REVIEW_MODEL_CONFIG={"id":"opencode-go/deepseek-review","baseUrl":"http://host.docker.internal:8090/v1","definition":{"name":"DeepSeek review","reasoning":true,"interleaved":{"field":"reasoning_content"},"limit":{"context":1000000,"output":384000}}}
+```
+
+Replace the socket, port and model metadata for your deployment. The suffix
+`deepseek-review` must equal the service's route `id`, whose protocol must be
+`chat-completions`; the actual upstream model is configured in the service TOML.
+An alias needs its model definition in OpenCode configuration. Metadata in the
+example is illustrative and must match the selected upstream.
+
+`MODEL_SECRET_COMMAND` is not used in service mode. The Runner requests a new
+two-hour grant for each owned job before Sandbox setup. It writes the grant to a
+private, temporary host file outside Sandbox mounts; sbx's credential proxy reads
+that file and gives the agent only a placeholder. Never put a job token or
+upstream credential in the Runner environment file.
+
+### Local transport and egress
+
+For a same-host service, use exactly
+`http://host.docker.internal:<PORT>/v1`. The HTTP exception is restricted to this
+sbx service mode and an explicit port. Ordinary direct model endpoints still
+require HTTPS. The LLM service remains bound to `127.0.0.1`; do not bind it to a
+LAN address or expose it through the public Worker or Tunnel.
+
+sbx 0.48 rewrites `host.docker.internal` to `localhost` before policy evaluation
+and credential substitution. Runner therefore installs a per-job rule for
+`localhost:<PORT>` and scopes the secret to `localhost`. The agent sends the
+placeholder through sbx's local transport; the host proxy substitutes the real
+grant on its loopback connection to the service. The port must match the
+service TOML; do not point it at another local process. A real sbx 0.48 probe
+verified both the loopback peer and credential substitution. Repeat this probe
+when upgrading sbx before switching review traffic. This is not a recipe for sending
+real bearer tokens over arbitrary plaintext network connections.
+
+Keep host default policy deny-all and remove unrelated global or organization
+allow rules as described in the installation manual. Service-enabled jobs need
+only the local service route and their existing GitHub API allowance; they no
+longer need direct access to the model supplier. The service host itself needs
+outbound access to the configured supplier.
+
+### Switch traffic and verify
+
+1. Stop new admissions and let current jobs finish using your existing operational
+   drain procedure; concurrency zero is invalid. Do not restart a Runner that
+   owns the shared sbx daemon while either instance still has active jobs.
+2. Start the independent LLM service, apply the Runner environment changes, and
+   restart that Runner. No Core/Ingress binding or database change is required.
+3. Trigger one review of a known PR. Verify the final review addresses the pinned
+   diff, the callback and published review agree, and Sandbox cleanup is
+   `destroyed`. Inspect the private evidence for credential leakage without
+   printing token values.
+4. Exercise cancellation and a service failure before increasing traffic. Grant
+   issuance is never retried within a job. Failed issuance or unconfirmed
+   revocation must not produce a review vote or fall back to direct credentials.
+
+Runner revokes the grant when agent work ends, before evidence export and Sandbox
+cleanup, and on cancellation. Revocation failure does not skip Sandbox cleanup.
+The two-hour expiry remains the upper bound if the control service is unreachable.
+Runner records only the job identity in a pending-revocation marker before
+requesting a grant. After a crash, a new Runner revokes those identities before
+claiming or admitting more jobs; unreadable or unresolved records keep admission
+closed. After repairing service or storage availability, restart the Runner to
+retry this startup recovery. Keep the instance's evidence directory across Runner restarts, and do not
+share it between concurrently running Runners. This recovery does not recreate
+jobs or replace the existing operational cleanup of orphan Sandboxes.
+Keep the service in its own systemd unit/cgroup; do not make its lifetime depend
+on the Runner unit.
+
+To roll back, drain jobs, remove `RUNNER_LLM_SERVICE_SOCKET`, restore the previous
+`REVIEW_MODEL_CONFIG` and host `MODEL_SECRET_COMMAND`, then restart the Runner.
+Only new jobs use the restored route; interrupted jobs require an explicit new
+review trigger. Stop the LLM service only after its callers are drained.
 
 ## Public boundaries
 
@@ -242,7 +301,6 @@ published GitHub review or Sandbox acceptance.
 
 Dedicated real ChatGPT login/refresh and real Codex/OpenCode client acceptance
 remain rollout gates; simulated auth and protocol tests do not establish them.
-Runner grant issuance/finalization, sbx/OpenShell credential migration, protected
-Sandbox networking, maintenance pause and per-job usage reporting remain separate
-integration work. Do not turn on this service for production jobs until those
-applicable gates pass.
+OpenShell credential migration, a product-level maintenance pause and per-job
+usage reporting remain separate work. Complete the applicable client, cancellation
+and publication checks above before switching a production instance.
