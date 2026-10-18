@@ -41,6 +41,8 @@ export interface SbxRuntimeOptions {
   readonly modelSecretCommand?: string;
 }
 
+const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
+
 export const createSbxRuntimeFactory = (options: SbxRuntimeOptions): SandboxRuntimeFactory => {
   return (spec: SandboxJobSpec): JobSandboxRuntime => {
     const placeholder = `cr-${spec.id}`;
@@ -122,6 +124,10 @@ export const createSbxRuntimeFactory = (options: SbxRuntimeOptions): SandboxRunt
     };
 
     const setup = async (command: SandboxCommand) => {
+      const modelSecretSource =
+        spec.modelTokenFile === undefined
+          ? (options.modelSecretCommand ?? '')
+          : `/usr/bin/cat ${shellQuote(spec.modelTokenFile)}`;
       const secret = await command(
         [
           'secret',
@@ -135,7 +141,7 @@ export const createSbxRuntimeFactory = (options: SbxRuntimeOptions): SandboxRunt
           '--placeholder',
           placeholder,
           '--command',
-          options.modelSecretCommand ?? '',
+          modelSecretSource,
         ],
         { stage: 'sandbox', command: 'set-secret' },
       );

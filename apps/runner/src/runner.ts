@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createWriteStream, type WriteStream } from 'node:fs';
 import {
@@ -13,7 +13,7 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { DateTime, Effect, Option, Schema } from 'effect';
 import {
   MAX_REVIEW_RESULT_BYTES,
@@ -46,6 +46,7 @@ import {
   type SandboxRuntimeKind,
 } from './sandbox-runtime.js';
 import { createSbxRuntimeFactory } from './sandbox-runtime-sbx.js';
+import { createLlmServiceClient } from './llm-service-client.js';
 import {
   createOpenShellPreflight,
   createOpenShellRuntimeFactory,
@@ -71,6 +72,9 @@ const SANDBOX_TEMPLATE = `ghcr.io/ariga39/petit-chiba-opencode:${OPENCODE_VERSIO
 const SETUP_TIMEOUT_MS = 2 * 60 * 1000;
 const SUBMIT_REMINDER_BUDGET_MS = 2 * 60 * 1000;
 const CLEANUP_RESERVE_MS = 60 * 1000;
+const FINALIZATION_BUDGET_MS = CLEANUP_RESERVE_MS;
+const GRANT_REVOKE_ATTEMPTS = 2;
+const GRANT_REVOKE_BUDGET_MS = 15 * 1000;
 const CLEANUP_COMMAND_TIMEOUT_MS = 30 * 1000;
 const ARCHIVE_COMMAND_TIMEOUT_MS = 30 * 1000;
 const ARCHIVE_PHASE_TIMEOUT_MS = 2 * 60 * 1000;
@@ -129,21 +133,47 @@ const ModelBaseUrl = Schema.URLFromString.check(
     { expected: 'absolute HTTPS URL without credentials, query, fragment, or wildcard host' },
   ),
 );
+// Service mode talks to the sandbox through the sbx local proxy, whose URL is
+// rewritten to localhost before policy matching. Only this exact host, explicit
+// port and /v1 path are accepted; ordinary direct-provider HTTPS is unchanged.
+const SbxLocalServiceBaseUrl = Schema.URLFromString.check(
+  Schema.makeFilter(
+    (url) =>
+      url.protocol === 'http:' &&
+      url.hostname === 'host.docker.internal' &&
+      url.port.length > 0 &&
+      (url.pathname === '/v1' || url.pathname === '/v1/') &&
+      url.username === '' &&
+      url.password === '' &&
+      url.search === '' &&
+      url.hash === '',
+    { expected: 'http://host.docker.internal:<port>/v1' },
+  ),
+);
 const ReviewModelConfig = Schema.Struct({
   id: Schema.String.check(Schema.isPattern(/^opencode-go\/[A-Za-z0-9._:-]{1,128}$/)),
   baseUrl: Schema.optional(ModelBaseUrl),
   definition: Schema.optional(ReviewModelDefinition),
 });
+const ServiceReviewModelConfig = Schema.Struct({
+  id: Schema.String.check(Schema.isPattern(/^opencode-go\/[A-Za-z0-9._:-]{1,128}$/)),
+  baseUrl: Schema.optional(SbxLocalServiceBaseUrl),
+  definition: Schema.optional(ReviewModelDefinition),
+});
 type ReviewModelConfigValue = Schema.Schema.Type<typeof ReviewModelConfig>;
 type ReviewModelDefinitionValue = Schema.Schema.Type<typeof ReviewModelDefinition>;
 
-const decodeReviewModelConfig = (raw: string | undefined): ReviewModelConfigValue | undefined =>
+const decodeReviewModelConfig = (
+  raw: string | undefined,
+  serviceMode: boolean,
+): ReviewModelConfigValue | undefined =>
   raw === undefined
     ? undefined
     : Option.getOrUndefined(
-        Schema.decodeUnknownOption(Schema.fromJsonString(ReviewModelConfig), {
-          onExcessProperty: 'error',
-        })(raw),
+        Schema.decodeUnknownOption(
+          Schema.fromJsonString(serviceMode ? ServiceReviewModelConfig : ReviewModelConfig),
+          { onExcessProperty: 'error' },
+        )(raw),
       );
 
 // Native OpenCode 2 configuration. The v1 `provider.options.baseURL` normalizer
@@ -530,6 +560,12 @@ type RunnerJob = {
   githubTokenRoot?: string;
   checkoutRoot?: string;
   configRoot?: string;
+  grantIssuanceAttempted: boolean;
+  grantRevoked: boolean;
+  grantToken?: string;
+  grantTokenPath?: string;
+  grantRoot?: string;
+  grantExpiresAt?: number;
   deadlineAt: number;
   executionStartedAt?: string;
   submissionCompletedAt?: string;
@@ -544,6 +580,8 @@ export interface RunnerOptions {
   readonly sbxPath?: string;
   readonly sandboxRuntime?: SandboxRuntimeKind;
   readonly sandboxCliPath?: string;
+  /** Absolute Unix socket for the host LLM service control plane. */
+  readonly llmServiceSocket?: string;
   readonly openshell?: {
     readonly gateway?: string;
     readonly gatewayEndpoint?: string;
@@ -727,6 +765,42 @@ const secureEvidenceTree = async (root: string): Promise<void> => {
   }
 };
 
+// Redact only the known bounded text evidence surfaces this Runner writes.
+// Sandbox databases remain placeholder-only and are never recursively scanned
+// or rewritten. latin1 round-trips bytes so an unchanged file is left exact.
+const redactEvidenceTextFiles = async (
+  evidencePath: string,
+  secrets: readonly string[],
+  sessionIds: readonly string[],
+): Promise<boolean> => {
+  const active = secrets.filter((value) => value.length > 0);
+  if (active.length === 0) return false;
+  let found = false;
+  for (const name of [
+    'opencode.jsonl',
+    'opencode.stderr',
+    'validated-review.md',
+    'opencode-session-list.json',
+    ...sessionIds.map((id) => `opencode-export-${id}.json`),
+  ]) {
+    const path = join(evidencePath, name);
+    let text: string;
+    try {
+      text = (await readFile(path)).toString('latin1');
+    } catch (error) {
+      if (Schema.is(Schema.Struct({ code: Schema.Literal('ENOENT') }))(error)) continue;
+      throw error;
+    }
+    let redacted = text;
+    for (const secret of active) redacted = redacted.replaceAll(secret, '[redacted]');
+    if (redacted !== text) {
+      found = true;
+      await writeFile(path, Buffer.from(redacted, 'latin1'), { mode: 0o600 });
+    }
+  }
+  return found;
+};
+
 const writeManifestAtomically = async (path: string, value: unknown) => {
   const temporaryPath = `${path}.tmp`;
   await writeFile(temporaryPath, JSON.stringify(value, null, 2) + '\n', { mode: 0o600 });
@@ -761,6 +835,14 @@ export const createRunner = (options: RunnerOptions = {}) => {
     settingsFile === undefined
       ? resolveConcurrency(options.concurrency, process.env.RUNNER_CONCURRENCY)
       : readRunnerSettingsSync(settingsFile).concurrency;
+  const llmServiceSocketRaw = options.llmServiceSocket ?? process.env.RUNNER_LLM_SERVICE_SOCKET;
+  const llmServiceSocket =
+    llmServiceSocketRaw === undefined || llmServiceSocketRaw.trim().length === 0
+      ? undefined
+      : llmServiceSocketRaw.trim();
+  if (llmServiceSocket !== undefined && !isAbsolute(llmServiceSocket)) {
+    throw new Error('RUNNER_LLM_SERVICE_SOCKET must be an absolute Unix socket path');
+  }
   const sandboxRuntime = resolveSandboxRuntimeConfig({
     kind: options.sandboxRuntime ?? process.env.RUNNER_SANDBOX_RUNTIME,
     cliPath: options.sandboxCliPath ?? process.env.RUNNER_SANDBOX_CLI,
@@ -776,28 +858,55 @@ export const createRunner = (options: RunnerOptions = {}) => {
   if (sandboxRuntime.kind === 'openshell' && sandboxRuntime.openshell === undefined) {
     throw new Error('OpenShell sandbox runtime configuration is incomplete');
   }
+  if (llmServiceSocket !== undefined && sandboxRuntime.kind === 'openshell') {
+    throw new Error('LLM service mode does not support the OpenShell sandbox runtime yet');
+  }
   const sbxPath = options.sbxPath ?? process.env.SBX_BIN ?? 'sbx';
   const sandboxPortPath =
     options.sandboxCliPath ??
     process.env.RUNNER_SANDBOX_CLI ??
     (sandboxRuntime.kind === 'openshell' ? sandboxRuntime.cliPath : sbxPath);
   const authToken = options.authToken ?? process.env.RUNNER_AUTH_TOKEN;
-  const modelSecretCommand = options.modelSecretCommand ?? process.env.MODEL_SECRET_COMMAND;
+  const modelSecretCommand =
+    llmServiceSocket === undefined
+      ? (options.modelSecretCommand ?? process.env.MODEL_SECRET_COMMAND)
+      : undefined;
   const sandboxRuntimeFactory =
     sandboxRuntime.kind === 'openshell'
       ? createOpenShellRuntimeFactory(sandboxRuntime.openshell!)
       : createSbxRuntimeFactory({ modelSecretCommand });
   const modelResolverMissing =
     sandboxRuntime.kind === 'sbx' &&
+    llmServiceSocket === undefined &&
     (modelSecretCommand === undefined || modelSecretCommand.length === 0);
   const modelConfig = decodeReviewModelConfig(
     options.modelConfig ?? process.env.REVIEW_MODEL_CONFIG,
+    llmServiceSocket !== undefined,
   );
+  if (
+    llmServiceSocket !== undefined &&
+    (modelConfig === undefined ||
+      modelConfig.baseUrl === undefined ||
+      modelConfig.definition === undefined)
+  ) {
+    throw new Error(
+      'LLM service mode requires REVIEW_MODEL_CONFIG with an explicit baseUrl and model definition',
+    );
+  }
+  const llmServiceClient =
+    llmServiceSocket === undefined ? undefined : createLlmServiceClient(llmServiceSocket);
   const modelId = modelConfig?.id;
-  const modelHost = modelConfig?.baseUrl?.hostname ?? MODEL_HOST;
+  const modelRouteId = modelId?.slice('opencode-go/'.length);
+  const serviceBaseUrl = modelConfig?.baseUrl;
+  const modelHost =
+    serviceBaseUrl !== undefined &&
+    serviceBaseUrl.protocol === 'http:' &&
+    serviceBaseUrl.hostname === 'host.docker.internal'
+      ? 'localhost'
+      : (serviceBaseUrl?.hostname ?? MODEL_HOST);
   const modelPort =
-    modelConfig?.baseUrl !== undefined && modelConfig.baseUrl.port.length > 0
-      ? modelConfig.baseUrl.port
+    serviceBaseUrl !== undefined && serviceBaseUrl.port.length > 0
+      ? serviceBaseUrl.port
       : MODEL_PORT;
   const modelResource = `${modelHost}:${modelPort}`;
   const openCodeConfig = modelConfig === undefined ? undefined : trustedOpenCodeConfig(modelConfig);
@@ -809,6 +918,23 @@ export const createRunner = (options: RunnerOptions = {}) => {
       'compte-rendu',
       'reviews',
     );
+  // Job-id-only durable markers. A marker is written before issuance and
+  // removed only after confirmed revocation, so a crash leaves the identity to
+  // revoke on the next startup. The raw token is never persisted.
+  const pendingGrantRoot = join(evidenceRoot, 'llm-grant-pending');
+  const grantMarkerPath = (jobId: string) =>
+    join(pendingGrantRoot, `${createHash('sha256').update(jobId).digest('hex')}.marker`);
+  const writeGrantMarker = async (jobId: string) => {
+    await mkdir(pendingGrantRoot, { recursive: true, mode: 0o700 });
+    await writeFile(grantMarkerPath(jobId), jobId, { mode: 0o600 });
+  };
+  const clearGrantMarker = async (jobId: string) => {
+    try {
+      await rm(grantMarkerPath(jobId), { force: true });
+    } catch {
+      // A stale marker only causes a redundant identity revocation next start.
+    }
+  };
   const executeProcess = options.process ?? runProcess;
   const log = options.log;
   const callbackUrl = options.callbackUrl ?? process.env.RUNNER_CALLBACK_URL;
@@ -842,6 +968,52 @@ export const createRunner = (options: RunnerOptions = {}) => {
   let claiming = false;
   let claimPollingHalted = false;
   let requestNextJob: (() => void) | undefined;
+  // Admission and claim stay gated until startup recovery has resolved every
+  // own pending grant marker; an unresolved identity keeps the gate closed.
+  const recoverPendingGrants = async () => {
+    if (llmServiceClient === undefined) return true;
+    let names: string[] = [];
+    try {
+      names = await readdir(pendingGrantRoot);
+    } catch (error) {
+      // Only a missing directory means "no markers". Any other readdir error
+      // must keep admission and claim gated rather than fail open.
+      if (!Schema.is(Schema.Struct({ code: Schema.Literal('ENOENT') }))(error)) return false;
+      names = [];
+    }
+    let unresolved = false;
+    for (const name of names) {
+      if (!name.endsWith('.marker')) continue;
+      const markerPath = join(pendingGrantRoot, name);
+      let jobId: string | undefined;
+      try {
+        // Preserve the identity exactly; input ids may contain surrounding whitespace.
+        const value = await readFile(markerPath, 'utf8');
+        if (value.length > 0) jobId = value;
+      } catch {
+        jobId = undefined;
+      }
+      if (jobId === undefined) {
+        unresolved = true;
+        continue;
+      }
+      let confirmed = false;
+      for (let attempt = 0; attempt < GRANT_REVOKE_ATTEMPTS; attempt += 1) {
+        try {
+          await llmServiceClient.revoke(jobId);
+          confirmed = true;
+          break;
+        } catch {
+          // Retry within the bounded attempt count before declaring it unresolved.
+        }
+      }
+      if (confirmed) await clearGrantMarker(jobId);
+      else unresolved = true;
+    }
+    return !unresolved;
+  };
+  const grantRecovery =
+    llmServiceClient === undefined ? undefined : recoverPendingGrants().catch(() => false);
   const activeJobCount = () =>
     [...jobs.values()].filter(
       (candidate) => candidate.state.status === 'queued' || candidate.state.status === 'running',
@@ -923,7 +1095,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
   const boundedDiagnostic = (job: RunnerJob, value: string | undefined) => {
     if (value === undefined || value.length === 0) return undefined;
     let sanitized = value;
-    for (const secret of [job.diagnosticCheckoutToken, modelSecretCommand]) {
+    for (const secret of [job.diagnosticCheckoutToken, modelSecretCommand, job.grantToken]) {
       if (secret !== undefined && secret.length > 0)
         sanitized = sanitized.replaceAll(secret, '[redacted]');
     }
@@ -993,6 +1165,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
             : [
                 job.diagnosticCheckoutToken,
                 modelSecretCommand,
+                job.grantToken,
                 job.input.repositoryUrl,
                 job.input.repositoryReadToken,
               ].filter((value): value is string => value !== undefined && value.length > 0),
@@ -1357,6 +1530,13 @@ export const createRunner = (options: RunnerOptions = {}) => {
           clean = false;
         }
       }
+      if (job.grantRoot !== undefined) {
+        try {
+          await rm(job.grantRoot, { recursive: true, force: true });
+        } catch {
+          clean = false;
+        }
+      }
       update(job, { sandbox: { cleanup: clean ? 'destroyed' : 'failed' } });
       return clean;
     }
@@ -1376,6 +1556,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
           stderrRedactions: [
             job.diagnosticCheckoutToken,
             modelSecretCommand,
+            job.grantToken,
             job.input.repositoryUrl,
             job.input.repositoryReadToken,
           ].filter((value): value is string => value !== undefined && value.length > 0),
@@ -1412,6 +1593,13 @@ export const createRunner = (options: RunnerOptions = {}) => {
     if (job.githubTokenRoot !== undefined) {
       try {
         await rm(job.githubTokenRoot, { recursive: true, force: true });
+      } catch {
+        clean = false;
+      }
+    }
+    if (job.grantRoot !== undefined) {
+      try {
+        await rm(job.grantRoot, { recursive: true, force: true });
       } catch {
         clean = false;
       }
@@ -1581,6 +1769,24 @@ export const createRunner = (options: RunnerOptions = {}) => {
     return callbackTooLarge;
   };
 
+  const revokeGrant = async (job: RunnerJob): Promise<boolean> => {
+    if (llmServiceClient === undefined || job.grantRevoked) return true;
+    if (!job.grantIssuanceAttempted) return true;
+    const deadline = Date.now() + GRANT_REVOKE_BUDGET_MS;
+    for (let attempt = 0; attempt < GRANT_REVOKE_ATTEMPTS; attempt += 1) {
+      try {
+        await llmServiceClient.revoke(job.id);
+        job.grantRevoked = true;
+        await clearGrantMarker(job.id);
+        return true;
+      } catch {
+        // A bounded retry keeps a transient control failure from losing revocation.
+      }
+      if (Date.now() >= deadline) break;
+    }
+    return false;
+  };
+
   const execute = async (job: RunnerJob) => {
     let failure: RunnerJobState['failure'];
     let executionCause: RunnerFailureCauseValue | undefined;
@@ -1593,6 +1799,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
     let evidenceReady = false;
     let evidenceComplete = false;
     let evidenceFailure: string | undefined;
+    let revocationUnconfirmed = false;
     try {
       evidenceStartedAt = await currentIso();
       job.executionStartedAt = evidenceStartedAt;
@@ -1631,6 +1838,37 @@ export const createRunner = (options: RunnerOptions = {}) => {
       }
       if (job.abortRequested) return;
 
+      if (llmServiceClient !== undefined && modelRouteId !== undefined) {
+        // Persist the job-id-only marker before the call: an ambiguous response
+        // must revoke by job identity and never retry issuance for this job.
+        try {
+          await writeGrantMarker(job.id);
+        } catch {
+          failure = { reason: 'agent' };
+          return;
+        }
+        job.grantIssuanceAttempted = true;
+        let grant: { token: string; expiresAt: number };
+        try {
+          grant = await llmServiceClient.issue(job.id, modelRouteId);
+        } catch {
+          failure = { reason: 'agent' };
+          return;
+        }
+        if (grant.expiresAt < job.deadlineAt + FINALIZATION_BUDGET_MS) {
+          failure = { reason: 'agent' };
+          return;
+        }
+        job.grantToken = grant.token;
+        job.grantExpiresAt = grant.expiresAt;
+        const grantRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-llm-grant-'));
+        job.grantRoot = grantRoot;
+        const tokenPath = join(grantRoot, 'job-token');
+        await writeFile(tokenPath, grant.token, { mode: 0o600 });
+        job.grantTokenPath = tokenPath;
+      }
+      if (job.abortRequested) return;
+
       const configRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-opencode-config-'));
       job.configRoot = configRoot;
       await mkdir(join(configRoot, 'opencode', 'skills', 'pr-review'), { recursive: true });
@@ -1656,6 +1894,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         checkoutRoot: join(checkoutRoot, 'checkout'),
         configRoot,
         modelResource,
+        ...(job.grantTokenPath === undefined ? {} : { modelTokenFile: job.grantTokenPath }),
         githubResource: 'api.github.com:443',
         githubReadToken: job.input.repositoryReadToken,
       });
@@ -1810,6 +2049,11 @@ export const createRunner = (options: RunnerOptions = {}) => {
     } catch {
       failure = { reason: 'agent' };
     } finally {
+      // Revoke as soon as agent work ends, before evidence/archive/cleanup, so a
+      // still-running Sandbox cannot keep using a finished job's grant.
+      if (job.grantIssuanceAttempted) {
+        revocationUnconfirmed = !(await revokeGrant(job));
+      }
       const submissionSessionId =
         agent === undefined ? undefined : uniqueSessionIdFrom(agent.stdout);
       let sessionTerminal = false;
@@ -1839,6 +2083,29 @@ export const createRunner = (options: RunnerOptions = {}) => {
         }
       } else {
         evidenceFailure = 'sandbox-not-created';
+      }
+      if (evidenceReady && job.grantToken !== undefined && job.grantToken.length > 0) {
+        try {
+          if (await redactEvidenceTextFiles(evidencePath, [job.grantToken], job.sessionIds)) {
+            failure ??= { reason: 'evidence' };
+            evidenceComplete = false;
+            evidenceFailure = 'credential-in-output';
+          }
+        } catch {
+          evidenceFailure = 'archive-incomplete';
+          evidenceComplete = false;
+        }
+      }
+      // A process that echoed the grant into its output must fail closed: the
+      // evidence copy is scrubbed, but a review carrying the token is never
+      // published as a modified result.
+      const echoedGrant =
+        job.grantToken !== undefined &&
+        job.grantToken.length > 0 &&
+        (agent?.stdout.includes(job.grantToken) === true ||
+          agent?.stderr?.includes(job.grantToken) === true);
+      if (echoedGrant && failure === undefined) {
+        failure = { reason: 'agent' };
       }
       if (agent !== undefined && failure === undefined) {
         job.submissionCompletedAt = await currentIso();
@@ -1893,8 +2160,18 @@ export const createRunner = (options: RunnerOptions = {}) => {
           ...(executionCause === undefined ? {} : { cause: executionCause }),
         };
       }
-      let finalStatus: RunnerJobState['status'] =
-        job.abortRequested && cleaned ? 'aborted' : failure !== undefined ? 'failed' : 'succeeded';
+      if (revocationUnconfirmed) {
+        // An unconfirmed revocation is a terminal failure with no vote; the
+        // Sandbox cleanup status above still reports what actually happened.
+        failure ??= { reason: 'agent' };
+      }
+      let finalStatus: RunnerJobState['status'] = revocationUnconfirmed
+        ? 'failed'
+        : job.abortRequested && cleaned
+          ? 'aborted'
+          : failure !== undefined
+            ? 'failed'
+            : 'succeeded';
       let finalFailure = finalStatus === 'failed' ? failure : undefined;
       let manifestFinalized = !evidenceReady;
       if (evidenceReady) {
@@ -1991,6 +2268,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
             : { status: 'succeeded', result, failure: undefined },
       );
       job.diagnosticCheckoutToken = '';
+      job.grantToken = '';
       job.resolveDone();
       requestNextJob?.();
     }
@@ -2048,6 +2326,8 @@ export const createRunner = (options: RunnerOptions = {}) => {
       progressStopped: false,
       sandboxAttempted: false,
       sandboxCreated: false,
+      grantIssuanceAttempted: false,
+      grantRevoked: false,
       sessionIds: [],
       diagnosticCheckoutToken: input.repositoryReadToken,
       deadlineAt: Date.now() + REVIEW_ATTEMPT_BUDGET_MS,
@@ -2097,6 +2377,9 @@ export const createRunner = (options: RunnerOptions = {}) => {
       if (modelConfig === undefined) {
         return jsonResponse(503, { error: 'runner unavailable' });
       }
+      if (grantRecovery !== undefined && !(await grantRecovery)) {
+        return jsonResponse(503, { error: 'runner unavailable' });
+      }
       if (!(await ensurePreflight())) {
         return jsonResponse(503, { error: 'runner unavailable' });
       }
@@ -2119,6 +2402,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
           stop(child);
           setTimeout(() => stop(child, 'SIGKILL'), 5_000);
         }
+        await revokeGrant(job);
         await job.done;
       }
       return jsonResponse(200, publicState(job));
@@ -2134,6 +2418,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
   };
 
   const claimNextJob = async () => {
+    if (grantRecovery !== undefined && !(await grantRecovery)) return;
     if (
       claiming ||
       claimPollingHalted ||

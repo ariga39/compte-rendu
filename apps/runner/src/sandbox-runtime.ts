@@ -152,6 +152,13 @@ export interface SandboxJobSpec {
   /** Host configuration directory to stage into the sandbox. */
   readonly configRoot: string;
   readonly modelResource: string;
+  /**
+   * Absolute host path to a private mode-0600 file holding the job's model
+   * grant token. When set, the sbx adapter resolves the model secret with
+   * `/usr/bin/cat <path>` instead of a host secret resolver. The token itself
+   * never appears in argv, environment, configuration or evidence.
+   */
+  readonly modelTokenFile?: string;
   readonly githubResource: string;
   /** Per-job GitHub read token; adapters pass it via child env, never argv. */
   readonly githubReadToken: string;

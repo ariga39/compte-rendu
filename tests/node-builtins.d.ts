@@ -54,10 +54,21 @@ declare module 'node:child_process' {
 
 declare module 'node:http' {
   export function request(
-    options: { socketPath: string; path: string; method: string },
+    options: {
+      socketPath: string;
+      path: string;
+      method: string;
+      headers?: Record<string, string | number>;
+    },
     callback: (response: IncomingMessage) => void,
-  ): { on(event: 'error', listener: (error: Error) => void): void; end(): void };
+  ): {
+    on(event: 'error', listener: (error: Error) => void): void;
+    end(data?: string): void;
+    destroy(): void;
+  };
   export interface IncomingMessage {
+    readonly statusCode?: number;
+    on(event: 'error', listener: (error: Error) => void): this;
     readonly headers: Record<string, string | string[] | undefined>;
     readonly method?: string;
     readonly url?: string;
@@ -142,6 +153,7 @@ declare module 'node:os' {
 
 declare module 'node:path' {
   export function dirname(path: string): string;
+  export function isAbsolute(path: string): boolean;
   export function join(...paths: string[]): string;
   export function resolve(...paths: string[]): string;
 }
