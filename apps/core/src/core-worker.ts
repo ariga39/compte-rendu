@@ -1,5 +1,6 @@
 import { DateTime, Effect, Option, Schema } from 'effect';
 import {
+  DEFAULT_REVIEW_NAME,
   MAX_RUNNER_CALLBACK_BYTES,
   type PublicTaskFailure,
   MetadataInvalidationEvent,
@@ -796,6 +797,12 @@ export const createCoreWorker = (
         } catch {
           return new Response(null, { status: 503 });
         }
+      }
+      if (request.method === 'GET' && new URL(request.url).pathname === '/api/dashboard-config') {
+        return Response.json(
+          { name: env.GITHUB_CHECK_NAME?.trim() || DEFAULT_REVIEW_NAME },
+          { headers: { 'cache-control': 'no-store' } },
+        );
       }
       if (request.method === 'GET') {
         try {

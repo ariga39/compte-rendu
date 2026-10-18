@@ -107,6 +107,11 @@ async function startHarness(): Promise<{ harness: Harness; server: Server }> {
         res.end();
         return;
       }
+      // Polling metrics cover task data, not the one-time instance-name lookup.
+      if (url.pathname === '/api/dashboard-config') {
+        respond(res, { status: 200, json: { name: 'Compte-rendu review' } });
+        return;
+      }
       if (url.pathname.startsWith('/api/')) {
         state.requests.push(url.pathname + url.search);
         const tracked = trackApi(res, state);

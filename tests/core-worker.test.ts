@@ -3447,7 +3447,7 @@ describe('Core Worker', () => {
         method: 'POST',
         path: '/repos/acme/reviewed/check-runs',
         body: {
-          name: 'Petit Chiba Review',
+          name: 'Compte-rendu review',
           head_sha: eligibleEvent.headSha,
           status: 'queued',
           external_id: 'run-1',
@@ -4083,7 +4083,7 @@ describe('Core Worker', () => {
       github.findCheckRunForSuite?.({ repositoryId: 11, installationId: 7, checkSuiteId: 555 }),
     ).resolves.toEqual({ candidates: [{ id: 321, externalId: 'run-1' }] });
     expect(requests).toContain(
-      '/repos/acme/reviewed/check-suites/555/check-runs?check_name=Petit%20Chiba%20Review&filter=latest&per_page=100',
+      '/repos/acme/reviewed/check-suites/555/check-runs?check_name=Compte-rendu%20review&filter=latest&per_page=100',
     );
   });
 });

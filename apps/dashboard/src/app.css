@@ -366,6 +366,8 @@ main#content {
 
 .app-footer {
   display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
   justify-content: center;
   padding: 16px;
   border-top: 1px solid #393939;
