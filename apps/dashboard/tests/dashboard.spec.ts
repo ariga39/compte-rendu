@@ -273,7 +273,9 @@ test('a longer Retry-After deadline is honoured over the backoff', async ({
 
 test('consecutive failures keep backing off beyond 30 seconds', async ({ page, harness, base }) => {
   harness.setHandler(() => ({ status: 503 }));
-  await page.clock.install();
+  await page.clock.install({ time: new Date(NOW) });
+  // Only explicit advances count toward the backoff, not host/CI scheduling time.
+  await page.clock.pauseAt(new Date(Date.parse(NOW) + 1000));
   await page.goto(`${base}/`);
   await page.getByRole('button', { name: 'Retry' }).waitFor();
   const initialRequests = harness.state.requests.length;
