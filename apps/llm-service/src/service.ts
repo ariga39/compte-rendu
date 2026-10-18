@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { Effect, Schema } from 'effect';
+import { REVIEW_ATTEMPT_BUDGET_MS } from '@compte-rendu/contracts';
 
-const GRANT_TTL_MS = 2 * 60 * 60 * 1000;
+const GRANT_TTL_MS = 4 * REVIEW_ATTEMPT_BUDGET_MS;
 const CONTROL_MAX_BYTES = 16 * 1024;
 const INFERENCE_MAX_BYTES = 16 * 1024 * 1024;
 
