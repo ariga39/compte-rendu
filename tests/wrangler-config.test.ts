@@ -252,9 +252,9 @@ describe('Wrangler deployment tooling', () => {
     withDeploymentFixture(({ run, runWithCheckName, read }) => {
       run('default-review');
       expect(parseConfigText(read('default-review').core).vars?.GITHUB_CHECK_NAME).toBe('');
-      runWithCheckName('named-review', 'Ariga39 "AI" Review');
+      runWithCheckName('named-review', 'Ariga39 "AI" Review $$ $&');
       expect(parseConfigText(read('named-review').core).vars?.GITHUB_CHECK_NAME).toBe(
-        'Ariga39 "AI" Review',
+        'Ariga39 "AI" Review $$ $&',
       );
     });
   });
