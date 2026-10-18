@@ -2470,6 +2470,86 @@ describe('Core Worker', () => {
     },
   );
 
+  it.each(['failed', 'superseded', 'publication-failed'] as const)(
+    'does not expose an unpublished decision after %s',
+    async (scenario) => {
+      const database = new SqliteD1Database();
+      const store = createD1ReviewStateStore(database);
+      const claim = await store.claimReview({
+        deliveryId: 'structured-vote',
+        job: {
+          repositoryId: 11,
+          installationId: 7,
+          pullRequestNumber: 42,
+          baseSha: eligibleEvent.baseSha,
+          headSha: eligibleEvent.headSha,
+          trigger: 'automatic',
+        },
+        occurredAt: '2026-09-01T00:00:00.000Z',
+      });
+      if (claim.kind !== 'claimed') throw new Error('not claimed');
+      await store.recordRunnerJob({ runId: claim.runId, jobId: 'runner-job-1', attempt: 1 });
+      if (scenario === 'failed')
+        await store.markSchedulingFailed({
+          runId: claim.runId,
+          occurredAt: '2026-09-01T00:01:00.000Z',
+        });
+      if (scenario === 'superseded')
+        await store.markRunSuperseded({
+          runId: claim.runId,
+          occurredAt: '2026-09-01T00:01:00.000Z',
+        });
+      const reviews: unknown[] = [];
+      const worker = createCoreWorker(
+        { ...coreEnv(database), EVIDENCE_BUCKET: { put: async () => undefined } },
+        {
+          github: {
+            findReviewByMarker: async () => {
+              throw new Error('GitHub lookup unavailable');
+            },
+            loadReviewTarget: async () => ({ headSha: eligibleEvent.headSha }),
+            createReview: async ({ payload }) => {
+              reviews.push(payload);
+              return { kind: 'created', review: payload };
+            },
+          },
+        },
+      );
+      const callback = JSON.parse(await successfulCallback(claim.runId));
+      callback.result = { version: 2, decision: 'request_changes', markdown: callback.result };
+      const manifest = JSON.parse(
+        Buffer.from(callback.evidence.manifest.content, 'base64').toString(),
+      );
+      manifest.result = callback.result;
+      callback.evidence.manifest = await evidenceField(
+        Buffer.from(JSON.stringify(manifest)).toString('base64'),
+      );
+      const response = await worker.fetch(
+        new Request('https://core.internal/runner-results', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-compte-rendu-runner-callback': 'verified',
+          },
+          body: JSON.stringify(callback),
+        }),
+      );
+      expect(response.status).toBe(scenario === 'publication-failed' ? 503 : 202);
+      expect(reviews).toEqual([]);
+      const fresh = createCoreWorker(coreEnv(database));
+      const detail = await fresh.fetch(
+        new Request(`https://core.internal/api/jobs/${claim.runId}`),
+      );
+      expect(await detail.json()).toMatchObject({
+        task: {
+          status: scenario === 'superseded' ? 'superseded' : 'failed',
+          decision: null,
+        },
+      });
+      database.close();
+    },
+  );
+
   it('stores callback evidence in R2 before publishing a successful runner result', async () => {
     const database = new SqliteD1Database();
     const stateStore = createD1ReviewStateStore(database);

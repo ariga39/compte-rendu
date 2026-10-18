@@ -902,12 +902,10 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
     runId,
     evidence,
     sandboxCleanup,
-    decision,
   }: {
     runId: string;
     evidence: ReviewEvidenceMetadata;
     sandboxCleanup?: RunnerCleanupStatus;
-    decision?: ReviewDecision;
   }) => {
     const result = await database
       .prepare(
@@ -916,8 +914,7 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
            evidence_sha256 = ?, evidence_uploaded_at = ?,
            execution_started_at = ?, submission_completed_at = ?,
            cleanup_completed_at = ?,
-           runner_cleanup_status = COALESCE(?, runner_cleanup_status),
-           review_decision = COALESCE(review_decision, ?)
+           runner_cleanup_status = COALESCE(?, runner_cleanup_status)
          WHERE run_id = ? AND (
            evidence_key IS NULL OR evidence_key = ?
          )`,
@@ -932,7 +929,6 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
         evidence.submissionCompletedAt ?? null,
         evidence.cleanupCompletedAt ?? null,
         sandboxCleanup ?? null,
-        decision ?? null,
         runId,
         evidence.key,
       )
