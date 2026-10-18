@@ -17,7 +17,22 @@ corepack pnpm --filter @compte-rendu/llm-service build
 Run the built entry inside its installed workspace. `pi-ai` remains an external
 runtime dependency; copying only `dist/llm-service.js` is insufficient.
 
-Set `LLM_SERVICE_CONFIG` to an absolute TOML filename:
+On the service host, create an instance-specific configuration directory as the
+service user. These commands preserve existing files on upgrades:
+
+```sh
+install -d -m 0700 ~/.config/<INSTANCE_NAME>-llm
+(umask 077; touch ~/.config/<INSTANCE_NAME>-llm/service.toml)
+chmod 0600 ~/.config/<INSTANCE_NAME>-llm/service.toml
+$EDITOR ~/.config/<INSTANCE_NAME>-llm/service.toml
+```
+
+Set `LLM_SERVICE_CONFIG` to that file's absolute path. Fill in the routes below;
+**remove routes you will not use**. Every configured route's credential file must
+exist before the service starts. Use the subscription login command below to
+create its file before starting the service.
+
+Example TOML (replace paths, port, route IDs and model names for this instance):
 
 ```toml
 controlSocket = "/run/user/1000/compte-rendu-llm/control.sock"
@@ -49,6 +64,20 @@ paths, never credential values. The subscription file is created by login, not b
 copying an existing Codex/OpenCode auth cache. Use separate configuration, files,
 ports and control sockets for separate production instances.
 
+For an API-key route, create its file without putting the secret in shell
+arguments or shell history, then paste the key in the editor:
+
+```sh
+(umask 077; touch ~/.config/<INSTANCE_NAME>-llm/deepseek-key)
+chmod 0600 ~/.config/<INSTANCE_NAME>-llm/deepseek-key
+$EDITOR ~/.config/<INSTANCE_NAME>-llm/deepseek-key
+```
+
+The `credentialFile` value must be the absolute path to that file. For a second
+instance, use different configuration/credential directories, control socket,
+HTTP port and systemd unit. These resources are local to the host; no new
+Cloudflare binding or D1 migration is required for this standalone service.
+
 ## Subscription login and exclusive ownership
 
 With the service stopped, create its private credential directory, then run:
@@ -78,7 +107,13 @@ The HTTP listener is intentionally **127.0.0.1 only**. A future Sandbox integrat
 must establish an authenticated, protected network path; exposing this port
 publicly is not an installation step.
 
-Example user unit, replacing the absolute paths:
+Save the following as
+`~/.config/systemd/user/<INSTANCE_NAME>-llm.service` (create the directory if
+needed), replacing the absolute paths. Install util-linux so `/usr/bin/flock`
+is available. Keep the checked-out workspace and installed dependencies on disk;
+this is a Node service, not a Worker deployment or a standalone copied bundle.
+
+Example user unit:
 
 ```ini
 [Unit]
@@ -101,6 +136,68 @@ causes startup failure; the service does not unlink arbitrary socket paths. If a
 crash leaves one, verify no old service owns it before removing it. A restart
 invalidates all in-memory grants and interrupts in-flight requests. Drain callers
 before planned maintenance; `concurrency = 0` is not a valid Runner setting.
+
+### Start and check the service
+
+Run as the service user, after configuring credentials and completing any
+subscription login:
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now <INSTANCE_NAME>-llm.service
+systemctl --user status <INSTANCE_NAME>-llm.service
+journalctl --user -u <INSTANCE_NAME>-llm.service -n 30 --no-pager
+```
+
+For unattended operation after logout/reboot, an administrator enables lingering
+once with `sudo loginctl enable-linger <RUNNER_USER>`. The unit should log
+`LLM service listening on 127.0.0.1:<PORT>`. Check both boundaries:
+
+```sh
+stat -c '%a %n' <CONTROL_SOCKET>
+curl --silent --output /dev/null --write-out '%{http_code}\n' \
+  -X POST http://127.0.0.1:<PORT>/v1/chat/completions
+curl --silent --output /dev/null --write-out '%{http_code}\n' \
+  --unix-socket <CONTROL_SOCKET> http://localhost/grants
+```
+
+Expect socket mode `600`, HTTP `401` without a job token, and control `405`
+(GET is not allowed). These checks prove startup and listener separation only;
+they do not prove model access. A successful inference probe must issue a fresh
+grant via the private socket, call an allowed route with that token, consume the
+complete stream, and revoke the job in a finalization path. Keep the token in
+process memory; do not print it or pass it as a command-line argument.
+
+Configuration is loaded at startup. After editing TOML, drain callers and run
+`systemctl --user restart <INSTANCE_NAME>-llm.service`; old grants become invalid.
+For a binary update, build the selected revision with its locked dependencies
+before restarting. Keep the previous revision and configuration for rollback;
+rolling back also invalidates grants and does not resume interrupted jobs.
+
+## Connecting the Runner
+
+There is currently no Runner setting for the LLM service control socket or grant
+lifecycle. `LLM_SERVICE_CONFIG` belongs to the LLM service process only. Keep the
+existing Runner model setup until the following integration is implemented and
+verified:
+
+1. After claiming a job, Runner requests one grant for its frozen route allowlist
+   and checks that the job deadline fits within the grant's two-hour expiry.
+2. The Sandbox receives that grant through its credential mechanism, with its
+   agent endpoint pointing at a protected, reachable service address. Sandbox
+   `127.0.0.1` is not host loopback. Do not expose the listener publicly or reuse
+   the upstream API key as a job token.
+3. Runner revokes the grant on every completion/cancellation/setup-failure path,
+   independently of evidence export and Sandbox destruction. A failed grant or
+   service call must not fall back to direct upstream access.
+4. Validate sbx first, then OpenShell's per-job model provider. Confirm real tool
+   turns, credential redaction, cancellation and final review publication before
+   migrating an instance. Real subscription login/refresh remains a separate gate.
+
+This is an implementation dependency, not an operator action that can be achieved
+by changing `MODEL_SECRET_COMMAND` or `REVIEW_MODEL_CONFIG` today. The existing
+[Runner installation](installation.md#first-installation) remains the supported
+production path until that integration lands.
 
 ## Public boundaries
 
