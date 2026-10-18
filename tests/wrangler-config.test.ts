@@ -19,6 +19,7 @@ type WranglerConfig = {
   assets?: { directory: string; binding: string; run_worker_first: boolean; html_handling: string };
   vars?: {
     GITHUB_APP_ID?: string;
+    GITHUB_CHECK_NAME?: string;
     DASHBOARD_ORIGIN?: string;
     ALLOWED_INSTALLATION_IDS?: string;
     ALLOWED_BOT_AUTHOR_IDS?: string;
@@ -53,6 +54,7 @@ type DeploymentFixture = {
   runWithoutInstallationIds: (instanceName: string) => string;
   runWithInstallationIds: (instanceName: string, installationIds: string) => string;
   runWithBotAuthorIds: (instanceName: string, botAuthorIds: string) => string;
+  runWithCheckName: (instanceName: string, name: string) => string;
   runWithPostHog: (instanceName: string, posthog: string) => string;
   outputs: (instanceName: string) => { core: string; ingress: string };
   read: (instanceName: string) => { core: string; ingress: string };
@@ -83,6 +85,7 @@ const withDeploymentFixture = <T>(callback: (fixture: DeploymentFixture) => T): 
     configuredInstallationIds: string | null = allowedInstallationIds,
     configuredBotAuthorIds?: string,
     posthog?: string,
+    checkName?: string,
   ) =>
     execFileSync(
       process.execPath,
@@ -96,6 +99,7 @@ const withDeploymentFixture = <T>(callback: (fixture: DeploymentFixture) => T): 
         ...(configuredInstallationIds === null ? [] : [configuredInstallationIds]),
         ...(configuredBotAuthorIds === undefined ? [] : [configuredBotAuthorIds]),
         ...(posthog === undefined ? [] : [posthog]),
+        ...(checkName === undefined ? [] : [checkName]),
       ],
       { cwd: root, encoding: 'utf8', stdio: 'pipe' },
     );
@@ -117,6 +121,15 @@ const withDeploymentFixture = <T>(callback: (fixture: DeploymentFixture) => T): 
         invoke(instanceName, runnerVpcServiceId, installationIds),
       runWithBotAuthorIds: (instanceName, botAuthorIds) =>
         invoke(instanceName, runnerVpcServiceId, allowedInstallationIds, botAuthorIds),
+      runWithCheckName: (instanceName, name) =>
+        invoke(
+          instanceName,
+          runnerVpcServiceId,
+          allowedInstallationIds,
+          '[]',
+          '{"enabled":false}',
+          name,
+        ),
       runWithPostHog: (instanceName, posthog) =>
         invoke(instanceName, runnerVpcServiceId, allowedInstallationIds, '[]', posthog),
       outputs,
@@ -231,6 +244,17 @@ describe('Wrangler deployment tooling', () => {
 
       expect(read('trusted-bots').ingress).toContain(
         `"ALLOWED_BOT_AUTHOR_IDS": "${allowedBotAuthorIds}"`,
+      );
+    });
+  });
+
+  it('renders per-instance Check names safely and leaves omitted names at the default', () => {
+    withDeploymentFixture(({ run, runWithCheckName, read }) => {
+      run('default-review');
+      expect(parseConfigText(read('default-review').core).vars?.GITHUB_CHECK_NAME).toBe('');
+      runWithCheckName('named-review', 'Ariga39 "AI" Review');
+      expect(parseConfigText(read('named-review').core).vars?.GITHUB_CHECK_NAME).toBe(
+        'Ariga39 "AI" Review',
       );
     });
   });

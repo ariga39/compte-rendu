@@ -89,7 +89,7 @@ request it created with `gh api repos/<OWNER>/<REPO>/pulls/<NUMBER> --jq
 Each independent deployment and its GitHub App must configure its own
 `ALLOWED_BOT_AUTHOR_IDS` value.
 
-PostHog capture is optional and disabled unless the final argument is supplied
+PostHog capture is optional and disabled unless the PostHog argument is supplied
 with an enabled JSON object. The project API key is a non-secret ingestion key;
 never provide a PostHog Personal API key. For example:
 
@@ -924,7 +924,7 @@ uses the temporary invocation described above.
 3. Render deployment-only configs from the repository root:
 
    ```sh
-   corepack pnpm render:wrangler <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '<GITHUB_BOT_AUTHOR_IDS_JSON>' ['<POSTHOG_CONFIG_JSON>']
+   corepack pnpm render:wrangler <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '<GITHUB_BOT_AUTHOR_IDS_JSON>' ['<POSTHOG_CONFIG_JSON>'] ['<GITHUB_CHECK_NAME>']
    ```
 
    This writes `apps/core/wrangler.<INSTANCE_NAME>.jsonc` and
@@ -1298,7 +1298,7 @@ For a normal compatible release:
 2. If there is a new migration, review it and apply it remotely with the D1
    migration command above. Prefer additive, backward-compatible changes.
 3. Render deployment-only configs again with the same
-   `corepack pnpm render:wrangler <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '<GITHUB_BOT_AUTHOR_IDS_JSON>' ['<POSTHOG_CONFIG_JSON>']`
+   `corepack pnpm render:wrangler <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '<GITHUB_BOT_AUTHOR_IDS_JSON>' ['<POSTHOG_CONFIG_JSON>'] ['<GITHUB_CHECK_NAME>']`
    inputs, then deploy using `apps/core/wrangler.<INSTANCE_NAME>.jsonc` and
    `apps/ingress/wrangler.<INSTANCE_NAME>.jsonc`.
 4. Redeliver one controlled GitHub event and inspect the identifier chain.
@@ -1324,7 +1324,7 @@ that no review is in flight before proceeding.
    deliveries arrive, then delete the App registration if it is no longer
    needed and revoke its private key.
 3. Render deployment-only configs again with the same
-   `corepack pnpm render:wrangler <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '<GITHUB_BOT_AUTHOR_IDS_JSON>' ['<POSTHOG_CONFIG_JSON>']`
+   `corepack pnpm render:wrangler <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '<GITHUB_BOT_AUTHOR_IDS_JSON>' ['<POSTHOG_CONFIG_JSON>'] ['<GITHUB_CHECK_NAME>']`
    inputs. Delete the public `<INSTANCE_NAME>-ingress` Worker, then the private
    `<INSTANCE_NAME>-core` Worker, in that order. Deleting the Workers removes
    their service and VPC bindings. Do not use `--force`.
@@ -1439,3 +1439,12 @@ Drain active reviews before changing the effective name. Existing Checks keep th
 original name; Check Suite lookup uses the newly configured name. If repository
 branch protection requires the old Check name, update that requirement when
 switching names.
+
+The renderer accepts the name as its final optional argument. Include the Bot
+allowlist and PostHog arguments when supplying it; use `[]` and
+`{"enabled":false}` when those options are unused. Retain the same name in your
+update and rollback commands. For example:
+
+```sh
+corepack pnpm render:wrangler ariga39-ai-reviewers <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '[]' '{"enabled":false}' 'Ariga39 AI Review'
+```

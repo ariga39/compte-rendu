@@ -10,6 +10,7 @@
   "vars": {
     "GITHUB_APP_ID": "REPLACE_WITH_GITHUB_APP_ID",
     "DASHBOARD_ORIGIN": "",
+    "GITHUB_CHECK_NAME": "",
     "POSTHOG_ENABLED": "false",
     "POSTHOG_PROJECT_API_KEY": "",
     "POSTHOG_HOST": "",

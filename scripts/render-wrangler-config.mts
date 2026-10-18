@@ -34,6 +34,7 @@ const renderDeploymentConfigs = (
   allowedInstallationIds: string,
   allowedBotAuthorIds = '[]',
   posthogConfig = '{"enabled":false}',
+  checkName = '',
 ) => {
   if (
     !instanceNamePattern.test(instanceName) ||
@@ -154,6 +155,12 @@ const renderDeploymentConfigs = (
     `"database_id": "${d1DatabaseId}"`,
   );
 
+  core = replaceRequired(
+    core,
+    '"GITHUB_CHECK_NAME": ""',
+    `"GITHUB_CHECK_NAME": ${JSON.stringify(checkName)}`,
+  );
+
   let ingress = readFileSync(join(ingressDirectory, 'wrangler.jsonc'), 'utf8');
   ingress = replaceRequired(
     ingress,
@@ -191,12 +198,21 @@ const renderDeploymentConfigs = (
 };
 
 const main = (args: readonly string[]) => {
-  if (args.length < 5 || args.length > 7) {
+  if (args.length < 5 || args.length > 8) {
     throw new Error(
-      'usage: render-wrangler-config <instance-name> <github-app-id> <d1-uuid> <runner-vpc-service-uuid> <github-installation-ids-json> [github-bot-author-ids-json] [posthog-config-json]',
+      'usage: render-wrangler-config <instance-name> <github-app-id> <d1-uuid> <runner-vpc-service-uuid> <github-installation-ids-json> [github-bot-author-ids-json] [posthog-config-json] [github-check-name]',
     );
   }
-  renderDeploymentConfigs(args[0], Number(args[1]), args[2], args[3], args[4], args[5], args[6]);
+  renderDeploymentConfigs(
+    args[0],
+    Number(args[1]),
+    args[2],
+    args[3],
+    args[4],
+    args[5],
+    args[6],
+    args[7],
+  );
 };
 
 if (fileURLToPath(import.meta.url) === resolve(process.argv[1] ?? '')) {
