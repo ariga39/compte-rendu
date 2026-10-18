@@ -23,7 +23,7 @@ const replaceRequired = (template: string, marker: string, value: string) => {
   if (!template.includes(marker)) {
     throw new Error(`template marker not found: ${marker}`);
   }
-  return template.replace(marker, value);
+  return template.replace(marker, () => value);
 };
 
 const renderDeploymentConfigs = (
