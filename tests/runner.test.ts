@@ -3502,6 +3502,32 @@ describe('Runner Job HTTP interface', () => {
     expect(skillAtSandboxBoundary).not.toContain('schema-valid');
     expect(skillAtSandboxBoundary).not.toContain('web or repository inspection');
     expect(skillAtSandboxBoundary).not.toContain('```');
+    const shellGuidance = skillAtSandboxBoundary?.replace(/\s+/g, ' ') ?? '';
+    expect(shellGuidance).toContain('as direct shell commands');
+    expect(shellGuidance).toContain(
+      '`gh pr view`, `gh api graphql`, `git diff`, `git grep`, `git log`, and `git show` are available',
+    );
+    expect(shellGuidance).toContain("shell tool's workdir option; do not use `git -C` or `cd`");
+    expect(shellGuidance).toContain(
+      'one direct command per call: no pipelines, redirection, command chaining, command substitution, or wrapper commands',
+    );
+    expect(shellGuidance).toContain('Keep each GraphQL query on a single line');
+    expect(shellGuidance).toContain(
+      'Bound GitHub output with the native `--json` flag and simple field lists instead of piping to another command such as `head`',
+    );
+    expect(shellGuidance).toContain(
+      'Avoid `--jq` expressions and other arguments containing shell metacharacters such as `|`, `>`, `;`, or `&`; the sandbox denies those command shapes',
+    );
+    expect(shellGuidance).toContain('Prefer field lists and pagination over output transformation');
+    expect(shellGuidance).toContain(
+      'permission denial means the command shape is unsupported, not that GitHub is unavailable',
+    );
+    expect(shellGuidance).toContain(
+      'Retry the same intent as one allowed direct command before concluding GitHub cannot be reached',
+    );
+    expect(shellGuidance).toContain(
+      'Do not probe the environment, auth, or token state, and do not broaden the allowed permissions',
+    );
     const configContent = createArgs?.find((value) => value.startsWith('OPENCODE_CONFIG_CONTENT='));
     expect(configContent).toBeDefined();
     const config = JSON.parse(configContent!.slice('OPENCODE_CONFIG_CONTENT='.length)) as {

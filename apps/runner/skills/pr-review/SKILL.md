@@ -34,6 +34,22 @@ repository programs. You may inspect already-present dependency source. Use
 the GitHub CLI for current context, read-only Git history and diff inspection,
 and the native read, grep, and glob tools.
 
+Run GitHub CLI and Git inspection as direct shell commands. Only `gh pr view`,
+`gh api graphql`, `git diff`, `git grep`, `git log`, and `git show` are
+available. Choose the checkout with the shell tool's workdir option; do not use
+`git -C` or `cd`. Issue one direct command per call: no pipelines, redirection,
+command chaining, command substitution, or wrapper commands. Keep each GraphQL
+query on a single line. Bound GitHub output with the native `--json` flag and
+simple field lists instead of piping to another command such as `head`. Avoid
+`--jq` expressions and other arguments containing shell metacharacters such as
+`|`, `>`, `;`, or `&`; the sandbox denies those command shapes. Prefer field
+lists and pagination over output transformation.
+
+A permission denial means the command shape is unsupported, not that GitHub is
+unavailable. Retry the same intent as one allowed direct command before
+concluding GitHub cannot be reached. Do not probe the environment, auth, or
+token state, and do not broaden the allowed permissions.
+
 Start with `git diff --find-renames MERGE_BASE_SHA HEAD_SHA` and use the head
 revision as the source of truth. Keep the admitted `BASE_SHA` and `HEAD_SHA` as
 freshness/context facts; do not use `BASE_SHA` as the diff starting point.
