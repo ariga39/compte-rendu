@@ -9,6 +9,8 @@ The accepted v1 architecture and delivery plan are in
 Operators can install and run the deployed Workers from
 [docs/installation.md](docs/installation.md). Evidence is retained in a
 private R2 bucket with a deployment-configured lifecycle expiration.
+The standalone [LLM service deployment guide](docs/llm-service.md) covers the new
+host-side inference service; Runner integration is not yet available.
 
 To print one sanitized correlated diagnosis, pass an explicit deployed
 database, bucket, and generated config:

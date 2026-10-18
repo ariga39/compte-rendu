@@ -8,6 +8,19 @@ credentials by itself.
 Values in angle brackets are operator choices. Do not replace them with values
 from another installation.
 
+## External LLM service status
+
+The [LLM service deployment guide](llm-service.md) covers the new standalone
+host service: credential preparation, TOML routes, subscription login, systemd
+startup, and listener checks. Deploy it independently of the Runner.
+
+**The current Runner does not yet consume this service.** It still uses the
+model configuration and credential paths below. Installing the LLM service does
+not switch review traffic, and changing `REVIEW_MODEL_CONFIG.baseUrl` alone is
+not a supported migration: Runner must first implement per-job grant issuance,
+revocation, and protected Sandbox access. The guide lists the
+[required integration work](llm-service.md#connecting-the-runner).
+
 ## What is deployed
 
 The repository deploys these resources:
@@ -580,7 +593,8 @@ To use a gateway compatible with the selected `opencode-go` model, add an
 optional `baseUrl`, for example `"baseUrl": "https://model.example.com/v1"`.
 It must be an absolute HTTPS URL without embedded credentials, a query, a
 fragment, or wildcard hostname. When omitted, OpenCode uses the official provider endpoint. The
-Runner uses the configured URL for OpenCode's `options.baseURL`, scopes the
+Runner sets the configured URL in OpenCode 2's provider and model
+`settings.baseURL`, scopes the
 Docker credential proxy to its hostname, and allows model traffic only to its
 host and port (443 by default). Cleanup removes that Job's exact network rule.
 
