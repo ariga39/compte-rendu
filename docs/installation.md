@@ -1423,3 +1423,15 @@ and [D1 migrations](https://developers.cloudflare.com/d1/reference/migrations/).
 - [GitHub webhook events and payloads](https://docs.github.com/en/webhooks/webhook-events-and-payloads)
 - [GitHub App installation scope](https://docs.github.com/en/apps/using-github-apps/installing-your-own-github-app)
 - [GitHub App private keys](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/managing-private-keys-for-github-apps)
+
+### GitHub Check name
+
+Set the optional Core Worker variable `GITHUB_CHECK_NAME` in its Wrangler `vars`
+to brand the Check for each deployment, for example `Ariga39 AI Review`. Omitted
+or blank values retain `Petit Chiba Review`. The same name is used for creation,
+recovery, and Check Suite lookup.
+
+Drain active reviews before changing this value. Existing Checks keep their
+original name; Check Suite lookup uses the newly configured name. If repository
+branch protection requires the old Check name, update that requirement when
+switching names.
