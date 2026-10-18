@@ -196,8 +196,11 @@ An alias needs its model definition in OpenCode configuration. Metadata in the
 example is illustrative and must match the selected upstream.
 
 `MODEL_SECRET_COMMAND` is not used in service mode. The Runner requests a new
-two-hour grant for each owned job before Sandbox setup. It writes the grant to a
-private, temporary host file outside Sandbox mounts; sbx's credential proxy reads
+grant for each owned job before Sandbox setup. Its lifetime is
+`4 × REVIEW_ATTEMPT_BUDGET_MS` from the shared contracts package: the current
+30-minute review budget gives a two-hour grant. Changing that budget updates
+both grant expiry and revocation-record retention when the service is rebuilt.
+The Runner writes the grant to a private, temporary host file outside Sandbox mounts; sbx's credential proxy reads
 that file and gives the agent only a placeholder. Never put a job token or
 upstream credential in the Runner environment file.
 
@@ -242,7 +245,8 @@ outbound access to the configured supplier.
 
 Runner revokes the grant when agent work ends, before evidence export and Sandbox
 cleanup, and on cancellation. Revocation failure does not skip Sandbox cleanup.
-The two-hour expiry remains the upper bound if the control service is unreachable.
+The grant expiry (currently two hours) remains the upper bound if the control
+service is unreachable.
 Runner records only the job identity in a pending-revocation marker before
 requesting a grant. After a crash, a new Runner revokes those identities before
 claiming or admitting more jobs; unreadable or unresolved records keep admission
@@ -269,10 +273,10 @@ The Unix socket exposes only:
 The socket is mode 0600, inside a private directory. Its filesystem permissions
 are the control-plane authentication. HTTP bearer tokens cannot administer grants.
 Duplicate issuance returns 409. Revocation of an unknown job prevents delayed
-issuance for that identity during the two-hour tombstone lifetime. If an issuance
-response is lost, the caller must fail the job and revoke by identity, never retry
-issuance within that job. Grants expire exactly two hours after issuance and have
-no renewal API. Revocation/expiry also cancels active inference.
+issuance for that identity during the same budget-derived tombstone lifetime.
+If an issuance response is lost, the caller must fail the job and revoke by identity, never retry
+issuance within that job. Grants expire exactly `4 × REVIEW_ATTEMPT_BUDGET_MS`
+after issuance and have no renewal API. Revocation/expiry also cancels active inference.
 
 The loopback listener exposes only `POST /v1/chat/completions` and
 `POST /v1/responses`, with `Authorization: Bearer <job token>`. Both require

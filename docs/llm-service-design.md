@@ -59,7 +59,7 @@ Agent input cannot add routes. Route definitions are stable for a live grant. Co
 grants; credential refresh may change the upstream secret without changing the
 route. Service failure never silently falls back to direct sandbox credentials.
 
-## Job grants: fixed two hours, no renewal
+## Job grants: four review budgets, no renewal
 
 Use an opaque, cryptographically random bearer token per executing job. The
 service generates it on an authenticated Runner control request and stores its
@@ -68,8 +68,8 @@ state. Return the secret once; never log it, put it in command arguments, commit
 it or include it in exported sessions or public dashboard payloads.
 
 Issue after the Runner owns the claim and before agent execution, not when the PR
-is admitted to Core's queue. A grant expires exactly two hours after issuance;
-there is no renewal endpoint or sliding expiry. The execution deadline must fit
+is admitted to Core's queue. A grant expires `4 × REVIEW_ATTEMPT_BUDGET_MS` after
+issuance (currently two hours); there is no renewal endpoint or sliding expiry. The execution deadline must fit
 inside that lifetime, leaving the existing budget for export and cleanup. Reject
 an incompatible job budget before starting model work: require the absolute
 execution/finalization deadline to be no later than grant expiry. The existing
