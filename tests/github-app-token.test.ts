@@ -43,6 +43,32 @@ const decodeBase64UrlJson = (value: string) => {
 };
 
 describe('GitHub App token provider', () => {
+  it('resolves the review author from the authenticated App identity', async () => {
+    const keyPair = await crypto.subtle.generateKey(
+      {
+        name: 'RSASSA-PKCS1-v1_5',
+        modulusLength: 2048,
+        publicExponent: new Uint8Array([1, 0, 1]),
+        hash: 'SHA-256',
+      },
+      true,
+      ['sign', 'verify'],
+    );
+    const provider = createGitHubAppTokenProvider({
+      appId: '1234567',
+      privateKey: pemFromDer(await crypto.subtle.exportKey('pkcs8', keyPair.privateKey)),
+      crypto,
+      fetch: async (input, init) => {
+        const request = new Request(input, init);
+        expect(new URL(request.url).pathname).toBe('/app');
+        const jwt = request.headers.get('authorization')!.slice('Bearer '.length);
+        expect(decodeBase64UrlJson(jwt.split('.')[1]).iss).toBe(1234567);
+        return Response.json({ id: 1234567, slug: 'test-reviewer' });
+      },
+    });
+    expect(await provider.getReviewAuthorLogin()).toBe('test-reviewer[bot]');
+  });
+
   it('mints a target-repository read token and validates its effective grant', async () => {
     const keyPair = await globalThis.crypto.subtle.generateKey(
       {

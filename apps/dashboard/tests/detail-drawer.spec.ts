@@ -26,6 +26,7 @@ const publicTask = (
   dispatch: null,
   stage: null,
   processing: null,
+  decision: null,
   identity: {
     kind: 'public',
     repositoryFullName: 'acme/widgets',

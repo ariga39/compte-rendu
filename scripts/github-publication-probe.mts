@@ -191,7 +191,8 @@ export const createGitHubPublicationProbe = async (
       payload: formatReviewPublicationPayload({
         runId: expected.job.runId,
         headSha: expected.job.headSha,
-        markdown: callback.result,
+        markdown: typeof callback.result === 'string' ? callback.result : callback.result.markdown,
+        decision: typeof callback.result === 'string' ? 'comment' : callback.result.decision,
       }),
     });
     if (publication.kind !== 'created') return response(409);

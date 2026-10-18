@@ -62,6 +62,79 @@ const eligiblePrivatePullRequest: ReviewEvent = {
 };
 
 describe('Review coordinator', () => {
+  it.each([
+    { version: 2, markdown: '## Review: fine' },
+    { version: 2, decision: 'APPROVE', markdown: '## Review: fine' },
+    { version: 2, decision: 'approve', markdown: 'fine' },
+  ])('never publishes an invalid structured decision %j', async (output) => {
+    const reviews: unknown[] = [];
+    let runId = '';
+    const coordinator = createReviewCoordinator({
+      stateStore: createInMemoryReviewStateStore(),
+      scheduler: {
+        schedule: async (_job, id) => {
+          runId = id;
+        },
+      },
+      github: {
+        loadReviewTarget: async () => ({ headSha: eligiblePrivatePullRequest.headSha }),
+        createReview: async ({ payload }) => {
+          reviews.push(payload);
+          return { kind: 'created', review: payload };
+        },
+      },
+    });
+    await coordinator.handleReviewEvent(eligiblePrivatePullRequest);
+    expect(await coordinator.completeReview({ runId, output })).toBe('failed');
+    expect(reviews).toEqual([]);
+  });
+
+  it.each([
+    ['approve', 'APPROVE'],
+    ['request_changes', 'REQUEST_CHANGES'],
+    ['comment', 'COMMENT'],
+  ] as const)(
+    'publishes a structured %s decision for the admitted revision',
+    async (decision, event) => {
+      const stateStore = createInMemoryReviewStateStore();
+      const reviews: ReviewPublicationPayload[] = [];
+      let runId = '';
+      const coordinator = createReviewCoordinator({
+        github: {
+          loadReviewTarget: async () => ({ headSha: eligiblePrivatePullRequest.headSha }),
+          createReview: async ({ payload }) => {
+            reviews.push(payload);
+            return { kind: 'created', review: payload };
+          },
+        },
+        stateStore,
+        scheduler: {
+          schedule: async (_job, id) => {
+            runId = id;
+          },
+        },
+      });
+      await coordinator.handleReviewEvent(eligiblePrivatePullRequest);
+      expect(
+        await coordinator.completeReview({
+          runId,
+          output: {
+            version: 2,
+            decision,
+            markdown: '## Review: findings',
+          },
+        }),
+      ).toBe('completed');
+      expect(reviews).toEqual([
+        {
+          event,
+          commit_id: eligiblePrivatePullRequest.headSha,
+          body: `<!-- compte-rendu:run:${runId} -->\n## Review: findings`,
+        },
+      ]);
+    },
+  );
+
   it('publishes the Markdown output as a body-only COMMENT for the admitted head', async () => {
     const stateStore = createInMemoryReviewStateStore();
     const reviews: ReviewPublicationPayload[] = [];

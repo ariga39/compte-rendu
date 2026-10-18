@@ -7,6 +7,7 @@ import {
   RunnerJobInput,
   RunnerProgressReport,
   RunnerResultCallback,
+  StructuredReviewResult,
   sanitizeOperationalLogEvent,
 } from '@compte-rendu/contracts';
 import {
@@ -74,6 +75,7 @@ const epochMilliseconds = (value: string) => {
   return Option.isSome(parsed) ? parsed.value.epochMilliseconds : undefined;
 };
 const RunnerManifest = Schema.Struct({
+  result: Schema.optional(StructuredReviewResult),
   jobId: Schema.NonEmptyString,
   runId: Schema.NonEmptyString,
   attempt: Schema.Int,
@@ -176,7 +178,17 @@ const completeCallbackEvidenceIsValid = async (
     return false;
   }
   const reviewBytes = decodeArtifact(evidence.validatedReview.content);
-  const resultBytes = new TextEncoder().encode(callback.result);
+  if (typeof callback.result === 'string') {
+    if (manifest.result !== undefined) return false;
+  } else if (
+    manifest.result === undefined ||
+    manifest.result.decision !== callback.result.decision ||
+    manifest.result.markdown !== callback.result.markdown
+  )
+    return false;
+  const resultBytes = new TextEncoder().encode(
+    typeof callback.result === 'string' ? callback.result : callback.result.markdown,
+  );
   return (
     reviewBytes !== undefined &&
     reviewBytes.byteLength === resultBytes.byteLength &&
@@ -201,6 +213,7 @@ export const createCoreWorker = (
     dependencies.github ??
     createGitHubPublicationAdapter({
       token: tokenProvider.getInstallationToken,
+      getReviewAuthorLogin: tokenProvider.getReviewAuthorLogin,
       dashboardOrigin: env.DASHBOARD_ORIGIN,
     });
   const stateStore = dependencies.stateStore ?? createD1ReviewStateStore(env.REVIEW_DB);
@@ -472,6 +485,10 @@ export const createCoreWorker = (
     const evidenceRecorded = await stateStore.recordEvidence({
       runId: callback.runId,
       sandboxCleanup: callback.sandbox.cleanup,
+      decision:
+        callback.status === 'succeeded' && typeof callback.result !== 'string'
+          ? callback.result.decision
+          : undefined,
       evidence: {
         key: `reviews/${callback.runId}`,
         status: callback.evidence.status,
@@ -546,6 +563,7 @@ export const createCoreWorker = (
             installationId: finalOutcome.installationId,
             checkRunId: finalOutcome.checkRunId,
             status: 'success',
+            ...(finalOutcome.decision === undefined ? {} : { decision: finalOutcome.decision }),
           })
           .catch(() => undefined);
       }

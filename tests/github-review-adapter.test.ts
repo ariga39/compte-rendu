@@ -90,3 +90,149 @@ describe('pull request facts branch refs', () => {
     ).toMatchObject({ baseRef: 'main', headRef: 'feature/drawer' });
   });
 });
+
+describe('structured review publication confirmation', () => {
+  it.each(['author', 'commit', 'state', 'valid', 'dismissed'])(
+    'checks %s when recovering a vote',
+    async (scenario) => {
+      const headSha = '2'.repeat(40);
+      const marker = '<!-- compte-rendu:run:vote -->';
+      const record = {
+        id: 123,
+        body: marker,
+        commit_id: scenario === 'commit' ? '3'.repeat(40) : headSha,
+        state:
+          scenario === 'state' ? 'COMMENTED' : scenario === 'dismissed' ? 'DISMISSED' : 'APPROVED',
+        user: { login: scenario === 'author' ? 'other[bot]' : 'reviewer[bot]', type: 'Bot' },
+      };
+      const github = createGitHubPublicationAdapter({
+        token: 'fixture',
+        getReviewAuthorLogin: async () => 'reviewer[bot]',
+        fetch: async (input) =>
+          new URL(input instanceof Request ? input.url : input).pathname === '/repositories/11'
+            ? Response.json({ full_name: 'acme/repo' })
+            : Response.json([record]),
+      });
+      const result = github.findReviewByMarker!({
+        repositoryId: 11,
+        installationId: 7,
+        pullRequestNumber: 42,
+        marker,
+        expected: { headSha, event: 'APPROVE' },
+      });
+      if (scenario === 'valid' || scenario === 'dismissed')
+        expect(await result).toMatchObject({ id: 123, state: record.state });
+      else await expect(result).rejects.toThrow();
+    },
+  );
+});
+
+it('labels a delivered Request changes review as a successful Check with its decision', async () => {
+  let update: unknown;
+  const github = createGitHubPublicationAdapter({
+    token: 'fixture',
+    fetch: async (input, init) => {
+      const request = new Request(input, init);
+      if (request.method === 'PATCH') {
+        update = await request.json();
+        return Response.json({});
+      }
+      return Response.json({ full_name: 'acme/repo' });
+    },
+  });
+  await github.updateCheckRun!({
+    runId: 'vote',
+    repositoryId: 11,
+    installationId: 7,
+    checkRunId: 4,
+    status: 'success',
+    decision: 'request_changes',
+  });
+  expect(update).toMatchObject({
+    conclusion: 'success',
+    output: { title: 'Review published: Request changes' },
+  });
+});
+
+it('recovers a lost vote response only from the matching App review without posting twice', async () => {
+  const records: unknown[] = [];
+  const headSha = '2'.repeat(40);
+  const payload = {
+    event: 'REQUEST_CHANGES' as const,
+    commit_id: headSha,
+    body: '<!-- compte-rendu:run:recover -->\n## Review: fix this',
+  };
+  const github = createGitHubPublicationAdapter({
+    token: 'fixture',
+    getReviewAuthorLogin: async () => 'reviewer[bot]',
+    fetch: async (input, init) => {
+      const request = new Request(input, init);
+      const path = new URL(request.url).pathname;
+      if (path === '/repositories/11') return Response.json({ full_name: 'acme/repo' });
+      if (path.endsWith('/pulls/42')) return Response.json({ head: { sha: headSha } });
+      if (request.method === 'POST') {
+        const body = await request.json();
+        records.push({
+          id: 100,
+          body: body.body,
+          commit_id: body.commit_id,
+          state: 'CHANGES_REQUESTED',
+          user: { login: 'reviewer[bot]', type: 'Bot' },
+        });
+        return new Response(null, { status: 503 });
+      }
+      return Response.json(records);
+    },
+  });
+  expect(
+    await github.createReview!({
+      repositoryId: 11,
+      installationId: 7,
+      pullRequestNumber: 42,
+      payload,
+      verifyPublication: true,
+    }),
+  ).toMatchObject({ kind: 'created', review: { id: 100, state: 'CHANGES_REQUESTED' } });
+  expect(records).toHaveLength(1);
+});
+
+it('does not retry a vote whose returned author contradicts the authenticated App', async () => {
+  const published: unknown[] = [];
+  const headSha = '2'.repeat(40);
+  const github = createGitHubPublicationAdapter({
+    token: 'fixture',
+    getReviewAuthorLogin: async () => 'reviewer[bot]',
+    fetch: async (input, init) => {
+      const request = new Request(input, init);
+      const path = new URL(request.url).pathname;
+      if (path === '/repositories/11') return Response.json({ full_name: 'acme/repo' });
+      if (path.endsWith('/pulls/42')) return Response.json({ head: { sha: headSha } });
+      if (request.method === 'POST') {
+        const body = await request.json();
+        published.push(body);
+        return Response.json({
+          id: 123,
+          body: body.body,
+          commit_id: headSha,
+          state: 'APPROVED',
+          user: { type: 'Bot', login: 'other[bot]' },
+        });
+      }
+      return Response.json([]);
+    },
+  });
+  await expect(
+    github.createReview!({
+      repositoryId: 11,
+      installationId: 7,
+      pullRequestNumber: 42,
+      verifyPublication: true,
+      payload: {
+        event: 'APPROVE',
+        commit_id: headSha,
+        body: '<!-- compte-rendu:run:wrong-author -->\n## Review: good',
+      },
+    }),
+  ).rejects.toThrow();
+  expect(published).toHaveLength(1);
+});

@@ -309,7 +309,7 @@ Configure the GitHub App with only these repository permissions:
 | Metadata              | Read  | Resolve the repository by numeric ID, validate repository metadata, and check the `/ai-review` commenter's collaborator permission before approving a public fork review.                                                     |
 | Contents              | Read  | Fetch the repository at the exact base/head SHAs in the Sandbox checkout. GitHub documents Contents as the permission for HTTP-based Git access.                                                                              |
 | Pull requests         | Read  | Load PR facts and current head SHA, and find existing reviews for idempotent publication.                                                                                                                                     |
-| Pull requests         | Write | Create the body-only `COMMENT` review.                                                                                                                                                                                        |
+| Pull requests         | Write | Publish the body-only `APPROVE`, `REQUEST_CHANGES`, or `COMMENT` review.                                                                                                                                                      |
 | Issues                | Write | Make the `issue_comment` webhook available for PR comments, create command reactions, and publish one ordinary PR comment when a Review fails. The handler accepts only a created comment whose body is exactly `/ai-review`. |
 | Checks                | Write | Create one head-SHA-bound Check Run per review run and update its queued, in-progress, success, failure, or cancelled state.                                                                                                  |
 
@@ -359,7 +359,7 @@ Manual command reactions are compact operator feedback: `eyes` means the
 authorized command was claimed and scheduled, `confused` means the command
 was denied, the pull request was missing or draft, or the run was superseded,
 and `-1` means the accepted run ended failed. A successful run keeps only
-`eyes`; its published `COMMENT` review is the completion signal. A failed run
+`eyes`; its published review is the completion signal. A failed run
 also publishes one ordinary PR comment so automatic and manual runs both have
 a visible terminal notification. Automatic reviews do not react to a command.
 Reaction writes target the originating numeric comment id and may be replayed
@@ -459,7 +459,7 @@ corepack pnpm --filter @compte-rendu/runner build
 ### Offline Sandbox template deployment
 
 The Runner uses the versioned custom template
-`ghcr.io/ariga39/petit-chiba-opencode:1.18.25-gh2.98.0`. When the NUC should
+`ghcr.io/ariga39/petit-chiba-opencode:2.0.32-gh2.98.0`. When the NUC should
 not pull from a registry, build and transfer the ordinary OCI image from a
 trusted build host, then load it into the NUC's separate Sandbox image store.
 Do not run these commands inside a review Sandbox or as a Runner Job, and do
@@ -469,11 +469,11 @@ not put credentials in the image:
 docker buildx build \
   --platform linux/amd64 \
   --load \
-  --tag ghcr.io/ariga39/petit-chiba-opencode:1.18.25-gh2.98.0 \
+  --tag ghcr.io/ariga39/petit-chiba-opencode:2.0.32-gh2.98.0 \
   apps/runner/sandbox-template
 
 docker image save \
-  ghcr.io/ariga39/petit-chiba-opencode:1.18.25-gh2.98.0 \
+  ghcr.io/ariga39/petit-chiba-opencode:2.0.32-gh2.98.0 \
   -o petit-chiba-opencode.tar
 ```
 
@@ -486,7 +486,7 @@ sbx template load /path/to/petit-chiba-opencode.tar
 sbx create \
   --name petit-chiba-template-probe \
   --no-share-skills \
-  --template ghcr.io/ariga39/petit-chiba-opencode:1.18.25-gh2.98.0 \
+  --template ghcr.io/ariga39/petit-chiba-opencode:2.0.32-gh2.98.0 \
   --cpus 4 \
   --memory 8g \
   shell /path/to/non-sensitive-probe-workspace
@@ -496,7 +496,7 @@ sbx rm --force petit-chiba-template-probe
 rm /path/to/petit-chiba-opencode.tar
 ```
 
-The version probes must report OpenCode `1.18.25` and GitHub CLI `2.98.0`.
+The version probes must report OpenCode `opencode v2.0.32` and GitHub CLI `2.98.0`.
 Keep the loaded template for the Runner. A later registry deployment may
 replace the local tag with a fully qualified registry reference plus its
 recorded digest, but registry access and a digest are optional for this
@@ -515,6 +515,27 @@ explicit per-job `policy allow` rules (the configured model host and
 host default is `deny-all` and no other global or organization-governance allow
 rules are active. This is long-standing shipped kit behavior, not a 0.48 change;
 the upgrade only made it worth verifying.
+
+### OpenCode 2 rollout
+
+Apply migration `0011_review_decision.sql` and deploy Core before upgrading
+Runners. Existing in-flight string results retain Comment behavior; new Runners
+submit a versioned decision and Markdown. Drain active jobs before replacing the
+Runner artifact or Sandbox template. Build/load the new pinned template before
+starting the upgraded Runner.
+
+Runner invokes OpenCode 2 in standalone mode, including session inspection and
+export. Each job gets fresh data/state directories and a placeholder-only auth
+context; never seed the image or job with a personal OpenCode database or legacy
+`auth.json`. Real model credentials remain in the host-side Sandbox proxy.
+`REVIEW_MODEL_CONFIG` remains the operator-facing format. Runner translates it to
+V2 native provider/model settings and agent permissions, including the selected
+model's endpoint override when a custom base URL is configured.
+
+A review publishes Approve, Request changes or Comment exactly as submitted.
+Request changes is a successfully delivered review, not a failed execution.
+Repository branch rules determine whether its vote blocks merging; this service
+does not change those rules or automatically dismiss earlier reviews.
 
 The runner listens only on IPv4 loopback port `8080`. It runs as the persistent
 service below on the host that also runs the remotely managed Tunnel connector.
@@ -822,7 +843,7 @@ daemon with plain `sbx` client calls, and confirm no scoped probe resource
 remains:
 
 ```sh
-sbx create --name compte-rendu-kvm-probe --no-share-skills --template ghcr.io/ariga39/petit-chiba-opencode:1.18.25-gh2.98.0 --cpus 4 --memory 8g opencode /path/to/non-sensitive-probe-workspace
+sbx create --name compte-rendu-kvm-probe --no-share-skills --template ghcr.io/ariga39/petit-chiba-opencode:2.0.32-gh2.98.0 --cpus 4 --memory 8g shell /path/to/non-sensitive-probe-workspace
 sbx exec compte-rendu-kvm-probe opencode --version
 sbx rm --force compte-rendu-kvm-probe
 sbx ls
@@ -1086,7 +1107,7 @@ head SHA, and the single installation ID in the generated config.
    delivery is accepted and record its `<DELIVERY_ID>` and the resulting
    `<RUN_ID>`.
 2. Confirm GitHub shows one visible body-only review for that PR and exact
-   `<HEAD_SHA>` with event type `COMMENT`. It must contain a useful, readable
+   `<HEAD_SHA>` with the submitted decision (`APPROVE`, `REQUEST_CHANGES`, or `COMMENT`). It must contain a useful, readable
    Markdown review body (actionable findings in prose or a clear no-findings
    conclusion), and its URL must be retained as
    `<PR_URL>#pullrequestreview-<REVIEW_ID>`.

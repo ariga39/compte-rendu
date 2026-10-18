@@ -76,10 +76,27 @@ those details entirely unless they materially establish a finding; even then,
 put them after the verdict. For zero findings, stop after the verdict unless a
 short explanation materially helps. Do not impose artificial brevity on a
 technical finding that needs detail.
+Choose an explicit `decision` that matches the review you actually completed:
+
+- `approve` — after a complete review of the exact diff, no blocking defect was
+  identified. Non-blocking suggestions may remain.
+- `request_changes` — at least one concrete, actionable defect should be fixed
+  before merging; the review explains its impact and the required correction.
+- `comment` — feedback without a definite merge recommendation, for example when
+  the context is insufficient for a definite recommendation.
+
+Style, naming, formatting, and preference comments are never blocking. Do not use
+`request_changes` for speculative risk or taste. Do not infer the decision from a
+finding count, Markdown keywords, a process exit code, or a confidence score. An
+incomplete review, a context or tooling failure, or any inability to establish the
+diff's behavior must not be labeled `approve`; use `comment` when a definite
+recommendation is not warranted. The decision and the Markdown must agree.
+
 Tool calls and intermediate work may remain visible during the review. After
-completing all analysis, call `submit_review` exactly once with the complete
-publishable Markdown in its `markdown` argument. The `markdown` argument itself
-must contain only findings and the conclusion ready to publish, with no visible
-planning, self-dialogue, candidate triage, or process narration. After optional
-outer whitespace, begin that argument with exactly `## Review:`. Do not emit
-the review as terminal prose; terminal assistant messages are evidence only.
+completing all analysis, call `submit_review` exactly once with the `decision` and
+the complete publishable Markdown in its `markdown` argument. The `markdown`
+argument itself must contain only findings and the conclusion ready to publish,
+with no visible planning, self-dialogue, candidate triage, or process narration.
+After optional outer whitespace, begin that argument with exactly `## Review:`.
+Do not emit the review as terminal prose; terminal assistant messages are
+evidence only.

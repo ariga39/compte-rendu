@@ -10,6 +10,28 @@ import {
 
 delete process.env.REVIEW_MODEL_CONFIG;
 
+const sessionExportJson = (
+  id: string,
+  options: {
+    readonly outcome?: string;
+    readonly finish?: string;
+    readonly terminalIdle?: boolean;
+  } = {},
+) =>
+  JSON.stringify({
+    info: { id, outcome: options.outcome ?? 'succeeded' },
+    messages: [
+      { type: 'assistant', finish: options.finish ?? 'stop' },
+      ...(options.terminalIdle === false ? [] : [{ type: 'idle', outcome: 'succeeded' }]),
+    ],
+  });
+
+const structuredResult = (markdown: string, decision = 'comment') => ({
+  version: 2,
+  decision,
+  markdown,
+});
+
 const runnerJobFields = {
   id: 'runner-job-test',
   repositoryName: 'acme/reviewed',
@@ -31,41 +53,45 @@ const standardModelConfig = JSON.stringify({
 
 const submitReviewEvent = (
   markdown = '## Review:\n\nNo findings.',
-  options: { readonly callID?: string; readonly status?: string } = {},
-) =>
-  JSON.stringify({
+  options: {
+    readonly callID?: string;
+    readonly status?: string;
+    readonly decision?: string;
+    readonly sessionID?: string;
+  } = {},
+) => {
+  const status = options.status ?? 'completed';
+  const input = { decision: options.decision ?? 'comment', markdown };
+  return JSON.stringify({
     type: 'tool_use',
+    sessionID: options.sessionID ?? 'scenario-session',
     part: {
       type: 'tool',
+      id: options.callID ?? 'call-submit-review',
       tool: 'submit_review',
-      callID: options.callID ?? 'call-submit-review',
       state:
-        options.status === undefined || options.status === 'completed'
-          ? {
-              status: 'completed',
-              input: { markdown },
-              output: 'Review submitted.',
-              title: 'Review submitted.',
-            }
-          : { status: options.status, error: 'submission failed' },
+        status === 'completed'
+          ? { status: 'completed', input, output: 'Review submitted.', title: 'Review submitted.' }
+          : { status, input, error: 'submission failed' },
     },
   });
+};
 
-const finalMarkdownJsonl = (markdown = '## Review:\n\nNo findings.') =>
+const finalMarkdownJsonl = (
+  markdown = '## Review:\n\nNo findings.',
+  sessionID = 'scenario-session',
+) =>
   [
     JSON.stringify({
       type: 'text',
+      sessionID,
       part: {
         type: 'text',
         messageID: 'msg-final',
         text: 'I finished reviewing the pull request.',
       },
     }),
-    submitReviewEvent(markdown),
-    JSON.stringify({
-      type: 'step_finish',
-      part: { type: 'step-finish', messageID: 'msg-final', reason: 'stop' },
-    }),
+    submitReviewEvent(markdown, { sessionID }),
   ].join('\n');
 
 const writeEvidenceFixture = async (
@@ -82,9 +108,9 @@ const writeEvidenceFixture = async (
     await writeFile(options.stdoutFilePath!, `${resultLine}\n`, { mode: 0o600, flag });
     await writeFile(options.stderrFilePath!, 'agent stderr\n', { mode: 0o600, flag });
   }
-  if (args[0] === 'exec' && args.includes('export')) {
+  if (args[0] === 'exec' && args.includes('export') && options.stdoutFilePath !== undefined) {
     await writeFile(
-      options.stdoutFilePath!,
+      options.stdoutFilePath,
       `{"session":"${args[args.indexOf('export') + 1]}","full":true}\n`,
       { mode: 0o600, flag },
     );
@@ -94,7 +120,7 @@ const writeEvidenceFixture = async (
     const destination = args[2];
     const sessionId = source.match(/opencode-export-([A-Za-z0-9._:-]+)\.json$/)?.[1];
     if (sessionId !== undefined) {
-      await writeFile(destination, JSON.stringify({ info: { id: sessionId }, messages: [] }), {
+      await writeFile(destination, sessionExportJson(sessionId), {
         mode: 0o600,
       });
     } else {
@@ -225,11 +251,7 @@ const createRunner = (options: TestRunnerOptions = {}) => {
         } catch {
           const sessionId = args[1].match(/opencode-export-([A-Za-z0-9._:-]+)\.json$/)?.[1];
           if (sessionId !== undefined) {
-            await writeFile(
-              destination,
-              JSON.stringify({ info: { id: sessionId }, messages: [] }),
-              { mode: 0o600 },
-            );
+            await writeFile(destination, sessionExportJson(sessionId), { mode: 0o600 });
           }
         }
       }
@@ -295,6 +317,7 @@ const runAgentScenario = async (scenario: {
   callbackHangs?: boolean;
   callbackTimeoutMs?: number;
   modelConfig?: string;
+  sessionExport?: string;
 }) => {
   const baseSha = '1111111111111111111111111111111111111111';
   const headSha = '2222222222222222222222222222222222222222';
@@ -328,6 +351,13 @@ const runAgentScenario = async (scenario: {
           },
     process: async (_command, args, options = {}) => {
       await writeEvidenceFixture(args, options, scenario.output);
+      if (
+        scenario.sessionExport !== undefined &&
+        args[0] === 'cp' &&
+        /opencode-export-[A-Za-z0-9._:-]+\.json$/.test(args[1])
+      ) {
+        await writeFile(args[2], scenario.sessionExport, { mode: 0o600 });
+      }
       if (args[0] === 'create') createArgs = args;
       if (args[0] === 'secret' && args[1] === 'set-custom') secretArgs = args;
       if (args[0] === 'policy' && args[1] === 'allow') {
@@ -356,10 +386,10 @@ const runAgentScenario = async (scenario: {
               : 0,
         stdout: args.includes('rev-parse')
           ? `${baseSha}\n${headSha}\n`
-          : args.includes('session')
-            ? '[{"id":"scenario-session"}]\n'
-            : args.includes('export')
-              ? ''
+          : args.includes('export')
+            ? sessionExportJson('scenario-session')
+            : args.includes('session')
+              ? '[{"id":"scenario-session"}]\n'
               : options.captureStdout === true
                 ? `${scenario.output}\n`
                 : '',
@@ -419,6 +449,7 @@ type ReminderRound = {
   readonly timedOut?: boolean;
   readonly truncated?: boolean;
   readonly advanceMs?: number;
+  readonly exportFinish?: string;
 };
 
 const runReminderScenario = async (scenario: {
@@ -457,13 +488,26 @@ const runReminderScenario = async (scenario: {
         };
       }
       await writeEvidenceFixture(args, options, '');
+      if (args[0] === 'cp' && args[1].includes('opencode-export-')) {
+        await writeFile(
+          args[2],
+          sessionExportJson(sessionId, {
+            finish: scenario.rounds[Math.max(agentRuns - 1, 0)]?.exportFinish,
+          }),
+          { mode: 0o600 },
+        );
+      }
       return {
         exitCode: 0,
         stdout: args.includes('rev-parse')
           ? `${baseSha}\n${headSha}\n`
-          : args.includes('session')
-            ? `[{"id":"${sessionId}"}]\n`
-            : '',
+          : args.includes('export')
+            ? sessionExportJson(sessionId, {
+                finish: scenario.rounds[Math.max(agentRuns - 1, 0)]?.exportFinish,
+              })
+            : args.includes('session')
+              ? `[{"id":"${sessionId}"}]\n`
+              : '',
         timedOut: false,
         truncated: false,
       };
@@ -508,22 +552,15 @@ const runReminderScenario = async (scenario: {
 };
 
 const completedWithoutSubmitJsonl = (sessionId: string) =>
-  [
-    JSON.stringify({
+  JSON.stringify({
+    type: 'text',
+    sessionID: sessionId,
+    part: {
       type: 'text',
-      sessionID: sessionId,
-      part: {
-        type: 'text',
-        messageID: 'msg-final',
-        text: 'I completed the review without submitting.',
-      },
-    }),
-    JSON.stringify({
-      type: 'step_finish',
-      sessionID: sessionId,
-      part: { type: 'step-finish', messageID: 'msg-final', reason: 'stop' },
-    }),
-  ].join('\n');
+      messageID: 'msg-final',
+      text: 'I completed the review without submitting.',
+    },
+  });
 
 const submitReminderJsonl = (sessionId: string, markdown: string) =>
   [
@@ -532,12 +569,7 @@ const submitReminderJsonl = (sessionId: string, markdown: string) =>
       sessionID: sessionId,
       part: { type: 'text', messageID: 'msg-reminder', text: 'Submitting the review now.' },
     }),
-    submitReviewEvent(markdown, { callID: 'call-reminder' }),
-    JSON.stringify({
-      type: 'step_finish',
-      sessionID: sessionId,
-      part: { type: 'step-finish', messageID: 'msg-reminder', reason: 'stop' },
-    }),
+    submitReviewEvent(markdown, { callID: 'call-reminder', sessionID: sessionId }),
   ].join('\n');
 
 describe('Runner Job HTTP interface', () => {
@@ -655,7 +687,7 @@ describe('Runner Job HTTP interface', () => {
       args: readonly string[],
       options: Parameters<RunnerProcess>[2] = {},
     ) => {
-      await writeEvidenceFixture(args, options, finalMarkdownJsonl());
+      await writeEvidenceFixture(args, options, finalMarkdownJsonl(undefined, 'session-1'));
       return {
         exitCode: 0,
         stdout: args.includes('rev-parse')
@@ -665,7 +697,7 @@ describe('Runner Job HTTP interface', () => {
             : args.includes('export')
               ? ''
               : options.captureStdout === true
-                ? finalMarkdownJsonl()
+                ? finalMarkdownJsonl(undefined, 'session-1')
                 : '',
         timedOut: false,
         truncated: false,
@@ -754,16 +786,16 @@ describe('Runner Job HTTP interface', () => {
           activeAgents += 1;
           maximumActiveAgents = Math.max(maximumActiveAgents, activeAgents);
           await new Promise((resolve) => setTimeout(resolve, 10));
-          await writeEvidenceFixture(args, options, finalMarkdownJsonl());
+          await writeEvidenceFixture(args, options, finalMarkdownJsonl(undefined, 'session-1'));
           activeAgents -= 1;
           return {
             exitCode: 0,
-            stdout: `${finalMarkdownJsonl()}\n`,
+            stdout: `${finalMarkdownJsonl(undefined, 'session-1')}\n`,
             timedOut: false,
             truncated: false,
           };
         }
-        await writeEvidenceFixture(args, options, finalMarkdownJsonl());
+        await writeEvidenceFixture(args, options, finalMarkdownJsonl(undefined, 'session-1'));
         return {
           exitCode: 0,
           stdout: args.includes('rev-parse')
@@ -1017,7 +1049,11 @@ describe('Runner Job HTTP interface', () => {
         },
         process: async (_command, args, options = {}) => {
           if (args[0] === 'exec' && args.includes('--agent')) {
-            await writeFile(options.stdoutFilePath!, `${finalMarkdownJsonl()}\n`, { mode: 0o600 });
+            await writeFile(
+              options.stdoutFilePath!,
+              `${finalMarkdownJsonl(undefined, 'oversized-session')}\n`,
+              { mode: 0o600 },
+            );
             await writeFile(options.stderrFilePath!, '', { mode: 0o600 });
           }
           if (args[0] === 'cp') {
@@ -1038,7 +1074,7 @@ describe('Runner Job HTTP interface', () => {
               : args.includes('session')
                 ? '[{"id":"oversized-session"}]\n'
                 : args.includes('--agent')
-                  ? `${finalMarkdownJsonl()}\n`
+                  ? `${finalMarkdownJsonl(undefined, 'oversized-session')}\n`
                   : '',
             timedOut: false,
             truncated: false,
@@ -1108,7 +1144,7 @@ describe('Runner Job HTTP interface', () => {
   it('reports a process-exit cause without exposing agent content', async () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
-    const resultLine = finalMarkdownJsonl();
+    const resultLine = finalMarkdownJsonl(undefined, 'process-exit-session');
     const runner = createRunner({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
@@ -1256,7 +1292,7 @@ describe('Runner Job HTTP interface', () => {
 
     expect(terminal).toMatchObject({
       status: 'succeeded',
-      result: finalMarkdown,
+      result: structuredResult(finalMarkdown),
       evidence: { status: 'complete' },
       sandbox: { cleanup: 'destroyed' },
     });
@@ -1279,10 +1315,11 @@ describe('Runner Job HTTP interface', () => {
 
   it.each([
     ['missing submission', 'text-only', 'zero-results'],
-    ['errored submission', 'errored', 'result-schema-failure'],
+    ['errored submission', 'errored', 'zero-results'],
     ['empty submission', 'empty', 'empty-final-text'],
     ['invalid Markdown', 'invalid-markdown', 'result-schema-failure'],
     ['duplicate submissions', 'duplicate', 'multiple-results'],
+    ['malformed completed submission', 'missing-call-id', 'result-schema-failure'],
   ] as const)('rejects %s as invalid output', async (_name, kind, cause) => {
     const terminalEvent = JSON.stringify({
       type: 'step_finish',
@@ -1301,7 +1338,9 @@ describe('Runner Job HTTP interface', () => {
             ? `${narrationEvent}\n${submitReviewEvent('')}\n${terminalEvent}`
             : kind === 'invalid-markdown'
               ? `${narrationEvent}\n${submitReviewEvent('not a review')}\n${terminalEvent}`
-              : `${narrationEvent}\n${submitReviewEvent()}\n${submitReviewEvent('## Review:\n\nSecond.', { callID: 'call-submit-review-2' })}\n${terminalEvent}`;
+              : kind === 'missing-call-id'
+                ? `${narrationEvent}\n${JSON.stringify({ type: 'tool_use', sessionID: 'scenario-session', part: { type: 'tool', tool: 'submit_review', state: { status: 'completed', input: { decision: 'comment', markdown: '## Review:\n\nNo findings.' } } } })}\n${terminalEvent}`
+                : `${narrationEvent}\n${submitReviewEvent()}\n${submitReviewEvent('## Review:\n\nSecond.', { callID: 'call-submit-review-2' })}\n${terminalEvent}`;
     const { terminal } = await runAgentScenario({
       runId: `run-109-${kind}`,
       output,
@@ -1329,7 +1368,7 @@ describe('Runner Job HTTP interface', () => {
     expect(result.agentRuns).toBe(2);
     expect(result.terminal).toMatchObject({
       status: 'succeeded',
-      result: reminderMarkdown,
+      result: structuredResult(reminderMarkdown),
       evidence: { status: 'complete' },
       sandbox: { cleanup: 'destroyed' },
     });
@@ -1376,7 +1415,6 @@ describe('Runner Job HTTP interface', () => {
   it.each([
     ['duplicate submissions', 'multiple-results'],
     ['an invalid result', 'result-schema-failure'],
-    ['an errored submission', 'result-schema-failure'],
     ['an agent error event', 'agent-error'],
   ] as const)('does not remind the session after a completed run with %s', async (kind, cause) => {
     const session = 'session-reminder';
@@ -1401,9 +1439,7 @@ describe('Runner Job HTTP interface', () => {
           ].join('\n')
         : kind === 'an invalid result'
           ? [textEvent, submitReviewEvent('not a review'), stopEvent].join('\n')
-          : kind === 'an errored submission'
-            ? [textEvent, submitReviewEvent(markdown, { status: 'error' }), stopEvent].join('\n')
-            : [textEvent, JSON.stringify({ type: 'error' }), stopEvent].join('\n');
+          : [textEvent, JSON.stringify({ type: 'error' }), stopEvent].join('\n');
 
     const result = await runReminderScenario({
       runId: `run-reminder-no-${kind.replace(/\W+/g, '-')}`,
@@ -1555,10 +1591,24 @@ describe('Runner Job HTTP interface', () => {
       expect(result.agentRuns).toBe(2);
       expect(result.agentTimeouts[0]).toBe(agentBudgetMs);
       expect(result.agentTimeouts[1]).toBe(30_000);
-      expect(result.terminal).toMatchObject({ status: 'succeeded', result: reminderMarkdown });
+      expect(result.terminal).toMatchObject({
+        status: 'succeeded',
+        result: structuredResult(reminderMarkdown),
+      });
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('does not remind a session whose exported final turn was truncated', async () => {
+    const result = await runReminderScenario({
+      runId: 'run-v2-no-reminder-after-length',
+      rounds: [{ output: completedWithoutSubmitJsonl('session-reminder'), exportFinish: 'length' }],
+    });
+    expect(result.agentRuns).toBe(1);
+    expect(result.terminal).toMatchObject({ status: 'failed', sandbox: { cleanup: 'destroyed' } });
+    expect(result.terminal).not.toHaveProperty('result');
+    expect(result.manifest).not.toHaveProperty('result');
   });
 
   it('rejects a reminder round that submits without its own terminal stop', async () => {
@@ -1569,11 +1619,17 @@ describe('Runner Job HTTP interface', () => {
         sessionID: session,
         part: { type: 'text', messageID: 'msg-reminder', text: 'Submitting the review.' },
       }),
-      submitReviewEvent('## Review:\n\nReminder without a stop.', { callID: 'call-reminder' }),
+      submitReviewEvent('## Review:\n\nReminder without a stop.', {
+        callID: 'call-reminder',
+        sessionID: session,
+      }),
     ].join('\n');
     const result = await runReminderScenario({
       runId: 'run-reminder-no-stop',
-      rounds: [{ output: completedWithoutSubmitJsonl(session) }, { output: reminderWithoutStop }],
+      rounds: [
+        { output: completedWithoutSubmitJsonl(session) },
+        { output: reminderWithoutStop, exportFinish: 'length' },
+      ],
     });
 
     expect(result.agentRuns).toBe(2);
@@ -1673,19 +1729,11 @@ describe('Runner Job HTTP interface', () => {
 
     expect(terminal).toMatchObject({
       status: 'failed',
-      failure: { reason: 'invalid-output', cause: 'missing-terminal-message' },
+      failure: { reason: 'invalid-output', cause: 'zero-results' },
     });
     expect(manifest).toMatchObject({
-      execution: {
-        status: 'failed',
-        reason: 'invalid-output',
-        cause: 'missing-terminal-message',
-      },
-      terminal: {
-        status: 'failed',
-        reason: 'invalid-output',
-        cause: 'missing-terminal-message',
-      },
+      execution: { status: 'failed', reason: 'invalid-output', cause: 'zero-results' },
+      terminal: { status: 'failed', reason: 'invalid-output', cause: 'zero-results' },
     });
   });
 
@@ -1709,19 +1757,42 @@ describe('Runner Job HTTP interface', () => {
 
       expect(terminal).toMatchObject({
         status: 'failed',
-        failure: { reason: 'invalid-output', cause: 'missing-terminal-message' },
+        failure: { reason: 'invalid-output', cause: 'zero-results' },
         evidence: { status: 'complete' },
         sandbox: { cleanup: 'destroyed' },
       });
       expect(terminal).not.toHaveProperty('result');
       expect(manifest).toMatchObject({
-        execution: {
-          status: 'failed',
-          reason: 'invalid-output',
-          cause: 'missing-terminal-message',
-        },
-        terminal: { status: 'failed', reason: 'invalid-output', cause: 'missing-terminal-message' },
+        execution: { status: 'failed', reason: 'invalid-output', cause: 'zero-results' },
+        terminal: { status: 'failed', reason: 'invalid-output', cause: 'zero-results' },
       });
+    },
+  );
+
+  it.each(['length', null, { malformed: true }])(
+    'rejects a submission whose final assistant finish is %j',
+    async (finish) => {
+      const markdown = '## Review:\n\nNo findings.';
+      const { terminal, manifest } = await runAgentScenario({
+        runId: 'run-v2-last-assistant-length',
+        output: finalMarkdownJsonl(markdown),
+        sessionExport: JSON.stringify({
+          info: { id: 'scenario-session', outcome: 'succeeded' },
+          messages: [
+            { type: 'assistant', finish: 'stop' },
+            { type: 'assistant', finish },
+            { type: 'idle', outcome: 'succeeded' },
+          ],
+        }),
+      });
+
+      expect(terminal).toMatchObject({
+        status: 'failed',
+        failure: { reason: 'invalid-output', cause: 'missing-terminal-message' },
+        sandbox: { cleanup: 'destroyed' },
+      });
+      expect(terminal).not.toHaveProperty('result');
+      expect(manifest).not.toHaveProperty('result');
     },
   );
 
@@ -1795,7 +1866,7 @@ describe('Runner Job HTTP interface', () => {
   it('removes only each job-owned network rules for jobs sharing resources', async () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
-    const resultLine = finalMarkdownJsonl();
+    const resultLine = finalMarkdownJsonl(undefined, 'policy-session');
     type PolicyRule = {
       id: string;
       resources: string[];
@@ -1941,7 +2012,7 @@ describe('Runner Job HTTP interface', () => {
   it('fails cleanup on exact policy removal failure while continuing Sandbox cleanup', async () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
-    const resultLine = finalMarkdownJsonl();
+    const resultLine = finalMarkdownJsonl(undefined, 'cleanup-failure-session');
     const rules: Array<Record<string, unknown>> = [
       {
         id: 'default-deny-all',
@@ -2039,7 +2110,7 @@ describe('Runner Job HTTP interface', () => {
   it('fails cleanup when a read-only policy rule remains attached after Sandbox removal', async () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
-    const resultLine = finalMarkdownJsonl();
+    const resultLine = finalMarkdownJsonl(undefined, 'orphan-session');
     const rules: Array<Record<string, unknown>> = [
       {
         id: 'default-deny-all',
@@ -2153,7 +2224,7 @@ describe('Runner Job HTTP interface', () => {
   it('removes a rule recorded before an initial policy lookup failure', async () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
-    const resultLine = finalMarkdownJsonl();
+    const resultLine = finalMarkdownJsonl(undefined, 'lookup-failure-session');
     const rules: Array<Record<string, unknown>> = [
       {
         id: 'default-deny-all',
@@ -2257,7 +2328,7 @@ describe('Runner Job HTTP interface', () => {
   it('inspects policy globally after Sandbox removal when the scoped sandbox no longer exists', async () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
-    const resultLine = finalMarkdownJsonl();
+    const resultLine = finalMarkdownJsonl(undefined, 'absent-scope-session');
     const rules: Array<Record<string, unknown>> = [
       {
         id: 'default-deny-all',
@@ -2355,7 +2426,7 @@ describe('Runner Job HTTP interface', () => {
   it('completes unattended cleanup only when network policy removal is forced', async () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
-    const resultLine = finalMarkdownJsonl();
+    const resultLine = finalMarkdownJsonl(undefined, 'force-removal-session');
     const rules: Array<Record<string, unknown>> = [
       {
         id: 'default-deny-all',
@@ -2450,7 +2521,7 @@ describe('Runner Job HTTP interface', () => {
   it('does not remove a replacement rule when a recorded policy ID disappears', async () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
-    const resultLine = finalMarkdownJsonl();
+    const resultLine = finalMarkdownJsonl(undefined, 'replacement-session');
     const sandboxRules: Array<Record<string, unknown>> = [
       {
         id: 'default-deny-all',
@@ -2585,7 +2656,7 @@ describe('Runner Job HTTP interface', () => {
           text: 'I finished reviewing the pull request.',
         },
       }),
-      submitReviewEvent(finalMarkdown),
+      submitReviewEvent(finalMarkdown, { sessionID: 'session-89' }),
       JSON.stringify({
         type: 'step_finish',
         part: { type: 'step-finish', messageID: 'msg-final', reason: 'stop' },
@@ -2610,11 +2681,16 @@ describe('Runner Job HTTP interface', () => {
           }
           if (command === 'sbx' && args[0] === 'cp') {
             const destination = args[2];
-            await mkdir(destination, { recursive: true, mode: 0o700 });
-            await writeFile(join(destination, 'opencode.db'), 'db', { mode: 0o600 });
-            await writeFile(join(destination, 'opencode.db-wal'), 'wal', { mode: 0o600 });
-            await writeFile(join(destination, 'opencode.db-shm'), 'shm', { mode: 0o600 });
-            await writeFile(join(destination, 'review.log'), 'log', { mode: 0o600 });
+            const sessionId = args[1].match(/opencode-export-([A-Za-z0-9._:-]+)\.json$/)?.[1];
+            if (sessionId !== undefined) {
+              await writeFile(destination, sessionExportJson(sessionId), { mode: 0o600 });
+            } else {
+              await mkdir(destination, { recursive: true, mode: 0o700 });
+              await writeFile(join(destination, 'opencode.db'), 'db', { mode: 0o600 });
+              await writeFile(join(destination, 'opencode.db-wal'), 'wal', { mode: 0o600 });
+              await writeFile(join(destination, 'opencode.db-shm'), 'shm', { mode: 0o600 });
+              await writeFile(join(destination, 'review.log'), 'log', { mode: 0o600 });
+            }
           }
           return {
             exitCode: 0,
@@ -2687,8 +2763,8 @@ describe('Runner Job HTTP interface', () => {
         sandboxId: expect.any(String),
         sessionIds: ['session-89', 'session-child'],
         model: 'opencode-go/deepseek-flash',
-        image: 'ghcr.io/ariga39/petit-chiba-opencode:1.18.25-gh2.98.0',
-        openCodeVersion: '1.18.25',
+        image: 'ghcr.io/ariga39/petit-chiba-opencode:2.0.32-gh2.98.0',
+        openCodeVersion: '2.0.32',
         agent: {
           exitCode: 0,
           timedOut: false,
@@ -2718,8 +2794,15 @@ describe('Runner Job HTTP interface', () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
     const sessionExport = JSON.stringify({
-      info: { id: 'large-session' },
-      messages: [{ id: 'message-1', parts: [{ type: 'text', text: 'x'.repeat(70 * 1024) }] }],
+      info: { id: 'large-session', outcome: 'succeeded' },
+      messages: [
+        {
+          type: 'assistant',
+          finish: 'stop',
+          parts: [{ type: 'text', text: 'x'.repeat(70 * 1024) }],
+        },
+        { type: 'idle', outcome: 'succeeded' },
+      ],
     });
     const sessionExportBytes = new TextEncoder().encode(sessionExport);
     expect(sessionExportBytes.byteLength).toBeGreaterThan(64 * 1024);
@@ -2731,7 +2814,11 @@ describe('Runner Job HTTP interface', () => {
         modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
         process: async (command, args, options = {}) => {
           if (args[0] === 'exec' && args.includes('--agent')) {
-            await writeFile(options.stdoutFilePath!, `${finalMarkdownJsonl()}\n`, { mode: 0o600 });
+            await writeFile(
+              options.stdoutFilePath!,
+              `${finalMarkdownJsonl(undefined, 'large-session')}\n`,
+              { mode: 0o600 },
+            );
             await writeFile(options.stderrFilePath!, '', { mode: 0o600 });
           }
           if (args[0] === 'exec' && args.includes('export')) {
@@ -2757,7 +2844,7 @@ describe('Runner Job HTTP interface', () => {
               : args.includes('session')
                 ? '[{"id":"large-session"}]\n'
                 : args.includes('--agent')
-                  ? `${finalMarkdownJsonl()}\n`
+                  ? `${finalMarkdownJsonl(undefined, 'large-session')}\n`
                   : '',
             timedOut: false,
             truncated: false,
@@ -2820,7 +2907,11 @@ describe('Runner Job HTTP interface', () => {
         modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
         process: async (_command, args, options = {}) => {
           if (args[0] === 'exec' && args.includes('--agent')) {
-            await writeFile(options.stdoutFilePath!, `${finalMarkdownJsonl()}\n`, { mode: 0o600 });
+            await writeFile(
+              options.stdoutFilePath!,
+              `${finalMarkdownJsonl(undefined, 'malformed-session')}\n`,
+              { mode: 0o600 },
+            );
             await writeFile(options.stderrFilePath!, '', { mode: 0o600 });
           }
           if (args[0] === 'exec' && args.includes('export')) {
@@ -2846,7 +2937,7 @@ describe('Runner Job HTTP interface', () => {
               : args.includes('session')
                 ? '[{"id":"malformed-session"}]\n'
                 : args.includes('--agent')
-                  ? `${finalMarkdownJsonl()}\n`
+                  ? `${finalMarkdownJsonl(undefined, 'malformed-session')}\n`
                   : '',
             timedOut: false,
             truncated: false,
@@ -2878,14 +2969,14 @@ describe('Runner Job HTTP interface', () => {
 
       expect(terminal).toMatchObject({
         status: 'failed',
-        failure: { reason: 'evidence' },
+        failure: { reason: 'invalid-output', cause: 'missing-terminal-message' },
         evidence: { status: 'incomplete' },
         sandbox: { cleanup: 'destroyed' },
       });
       expect(manifest).toMatchObject({
         complete: false,
         evidence: { status: 'incomplete' },
-        terminal: { status: 'failed', reason: 'evidence' },
+        terminal: { status: 'failed', reason: 'invalid-output', cause: 'missing-terminal-message' },
       });
     } finally {
       await rm(evidenceRoot, { recursive: true, force: true });
@@ -2895,7 +2986,7 @@ describe('Runner Job HTTP interface', () => {
   it('reports incomplete evidence as its own failure when archiving fails', async () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
-    const resultLine = finalMarkdownJsonl();
+    const resultLine = finalMarkdownJsonl(undefined, 'archive-failure-session');
     const runner = createRunner({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
@@ -2940,7 +3031,7 @@ describe('Runner Job HTTP interface', () => {
     const terminal = await waitForTerminal(runner, id);
     expect(terminal).toMatchObject({
       status: 'failed',
-      failure: { reason: 'evidence' },
+      failure: { reason: 'invalid-output', cause: 'missing-terminal-message' },
       evidence: { status: 'incomplete' },
       sandbox: { cleanup: 'destroyed' },
     });
@@ -3096,7 +3187,7 @@ describe('Runner Job HTTP interface', () => {
   it('archives available Sandbox evidence when network setup fails before the agent', async () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
-    const resultLine = finalMarkdownJsonl();
+    const resultLine = finalMarkdownJsonl(undefined, 'network-failure-session');
     const runner = createRunner({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
@@ -3248,7 +3339,7 @@ describe('Runner Job HTTP interface', () => {
           text: 'I finished reviewing the pull request.',
         },
       }),
-      submitReviewEvent(finalMarkdown),
+      submitReviewEvent(finalMarkdown, { sessionID: 'fixture-session' }),
       JSON.stringify({
         type: 'step_finish',
         part: { type: 'step-finish', messageID: 'msg-final', reason: 'stop' },
@@ -3283,7 +3374,7 @@ describe('Runner Job HTTP interface', () => {
             join(configRoot, 'opencode/skills/pr-review/SKILL.md'),
             'utf8',
           );
-          await readFile(join(configRoot, 'opencode/tools/submit_review.js'), 'utf8');
+          await readFile(join(configRoot, 'opencode/plugins/submit_review/index.js'), 'utf8');
           submitReviewToolAvailableAtSandboxBoundary = true;
         }
       }
@@ -3333,11 +3424,11 @@ describe('Runner Job HTTP interface', () => {
 
     await expect(waitForTerminal(runner, id)).resolves.toMatchObject({
       status: 'succeeded',
-      result: finalMarkdown,
+      result: structuredResult(finalMarkdown),
       sandbox: { cleanup: 'destroyed' },
     });
     expect(createArgs).toEqual(expect.arrayContaining(['--clone', '--no-share-skills']));
-    const template = 'ghcr.io/ariga39/petit-chiba-opencode:1.18.25-gh2.98.0';
+    const template = 'ghcr.io/ariga39/petit-chiba-opencode:2.0.32-gh2.98.0';
     const templateIndex = createArgs?.indexOf(template) ?? -1;
     const launcherIndex = createArgs?.lastIndexOf('shell') ?? -1;
     expect(templateIndex).toBeGreaterThanOrEqual(0);
@@ -3402,7 +3493,7 @@ describe('Runner Job HTTP interface', () => {
       'Tool calls and intermediate work may remain visible during the review.',
     );
     expect(skillAtSandboxBoundary?.replace(/\s+/g, ' ')).toContain(
-      'After completing all analysis, call `submit_review` exactly once with the complete publishable Markdown in its `markdown` argument. The `markdown` argument itself must contain only findings and the conclusion ready to publish, with no visible planning, self-dialogue, candidate triage, or process narration. After optional outer whitespace, begin that argument with exactly `## Review:`. Do not emit the review as terminal prose; terminal assistant messages are evidence only.',
+      'After completing all analysis, call `submit_review` exactly once with the `decision` and the complete publishable Markdown in its `markdown` argument. The `markdown` argument itself must contain only findings and the conclusion ready to publish, with no visible planning, self-dialogue, candidate triage, or process narration. After optional outer whitespace, begin that argument with exactly `## Review:`. Do not emit the review as terminal prose; terminal assistant messages are evidence only.',
     );
     expect(submitReviewToolAvailableAtSandboxBoundary).toBe(true);
     expect(skillAtSandboxBoundary).not.toContain(
@@ -3414,84 +3505,45 @@ describe('Runner Job HTTP interface', () => {
     const configContent = createArgs?.find((value) => value.startsWith('OPENCODE_CONFIG_CONTENT='));
     expect(configContent).toBeDefined();
     const config = JSON.parse(configContent!.slice('OPENCODE_CONFIG_CONTENT='.length)) as {
-      agent: { review: { permission: Record<string, unknown> } };
-    };
-    expect(config).toMatchObject({
-      model: 'opencode-go/deepseek-flash',
-      provider: {
-        'opencode-go': {
-          models: {
-            'deepseek-flash': {
-              name: 'DeepSeek V4.1 Flash',
-              reasoning: true,
-              interleaved: { field: 'reasoning_content' },
-              limit: { context: 1000000, output: 384000 },
-              cost: { input: 0.15, output: 0.6, cache_read: 0.003 },
-            },
-          },
-        },
-      },
-      agent: {
+      model: string;
+      providers: Record<string, { models: Record<string, Record<string, unknown>> }>;
+      agents: {
         review: {
-          description: 'Pull request reviewer',
-          permission: {
-            '*': 'deny',
-            submit_review: 'allow',
-            bash: {
-              '*': 'deny',
-              'gh *': 'deny',
-              'gh api graphql *': 'allow',
-              'gh pr view *': 'allow',
-              'git diff': 'allow',
-              'git diff *': 'allow',
-              'git grep': 'allow',
-              'git grep *': 'allow',
-              'git log': 'allow',
-              'git log *': 'allow',
-              'git log *--output*': 'deny',
-              'git show': 'allow',
-              'git show *': 'allow',
-              'git diff *--no-index*': 'deny',
-              'git diff *--output*': 'deny',
-              'git show *--output*': 'deny',
-              'git diff *--extcmd*': 'deny',
-              'git diff *>*': 'deny',
-              'git show *>*': 'deny',
-              'git grep *>*': 'deny',
-              'git grep *--open-files-in-pager*': 'deny',
-              'git grep *-O*': 'deny',
-              'gh *&*': 'deny',
-              'gh *;*': 'deny',
-              'gh *|*': 'deny',
-              'gh *>*': 'deny',
-              'gh *<*': 'deny',
-              'gh *$(*': 'deny',
-              'gh *`*': 'deny',
-              'gh *\n*': 'deny',
-              'git *&*': 'deny',
-              'git *;*': 'deny',
-              'git *|*': 'deny',
-              'git *>*': 'deny',
-              'git *<*': 'deny',
-              'git *$(*': 'deny',
-              'git *`*': 'deny',
-              'git *\n*': 'deny',
-              'npm *': 'deny',
-              'pnpm *': 'deny',
-              'python *': 'deny',
-              './*': 'deny',
-            },
-            edit: 'deny',
-            external_directory: 'allow',
-            glob: 'allow',
-            grep: 'allow',
-            read: 'allow',
-            skill: 'allow',
-            webfetch: 'deny',
-          },
-        },
-      },
+          description: string;
+          mode: string;
+          permissions: Array<{ action: string; resource: string; effect: string }>;
+        };
+      };
+    };
+    expect(config.model).toBe('opencode-go/deepseek-flash');
+    expect(config.providers['opencode-go']?.models['deepseek-flash']).toEqual({
+      name: 'DeepSeek V4.1 Flash',
+      capabilities: { reasoning: { supported: true } },
+      limit: { context: 1000000, output: 384000 },
+      cost: { input: 0.15, output: 0.6, cache: { read: 0.003 } },
     });
+    const permissions = config.agents.review.permissions;
+    const rule = (action: string, resource: string, effect: string) =>
+      permissions.find(
+        (entry) =>
+          entry.action === action && entry.resource === resource && entry.effect === effect,
+      );
+    expect(config.agents.review.mode).toBe('primary');
+    expect(config.agents.review.description).toBe('Pull request reviewer');
+    expect(permissions[0]).toEqual({ action: '*', resource: '*', effect: 'deny' });
+    expect(rule('submit_review', '*', 'allow')).toBeDefined();
+    expect(rule('shell', 'gh api graphql *', 'allow')).toBeDefined();
+    expect(rule('shell', 'gh pr view *', 'allow')).toBeDefined();
+    expect(rule('shell', 'git diff *', 'allow')).toBeDefined();
+    expect(rule('shell', 'git show *', 'allow')).toBeDefined();
+    expect(rule('shell', '*', 'deny')).toBeDefined();
+    expect(rule('edit', '*', 'deny')).toBeDefined();
+    expect(rule('glob', '*', 'allow')).toBeDefined();
+    expect(rule('grep', '*', 'allow')).toBeDefined();
+    expect(rule('read', '*', 'allow')).toBeDefined();
+    expect(rule('skill', '*', 'allow')).toBeDefined();
+    expect(rule('webfetch', '*', 'deny')).toBeDefined();
+    expect(permissions.some((entry) => entry.action === 'bash')).toBe(false);
     expect(sandboxEnvironment?.SSH_AUTH_SOCK).toBeUndefined();
     expect(sandboxEnvironment?.SSH_AGENT_PID).toBeUndefined();
     expect(sandboxEnvironment?.GH_TOKEN).toBeUndefined();
@@ -3511,7 +3563,7 @@ describe('Runner Job HTTP interface', () => {
       'Tool calls and intermediate work may remain visible during the review.',
     );
     expect(agentArgs?.join(' ')).toContain(
-      'After completing all analysis, call `submit_review` exactly once with the complete publishable Markdown in its `markdown` argument. The `markdown` argument itself must contain only findings and the conclusion ready to publish, with no visible planning, self-dialogue, candidate triage, or process narration. After optional outer whitespace, begin that argument with exactly `## Review:`. Do not emit the review as terminal prose; terminal assistant messages are evidence only.',
+      'After completing all analysis, call `submit_review` exactly once with the `decision` and the complete publishable Markdown in its `markdown` argument. The `markdown` argument itself must contain only findings and the conclusion ready to publish, with no visible planning, self-dialogue, candidate triage, or process narration. After optional outer whitespace, begin that argument with exactly `## Review:`. Do not emit the review as terminal prose; terminal assistant messages are evidence only.',
     );
     expect(agentArgs?.join(' ')).not.toContain('Return exactly one bare JSON object');
     expect(agentArgs?.join(' ')).not.toContain('schema-valid');
@@ -3544,9 +3596,16 @@ describe('Runner Job HTTP interface', () => {
     );
     expect(JSON.parse(configContent!.slice('OPENCODE_CONFIG_CONTENT='.length))).toMatchObject({
       model: 'opencode-go/test-model-7',
-      provider: {
+      providers: {
         'opencode-go': {
-          models: { 'test-model-7': definition },
+          models: {
+            'test-model-7': {
+              name: 'Test Model',
+              capabilities: { reasoning: { supported: true } },
+              limit: { context: 200000, output: 8192 },
+              cost: { input: 0.1, output: 0.2, cache: { read: 0.01 } },
+            },
+          },
         },
       },
     });
@@ -3566,10 +3625,10 @@ describe('Runner Job HTTP interface', () => {
     );
     const config = JSON.parse(configContent!.slice('OPENCODE_CONFIG_CONTENT='.length)) as {
       model: string;
-      provider?: unknown;
+      providers?: unknown;
     };
     expect(config.model).toBe('opencode-go/test-model-catalog');
-    expect(config.provider).toBeUndefined();
+    expect(config.providers).toBeUndefined();
   });
 
   it('routes a custom base URL through provider options, credential host, network, and cleanup', async () => {
@@ -3593,13 +3652,25 @@ describe('Runner Job HTTP interface', () => {
     );
     const config = JSON.parse(configContent!.slice('OPENCODE_CONFIG_CONTENT='.length)) as {
       model: string;
-      provider: Record<string, { options?: { baseURL?: string }; models?: unknown }>;
+      providers: Record<
+        string,
+        {
+          package?: string;
+          settings?: { baseURL?: string };
+          models?: Record<string, { settings?: { baseURL?: string } }>;
+        }
+      >;
     };
     expect(config.model).toBe('opencode-go/test-model-7');
-    expect(config.provider['opencode-go']?.options).toEqual({
-      baseURL: 'https://model.example.test/v1',
-    });
-    expect(config.provider['opencode-go']?.models).toBeUndefined();
+    expect(config.providers['opencode-go']?.package).toBe(
+      '@opencode/ai/providers/openai-compatible',
+    );
+    expect(config.providers['opencode-go']?.settings?.baseURL).toBe(
+      'https://model.example.test/v1',
+    );
+    expect(config.providers['opencode-go']?.models?.['test-model-7']?.settings?.baseURL).toBe(
+      'https://model.example.test/v1',
+    );
   });
 
   it('derives an explicit HTTPS port for the custom route and coexists with a definition', async () => {
@@ -3625,10 +3696,17 @@ describe('Runner Job HTTP interface', () => {
     );
     expect(JSON.parse(configContent!.slice('OPENCODE_CONFIG_CONTENT='.length))).toMatchObject({
       model: 'opencode-go/test-model-7',
-      provider: {
+      providers: {
         'opencode-go': {
-          options: { baseURL: 'https://model.example.test:8443/v1' },
-          models: { 'test-model-7': definition },
+          package: '@opencode/ai/providers/openai-compatible',
+          settings: { baseURL: 'https://model.example.test:8443/v1' },
+          models: {
+            'test-model-7': {
+              name: 'Test Model',
+              capabilities: { reasoning: { supported: true } },
+              settings: { baseURL: 'https://model.example.test:8443/v1' },
+            },
+          },
         },
       },
     });
@@ -3655,19 +3733,16 @@ describe('Runner Job HTTP interface', () => {
       type: 'text',
       part: { type: 'text', messageID: 'msg-final', text: finalPartTwo },
     });
-    const finishEvent = JSON.stringify({
-      type: 'step_finish',
-      part: { type: 'step-finish', messageID: 'msg-final', reason: 'stop' },
-    });
     const submitEvent = JSON.stringify({
       type: 'tool_use',
+      sessionID: 'scenario-session',
       part: {
         type: 'tool',
+        id: 'call-final-review',
         tool: 'submit_review',
-        callID: 'call-final-review',
         state: {
           status: 'completed',
-          input: { markdown: finalReview },
+          input: { decision: 'comment', markdown: finalReview },
           output: 'Review submitted.',
           title: 'Review submitted.',
         },
@@ -3675,12 +3750,12 @@ describe('Runner Job HTTP interface', () => {
     });
     const { terminal, manifest } = await runAgentScenario({
       runId: 'run-109-submitted-markdown-review',
-      output: `${progressEvent}\n${finalPartOneEvent}\n${finalPartTwoEvent}\n${submitEvent}\n${finishEvent}`,
+      output: `${progressEvent}\n${finalPartOneEvent}\n${finalPartTwoEvent}\n${submitEvent}`,
     });
 
     expect(terminal).toMatchObject({
       status: 'succeeded',
-      result: finalReview,
+      result: structuredResult(finalReview),
       evidence: { status: 'complete' },
       sandbox: { cleanup: 'destroyed' },
     });
@@ -3691,7 +3766,7 @@ describe('Runner Job HTTP interface', () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const mergeBaseSha = '3333333333333333333333333333333333333333';
     const headSha = '2222222222222222222222222222222222222222';
-    const resultLine = finalMarkdownJsonl();
+    const resultLine = finalMarkdownJsonl(undefined, 'merge-base-session');
     let agentPrompt: string | undefined;
     const runner = createRunner({
       evidenceRoot: sharedEvidenceRoot,
@@ -3741,7 +3816,7 @@ describe('Runner Job HTTP interface', () => {
 
     await expect(waitForTerminal(runner, id)).resolves.toMatchObject({
       status: 'succeeded',
-      result: '## Review:\n\nNo findings.',
+      result: structuredResult('## Review:\n\nNo findings.'),
       sandbox: { cleanup: 'destroyed' },
     });
     expect(agentPrompt).toContain(`git diff --find-renames ${mergeBaseSha} ${headSha}`);
@@ -3752,7 +3827,7 @@ describe('Runner Job HTTP interface', () => {
   it('preserves the expected diff when the merge base equals the admitted base', async () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
-    const resultLine = finalMarkdownJsonl();
+    const resultLine = finalMarkdownJsonl(undefined, 'merge-base-equal-session');
     let agentPrompt: string | undefined;
     const runner = createRunner({
       evidenceRoot: sharedEvidenceRoot,
@@ -3877,7 +3952,7 @@ describe('Runner Job HTTP interface', () => {
     const repositoryReadToken = 'github-read-token-must-not-be-an-argument';
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
-    const resultLine = finalMarkdownJsonl();
+    const resultLine = finalMarkdownJsonl(undefined, 'fixture-session');
     const commands: string[][] = [];
     const events: unknown[] = [];
     let resolvedGithubToken: string | undefined;
@@ -4049,7 +4124,7 @@ describe('Runner Job HTTP interface', () => {
     try {
       const baseSha = '1111111111111111111111111111111111111111';
       const headSha = '2222222222222222222222222222222222222222';
-      const resultLine = finalMarkdownJsonl();
+      const resultLine = finalMarkdownJsonl(undefined, 'fixture-session');
       const successfulProcess = async (
         _command: string,
         args: readonly string[],
@@ -4106,7 +4181,7 @@ describe('Runner Job HTTP interface', () => {
       expect(terminal).toMatchObject({
         status: 'succeeded',
         attempt: 1,
-        result: '## Review:\n\nNo findings.',
+        result: structuredResult('## Review:\n\nNo findings.'),
         sandbox: { cleanup: 'destroyed' },
       });
     } finally {
@@ -4259,7 +4334,7 @@ describe('Runner Job HTTP interface', () => {
   it('fails closed when custom secret cleanup returns exit 1', async () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
-    const resultLine = finalMarkdownJsonl();
+    const resultLine = finalMarkdownJsonl(undefined, 'fixture-session');
     const runner = createRunner({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
@@ -4362,7 +4437,7 @@ describe('Runner Job HTTP interface', () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
     const stalePullRequestHead = '8fb71a5da668f89beff853e7b8899a689a6b2401';
-    const resultLine = finalMarkdownJsonl();
+    const resultLine = finalMarkdownJsonl(undefined, 'fixture-session');
     let fetchArgs: readonly string[] | undefined;
     let simulatedReviewHead = stalePullRequestHead;
     const runner = createRunner({
@@ -4870,16 +4945,24 @@ describe('Runner concurrency', () => {
           maximumActiveAgents = Math.max(maximumActiveAgents, activeAgents);
           if (agentsStarted >= 2) bothRunning();
           await gate;
-          await writeEvidenceFixture(args, options, finalMarkdownJsonl());
+          await writeEvidenceFixture(
+            args,
+            options,
+            finalMarkdownJsonl(undefined, 'concurrency-session'),
+          );
           activeAgents -= 1;
           return {
             exitCode: 0,
-            stdout: `${finalMarkdownJsonl()}\n`,
+            stdout: `${finalMarkdownJsonl(undefined, 'concurrency-session')}\n`,
             timedOut: false,
             truncated: false,
           };
         }
-        await writeEvidenceFixture(args, options, finalMarkdownJsonl());
+        await writeEvidenceFixture(
+          args,
+          options,
+          finalMarkdownJsonl(undefined, 'concurrency-session'),
+        );
         return {
           exitCode: 0,
           stdout: args.includes('rev-parse')
@@ -4953,16 +5036,24 @@ describe('Runner concurrency', () => {
             twoRunning();
           }
           if (startedCount <= 2) await firstWaveGate;
-          await writeEvidenceFixture(args, options, finalMarkdownJsonl());
+          await writeEvidenceFixture(
+            args,
+            options,
+            finalMarkdownJsonl(undefined, 'concurrency-session'),
+          );
           activeAgents -= 1;
           return {
             exitCode: 0,
-            stdout: `${finalMarkdownJsonl()}\n`,
+            stdout: `${finalMarkdownJsonl(undefined, 'concurrency-session')}\n`,
             timedOut: false,
             truncated: false,
           };
         }
-        await writeEvidenceFixture(args, options, finalMarkdownJsonl());
+        await writeEvidenceFixture(
+          args,
+          options,
+          finalMarkdownJsonl(undefined, 'concurrency-session'),
+        );
         return {
           exitCode: 0,
           stdout: args.includes('rev-parse')
@@ -5033,7 +5124,11 @@ describe('Runner concurrency', () => {
         return new Response(null, { status: 202 });
       },
       process: async (_command, args, options = {}) => {
-        await writeEvidenceFixture(args, options, finalMarkdownJsonl());
+        await writeEvidenceFixture(
+          args,
+          options,
+          finalMarkdownJsonl(undefined, 'concurrency-session'),
+        );
         return {
           exitCode: 0,
           stdout: args.includes('rev-parse')
@@ -5041,7 +5136,7 @@ describe('Runner concurrency', () => {
             : args.includes('session')
               ? '[{"id":"concurrency-session"}]\n'
               : options.captureStdout === true
-                ? `${finalMarkdownJsonl()}\n`
+                ? `${finalMarkdownJsonl(undefined, 'concurrency-session')}\n`
                 : '',
           timedOut: false,
           truncated: false,
@@ -5096,7 +5191,11 @@ describe('Runner concurrency', () => {
         return new Response(null, { status: 204 });
       },
       process: async (_command, args, options = {}) => {
-        await writeEvidenceFixture(args, options, finalMarkdownJsonl());
+        await writeEvidenceFixture(
+          args,
+          options,
+          finalMarkdownJsonl(undefined, 'concurrency-session'),
+        );
         return {
           exitCode: 0,
           stdout: args.includes('rev-parse')
@@ -5104,7 +5203,7 @@ describe('Runner concurrency', () => {
             : args.includes('session')
               ? '[{"id":"concurrency-session"}]\n'
               : options.captureStdout === true
-                ? `${finalMarkdownJsonl()}\n`
+                ? `${finalMarkdownJsonl(undefined, 'concurrency-session')}\n`
                 : '',
           timedOut: false,
           truncated: false,
@@ -5161,16 +5260,24 @@ describe('Runner concurrency', () => {
           activeAgents += 1;
           maximumActiveAgents = Math.max(maximumActiveAgents, activeAgents);
           await new Promise((resolve) => setTimeout(resolve, 10));
-          await writeEvidenceFixture(args, options, finalMarkdownJsonl());
+          await writeEvidenceFixture(
+            args,
+            options,
+            finalMarkdownJsonl(undefined, 'concurrency-session'),
+          );
           activeAgents -= 1;
           return {
             exitCode: 0,
-            stdout: `${finalMarkdownJsonl()}\n`,
+            stdout: `${finalMarkdownJsonl(undefined, 'concurrency-session')}\n`,
             timedOut: false,
             truncated: false,
           };
         }
-        await writeEvidenceFixture(args, options, finalMarkdownJsonl());
+        await writeEvidenceFixture(
+          args,
+          options,
+          finalMarkdownJsonl(undefined, 'concurrency-session'),
+        );
         return {
           exitCode: 0,
           stdout: args.includes('rev-parse')
@@ -5207,15 +5314,23 @@ describe('Runner concurrency', () => {
       process: async (_command, args, options = {}) => {
         if (args[0] === 'exec' && args.includes('--agent')) {
           await gate;
-          await writeEvidenceFixture(args, options, finalMarkdownJsonl());
+          await writeEvidenceFixture(
+            args,
+            options,
+            finalMarkdownJsonl(undefined, 'concurrency-session'),
+          );
           return {
             exitCode: 0,
-            stdout: `${finalMarkdownJsonl()}\n`,
+            stdout: `${finalMarkdownJsonl(undefined, 'concurrency-session')}\n`,
             timedOut: false,
             truncated: false,
           };
         }
-        await writeEvidenceFixture(args, options, finalMarkdownJsonl());
+        await writeEvidenceFixture(
+          args,
+          options,
+          finalMarkdownJsonl(undefined, 'concurrency-session'),
+        );
         return {
           exitCode: 0,
           stdout: args.includes('rev-parse')
@@ -5288,7 +5403,11 @@ describe('Runner concurrency', () => {
         return new Response(null, { status: 202 });
       },
       process: async (_command, args, options = {}) => {
-        await writeEvidenceFixture(args, options, finalMarkdownJsonl());
+        await writeEvidenceFixture(
+          args,
+          options,
+          finalMarkdownJsonl(undefined, 'concurrency-session'),
+        );
         return {
           exitCode: 0,
           stdout: args.includes('rev-parse')
@@ -5296,7 +5415,7 @@ describe('Runner concurrency', () => {
             : args.includes('session')
               ? '[{"id":"concurrency-session"}]\n'
               : options.captureStdout === true
-                ? `${finalMarkdownJsonl()}\n`
+                ? `${finalMarkdownJsonl(undefined, 'concurrency-session')}\n`
                 : '',
           timedOut: false,
           truncated: false,
@@ -5348,7 +5467,11 @@ describe('Runner concurrency', () => {
       modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       evidenceRoot,
       process: async (_command, args, options = {}) => {
-        await writeEvidenceFixture(args, options, finalMarkdownJsonl());
+        await writeEvidenceFixture(
+          args,
+          options,
+          finalMarkdownJsonl(undefined, 'concurrency-session'),
+        );
         return {
           exitCode:
             args[0] === 'rm' && args[1] === '--force' && args[2] === `compte-rendu-${failing.id}`
@@ -5359,7 +5482,7 @@ describe('Runner concurrency', () => {
             : args.includes('session')
               ? '[{"id":"concurrency-session"}]\n'
               : options.captureStdout === true
-                ? `${finalMarkdownJsonl()}\n`
+                ? `${finalMarkdownJsonl(undefined, 'concurrency-session')}\n`
                 : '',
           timedOut: false,
           truncated: false,
@@ -5403,9 +5526,14 @@ describe('Runner concurrency', () => {
     const jobD = independentJob(45, 'run-oversized-d');
     const sandboxA = `compte-rendu-${jobA.id}`;
     const bigExport = JSON.stringify({
-      info: { id: 'oversized-session' },
+      info: { id: 'oversized-session', outcome: 'succeeded' },
       messages: [
-        { id: 'message-1', parts: [{ type: 'text', text: 'x'.repeat(25 * 1024 * 1024) }] },
+        {
+          type: 'assistant',
+          finish: 'stop',
+          parts: [{ type: 'text', text: 'x'.repeat(25 * 1024 * 1024) }],
+        },
+        { type: 'idle', outcome: 'succeeded' },
       ],
     });
     let callbacks = 0;
@@ -5450,6 +5578,7 @@ describe('Runner concurrency', () => {
       },
       process: async (_command, args, options = {}) => {
         const sandbox = args.find((value) => value.startsWith('compte-rendu-'));
+        const sessionId = sandbox === sandboxA ? 'oversized-session' : 'concurrency-session';
         if (args[0] === 'exec' && args.includes('--agent')) {
           if (sandbox === `compte-rendu-${jobB.id}`) {
             bAgentStarted();
@@ -5458,7 +5587,11 @@ describe('Runner concurrency', () => {
             cAgentStarted();
             await gateC;
           }
-          await writeFile(options.stdoutFilePath!, `${finalMarkdownJsonl()}\n`, { mode: 0o600 });
+          await writeFile(
+            options.stdoutFilePath!,
+            `${finalMarkdownJsonl(undefined, sessionId)}\n`,
+            { mode: 0o600 },
+          );
           await writeFile(options.stderrFilePath!, '', { mode: 0o600 });
         }
         if (args[0] === 'cp') {
@@ -5467,19 +5600,16 @@ describe('Runner concurrency', () => {
           if (source.endsWith('opencode-export-oversized-session.json')) {
             await writeFile(destination, bigExport, { mode: 0o600 });
           } else if (source.includes('opencode-export-')) {
-            const sessionId = source.match(/opencode-export-([A-Za-z0-9._:-]+)\.json$/)?.[1];
-            await writeFile(
-              destination,
-              JSON.stringify({ info: { id: sessionId }, messages: [] }),
-              { mode: 0o600 },
-            );
+            const sessionId =
+              source.match(/opencode-export-([A-Za-z0-9._:-]+)\.json$/)?.[1] ?? 'oversized-session';
+            await writeFile(destination, sessionExportJson(sessionId), { mode: 0o600 });
           } else {
             await mkdir(destination, { recursive: true, mode: 0o700 });
             await writeFile(join(destination, 'opencode.db'), 'db', { mode: 0o600 });
             await writeFile(join(destination, 'review.log'), 'log', { mode: 0o600 });
           }
         }
-        const sessionId = sandbox === sandboxA ? 'oversized-session' : 'concurrency-session';
+
         return {
           exitCode: 0,
           stdout: args.includes('rev-parse')
@@ -5487,7 +5617,7 @@ describe('Runner concurrency', () => {
             : args.includes('session')
               ? `[{"id":"${sessionId}"}]\n`
               : args.includes('--agent')
-                ? `${finalMarkdownJsonl()}\n`
+                ? `${finalMarkdownJsonl(undefined, sessionId)}\n`
                 : '',
           timedOut: false,
           truncated: false,
@@ -5606,15 +5736,23 @@ describe('Runner concurrency', () => {
             firstAgentStarted();
             await gate;
           }
-          await writeEvidenceFixture(args, options, finalMarkdownJsonl());
+          await writeEvidenceFixture(
+            args,
+            options,
+            finalMarkdownJsonl(undefined, 'concurrency-session'),
+          );
           return {
             exitCode: 0,
-            stdout: `${finalMarkdownJsonl()}\n`,
+            stdout: `${finalMarkdownJsonl(undefined, 'concurrency-session')}\n`,
             timedOut: false,
             truncated: false,
           };
         }
-        await writeEvidenceFixture(args, options, finalMarkdownJsonl());
+        await writeEvidenceFixture(
+          args,
+          options,
+          finalMarkdownJsonl(undefined, 'concurrency-session'),
+        );
         return {
           exitCode: 0,
           stdout: args.includes('rev-parse')
@@ -5775,7 +5913,7 @@ describe('Runner OpenShell runtime lifecycle', () => {
     providerReconcileFails?: boolean;
     providerReplaced?: boolean;
   }) => {
-    const resultLine = finalMarkdownJsonl();
+    const resultLine = finalMarkdownJsonl(undefined, 'os-session');
     const token = 'os-read-token-must-not-be-argv';
     const commands: string[][] = [];
     const providerEnvs: Array<NodeJS.ProcessEnv | undefined> = [];
@@ -5986,13 +6124,9 @@ describe('Runner OpenShell runtime lifecycle', () => {
           const source = args[head + 3];
           const destination = args[head + 4];
           if (source.endsWith('.json')) {
-            await writeFile(
-              destination,
-              JSON.stringify({ info: { id: 'os-session' }, messages: [] }),
-              {
-                mode: 0o600,
-              },
-            );
+            await writeFile(destination, sessionExportJson('os-session'), {
+              mode: 0o600,
+            });
           } else {
             await mkdir(destination, { recursive: true, mode: 0o700 });
             await writeFile(join(destination, 'opencode.db'), 'db', { mode: 0o600 });

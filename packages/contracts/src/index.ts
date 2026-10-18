@@ -34,6 +34,17 @@ export const ReviewResult = Schema.String.check(
 
 export type ReviewResult = typeof ReviewResult.Type;
 
+export const ReviewDecision = Schema.Literals(['approve', 'request_changes', 'comment']);
+export type ReviewDecision = typeof ReviewDecision.Type;
+export const StructuredReviewResult = Schema.Struct({
+  version: Schema.Literal(2),
+  decision: ReviewDecision,
+  markdown: ReviewResult,
+});
+export type StructuredReviewResult = typeof StructuredReviewResult.Type;
+export const RunnerReviewResult = Schema.Union([ReviewResult, StructuredReviewResult]);
+export type RunnerReviewResult = typeof RunnerReviewResult.Type;
+
 export const RunnerFailureCause = Schema.Literals([
   'process-exit',
   'timeout',
@@ -73,7 +84,7 @@ export const RunnerJobResponse = Schema.Struct({
   sandbox: Schema.Struct({
     cleanup: Schema.Literals(['pending', 'destroyed', 'failed']),
   }),
-  result: Schema.optional(ReviewResult),
+  result: Schema.optional(RunnerReviewResult),
   failure: Schema.optional(
     Schema.Struct({
       reason: Schema.Literals([
@@ -200,7 +211,7 @@ const SuccessfulRunnerResultCallback = Schema.Struct({
   evidence: CompleteRunnerEvidence,
   timestamps: CallbackTimestamps,
   sandbox: Schema.Struct({ cleanup: Schema.Literal('destroyed') }),
-  result: ReviewResult,
+  result: RunnerReviewResult,
   lifecycle: Schema.optional(RunnerProgressSnapshot),
 });
 const FailedRunnerResultCallback = Schema.Struct({
@@ -523,6 +534,7 @@ export const PublicProcessing = Schema.NullOr(Schema.Literals(['received', 'publ
 export type PublicProcessing = typeof PublicProcessing.Type;
 
 export const PublicTaskState = Schema.Struct({
+  decision: Schema.NullOr(ReviewDecision),
   runId: Schema.NonEmptyString,
   status: PublicTaskStatus,
   dispatch: PublicTaskDispatch,

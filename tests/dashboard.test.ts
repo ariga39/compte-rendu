@@ -77,6 +77,31 @@ const verifyMetadata = async (
 const asJson = async <T>(response: Response): Promise<T> => (await response.json()) as T;
 
 describe('public dashboard reads are DB-only', () => {
+  it('retains an explicit decision through a fresh Worker without inventing historical votes', async () => {
+    const database = new SqliteD1Database();
+    const store = createD1ReviewStateStore(database);
+    const claimed = await store.claimReview({
+      deliveryId: 'decision-run',
+      job: job(),
+      occurredAt: '2026-01-01T00:00:00.000Z',
+    });
+    if (claimed.kind !== 'claimed') throw new Error('not claimed');
+    const worker = createCoreWorker(coreEnv(database));
+    expect(await (await get(worker, `/api/jobs/${claimed.runId}`)).json()).toMatchObject({
+      task: { decision: null },
+    });
+    await store.completeRunPublication({
+      runId: claimed.runId,
+      occurredAt: '2026-01-01T00:01:00.000Z',
+      fingerprints: [],
+      decision: 'request_changes',
+    });
+    const fresh = createCoreWorker(coreEnv(database));
+    expect(await (await get(fresh, `/api/jobs/${claimed.runId}`)).json()).toMatchObject({
+      task: { status: 'completed', decision: 'request_changes', identity: { kind: 'anonymous' } },
+    });
+  });
+
   it('shows public repository identity and hides a known-private run as anonymous', async () => {
     const database = new SqliteD1Database();
     const store = createD1ReviewStateStore(database);

@@ -3,7 +3,8 @@ import { DateTime, Effect, Option, Schema } from 'effect';
 import {
   PullRequestFacts,
   ReviewEvent,
-  ReviewResult,
+  RunnerReviewResult,
+  type ReviewDecision,
   GitHubSha,
   type PullRequestFacts as PullRequestFactsType,
   type OperationalLog,
@@ -138,6 +139,7 @@ export interface CoreLifecycleLog {
   readonly record: (event: CoreLifecycleEvent) => void;
 }
 export interface ReviewOutcome {
+  decision?: ReviewDecision;
   deliveryId: string;
   installationId: number;
   repositoryId: number;
@@ -183,6 +185,7 @@ export interface RepositoryMetadataRow {
 export type PublicRunStatusValue = 'scheduled' | 'completed' | 'failed' | 'superseded';
 
 export interface PublicRunRow {
+  decision: ReviewDecision | null;
   runId: string;
   status: PublicRunStatusValue;
   installationId: number;
@@ -315,6 +318,7 @@ export interface ReviewStateQueries {
     runId: string;
     evidence: ReviewEvidenceMetadata;
     sandboxCleanup?: RunnerCleanupStatus;
+    decision?: ReviewDecision;
   }): Promise<boolean>;
   recordRunnerJob(input: { runId: string; jobId: string; attempt: number }): Promise<boolean>;
   clearRunnerJob?(input: { runId: string; jobId: string }): Promise<boolean>;
@@ -335,6 +339,7 @@ export interface ReviewStateQueries {
     runId: string;
     occurredAt: string;
     fingerprints: readonly string[];
+    decision?: ReviewDecision;
   }): Promise<boolean>;
   recordResultReceived?(input: {
     runId: string;
@@ -477,6 +482,7 @@ export interface GitHubAdapter {
     installationId: number;
     checkRunId: number;
     status: 'in_progress' | 'success' | 'failure' | 'cancelled';
+    decision?: ReviewDecision;
   }): Promise<void>;
   findCheckRunForSuite?(input: {
     repositoryId: number;
@@ -499,17 +505,19 @@ export interface GitHubAdapter {
     pullRequestNumber: number;
     installationId: number;
     marker: string;
+    expected?: { headSha: GitHubShaValue; event: ReviewPublicationPayload['event'] };
   }): Promise<unknown>;
   createReview?(input: {
     repositoryId: number;
     pullRequestNumber: number;
     installationId: number;
     payload: ReviewPublicationPayload;
+    verifyPublication?: boolean;
   }): Promise<ReviewPublicationCreateResult>;
 }
 
 export interface ReviewPublicationPayload {
-  readonly event: 'COMMENT';
+  readonly event: 'COMMENT' | 'APPROVE' | 'REQUEST_CHANGES';
   readonly commit_id: GitHubShaValue;
   readonly body: string;
 }
@@ -674,6 +682,7 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
     });
     return 'failed' as const;
   }
+  let decision: ReviewDecision | undefined;
   const completeRun = Effect.fn('completeRun')(function* (fingerprints: readonly string[]) {
     const completedAt = yield* currentIso;
     return yield* Effect.tryPromise({
@@ -684,6 +693,7 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
               runId: input.runId,
               occurredAt: completedAt,
               fingerprints,
+              decision,
             }),
       catch: () => undefined,
     }).pipe(Effect.catch(() => Effect.succeed(false)));
@@ -844,7 +854,7 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
     yield* publishFailureNotification(ownsPublication);
   });
 
-  const decodedOutput = yield* Schema.decodeUnknownEffect(ReviewResult)(input.output).pipe(
+  const decodedOutput = yield* Schema.decodeUnknownEffect(RunnerReviewResult)(input.output).pipe(
     Effect.catch(() => Effect.succeed(undefined)),
   );
   if (decodedOutput === undefined) {
@@ -855,6 +865,8 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
     });
     return 'failed' as const;
   }
+
+  decision = typeof decodedOutput === 'string' ? undefined : decodedOutput.decision;
 
   if (
     github.loadReviewTarget === undefined ||
@@ -927,6 +939,13 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
     return 'failed' as const;
   }
 
+  const payload: ReviewPublicationPayload = formatReviewPublicationPayload({
+    runId: input.runId,
+    headSha: outcome.headSha,
+    markdown: typeof decodedOutput === 'string' ? decodedOutput : decodedOutput.markdown,
+    decision: typeof decodedOutput === 'string' ? 'comment' : decodedOutput.decision,
+  });
+
   const marker = formatReviewPublicationMarker(input.runId);
   const lookupMarker = () =>
     github.findReviewByMarker === undefined
@@ -938,6 +957,14 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
               pullRequestNumber: outcome.pullRequestNumber,
               installationId: outcome.installationId,
               marker,
+              ...(typeof decodedOutput === 'string'
+                ? {}
+                : {
+                    expected: {
+                      headSha: outcome.headSha!,
+                      event: payload.event,
+                    },
+                  }),
             }),
           catch: () => undefined,
         }).pipe(
@@ -984,12 +1011,6 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
     ownsPublication = true;
   }
 
-  const payload: ReviewPublicationPayload = formatReviewPublicationPayload({
-    runId: input.runId,
-    headSha: outcome.headSha,
-    markdown: decodedOutput,
-  });
-
   const publication = yield* Effect.tryPromise({
     try: () =>
       github.createReview!({
@@ -997,6 +1018,7 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
         pullRequestNumber: outcome.pullRequestNumber,
         installationId: outcome.installationId,
         payload,
+        ...(typeof decodedOutput === 'string' ? {} : { verifyPublication: true }),
       }),
     catch: () => undefined,
   }).pipe(
@@ -1152,6 +1174,9 @@ const setupCheck = Effect.fn('setupCheck')(function* (
                 installationId: current.installationId,
                 checkRunId: checkRun.id,
                 status,
+                ...(status === 'success' && current.decision !== undefined
+                  ? { decision: current.decision }
+                  : {}),
               }),
             catch: () => undefined,
           }).pipe(Effect.catch(() => Effect.succeed(undefined)));
@@ -1174,6 +1199,9 @@ const setupCheck = Effect.fn('setupCheck')(function* (
                     installationId: latest.installationId,
                     checkRunId: checkRun.id,
                     status: latestStatus,
+                    ...(latestStatus === 'success' && latest.decision !== undefined
+                      ? { decision: latest.decision }
+                      : {}),
                   }),
                 catch: () => undefined,
               }).pipe(Effect.catch(() => Effect.succeed(undefined)));
@@ -1773,6 +1801,7 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
       runnerAttempt?: number;
       runnerCleanupStatus?: RunnerCleanupStatus;
       evidence?: ReviewEvidenceMetadata;
+      decision?: ReviewDecision;
       checkRunId?: number;
       checkSetupStatus: 'pending' | 'ready' | 'failed';
       checkSetupClaimedAt?: string;
@@ -1999,11 +2028,12 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
         run.runnerCleanupStatus = undefined;
       }
     },
-    recordEvidence: async ({ runId, evidence, sandboxCleanup }) => {
+    recordEvidence: async ({ runId, evidence, sandboxCleanup, decision }) => {
       const run = runs.get(runId);
       if (run === undefined) return false;
       if (run.evidence !== undefined && run.evidence.key !== evidence.key) return false;
       run.evidence = evidence;
+      if (decision !== undefined) run.decision = decision;
       if (sandboxCleanup !== undefined) run.runnerCleanupStatus = sandboxCleanup;
       return true;
     },
@@ -2105,10 +2135,11 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
       }
       return false;
     },
-    completeRunPublication: async ({ runId, occurredAt }) => {
+    completeRunPublication: async ({ runId, occurredAt, decision }) => {
       const run = runs.get(runId);
       if (run !== undefined && run.status === 'scheduled') {
         run.status = 'completed';
+        if (decision !== undefined) run.decision = decision;
         run.updatedAt = occurredAt;
         setDeliveryStatus(run.deliveryId, 'completed', occurredAt);
         return true;
@@ -2131,6 +2162,7 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
             ...(run.runnerAttempt === undefined ? {} : { runnerAttempt: run.runnerAttempt }),
             ...(run.checkRunId === undefined ? {} : { checkRunId: run.checkRunId }),
             evidence: run.evidence,
+            decision: run.decision,
           };
     },
   };

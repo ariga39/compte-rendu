@@ -7,6 +7,21 @@ export const STATUS_LABEL: Record<string, string> = {
   superseded: 'Superseded',
 };
 
+export const DECISION_LABEL: Record<string, string> = {
+  approve: 'Approve',
+  request_changes: 'Request changes',
+  comment: 'Comment',
+};
+
+export const DECISION_NOTE = 'The review’s original conclusion, not current merge eligibility.';
+
+export const DECISION_UNKNOWN =
+  'No decision was recorded; older reviews may predate review decisions.';
+
+export function decisionLabel(decision: TaskState['decision']): string {
+  return decision ? (DECISION_LABEL[decision] ?? '—') : '—';
+}
+
 export const STAGE_LABEL: Record<string, string> = {
   checkout: 'Fetching code',
   sandbox: 'Preparing environment',
