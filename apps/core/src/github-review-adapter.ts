@@ -48,7 +48,20 @@ const ReviewRecord = Schema.Struct({
   body: Schema.NullOr(Schema.String),
 });
 
+const ConfirmedReview = Schema.Struct({
+  id: Schema.Int,
+  body: Schema.NullOr(Schema.String),
+  commit_id: GitHubSha,
+  state: Schema.Literals(['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED', 'PENDING']),
+  user: Schema.Struct({ login: Schema.NonEmptyString, type: Schema.NonEmptyString }),
+});
 const ReviewRecords = Schema.Array(ReviewRecord);
+const expectedReviewState = (event: 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT') =>
+  event === 'APPROVE'
+    ? 'APPROVED'
+    : event === 'REQUEST_CHANGES'
+      ? 'CHANGES_REQUESTED'
+      : 'COMMENTED';
 const pageSize = 100;
 const maxReviewPages = 10;
 
@@ -79,6 +92,7 @@ const CheckRuns = Schema.Struct({
 const checkName = 'Petit Chiba Review';
 
 class MarkerLookupFailed extends Error {}
+class ReviewConfirmationFailed extends Error {}
 export { GitHubNotFoundError, GitHubRequestError } from './github-http';
 
 type TokenProvider = string | ((installationId: number, signal?: AbortSignal) => Promise<string>);
@@ -88,6 +102,7 @@ export interface GitHubPublicationAdapterOptions {
   readonly fetch?: typeof fetch;
   readonly apiBaseUrl?: string;
   readonly dashboardOrigin?: string;
+  readonly getReviewAuthorLogin?: () => Promise<string>;
 }
 
 export const createGitHubPublicationAdapter = (
@@ -174,25 +189,54 @@ export const createGitHubPublicationAdapter = (
     return (await Schema.decodeUnknownPromise(PullRequest)(value)).head.sha;
   };
 
+  const confirmReview = async (
+    value: unknown,
+    expected: { headSha: string; event: 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT' },
+    allowDismissed: boolean,
+  ) => {
+    let review: typeof ConfirmedReview.Type;
+    try {
+      review = await Schema.decodeUnknownPromise(ConfirmedReview)(value);
+    } catch {
+      throw new ReviewConfirmationFailed('GitHub review response is invalid');
+    }
+    if (
+      options.getReviewAuthorLogin === undefined ||
+      review.user.type !== 'Bot' ||
+      review.user.login !== (await options.getReviewAuthorLogin()) ||
+      review.commit_id !== expected.headSha ||
+      (review.state !== expectedReviewState(expected.event) &&
+        !(allowDismissed && review.state === 'DISMISSED'))
+    )
+      throw new ReviewConfirmationFailed('GitHub review identity or decision does not match');
+    return review;
+  };
+
   const findReviewByMarkerPage = async ({
     repositoryId,
     pullRequestNumber,
     installationId,
     marker,
+    expected,
   }: {
     repositoryId: number;
     pullRequestNumber: number;
     installationId: number;
     marker: string;
+    expected?: { headSha: string; event: 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT' };
   }) => {
     for (let page = 1; page <= maxReviewPages; page += 1) {
       const value = await requestJson(
         installationId,
         `${await pullRequestPath(repositoryId, pullRequestNumber, installationId)}/reviews?per_page=${pageSize}&page=${page}`,
       );
-      const reviews = await Schema.decodeUnknownPromise(ReviewRecords)(value);
-      const existing = reviews.find((review) => review.body?.includes(marker));
-      if (existing !== undefined) return existing;
+      const reviews = await Schema.decodeUnknownPromise(Schema.Array(Schema.Unknown))(value);
+      const parsedReviews = await Schema.decodeUnknownPromise(ReviewRecords)(reviews);
+      const index = parsedReviews.findIndex((review) => review.body?.includes(marker));
+      if (index !== -1)
+        return expected === undefined
+          ? parsedReviews[index]
+          : confirmReview(reviews[index], expected, true);
       if (reviews.length < pageSize) return undefined;
     }
     throw new Error('GitHub review listing exceeded the safe page limit');
@@ -203,6 +247,7 @@ export const createGitHubPublicationAdapter = (
     pullRequestNumber: number;
     installationId: number;
     marker: string;
+    expected?: { headSha: string; event: 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT' };
   }) => {
     let attempt = 0;
     while (attempt < 2) {
@@ -400,7 +445,14 @@ export const createGitHubPublicationAdapter = (
       }
     },
     findCheckRunForSuite,
-    updateCheckRun: async ({ repositoryId, installationId, checkRunId, runId, status }) => {
+    updateCheckRun: async ({
+      repositoryId,
+      installationId,
+      checkRunId,
+      runId,
+      status,
+      decision,
+    }) => {
       const payload =
         status === 'in_progress'
           ? {
@@ -411,7 +463,14 @@ export const createGitHubPublicationAdapter = (
             ? {
                 status: 'completed',
                 conclusion: status,
-                output: { title: 'Review completed', summary: 'The Review was published.' },
+                output:
+                  decision === undefined
+                    ? { title: 'Review completed', summary: 'The Review was published.' }
+                    : {
+                        title: `Review published: ${decision === 'approve' ? 'Approve' : decision === 'request_changes' ? 'Request changes' : 'Comment'}`,
+                        summary:
+                          'The review decision was published for this revision. Repository rules determine merge eligibility.',
+                      },
               }
             : status === 'failure'
               ? {
@@ -458,7 +517,13 @@ export const createGitHubPublicationAdapter = (
       const pullRequest = await Schema.decodeUnknownPromise(PullRequest)(pullRequestValue);
       return { headSha: pullRequest.head.sha };
     },
-    createReview: async ({ repositoryId, pullRequestNumber, installationId, payload }) => {
+    createReview: async ({
+      repositoryId,
+      pullRequestNumber,
+      installationId,
+      payload,
+      verifyPublication,
+    }) => {
       let attempt = 0;
       while (attempt < 2) {
         try {
@@ -474,9 +539,16 @@ export const createGitHubPublicationAdapter = (
             );
             return {
               kind: 'created',
-              review: await Schema.decodeUnknownPromise(CreatedReview)(value),
+              review: verifyPublication
+                ? await confirmReview(
+                    value,
+                    { headSha: payload.commit_id, event: payload.event },
+                    false,
+                  )
+                : await Schema.decodeUnknownPromise(CreatedReview)(value),
             };
           } catch (error) {
+            if (error instanceof ReviewConfirmationFailed) throw error;
             const marker = /<!-- compte-rendu:run:[^>]+ -->/.exec(payload.body)?.[0];
             if (marker !== undefined) {
               let existing: Awaited<ReturnType<typeof findReviewByMarker>>;
@@ -486,6 +558,9 @@ export const createGitHubPublicationAdapter = (
                   pullRequestNumber,
                   installationId,
                   marker,
+                  ...(verifyPublication
+                    ? { expected: { headSha: payload.commit_id, event: payload.event } }
+                    : {}),
                 });
               } catch {
                 throw new MarkerLookupFailed('GitHub review marker lookup failed');
@@ -495,7 +570,8 @@ export const createGitHubPublicationAdapter = (
             throw error;
           }
         } catch (error) {
-          if (error instanceof MarkerLookupFailed) throw error;
+          if (error instanceof MarkerLookupFailed || error instanceof ReviewConfirmationFailed)
+            throw error;
           attempt += 1;
           if (attempt === 2) throw error;
         }

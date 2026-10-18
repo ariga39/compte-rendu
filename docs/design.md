@@ -82,7 +82,7 @@ GitHub `eyes` reaction. A conclusive denial, missing pull request, or draft
 gets `confused` and does not start a Runner Job. An accepted run that ends in a
 failure gets `-1`; a run superseded by a newer head gets `confused`. A
 successful run adds no reaction beyond `eyes`, because its published
-`COMMENT` review is the completion signal. Automatic jobs have no command
+review is the completion signal. Automatic jobs have no command
 reaction. Feedback uses GitHub's issue-comment reaction endpoint; repeating a
 same-app, same-content write is the replay-idempotency mechanism and does not
 introduce feedback state.
@@ -128,26 +128,29 @@ Review or failure comment provide feedback. `/ai-review` remains available.
 
 ### Review result
 
-The agent submits one concise human-readable Markdown review through the
-packaged `submit_review` custom tool. The Runner validates the JSONL transport,
-requires exactly one completed submission plus a `step_finish` event with
-reason `stop`, and accepts the tool's exact `state.input.markdown` value.
-Terminal assistant prose remains raw evidence and is never a product result.
-If the agent stops normally without a submission, the Runner may send one
-explicit submission reminder in the same Sandbox and OpenCode session. The
-reminder asks it to submit its existing analysis without reviewing again.
-Both turns remain in the retained evidence. A missing submission after that
-reminder, malformed JSONL, explicit agent errors, oversized output, errored or
-duplicate submissions, a missing terminal stop, and invalid review Markdown
-fail closed. These other failures do not trigger a submission reminder.
+The OpenCode 2 agent submits exactly one `submit_review` result with `decision`
+(`approve`, `request_changes`, or `comment`) and size-bounded Markdown beginning
+with `## Review:`. Its V2 plugin validates arguments and returns errors to the
+same agent loop. A rejected tool call is not a successful submission. The Runner
+accepts one completed result only after validating the session export's identity,
+successful outcome, final assistant stop and final successful idle message.
+Terminal assistant prose is evidence, never the product result.
 
-Core accepts the submitted, size-bounded Markdown body beginning with
-`## Review:` only after confirming that the run still targets the pull
-request's current head SHA, then publishes it as a body-only `COMMENT` review
-with no inline finding projection. Review guidance may suggest up to five
-high-confidence actionable findings when present and a clear conclusion when
-none are found; this is guidance for the human-readable review, not a JSON
-schema. It never publishes `APPROVE` or `REQUEST_CHANGES` in v1.
+If the agent finishes normally without submitting, Runner may issue one reminder
+inside the same live Sandbox and session. Both invocations share the original
+execution deadline. Correction settles before final export, archival and Sandbox
+destruction; no callback or Core path resumes the agent. Malformed/truncated
+output, unresolved invalid results, ambiguous sessions and duplicate successful
+submissions fail without a vote.
+
+New results are versioned `{version: 2, decision, markdown}`. Core validates the
+manifest result against the callback and exact Markdown bytes, checks revision
+freshness, and publishes the corresponding GitHub `APPROVE`, `REQUEST_CHANGES`,
+or `COMMENT` review. Publication/recovery for new results checks the App author,
+commit and review state. Legacy string callbacks retain COMMENT behavior during
+rollout; historical decisions remain unknown. A published Request changes is a
+successful review delivery; repository rules determine merge eligibility.
+See [review decisions](review-decisions-design.md) for vote semantics and rollout.
 
 ## Public dashboard
 

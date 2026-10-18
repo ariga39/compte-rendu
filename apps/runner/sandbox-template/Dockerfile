@@ -5,14 +5,14 @@ LABEL org.opencontainers.image.source="https://github.com/ariga39/compte-rendu"
 
 USER root
 
-# Remove the moving npm-installed OpenCode from the base, then install one
-# official release binary with its release-asset digest.
+# Remove the moving npm-installed OpenCode from the base, then install the
+# pinned OpenCode 2 npm target package with its tarball digest.
 RUN npm uninstall --global opencode-ai \
-    && curl -fL https://github.com/anomalyco/opencode/releases/download/v1.18.25/opencode-linux-x64.tar.gz -o /tmp/opencode.tar.gz \
-    && echo "58a3729a6f3432dd6d2917fcc4a949788891a035818646ad480e12c947f56e78  /tmp/opencode.tar.gz" | sha256sum -c - \
-    && tar -xzf /tmp/opencode.tar.gz -C /usr/local/bin opencode \
-    && chmod 0755 /usr/local/bin/opencode \
-    && rm /tmp/opencode.tar.gz
+    && curl -fL https://registry.npmjs.org/@opencode/cli-linux-x64/-/cli-linux-x64-2.0.32.tgz -o /tmp/opencode.tgz \
+    && echo "64a1f4b381c2d2efc18c8d76b2ce399141778b421b54c98b94be8e80803606dc  /tmp/opencode.tgz" | sha256sum -c - \
+    && tar -xzf /tmp/opencode.tgz -C /tmp \
+    && install -m 0755 /tmp/package/bin/opencode /usr/local/bin/opencode \
+    && rm -rf /tmp/opencode.tgz /tmp/package
 
 # /usr/local/bin precedes the base image's apt-installed /usr/bin/gh.
 RUN curl -fL https://github.com/cli/cli/releases/download/v2.98.0/gh_2.98.0_linux_amd64.tar.gz -o /tmp/gh.tar.gz \
@@ -21,7 +21,7 @@ RUN curl -fL https://github.com/cli/cli/releases/download/v2.98.0/gh_2.98.0_linu
     && install -m 0755 /tmp/gh_2.98.0_linux_amd64/bin/gh /usr/local/bin/gh \
     && rm -rf /tmp/gh.tar.gz /tmp/gh_2.98.0_linux_amd64
 
-RUN test "$(opencode --version)" = "1.18.25" \
+RUN test "$(opencode --version)" = "opencode v2.0.32" \
     && gh version | grep -F "gh version 2.98.0"
 
 USER agent

@@ -17,6 +17,9 @@
     cleanupLabel,
     cleanupNote,
     cleanupTone,
+    DECISION_NOTE,
+    DECISION_UNKNOWN,
+    decisionLabel,
     failurePhaseLabel,
     failureReasonLabel,
     formatDuration,
@@ -236,6 +239,20 @@
         {failureReasonLabel(dash.data.task.failure.reason)}
       </div>
     {/if}
+
+    <h2>Decision</h2>
+    <p class="decision-block">
+      <span
+        class="decision-value"
+        class:unknown={dash.data.task.decision === null}
+        data-testid="detail-decision"
+      >
+        {decisionLabel(dash.data.task.decision)}
+      </span>
+    </p>
+    <p class="muted">
+      {dash.data.task.decision ? DECISION_NOTE : DECISION_UNKNOWN}
+    </p>
 
     {@render revisionGrid()}
 

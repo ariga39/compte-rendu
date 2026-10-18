@@ -96,6 +96,7 @@ export interface GitHubAppTokenProviderOptions {
 }
 
 export interface GitHubAppTokenProvider {
+  readonly getReviewAuthorLogin: () => Promise<string>;
   readonly getInstallationToken: (installationId: number, signal?: AbortSignal) => Promise<string>;
   readonly getReadInstallationToken: (
     installationId: number,
@@ -153,7 +154,7 @@ export const createGitHubAppTokenProvider = (
     }
   };
 
-  const exchange = async (installationId: number, body?: unknown, signal?: AbortSignal) => {
+  const appJwt = async () => {
     const appId = Number(options.appId);
     if (!Number.isSafeInteger(appId) || appId < 1) {
       throw new Error('GitHub App ID is invalid');
@@ -179,13 +180,18 @@ export const createGitHubAppTokenProvider = (
       throw new Error('GitHub App token could not be signed');
     }
 
+    return `${signingInput}.${base64Url(new Uint8Array(signature))}`;
+  };
+
+  const exchange = async (installationId: number, body?: unknown, signal?: AbortSignal) => {
+    const jwt = await appJwt();
     let response: Response;
     try {
       response = await fetcher(`${apiBaseUrl}/app/installations/${installationId}/access_tokens`, {
         method: 'POST',
         headers: {
           accept: 'application/vnd.github+json',
-          authorization: `Bearer ${signingInput}.${base64Url(new Uint8Array(signature))}`,
+          authorization: `Bearer ${jwt}`,
           'content-type': 'application/json',
           'user-agent': 'compte-rendu-core',
           'x-github-api-version': '2022-11-28',
@@ -208,7 +214,26 @@ export const createGitHubAppTokenProvider = (
     return responseJson(response, signal);
   };
 
+  let authorLogin: string | undefined;
   return {
+    getReviewAuthorLogin: async () => {
+      if (authorLogin !== undefined) return authorLogin;
+      const response = await fetcher(`${apiBaseUrl}/app`, {
+        headers: {
+          accept: 'application/vnd.github+json',
+          authorization: `Bearer ${await appJwt()}`,
+          'user-agent': 'compte-rendu-core',
+          'x-github-api-version': '2022-11-28',
+        },
+      });
+      if (!response.ok) throw new GitHubRequestError(response.status, parseRetryAfterMs(response));
+      const app = await Schema.decodeUnknownPromise(
+        Schema.Struct({ id: Schema.Int, slug: Schema.NonEmptyString }),
+      )(await response.json());
+      if (app.id !== Number(options.appId)) throw new Error('GitHub App identity mismatch');
+      authorLogin = `${app.slug}[bot]`;
+      return authorLogin;
+    },
     getInstallationToken: async (installationId, signal) => {
       const value = await exchange(installationId, undefined, signal);
       try {

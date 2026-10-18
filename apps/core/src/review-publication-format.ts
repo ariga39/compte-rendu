@@ -1,3 +1,5 @@
+import type { ReviewDecision } from '@compte-rendu/contracts';
+
 export const formatReviewPublicationMarker = (runId: string) =>
   `<!-- compte-rendu:run:${runId} -->`;
 
@@ -8,8 +10,14 @@ export const formatReviewPublicationPayload = <HeadSha extends string>(input: {
   readonly runId: string;
   readonly headSha: HeadSha;
   readonly markdown: string;
+  readonly decision?: ReviewDecision;
 }) => ({
-  event: 'COMMENT' as const,
+  event:
+    input.decision === 'approve'
+      ? ('APPROVE' as const)
+      : input.decision === 'request_changes'
+        ? ('REQUEST_CHANGES' as const)
+        : ('COMMENT' as const),
   commit_id: input.headSha,
   body: `${formatReviewPublicationMarker(input.runId)}\n${input.markdown}`,
 });

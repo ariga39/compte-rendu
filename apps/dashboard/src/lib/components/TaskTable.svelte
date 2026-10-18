@@ -8,7 +8,14 @@
     TableHeader,
     TableRow,
   } from 'carbon-components-svelte';
-  import { absoluteTime, relativeTime, statusDetail, statusLabel, statusTone } from '#lib/format.ts';
+  import {
+    absoluteTime,
+    decisionLabel,
+    relativeTime,
+    statusDetail,
+    statusLabel,
+    statusTone,
+  } from '#lib/format.ts';
   import { liveIdentity } from '#lib/model.ts';
   import type { DatedTask, PublicIdentity } from '#lib/types.ts';
   import Badge from './Badge.svelte';
@@ -62,6 +69,7 @@
       <TableRow>
         <TableHeader>Review</TableHeader>
         <TableHeader>Status</TableHeader>
+        <TableHeader>Decision</TableHeader>
         {#if !compact}
           <TableHeader>Received</TableHeader>
           <TableHeader>Pull request</TableHeader>
@@ -112,6 +120,15 @@
             {#if statusDetail(task)}
               <p class="task-meta">{statusDetail(task)}</p>
             {/if}
+          </TableCell>
+          <TableCell>
+            <span
+              class="task-decision"
+              class:unknown={task.decision === null}
+              data-testid="task-decision"
+            >
+              {decisionLabel(task.decision)}
+            </span>
           </TableCell>
           {#if !compact}
             <TableCell>

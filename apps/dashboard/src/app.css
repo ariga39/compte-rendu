@@ -152,6 +152,12 @@ main#content {
   color: #78a9ff;
   white-space: nowrap;
 }
+.task-decision {
+  color: #f4f4f4;
+}
+.task-decision.unknown {
+  color: #c6c6c6;
+}
 
 .task-table--compact .bx--data-table {
   min-width: 0;
@@ -343,6 +349,19 @@ main#content {
   justify-items: start;
   gap: 6px;
   margin: 4px 0;
+}
+
+.decision-block {
+  margin: 4px 0;
+}
+.decision-value {
+  display: inline-block;
+  padding: 2px 0;
+  color: #f4f4f4;
+  line-height: 1.5;
+}
+.decision-value.unknown {
+  color: #c6c6c6;
 }
 
 .app-footer {

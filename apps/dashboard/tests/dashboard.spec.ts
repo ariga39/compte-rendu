@@ -42,6 +42,7 @@ const task = (overrides: Partial<PublicTaskState> = {}): PublicTaskState => ({
   dispatch: 'queued',
   stage: null,
   processing: null,
+  decision: null,
   identity: { kind: 'anonymous' },
   receivedAt: NOW,
   claimedAt: null,
@@ -1389,10 +1390,11 @@ test('history renders a semantic table with named columns', async ({ page, harne
   expect(await page.locator('thead th').allTextContents()).toEqual([
     'Review',
     'Status',
+    'Decision',
     'Received',
     'Pull request',
   ]);
-  await expect(page.locator('[data-testid="task"]').first().locator('td')).toHaveCount(4);
+  await expect(page.locator('[data-testid="task"]').first().locator('td')).toHaveCount(5);
   for (const header of await page.getByRole('columnheader').all()) {
     await expect(header).toBeInViewport({ ratio: 1 });
   }

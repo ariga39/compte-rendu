@@ -68,6 +68,7 @@ export class SqliteD1Database implements D1DatabaseLike {
       '0008_runner_cleanup.sql',
       '0009_dashboard_lifecycle.sql',
       '0010_review_branch_refs.sql',
+      '0011_review_decision.sql',
     ],
   ) {
     this.applyMigrations(migrationNames);

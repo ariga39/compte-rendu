@@ -1,3 +1,4 @@
+import type { ReviewDecision } from '@compte-rendu/contracts';
 import type {
   ReviewDeliveryRecord,
   ReviewJob,
@@ -37,6 +38,7 @@ export interface D1DatabaseLike {
 export type D1ReviewStateStore = ReviewStateStore & ReviewStateQueries;
 
 interface DeliveryRow {
+  review_decision?: ReviewDecision | null;
   delivery_id: string;
   installation_id: number;
   repository_id: number;
@@ -123,6 +125,7 @@ const dispositionForStatus = (status: ReviewStoredStatus) => {
 };
 
 const outcomeFromRow = (row: DeliveryRow): ReviewOutcome => ({
+  ...(row.review_decision == null ? {} : { decision: row.review_decision }),
   deliveryId: row.delivery_id,
   installationId: row.installation_id,
   repositoryId: row.repository_id,
@@ -174,7 +177,7 @@ const runOutcomeSelect = `
     d.base_sha, d.head_sha, d.trigger, r.status,
     r.created_at, r.updated_at, r.runner_job_id, r.runner_attempt, r.comment_id,
     r.check_run_id,
-    r.check_setup_status,
+    r.check_setup_status, r.review_decision,
     r.evidence_key, r.evidence_status,
     r.evidence_size, r.evidence_sha256, r.evidence_uploaded_at,
     r.execution_started_at, r.submission_completed_at, r.cleanup_completed_at
@@ -184,6 +187,7 @@ const runOutcomeSelect = `
 `;
 
 interface PublicRunDbRow {
+  review_decision: ReviewDecision | null;
   run_id: string;
   status: ReviewRunStatus;
   installation_id: number;
@@ -219,6 +223,7 @@ interface PublicRunDbRow {
 }
 
 const mapPublicRun = (row: PublicRunDbRow): PublicRunRow => ({
+  decision: row.review_decision,
   runId: row.run_id,
   status: row.status,
   installationId: row.installation_id,
@@ -279,7 +284,7 @@ const mapMetadataRow = (row: MetadataDbRow): RepositoryMetadataRow => ({
 
 const publicRunColumns = `
   r.run_id, r.status, r.installation_id, r.repository_id, r.pull_request_number,
-  r.base_sha, r.head_sha, r.base_ref, r.head_ref,
+  r.base_sha, r.head_sha, r.base_ref, r.head_ref, r.review_decision,
   r.created_at, r.claimed_at, r.terminal_at, r.result_received_at, r.publication_started_at, r.runner_job_id, r.failure_phase, r.failure_reason,
   r.evidence_status, r.runner_cleanup_status, r.publication_claimed_at,
   r.progress_stage, r.progress_received_at, r.progress_milestones,
@@ -897,10 +902,12 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
     runId,
     evidence,
     sandboxCleanup,
+    decision,
   }: {
     runId: string;
     evidence: ReviewEvidenceMetadata;
     sandboxCleanup?: RunnerCleanupStatus;
+    decision?: ReviewDecision;
   }) => {
     const result = await database
       .prepare(
@@ -909,7 +916,8 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
            evidence_sha256 = ?, evidence_uploaded_at = ?,
            execution_started_at = ?, submission_completed_at = ?,
            cleanup_completed_at = ?,
-           runner_cleanup_status = COALESCE(?, runner_cleanup_status)
+           runner_cleanup_status = COALESCE(?, runner_cleanup_status),
+           review_decision = COALESCE(review_decision, ?)
          WHERE run_id = ? AND (
            evidence_key IS NULL OR evidence_key = ?
          )`,
@@ -924,6 +932,7 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
         evidence.submissionCompletedAt ?? null,
         evidence.cleanupCompletedAt ?? null,
         sandboxCleanup ?? null,
+        decision ?? null,
         runId,
         evidence.key,
       )
@@ -1064,7 +1073,7 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
     return results.every((result) => result.meta.changes === 1);
   },
 
-  completeRunPublication: async ({ runId, occurredAt, fingerprints }) => {
+  completeRunPublication: async ({ runId, occurredAt, fingerprints, decision }) => {
     const results = await database.batch([
       ...fingerprints.map((fingerprint) =>
         database
@@ -1078,10 +1087,10 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
       ),
       database
         .prepare(
-          `UPDATE review_runs SET status = 'completed', updated_at = ?, terminal_at = COALESCE(terminal_at, ?)
+          `UPDATE review_runs SET status = 'completed', updated_at = ?, terminal_at = COALESCE(terminal_at, ?), review_decision = COALESCE(review_decision, ?)
            WHERE run_id = ? AND status = 'scheduled'`,
         )
-        .bind(occurredAt, occurredAt, runId),
+        .bind(occurredAt, occurredAt, decision ?? null, runId),
       database
         .prepare(
           `UPDATE deliveries SET status = 'completed', updated_at = ?

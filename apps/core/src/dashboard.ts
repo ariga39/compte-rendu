@@ -109,6 +109,7 @@ export const projectPublicTask = (row: PublicRunRow, now: string): PublicTaskSta
             ? 'received'
             : null,
     identity,
+    decision: row.decision,
     receivedAt: row.createdAt,
     claimedAt: row.claimedAt,
     terminalAt: row.terminalAt,

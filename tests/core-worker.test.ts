@@ -1206,6 +1206,7 @@ describe('Core Worker', () => {
     const inProgressStarted = deferred<void>();
     const releaseInProgress = deferred<void>();
     const checkStatuses: string[] = [];
+    const checkDecisions: (string | undefined)[] = [];
     const worker = createCoreWorker(
       {
         ...coreEnv(database),
@@ -1214,12 +1215,13 @@ describe('Core Worker', () => {
       {
         github: {
           createCheckRun: async () => check.promise,
-          updateCheckRun: async ({ status }) => {
+          updateCheckRun: async ({ status, decision }) => {
             if (status === 'in_progress' && !checkStatuses.includes('in_progress')) {
               inProgressStarted.resolve();
               await releaseInProgress.promise;
             }
             checkStatuses.push(status);
+            checkDecisions.push(decision);
           },
           getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
           loadReviewTarget: async () => ({ headSha: eligibleEvent.headSha }),
@@ -1258,6 +1260,15 @@ describe('Core Worker', () => {
       const claimed = (await claim.json()) as { id: string; runId: string };
       check.resolve({ id: 321 });
       await inProgressStarted.promise;
+      const callback = JSON.parse(await successfulCallback(claimed.runId, claimed.id));
+      callback.result = { version: 2, decision: 'request_changes', markdown: callback.result };
+      const manifest = JSON.parse(
+        Buffer.from(callback.evidence.manifest.content, 'base64').toString(),
+      );
+      manifest.result = callback.result;
+      callback.evidence.manifest = await evidenceField(
+        Buffer.from(JSON.stringify(manifest)).toString('base64'),
+      );
 
       expect(
         (
@@ -1268,7 +1279,7 @@ describe('Core Worker', () => {
                 'content-type': 'application/json',
                 'x-compte-rendu-runner-callback': 'verified',
               },
-              body: await successfulCallback(claimed.runId, claimed.id),
+              body: JSON.stringify(callback),
             }),
           )
         ).status,
@@ -1277,6 +1288,7 @@ describe('Core Worker', () => {
       await Promise.all(backgroundTasks);
 
       expect(checkStatuses.at(-1)).toBe('success');
+      expect(checkDecisions.at(-1)).toBe('request_changes');
     } finally {
       releaseInProgress.resolve();
       await Promise.all(backgroundTasks);
@@ -2390,6 +2402,73 @@ describe('Core Worker', () => {
       database.close();
     }
   });
+
+  it.each([true, false])(
+    'publishes a structured vote only when evidence agrees (matching=%s)',
+    async (matching) => {
+      const database = new SqliteD1Database();
+      const store = createD1ReviewStateStore(database);
+      const claim = await store.claimReview({
+        deliveryId: 'structured-vote',
+        job: {
+          repositoryId: 11,
+          installationId: 7,
+          pullRequestNumber: 42,
+          baseSha: eligibleEvent.baseSha,
+          headSha: eligibleEvent.headSha,
+          trigger: 'automatic',
+        },
+        occurredAt: '2026-09-01T00:00:00.000Z',
+      });
+      if (claim.kind !== 'claimed') throw new Error('not claimed');
+      await store.recordRunnerJob({ runId: claim.runId, jobId: 'runner-job-1', attempt: 1 });
+      const reviews: unknown[] = [];
+      const worker = createCoreWorker(
+        { ...coreEnv(database), EVIDENCE_BUCKET: { put: async () => undefined } },
+        {
+          github: {
+            loadReviewTarget: async () => ({ headSha: eligibleEvent.headSha }),
+            createReview: async ({ payload }) => {
+              reviews.push(payload);
+              return { kind: 'created', review: payload };
+            },
+          },
+        },
+      );
+      const callback = JSON.parse(await successfulCallback(claim.runId));
+      callback.result = { version: 2, decision: 'request_changes', markdown: callback.result };
+      const manifest = JSON.parse(
+        Buffer.from(callback.evidence.manifest.content, 'base64').toString(),
+      );
+      manifest.result = { ...callback.result, decision: matching ? 'request_changes' : 'approve' };
+      callback.evidence.manifest = await evidenceField(
+        Buffer.from(JSON.stringify(manifest)).toString('base64'),
+      );
+      const response = await worker.fetch(
+        new Request('https://core.internal/runner-results', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-compte-rendu-runner-callback': 'verified',
+          },
+          body: JSON.stringify(callback),
+        }),
+      );
+      if (matching) {
+        expect(response.status).toBe(202);
+        expect(reviews).toEqual([
+          expect.objectContaining({ event: 'REQUEST_CHANGES', commit_id: eligibleEvent.headSha }),
+        ]);
+        expect(await createD1ReviewStateStore(database).getRunOutcome(claim.runId)).toMatchObject({
+          status: 'completed',
+          decision: 'request_changes',
+        });
+      } else {
+        expect(reviews).toEqual([]);
+        expect(await store.getRunOutcome(claim.runId)).toMatchObject({ status: 'failed' });
+      }
+    },
+  );
 
   it('stores callback evidence in R2 before publishing a successful runner result', async () => {
     const database = new SqliteD1Database();
