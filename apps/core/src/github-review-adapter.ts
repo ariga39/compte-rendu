@@ -89,7 +89,6 @@ const CheckRun = Schema.Struct({
 const CheckRuns = Schema.Struct({
   check_runs: Schema.Array(CheckRun),
 });
-const checkName = 'Petit Chiba Review';
 
 class MarkerLookupFailed extends Error {}
 class ReviewConfirmationFailed extends Error {}
@@ -103,6 +102,7 @@ export interface GitHubPublicationAdapterOptions {
   readonly apiBaseUrl?: string;
   readonly dashboardOrigin?: string;
   readonly getReviewAuthorLogin?: () => Promise<string>;
+  readonly checkName?: string;
 }
 
 export const createGitHubPublicationAdapter = (
@@ -110,6 +110,7 @@ export const createGitHubPublicationAdapter = (
 ): GitHubAdapter => {
   const fetcher = options.fetch ?? globalThis.fetch;
   const apiBaseUrl = (options.apiBaseUrl ?? 'https://api.github.com').replace(/\/$/, '');
+  const checkName = options.checkName?.trim() || 'Petit Chiba Review';
   const dashboardOrigin = options.dashboardOrigin?.trim();
   if (dashboardOrigin) {
     const parsed = new URL(dashboardOrigin);
