@@ -3,6 +3,8 @@ packages:
   - packages/*
 
 allowBuilds:
+  '@google/genai': false
+  protobufjs: false
   carbon-components-svelte: false
   esbuild: true
   msgpackr-extract: false

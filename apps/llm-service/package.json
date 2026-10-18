@@ -1,0 +1,15 @@
+{
+  "name": "@compte-rendu/llm-service",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vp build",
+    "start": "node dist/llm-service.js"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "1.3.0",
+    "effect": "4.0.0-rc.111",
+    "eventsource-parser": "3.0.6",
+    "smol-toml": "1.9.1"
+  }
+}

@@ -24,6 +24,7 @@ declare module 'node:fs' {
 
 declare module 'node:child_process' {
   export interface ChildProcess {
+    readonly stdin: { end(): void } | null;
     readonly stdout: { on(event: 'data', listener: (chunk: Buffer | string) => void): void } | null;
     readonly stderr: { on(event: 'data', listener: (chunk: Buffer | string) => void): void } | null;
     kill(signal?: string): boolean;
@@ -52,20 +53,35 @@ declare module 'node:child_process' {
 }
 
 declare module 'node:http' {
+  export function request(
+    options: { socketPath: string; path: string; method: string },
+    callback: (response: IncomingMessage) => void,
+  ): { on(event: 'error', listener: (error: Error) => void): void; end(): void };
   export interface IncomingMessage {
     readonly headers: Record<string, string | string[] | undefined>;
     readonly method?: string;
     readonly url?: string;
+    on(event: 'data', listener: (data: Buffer) => void): this;
+    on(event: 'end', listener: () => void): this;
     [Symbol.asyncIterator](): AsyncIterableIterator<Buffer | string>;
   }
   export interface ServerResponse {
     statusCode: number;
     readonly headersSent: boolean;
+    readonly writableEnded: boolean;
+    once(event: 'drain', listener: () => void): this;
+    removeListener(event: 'drain', listener: () => void): this;
+    on(event: 'close', listener: () => void): this;
+    write(chunk: Uint8Array): boolean;
+    destroy(): void;
     setHeader(name: string, value: string): void;
     writeHead(statusCode: number, headers?: Record<string, string>): this;
     end(data?: string | Uint8Array): void;
   }
   export interface Server {
+    close(callback: () => void): void;
+    closeAllConnections(): void;
+    listen(path: string, callback: () => void): this;
     listen(port: number, host: string, callback: () => void): this;
     listen(options: { port: number; host: string }): this;
     once(event: 'error', listener: (error: unknown) => void): this;
@@ -125,6 +141,7 @@ declare module 'node:os' {
 }
 
 declare module 'node:path' {
+  export function dirname(path: string): string;
   export function join(...paths: string[]): string;
   export function resolve(...paths: string[]): string;
 }
@@ -157,6 +174,8 @@ declare namespace NodeJS {
 }
 
 declare const process: {
+  exitCode: number;
+  once(event: string, listener: () => void): void;
   argv: string[];
   cwd(): string;
   execPath: string;
@@ -173,6 +192,11 @@ declare class Buffer extends Uint8Array {
 }
 
 declare module 'node:events' {
+  export function once(
+    emitter: unknown,
+    event: string,
+    options?: { signal?: AbortSignal },
+  ): Promise<unknown[]>;
   export class EventEmitter<Events = Record<string, unknown[]>> {
     on(event: string, listener: (...args: unknown[]) => void): this;
   }
