@@ -969,18 +969,27 @@ describe('Core Worker', () => {
       await Promise.all(waitUntilTasks);
       const events = await postHogEvents(requests);
       expect(events).toHaveLength(3);
-      const lifecycleIds = events as Array<{
+      const lifecycle = events as Array<{
+        readonly event: string;
         readonly distinct_id: string;
         readonly properties: { readonly run_id: string };
       }>;
-      const runId = lifecycleIds[0]?.distinct_id;
+      const runId = lifecycle[0]?.distinct_id;
       expect(runId).toEqual(expect.any(String));
-      expect(lifecycleIds.map((event) => [event.distinct_id, event.properties.run_id])).toEqual([
+      expect(lifecycle.map((entry) => [entry.distinct_id, entry.properties.run_id])).toEqual([
         [runId, runId],
         [runId, runId],
         [runId, runId],
       ]);
-      expect(events[2]).toMatchObject({
+      // PostHog transport delivery order is not guaranteed, so compare the
+      // exact set of captured lifecycle events rather than their positions.
+      expect(lifecycle.map((entry) => entry.event).sort()).toEqual([
+        'review claimed',
+        'review finished',
+        'review scheduled',
+      ]);
+      const finished = lifecycle.find((entry) => entry.event === 'review finished');
+      expect(finished).toMatchObject({
         event: 'review finished',
         properties: {
           outcome: 'failed',
