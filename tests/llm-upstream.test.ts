@@ -20,6 +20,7 @@ it('streams native Chat Completions through the configured model and upstream cr
       if (typeof init?.body !== 'string') throw new Error('expected JSON body');
       const body = JSON.parse(init.body);
       expect(body.model).toBe('deepseek-flash');
+      expect(body.store).toBe(false);
       expect(body.messages).toEqual([{ role: 'user', content: 'Review this change' }]);
       return new Response(
         'data: {"id":"c1","choices":[{"index":0,"delta":{"content":"Looks good"},"finish_reason":null}]}\n\ndata: {"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
@@ -32,6 +33,7 @@ it('streams native Chat Completions through the configured model and upstream cr
     {
       model: 'review',
       stream: true,
+      store: false,
       messages: [{ role: 'user', content: 'Review this change' }],
     },
     new AbortController().signal,
@@ -57,6 +59,7 @@ it('rejects unsupported or server-executed tools before sending a provider reque
   });
   for (const extra of [
     { stream: false },
+    { store: true },
     { base_url: 'https://evil.invalid' },
     { tools: [{ type: 'web_search' }] },
   ]) {

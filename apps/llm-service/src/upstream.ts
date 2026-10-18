@@ -24,6 +24,7 @@ export interface PiUpstreamOptions {
 const optional = Schema.optionalKey(Schema.Unknown);
 const ChatRequest = Schema.Struct({
   model: Schema.String,
+  store: Schema.optionalKey(Schema.Literal(false)),
   stream: Schema.Literal(true),
   messages: Schema.Array(Schema.Unknown),
   tools: Schema.optionalKey(
