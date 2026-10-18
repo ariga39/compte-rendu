@@ -318,7 +318,6 @@ export interface ReviewStateQueries {
     runId: string;
     evidence: ReviewEvidenceMetadata;
     sandboxCleanup?: RunnerCleanupStatus;
-    decision?: ReviewDecision;
   }): Promise<boolean>;
   recordRunnerJob(input: { runId: string; jobId: string; attempt: number }): Promise<boolean>;
   clearRunnerJob?(input: { runId: string; jobId: string }): Promise<boolean>;
@@ -2028,12 +2027,11 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
         run.runnerCleanupStatus = undefined;
       }
     },
-    recordEvidence: async ({ runId, evidence, sandboxCleanup, decision }) => {
+    recordEvidence: async ({ runId, evidence, sandboxCleanup }) => {
       const run = runs.get(runId);
       if (run === undefined) return false;
       if (run.evidence !== undefined && run.evidence.key !== evidence.key) return false;
       run.evidence = evidence;
-      if (decision !== undefined) run.decision = decision;
       if (sandboxCleanup !== undefined) run.runnerCleanupStatus = sandboxCleanup;
       return true;
     },

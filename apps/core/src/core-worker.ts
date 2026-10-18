@@ -485,10 +485,6 @@ export const createCoreWorker = (
     const evidenceRecorded = await stateStore.recordEvidence({
       runId: callback.runId,
       sandboxCleanup: callback.sandbox.cleanup,
-      decision:
-        callback.status === 'succeeded' && typeof callback.result !== 'string'
-          ? callback.result.decision
-          : undefined,
       evidence: {
         key: `reviews/${callback.runId}`,
         status: callback.evidence.status,
