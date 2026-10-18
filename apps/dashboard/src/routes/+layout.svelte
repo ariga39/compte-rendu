@@ -12,7 +12,7 @@
   import { createDashboardQueryClient, installFocusTracking } from '#lib/query.svelte.ts';
   import { createRefreshState, provideRefresh } from '#lib/refresh.svelte.ts';
 
-  let { children } = $props();
+  let { children, data } = $props();
 
   installFocusTracking();
   const queryClient = createDashboardQueryClient();
@@ -36,10 +36,14 @@
   provideRefresh(refresh.handle);
 </script>
 
+<svelte:head>
+  <title>{path === "/help" ? "Help | " : ""}{data.reviewName}</title>
+</svelte:head>
+
 <a class="skip-link" href="#content" data-testid="skip-link">Skip to content</a>
 
-<Header uiShellAriaLabel="Compte rendu">
-  <a class="bx--header__name" href="/">Compte rendu</a>
+<Header uiShellAriaLabel={data.reviewName}>
+  <a class="bx--header__name" href="/">{data.reviewName}</a>
   <HeaderNav aria-label="Primary">
     {#each links as [href, label] (href)}
       <HeaderNavItem {href} text={label} isSelected={path === href} />
@@ -72,6 +76,7 @@
 </Content>
 
 <footer class="app-footer">
+  <a href="https://github.com/ariga39/compte-rendu" target="_blank" rel="noopener noreferrer">Compte-rendu</a>
   <a
     data-testid="commit-link"
     href={`https://github.com/ariga39/compte-rendu/commit/${__COMMIT_SHA__}`}

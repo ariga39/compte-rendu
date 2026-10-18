@@ -2,10 +2,6 @@
   import Help from '#lib/content/help.md';
 </script>
 
-<svelte:head>
-  <title>Help | Compte rendu</title>
-</svelte:head>
-
 <article class="help">
   <Help />
 </article>

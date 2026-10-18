@@ -1209,3 +1209,25 @@ describe('public dashboard reads are DB-only', () => {
     expect(tokenExchanges).toBeLessThan(8);
   });
 });
+
+describe('dashboard instance name', () => {
+  it.each([undefined, '', '  ', 'Ariga39 AI Review'])(
+    'serves the Check name through ingress (%s)',
+    async (name) => {
+      const database = new SqliteD1Database();
+      const core = createCoreWorker({ ...coreEnv(database), GITHUB_CHECK_NAME: name });
+      const ingress = createIngressWorker({
+        core,
+        secret: 'test-secret',
+        crypto,
+        allowedInstallationIds: [],
+      });
+      const response = await ingress.fetch(
+        new Request('https://reviews.example/api/dashboard-config'),
+      );
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ name: name?.trim() || 'Compte-rendu review' });
+      expect(response.headers.get('cache-control')).toBe('no-store');
+    },
+  );
+});

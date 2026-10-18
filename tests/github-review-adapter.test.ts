@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { createGitHubPublicationAdapter } from '../apps/core/src/github-review-adapter';
 
 describe('per-run dashboard Check links', () => {
-  it.each([undefined, 'Ariga39 AI Review'])(
+  it.each([undefined, '', '  ', 'Ariga39 AI Review'])(
     'keeps creation, recovery, and updates linked with check name %s',
     async (checkName) => {
       const checks: Array<{
@@ -53,7 +53,7 @@ describe('per-run dashboard Check links', () => {
         runId: 'run-one',
       };
       expect(await github.createCheckRun!(input)).toEqual({ id: 1 });
-      expect(checks[0].name).toBe(checkName ?? 'Petit Chiba Review');
+      expect(checks[0].name).toBe(checkName?.trim() || 'Compte-rendu review');
       expect(checks[0].details_url).toBe('https://dashboard.example/jobs/run-one');
       expect(checks[0].output?.summary).toContain('https://dashboard.example/jobs/run-one');
       delete checks[0].details_url;

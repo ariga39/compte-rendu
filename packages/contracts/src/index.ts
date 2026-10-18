@@ -1,5 +1,8 @@
 import { Schema } from 'effect';
 
+export const DEFAULT_REVIEW_NAME = 'Compte-rendu review';
+export const PublicDashboardConfig = Schema.Struct({ name: Schema.String });
+
 export const REVIEW_ATTEMPT_BUDGET_MS = 30 * 60 * 1000;
 
 export interface WorkerEntrypoint<Env = unknown> {

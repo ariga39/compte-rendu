@@ -1428,10 +1428,14 @@ and [D1 migrations](https://developers.cloudflare.com/d1/reference/migrations/).
 
 Set the optional Core Worker variable `GITHUB_CHECK_NAME` in its Wrangler `vars`
 to brand the Check for each deployment, for example `Ariga39 AI Review`. Omitted
-or blank values retain `Petit Chiba Review`. The same name is used for creation,
-recovery, and Check Suite lookup.
+or blank values use `Compte-rendu review`. The dashboard header and browser title
+use the same Core setting, fetched via `/api/dashboard-config`; no separate
+frontend setting or rebuild is needed. This endpoint exposes only the display name.
+The same name is used for creation, recovery, and Check Suite lookup.
 
-Drain active reviews before changing this value. Existing Checks keep their
+Existing deployments that need the old name must explicitly set
+`GITHUB_CHECK_NAME = "Petit Chiba Review"` before upgrading.
+Drain active reviews before changing the effective name. Existing Checks keep their
 original name; Check Suite lookup uses the newly configured name. If repository
 branch protection requires the old Check name, update that requirement when
 switching names.

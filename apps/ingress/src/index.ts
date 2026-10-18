@@ -797,7 +797,10 @@ const forwardRunnerClaim = async (request: Request, dependencies: IngressDepende
 };
 
 const isPublicReadPath = (path: string) =>
-  path === '/api/dashboard' || path === '/api/jobs' || path.startsWith('/api/jobs/');
+  path === '/api/dashboard-config' ||
+  path === '/api/dashboard' ||
+  path === '/api/jobs' ||
+  path.startsWith('/api/jobs/');
 
 const forwardPublicRead = async (request: Request, dependencies: IngressDependencies) => {
   const url = new URL(request.url);
