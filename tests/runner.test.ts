@@ -6676,7 +6676,10 @@ describe('Runner settings reload', () => {
         expect((await get(h.runner, 'settings-raise-b')).status).toBe('running');
       });
       expect(claims).toBe(2);
-      expect(h.callbackReleases.size).toBe(2);
+      await vi.waitFor(() => {
+        expect(h.callbackReleases.has('settings-raise-a')).toBe(true);
+        expect(h.callbackReleases.has('settings-raise-b')).toBe(true);
+      });
     } finally {
       await h.close();
     }
