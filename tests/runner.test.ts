@@ -3202,6 +3202,118 @@ describe('Runner Job HTTP interface', () => {
     });
   });
 
+  it('retains sanitized checkout failure diagnostics without exposing credentials', async () => {
+    const events: unknown[] = [];
+    const repositoryUrl = 'https://github.com/acme/reviewed.git';
+    const repositoryReadToken = 'checkout-diagnostic-secret';
+    const runner = createRunner({
+      evidenceRoot: sharedEvidenceRoot,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'model-secret-resolver',
+      log: {
+        record: async (event) => {
+          events.push(event);
+        },
+      },
+      process: async (_command, args) => ({
+        exitCode: args.includes('clone') ? 128 : 0,
+        stdout: '',
+        stderr: args.includes('clone')
+          ? `fatal: unable to access ${repositoryUrl}: connection reset ${repositoryReadToken}`
+          : '',
+        timedOut: false,
+        truncated: false,
+      }),
+    });
+    const response = await runner.handle(
+      new Request('http://runner/jobs', {
+        method: 'POST',
+        headers: { authorization: 'Bearer runner-test-token', 'content-type': 'application/json' },
+        body: JSON.stringify({
+          ...runnerJobFields,
+          runId: 'run-checkout-diagnostics',
+          attempt: 1,
+          repositoryUrl,
+          repositoryReadToken,
+          baseSha: '1111111111111111111111111111111111111111',
+          headSha: '2222222222222222222222222222222222222222',
+        }),
+      }),
+    );
+    const { id } = (await response.json()) as { id: string };
+    await expect(waitForTerminal(runner, id)).resolves.toMatchObject({
+      status: 'failed',
+      failure: { reason: 'checkout' },
+      sandbox: { cleanup: 'destroyed' },
+    });
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        stage: 'checkout',
+        command: 'clone',
+        exitCode: 128,
+        stderr: 'fatal: unable to access [repository]: connection reset [redacted]',
+      }),
+    );
+    expect(JSON.stringify(events)).not.toContain(repositoryReadToken);
+    expect(JSON.stringify(events)).not.toContain(repositoryUrl);
+  });
+
+  it.each(['absent', 'present', 'unavailable', 'truncated', 'timeout', 'wrong-name'])(
+    'confirms failed-create cleanup only with exact sandbox absence: %s',
+    async (inspection) => {
+      const baseSha = '1111111111111111111111111111111111111111';
+      const headSha = '2222222222222222222222222222222222222222';
+      const runner = createRunner({
+        evidenceRoot: sharedEvidenceRoot,
+        authToken: 'runner-test-token',
+        modelSecretCommand: 'model-secret-resolver',
+        process: async (_command, args) => {
+          if (args[0] === 'inspect')
+            return {
+              exitCode: inspection === 'present' ? 0 : 1,
+              stdout: inspection === 'present' ? '{"name":"existing"}' : '',
+              stderr:
+                inspection === 'unavailable'
+                  ? 'error: daemon unavailable'
+                  : `WARN: docker hub refresh lock held by another process: context deadline exceeded\nerror: sandbox '${inspection === 'wrong-name' ? 'another-sandbox' : args[1]}' not found\n  try: sbx ls\n`,
+              timedOut: inspection === 'timeout',
+              truncated: false,
+              stderrTruncated: inspection === 'truncated',
+            };
+          return {
+            exitCode: args[0] === 'create' || args[0] === 'rm' ? 1 : 0,
+            stdout: args.includes('rev-parse') ? `${baseSha}\n${headSha}\n` : '',
+            stderr: args[0] === 'create' ? 'context canceled' : '',
+            timedOut: false,
+            truncated: false,
+          };
+        },
+      });
+      const response = await runner.handle(
+        new Request('http://runner/jobs', {
+          method: 'POST',
+          headers: {
+            authorization: 'Bearer runner-test-token',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            ...runnerJobFields,
+            runId: `run-absent-cleanup-${inspection}`,
+            attempt: 1,
+            repositoryUrl: 'https://github.com/acme/reviewed.git',
+            baseSha,
+            headSha,
+          }),
+        }),
+      );
+      const { id } = (await response.json()) as { id: string };
+      await expect(waitForTerminal(runner, id)).resolves.toMatchObject({
+        status: 'failed',
+        sandbox: { cleanup: inspection === 'absent' ? 'destroyed' : 'failed' },
+      });
+    },
+  );
+
   it('keeps sanitized setup diagnostics when cleanup is also unconfirmed', async () => {
     const events: unknown[] = [];
     const baseSha = '1111111111111111111111111111111111111111';

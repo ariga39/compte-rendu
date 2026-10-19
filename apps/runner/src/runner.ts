@@ -1196,7 +1196,8 @@ export const createRunner = (options: RunnerOptions = {}) => {
       command: diagnostic.command,
       exitCode: result.exitCode,
       timedOut: result.timedOut,
-      ...(diagnostic.includeStderr === true
+      ...(diagnostic.includeStderr === true ||
+      (diagnostic.stage === 'checkout' && (result.exitCode !== 0 || result.timedOut))
         ? (() => {
             const stderr = boundedDiagnostic(job, result.stderr);
             return stderr === undefined ? {} : { stderr };
