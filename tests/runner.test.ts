@@ -9160,6 +9160,8 @@ describe('Runner multi-model review', () => {
     expect(supervisorPromptText).toContain('Review task');
     expect(supervisorPromptText).toContain('synthesize');
     expect(supervisorPromptText).toContain('Start all configured reviewers in parallel');
+    expect(supervisorPromptText).toContain('foreground subagent tasks (background: false)');
+    expect(supervisorPromptText).toContain('Wait for every configured reviewer to return');
     expect(supervisorPromptText).toContain(
       'Once their reviews return, only synthesize the supplied results',
     );

@@ -34,7 +34,7 @@ export const reviewPrompt = (input: ReviewPromptInput): string => {
     'Stay read-only; do not execute repository code, edit, commit, push, or publish.';
   const execution =
     reviewers.length > 1
-      ? 'Start all configured reviewers in parallel for one independent review each, then synthesize one final review:\n' +
+      ? 'Start all configured reviewers in parallel using foreground subagent tasks (background: false) for one independent review each. Wait for every configured reviewer to return, then synthesize one final review:\n' +
         reviewers.map(({ participant, model }) => `- ${participant}: ${model}`).join('\n') +
         '\nGive each reviewer the same review task below. Delegate repository inspection to the reviewers. ' +
         'Once their reviews return, only synthesize the supplied results: compare their evidence, remove duplicates and weak claims, and preserve substantive disagreements rather than forcing consensus. ' +
