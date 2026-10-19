@@ -1118,8 +1118,9 @@ behavior. OpenShell does not support this multi-model path yet.
 Configure each selected route in the host LLM service first (see
 [LLM service configuration](llm-service.md)). Use distinct, stable route IDs such
 as `deepseek-v4.1-flash` and `step-5-preview`, both using `chat-completions` for
-this OpenCode adapter. Keep `provider = "opencode-go"` when using an OpenCode Go
-custom base URL. Restart the service only when its active requests have drained;
+this OpenCode adapter. Configure the upstream model and full base URL in LiteLLM YAML; keep the
+job-derived OpenCode Go session header through the trusted Node service.
+Restart the services only when active requests have drained;
 service route definitions are not hot-reloaded. Preserve old routes until jobs
 that reference them finish.
 

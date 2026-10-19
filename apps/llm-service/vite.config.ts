@@ -5,6 +5,6 @@ export default defineConfig({
     lib: { entry: 'src/server.ts', formats: ['es'], fileName: 'llm-service' },
     outDir: 'dist',
     sourcemap: true,
-    rollupOptions: { external: [/^node:/, /^@earendil-works\/pi-ai/] },
+    rollupOptions: { external: [/^node:/] },
   },
 });

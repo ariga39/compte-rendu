@@ -1,148 +1,147 @@
 # LLM service
 
-The standalone Node service is the first implementation slice of the
-[external LLM service design](llm-service-design.md). It supplies authenticated
-inference and job grants. The sbx Runner can use it through the integration below.
-It does not automatically change either deployed review instance.
+The host runs two processes: the compte-rendu Node service owns job grants,
+route authorization, cancellation and sanitized diagnostics; LiteLLM Proxy owns
+model routing, provider credentials and protocol adaptation. Sandbox and Runner
+addresses stay unchanged. Neither process is exposed publicly.
 
 ## Build and configuration
 
-Use Node >= 22.19 (production currently uses Node 24), then:
+Build the Node service with Node 24 and the locked workspace dependencies:
 
 ```sh
 corepack pnpm install --frozen-lockfile
 corepack pnpm --filter @compte-rendu/llm-service build
 ```
 
-Run the built entry inside its installed workspace. `pi-ai` remains an external
-runtime dependency; copying only `dist/llm-service.js` is insufficient.
-
-On the service host, create an instance-specific configuration directory as the
-service user. These commands preserve existing files on upgrades:
+The Node artifact no longer needs pi-ai. Install the tested Python backend into
+its own virtual environment (Python 3.13, with `venv`/ensurepip installed):
 
 ```sh
-install -d -m 0700 ~/.config/<INSTANCE_NAME>-llm
-(umask 077; touch ~/.config/<INSTANCE_NAME>-llm/service.toml)
-chmod 0600 ~/.config/<INSTANCE_NAME>-llm/service.toml
-$EDITOR ~/.config/<INSTANCE_NAME>-llm/service.toml
+python3 -m venv /absolute/path/litellm-venv
+/absolute/path/litellm-venv/bin/pip install -r apps/llm-service/litellm/requirements.txt
 ```
 
-Set `LLM_SERVICE_CONFIG` to that file's absolute path. Fill in the routes below;
-**remove routes you will not use**. Every configured route's credential file must
-exist before the service starts. Use the subscription login command below to
-create its file before starting the service.
+Alternatively use `uv venv --python python3 /absolute/path/litellm-venv` and
+`uv pip install --python /absolute/path/litellm-venv/bin/python -r
+apps/llm-service/litellm/requirements.txt`. The pinned Prisma package is needed by
+LiteLLM 1.106.0 error handling even when no database is configured. This setup
+uses our existing job grants, not LiteLLM virtual keys, and needs no PostgreSQL.
 
-Example TOML (replace paths, port, route IDs and model names for this instance):
+Create a separate private directory for each instance, mode 0700, with files
+mode 0600. Keep all secrets outside repository checkouts and Sandbox mounts.
+Copy [config.example.yaml](../apps/llm-service/litellm/config.example.yaml) there
+and edit it. `model_name` is the LiteLLM alias; `model: openai/<id>` selects the
+OpenAI-compatible protocol, even when the model is DeepSeek or Step. Set the
+actual `api_base` for that instance, preserving its full prefix. Official
+OpenCode Go uses `https://opencode.ai/inference/go/openai/v1`; a custom gateway
+may use a different prefix. Do not replace a custom URL with the official URL.
+
+Supply `OPENCODE_GO_API_KEY` and a separately generated `LITELLM_MASTER_KEY` in
+a private systemd EnvironmentFile. Edit the file; do not put secret values in
+command-line arguments, logs or committed YAML. The backend key is distinct
+from both upstream credentials and sandbox job tokens. Store the identical
+backend key alone in a private file for the Node service to read.
+
+Set `LLM_SERVICE_CONFIG` to the Node TOML's absolute path:
 
 ```toml
 controlSocket = "/run/user/1000/compte-rendu-llm/control.sock"
 port = 8090
 
+[upstream]
+baseUrl = "http://127.0.0.1:4000"
+credentialFile = "/home/runner/.config/compte-rendu-llm/backend-key"
+
 [[routes]]
 id = "deepseek-review"
-provider = "openai-compatible"
 protocol = "chat-completions"
-model = "deepseek-v4.1-flash"
-baseUrl = "https://your-provider.example/v1"
-credentialFile = "/home/runner/.config/compte-rendu-llm/deepseek-key"
+model = "deepseek-review"
 
 [[routes]]
-id = "subscription-review"
-provider = "openai-codex"
-protocol = "codex-responses"
-model = "gpt-6.1-sol"
-baseUrl = "https://chatgpt.com/backend-api"
-credentialFile = "/home/runner/.config/compte-rendu-llm/subscription.json"
+id = "step-review"
+protocol = "chat-completions"
+model = "step-review"
 ```
 
-Names are examples, not a claim that every account offers those models. Each
-route is fixed at startup. Clients send the route ID as `model`; the service
-replaces it with the configured upstream model. No runtime hot reload or model
-fallback is implemented. The client must use the route's matching HTTP protocol.
+`upstream.baseUrl` is an origin, without `/v1`, query or fragment. HTTPS is
+accepted; plaintext HTTP is restricted to loopback. The Node service appends the
+selected `/v1/chat/completions` or `/v1/responses` path. A route's `id` is the
+sandbox-facing alias and `model` names the LiteLLM alias. Use `protocol =
+"responses"` for a Responses client. Routes and configuration load at startup;
+no hot reload or automatic provider fallback is introduced.
 
-Choose `provider` independently of `baseUrl`. It is required; existing configuration
-files must add it before upgrading. Supported combinations are:
+The Node service generates `x-opencode-session` and `session_id` from the
+verified grant's job ID. It does not forward incoming HTTP headers or accept
+client-supplied routing/credential overrides. The example enables LiteLLM header
+forwarding only behind this trusted boundary, preserving OpenCode Go session
+routing for both official and custom endpoints. Keep the LiteLLM master key out
+of every Sandbox and do not expose its management API to agents.
 
-| Provider            | Protocol           | pi-ai adapter                                       |
-| ------------------- | ------------------ | --------------------------------------------------- |
-| `opencode-go`       | `chat-completions` | Native OpenCode Go provider                         |
-| `openai-compatible` | `chat-completions` | Custom provider using pi-ai’s OpenAI-compatible API |
-| `openai-codex`      | `codex-responses`  | Native ChatGPT subscription provider                |
+## Optional ChatGPT subscription
 
-For OpenCode Go, use `provider = "opencode-go"`. The official base URL is
-`https://opencode.ai/inference/go/openai/v1`; a custom gateway URL works with the
-same provider selection. The service passes the authenticated grant’s job ID as
-pi-ai’s `sessionId`, so its native provider supplies the required routing header.
-Requests within a job retain that identity; client-supplied session headers are
-not forwarded. A custom URL does not turn an OpenCode Go route into a generic
-provider. Use `openai-compatible` only for an explicitly generic endpoint.
-Unknown providers or incompatible provider/protocol pairs fail at startup.
+LiteLLM owns this provider. Add an alias with `litellm_params.model:
+chatgpt/<supported-model>` and `model_info.mode: responses` to its YAML, then
+configure a matching Node route. This is separate from an OpenAI API key. The
+current OpenCode Runner integration uses Chat Completions; LiteLLM supports a
+Chat-to-Responses bridge for supported subscription models. Test the selected
+model and tool calls before selecting it for reviews.
 
-The model API key file contains only the key. Keep credential directories mode
-0700 and files mode 0600; files readable by other users are rejected. TOML contains
-paths, never credential values. The subscription file is created by login, not by
-copying an existing Codex/OpenCode auth cache. Use separate configuration, files,
-ports and control sockets for separate production instances.
-
-For an API-key route, create its file without putting the secret in shell
-arguments or shell history, then paste the key in the editor:
+With that instance's LiteLLM stopped, log in from a terminal:
 
 ```sh
-(umask 077; touch ~/.config/<INSTANCE_NAME>-llm/deepseek-key)
-chmod 0600 ~/.config/<INSTANCE_NAME>-llm/deepseek-key
-$EDITOR ~/.config/<INSTANCE_NAME>-llm/deepseek-key
+umask 077
+export CHATGPT_TOKEN_DIR=/absolute/private/path/chatgpt
+/absolute/path/litellm-venv/bin/python -c 'from litellm.llms.chatgpt.authenticator import Authenticator; Authenticator().get_access_token()'
 ```
 
-The `credentialFile` value must be the absolute path to that file. For a second
-instance, use different configuration/credential directories, control socket,
-HTTP port and systemd unit. These resources are local to the host; no new
-Cloudflare binding or D1 migration is required for this standalone service.
+Open the printed verification URL and enter its device code. Set the same
+`CHATGPT_TOKEN_DIR` in the LiteLLM unit. The directory must persist and be writable
+by its service user. Do not copy a developer CLI's rotating auth cache. One
+LiteLLM process uses one ChatGPT account; different accounts need separate
+instances. Run one worker and one owner of that file. LiteLLM 1.106.0 uses
+in-place file writes and does not serialize simultaneous refreshes: this is a
+known upstream limitation, not a guarantee supplied by our Node service. Do not
+share the file between instances or start parallel login/refresh processes.
+Subscription token counts are available, but recorded dollar spend is zero.
+No subscription route is enabled by the provided example or by migration.
 
-## Subscription login and exclusive ownership
+## Host services
 
-With the service stopped, create its private credential directory, then run:
+Create separate user units per instance. Use different ports, keys, configuration
+directories, control sockets and subscription stores for the two deployments.
+Keep the Runner unit and its cgroup independent.
 
-```sh
-LLM_SERVICE_CONFIG=/absolute/path/service.toml \
-  node apps/llm-service/dist/llm-service.js login subscription-review
-```
-
-Follow the displayed device URL and code. The service delegates login and refresh
-to pi-ai's ChatGPT subscription provider. It serializes refresh in-process and
-atomically replaces the mode-0600 credential file. Authentication errors are
-sanitized; the CLI never prints the resulting credential.
-
-The service and login command automatically acquire an exclusive OS lock beside
-each subscription credential file (`<file>.owner.lock`), using `/usr/bin/flock`
-on Linux. A second owner fails before login or inference starts. Stop the service
-before re-login; do not delete lock files while an owner is running. The lock is
-released on shutdown or process exit. Do not share this file with developer CLIs or another
-service instance. This first version does not implement distributed locks or
-cross-host credential sharing.
-
-## Host service
-
-Run as the same user as its Runner, with a private control socket directory.
-The HTTP listener is intentionally **127.0.0.1 only**. A future Sandbox integration
-must establish an authenticated, protected network path; exposing this port
-publicly is not an installation step.
-
-Save the following as
-`~/.config/systemd/user/<INSTANCE_NAME>-llm.service` (create the directory if
-needed), replacing the absolute paths. Install util-linux so `/usr/bin/flock`
-is available. Keep the checked-out workspace and installed dependencies on disk;
-this is a Node service, not a Worker deployment or a standalone copied bundle.
-
-Example user unit:
+`~/.config/systemd/user/<INSTANCE_NAME>-litellm.service`:
 
 ```ini
 [Unit]
-Description=compte-rendu LLM service
+Description=compte-rendu LiteLLM backend
+
+[Service]
+Type=simple
+EnvironmentFile=/absolute/private/path/litellm.env
+Environment=LITELLM_LOCAL_MODEL_COST_MAP=True
+UMask=0077
+ExecStart=/absolute/path/litellm-venv/bin/litellm --config /absolute/private/path/litellm.yaml --host 127.0.0.1 --port 4000 --num_workers 1
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+
+`~/.config/systemd/user/<INSTANCE_NAME>-llm.service`:
+
+```ini
+[Unit]
+Description=compte-rendu job-authorized LLM service
+Wants=<INSTANCE_NAME>-litellm.service
+After=<INSTANCE_NAME>-litellm.service
 
 [Service]
 Type=simple
 WorkingDirectory=/absolute/path/compte-rendu
-Environment=LLM_SERVICE_CONFIG=/absolute/path/service.toml
+Environment=LLM_SERVICE_CONFIG=/absolute/private/path/service.toml
 UMask=0077
 ExecStart=/absolute/path/node apps/llm-service/dist/llm-service.js
 Restart=on-failure
@@ -151,48 +150,29 @@ Restart=on-failure
 WantedBy=default.target
 ```
 
-Keep this unit independent of the Runner unit and cgroup. An occupied/stale socket
-causes startup failure; the service does not unlink arbitrary socket paths. If a
-crash leaves one, verify no old service owns it before removing it. A restart
-invalidates all in-memory grants and interrupts in-flight requests. Drain callers
-before planned maintenance; `concurrency = 0` is not a valid Runner setting.
+Start the backend, then the Node service. Both listeners bind to loopback; the
+control socket must be mode 0600. Node inference without a job token returns
+401, and GET on the control socket's `/grants` returns 405. Startup checks alone
+do not prove model access: issue a grant through the socket, consume a complete
+model/tool response, then revoke it and confirm the old token is rejected.
+Never print the token or place it in command-line arguments.
 
-### Start and check the service
+### Upgrade from the pi-ai backend
 
-Run as the service user, after configuring credentials and completing any
-subscription login:
+Before changing traffic, install and start LiteLLM on an unused loopback port
+with independent keys. Validate each existing alias, custom base URL, streaming
+tool calls and session header. Keep old artifacts and TOML for rollback.
+Drain both instances before replacing Node configuration/artifacts: restarting
+Node invalidates grants and interrupts active requests. Restarting LiteLLM also
+interrupts active model calls. `concurrency = 0` is not a valid drain mechanism.
 
-```sh
-systemctl --user daemon-reload
-systemctl --user enable --now <INSTANCE_NAME>-llm.service
-systemctl --user status <INSTANCE_NAME>-llm.service
-journalctl --user -u <INSTANCE_NAME>-llm.service -n 30 --no-pager
-```
-
-For unattended operation after logout/reboot, an administrator enables lingering
-once with `sudo loginctl enable-linger <RUNNER_USER>`. The unit should log
-`LLM service listening on 127.0.0.1:<PORT>`. Check both boundaries:
-
-```sh
-stat -c '%a %n' <CONTROL_SOCKET>
-curl --silent --output /dev/null --write-out '%{http_code}\n' \
-  -X POST http://127.0.0.1:<PORT>/v1/chat/completions
-curl --silent --output /dev/null --write-out '%{http_code}\n' \
-  --unix-socket <CONTROL_SOCKET> http://localhost/grants
-```
-
-Expect socket mode `600`, HTTP `401` without a job token, and control `405`
-(GET is not allowed). These checks prove startup and listener separation only;
-they do not prove model access. A successful inference probe must issue a fresh
-grant via the private socket, call an allowed route with that token, consume the
-complete stream, and revoke the job in a finalization path. Keep the token in
-process memory; do not print it or pass it as a command-line argument.
-
-Configuration is loaded at startup. After editing TOML, drain callers and run
-`systemctl --user restart <INSTANCE_NAME>-llm.service`; old grants become invalid.
-For a binary update, build the selected revision with its locked dependencies
-before restarting. Keep the previous revision and configuration for rollback;
-rolling back also invalidates grants and does not resume interrupted jobs.
+Replace per-route `provider/baseUrl/credentialFile` with the `[upstream]` section
+and aliases above; old configuration fails validation rather than silently using
+another provider. The old Node `login` command is removed. After switching,
+verify both routes through fresh job grants and verify revocation. Runner/Core
+configuration does not change when existing route IDs are preserved. No D1
+migration is needed. Rollback restores the old Node artifact and old TOML;
+never silently change backend for an already executing job.
 
 ## Connecting an sbx Runner
 
@@ -211,7 +191,7 @@ REVIEW_MODEL_CONFIG={"id":"opencode-go/deepseek-review","baseUrl":"http://host.d
 
 Replace the socket, port and model metadata for your deployment. The suffix
 `deepseek-review` must equal the service's route `id`, whose protocol must be
-`chat-completions`; the actual upstream model is configured in the service TOML.
+`chat-completions`; the TOML maps it to a LiteLLM alias, whose upstream model is configured in YAML.
 An alias needs its model definition in OpenCode configuration. Metadata in the
 example is illustrative and must match the selected upstream.
 
@@ -300,33 +280,27 @@ after issuance and have no renewal API. Revocation/expiry also cancels active in
 
 The loopback listener exposes only `POST /v1/chat/completions` and
 `POST /v1/responses`, with `Authorization: Bearer <job token>`. Both require
-`stream: true`. Tool execution stays in the agent: only client-executed function
-tools (plus Responses custom tools) are supported. Unsupported top-level fields
-or hosted tool types are rejected instead of silently ignored. Upstream HTTP
+`stream: true`. Review tool execution stays in the agent. Unsupported top-level fields
+are rejected instead of silently ignored. Nested protocol payloads are handled by LiteLLM. Upstream HTTP
 errors become sanitized failures; interrupted streams are not successful results.
 
-Incoming messages and tools are converted to pi-ai Context, and the selected
-provider constructs the upstream request. Protocol-specific options not represented
-by pi-ai options are applied explicitly to that generated payload; the original
-request body does not replace it. The service relays native response events for
-the matching protocol. This does not persist per-job token usage.
+Messages, tools, reasoning, image parts and provider-native replay data are
+forwarded without conversion to an intermediate agent Context. LiteLLM performs
+provider adaptation. Our service validates the request envelope and forbids
+client routing/credential overrides; it retains bounded SSE error sanitization
+and completion checks. Normal response events and usage remain native. This
+change does not add persistent per-job usage storage.
 
-Image parts must contain inline base64 data URLs. Remote image URLs are rejected;
-the service does not fetch them. Responses custom tools keep their native wire
-types, including when no grammar is supplied.
-
-For Responses requests, an explicit `prompt_cache_key` remains a client cache
-hint. It does not replace the authenticated grant's job-derived `sessionId` or
-provider routing headers, select credentials, or authorize another route. When
-the hint is omitted, pi-ai derives its default from `sessionId`. Neither a stable
-session ID nor a supplied cache key guarantees a cache hit.
+A client `prompt_cache_key` remains a cache hint, not job identity or authority.
+The authenticated grant supplies routing session headers. Neither guarantees a
+cache hit.
 
 Control bodies are bounded at 16 KiB; inference bodies at 16 MiB. The larger bound
 allows substantial review context/tool transcripts while bounding per-request
 buffering, and is independent of the Runner claim/callback body limits. Each model
 request has a two-minute total timeout, including credential resolution, in
 addition to grant expiry. Native response output is streamed with backpressure and a 16 MiB total bound
-(to bound the provider parser's retained output as well as network queues).
+(to bound buffering and network queues).
 No extra output-token cap is injected: supported client limits are forwarded.
 
 ## OpenCode recovery and terminal state
@@ -351,7 +325,7 @@ Grant revocation and confirmed Sandbox destruction still run before final succes
 The service emits `llm.request.started` and `llm.request.finished` records to its
 systemd journal. Match `jobId` to the Runner job identity and `requestId` to one
 model request; an agent can make several requests during the same job. Terminal
-records include route/provider/protocol, elapsed milliseconds, upstream HTTP
+records include route/protocol, elapsed milliseconds, upstream HTTP
 status, received bytes, and observed completion and `[DONE]` markers. They omit
 credentials, request/response bodies, URLs, and raw upstream error messages.
 
@@ -362,8 +336,8 @@ journalctl --user -u <LLM_UNIT> --since '2026-10-19 01:45:00 UTC' --until '2026-
 ```
 
 - `service-timeout`: the service's two-minute deadline expired.
-- `provider-request-aborted`: the provider SDK cancelled its request. This alone
-  does not establish why; the SDK also enforces a request timeout.
+- `provider-request-aborted`: the outbound LiteLLM request was aborted. Correlate
+  with caller and service lifecycle records to establish why.
 - `request-aborted` / `client-cancelled`: the caller, grant lifecycle, or service
   shutdown cancelled the request, or the response consumer cancelled its stream.
 - `upstream-http-error` / `upstream-fetch-error`: HTTP rejection or a failure
@@ -374,8 +348,6 @@ journalctl --user -u <LLM_UNIT> --since '2026-10-19 01:45:00 UTC' --until '2026-
 - `upstream-error-event`, `invalid-stream`, or `stream-too-large`: the service
   rejected the stream for the stated reason.
 - `credential-or-request-failure`: credential resolution or request setup failed.
-- `provider-error`: the provider adapter failed before a usable response or
-  terminated its parser unexpectedly. The raw error is deliberately omitted.
 - `completed`: the upstream stream completed and was consumed by the service's
   response bridge. This is not proof of a successful review or publication.
 
@@ -386,16 +358,12 @@ Historical failures without these records remain inconclusive.
 
 ## Verification and remaining integration
 
-Tests exercise the HTTP/control boundaries, token lifecycle, route restrictions,
-stream cancellation and failure, private credentials, serialized refresh and
-refresh persistence after service recreation. Local live DeepSeek acceptance
-used the built service, a newly issued grant and a synthetic code-review tool
-loop; it identified a shipping-threshold regression and returned `request_changes`.
-The revoked token then received HTTP 401. This is a loopback service probe, not a
-published GitHub review or Sandbox acceptance.
+Tests cover grant authorization/revocation, native request forwarding, trusted
+session headers, private backend credentials, sanitized HTTP/SSE failures,
+completion markers and cancellation. Release acceptance also runs the real
+pinned LiteLLM backend against configured model routes; a synthetic upstream
+fixture proves protocol plumbing but does not prove a useful model review.
 
-Dedicated real ChatGPT login/refresh and real Codex/OpenCode client acceptance
-remain rollout gates; simulated auth and protocol tests do not establish them.
-OpenShell credential migration, a product-level maintenance pause and per-job
-usage reporting remain separate work. Complete the applicable client, cancellation
-and publication checks above before switching a production instance.
+OpenShell service integration, persistent job usage reporting and new coding-agent
+runtimes remain separate work. ChatGPT subscription activation needs its own
+login, refresh and model/tool acceptance; it is not enabled by this migration.
