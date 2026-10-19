@@ -33,6 +33,7 @@ import {
   type OperationalLogEvent,
   type RunnerJobResponse as RunnerJobResponseValue,
 } from '@compte-rendu/contracts';
+import reviewSubmissionContractSource from 'virtual:review-contract-source';
 import prReviewSkill from '../skills/pr-review/SKILL.md?raw';
 import submitReviewTool from '../tools/submit_review.js?raw';
 import {
@@ -2176,9 +2177,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         });
       }
       if (usedSessions.size !== childIds.length) return { cause: 'result-schema-failure' };
-      if (
-        coverageProblem(allFindings, synthesisValue.coverage, synthesisValue.markdown) !== undefined
-      ) {
+      if (coverageProblem(allFindings, synthesisValue.coverage) !== undefined) {
         return { cause: 'result-schema-failure' };
       }
       job.multiReview = {
@@ -2304,8 +2303,13 @@ export const createRunner = (options: RunnerOptions = {}) => {
       );
       await mkdir(join(configRoot, 'opencode', 'plugins', 'submit_review'), { recursive: true });
       await writeFile(
+        join(configRoot, 'opencode', 'plugins', 'submit_review', 'contract.js'),
+        reviewSubmissionContractSource,
+        'utf8',
+      );
+      await writeFile(
         join(configRoot, 'opencode', 'plugins', 'submit_review', 'index.js'),
-        submitReviewTool,
+        `const REVIEW_SUBMISSION_MODE = ${JSON.stringify(multi ? 'multi' : 'single')};\n${submitReviewTool}`,
         'utf8',
       );
       if (multiBriefs !== undefined) {

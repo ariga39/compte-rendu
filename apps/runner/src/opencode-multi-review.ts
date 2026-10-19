@@ -1,5 +1,26 @@
 import { Option, Schema } from 'effect';
-import { ReviewDecision, ReviewResult, RunnerFailureCause } from '@compte-rendu/contracts';
+import { RunnerFailureCause } from '@compte-rendu/contracts';
+import {
+  coverageProblem,
+  ReviewerSubmissionSchema,
+  SynthesisSubmissionSchema,
+} from './review-submission-contract.js';
+import type {
+  CoverageOutcome,
+  MultiFinding,
+  ReviewerSubmission,
+  SynthesisCoverage,
+  SynthesisSubmission,
+} from './review-submission-contract.js';
+
+export type {
+  CoverageOutcome,
+  MultiFinding,
+  ReviewerSubmission,
+  SynthesisCoverage,
+  SynthesisSubmission,
+};
+export { coverageProblem };
 
 export type FailureCause = typeof RunnerFailureCause.Type;
 
@@ -12,40 +33,6 @@ export const MULTI_PROVIDER_ID = 'compte-rendu';
 export const SUPERVISOR_AGENT_ID = 'multi-review-supervisor';
 
 const SessionId = Schema.NonEmptyString.check(Schema.isPattern(/^[A-Za-z0-9._:-]+$/));
-const FindingId = Schema.NonEmptyString.check(Schema.isPattern(/^[A-Za-z0-9._:-]{1,128}$/));
-
-export const MultiFinding = Schema.Struct({
-  id: FindingId,
-  location: Schema.NonEmptyString,
-  claim: Schema.NonEmptyString,
-  impact: Schema.NonEmptyString,
-  evidence: Schema.NonEmptyString,
-});
-export type MultiFinding = typeof MultiFinding.Type;
-
-export const ReviewerSubmission = Schema.Struct({
-  decision: ReviewDecision,
-  markdown: ReviewResult,
-  findings: Schema.Array(MultiFinding),
-});
-export type ReviewerSubmission = typeof ReviewerSubmission.Type;
-
-export const CoverageOutcome = Schema.Literals(['retained', 'merged', 'disagreement']);
-export type CoverageOutcome = typeof CoverageOutcome.Type;
-
-export const SynthesisCoverage = Schema.Struct({
-  findingId: FindingId,
-  outcome: CoverageOutcome,
-  finalId: Schema.optional(FindingId),
-});
-export type SynthesisCoverage = typeof SynthesisCoverage.Type;
-
-export const SynthesisSubmission = Schema.Struct({
-  decision: ReviewDecision,
-  markdown: ReviewResult,
-  coverage: Schema.Array(SynthesisCoverage),
-});
-export type SynthesisSubmission = typeof SynthesisSubmission.Type;
 
 export const SessionModelRef = Schema.Struct({
   providerID: Schema.NonEmptyString,
@@ -249,7 +236,7 @@ export const extractReviewerSubmission = (
   if ('cause' in collected) return { cause: collected.cause };
   if (collected.inputs.length === 0) return { cause: 'zero-results' };
   if (collected.inputs.length > 1) return { cause: 'multiple-results' };
-  const decoded = decodeStrict(ReviewerSubmission, collected.inputs[0]);
+  const decoded = decodeStrict(ReviewerSubmissionSchema, collected.inputs[0]);
   if (Option.isNone(decoded)) return { cause: 'result-schema-failure' };
   return { value: decoded.value };
 };
@@ -262,7 +249,7 @@ export const extractSynthesisSubmission = (
   if ('cause' in collected) return { cause: collected.cause };
   if (collected.inputs.length === 0) return { cause: 'zero-results' };
   if (collected.inputs.length > 1) return { cause: 'multiple-results' };
-  const decoded = decodeStrict(SynthesisSubmission, collected.inputs[0]);
+  const decoded = decodeStrict(SynthesisSubmissionSchema, collected.inputs[0]);
   if (Option.isNone(decoded)) return { cause: 'result-schema-failure' };
   return { value: decoded.value };
 };
@@ -369,9 +356,10 @@ export const multiReviewConfig = (options: {
 
 export const multiReviewerBrief = (baseBrief: string, participant: string): string =>
   `${baseBrief}\n\nParticipant: ${participant}. This is the same frozen review brief given to every reviewer. ` +
-  `In addition to decision and markdown, call submit_review exactly once with a findings array. Each finding must have ` +
+  `In addition to decision and markdown, call submit_review with a findings array; exactly one successful submission is ` +
+  `accepted. If an attempt is rejected, correct it in the same session without redoing the review. Each finding must have ` +
   `id, location, claim, impact, and evidence; prefix every finding id with "${participant}-". If there are no findings, ` +
-  `use an empty array. Do not call subagent and do not spawn reviewers. After the submit_review call, reply with only a ` +
+  `use an empty array. Do not include a coverage array. Do not call subagent and do not spawn reviewers. After the successful submit_review call, reply with only a ` +
   `compact JSON object {"participant":"${participant}","decision":...,"findings":[...],"conclusion":"..."} using the exact ` +
   `finding ids from the tool call, so the supervisor can synthesize. Do not include planning or chain-of-thought.`;
 
@@ -394,9 +382,11 @@ export const multiReviewSupervisorPrompt = (options: {
     "another reviewer's findings, and do not dispatch extra reviewers. Participants:\n" +
     `${roster}\n\n` +
     'When every subagent result has returned, use only the submitted findings and their exact finding ids to produce one ' +
-    'synthesis. Call submit_review exactly once with decision, markdown, and coverage. coverage must contain exactly one ' +
-    'entry for every reviewer finding id, with outcome "retained", "merged", or "disagreement"; use finalId for ' +
-    'retained or merged and preserve disagreements explicitly. Do not invent, drop, or rename findings. Do not start ' +
+    'synthesis. Call submit_review with decision, markdown, and coverage; exactly one successful submission is accepted. ' +
+    'If an attempt is rejected, correct it in the same session without rerunning the review. Do not include a findings ' +
+    'array. coverage must contain exactly one entry for every reviewer finding id, with outcome "retained", "merged", or ' +
+    '"disagreement"; every retained entry needs a finalId, and every merged entry needs a finalId that matches a ' +
+    'retained finalId. Preserve disagreements explicitly. Do not invent, drop, or rename findings. Do not start ' +
     'another review round. The final markdown must begin with "## Review:" and the decision must follow the supplied ' +
     'results.'
   );
@@ -410,6 +400,7 @@ export const multiReviewSupervisorPrompt = (options: {
 // The plugin is read-only with respect to repo contents; Runner still performs
 // all final schema validation over the exported sessions.
 export const multiReviewGuardPlugin = (briefs: Readonly<Record<string, string>>): string =>
+  `import { reviewerSubmissionProblem, synthesisSubmissionProblem } from '../submit_review/contract.js';\n` +
   `const BRIEFS = ${JSON.stringify(briefs)};\n` +
   `const SUPERVISOR = ${JSON.stringify(SUPERVISOR_AGENT_ID)};\n` +
   `const ROSTER = ${Object.keys(briefs).length};\n` +
@@ -418,8 +409,23 @@ export const multiReviewGuardPlugin = (briefs: Readonly<Record<string, string>>)
   `  const reports = new Map();\n` +
   `  let root;\n` +
   `  await ctx.tool.hook('execute.before', (event) => {\n` +
-  `    if (event.tool === 'submit_review' && event.agent === SUPERVISOR) {\n` +
-  `      if (event.sessionID !== root || reports.size !== ROSTER) throw new Error('all reviewers must submit first');\n` +
+  `    if (event.tool === 'submit_review') {\n` +
+  `      if (event.agent === SUPERVISOR) {\n` +
+  `        if (event.sessionID !== root || reports.size !== ROSTER) throw new Error('all reviewers must submit first');\n` +
+  `        const findings = [];\n` +
+  `        for (const report of reports.values()) {\n` +
+  `          if (!Array.isArray(report.submission.findings)) throw new Error('reviewer report missing findings');\n` +
+  `          for (const finding of report.submission.findings) findings.push(finding);\n` +
+  `        }\n` +
+  `        const problem = synthesisSubmissionProblem(event.input, findings);\n` +
+  `        if (problem !== undefined) throw new Error(problem);\n` +
+  `        return;\n` +
+  `      }\n` +
+  `      if (BRIEFS[event.agent] !== undefined) {\n` +
+  `        const problem = reviewerSubmissionProblem(event.input);\n` +
+  `        if (problem !== undefined) throw new Error(problem);\n` +
+  `      }\n` +
+  `      return;\n` +
   `    }\n` +
   `    if (event.tool !== 'subagent') return;\n` +
   `    if (event.agent !== SUPERVISOR) throw new Error('only the supervisor may dispatch reviewers');\n` +
@@ -444,41 +450,3 @@ export const multiReviewGuardPlugin = (briefs: Readonly<Record<string, string>>)
   `    }\n` +
   `  });\n` +
   `} };\n`;
-
-export const coverageProblem = (
-  findings: readonly MultiFinding[],
-  coverage: readonly SynthesisCoverage[],
-  markdown: string,
-): string | undefined => {
-  const ids = findings.map((finding) => finding.id);
-  if (new Set(ids).size !== ids.length) return 'duplicate-finding-id';
-  const byFinding = new Map<string, SynthesisCoverage>();
-  for (const entry of coverage) {
-    if (byFinding.has(entry.findingId)) return 'duplicate-coverage';
-    byFinding.set(entry.findingId, entry);
-  }
-  for (const id of ids) if (!byFinding.has(id)) return 'uncovered-finding';
-  for (const entry of coverage) if (!ids.includes(entry.findingId)) return 'unknown-coverage';
-  const retained = new Set(
-    coverage
-      .filter((entry) => entry.outcome === 'retained')
-      .map((entry) => entry.finalId ?? entry.findingId),
-  );
-  for (const entry of coverage) {
-    if (entry.outcome === 'retained') {
-      if (entry.finalId === undefined) return 'missing-final-id';
-      // A retained finding's final id must be visible in the published review,
-      // so an omission is observable rather than silently claimed.
-      if (!markdown.includes(entry.finalId)) return 'missing-final-in-markdown';
-    }
-    if (entry.outcome === 'merged') {
-      if (entry.finalId === undefined || !retained.has(entry.finalId))
-        return 'invalid-merge-target';
-      if (!markdown.includes(entry.finalId)) return 'missing-final-in-markdown';
-    }
-    if (entry.outcome === 'disagreement' && !markdown.includes(entry.findingId)) {
-      return 'missing-disagreement-in-markdown';
-    }
-  }
-  return undefined;
-};

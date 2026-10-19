@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from '
 import { createServer, request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 import {
   createRunner as createProductionRunner,
@@ -8786,6 +8787,8 @@ describe('Runner multi-model review', () => {
     let createArgs: readonly string[] | undefined;
     let agentArgs: readonly string[] | undefined;
     let guardPlugin: string | undefined;
+    let submitPlugin: string | undefined;
+    let contractPlugin: string | undefined;
     const callbacks: Request[] = [];
     const runner = createRunner({
       evidenceRoot: join(controlRoot, 'evidence'),
@@ -8803,19 +8806,27 @@ describe('Runner multi-model review', () => {
           createArgs = args;
           const configRootArg = args.find((value) => value.startsWith('XDG_CONFIG_HOME='));
           if (configRootArg !== undefined) {
+            const configRoot = configRootArg.slice('XDG_CONFIG_HOME='.length);
             try {
               guardPlugin = await readFile(
-                join(
-                  configRootArg.slice('XDG_CONFIG_HOME='.length),
-                  'opencode',
-                  'plugins',
-                  'multi_review_guard',
-                  'index.js',
-                ),
+                join(configRoot, 'opencode', 'plugins', 'multi_review_guard', 'index.js'),
                 'utf8',
               );
             } catch {
               guardPlugin = undefined;
+            }
+            try {
+              submitPlugin = await readFile(
+                join(configRoot, 'opencode', 'plugins', 'submit_review', 'index.js'),
+                'utf8',
+              );
+              contractPlugin = await readFile(
+                join(configRoot, 'opencode', 'plugins', 'submit_review', 'contract.js'),
+                'utf8',
+              );
+            } catch {
+              submitPlugin = undefined;
+              contractPlugin = undefined;
             }
           }
         }
@@ -8934,6 +8945,8 @@ describe('Runner multi-model review', () => {
         evidencePath,
         childExports,
         guardPlugin,
+        submitPlugin,
+        contractPlugin,
         sessionPageContents,
         multiReviewDocument:
           multiReviewText === undefined ? undefined : JSON.parse(multiReviewText),
@@ -8953,27 +8966,82 @@ describe('Runner multi-model review', () => {
     readonly input?: Record<string, unknown>;
     result?: { content: string };
   };
-  // Load the exact plugin source the Sandbox received at the create boundary and
-  // drive its public hook contract, so the guard is exercised as a delivered
-  // artifact rather than through internal helpers.
-  const loadGuardHooks = async (source: string) => {
-    const url = `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`;
-    const module = (await import(/* @vite-ignore */ url)) as {
-      default: { setup: (ctx: unknown) => Promise<void> };
-    };
+  type SubmitTool = {
+    readonly input: unknown;
+    execute(
+      input: unknown,
+      context: { readonly sessionID?: string },
+    ): Promise<{ readonly content: string }>;
+  };
+  type DeliveredPlugins = {
+    readonly guardPlugin?: string;
+    readonly submitPlugin?: string;
+    readonly contractPlugin?: string;
+  };
+  // Load the exact files the Sandbox received at the create boundary and drive
+  // their public hook/tool contracts, so both plugins are exercised as
+  // delivered artifacts with their real relative contract import.
+  const loadDeliveredPlugins = async (delivered: DeliveredPlugins) => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-delivered-plugins-'));
+    await mkdir(join(root, 'submit_review'), { recursive: true, mode: 0o700 });
+    await mkdir(join(root, 'multi_review_guard'), { recursive: true, mode: 0o700 });
+    await writeFile(
+      join(root, 'submit_review', 'contract.js'),
+      delivered.contractPlugin ?? '',
+      'utf8',
+    );
+    await writeFile(join(root, 'submit_review', 'index.js'), delivered.submitPlugin ?? '', 'utf8');
+    await writeFile(
+      join(root, 'multi_review_guard', 'index.js'),
+      delivered.guardPlugin ?? '',
+      'utf8',
+    );
+    const submitModule = (await import(
+      /* @vite-ignore */ pathToFileURL(join(root, 'submit_review', 'index.js')).href
+    )) as { default: { setup: (ctx: unknown) => Promise<void> } };
+    const guardModule = (await import(
+      /* @vite-ignore */ pathToFileURL(join(root, 'multi_review_guard', 'index.js')).href
+    )) as { default: { setup: (ctx: unknown) => Promise<void> } };
+
+    let tool: SubmitTool | undefined;
+    await submitModule.default.setup({
+      tool: {
+        transform: (transform: (editor: { add: (value: SubmitTool) => void }) => void) =>
+          transform({
+            add: (value) => {
+              tool = value;
+            },
+          }),
+      },
+    });
+    if (tool === undefined) throw new Error('submit_review tool was not registered');
+
     const hooks = new Map<string, (event: GuardEvent) => void>();
-    const ctx = {
+    await guardModule.default.setup({
       tool: {
         hook: (name: string, handler: (event: GuardEvent) => void) => {
           hooks.set(name, handler);
         },
       },
-    };
-    await module.default.setup(ctx);
+    });
     return {
-      before: (event: GuardEvent) => hooks.get('execute.before')!(event),
-      after: (event: GuardEvent) => hooks.get('execute.after')!(event),
+      tool,
+      guard: {
+        before: (event: GuardEvent) => hooks.get('execute.before')!(event),
+        after: (event: GuardEvent) => hooks.get('execute.after')!(event),
+      },
     };
+  };
+
+  const dispatchReviewers = (guard: { before: (event: GuardEvent) => void }) => {
+    for (const participant of ['reviewer-0', 'reviewer-1']) {
+      guard.before({
+        tool: 'subagent',
+        agent: 'multi-review-supervisor',
+        sessionID: rootSession,
+        input: { agent: participant, prompt: '', background: true },
+      });
+    }
   };
 
   it('runs the frozen roster through native foreground subagents and publishes one synthesis', async () => {
@@ -9240,19 +9308,9 @@ describe('Runner multi-model review', () => {
     name: 'submit_review',
     state: 'completed',
   };
-  const missingFinalInMarkdownRoot = JSON.parse(rootExport);
-  missingFinalInMarkdownRoot.messages[0].content[0].state.input.markdown =
-    '## Review:\n\nSynthesis omitted the final id.';
-  const missingDisagreementInMarkdownRoot = JSON.parse(rootExport);
-  missingDisagreementInMarkdownRoot.messages[0].content[0].state.input.markdown =
-    '## Review:\n\nOnly reviewer-0-f1 is disclosed.';
-  missingDisagreementInMarkdownRoot.messages[0].content[0].state.input.coverage = [
-    { findingId: 'reviewer-0-f1', outcome: 'retained', finalId: 'reviewer-0-f1' },
-    { findingId: 'reviewer-1-f1', outcome: 'disagreement' },
-  ];
   const disagreementRoot = JSON.parse(rootExport);
   disagreementRoot.messages[0].content[0].state.input.markdown =
-    '## Review:\n\nDisagreement: reviewer-0-f1 stands while reviewer-1-f1 is preserved.';
+    '## Review:\n\nDisagreement preserved without restating finding ids.';
   disagreementRoot.messages[0].content[0].state.input.coverage = [
     { findingId: 'reviewer-0-f1', outcome: 'retained', finalId: 'reviewer-0-f1' },
     { findingId: 'reviewer-1-f1', outcome: 'disagreement' },
@@ -9318,16 +9376,6 @@ describe('Runner multi-model review', () => {
     [
       'a malformed known root submit_review',
       { rootExport: JSON.stringify(malformedKnownRootSubmit) },
-      'result-schema-failure',
-    ],
-    [
-      'a retained final id missing from the synthesis markdown',
-      { rootExport: JSON.stringify(missingFinalInMarkdownRoot) },
-      'result-schema-failure',
-    ],
-    [
-      'a disagreement finding id missing from the synthesis markdown',
-      { rootExport: JSON.stringify(missingDisagreementInMarkdownRoot) },
       'result-schema-failure',
     ],
     [
@@ -9437,7 +9485,7 @@ describe('Runner multi-model review', () => {
       ]),
     );
   });
-  it('preserves an explicit disagreement whose finding id appears in the synthesis', async () => {
+  it('preserves an explicit disagreement without requiring finding ids in the markdown', async () => {
     const disagreementMarkdown = disagreementRoot.messages[0].content[0].state.input.markdown;
     const result = await runScenario({ rootExport: JSON.stringify(disagreementRoot) });
 
@@ -9453,7 +9501,7 @@ describe('Runner multi-model review', () => {
 
   it('enforces the frozen dispatch and report transport through the delivered guard', async () => {
     const delivered = await runScenario();
-    const guard = await loadGuardHooks(delivered.guardPlugin ?? '');
+    const { guard } = await loadDeliveredPlugins(delivered);
     const root = rootSession;
     const supervisor = 'multi-review-supervisor';
 
@@ -9463,6 +9511,7 @@ describe('Runner multi-model review', () => {
         tool: 'submit_review',
         agent: 'reviewer-0',
         sessionID: 'ses_multi_child_a',
+        input: { decision: 'comment', markdown: '## Review:\n\na', findings: [] },
       }),
     ).not.toThrow();
 
@@ -9574,7 +9623,152 @@ describe('Runner multi-model review', () => {
       guard.before({ tool: 'submit_review', agent: supervisor, sessionID: 'ses_other_root' }),
     ).toThrow('all reviewers must submit first');
     expect(() =>
-      guard.before({ tool: 'submit_review', agent: supervisor, sessionID: root }),
+      guard.before({
+        tool: 'submit_review',
+        agent: supervisor,
+        sessionID: root,
+        input: { decision: 'request_changes', markdown: '## Review:\n\na', coverage: [] },
+      }),
     ).not.toThrow();
+  });
+
+  it('rejects reviewer coverage before success and accepts the corrected findings call', async () => {
+    const delivered = await runScenario();
+    const { guard, tool } = await loadDeliveredPlugins(delivered);
+    const reviewer = 'reviewer-0';
+    const sessionID = 'ses_multi_child_a';
+    const call = async (input: Record<string, unknown>) => {
+      const event = { tool: 'submit_review', agent: reviewer, sessionID, status: 'completed' };
+      guard.before({ ...event, input });
+      const result = await tool.execute(input, { sessionID });
+      guard.after({ ...event, input });
+      return result;
+    };
+
+    await expect(
+      call({
+        decision: 'comment',
+        markdown: reviewerMarkdown['reviewer-0'],
+        coverage: [],
+      }),
+    ).rejects.toThrow();
+    await expect(
+      call({
+        decision: 'comment',
+        markdown: reviewerMarkdown['reviewer-0'],
+      }),
+    ).rejects.toThrow();
+    await expect(
+      call({
+        decision: 'comment',
+        markdown: reviewerMarkdown['reviewer-0'],
+        findings: findings['reviewer-0'],
+      }),
+    ).resolves.toEqual({ content: 'Review submitted.' });
+  });
+
+  it('rejects supervisor findings before success and accepts the corrected coverage call', async () => {
+    const delivered = await runScenario();
+    const { guard, tool } = await loadDeliveredPlugins(delivered);
+    const supervisor = 'multi-review-supervisor';
+    dispatchReviewers(guard);
+    const call = async (agent: string, sessionID: string, input: Record<string, unknown>) => {
+      const event = { tool: 'submit_review', agent, sessionID, status: 'completed' };
+      guard.before({ ...event, input });
+      const result = await tool.execute(input, { sessionID });
+      guard.after({ ...event, input });
+      return result;
+    };
+    for (const participant of ['reviewer-0', 'reviewer-1'] as const) {
+      await call(
+        participant,
+        participant === 'reviewer-0' ? 'ses_multi_child_a' : 'ses_multi_child_b',
+        {
+          decision: reviewerDecision[participant],
+          markdown: reviewerMarkdown[participant],
+          findings: findings[participant],
+        },
+      );
+    }
+    const coverage = [
+      { findingId: 'reviewer-0-f1', outcome: 'retained', finalId: 'reviewer-0-f1' },
+      { findingId: 'reviewer-1-f1', outcome: 'merged', finalId: 'reviewer-0-f1' },
+    ];
+
+    await expect(
+      call(supervisor, rootSession, {
+        decision: 'request_changes',
+        markdown: synthesisMarkdown,
+        coverage,
+        findings: findings['reviewer-0'],
+      }),
+    ).rejects.toThrow();
+    await expect(
+      call(supervisor, rootSession, {
+        decision: 'request_changes',
+        markdown: synthesisMarkdown,
+        coverage,
+      }),
+    ).resolves.toEqual({ content: 'Review submitted.' });
+  });
+
+  it('rejects structurally invalid coverage before success and accepts the correction', async () => {
+    const delivered = await runScenario();
+    const { guard, tool } = await loadDeliveredPlugins(delivered);
+    const supervisor = 'multi-review-supervisor';
+    dispatchReviewers(guard);
+    const call = async (agent: string, sessionID: string, input: Record<string, unknown>) => {
+      const event = { tool: 'submit_review', agent, sessionID, status: 'completed' };
+      guard.before({ ...event, input });
+      const result = await tool.execute(input, { sessionID });
+      guard.after({ ...event, input });
+      return result;
+    };
+    for (const participant of ['reviewer-0', 'reviewer-1'] as const) {
+      await call(
+        participant,
+        participant === 'reviewer-0' ? 'ses_multi_child_a' : 'ses_multi_child_b',
+        {
+          decision: reviewerDecision[participant],
+          markdown: reviewerMarkdown[participant],
+          findings: findings[participant],
+        },
+      );
+    }
+    const validInput = {
+      decision: 'request_changes',
+      // Structured coverage carries the provenance; the public Markdown does
+      // not need to repeat internal finding ids.
+      markdown: '## Review:\n\nSynthesis without restating finding ids.',
+      coverage: [
+        { findingId: 'reviewer-0-f1', outcome: 'retained', finalId: 'reviewer-0-f1' },
+        { findingId: 'reviewer-1-f1', outcome: 'merged', finalId: 'reviewer-0-f1' },
+      ],
+    };
+
+    await expect(
+      call(supervisor, rootSession, {
+        ...validInput,
+        coverage: validInput.coverage.slice(0, 1),
+      }),
+    ).rejects.toThrow();
+    await expect(
+      call(supervisor, rootSession, {
+        ...validInput,
+        coverage: [{ findingId: 'reviewer-0-f1', outcome: 'retained' }],
+      }),
+    ).rejects.toThrow();
+    await expect(
+      call(supervisor, rootSession, {
+        ...validInput,
+        coverage: [
+          { findingId: 'reviewer-0-f1', outcome: 'retained', finalId: 'reviewer-0-f1' },
+          { findingId: 'reviewer-1-f1', outcome: 'merged', finalId: 'reviewer-1-f1' },
+        ],
+      }),
+    ).rejects.toThrow();
+    await expect(call(supervisor, rootSession, validInput)).resolves.toEqual({
+      content: 'Review submitted.',
+    });
   });
 });
