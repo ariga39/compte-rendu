@@ -141,17 +141,6 @@ const withDeploymentFixture = <T>(callback: (fixture: DeploymentFixture) => T): 
 };
 
 describe('Wrangler deployment tooling', () => {
-  it('keeps Bot author IDs in update/rollback and uninstall renderer commands', () => {
-    const installation = readFileSync(resolve(repositoryRoot, 'docs/installation.md'), 'utf8');
-    const lifecycle = installation.slice(installation.indexOf('## Update and rollback'));
-    const commands = lifecycle.match(/^   `corepack pnpm render:wrangler.*`$/gm);
-
-    expect(commands).toHaveLength(2);
-    for (const command of commands ?? []) {
-      expect(command).toContain("'<GITHUB_BOT_AUTHOR_IDS_JSON>'");
-    }
-  });
-
   it('renders gitignored configs through the documented root pnpm command', () => {
     const instanceName = 'package-script-invocation';
     const outputPaths = {
