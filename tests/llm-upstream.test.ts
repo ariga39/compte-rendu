@@ -204,8 +204,15 @@ it('forwards native Responses fields, preserving images, reasoning, signatures, 
       name: 'run_code',
       description: 'Run',
       format: { type: 'grammar', syntax: 'lark', definition: 'start: /.+/' },
+      provider_specific_fields: { dialect: 'vendor' },
     },
-    { type: 'function', name: 'submit_review', parameters: { type: 'object', properties: {} } },
+    {
+      type: 'function',
+      name: 'submit_review',
+      strict: true,
+      parameters: { type: 'object', properties: {} },
+      provider_specific_fields: { signature: 'opaque' },
+    },
   ];
   const h = harness({
     route: responsesRoute(),
@@ -358,6 +365,60 @@ it.each([
   });
   expect(responsesResponse.status).toBe(400);
   expect(await responsesResponse.text()).not.toContain('canary');
+  expect(calls).toBe(0);
+});
+
+it.each([
+  ['a hosted web_search_preview tool', { tools: [{ type: 'web_search_preview' }] }],
+  ['a hosted code_interpreter tool', { tools: [{ type: 'code_interpreter' }] }],
+  ['a hosted file_search tool', { tools: [{ type: 'file_search' }] }],
+  ['a hosted mcp tool', { tools: [{ type: 'mcp' }] }],
+  ['a hosted computer_use tool', { tools: [{ type: 'computer_use' }] }],
+  ['the web_search_options field', { web_search_options: { search_context_size: 'high' } }],
+  ['a function tool without a function object', { tools: [{ type: 'function' }] }],
+  ['a function tool with a non-object function', { tools: [{ type: 'function', function: 'x' }] }],
+  ['a function tool without a name', { tools: [{ type: 'function', function: {} }] }],
+  ['a non-object tool', { tools: ['not-object'] }],
+])('rejects Chat %s before contacting LiteLLM', async (_name, extra) => {
+  let calls = 0;
+  const h = harness({
+    fetch: async () => {
+      calls += 1;
+      return new Response(chatWire(), { headers: { 'content-type': 'text/event-stream' } });
+    },
+  });
+  const response = await h.request({
+    model: 'review',
+    messages: [{ role: 'user', content: 'Review' }],
+    ...extra,
+  });
+  expect(response.status).toBe(400);
+  expect(calls).toBe(0);
+});
+
+it.each([
+  ['a hosted web_search_preview tool', { tools: [{ type: 'web_search_preview' }] }],
+  ['a hosted code_interpreter tool', { tools: [{ type: 'code_interpreter' }] }],
+  ['a hosted file_search tool', { tools: [{ type: 'file_search' }] }],
+  ['a hosted mcp tool', { tools: [{ type: 'mcp' }] }],
+  ['a hosted computer_use tool', { tools: [{ type: 'computer_use' }] }],
+  ['a function tool without a name', { tools: [{ type: 'function' }] }],
+  ['a custom tool without a name', { tools: [{ type: 'custom' }] }],
+  ['an unknown tool type', { tools: [{ type: 'mystery', name: 'x' }] }],
+  ['a non-object tool', { tools: ['not-object'] }],
+])('rejects Responses %s before contacting LiteLLM', async (_name, extra) => {
+  let calls = 0;
+  const h = harness({
+    route: responsesRoute(),
+    fetch: async () => {
+      calls += 1;
+      return new Response(responsesWire(), {
+        headers: { 'content-type': 'text/event-stream' },
+      });
+    },
+  });
+  const response = await h.request({ model: 'subscription', input: 'Review', ...extra });
+  expect(response.status).toBe(400);
   expect(calls).toBe(0);
 });
 

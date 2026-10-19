@@ -6,12 +6,23 @@ const REQUEST_TIMEOUT_MS = 120_000;
 const MAX_STREAM_BYTES = 16 * 1024 * 1024;
 
 const optional = Schema.optionalKey(Schema.Unknown);
+const ChatFunction = Schema.StructWithRest(Schema.Struct({ name: Schema.String }), [
+  Schema.Record(Schema.String, Schema.Unknown),
+]);
+const ChatTool = Schema.StructWithRest(
+  Schema.Struct({ type: Schema.Literal('function'), function: ChatFunction }),
+  [Schema.Record(Schema.String, Schema.Unknown)],
+);
+const ResponsesTool = Schema.StructWithRest(
+  Schema.Struct({ type: Schema.Literals(['function', 'custom']), name: Schema.String }),
+  [Schema.Record(Schema.String, Schema.Unknown)],
+);
 const ChatRequest = Schema.Struct({
   model: Schema.String,
   messages: Schema.Array(Schema.Unknown),
   stream: optional,
   store: optional,
-  tools: Schema.optionalKey(Schema.Array(Schema.Unknown)),
+  tools: Schema.optionalKey(Schema.Array(ChatTool)),
   tool_choice: optional,
   parallel_tool_calls: optional,
   temperature: optional,
@@ -37,7 +48,6 @@ const ChatRequest = Schema.Struct({
   modalities: optional,
   audio: optional,
   prediction: optional,
-  web_search_options: optional,
 });
 const ResponsesRequest = Schema.Struct({
   model: Schema.String,
@@ -45,7 +55,7 @@ const ResponsesRequest = Schema.Struct({
   instructions: optional,
   stream: optional,
   store: optional,
-  tools: Schema.optionalKey(Schema.Array(Schema.Unknown)),
+  tools: Schema.optionalKey(Schema.Array(ResponsesTool)),
   tool_choice: optional,
   parallel_tool_calls: optional,
   temperature: optional,
