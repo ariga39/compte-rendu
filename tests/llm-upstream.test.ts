@@ -443,3 +443,51 @@ it.each(['client-cancelled', 'request-aborted', 'upstream-stream-error'] as cons
     }
   },
 );
+
+it('records the service deadline when its own timeout signal aborts', async () => {
+  vi.useFakeTimers();
+  const timeout = vi.spyOn(AbortSignal, 'timeout').mockImplementation((delay) => {
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(new DOMException('deadline', 'TimeoutError')), delay);
+    return controller.signal;
+  });
+  const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+  try {
+    const upstream = createPiUpstream({
+      routes: [
+        {
+          id: 'review',
+          provider: 'openai-compatible',
+          protocol: 'chat-completions',
+          model: 'model',
+          baseUrl: 'https://provider.invalid/v1',
+        },
+      ],
+      credential: async () => 'secret',
+      fetch: async (_url, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(new Error('private-error')), {
+            once: true,
+          });
+        }),
+    });
+    const pending = upstream(
+      'review',
+      { model: 'review', stream: true, messages: [] },
+      new AbortController().signal,
+      'job-service-timeout',
+    );
+    await vi.advanceTimersByTimeAsync(120001);
+    expect((await pending).status).toBe(502);
+    const finished = logs.mock.calls.filter((call) => call.includes('llm.request.finished'));
+    expect(finished).toHaveLength(1);
+    expect(finished[0]?.[2]).toMatchObject({
+      outcome: 'service-timeout',
+      jobId: 'job-service-timeout',
+    });
+  } finally {
+    logs.mockRestore();
+    timeout.mockRestore();
+    vi.useRealTimers();
+  }
+});
