@@ -544,6 +544,15 @@ context; never seed the image or job with a personal OpenCode database or legacy
 V2 native provider/model settings and agent permissions, including the selected
 model's endpoint override when a custom base URL is configured.
 
+For the final-text output update, deploy Core before Runner: Core must accept
+non-empty Markdown without the former `## Review:` heading requirement. Then
+drain jobs and replace the Runner artifact. The pinned OpenCode 2 image is
+unchanged; no result-tool plugin or validation bundle is installed in new jobs.
+One-model and multi-model jobs use the same final JSON contract and same-session
+correction before cleanup. `TLDR:` and concise adversarial review are prompt
+instructions only. No new secret, dependency or database migration is needed
+for this output change.
+
 A review publishes Approve, Request changes or Comment exactly as submitted.
 Request changes is a successfully delivered review, not a failed execution.
 Repository branch rules determine whether its vote blocks merging; this service
@@ -1112,8 +1121,9 @@ limits.
 
 Deploy Core migration `0012_review_configuration.sql` and the multi-model-capable
 Runner before enabling a selection. This execution path requires sbx, OpenCode 2,
-and the external LLM service. Existing single-model jobs keep their original
-behavior. OpenShell does not support this multi-model path yet.
+and the external LLM service. A selection can contain one reviewer; it runs directly with the same prompt
+and output contract used for multiple reviewers. Jobs retain the selection
+frozen when admitted. OpenShell does not support this multi-model path yet.
 
 Configure each selected route in the host LLM service first (see
 [LLM service configuration](llm-service.md)). Use distinct, stable route IDs such

@@ -65,7 +65,7 @@ describe('Review coordinator', () => {
   it.each([
     { version: 2, markdown: '## Review: fine' },
     { version: 2, decision: 'APPROVE', markdown: '## Review: fine' },
-    { version: 2, decision: 'approve', markdown: 'fine' },
+    { version: 2, decision: 'approve', markdown: '' },
   ])('never publishes an invalid structured decision %j', async (output) => {
     const reviews: unknown[] = [];
     let runId = '';

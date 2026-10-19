@@ -8,7 +8,7 @@ export const REVIEW_ATTEMPT_BUDGET_MS = 30 * 60 * 1000;
 const ModelRouteId = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9._:-]{1,128}$/));
 export const ReviewModelSelection = Schema.Struct({
   reviewers: Schema.Array(ModelRouteId).check(
-    Schema.isMinLength(2),
+    Schema.isMinLength(1),
     Schema.makeFilter((routes) => new Set(routes).size === routes.length, {
       expected: 'distinct reviewer routes',
     }),
@@ -47,9 +47,6 @@ export const ReviewResult = Schema.String.check(
     (markdown) => new TextEncoder().encode(markdown).byteLength <= MAX_REVIEW_RESULT_BYTES,
     { expected: `review Markdown no larger than ${MAX_REVIEW_RESULT_BYTES} bytes` },
   ),
-  Schema.makeFilter((markdown) => markdown.trim().startsWith('## Review:'), {
-    expected: 'review Markdown beginning with ## Review:',
-  }),
 );
 
 export type ReviewResult = typeof ReviewResult.Type;

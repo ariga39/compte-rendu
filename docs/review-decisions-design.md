@@ -25,46 +25,36 @@ cleanup retain the existing failure path. They never become Request changes
 or an implicit Comment review. A missing or unknown decision in a new-format
 result is invalid output, never approval.
 
-## Submission and publication
+## Final output and publication
 
-Extend the existing `submit_review` tool with a required enum `decision` beside
-`markdown`. Retain exactly one completed submission, the existing Markdown size
-and heading rules, and normal terminal completion requirements. No second model
-or prose classifier is needed.
+OpenCode returns one final assistant JSON object containing `decision` and
+`markdown`. No custom submission tool is required. Runner validates the shared
+structural contract: a known decision, non-empty Markdown and the size bound.
+It also verifies the exact session and authoritative normal completion. The
+final Markdown is preserved unchanged for Core publication.
 
-Use the tool-output pattern documented in
-[the output reliability research](review-output-reliability-research.md).
-Return invalid tool arguments to the model inside the running OpenCode session.
-The existing execution deadline bounds this tool loop. Allow one Runner reminder
-for a missing submission after normal completion.
-Rejected invalid attempts do not count as successful submissions. Multiple
-successful submissions remain ambiguous and fail; never select the first or last.
-Refusal, truncation and process failure publish no vote. Event JSONL is not
-schema enforcement. V2 plugin registration and export-based normal completion
-were verified with the pinned binary and real model probes.
+One prompt serves every roster size, including a single configured model. It
+asks for concise adversarial review: challenge the PR's claimed need, verify its
+premises and consequences, and consider smaller, lighter implementations. The
+first Markdown line should be `TLDR:` followed by the conclusion. These are
+prompt instructions only; style or heading differences do not fail a review.
 
 ### Correction belongs to the live Sandbox phase
 
-OpenCode handles tool errors inside the live session; Runner owns the bounded
-missing-submission reminder. Core and the publication callback never resume an agent.
-The lifecycle is: execute review → validate submission/completion → optionally
-correct in the same Sandbox and session → validate again → export final session
-and evidence → destroy Sandbox and scoped resources → finalize manifest/callback
-→ Core publication. Failed attempts still export available evidence and clean up.
+A normally completed session with missing or malformed final JSON can receive
+one correction using its existing analysis and the same session, model, agent
+and execution deadline. This applies to both one-model and multi-model jobs.
+Core and the callback never resume an agent. The lifecycle is: execute review →
+validate final output/completion → optionally correct in the same live Sandbox
+and session → validate again → export evidence → destroy Sandbox and scoped
+resources → finalize manifest/callback → Core publication.
 
-A tool argument rejection is returned to the running agent as a tool error; it
-must not persist an accepted result. A missing submission discovered after normal
-CLI exit can use one awaited `runtime.exec` with the exact same session ID, inside
-the still-live Sandbox. CLI exit is not Sandbox destruction. Both paths share the original execution deadline. Only the missing-submission
-reminder starts another CLI invocation; argument corrections stay in OpenCode. V2 tool-error feedback is now verified with a real binary and scripted provider.
-The tool loop has no automatic one-correction bound; use the existing job deadline
-instead of adding a second retry controller.
-
-No detached correction task, new Sandbox, second review, or post-cleanup retry is
-allowed. Abort, exhausted budget, ambiguous session identity or multiple accepted
-results skip correction. Archival starts after correction settles and includes
-both attempts; cleanup remains unconditional even when correction or export fails.
-Later evidence/publication validation can reject a result but cannot reopen it.
+No detached correction, new Sandbox, second review, or post-cleanup retry is
+allowed. Abort, exhausted budget, truncation or ambiguous session identity skip
+correction. Failed attempts still preserve evidence and clean up. An unresolved
+invalid result publishes no vote. Event JSONL formatting alone does not enforce
+a result schema; do not describe this explicit validation/correction path as an
+OpenCode-native schema guarantee.
 
 Behavior tests must prove correction executes while the original Sandbox is live,
 uses the original session, is included in the exported evidence, and finishes
@@ -132,10 +122,10 @@ framework is needed for this feature.
 
 ## Acceptance through existing public seams
 
-- A valid tool submission produces the same decision in terminal result,
+- A valid final assistant result produces the same decision in terminal result,
   evidence, authenticated Core callback, GitHub payload, and dashboard detail.
 - Each decision maps to its exact GitHub event and reviewed commit.
-- Missing/invalid/duplicate submissions and contradictory evidence do not vote.
+- Missing/invalid final results and contradictory evidence do not vote.
 - A changed head is superseded without publishing a stale approval.
 - Duplicate callbacks and a lost successful response create one review; marker
   recovery cannot accept another author, commit, or decision.
@@ -152,7 +142,7 @@ framework is needed for this feature.
 - [Create a pull request review](https://docs.github.com/en/rest/pulls/reviews#create-a-review-for-a-pull-request): `event`, `commit_id`, and pending/submitted semantics.
 - [Protected branches](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches): required approvals, stale approvals, dismissals, and bypasses.
 
-Current implementation anchors: `apps/runner/tools/submit_review.js`,
+Current implementation anchors: `apps/runner/src/review-prompt.ts`,
 `packages/contracts/src/index.ts`, `apps/core/src/review-publication-format.ts`,
 and `apps/core/src/github-review-adapter.ts`. Legacy Markdown-only callbacks
 retain COMMENT publication; new structured results use the explicit decision

@@ -1,4 +1,4 @@
-import { JsonSchema, Option, Schema } from 'effect';
+import { Option, Schema } from 'effect';
 import { ReviewDecision, ReviewResult } from '@compte-rendu/contracts';
 
 // The publishable contract is one decision and one Markdown body. Multi-model
@@ -10,20 +10,7 @@ export const ReviewSubmissionSchema = Schema.Struct({
 });
 export type ReviewSubmission = typeof ReviewSubmissionSchema.Type;
 
-// OpenCode normalizes the tool input before execute while the exported session
-// keeps the raw call, so excess fields are ignored consistently on both sides.
-export const reviewSubmissionProblem = (value: unknown): string | undefined =>
-  Option.isSome(Schema.decodeUnknownOption(ReviewSubmissionSchema)(value))
-    ? undefined
-    : 'Review submissions must include a valid decision and Markdown.';
-
-const inputSchema = (schema: Schema.Constraint): Record<string, unknown> => {
-  const document = JsonSchema.resolveTopLevel$ref(
-    Schema.toJsonSchemaDocument(schema, { generateDescriptions: true }),
+export const parseReviewSubmission = (text: string): ReviewSubmission | undefined =>
+  Option.getOrUndefined(
+    Schema.decodeUnknownOption(Schema.fromJsonString(ReviewSubmissionSchema))(text),
   );
-  return Object.keys(document.definitions).length === 0
-    ? { ...document.schema }
-    : { ...document.schema, $defs: document.definitions };
-};
-
-export const reviewSubmissionInputSchema = inputSchema(ReviewSubmissionSchema);

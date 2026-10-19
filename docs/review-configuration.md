@@ -59,14 +59,17 @@ selection:
 
 A successful write returns 200 with the incremented revision. A stale revision
 returns 409; reload before deciding whether to retry. Invalid data returns 400 and
-does not change the active selection. At least two distinct reviewer routes and
-one synthesis route are required. Synthesis may reuse a reviewer model. Unknown
+does not change the active selection. At least one reviewer route (distinct when there are several) and
+one synthesis route are required. With one reviewer, that reviewer returns the
+final result directly; the synthesis route is used only when combining multiple
+reviewers. Synthesis may reuse a reviewer model. Unknown
 fields are rejected. Requests are limited to 16 KiB, matching the LLM grant-control
 payload budget rather than an inference or review-output limit. Responses are
 `Cache-Control: no-store`.
 
-Use `selection: null` with the current revision to select legacy single-review
-behavior for newly admitted jobs. This does not modify already admitted jobs.
+Use `selection: null` with the current revision to use the Runner-configured
+default model for newly admitted jobs. It uses the same review prompt and final
+output contract as an explicit one-model or multi-model selection. This does not modify already admitted jobs.
 Saving a syntactically valid route ID does not prove upstream availability; the
 execution adapter must validate support when preparing the job's grant.
 

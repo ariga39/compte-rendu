@@ -128,20 +128,28 @@ Review or failure comment provide feedback. `/ai-review` remains available.
 
 ### Review result
 
-The OpenCode 2 agent submits exactly one `submit_review` result with `decision`
-(`approve`, `request_changes`, or `comment`) and size-bounded Markdown beginning
-with `## Review:`. Its V2 plugin validates arguments and returns errors to the
-same agent loop. A rejected tool call is not a successful submission. The Runner
-accepts one completed result only after validating the session export's identity,
-successful outcome, final assistant stop and final successful idle message.
-Terminal assistant prose is evidence, never the product result.
+The OpenCode 2 agent returns its final review as a JSON object containing
+`decision` (`approve`, `request_changes`, or `comment`) and non-empty,
+size-bounded `markdown`. No custom result-submission tool is installed or
+required. Runner reads the final assistant output and validates it with the
+shared Effect schema, together with the exact session identity, successful
+outcome, final assistant stop and final successful idle message. Intermediate
+analysis and tool output are not review results.
 
-If the agent finishes normally without submitting, Runner may issue one reminder
-inside the same live Sandbox and session. Both invocations share the original
-execution deadline. Correction settles before final export, archival and Sandbox
-destruction; no callback or Core path resumes the agent. Malformed/truncated
-output, unresolved invalid results, ambiguous sessions and duplicate successful
-submissions fail without a vote.
+A normally completed session with missing or invalid final JSON can receive one
+correction in the same live Sandbox and session. This applies to one-model and
+multi-model reviews alike; both invocations share the original execution
+deadline, model and agent. Correction settles before grant revocation, final
+export, archival and destruction. Abort, timeout, truncation and ambiguous
+session identity do not trigger correction. An unresolved invalid result fails
+without a vote. Runner does not extract JSON from surrounding prose, infer a
+decision, or rewrite the review.
+
+The common prompt asks for concise, adversarial review of the change's necessity,
+correctness and implementation cost, and a first line beginning `TLDR:` with the
+conclusion. Those are model instructions, not schema checks or failure gates.
+An otherwise valid result is not rejected for a missing heading or different
+wording. Review quality and prompt adherence are evaluated from retained output.
 
 New results are versioned `{version: 2, decision, markdown}`. Core validates the
 manifest result against the callback and exact Markdown bytes, checks revision
@@ -251,13 +259,11 @@ share the job deadline, read-only repository permissions, and a grant restricted
 to the selected LLM routes.
 
 Only the final review is a product output contract: `decision` and `markdown`.
-The submission tool and Runner use the same Effect schema. The build bundles
-this contract for the Sandbox tool; jobs do not install validation dependencies.
-Invalid decisions or Markdown are rejected while the session is active and may
-be corrected before its successful submission. Both boundaries extract the same
-product fields and ignore unrelated extras: OpenCode normalizes tool arguments
-but retains the original arguments in session exports. Runner validates the final result
-and authoritative root-session completion before publication. Intermediate
+Runner uses the same structural output contract for every roster size. A
+single configured reviewer is the one-model case, not a separate review prompt.
+The final assistant JSON is validated before publication; the original Markdown
+is preserved exactly. The schema checks the decision, non-empty body and size,
+not headings or review style. Intermediate
 reports and child-session records are evidence, not additional acceptance gates.
 There is no required finding-ID ledger or coverage array. The supervisor is
 instructed to preserve useful findings and explain substantive disagreements;
@@ -410,7 +416,7 @@ resolver. Review permissions are unaffected.
 
 The review Sandbox runs OpenCode non-interactively inside the microVM, without
 per-call approval prompts. Its static-review policy allows the packaged skill,
-the final-review submission tool, read/search, and narrowly bounded read-only
+read/search and narrowly bounded read-only
 Git/GitHub commands. The reviewer has direct GitHub read capability through
 Docker's sandbox-scoped built-in `github` service and `api.github.com` egress. After
 fetching and verifying the immutable admitted base and head commits, the
@@ -547,13 +553,13 @@ Review-quality and queue probes use the checked-in GitHub publication shim in
 and captures review and reaction writes locally. Real GitHub publication is
 tested only when publication behavior changes.
 
-Changes to the submission contract must exercise the delivered submission tool, including
-rejection followed by a corrected submission in the same session, and pass the
-accepted result through Runner and Core's publication seam. Before merging changes
-to OpenCode plugin integration, also run the pinned OpenCode executable against a
-local scripted provider and verify the exported session is accepted by Runner.
-Production reviews are not a substitute for this compatibility check. A broken
-product review path must not be its own merge gate; use independent local review.
+Changes to the final-output contract must exercise final assistant JSON and
+same-session correction through the public Runner boundary, then pass the
+accepted result through Core's publication seam. Run the pinned OpenCode
+executable against a local scripted provider to verify final text and export
+identity, including a missing/invalid result followed by correction. Production
+reviews are not a substitute for this compatibility check. A broken product
+review path must not be its own merge gate; use independent local review.
 
 The isolated publication probe is runnable with a mode-0600 jobs file and an
 evidence directory:

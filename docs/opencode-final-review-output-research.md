@@ -1,5 +1,12 @@
 # OpenCode final review output for issue #105
 
+> Historical research. The custom submission-tool recommendation is superseded
+> by the current [final-output contract](design.md#review-result). OpenCode V2
+> returns final assistant JSON; Runner validates it and can request one
+> same-session correction before cleanup. Headings and review style are prompt
+> instructions, not schema constraints. V1 structured-output APIs described
+> below are not the V2 prompt API.
+
 Research date: 2026-09-01. Scope: official OpenCode documentation and the
 official `anomalyco/opencode` v1.18.25 tag, pinned to commit
 `cb7d8b2f5e44876ef98b661dc10590c915af3a9f`.

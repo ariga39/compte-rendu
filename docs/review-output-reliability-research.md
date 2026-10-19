@@ -1,5 +1,12 @@
 # Review output reliability: structured-output best practice
 
+> Historical research. The custom submission-tool recommendation is superseded
+> by the current [final-output contract](design.md#review-result). OpenCode V2
+> returns final assistant JSON; Runner validates it and can request one
+> same-session correction before cleanup. Headings and review style are prompt
+> instructions, not schema constraints. V1 structured-output APIs described
+> below are not the V2 prompt API.
+
 Research date: 2026-10-18. Bounded primary-source review of how agent libraries
 produce a final, machine-checkable result, to choose a pattern before relying on
 the OpenCode `submit_review` result tool. Scope: LangChain structured output,
