@@ -64,8 +64,9 @@ protocol = "chat-completions"
 model = "step-review"
 ```
 
-`upstream.baseUrl` is an origin, without `/v1`, query or fragment. HTTPS is
-accepted; plaintext HTTP is restricted to loopback. The Node service appends the
+`upstream.baseUrl` is a loopback origin, without `/v1`, query or fragment.
+Both HTTP and HTTPS require `localhost`, `127.0.0.1`, or `[::1]`; remote backend
+addresses are rejected. The Node service appends the
 selected `/v1/chat/completions` or `/v1/responses` path. A route's `id` is the
 sandbox-facing alias and `model` names the LiteLLM alias. Use `protocol =
 "responses"` for a Responses client. Routes and configuration load at startup;
@@ -76,7 +77,10 @@ verified grant's job ID. It does not forward incoming HTTP headers or accept
 client-supplied routing/credential overrides. The example enables LiteLLM header
 forwarding only behind this trusted boundary, preserving OpenCode Go session
 routing for both official and custom endpoints. Keep the LiteLLM master key out
-of every Sandbox and do not expose its management API to agents.
+of every Sandbox and do not expose its management API to agents. The pinned
+LiteLLM generic OpenAI Responses path forwards `x-opencode-session` but drops
+`session_id`; do not assume that header reaches a Responses supplier. Subscription
+session binding requires its separate provider-specific acceptance test.
 
 ## Optional ChatGPT subscription
 
@@ -161,7 +165,10 @@ Never print the token or place it in command-line arguments.
 
 Before changing traffic, install and start LiteLLM on an unused loopback port
 with independent keys. Validate each existing alias, custom base URL, streaming
-tool calls and session header. Keep old artifacts and TOML for rollback.
+tool calls and session header. Keep the old artifact, TOML, and its complete
+runtime dependency tree in a separate release directory for rollback. The old
+Node bundle externalizes pi-ai: copying its JavaScript alone is insufficient,
+and installing this revision in its workspace removes the required package.
 Drain both instances before replacing Node configuration/artifacts: restarting
 Node invalidates grants and interrupts active requests. Restarting LiteLLM also
 interrupts active model calls. `concurrency = 0` is not a valid drain mechanism.
@@ -171,8 +178,11 @@ and aliases above; old configuration fails validation rather than silently using
 another provider. The old Node `login` command is removed. After switching,
 verify both routes through fresh job grants and verify revocation. Runner/Core
 configuration does not change when existing route IDs are preserved. No D1
-migration is needed. Rollback restores the old Node artifact and old TOML;
-never silently change backend for an already executing job.
+migration is needed. Rollback restores the old Node artifact, its preserved
+runtime dependencies and old TOML. If the old dependency tree was not preserved,
+rebuild/install the old revision with its own frozen lockfile in a separate
+directory before switching back. Never silently change backend for an already
+executing job.
 
 ## Connecting an sbx Runner
 

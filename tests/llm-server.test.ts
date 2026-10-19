@@ -248,6 +248,38 @@ it('rejects obsolete provider routes and malformed upstream settings', async () 
   }
 });
 
+it('requires a loopback LiteLLM backend for both HTTP and HTTPS', async () => {
+  const { readLlmConfig } = await import('../apps/llm-service/src/bootstrap');
+  const dir = await mkdtemp(join(tmpdir(), 'llm-loopback-'));
+  const file = join(dir, 'service.toml');
+  const key = join(dir, 'key');
+  const port = await probePort(dir);
+  const config = (baseUrl: string) =>
+    `controlSocket = "${dir}/control.sock"\nport = ${port}\n\n[upstream]\nbaseUrl = "${baseUrl}"\ncredentialFile = "${key}"\n\n[[routes]]\nid = "review"\nmodel = "example"\nprotocol = "chat-completions"\n`;
+  try {
+    await writeFile(key, 'private-test-key', { mode: 0o600 });
+    for (const baseUrl of [
+      'https://litellm.example.com',
+      'http://litellm.example.com',
+      'https://litellm.example.com:4000',
+    ]) {
+      await writeFile(file, config(baseUrl));
+      await expect(readLlmConfig(file)).rejects.toThrow('invalid LLM service configuration');
+    }
+    for (const baseUrl of [
+      'http://127.0.0.1:4000',
+      'https://127.0.0.1:4000',
+      'http://localhost:4000',
+      'https://localhost:4000',
+    ]) {
+      await writeFile(file, config(baseUrl));
+      await expect(readLlmConfig(file)).resolves.toBeDefined();
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 it('requires a private backend credential file', async () => {
   const { startConfiguredService } = await import('../apps/llm-service/src/bootstrap');
   const dir = await mkdtemp(join(tmpdir(), 'llm-key-'));

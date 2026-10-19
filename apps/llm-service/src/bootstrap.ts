@@ -30,8 +30,8 @@ const backendEndpoint = (baseUrl: string): URL => {
     url.search ||
     url.hash ||
     url.pathname !== '/' ||
-    (url.protocol !== 'https:' &&
-      !(url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)))
+    (url.protocol !== 'http:' && url.protocol !== 'https:') ||
+    !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
   )
     throw new Error('invalid backend endpoint');
   return url;

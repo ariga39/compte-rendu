@@ -141,11 +141,14 @@ const requestDiagnostic = (route: LiteLlmRoute, jobId: string | undefined, signa
     finish(outcome: StreamOutcome) {
       if (finished) return;
       finished = true;
-      const finalOutcome = signal.aborted
-        ? signal.reason instanceof DOMException && signal.reason.name === 'TimeoutError'
-          ? 'service-timeout'
-          : 'request-aborted'
-        : outcome;
+      const finalOutcome =
+        outcome === 'completed'
+          ? 'completed'
+          : signal.aborted
+            ? signal.reason instanceof DOMException && signal.reason.name === 'TimeoutError'
+              ? 'service-timeout'
+              : 'request-aborted'
+            : outcome;
       Effect.runSync(
         Effect.logInfo('llm.request.finished', {
           ...identity,
@@ -180,8 +183,12 @@ const relay = (
       signal.removeEventListener('abort', onAbort);
       controller.abort();
     };
+    const reachedTerminal = () =>
+      route.protocol === 'chat-completions'
+        ? diagnostic.state.finishMarker && diagnostic.state.doneMarker
+        : diagnostic.state.finishMarker;
     const onAbort = () => {
-      diagnostic.finish('request-aborted');
+      diagnostic.finish(reachedTerminal() ? 'completed' : 'request-aborted');
       stop();
       settle(failure());
     };
@@ -254,10 +261,7 @@ const relay = (
           .pipeThrough(new EventSourceParserStream())
           .getReader();
 
-        const complete = () =>
-          route.protocol === 'chat-completions'
-            ? diagnostic.state.finishMarker && diagnostic.state.doneMarker
-            : diagnostic.state.finishMarker;
+        const complete = reachedTerminal;
 
         const bodyStream = new ReadableStream<Uint8Array>(
           {
@@ -335,7 +339,7 @@ const relay = (
               }
             },
             async cancel() {
-              diagnostic.finish('client-cancelled');
+              diagnostic.finish(reachedTerminal() ? 'completed' : 'client-cancelled');
               stop();
               await reader.cancel().catch(() => undefined);
             },
