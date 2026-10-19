@@ -1,3 +1,4 @@
+import type { ModelUsageSummary } from '@compte-rendu/contracts';
 import type { PublicTaskFailure } from '@compte-rendu/contracts';
 import { DateTime, Effect, Option, Schema } from 'effect';
 import {
@@ -187,6 +188,7 @@ export interface RepositoryMetadataRow {
 export type PublicRunStatusValue = 'scheduled' | 'completed' | 'failed' | 'superseded';
 
 export interface PublicRunRow {
+  modelUsage?: string | null;
   decision: ReviewDecision | null;
   runId: string;
   status: PublicRunStatusValue;
@@ -375,6 +377,12 @@ export interface ReviewStateQueries {
       stage: 'checkout' | 'sandbox' | 'agent' | 'evidence' | 'cleanup';
       startedAt: string;
     }[];
+  }): Promise<boolean>;
+  recordModelUsage?(input: {
+    runId: string;
+    jobId: string;
+    attempt: number;
+    usage: ModelUsageSummary;
   }): Promise<boolean>;
   recordTerminalLifecycle?(input: {
     runId: string;

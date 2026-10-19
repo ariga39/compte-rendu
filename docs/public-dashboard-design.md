@@ -182,3 +182,12 @@ terminal races, polling, drawers and failure presentation. See
 [installation](installation.md#public-dashboard) for assets, Cron and deployment
 requirements. Runtime sources are `apps/core/src/dashboard.ts`,
 `review-state-store.ts`, `apps/dashboard/src/lib/` and the shared contracts.
+
+### Model usage
+
+Detail pages and drawers show the persisted per-job model/token summary. Counts
+come from the grant service through Runner's terminal callback, not from live
+Runner/provider reads. Route and reported model are distinct. Missing fields say
+Not reported; known subtotals identify how many requests reported them. Input/cache
+and output/reasoning are overlapping totals, not additive costs. Anonymous reviews
+retain these aggregate statistics without gaining repository/branch identity.

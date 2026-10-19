@@ -1,3 +1,4 @@
+import { ModelUsageSummary } from '@compte-rendu/contracts';
 import { request } from 'node:http';
 import { Effect, Schema } from 'effect';
 
@@ -13,6 +14,7 @@ export const createLlmServiceClient = (socketPath: string) => {
     path: string,
     payload: unknown,
     expectedStatus: number,
+    maxBytes = 16 * 1024,
   ) {
     return yield* Effect.tryPromise({
       try: () =>
@@ -42,7 +44,7 @@ export const createLlmServiceClient = (socketPath: string) => {
               res.on('error', () => finish(new Error('control response interrupted')));
               res.on('data', (chunk: Buffer) => {
                 size += chunk.byteLength;
-                if (size > 16 * 1024) {
+                if (size > maxBytes) {
                   finish(new Error('control response too large'));
                   req.destroy();
                   return;
@@ -75,7 +77,17 @@ export const createLlmServiceClient = (socketPath: string) => {
     },
     Effect.catch(() => Effect.fail(new Error('LLM service grant unavailable'))),
   );
+  const usage = Effect.fn('RunnerLlmControl.usage')(
+    function* (jobId: string) {
+      const body = yield* post('/grants/usage', { jobId }, 200, 64 * 1024);
+      return yield* Schema.decodeUnknownEffect(Schema.fromJsonString(ModelUsageSummary), {
+        onExcessProperty: 'error',
+      })(body);
+    },
+    Effect.catch(() => Effect.fail(new Error('LLM usage unavailable'))),
+  );
   return {
+    usage: (jobId: string) => Effect.runPromise(usage(jobId)),
     issue: (jobId: string, routes: string | readonly string[]) =>
       Effect.runPromise(issue(jobId, routes)),
     revoke: async (jobId: string): Promise<void> => {

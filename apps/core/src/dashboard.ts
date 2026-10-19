@@ -1,5 +1,9 @@
 import { DateTime, Effect, Option, Schema } from 'effect';
-import { PublicTaskFailure, type PublicTaskState } from '@compte-rendu/contracts';
+import {
+  ModelUsageSummary,
+  PublicTaskFailure,
+  type PublicTaskState,
+} from '@compte-rendu/contracts';
 import { GitHubRequestError } from './github-review-adapter';
 import type {
   GitHubAdapter,
@@ -315,6 +319,12 @@ export const handleDashboardRequest = async (
     return json({
       generatedAt: now,
       task: projectPublicTask(row, now),
+      usage:
+        row.modelUsage == null
+          ? null
+          : Option.getOrNull(
+              Schema.decodeUnknownOption(Schema.fromJsonString(ModelUsageSummary))(row.modelUsage),
+            ),
       milestones,
       processingMilestones: [
         ...(row.resultReceivedAt === null

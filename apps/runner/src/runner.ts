@@ -1,3 +1,4 @@
+import type { ModelUsageSummary } from '@compte-rendu/contracts';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createWriteStream, type WriteStream } from 'node:fs';
@@ -545,6 +546,7 @@ type RunnerMultiReviewEvidence = {
 };
 
 type RunnerJob = {
+  usage?: ModelUsageSummary;
   readonly state: RunnerJobState;
   readonly id: string;
   readonly sandboxName: string;
@@ -1759,6 +1761,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       status,
       stage: job.state.stage,
       lifecycle: job.lifecycle,
+      ...(job.usage === undefined ? {} : { usage: job.usage }),
       sandbox: job.state.sandbox,
       evidence: await callbackEvidence(evidencePath, job, result !== undefined),
       timestamps: {
@@ -2326,6 +2329,12 @@ export const createRunner = (options: RunnerOptions = {}) => {
       // still-running Sandbox cannot keep using a finished job's grant.
       if (job.grantIssuanceAttempted) {
         revocationUnconfirmed = !(await revokeGrant(job));
+        try {
+          job.usage = await llmServiceClient?.usage(job.id);
+        } catch {
+          // Usage is optional telemetry: preserve review/cleanup outcomes when unavailable.
+          await Effect.runPromise(Effect.logWarning('llm.usage.unavailable', { jobId: job.id }));
+        }
       }
       const submissionSessionId =
         agent === undefined ? undefined : uniqueSessionIdFrom(agent.stdout);
@@ -2589,6 +2598,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
             startedAt: evidenceStartedAt,
             finishedAt: await currentIso(),
             model: executionModel,
+            ...(job.usage === undefined ? {} : { usage: job.usage }),
             image: job.sandboxRuntime?.metadata.imageRef ?? SANDBOX_TEMPLATE,
             openCodeVersion: OPENCODE_VERSION,
             agent: {

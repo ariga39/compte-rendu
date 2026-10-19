@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Effect, Option, Schema } from 'effect';
 import { EventSourceParserStream } from 'eventsource-parser/stream';
+import type { UpstreamUsage } from './usage.js';
 
 const REQUEST_TIMEOUT_MS = 120_000;
 const MAX_STREAM_BYTES = 16 * 1024 * 1024;
@@ -79,17 +80,115 @@ const ResponsesRequest = Schema.Struct({
 const ChatChoice = Schema.Struct({
   finish_reason: Schema.optionalKey(Schema.NullOr(Schema.String)),
 });
+const TokenNumber = Schema.Int.check(
+  Schema.isGreaterThanOrEqualTo(0),
+  Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER),
+);
+const ChatUsageDetails = Schema.StructWithRest(
+  Schema.Struct({
+    cached_tokens: Schema.optionalKey(Schema.NullOr(TokenNumber)),
+    cache_write_tokens: Schema.optionalKey(Schema.NullOr(TokenNumber)),
+    cache_creation_input_tokens: Schema.optionalKey(Schema.NullOr(TokenNumber)),
+  }),
+  [Schema.Record(Schema.String, Schema.Unknown)],
+);
+const ChatCompletionDetails = Schema.StructWithRest(
+  Schema.Struct({ reasoning_tokens: Schema.optionalKey(Schema.NullOr(TokenNumber)) }),
+  [Schema.Record(Schema.String, Schema.Unknown)],
+);
+const ChatUsage = Schema.Struct({
+  prompt_tokens: Schema.optionalKey(Schema.NullOr(TokenNumber)),
+  completion_tokens: Schema.optionalKey(Schema.NullOr(TokenNumber)),
+  total_tokens: Schema.optionalKey(Schema.NullOr(TokenNumber)),
+  prompt_tokens_details: Schema.optionalKey(Schema.NullOr(ChatUsageDetails)),
+  completion_tokens_details: Schema.optionalKey(Schema.NullOr(ChatCompletionDetails)),
+});
+const ResponsesUsageDetails = Schema.StructWithRest(
+  Schema.Struct({
+    cached_tokens: Schema.optionalKey(Schema.NullOr(TokenNumber)),
+    cache_write_tokens: Schema.optionalKey(Schema.NullOr(TokenNumber)),
+    cache_creation_input_tokens: Schema.optionalKey(Schema.NullOr(TokenNumber)),
+  }),
+  [Schema.Record(Schema.String, Schema.Unknown)],
+);
+const ResponsesOutputDetails = Schema.StructWithRest(
+  Schema.Struct({ reasoning_tokens: Schema.optionalKey(Schema.NullOr(TokenNumber)) }),
+  [Schema.Record(Schema.String, Schema.Unknown)],
+);
+const ResponsesUsage = Schema.Struct({
+  input_tokens: Schema.optionalKey(Schema.NullOr(TokenNumber)),
+  output_tokens: Schema.optionalKey(Schema.NullOr(TokenNumber)),
+  total_tokens: Schema.optionalKey(Schema.NullOr(TokenNumber)),
+  input_tokens_details: Schema.optionalKey(Schema.NullOr(ResponsesUsageDetails)),
+  output_tokens_details: Schema.optionalKey(Schema.NullOr(ResponsesOutputDetails)),
+});
 const StreamFrame = Schema.Struct({
   type: Schema.optionalKey(Schema.String),
+  model: Schema.optionalKey(Schema.Unknown),
   choices: Schema.optionalKey(Schema.Array(ChatChoice)),
+  usage: Schema.optionalKey(Schema.Unknown),
   error: Schema.optionalKey(Schema.Unknown),
   response: Schema.optionalKey(
     Schema.Struct({
       status: Schema.optionalKey(Schema.String),
+      model: Schema.optionalKey(Schema.Unknown),
+      usage: Schema.optionalKey(Schema.Unknown),
     }),
   ),
 });
 const decodeFrame = Schema.decodeUnknownOption(Schema.fromJsonString(StreamFrame));
+const SafeModel = Schema.String.check(
+  Schema.isMaxLength(128),
+  Schema.isPattern(/^[A-Za-z0-9._:/-]+$/),
+);
+const modelIdentity = (value: unknown): string | null =>
+  Option.getOrUndefined(Schema.decodeUnknownOption(SafeModel)(value)) ?? null;
+
+type ObservedTokens = {
+  -readonly [K in Exclude<keyof UpstreamUsage, 'model' | 'complete'>]?: number;
+};
+
+const put = (
+  target: ObservedTokens,
+  key: Exclude<keyof UpstreamUsage, 'model' | 'complete'>,
+  value: number | null | undefined,
+): void => {
+  if (value !== null && value !== undefined) target[key] = value;
+};
+
+const responsesUsage = (value: unknown): ObservedTokens => {
+  const decoded = Option.getOrUndefined(Schema.decodeUnknownOption(ResponsesUsage)(value));
+  const observed: ObservedTokens = {};
+  if (decoded === undefined) return observed;
+  put(observed, 'inputTokens', decoded.input_tokens);
+  put(observed, 'cacheReadTokens', decoded.input_tokens_details?.cached_tokens);
+  put(
+    observed,
+    'cacheWriteTokens',
+    decoded.input_tokens_details?.cache_write_tokens ??
+      decoded.input_tokens_details?.cache_creation_input_tokens,
+  );
+  put(observed, 'outputTokens', decoded.output_tokens);
+  put(observed, 'reasoningTokens', decoded.output_tokens_details?.reasoning_tokens);
+  return observed;
+};
+
+const chatUsage = (value: unknown): ObservedTokens => {
+  const decoded = Option.getOrUndefined(Schema.decodeUnknownOption(ChatUsage)(value));
+  const observed: ObservedTokens = {};
+  if (decoded === undefined) return observed;
+  put(observed, 'inputTokens', decoded.prompt_tokens);
+  put(observed, 'cacheReadTokens', decoded.prompt_tokens_details?.cached_tokens);
+  put(
+    observed,
+    'cacheWriteTokens',
+    decoded.prompt_tokens_details?.cache_write_tokens ??
+      decoded.prompt_tokens_details?.cache_creation_input_tokens,
+  );
+  put(observed, 'outputTokens', decoded.completion_tokens);
+  put(observed, 'reasoningTokens', decoded.completion_tokens_details?.reasoning_tokens);
+  return observed;
+};
 
 export interface LiteLlmRoute {
   readonly id: string;
@@ -180,6 +279,7 @@ const relay = (
   fetchUpstream: typeof globalThis.fetch,
   diagnostic: ReturnType<typeof requestDiagnostic>,
   sessionId: string | undefined,
+  observe: ((usage: UpstreamUsage) => void) | undefined,
 ): Promise<Response> =>
   new Promise((resolve) => {
     const controller = new AbortController();
@@ -188,6 +288,26 @@ const relay = (
       if (settled) return;
       settled = true;
       resolve(response);
+    };
+    let usage: UpstreamUsage = {
+      model: null,
+      inputTokens: null,
+      cacheReadTokens: null,
+      cacheWriteTokens: null,
+      outputTokens: null,
+      reasoningTokens: null,
+      complete: false,
+    };
+    let observed = false;
+    const observeOnce = (complete: boolean) => {
+      if (observed) return;
+      observed = true;
+      if (observe === undefined) return;
+      try {
+        observe({ ...usage, complete });
+      } catch {
+        /* Telemetry is optional and never changes model behavior. */
+      }
     };
     const stop = () => {
       signal.removeEventListener('abort', onAbort);
@@ -198,7 +318,9 @@ const relay = (
         ? diagnostic.state.finishMarker && diagnostic.state.doneMarker
         : diagnostic.state.finishMarker;
     const onAbort = () => {
-      diagnostic.finish(reachedTerminal() ? 'completed' : 'request-aborted');
+      const complete = reachedTerminal();
+      diagnostic.finish(complete ? 'completed' : 'request-aborted');
+      observeOnce(complete);
       stop();
       settle(failure());
     };
@@ -234,13 +356,17 @@ const relay = (
           diagnostic.finish(
             controller.signal.aborted ? 'provider-request-aborted' : 'upstream-fetch-error',
           );
+          observeOnce(false);
           stop();
           settle(failure());
           return;
         }
+        const deploymentModel = modelIdentity(upstream.headers.get('x-litellm-model-name'));
+        if (deploymentModel !== null) usage = { ...usage, model: deploymentModel };
         diagnostic.state.upstreamStatus = upstream.status;
         if (!upstream.ok || upstream.body === null) {
           diagnostic.finish('upstream-http-error');
+          observeOnce(false);
           stop();
           await upstream.body?.cancel().catch(() => undefined);
           settle(failure());
@@ -283,6 +409,7 @@ const relay = (
                 diagnostic.finish(
                   controller.signal.aborted ? 'provider-request-aborted' : streamOutcome,
                 );
+                observeOnce(false);
                 stop();
                 output.error(new Error('model stream failed'));
                 return;
@@ -290,40 +417,48 @@ const relay = (
               if (next.done) {
                 if (!complete()) {
                   diagnostic.finish('incomplete-stream');
+                  observeOnce(false);
                   stop();
                   output.error(new Error('model stream failed'));
                   return;
                 }
                 diagnostic.finish('completed');
+                observeOnce(true);
                 stop();
                 output.close();
                 return;
               }
               const event = next.value;
               try {
-                if (event.event === 'error' || event.event === 'response.failed') {
-                  streamOutcome = 'upstream-error-event';
-                  throw new Error('upstream error');
-                }
-                if (event.data === '[DONE]') {
+                const errorEvent = event.event === 'error' || event.event === 'response.failed';
+                if (event.data === '[DONE]' && !errorEvent) {
                   diagnostic.state.doneMarker = true;
                 } else {
                   const decoded = decodeFrame(event.data);
                   if (Option.isNone(decoded)) {
-                    streamOutcome = 'invalid-stream';
-                    throw new Error('invalid stream');
+                    streamOutcome = errorEvent ? 'upstream-error-event' : 'invalid-stream';
+                    throw new Error(errorEvent ? 'upstream error' : 'invalid stream');
                   }
                   const frame = decoded.value;
                   if (route.protocol === 'chat-completions') {
+                    const model = modelIdentity(frame.model);
+                    if (deploymentModel === null && model !== null) usage = { ...usage, model };
+                    usage = { ...usage, ...chatUsage(frame.usage) };
                     if (frame.choices?.some((choice) => choice.finish_reason != null) === true)
                       diagnostic.state.finishMarker = true;
-                  } else if (
-                    frame.type === 'response.completed' ||
-                    frame.type === 'response.incomplete'
-                  ) {
-                    diagnostic.state.finishMarker = true;
+                  } else {
+                    const model = modelIdentity(frame.response?.model);
+                    if (deploymentModel === null && model !== null) usage = { ...usage, model };
+                    usage = { ...usage, ...responsesUsage(frame.response?.usage) };
+                    if (
+                      frame.type === 'response.completed' ||
+                      frame.type === 'response.incomplete'
+                    ) {
+                      diagnostic.state.finishMarker = true;
+                    }
                   }
                   if (
+                    errorEvent ||
                     frame.error != null ||
                     frame.type === 'error' ||
                     frame.type === 'response.failed' ||
@@ -343,13 +478,16 @@ const relay = (
                 output.enqueue(new TextEncoder().encode(frame));
               } catch {
                 diagnostic.finish(streamOutcome);
+                observeOnce(false);
                 stop();
                 await reader.cancel().catch(() => undefined);
                 output.error(new Error('model stream failed'));
               }
             },
             async cancel() {
-              diagnostic.finish(reachedTerminal() ? 'completed' : 'client-cancelled');
+              const complete = reachedTerminal();
+              diagnostic.finish(complete ? 'completed' : 'client-cancelled');
+              observeOnce(complete);
               stop();
               await reader.cancel().catch(() => undefined);
             },
@@ -366,6 +504,7 @@ const relay = (
         diagnostic.finish(
           controller.signal.aborted ? 'provider-request-aborted' : 'upstream-fetch-error',
         );
+        observeOnce(false);
         stop();
         settle(failure());
       }
@@ -379,6 +518,7 @@ export const createLiteLlmUpstream = (options: LiteLlmUpstreamOptions) => {
       body: Record<string, unknown>,
       signal: AbortSignal,
       sessionId?: string,
+      observe?: (usage: UpstreamUsage) => void,
     ) {
       const route = options.routes.find((candidate) => candidate.id === routeId);
       if (route === undefined) return failure();
@@ -404,6 +544,19 @@ export const createLiteLlmUpstream = (options: LiteLlmUpstreamOptions) => {
       );
       if (key === undefined || key.trim().length === 0) {
         diagnostic.finish('credential-or-request-failure');
+        try {
+          observe?.({
+            model: null,
+            inputTokens: null,
+            cacheReadTokens: null,
+            cacheWriteTokens: null,
+            outputTokens: null,
+            reasoningTokens: null,
+            complete: false,
+          });
+        } catch {
+          /* Telemetry is optional and never changes model behavior. */
+        }
         return failure();
       }
       return yield* Effect.tryPromise({
@@ -417,6 +570,7 @@ export const createLiteLlmUpstream = (options: LiteLlmUpstreamOptions) => {
             options.fetch ?? globalThis.fetch,
             diagnostic,
             sessionId,
+            observe,
           ),
         catch: () => undefined,
       }).pipe(
@@ -424,6 +578,19 @@ export const createLiteLlmUpstream = (options: LiteLlmUpstreamOptions) => {
           onSuccess: (response) => response,
           onFailure: () => {
             diagnostic.finish('credential-or-request-failure');
+            try {
+              observe?.({
+                model: null,
+                inputTokens: null,
+                cacheReadTokens: null,
+                cacheWriteTokens: null,
+                outputTokens: null,
+                reasoningTokens: null,
+                complete: false,
+              });
+            } catch {
+              /* Telemetry is optional and never changes model behavior. */
+            }
             return failure();
           },
         }),
@@ -437,6 +604,7 @@ export const createLiteLlmUpstream = (options: LiteLlmUpstreamOptions) => {
     body: Record<string, unknown>,
     signal: AbortSignal,
     sessionId?: string,
+    observe?: (usage: UpstreamUsage) => void,
   ) =>
     Effect.runPromise(
       run(
@@ -444,6 +612,7 @@ export const createLiteLlmUpstream = (options: LiteLlmUpstreamOptions) => {
         body,
         AbortSignal.any([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
         sessionId,
+        observe,
       ),
     );
 };

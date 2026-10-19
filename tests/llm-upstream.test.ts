@@ -79,6 +79,33 @@ const harness = (
         }),
       );
     },
+    async open(jobId: string) {
+      const issued = await service.control(
+        new Request('http://control/grants', {
+          method: 'POST',
+          body: JSON.stringify({ jobId, routes: [route.id] }),
+        }),
+      );
+      if (issued.status !== 201) throw new Error(`grant unavailable: ${issued.status}`);
+      const { token } = (await issued.json()) as { token: string };
+      return (body: Record<string, unknown>, signal?: AbortSignal): Promise<Response> =>
+        service.inference(
+          new Request(`http://service${routePath(route)}`, {
+            method: 'POST',
+            headers: { authorization: `Bearer ${token}` },
+            body: JSON.stringify(body),
+            signal,
+          }),
+        );
+    },
+    async usage(jobId: string): Promise<Response> {
+      return service.control(
+        new Request('http://control/grants/usage', {
+          method: 'POST',
+          body: JSON.stringify({ jobId }),
+        }),
+      );
+    },
     close() {
       service.close();
     },
@@ -164,6 +191,45 @@ it('forwards native Chat Completions fields and usage frames with the LiteLLM mo
   expect(captured?.body.tools).toEqual(tools);
   expect(captured?.body.prompt_cache_key).toBe('client-cache-key');
   expect(captured?.body.max_completion_tokens).toBe(321);
+});
+
+it('records one grant-attributed Chat usage snapshot from cumulative SSE frames', async () => {
+  const h = harness({
+    fetch: async () =>
+      new Response(
+        'data: {"model":"deepseek-v4.1-flash","choices":[{"index":0,"delta":{"content":"Review"},"finish_reason":null}],"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6}}\n\n' +
+          'data: {"model":"deepseek-v4.1-flash","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8,"prompt_tokens_details":{"cached_tokens":2},"completion_tokens_details":{"reasoning_tokens":1}}}\n\n' +
+          'data: {"model":"deepseek-v4.1-flash","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n' +
+          'data: [DONE]\n\n',
+        { headers: { 'content-type': 'text/event-stream' } },
+      ),
+  });
+  const response = await h.request(
+    { model: 'review', messages: [{ role: 'user', content: 'Review' }] },
+    undefined,
+    'job-usage-chat',
+  );
+  await response.text();
+
+  const usage = await h.usage('job-usage-chat');
+  expect(usage.status).toBe(200);
+  expect(await usage.json()).toEqual({
+    version: 1,
+    models: [
+      {
+        route: 'review',
+        model: 'deepseek-v4.1-flash',
+        requests: 1,
+        incompleteRequests: 0,
+        inputTokens: { total: 5, reportedRequests: 1 },
+        uncachedInputTokens: { total: 3, reportedRequests: 1 },
+        cacheReadTokens: { total: 2, reportedRequests: 1 },
+        cacheWriteTokens: null,
+        outputTokens: { total: 3, reportedRequests: 1 },
+        reasoningTokens: { total: 1, reportedRequests: 1 },
+      },
+    ],
+  });
 });
 
 it('forwards native Responses fields, preserving images, reasoning, signatures, and custom tools', async () => {
@@ -261,6 +327,350 @@ it('forwards native Responses fields, preserving images, reasoning, signatures, 
   expect(captured?.body.tools).toEqual(tools);
   expect(captured?.body.prompt_cache_key).toBe('client-cache-key');
   expect(captured?.body.client_metadata).toEqual({ client: 'sandbox' });
+});
+
+it('records grant-attributed Responses usage with cache and reasoning details', async () => {
+  const h = harness({
+    route: responsesRoute(),
+    fetch: async () =>
+      new Response(
+        'event: response.created\ndata: {"type":"response.created","response":{"id":"r1","model":"gpt-6.1-sol","status":"in_progress"}}\n\n' +
+          'event: response.completed\ndata: {"type":"response.completed","response":{"id":"r1","model":"gpt-6.1-sol","status":"completed","usage":{"input_tokens":12,"input_tokens_details":{"cached_tokens":5,"cache_write_tokens":2},"output_tokens":7,"output_tokens_details":{"reasoning_tokens":3},"total_tokens":19}}}\n\n',
+        { headers: { 'content-type': 'text/event-stream' } },
+      ),
+  });
+  const response = await h.request(
+    { model: 'subscription', input: 'Review' },
+    undefined,
+    'job-usage-responses',
+  );
+  await response.text();
+
+  const usage = await h.usage('job-usage-responses');
+  expect(usage.status).toBe(200);
+  expect(await usage.json()).toEqual({
+    version: 1,
+    models: [
+      {
+        route: 'subscription',
+        model: 'gpt-6.1-sol',
+        requests: 1,
+        incompleteRequests: 0,
+        inputTokens: { total: 12, reportedRequests: 1 },
+        uncachedInputTokens: { total: 7, reportedRequests: 1 },
+        cacheReadTokens: { total: 5, reportedRequests: 1 },
+        cacheWriteTokens: { total: 2, reportedRequests: 1 },
+        outputTokens: { total: 7, reportedRequests: 1 },
+        reasoningTokens: { total: 3, reportedRequests: 1 },
+      },
+    ],
+  });
+});
+
+it('retains partial usage when a Chat stream fails after reporting usage', async () => {
+  const h = harness({
+    fetch: async () =>
+      new Response(
+        'data: {"model":"deepseek-v4.1-flash","choices":[],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6,"prompt_tokens_details":{"cached_tokens":1},"completion_tokens_details":{"reasoning_tokens":1}}}\n\n' +
+          'data: not-json\n\n',
+        { headers: { 'content-type': 'text/event-stream' } },
+      ),
+  });
+  const response = await h.request(
+    { model: 'review', messages: [] },
+    undefined,
+    'job-usage-failed',
+  );
+  await expect(response.text()).rejects.toThrow();
+  const usage = await h.usage('job-usage-failed');
+  expect(await usage.json()).toMatchObject({
+    version: 1,
+    models: [
+      {
+        route: 'review',
+        model: 'deepseek-v4.1-flash',
+        requests: 1,
+        incompleteRequests: 1,
+        inputTokens: { total: 4, reportedRequests: 1 },
+        cacheReadTokens: { total: 1, reportedRequests: 1 },
+        outputTokens: { total: 2, reportedRequests: 1 },
+        reasoningTokens: { total: 1, reportedRequests: 1 },
+      },
+    ],
+  });
+});
+
+it('retains partial usage when a Chat client cancels after reporting usage', async () => {
+  const h = harness({
+    fetch: async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(
+              new TextEncoder().encode(
+                'data: {"model":"deepseek-v4.1-flash","choices":[],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6,"prompt_tokens_details":{"cached_tokens":1}}}\n\n',
+              ),
+            );
+          },
+        }),
+        { headers: { 'content-type': 'text/event-stream' } },
+      ),
+  });
+  const response = await h.request(
+    { model: 'review', messages: [] },
+    undefined,
+    'job-usage-cancelled',
+  );
+  const reader = response.body!.getReader();
+  await reader.read();
+  await reader.cancel();
+  const usage = await h.usage('job-usage-cancelled');
+  expect(await usage.json()).toMatchObject({
+    version: 1,
+    models: [
+      {
+        route: 'review',
+        model: 'deepseek-v4.1-flash',
+        requests: 1,
+        incompleteRequests: 1,
+        inputTokens: { total: 4, reportedRequests: 1 },
+        cacheReadTokens: { total: 1, reportedRequests: 1 },
+        outputTokens: { total: 2, reportedRequests: 1 },
+        reasoningTokens: null,
+      },
+    ],
+  });
+});
+
+it('does not turn malformed telemetry into a stream failure', async () => {
+  const h = harness({
+    fetch: async () =>
+      new Response(
+        'data: {"model":null,"choices":[{"index":0,"delta":{"content":"Review"},"finish_reason":null}],"usage":"not-an-object"}\n\n' +
+          'data: {"model":42,"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":-1}}\n\n' +
+          'data: [DONE]\n\n',
+        { headers: { 'content-type': 'text/event-stream' } },
+      ),
+  });
+  const response = await h.request(
+    { model: 'review', messages: [] },
+    undefined,
+    'job-usage-malformed',
+  );
+  await expect(response.text()).resolves.toContain('Review');
+  const usage = await h.usage('job-usage-malformed');
+  expect(await usage.json()).toEqual({
+    version: 1,
+    models: [
+      {
+        route: 'review',
+        model: null,
+        requests: 1,
+        incompleteRequests: 0,
+        inputTokens: null,
+        uncachedInputTokens: null,
+        cacheReadTokens: null,
+        cacheWriteTokens: null,
+        outputTokens: null,
+        reasoningTokens: null,
+      },
+    ],
+  });
+});
+
+it('keeps different actual models under one configured route in separate rows', async () => {
+  let call = 0;
+  const h = harness({
+    fetch: async () => {
+      call += 1;
+      const model = call === 1 ? 'deepseek-v4.1-flash' : 'step-5-preview';
+      return new Response(
+        `data: {"model":"${model}","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}\n\ndata: [DONE]\n\n`,
+        { headers: { 'content-type': 'text/event-stream' } },
+      );
+    },
+  });
+  const run = await h.open('job-usage-models');
+  await (await run({ model: 'review', messages: [] })).text();
+  await (await run({ model: 'review', messages: [] })).text();
+
+  const usage = await h.usage('job-usage-models');
+  const body = (await usage.json()) as {
+    models: Array<{ route: string; model: string | null; requests: number }>;
+  };
+  expect(body.models).toMatchObject([
+    { route: 'review', model: 'deepseek-v4.1-flash', requests: 1 },
+    { route: 'review', model: 'step-5-preview', requests: 1 },
+  ]);
+});
+
+it('records one unknown incomplete request when the backend credential is unavailable', async () => {
+  let calls = 0;
+  const h = harness({
+    credential: async () => '',
+    fetch: async () => {
+      calls += 1;
+      return new Response('unexpected', { status: 200 });
+    },
+  });
+  const response = await h.request(
+    { model: 'review', messages: [] },
+    undefined,
+    'job-usage-credential',
+  );
+  expect(response.status).toBe(502);
+  expect(calls).toBe(0);
+  const usage = await h.usage('job-usage-credential');
+  expect(await usage.json()).toEqual({
+    version: 1,
+    models: [
+      {
+        route: 'review',
+        model: null,
+        requests: 1,
+        incompleteRequests: 1,
+        inputTokens: null,
+        uncachedInputTokens: null,
+        cacheReadTokens: null,
+        cacheWriteTokens: null,
+        outputTokens: null,
+        reasoningTokens: null,
+      },
+    ],
+  });
+});
+
+it('keeps an unknown-model row separate from a later reported model', async () => {
+  let call = 0;
+  const h = harness({
+    fetch: async () => {
+      call += 1;
+      const model = call === 1 ? null : 'deepseek-v4.1-flash';
+      return new Response(
+        `data: ${JSON.stringify({
+          model,
+          choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        })}\n\ndata: [DONE]\n\n`,
+        { headers: { 'content-type': 'text/event-stream' } },
+      );
+    },
+  });
+  const run = await h.open('job-usage-null-model');
+  await (await run({ model: 'review', messages: [] })).text();
+  await (await run({ model: 'review', messages: [] })).text();
+  const usage = await h.usage('job-usage-null-model');
+  const body = (await usage.json()) as {
+    models: Array<{ route: string; model: string | null; requests: number }>;
+  };
+  expect(body.models).toMatchObject([
+    { route: 'review', model: null, requests: 1 },
+    { route: 'review', model: 'deepseek-v4.1-flash', requests: 1 },
+  ]);
+});
+
+it('retains Responses usage carried on a failed terminal event without forwarding it', async () => {
+  const h = harness({
+    route: responsesRoute(),
+    fetch: async () =>
+      new Response(
+        'event: response.created\ndata: {"type":"response.created","response":{"id":"r-fail","model":"gpt-6.1-sol","status":"in_progress"}}\n\n' +
+          'event: response.failed\ndata: {"type":"response.failed","response":{"id":"r-fail","model":"gpt-6.1-sol","status":"failed","usage":{"input_tokens":8,"input_tokens_details":{"cached_tokens":2},"output_tokens":4,"output_tokens_details":{"reasoning_tokens":1},"total_tokens":12}}}\n\n',
+        { headers: { 'content-type': 'text/event-stream' } },
+      ),
+  });
+  const response = await h.request(
+    { model: 'subscription', input: 'Review' },
+    undefined,
+    'job-usage-failed-terminal',
+  );
+  await expect(response.text()).rejects.toThrow();
+  const usage = await h.usage('job-usage-failed-terminal');
+  expect(await usage.json()).toMatchObject({
+    version: 1,
+    models: [
+      {
+        route: 'subscription',
+        model: 'gpt-6.1-sol',
+        requests: 1,
+        incompleteRequests: 1,
+        inputTokens: { total: 8, reportedRequests: 1 },
+        uncachedInputTokens: { total: 6, reportedRequests: 1 },
+        cacheReadTokens: { total: 2, reportedRequests: 1 },
+        outputTokens: { total: 4, reportedRequests: 1 },
+        reasoningTokens: { total: 1, reportedRequests: 1 },
+      },
+    ],
+  });
+});
+
+it('keeps usable Chat totals when details are null and retains known counters across later empty usage', async () => {
+  const h = harness({
+    fetch: async () =>
+      new Response(
+        'data: {"model":"deepseek-v4.1-flash","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8,"prompt_tokens_details":null,"completion_tokens_details":null}}\n\n' +
+          'data: {"model":"deepseek-v4.1-flash","choices":[],"usage":{"prompt_tokens_details":{"cached_tokens":null}}}\n\n' +
+          'data: {"model":"deepseek-v4.1-flash","choices":[],"usage":{}}\n\n' +
+          'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+        { headers: { 'content-type': 'text/event-stream' } },
+      ),
+  });
+  const response = await h.request(
+    { model: 'review', messages: [] },
+    undefined,
+    'job-usage-null-details',
+  );
+  await response.text();
+  const usage = await h.usage('job-usage-null-details');
+  expect(await usage.json()).toMatchObject({
+    version: 1,
+    models: [
+      {
+        route: 'review',
+        model: 'deepseek-v4.1-flash',
+        requests: 1,
+        incompleteRequests: 0,
+        inputTokens: { total: 5, reportedRequests: 1 },
+        outputTokens: { total: 3, reportedRequests: 1 },
+        cacheReadTokens: null,
+        reasoningTokens: null,
+      },
+    ],
+  });
+});
+
+it('keeps usable Responses totals when detail objects are null', async () => {
+  const h = harness({
+    route: responsesRoute(),
+    fetch: async () =>
+      new Response(
+        'event: response.created\ndata: {"type":"response.created","response":{"id":"r-null","model":"gpt-6.1-sol","status":"in_progress"}}\n\n' +
+          'event: response.completed\ndata: {"type":"response.completed","response":{"id":"r-null","model":"gpt-6.1-sol","status":"completed","usage":{"input_tokens":7,"output_tokens":2,"total_tokens":9,"input_tokens_details":null,"output_tokens_details":null}}}\n\n',
+        { headers: { 'content-type': 'text/event-stream' } },
+      ),
+  });
+  const response = await h.request(
+    { model: 'subscription', input: 'Review' },
+    undefined,
+    'job-usage-null-responses',
+  );
+  await response.text();
+  const usage = await h.usage('job-usage-null-responses');
+  expect(await usage.json()).toMatchObject({
+    version: 1,
+    models: [
+      {
+        route: 'subscription',
+        model: 'gpt-6.1-sol',
+        requests: 1,
+        incompleteRequests: 0,
+        inputTokens: { total: 7, reportedRequests: 1 },
+        outputTokens: { total: 2, reportedRequests: 1 },
+        cacheReadTokens: null,
+        reasoningTokens: null,
+      },
+    ],
+  });
 });
 
 it('preserves provider-generated nested payload fields unchanged', async () => {
@@ -923,3 +1333,33 @@ it.each(['cancel', 'abort'] as const)(
     }
   },
 );
+
+it('records the LiteLLM deployment model while preserving the client-facing model alias', async () => {
+  const wire = chatWire().replace('"id":"c1"', '"id":"c1","model":"review"');
+  const h = harness({
+    fetch: async () =>
+      new Response(wire, {
+        headers: {
+          'content-type': 'text/event-stream',
+          'x-litellm-model-name': 'openai/deepseek-flash',
+          'x-litellm-model-api-base': 'https://private-backend.invalid',
+        },
+      }),
+  });
+  try {
+    const response = await h.request(
+      { model: 'review', messages: [] },
+      undefined,
+      'deployment-job',
+    );
+    expect(await response.text()).toBe(wire);
+    expect(response.headers.has('x-litellm-model-api-base')).toBe(false);
+    const summary = await (await h.usage('deployment-job')).json();
+    expect(summary).toMatchObject({
+      models: [{ route: 'review', model: 'openai/deepseek-flash', requests: 1 }],
+    });
+    expect(JSON.stringify(summary)).not.toContain('private-backend');
+  } finally {
+    h.close();
+  }
+});
