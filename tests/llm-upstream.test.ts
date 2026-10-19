@@ -6,6 +6,7 @@ it('streams native Chat Completions through the configured model and upstream cr
     routes: [
       {
         id: 'review',
+        provider: 'openai-compatible',
         protocol: 'chat-completions',
         model: 'deepseek-flash',
         baseUrl: 'https://provider.invalid/v1',
@@ -47,6 +48,7 @@ it('rejects unsupported or server-executed tools before sending a provider reque
     routes: [
       {
         id: 'review',
+        provider: 'openai-compatible',
         protocol: 'chat-completions',
         model: 'deepseek-flash',
         baseUrl: 'https://provider.invalid/v1',
@@ -82,6 +84,7 @@ it('does not report a truncated upstream stream as successful completion', async
     routes: [
       {
         id: 'review',
+        provider: 'openai-compatible',
         protocol: 'chat-completions',
         model: 'deepseek-flash',
         baseUrl: 'https://provider.invalid/v1',
@@ -115,6 +118,7 @@ it('preserves native Responses events for subscription clients', async () => {
     routes: [
       {
         id: 'subscription',
+        provider: 'openai-codex',
         protocol: 'codex-responses',
         model: 'gpt-6.1-sol',
         baseUrl: 'https://chatgpt.com/backend-api',
@@ -144,6 +148,7 @@ it('cancels the upstream request when a client abandons the stream', async () =>
     routes: [
       {
         id: 'review',
+        provider: 'openai-compatible',
         protocol: 'chat-completions',
         model: 'deepseek-flash',
         baseUrl: 'https://provider.invalid/v1',
@@ -182,6 +187,7 @@ it('does not forward raw upstream error events to the sandbox', async () => {
     routes: [
       {
         id: 'review',
+        provider: 'openai-compatible',
         protocol: 'chat-completions',
         model: 'deepseek-flash',
         baseUrl: 'https://provider.invalid/v1',
@@ -214,6 +220,7 @@ it.each(['error', 'response.failed'])(
       routes: [
         {
           id: 'subscription',
+          provider: 'openai-codex',
           protocol: 'codex-responses',
           model: 'gpt-6.1-sol',
           baseUrl: 'https://chatgpt.com/backend-api',

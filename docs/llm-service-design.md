@@ -39,6 +39,13 @@ header or an unrestricted model override. Strip downstream authorization before
 constructing upstream authentication. Reject unsupported protocol options rather
 than silently dropping them or changing models.
 
+Provider identity is explicit configuration, separate from the endpoint URL.
+`opencode-go` uses pi-ai's native OpenCode Go provider even behind a custom
+`baseUrl`; `openai-codex` uses its native subscription provider; explicitly
+`openai-compatible` routes use a pi-ai custom provider. The authenticated grant's
+job ID supplies `sessionId`, never a caller-provided routing header. Provider
+adaptation must not be bypassed by calling the low-level API stream directly.
+
 Prefer native protocol paths: Responses for the subscription route, and OpenAI-compatible
 Chat Completions for DeepSeek/OpenCode.
 The earlier Responses relay proved a narrow Codex/OpenCode subscription path,
