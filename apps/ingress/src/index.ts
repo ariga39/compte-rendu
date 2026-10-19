@@ -841,6 +841,15 @@ const forwardRunnerProgress = async (request: Request, dependencies: IngressDepe
 export function createIngressWorker(dependencies: IngressDependencies): WorkerEntrypoint {
   return {
     fetch: async (request) => {
+      if (new URL(request.url).pathname === '/api/review-configuration') {
+        try {
+          return await dependencies.core.fetch(
+            new Request('https://core.internal/review-configuration', request),
+          );
+        } catch {
+          return new Response(null, { status: 503, headers: { 'cache-control': 'no-store' } });
+        }
+      }
       if (request.method === 'GET') {
         const path = new URL(request.url).pathname;
         const isPage =

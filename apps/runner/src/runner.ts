@@ -532,6 +532,7 @@ type RunnerJobState = RunnerJobResponseValue;
 type RunnerFailureCauseValue = typeof RunnerFailureCause.Type;
 
 type RunnerJobInputState = {
+  reviewConfiguration?: RunnerJobInput['reviewConfiguration'];
   id: string;
   runId: string;
   attempt: number;
@@ -1827,6 +1828,12 @@ export const createRunner = (options: RunnerOptions = {}) => {
         cleanup: { status: 'pending' },
       });
       if (job.abortRequested) return;
+      // The configuration slice must not silently execute a multi-model plan
+      // with the legacy single-review adapter during a staged rollout.
+      if (job.input.reviewConfiguration?.selection != null) {
+        failure = { reason: 'agent' };
+        return;
+      }
       update(job, { status: 'running', stage: 'checkout' });
       reportStage(job, 'checkout');
       const checkoutRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-review-'));

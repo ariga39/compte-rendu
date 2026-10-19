@@ -306,6 +306,7 @@ const waitForTerminal = async (
 };
 
 const runAgentScenario = async (scenario: {
+  reviewConfiguration?: { revision: number; selection: { reviewers: string[]; synthesis: string } };
   runId: string;
   output: string;
   exitCode?: number;
@@ -428,6 +429,9 @@ const runAgentScenario = async (scenario: {
       },
       body: JSON.stringify({
         ...runnerJobFields,
+        ...(scenario.reviewConfiguration === undefined
+          ? {}
+          : { reviewConfiguration: scenario.reviewConfiguration }),
         runId: scenario.runId,
         attempt: 1,
         repositoryUrl: 'https://github.com/acme/reviewed.git',
@@ -7077,6 +7081,18 @@ describe('Runner progress response disposal', () => {
 });
 
 describe('Runner LLM service mode', () => {
+  it('never substitutes the legacy single reviewer for a configured multi-model review', async () => {
+    const result = await runAgentScenario({
+      runId: 'configured-review-is-not-single-review',
+      output: finalMarkdownJsonl(),
+      reviewConfiguration: {
+        revision: 1,
+        selection: { reviewers: ['deepseek-review', 'step-review'], synthesis: 'deepseek-review' },
+      },
+    });
+    expect(result.terminal).toMatchObject({ status: 'failed', sandbox: { cleanup: 'destroyed' } });
+    expect(result.terminal).not.toHaveProperty('result');
+  });
   it.each([
     'https://models.example/v1',
     'http://localhost:8090/v1',

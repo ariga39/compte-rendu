@@ -5,6 +5,23 @@ export const PublicDashboardConfig = Schema.Struct({ name: Schema.String });
 
 export const REVIEW_ATTEMPT_BUDGET_MS = 30 * 60 * 1000;
 
+const ModelRouteId = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9._:-]{1,128}$/));
+export const ReviewModelSelection = Schema.Struct({
+  reviewers: Schema.Array(ModelRouteId).check(
+    Schema.isMinLength(2),
+    Schema.makeFilter((routes) => new Set(routes).size === routes.length, {
+      expected: 'distinct reviewer routes',
+    }),
+  ),
+  synthesis: ModelRouteId,
+});
+export type ReviewModelSelection = typeof ReviewModelSelection.Type;
+export const ReviewConfiguration = Schema.Struct({
+  revision: Schema.Natural,
+  selection: Schema.NullOr(ReviewModelSelection),
+});
+export type ReviewConfiguration = typeof ReviewConfiguration.Type;
+
 export interface WorkerEntrypoint<Env = unknown> {
   fetch(
     request: Request,
@@ -62,6 +79,7 @@ export const RunnerFailureCause = Schema.Literals([
 ]);
 
 export const RunnerJobInput = Schema.Struct({
+  reviewConfiguration: Schema.optional(ReviewConfiguration),
   id: Schema.NonEmptyString,
   runId: Schema.NonEmptyString,
   attempt: Schema.Int,
