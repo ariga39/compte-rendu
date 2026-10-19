@@ -7145,7 +7145,7 @@ describe('Runner settings reload', () => {
         expect((await get(h.runner, 'settings-race-a')).status).toBe('running');
         expect((await get(h.runner, 'settings-race-b')).status).toBe('running');
       });
-      expect(h.callbackReleases.size).toBe(2);
+      await vi.waitFor(() => expect(h.callbackReleases.size).toBe(2));
       const reload = writeCap(h.dir, 3);
       h.releaseCallbacks();
       await reload;
