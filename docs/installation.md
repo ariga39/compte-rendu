@@ -1135,7 +1135,7 @@ head SHA, and the single installation ID in the generated config.
 
 ## Public dashboard
 
-The existing Ingress serves `/`, `/history`, `/help`, and `/jobs/<RUN_ID>`. The Help
+The unified SvelteKit Worker serves `/`, `/history`, `/help`, and `/jobs/<RUN_ID>`. The Help
 page explains navigation, task states, cleanup, refresh, and privacy. Its source is
 `apps/dashboard/src/lib/content/help.md`, compiled into the page by mdsvex at build time. Its public
 read APIs use only D1 through Core. Opening or refreshing these pages never
@@ -1143,8 +1143,8 @@ queries GitHub or the Runner. The pages expose operational status and recorded
 milestones, not review bodies, evidence, logs, credentials, or administrative
 controls. A claimed row is a durable assignment, not proof of a live process.
 
-Set the optional Core variable `DASHBOARD_ORIGIN` to the canonical HTTPS origin
-of the deployed Ingress, without a path, query, or fragment. Enable it only after
+Set the optional Worker variable `DASHBOARD_ORIGIN` to the canonical HTTPS origin
+of the deployed Worker, without a path, query, or fragment. Enable it only after
 the page and API routes are available. New and recovered product Check Runs use
 this origin for their permanent `/jobs/<RUN_ID>` details link. An empty value
 omits the link. GitHub retains its own Check page; this does not change links
@@ -1152,17 +1152,17 @@ on unrelated Actions jobs or other Apps' checks.
 
 ### Repository identity and background refresh
 
-Apply `0009_dashboard_lifecycle.sql` before deploying the updated Workers.
+Apply `0009_dashboard_lifecycle.sql` before deploying the updated Worker.
 Apply the additive `0010_review_branch_refs.sql` before or with the updated
 Core; older Ingress payloads without branch names still admit and record null
 refs. Existing runs keep null refs and display the recorded head commit only.
-Run `corepack pnpm build` before deploying Ingress: the SvelteKit dashboard
-workspace emits `apps/dashboard/build`, served by the existing Ingress `ASSETS`
-binding. Keep the `assets` block when updating an existing generated Wrangler
+Run `corepack pnpm build` before deploying the Worker: the Cloudflare adapter
+emits `apps/dashboard/.svelte-kit/cloudflare`, used by
+`apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc` and its `ASSETS` binding. Keep the `assets` block when updating an existing generated Wrangler
 config. `run_worker_first: true` preserves API, webhook and authenticated Runner
 routing; SvelteKit renders dashboard pages on the server before browser hydration.
-The build contains no repository or task data; browsers read the public Core
-API through Ingress.
+The build contains no repository or task data. At request time, SSR and browser
+queries read the same DB-backed public projection inside the Worker.
 Keep the Worker Cron Trigger `* * * * *` in the deployment-specific Wrangler
 configuration as well as the tracked template. The scheduled handler refreshes
 shared repository metadata independently of dashboard traffic. It checks due
