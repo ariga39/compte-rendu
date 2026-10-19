@@ -27,7 +27,8 @@ shared host integrations, credentials, and network reachability.
 The product decision is therefore to run OpenCode autonomously within the
 review task inside the microVM, without approval prompts. The trusted
 configuration denies permissions by default and allows the native `read`,
-`grep`, `glob`, `skill`, and `submit_review` tools plus the exact static `git`
+`grep`, `glob`, `skill`, and the historical `submit_review` tool (since replaced
+by [final assistant JSON](../design.md)) plus the exact static `git`
 and `gh` commands needed for review. It denies edits, `webfetch`, package
 managers, repository programs, builds, tests, and shell escapes. This inner
 tool policy is defense in depth; the outer Sandbox boundaries below remain the
@@ -158,7 +159,8 @@ wins
 ([tools](https://github.com/anomalyco/opencode/blob/10765ff2a9da8c3b88e4de873aa383a49c318912/packages/web/src/content/docs/tools.mdx#L42-L98),
 [permissions](https://github.com/anomalyco/opencode/blob/10765ff2a9da8c3b88e4de873aa383a49c318912/packages/web/src/content/docs/permissions.mdx#L54-L87)).
 The trusted review configuration sets `*` to `deny`. It allows the native
-`read`, `grep`, `glob`, `skill`, and `submit_review` tools, and permits only
+`read`, `grep`, `glob`, `skill`, and the historical `submit_review` tool
+(since replaced by [final assistant JSON](../design.md)), and permits only
 these static review commands through `bash`:
 
 - `git diff`, `git grep`, `git log`, and `git show`;
