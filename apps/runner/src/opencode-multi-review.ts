@@ -1,26 +1,9 @@
 import { Option, Schema } from 'effect';
 import { RunnerFailureCause } from '@compte-rendu/contracts';
-import {
-  coverageProblem,
-  ReviewerSubmissionSchema,
-  SynthesisSubmissionSchema,
-} from './review-submission-contract.js';
-import type {
-  CoverageOutcome,
-  MultiFinding,
-  ReviewerSubmission,
-  SynthesisCoverage,
-  SynthesisSubmission,
-} from './review-submission-contract.js';
+import { ReviewSubmissionSchema } from './review-submission-contract.js';
+import type { ReviewSubmission } from './review-submission-contract.js';
 
-export type {
-  CoverageOutcome,
-  MultiFinding,
-  ReviewerSubmission,
-  SynthesisCoverage,
-  SynthesisSubmission,
-};
-export { coverageProblem };
+export type { ReviewSubmission };
 
 export type FailureCause = typeof RunnerFailureCause.Type;
 
@@ -116,12 +99,6 @@ const TerminalIdle = Schema.Struct({
 export type SubmissionResult<T> =
   | { readonly value: T; readonly cause?: undefined }
   | { readonly value?: undefined; readonly cause: FailureCause };
-
-const decodeStrict = <S extends Schema.ConstraintDecoder<unknown>>(
-  schema: S,
-  value: unknown,
-): Option.Option<S['Type']> =>
-  Schema.decodeUnknownOption(schema, { onExcessProperty: 'error' })(value);
 
 export const decodeSessionExport = (value: unknown): MultiSessionExport | undefined =>
   Option.getOrUndefined(Schema.decodeUnknownOption(MultiSessionExport)(value));
@@ -228,28 +205,18 @@ const collectSubmitInputs = (
   return { inputs };
 };
 
-export const extractReviewerSubmission = (
+export const extractReviewSubmission = (
   value: unknown,
   identity: SessionIdentity,
-): SubmissionResult<ReviewerSubmission> => {
+): SubmissionResult<ReviewSubmission> => {
   const collected = collectSubmitInputs(value, identity);
   if ('cause' in collected) return { cause: collected.cause };
   if (collected.inputs.length === 0) return { cause: 'zero-results' };
   if (collected.inputs.length > 1) return { cause: 'multiple-results' };
-  const decoded = decodeStrict(ReviewerSubmissionSchema, collected.inputs[0]);
-  if (Option.isNone(decoded)) return { cause: 'result-schema-failure' };
-  return { value: decoded.value };
-};
-
-export const extractSynthesisSubmission = (
-  value: unknown,
-  identity: SessionIdentity,
-): SubmissionResult<SynthesisSubmission> => {
-  const collected = collectSubmitInputs(value, identity);
-  if ('cause' in collected) return { cause: collected.cause };
-  if (collected.inputs.length === 0) return { cause: 'zero-results' };
-  if (collected.inputs.length > 1) return { cause: 'multiple-results' };
-  const decoded = decodeStrict(SynthesisSubmissionSchema, collected.inputs[0]);
+  // Excess keys are ignored on both sides: OpenCode's tool boundary normalizes
+  // them away while the exported session keeps the raw call, so unrelated extra
+  // fields must never turn a valid decision and Markdown into a failure.
+  const decoded = Schema.decodeUnknownOption(ReviewSubmissionSchema)(collected.inputs[0]);
   if (Option.isNone(decoded)) return { cause: 'result-schema-failure' };
   return { value: decoded.value };
 };
@@ -354,17 +321,9 @@ export const multiReviewConfig = (options: {
   });
 };
 
-export const multiReviewerBrief = (baseBrief: string, participant: string): string =>
-  `${baseBrief}\n\nParticipant: ${participant}. This is the same frozen review brief given to every reviewer. ` +
-  `In addition to decision and markdown, call submit_review with a findings array; exactly one successful submission is ` +
-  `accepted. If an attempt is rejected, correct it in the same session without redoing the review. Each finding must have ` +
-  `id, location, claim, impact, and evidence; prefix every finding id with "${participant}-". If there are no findings, ` +
-  `use an empty array. Do not include a coverage array. Do not call subagent and do not spawn reviewers. After the successful submit_review call, reply with only a ` +
-  `compact JSON object {"participant":"${participant}","decision":...,"findings":[...],"conclusion":"..."} using the exact ` +
-  `finding ids from the tool call, so the supervisor can synthesize. Do not include planning or chain-of-thought.`;
-
 export const multiReviewSupervisorPrompt = (options: {
   readonly roster: readonly { readonly participant: string; readonly route: string }[];
+  readonly baseBrief: string;
 }): string => {
   const roster =
     options.roster.length === 0
@@ -373,80 +332,13 @@ export const multiReviewSupervisorPrompt = (options: {
           .map(({ participant, route }) => `- ${participant} (${modelReference(route)})`)
           .join('\n');
   return (
-    'You are the multi-model review supervisor. Do not inspect the repository, read files, run shell commands, ' +
-    'or use any tool other than subagent and submit_review. Your only job is to dispatch the configured reviewers and ' +
-    'then synthesize their submitted findings editorially. ' +
-    'Dispatch all reviewers now, in the same assistant turn, foreground, exactly one subagent call per participant. ' +
-    'Set background:false. Use the exact participant id as the subagent agent and a short description. The runtime ' +
-    'injects the frozen review brief for that participant; do not add your own review instructions, do not include ' +
-    "another reviewer's findings, and do not dispatch extra reviewers. Participants:\n" +
-    `${roster}\n\n` +
-    'When every subagent result has returned, use only the submitted findings and their exact finding ids to produce one ' +
-    'synthesis. Call submit_review with decision, markdown, and coverage; exactly one successful submission is accepted. ' +
-    'If an attempt is rejected, correct it in the same session without rerunning the review. Do not include a findings ' +
-    'array. coverage must contain exactly one entry for every reviewer finding id, with outcome "retained", "merged", or ' +
-    '"disagreement"; every retained entry needs a finalId, and every merged entry needs a finalId that matches a ' +
-    'retained finalId. Preserve disagreements explicitly. Do not invent, drop, or rename findings. Do not start ' +
-    'another review round. The final markdown must begin with "## Review:" and the decision must follow the supplied ' +
-    'results.'
+    'You are the multi-model review supervisor. Run independent reviews with the configured models and then ' +
+    'synthesize their reports into one final review. Do not inspect the repository, read files, or run shell commands ' +
+    'yourself; use the subagent and submit_review tools. Participants:\n' +
+    `${roster}\n\nFrozen review brief:\n${options.baseBrief}\n\n` +
+    'Give each reviewer this same brief and let it review independently; use whatever orchestration you judge best. ' +
+    'Reviewers return their own reports. Then synthesize those reports into one review, preserving substantive ' +
+    'disagreements rather than forcing consensus. Submit your final decision and publishable Markdown with ' +
+    'submit_review; the Markdown must begin with "## Review:". If a submission is rejected, correct it in the same session.'
   );
 };
-
-// The delivered guard binds one supervisor session, dispatches each configured
-// participant once with that participant's frozen brief, captures each child's
-// completed submit_review through the execute.after transport, and replaces the
-// parent-visible subagent result with the frozen report. It withholds the
-// supervisor's own submit_review until every formal reviewer submission exists.
-// The plugin is read-only with respect to repo contents; Runner still performs
-// all final schema validation over the exported sessions.
-export const multiReviewGuardPlugin = (briefs: Readonly<Record<string, string>>): string =>
-  `import { reviewerSubmissionProblem, synthesisSubmissionProblem } from '../submit_review/contract.js';\n` +
-  `const BRIEFS = ${JSON.stringify(briefs)};\n` +
-  `const SUPERVISOR = ${JSON.stringify(SUPERVISOR_AGENT_ID)};\n` +
-  `const ROSTER = ${Object.keys(briefs).length};\n` +
-  `export default { id: 'multi-review-guard', async setup(ctx) {\n` +
-  `  const dispatched = new Set();\n` +
-  `  const reports = new Map();\n` +
-  `  let root;\n` +
-  `  await ctx.tool.hook('execute.before', (event) => {\n` +
-  `    if (event.tool === 'submit_review') {\n` +
-  `      if (event.agent === SUPERVISOR) {\n` +
-  `        if (event.sessionID !== root || reports.size !== ROSTER) throw new Error('all reviewers must submit first');\n` +
-  `        const findings = [];\n` +
-  `        for (const report of reports.values()) {\n` +
-  `          if (!Array.isArray(report.submission.findings)) throw new Error('reviewer report missing findings');\n` +
-  `          for (const finding of report.submission.findings) findings.push(finding);\n` +
-  `        }\n` +
-  `        const problem = synthesisSubmissionProblem(event.input, findings);\n` +
-  `        if (problem !== undefined) throw new Error(problem);\n` +
-  `        return;\n` +
-  `      }\n` +
-  `      if (BRIEFS[event.agent] !== undefined) {\n` +
-  `        const problem = reviewerSubmissionProblem(event.input);\n` +
-  `        if (problem !== undefined) throw new Error(problem);\n` +
-  `      }\n` +
-  `      return;\n` +
-  `    }\n` +
-  `    if (event.tool !== 'subagent') return;\n` +
-  `    if (event.agent !== SUPERVISOR) throw new Error('only the supervisor may dispatch reviewers');\n` +
-  `    if (root !== undefined && root !== event.sessionID) throw new Error('unexpected supervisor session');\n` +
-  `    root = event.sessionID;\n` +
-  `    const input = event.input ?? {};\n` +
-  `    const participant = String(input.agent ?? '');\n` +
-  `    if (BRIEFS[participant] === undefined || dispatched.has(participant)) throw new Error('invalid or repeated reviewer');\n` +
-  `    dispatched.add(participant);\n` +
-  `    input.agent = participant;\n` +
-  `    input.background = false;\n` +
-  `    input.prompt = BRIEFS[participant];\n` +
-  `  });\n` +
-  `  await ctx.tool.hook('execute.after', (event) => {\n` +
-  `    if (event.status !== 'completed') return;\n` +
-  `    if (event.tool === 'submit_review' && BRIEFS[event.agent] !== undefined) {\n` +
-  `      reports.set(event.agent, { participant: event.agent, sessionId: event.sessionID, submission: event.input === undefined ? {} : JSON.parse(JSON.stringify(event.input)) });\n` +
-  `    }\n` +
-  `    if (event.tool === 'subagent' && event.agent === SUPERVISOR) {\n` +
-  `      const report = reports.get(event.input === undefined ? undefined : event.input.agent);\n` +
-  `      event.result.content = JSON.stringify(report ?? { error: 'reviewer did not submit' });\n` +
-  `    }\n` +
-  `  });\n` +
-  `} };\n`;

@@ -242,27 +242,26 @@ versioned model selection at admission; changing the operator configuration affe
 new jobs only. The public dashboard remains read-only. See
 [review configuration](review-configuration.md) for the protected operator API.
 
-The sbx/OpenCode adapter executes the selected reviewers as independent foreground
-subagent sessions inside one Sandbox, followed by one supervisor synthesis. All
-participants receive the same immutable PR brief, have read-only review tools,
-and share the job deadline and a grant restricted to the selected LLM routes.
-The supervisor can dispatch the frozen roster and submit a synthesis; it does not
-investigate code, run a second review round, or repair the repository.
+The sbx/OpenCode adapter gives a supervisor the selected reviewer agents inside
+one Sandbox. Its task is to obtain independent reviews of the same immutable PR
+revision and synthesize one final review. The agent controls dispatch, retries,
+and how it exchanges intermediate reports; Runner does not enforce an internal
+workflow or require child agents to submit structured findings. All sessions
+share the job deadline, read-only repository permissions, and a grant restricted
+to the selected LLM routes.
 
-The delivered plugin forwards each reviewer's formal submission to the supervisor.
-Runner validates the complete parent/child session exports, selected model and
-agent identities, unique submissions, and coverage of every submitted finding.
-Synthesis preserves unique findings, merges duplicates with provenance, and keeps
-substantive disagreements explicit rather than forcing consensus. Structural
-validation does not prove the model's semantic judgment. Missing or invalid
-participant evidence fails the whole job without a review vote.
-
-The submission tool and Runner use the same Effect schemas and finding-coverage
-validator. The build bundles this contract for the Sandbox plugins; jobs do not
-install validation dependencies. Invalid submissions are rejected while the
-session is still active and may be corrected before its one successful submission.
-Coverage is internal provenance (retained, merged, or disputed findings); internal
-IDs need not appear in the published Markdown.
+Only the final review is a product output contract: `decision` and `markdown`.
+The submission tool and Runner use the same Effect schema. The build bundles
+this contract for the Sandbox tool; jobs do not install validation dependencies.
+Invalid decisions or Markdown are rejected while the session is active and may
+be corrected before its successful submission. Both boundaries extract the same
+product fields and ignore unrelated extras: OpenCode normalizes tool arguments
+but retains the original arguments in session exports. Runner validates the final result
+and authoritative root-session completion before publication. Intermediate
+reports and child-session records are evidence, not additional acceptance gates.
+There is no required finding-ID ledger or coverage array. The supervisor is
+instructed to preserve useful findings and explain substantive disagreements;
+structural validation does not prove the quality of that judgment.
 
 The job retains its frozen selection, child exports and `multi-review.json` along
 with the usual final result. There is one terminal callback and one publication.
@@ -548,7 +547,7 @@ Review-quality and queue probes use the checked-in GitHub publication shim in
 and captures review and reaction writes locally. Real GitHub publication is
 tested only when publication behavior changes.
 
-Changes to the submission contract must exercise the delivered plugins, including
+Changes to the submission contract must exercise the delivered submission tool, including
 rejection followed by a corrected submission in the same session, and pass the
 accepted result through Runner and Core's publication seam. Before merging changes
 to OpenCode plugin integration, also run the pinned OpenCode executable against a

@@ -8496,30 +8496,6 @@ describe('Runner multi-model review', () => {
       synthesis: 'deepseek-v4.1-flash',
     },
   };
-  const findings = {
-    'reviewer-0': [
-      {
-        id: 'reviewer-0-f1',
-        location: 'src/example.ts:10',
-        claim: 'The new branch drops the retry budget.',
-        impact: 'A transient failure becomes terminal.',
-        evidence: 'The diff removes the retry wrapper around the request.',
-      },
-    ],
-    'reviewer-1': [
-      {
-        id: 'reviewer-1-f1',
-        location: 'src/other.ts:20',
-        claim: 'The error path is not covered.',
-        impact: 'A regression can ship without a failing test.',
-        evidence: 'No test exercises the new error branch.',
-      },
-    ],
-  } as const;
-  const reviewerMarkdown = {
-    'reviewer-0': '## Review:\n\nRequest changes: retry budget removed.',
-    'reviewer-1': '## Review:\n\nComment: missing error-path coverage.',
-  } as const;
   const synthesisMarkdown =
     '## Review:\n\nSynthesized blocking finding reviewer-0-f1 with merged source reviewer-1-f1.';
   const reviewerDecision = {
@@ -8539,26 +8515,6 @@ describe('Runner multi-model review', () => {
       messages: [
         {
           type: 'assistant',
-          finish: 'tool-calls',
-          agent: participant,
-          model: { providerID: 'compte-rendu', id: route },
-          content: [
-            {
-              type: 'tool',
-              name: 'submit_review',
-              state: {
-                status: 'completed',
-                input: {
-                  decision: reviewerDecision[participant as keyof typeof reviewerDecision],
-                  markdown: reviewerMarkdown[participant as keyof typeof reviewerMarkdown],
-                  findings: findings[participant as keyof typeof findings],
-                },
-              },
-            },
-          ],
-        },
-        {
-          type: 'assistant',
           finish: 'stop',
           agent: participant,
           model: { providerID: 'compte-rendu', id: route },
@@ -8568,7 +8524,7 @@ describe('Runner multi-model review', () => {
               text: JSON.stringify({
                 participant,
                 decision: reviewerDecision[participant as keyof typeof reviewerDecision],
-                findings: findings[participant as keyof typeof findings],
+                report: 'independent narrative review',
               }),
             },
           ],
@@ -8786,7 +8742,6 @@ describe('Runner multi-model review', () => {
 
     let createArgs: readonly string[] | undefined;
     let agentArgs: readonly string[] | undefined;
-    let guardPlugin: string | undefined;
     let submitPlugin: string | undefined;
     let contractPlugin: string | undefined;
     const callbacks: Request[] = [];
@@ -8807,14 +8762,6 @@ describe('Runner multi-model review', () => {
           const configRootArg = args.find((value) => value.startsWith('XDG_CONFIG_HOME='));
           if (configRootArg !== undefined) {
             const configRoot = configRootArg.slice('XDG_CONFIG_HOME='.length);
-            try {
-              guardPlugin = await readFile(
-                join(configRoot, 'opencode', 'plugins', 'multi_review_guard', 'index.js'),
-                'utf8',
-              );
-            } catch {
-              guardPlugin = undefined;
-            }
             try {
               submitPlugin = await readFile(
                 join(configRoot, 'opencode', 'plugins', 'submit_review', 'index.js'),
@@ -8944,7 +8891,6 @@ describe('Runner multi-model review', () => {
         agentArgs,
         evidencePath,
         childExports,
-        guardPlugin,
         submitPlugin,
         contractPlugin,
         sessionPageContents,
@@ -8958,14 +8904,6 @@ describe('Runner multi-model review', () => {
     }
   };
 
-  type GuardEvent = {
-    readonly tool: string;
-    readonly agent: string;
-    readonly sessionID: string;
-    readonly status?: string;
-    readonly input?: Record<string, unknown>;
-    result?: { content: string };
-  };
   type SubmitTool = {
     readonly input: unknown;
     execute(
@@ -8973,38 +8911,25 @@ describe('Runner multi-model review', () => {
       context: { readonly sessionID?: string },
     ): Promise<{ readonly content: string }>;
   };
-  type DeliveredPlugins = {
-    readonly guardPlugin?: string;
+  // Load the exact submit tool and contract files the Sandbox received, with
+  // their real relative import, and drive the public execute contract.
+  const loadDeliveredSubmitTool = async (delivered: {
     readonly submitPlugin?: string;
     readonly contractPlugin?: string;
-  };
-  // Load the exact files the Sandbox received at the create boundary and drive
-  // their public hook/tool contracts, so both plugins are exercised as
-  // delivered artifacts with their real relative contract import.
-  const loadDeliveredPlugins = async (delivered: DeliveredPlugins) => {
-    const root = await mkdtemp(join(tmpdir(), 'cr-delivered-plugins-'));
+  }): Promise<SubmitTool> => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-delivered-submit-'));
     await mkdir(join(root, 'submit_review'), { recursive: true, mode: 0o700 });
-    await mkdir(join(root, 'multi_review_guard'), { recursive: true, mode: 0o700 });
     await writeFile(
       join(root, 'submit_review', 'contract.js'),
       delivered.contractPlugin ?? '',
       'utf8',
     );
     await writeFile(join(root, 'submit_review', 'index.js'), delivered.submitPlugin ?? '', 'utf8');
-    await writeFile(
-      join(root, 'multi_review_guard', 'index.js'),
-      delivered.guardPlugin ?? '',
-      'utf8',
-    );
-    const submitModule = (await import(
+    const module = (await import(
       /* @vite-ignore */ pathToFileURL(join(root, 'submit_review', 'index.js')).href
     )) as { default: { setup: (ctx: unknown) => Promise<void> } };
-    const guardModule = (await import(
-      /* @vite-ignore */ pathToFileURL(join(root, 'multi_review_guard', 'index.js')).href
-    )) as { default: { setup: (ctx: unknown) => Promise<void> } };
-
     let tool: SubmitTool | undefined;
-    await submitModule.default.setup({
+    await module.default.setup({
       tool: {
         transform: (transform: (editor: { add: (value: SubmitTool) => void }) => void) =>
           transform({
@@ -9015,33 +8940,7 @@ describe('Runner multi-model review', () => {
       },
     });
     if (tool === undefined) throw new Error('submit_review tool was not registered');
-
-    const hooks = new Map<string, (event: GuardEvent) => void>();
-    await guardModule.default.setup({
-      tool: {
-        hook: (name: string, handler: (event: GuardEvent) => void) => {
-          hooks.set(name, handler);
-        },
-      },
-    });
-    return {
-      tool,
-      guard: {
-        before: (event: GuardEvent) => hooks.get('execute.before')!(event),
-        after: (event: GuardEvent) => hooks.get('execute.after')!(event),
-      },
-    };
-  };
-
-  const dispatchReviewers = (guard: { before: (event: GuardEvent) => void }) => {
-    for (const participant of ['reviewer-0', 'reviewer-1']) {
-      guard.before({
-        tool: 'subagent',
-        agent: 'multi-review-supervisor',
-        sessionID: rootSession,
-        input: { agent: participant, prompt: '', background: true },
-      });
-    }
+    return tool;
   };
 
   it('runs the frozen roster through native foreground subagents and publishes one synthesis', async () => {
@@ -9092,9 +8991,13 @@ describe('Runner multi-model review', () => {
       permissions: expect.arrayContaining([{ action: 'subagent', resource: '*', effect: 'deny' }]),
     });
     expect(config.agents['reviewer-1']).toMatchObject({ mode: 'subagent' });
-    expect(result.guardPlugin).toContain('Participant: reviewer-0');
-    expect(result.guardPlugin).toContain('Participant: reviewer-1');
-    expect(result.guardPlugin).toContain('background = false');
+    const supervisorPromptText = (result.agentArgs ?? []).join(' ');
+    expect(supervisorPromptText).toContain('reviewer-0');
+    expect(supervisorPromptText).toContain('reviewer-1');
+    expect(supervisorPromptText).toContain('Frozen review brief');
+    expect(supervisorPromptText).not.toContain(
+      'call submit_review exactly once with a findings array',
+    );
 
     expect(result.manifest.multiReview).toMatchObject({
       revision: 3,
@@ -9111,10 +9014,6 @@ describe('Runner multi-model review', () => {
     ).toEqual([
       { sessionId: 'ses_multi_child_a', route: 'deepseek-v4.1-flash' },
       { sessionId: 'ses_multi_child_b', route: 'step-5-preview' },
-    ]);
-    expect(result.manifest.multiReview.synthesis.coverage).toEqual([
-      { findingId: 'reviewer-0-f1', outcome: 'retained', finalId: 'reviewer-0-f1' },
-      { findingId: 'reviewer-1-f1', outcome: 'merged', finalId: 'reviewer-0-f1' },
     ]);
     expect(result.manifest.files).toEqual(
       expect.arrayContaining([
@@ -9149,7 +9048,7 @@ describe('Runner multi-model review', () => {
       frozenSelection: { reviewers: string[]; synthesis: string };
       rootSessionId: string;
       reviewers: Array<{ sessionId: string; route: string }>;
-      synthesis: { coverage: unknown[] };
+      synthesis: { decision: string; markdown: string };
     };
     expect(multiReviewDocument).toMatchObject({
       revision: 3,
@@ -9163,7 +9062,12 @@ describe('Runner multi-model review', () => {
       'ses_multi_child_a',
       'ses_multi_child_b',
     ]);
-    expect(multiReviewDocument.synthesis.coverage).toHaveLength(2);
+    expect(multiReviewDocument.synthesis).toEqual({
+      sessionId: rootSession,
+      model: 'compte-rendu/deepseek-v4.1-flash',
+      decision: 'request_changes',
+      markdown: synthesisMarkdown,
+    });
 
     expect(result.callbacks).toHaveLength(1);
     const callback = (await result.callbacks[0]!.json()) as {
@@ -9181,7 +9085,10 @@ describe('Runner multi-model review', () => {
       Buffer.from(callback.evidence.manifest.content, 'base64').toString('utf8'),
     );
     expect(callbackManifest.multiReview.reviewers).toHaveLength(2);
-    expect(callbackManifest.multiReview.synthesis.coverage).toHaveLength(2);
+    expect(callbackManifest.multiReview.synthesis).toMatchObject({
+      decision: 'request_changes',
+      markdown: synthesisMarkdown,
+    });
     expect(callbackManifest.sessionIds).toEqual([rootSession]);
 
     for (const child of ['ses_multi_child_a', 'ses_multi_child_b']) {
@@ -9265,41 +9172,6 @@ describe('Runner multi-model review', () => {
     }
   });
 
-  const childExportValue = (participant: 'reviewer-0' | 'reviewer-1') =>
-    JSON.parse(
-      multiChildExports(
-        participant === 'reviewer-0' ? 'ses_multi_child_a' : 'ses_multi_child_b',
-        participant,
-        participant === 'reviewer-0' ? 'deepseek-v4.1-flash' : 'step-5-preview',
-      ),
-    );
-  const exportsWithA = (value: string): Record<string, string> => ({
-    [rootSession]: rootExport,
-    ses_multi_child_a: value,
-    ses_multi_child_b: defaultExport('ses_multi_child_b')!,
-  });
-  const wrongModel = childExportValue('reviewer-0');
-  wrongModel.info.model.id = 'step-5-preview';
-  const incomplete = childExportValue('reviewer-0');
-  incomplete.info.outcome = 'failed';
-  incomplete.messages[incomplete.messages.length - 1] = { type: 'idle', outcome: 'failed' };
-  const duplicate = childExportValue('reviewer-0');
-  duplicate.messages[0].content.push({ ...duplicate.messages[0].content[0] });
-  const uncoveredRoot = JSON.parse(rootExport);
-  uncoveredRoot.messages[0].content[0].state.input.coverage =
-    uncoveredRoot.messages[0].content[0].state.input.coverage.slice(0, 1);
-  const wrongAssistantAgent = childExportValue('reviewer-0');
-  wrongAssistantAgent.messages[0].agent = 'reviewer-1';
-  const wrongAssistantModel = childExportValue('reviewer-0');
-  wrongAssistantModel.messages[1].model.id = 'step-5-preview';
-  const missingAssistantIdentity = childExportValue('reviewer-0');
-  delete missingAssistantIdentity.messages[0].agent;
-  const malformedKnownChildSubmit = childExportValue('reviewer-0');
-  malformedKnownChildSubmit.messages[0].content[0] = {
-    type: 'tool',
-    name: 'submit_review',
-    state: 'completed',
-  };
   const wrongRootAssistantModel = JSON.parse(rootExport);
   wrongRootAssistantModel.messages[0].model.id = 'step-5-preview';
   const malformedKnownRootSubmit = JSON.parse(rootExport);
@@ -9308,66 +9180,23 @@ describe('Runner multi-model review', () => {
     name: 'submit_review',
     state: 'completed',
   };
-  const disagreementRoot = JSON.parse(rootExport);
-  disagreementRoot.messages[0].content[0].state.input.markdown =
-    '## Review:\n\nDisagreement preserved without restating finding ids.';
-  disagreementRoot.messages[0].content[0].state.input.coverage = [
-    { findingId: 'reviewer-0-f1', outcome: 'retained', finalId: 'reviewer-0-f1' },
-    { findingId: 'reviewer-1-f1', outcome: 'disagreement' },
-  ];
+  const rootWrongAgent = JSON.parse(rootExport);
+  rootWrongAgent.info.agent = 'reviewer-0';
+  const rootInvalidDecision = JSON.parse(rootExport);
+  rootInvalidDecision.messages[0].content[0].state.input = {
+    decision: 'maybe',
+    markdown: synthesisMarkdown,
+  };
+  const rootZeroSubmission = JSON.parse(rootExport);
+  rootZeroSubmission.messages[0].content[0].state.status = 'error';
+  const rootMultipleSubmissions = JSON.parse(rootExport);
+  rootMultipleSubmissions.messages[0].content.push(
+    JSON.parse(JSON.stringify(rootMultipleSubmissions.messages[0].content[0])),
+  );
+  const rootNoTerminalIdle = JSON.parse(rootExport);
+  rootNoTerminalIdle.messages = rootNoTerminalIdle.messages.slice(0, -1);
 
   const failureCases: ReadonlyArray<readonly [string, MultiScenarioOverrides, string]> = [
-    [
-      'a missing child',
-      {
-        children: [defaultChildren[0]!],
-        exports: {
-          [rootSession]: rootExport,
-          ses_multi_child_a: defaultExport('ses_multi_child_a')!,
-        },
-      },
-      'result-schema-failure',
-    ],
-    [
-      'a child with the wrong model',
-      { exports: exportsWithA(JSON.stringify(wrongModel)) },
-      'result-schema-failure',
-    ],
-    [
-      'an incomplete child',
-      { exports: exportsWithA(JSON.stringify(incomplete)) },
-      'missing-terminal-message',
-    ],
-    [
-      'a duplicate child submission',
-      { exports: exportsWithA(JSON.stringify(duplicate)) },
-      'multiple-results',
-    ],
-    [
-      'an uncovered finding',
-      { rootExport: JSON.stringify(uncoveredRoot) },
-      'result-schema-failure',
-    ],
-    [
-      'a child assistant with the wrong agent',
-      { exports: exportsWithA(JSON.stringify(wrongAssistantAgent)) },
-      'result-schema-failure',
-    ],
-    [
-      'a child assistant with the wrong model',
-      { exports: exportsWithA(JSON.stringify(wrongAssistantModel)) },
-      'result-schema-failure',
-    ],
-    [
-      'a child assistant missing its identity',
-      { exports: exportsWithA(JSON.stringify(missingAssistantIdentity)) },
-      'result-schema-failure',
-    ],
-    [
-      'a malformed known child submit_review',
-      { exports: exportsWithA(JSON.stringify(malformedKnownChildSubmit)) },
-      'result-schema-failure',
-    ],
     [
       'a root assistant with the wrong model',
       { rootExport: JSON.stringify(wrongRootAssistantModel) },
@@ -9379,55 +9208,29 @@ describe('Runner multi-model review', () => {
       'result-schema-failure',
     ],
     [
-      'a repeated session.list cursor',
-      {
-        pages: [
-          { stdout: childSessionPage([defaultChildren[0]], 'cursor-1') },
-          { stdout: childSessionPage([defaultChildren[1]], 'cursor-1', 'cursor-0') },
-        ],
-      },
+      'a root session with the wrong agent',
+      { rootExport: JSON.stringify(rootWrongAgent) },
       'result-schema-failure',
     ],
     [
-      'a duplicate child session id across pages',
-      {
-        pages: [
-          { stdout: childSessionPage([defaultChildren[0]], 'cursor-1') },
-          { stdout: childSessionPage([defaultChildren[0]], 'cursor-2', 'cursor-0') },
-          { stdout: childSessionPage([], null, 'cursor-1') },
-        ],
-      },
+      'an invalid final decision',
+      { rootExport: JSON.stringify(rootInvalidDecision) },
       'result-schema-failure',
     ],
     [
-      'excess child sessions',
-      {
-        children: [
-          defaultChildren[0]!,
-          defaultChildren[1]!,
-          {
-            id: 'ses_multi_child_c',
-            parentID: rootSession,
-            agent: 'reviewer-2',
-            model: { providerID: 'compte-rendu', id: 'another-model' },
-            outcome: 'succeeded',
-          },
-        ],
-      },
-      'result-schema-failure',
+      'a root without a terminal idle message',
+      { rootExport: JSON.stringify(rootNoTerminalIdle) },
+      'missing-terminal-message',
     ],
     [
-      'a truncated session.list page',
-      {
-        pages: [{ stdout: childSessionPage([defaultChildren[0]], 'cursor-1'), truncated: true }],
-      },
-      'result-schema-failure',
+      'a root with no completed submission',
+      { rootExport: JSON.stringify(rootZeroSubmission) },
+      'zero-results',
     ],
-    ['a failed session.list page', { pages: [{ exitCode: 1 }] }, 'result-schema-failure'],
     [
-      'incomplete session.list pagination without a cursor',
-      { pages: [{ stdout: JSON.stringify({ data: [defaultChildren[0]] }) }] },
-      'result-schema-failure',
+      'a root with two completed submissions',
+      { rootExport: JSON.stringify(rootMultipleSubmissions) },
+      'multiple-results',
     ],
   ];
 
@@ -9447,11 +9250,12 @@ describe('Runner multi-model review', () => {
     expect(callback.result).toBeUndefined();
   });
 
-  it('retains the frozen selection and partial child evidence after a failed review', async () => {
-    const result = await runScenario({ exports: exportsWithA(JSON.stringify(wrongModel)) });
+  it('retains frozen selection and available child evidence after a failed root review', async () => {
+    const result = await runScenario({ rootExport: JSON.stringify(rootInvalidDecision) });
 
     expect(result.terminal).toMatchObject({
       status: 'failed',
+      sandbox: { cleanup: 'destroyed' },
       failure: { reason: 'invalid-output', cause: 'result-schema-failure' },
     });
     expect(result.manifest.frozenSelection).toEqual({
@@ -9459,316 +9263,83 @@ describe('Runner multi-model review', () => {
       synthesis: 'deepseek-v4.1-flash',
     });
     const document = result.multiReviewDocument as {
-      revision: number;
-      frozenSelection: { reviewers: string[]; synthesis: string };
       rootSessionId: string;
-      sessions: Array<{ sessionId: string; parentID?: string }>;
+      sessions: Array<{ sessionId: string }>;
     };
-    expect(document).toMatchObject({
-      revision: 3,
-      frozenSelection: {
-        reviewers: ['deepseek-v4.1-flash', 'step-5-preview'],
-        synthesis: 'deepseek-v4.1-flash',
-      },
-      rootSessionId: rootSession,
-    });
-    expect(document.sessions.map((session) => session.sessionId)).toEqual([
-      rootSession,
-      'ses_multi_child_a',
-      'ses_multi_child_b',
-    ]);
+    expect(document.rootSessionId).toBe(rootSession);
+    expect(document.sessions.map((session) => session.sessionId)).toEqual(
+      expect.arrayContaining([rootSession, 'ses_multi_child_a', 'ses_multi_child_b']),
+    );
     expect(result.manifest.files).toEqual(
-      expect.arrayContaining([
-        'opencode-export-ses_multi_child_a.json',
-        'opencode-export-ses_multi_child_b.json',
-        'multi-review.json',
-      ]),
+      expect.arrayContaining(['multi-review.json', 'opencode-export-ses_multi_child_a.json']),
     );
   });
-  it('preserves an explicit disagreement without requiring finding ids in the markdown', async () => {
-    const disagreementMarkdown = disagreementRoot.messages[0].content[0].state.input.markdown;
-    const result = await runScenario({ rootExport: JSON.stringify(disagreementRoot) });
+
+  it('accepts unrelated extra fields in the final submission and publishes only decision and markdown', async () => {
+    const withExtras = JSON.parse(rootExport);
+    withExtras.messages[0].content[0].state.input = {
+      decision: 'request_changes',
+      markdown: synthesisMarkdown,
+      findings: [{ id: 'f1', location: 'x', claim: 'c', impact: 'i', evidence: 'e' }],
+      coverage: [],
+    };
+    const result = await runScenario({ rootExport: JSON.stringify(withExtras) });
 
     expect(result.terminal).toMatchObject({
       status: 'succeeded',
-      result: { version: 2, decision: 'request_changes', markdown: disagreementMarkdown },
+      result: { version: 2, decision: 'request_changes', markdown: synthesisMarkdown },
     });
-    expect(result.manifest.multiReview.synthesis.coverage).toEqual([
-      { findingId: 'reviewer-0-f1', outcome: 'retained', finalId: 'reviewer-0-f1' },
-      { findingId: 'reviewer-1-f1', outcome: 'disagreement' },
-    ]);
+    expect(
+      (result.terminal as { result?: { findings?: unknown } }).result?.findings,
+    ).toBeUndefined();
   });
 
-  it('enforces the frozen dispatch and report transport through the delivered guard', async () => {
+  it('rejects an invalid final decision in the delivered tool and accepts a corrected call', async () => {
     const delivered = await runScenario();
-    const { guard } = await loadDeliveredPlugins(delivered);
-    const root = rootSession;
-    const supervisor = 'multi-review-supervisor';
+    const tool = await loadDeliveredSubmitTool(delivered);
 
-    // A regular reviewer submit_review is not the supervisor gate.
-    expect(() =>
-      guard.before({
-        tool: 'submit_review',
-        agent: 'reviewer-0',
-        sessionID: 'ses_multi_child_a',
-        input: { decision: 'comment', markdown: '## Review:\n\na', findings: [] },
-      }),
-    ).not.toThrow();
-
-    // The supervisor cannot submit until every reviewer has formally submitted.
-    expect(() =>
-      guard.before({ tool: 'submit_review', agent: supervisor, sessionID: root }),
-    ).toThrow('all reviewers must submit first');
-
-    // Only the supervisor dispatches; the participant must be a known, unique roster member.
-    expect(() =>
-      guard.before({
-        tool: 'subagent',
-        agent: 'reviewer-0',
-        sessionID: root,
-        input: { agent: 'reviewer-0' },
-      }),
-    ).toThrow('only the supervisor');
-    expect(() =>
-      guard.before({
-        tool: 'subagent',
-        agent: supervisor,
-        sessionID: root,
-        input: { agent: 'reviewer-9' },
-      }),
-    ).toThrow('invalid or repeated reviewer');
-
-    const firstDispatch = { agent: 'reviewer-0', prompt: 'malicious prompt', background: true };
-    guard.before({
-      tool: 'subagent',
-      agent: supervisor,
-      sessionID: root,
-      input: firstDispatch,
-    });
-    expect(firstDispatch.prompt).toContain('Participant: reviewer-0');
-    expect(firstDispatch.prompt).not.toContain('malicious prompt');
-    expect(firstDispatch.background).toBe(false);
-    expect(() =>
-      guard.before({
-        tool: 'subagent',
-        agent: supervisor,
-        sessionID: root,
-        input: { agent: 'reviewer-0' },
-      }),
-    ).toThrow('invalid or repeated reviewer');
-    expect(() =>
-      guard.before({
-        tool: 'subagent',
-        agent: supervisor,
-        sessionID: 'ses_other_root',
-        input: { agent: 'reviewer-1' },
-      }),
-    ).toThrow('unexpected supervisor session');
-
-    guard.before({
-      tool: 'subagent',
-      agent: supervisor,
-      sessionID: root,
-      input: { agent: 'reviewer-1' },
-    });
-
-    const firstSubmission = {
-      decision: 'request_changes',
-      markdown: '## Review:\n\na',
-      findings: [],
-    };
-    guard.after({
-      tool: 'submit_review',
-      agent: 'reviewer-0',
-      sessionID: 'ses_multi_child_a',
-      status: 'completed',
-      input: firstSubmission,
-    });
-    const subagentResult = { content: 'CHILD_NARRATIVE_CANARY' };
-    guard.after({
-      tool: 'subagent',
-      agent: supervisor,
-      sessionID: root,
-      status: 'completed',
-      input: { agent: 'reviewer-0' },
-      result: subagentResult,
-    });
-    expect(JSON.parse(subagentResult.content)).toMatchObject({
-      participant: 'reviewer-0',
-      sessionId: 'ses_multi_child_a',
-      submission: firstSubmission,
-    });
-    expect(subagentResult.content).not.toContain('CHILD_NARRATIVE_CANARY');
-
-    // An errored child submission is not a formal report, so the root stays blocked.
-    guard.after({
-      tool: 'submit_review',
-      agent: 'reviewer-1',
-      sessionID: 'ses_multi_child_b',
-      status: 'error',
-      input: { decision: 'comment', markdown: '## Review:\n\nb', findings: [] },
-    });
-    expect(() =>
-      guard.before({ tool: 'submit_review', agent: supervisor, sessionID: root }),
-    ).toThrow('all reviewers must submit first');
-
-    guard.after({
-      tool: 'submit_review',
-      agent: 'reviewer-1',
-      sessionID: 'ses_multi_child_b',
-      status: 'completed',
-      input: { decision: 'comment', markdown: '## Review:\n\nb', findings: [] },
-    });
-    expect(() =>
-      guard.before({ tool: 'submit_review', agent: supervisor, sessionID: 'ses_other_root' }),
-    ).toThrow('all reviewers must submit first');
-    expect(() =>
-      guard.before({
-        tool: 'submit_review',
-        agent: supervisor,
-        sessionID: root,
-        input: { decision: 'request_changes', markdown: '## Review:\n\na', coverage: [] },
-      }),
-    ).not.toThrow();
+    await expect(
+      tool.execute({ decision: 'maybe', markdown: synthesisMarkdown }, { sessionID: rootSession }),
+    ).rejects.toThrow();
+    await expect(
+      tool.execute(
+        { decision: 'request_changes', markdown: synthesisMarkdown },
+        { sessionID: rootSession },
+      ),
+    ).resolves.toEqual({ content: 'Review submitted.' });
+    await expect(
+      tool.execute(
+        { decision: 'comment', markdown: synthesisMarkdown },
+        { sessionID: rootSession },
+      ),
+    ).rejects.toThrow();
   });
 
-  it('rejects reviewer coverage before success and accepts the corrected findings call', async () => {
+  it('accepts raw unrelated extra fields at the delivered tool boundary', async () => {
     const delivered = await runScenario();
-    const { guard, tool } = await loadDeliveredPlugins(delivered);
-    const reviewer = 'reviewer-0';
-    const sessionID = 'ses_multi_child_a';
-    const call = async (input: Record<string, unknown>) => {
-      const event = { tool: 'submit_review', agent: reviewer, sessionID, status: 'completed' };
-      guard.before({ ...event, input });
-      const result = await tool.execute(input, { sessionID });
-      guard.after({ ...event, input });
-      return result;
-    };
+    const tool = await loadDeliveredSubmitTool(delivered);
 
     await expect(
-      call({
-        decision: 'comment',
-        markdown: reviewerMarkdown['reviewer-0'],
-        coverage: [],
-      }),
-    ).rejects.toThrow();
-    await expect(
-      call({
-        decision: 'comment',
-        markdown: reviewerMarkdown['reviewer-0'],
-      }),
-    ).rejects.toThrow();
-    await expect(
-      call({
-        decision: 'comment',
-        markdown: reviewerMarkdown['reviewer-0'],
-        findings: findings['reviewer-0'],
-      }),
+      tool.execute(
+        { decision: 'comment', markdown: synthesisMarkdown, findings: [] },
+        { sessionID: rootSession },
+      ),
     ).resolves.toEqual({ content: 'Review submitted.' });
   });
 
-  it('rejects supervisor findings before success and accepts the corrected coverage call', async () => {
-    const delivered = await runScenario();
-    const { guard, tool } = await loadDeliveredPlugins(delivered);
-    const supervisor = 'multi-review-supervisor';
-    dispatchReviewers(guard);
-    const call = async (agent: string, sessionID: string, input: Record<string, unknown>) => {
-      const event = { tool: 'submit_review', agent, sessionID, status: 'completed' };
-      guard.before({ ...event, input });
-      const result = await tool.execute(input, { sessionID });
-      guard.after({ ...event, input });
-      return result;
+  it('archives available child sessions without capping them at the roster', async () => {
+    const extra = {
+      id: 'ses_multi_child_c',
+      parentID: rootSession,
+      agent: 'reviewer-2',
+      model: { providerID: 'compte-rendu', id: 'another-model' },
+      outcome: 'succeeded',
     };
-    for (const participant of ['reviewer-0', 'reviewer-1'] as const) {
-      await call(
-        participant,
-        participant === 'reviewer-0' ? 'ses_multi_child_a' : 'ses_multi_child_b',
-        {
-          decision: reviewerDecision[participant],
-          markdown: reviewerMarkdown[participant],
-          findings: findings[participant],
-        },
-      );
-    }
-    const coverage = [
-      { findingId: 'reviewer-0-f1', outcome: 'retained', finalId: 'reviewer-0-f1' },
-      { findingId: 'reviewer-1-f1', outcome: 'merged', finalId: 'reviewer-0-f1' },
-    ];
+    const result = await runScenario({ children: [...defaultChildren, extra] });
 
-    await expect(
-      call(supervisor, rootSession, {
-        decision: 'request_changes',
-        markdown: synthesisMarkdown,
-        coverage,
-        findings: findings['reviewer-0'],
-      }),
-    ).rejects.toThrow();
-    await expect(
-      call(supervisor, rootSession, {
-        decision: 'request_changes',
-        markdown: synthesisMarkdown,
-        coverage,
-      }),
-    ).resolves.toEqual({ content: 'Review submitted.' });
-  });
-
-  it('rejects structurally invalid coverage before success and accepts the correction', async () => {
-    const delivered = await runScenario();
-    const { guard, tool } = await loadDeliveredPlugins(delivered);
-    const supervisor = 'multi-review-supervisor';
-    dispatchReviewers(guard);
-    const call = async (agent: string, sessionID: string, input: Record<string, unknown>) => {
-      const event = { tool: 'submit_review', agent, sessionID, status: 'completed' };
-      guard.before({ ...event, input });
-      const result = await tool.execute(input, { sessionID });
-      guard.after({ ...event, input });
-      return result;
-    };
-    for (const participant of ['reviewer-0', 'reviewer-1'] as const) {
-      await call(
-        participant,
-        participant === 'reviewer-0' ? 'ses_multi_child_a' : 'ses_multi_child_b',
-        {
-          decision: reviewerDecision[participant],
-          markdown: reviewerMarkdown[participant],
-          findings: findings[participant],
-        },
-      );
-    }
-    const validInput = {
-      decision: 'request_changes',
-      // Structured coverage carries the provenance; the public Markdown does
-      // not need to repeat internal finding ids.
-      markdown: '## Review:\n\nSynthesis without restating finding ids.',
-      coverage: [
-        { findingId: 'reviewer-0-f1', outcome: 'retained', finalId: 'reviewer-0-f1' },
-        { findingId: 'reviewer-1-f1', outcome: 'merged', finalId: 'reviewer-0-f1' },
-      ],
-    };
-
-    await expect(
-      call(supervisor, rootSession, {
-        ...validInput,
-        coverage: validInput.coverage.slice(0, 1),
-      }),
-    ).rejects.toThrow();
-    await expect(
-      call(supervisor, rootSession, {
-        ...validInput,
-        coverage: [{ findingId: 'reviewer-0-f1', outcome: 'retained' }],
-      }),
-    ).rejects.toThrow();
-    await expect(
-      call(supervisor, rootSession, {
-        ...validInput,
-        coverage: [
-          { findingId: 'reviewer-0-f1', outcome: 'retained', finalId: 'reviewer-0-f1' },
-          { findingId: 'reviewer-1-f1', outcome: 'merged', finalId: 'reviewer-1-f1' },
-        ],
-      }),
-    ).rejects.toThrow();
-    await expect(call(supervisor, rootSession, validInput)).resolves.toEqual({
-      content: 'Review submitted.',
-    });
+    expect(result.terminal).toMatchObject({ status: 'succeeded' });
+    expect(result.manifest.files).toEqual(
+      expect.arrayContaining(['opencode-export-ses_multi_child_c.json']),
+    );
   });
 });

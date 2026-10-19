@@ -1149,13 +1149,14 @@ To return new jobs to single-model review, PUT the current revision with
 running jobs retain their frozen selection. No Runner restart is required for
 this selection change.
 
-Each job uses one Sandbox and one concurrency slot. Independent reviewer
-sessions run in parallel, then a supervisor combines their submitted findings.
-All sessions share the job deadline and route-restricted grant. The retained
-`multi-review.json`, session exports, and manifest record the frozen selection,
-participant identities, findings, and final coverage. Missing or invalid
-participant evidence produces a failed job, not a partial approval. The public
-dashboard still shows one job and one final decision; it has no settings editor.
+Each job uses one Sandbox and one concurrency slot. A supervisor asks the
+configured models for independent reviews and combines their reports into one
+final decision and Markdown review. The agent manages the internal workflow;
+child reports do not have to follow a separate submission schema. All sessions
+share the job deadline and route-restricted grant. The retained `multi-review.json`,
+session exports, and manifest record the frozen selection and available session
+evidence. Runner validates the final submission and root-session completion.
+The public dashboard shows one job and one final decision; it has no settings editor.
 
 ### First-deployment acceptance gate
 
