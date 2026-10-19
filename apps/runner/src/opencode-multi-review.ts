@@ -1,7 +1,6 @@
 import { Option, Schema } from 'effect';
 import { RunnerFailureCause } from '@compte-rendu/contracts';
-import { ReviewSubmissionSchema } from './review-submission-contract.js';
-import type { ReviewSubmission } from './review-submission-contract.js';
+import { parseReviewSubmission, type ReviewSubmission } from './review-submission-contract.js';
 
 export type { ReviewSubmission };
 
@@ -48,47 +47,22 @@ export const ChildSession = Schema.Struct({
 });
 export type ChildSession = typeof ChildSession.Type;
 
-const ChildSessionList = Schema.Union([
-  Schema.Array(ChildSession),
-  Schema.Struct({ data: Schema.Array(ChildSession) }),
-  Schema.Struct({ sessions: Schema.Array(ChildSession) }),
-]);
-
 const AssistantMessage = Schema.Struct({
   type: Schema.Literal('assistant'),
+  id: Schema.optional(Schema.NonEmptyString),
   finish: Schema.optional(Schema.String),
-  agent: Schema.optional(Schema.String),
+  agent: Schema.optional(Schema.NonEmptyString),
   model: Schema.optional(SessionModelRef),
   content: Schema.optional(Schema.Array(Schema.Unknown)),
 });
 
-// Every assistant message in a session export must carry the identity the job
-// selected: the expected agent and the expected provider/model. A missing or
-// mismatched identity fails closed rather than being silently accepted from the
-// session-level info alone.
-const AssistantMessageIdentity = Schema.Struct({
-  type: Schema.Literal('assistant'),
-  agent: Schema.NonEmptyString,
-  model: SessionModelRef,
-  content: Schema.Array(Schema.Unknown),
-});
+const AssistantTag = Schema.Struct({ type: Schema.Literal('assistant') });
 
-const AssistantMessageTag = Schema.Struct({ type: Schema.Literal('assistant') });
+const TextTag = Schema.Struct({ type: Schema.Literal('text') });
 
-const SubmitReviewTool = Schema.Struct({
-  type: Schema.Literal('tool'),
-  name: Schema.Literal('submit_review'),
-  state: Schema.Struct({
-    status: Schema.String,
-    input: Schema.optional(Schema.Unknown),
-  }),
-});
-
-// A tool part that is identifiably `submit_review` but whose envelope does not
-// match the known shape must fail closed instead of being skipped.
-const KnownSubmitReviewTool = Schema.Struct({
-  type: Schema.Literal('tool'),
-  name: Schema.Literal('submit_review'),
+const TextPart = Schema.Struct({
+  type: Schema.Literal('text'),
+  text: Schema.String,
 });
 
 const TerminalIdle = Schema.Struct({
@@ -102,20 +76,6 @@ export type SubmissionResult<T> =
 
 export const decodeSessionExport = (value: unknown): MultiSessionExport | undefined =>
   Option.getOrUndefined(Schema.decodeUnknownOption(MultiSessionExport)(value));
-
-export const parseChildSessions = (stdout: string): readonly ChildSession[] | undefined => {
-  try {
-    const decoded = Option.getOrUndefined(
-      Schema.decodeUnknownOption(ChildSessionList)(JSON.parse(stdout)),
-    );
-    if (decoded === undefined) return undefined;
-    if (Array.isArray(decoded)) return decoded;
-    if ('data' in decoded) return (decoded as { readonly data: readonly ChildSession[] }).data;
-    return (decoded as { readonly sessions: readonly ChildSession[] }).sessions;
-  } catch {
-    return undefined;
-  }
-};
 
 // Native `session.list` returns `{ data, cursor }`, and the final non-empty
 // page still advertises a `next` cursor, so enumeration must follow pagination
@@ -151,15 +111,18 @@ export const sessionSucceeded = (value: unknown, sessionId: string): boolean => 
   ) {
     return false;
   }
-  let lastAssistantFinish: unknown;
-  for (let index = exported.messages.length - 1; index >= 0; index -= 1) {
-    const assistant = Schema.decodeUnknownOption(AssistantMessage)(exported.messages[index]);
-    if (Option.isSome(assistant)) {
-      lastAssistantFinish = assistant.value.finish;
-      break;
-    }
+  const finalAssistant = finalAssistantMessage(exported.messages);
+  return finalAssistant !== undefined && finalAssistant.finish === 'stop';
+};
+
+const finalAssistantMessage = (
+  messages: readonly unknown[],
+): typeof AssistantMessage.Type | undefined => {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (Option.isNone(Schema.decodeUnknownOption(AssistantTag)(messages[index]))) continue;
+    return Option.getOrUndefined(Schema.decodeUnknownOption(AssistantMessage)(messages[index]));
   }
-  return lastAssistantFinish === 'stop';
+  return undefined;
 };
 
 export type SessionIdentity = {
@@ -173,52 +136,66 @@ export type SessionIdentity = {
 const identityMatches = (value: SessionModelRef, expected: SessionIdentity['model']): boolean =>
   value.providerID === expected.providerID && value.id === expected.id;
 
-const collectSubmitInputs = (
-  value: unknown,
-  identity: SessionIdentity,
-): { readonly inputs: readonly unknown[] } | { readonly cause: FailureCause } => {
+export type FinalAssistant =
+  | {
+      readonly text: string;
+      readonly messageId?: string;
+      readonly cause?: undefined;
+    }
+  | {
+      readonly text?: undefined;
+      readonly messageId?: undefined;
+      readonly cause: FailureCause;
+    };
+
+export const finalAssistantText = (value: unknown, identity?: SessionIdentity): FinalAssistant => {
   const exported = decodeSessionExport(value);
   if (exported === undefined) return { cause: 'result-schema-failure' };
-  const inputs: unknown[] = [];
-  for (const message of exported.messages) {
-    if (Option.isNone(Schema.decodeUnknownOption(AssistantMessageTag)(message))) continue;
-    const assistant = Option.getOrUndefined(
-      Schema.decodeUnknownOption(AssistantMessageIdentity)(message),
+  let finalAssistant: typeof AssistantMessage.Type | undefined;
+  for (let index = exported.messages.length - 1; index >= 0; index -= 1) {
+    if (Option.isNone(Schema.decodeUnknownOption(AssistantTag)(exported.messages[index]))) continue;
+    finalAssistant = Option.getOrUndefined(
+      Schema.decodeUnknownOption(AssistantMessage)(exported.messages[index]),
     );
-    if (
-      assistant === undefined ||
-      assistant.agent !== identity.agent ||
-      !identityMatches(assistant.model, identity.model)
-    ) {
-      return { cause: 'result-schema-failure' };
-    }
-    for (const part of assistant.content) {
-      if (Option.isNone(Schema.decodeUnknownOption(KnownSubmitReviewTool)(part))) continue;
-      const tool = Option.getOrUndefined(Schema.decodeUnknownOption(SubmitReviewTool)(part));
-      if (tool === undefined) return { cause: 'result-schema-failure' };
-      const status = tool.state.status;
-      if (status === 'error') continue;
-      if (status !== 'completed') return { cause: 'result-schema-failure' };
-      inputs.push(tool.state.input);
-    }
+    break;
   }
-  return { inputs };
+  if (finalAssistant === undefined) return { cause: 'zero-results' };
+  if (finalAssistant.finish !== 'stop') return { cause: 'missing-terminal-message' };
+  if (identity !== undefined) {
+    if (
+      finalAssistant.agent !== identity.agent ||
+      finalAssistant.model === undefined ||
+      !identityMatches(finalAssistant.model, identity.model)
+    )
+      return { cause: 'result-schema-failure' };
+  }
+  const texts: string[] = [];
+  for (const part of finalAssistant.content ?? []) {
+    if (Option.isNone(Schema.decodeUnknownOption(TextTag)(part))) continue;
+    const decoded = Option.getOrUndefined(Schema.decodeUnknownOption(TextPart)(part));
+    if (decoded === undefined) return { cause: 'result-schema-failure' };
+    texts.push(decoded.text);
+  }
+  const text = texts.join('');
+  return {
+    text,
+    ...(finalAssistant.id === undefined ? {} : { messageId: finalAssistant.id }),
+  };
 };
 
 export const extractReviewSubmission = (
   value: unknown,
-  identity: SessionIdentity,
+  identity?: SessionIdentity,
 ): SubmissionResult<ReviewSubmission> => {
-  const collected = collectSubmitInputs(value, identity);
-  if ('cause' in collected) return { cause: collected.cause };
-  if (collected.inputs.length === 0) return { cause: 'zero-results' };
-  if (collected.inputs.length > 1) return { cause: 'multiple-results' };
-  // Excess keys are ignored on both sides: OpenCode's tool boundary normalizes
-  // them away while the exported session keeps the raw call, so unrelated extra
-  // fields must never turn a valid decision and Markdown into a failure.
-  const decoded = Schema.decodeUnknownOption(ReviewSubmissionSchema)(collected.inputs[0]);
-  if (Option.isNone(decoded)) return { cause: 'result-schema-failure' };
-  return { value: decoded.value };
+  const assistant = finalAssistantText(value, identity);
+  if (assistant.cause !== undefined) return { cause: assistant.cause };
+  if (assistant.text.trim().length === 0) return { cause: 'empty-final-text' };
+  const decoded = parseReviewSubmission(assistant.text);
+  if (decoded === undefined) return { cause: 'result-schema-failure' };
+  return {
+    value: decoded,
+    ...(assistant.messageId === undefined ? {} : { messageId: assistant.messageId }),
+  };
 };
 
 export const participantId = (index: number) => `reviewer-${index}`;
@@ -244,7 +221,6 @@ const reviewerPermissions = (
   shellPermissionRules: ReadonlyArray<readonly [string, 'allow' | 'deny']>,
 ): readonly Permission[] => [
   { action: '*', resource: '*', effect: 'deny' },
-  { action: 'submit_review', resource: '*', effect: 'allow' },
   { action: 'subagent', resource: '*', effect: 'deny' },
   ...shellPermissionRules.map(([resource, effect]) => ({
     action: 'shell',
@@ -269,7 +245,6 @@ const supervisorPermissions = (
     resource: participant,
     effect: 'allow' as const,
   })),
-  { action: 'submit_review', resource: '*', effect: 'allow' },
 ];
 
 export const multiReviewConfig = (options: {
@@ -285,6 +260,32 @@ export const multiReviewConfig = (options: {
       { settings: { baseURL: options.serviceBaseUrl } },
     ]),
   );
+  if (roster.length === 1) {
+    const route = roster[0]!.route;
+    return JSON.stringify({
+      model: modelReference(route),
+      providers: {
+        [MULTI_PROVIDER_ID]: {
+          name: 'Compte-rendu service',
+          canonical: 'opencode-go',
+          package: '@opencode/ai/providers/openai-compatible',
+          settings: {
+            baseURL: options.serviceBaseUrl,
+            apiKey: '{env:OPENCODE_API_KEY}',
+          },
+          models,
+        },
+      },
+      agents: {
+        review: {
+          description: 'Pull request reviewer',
+          mode: 'primary',
+          model: modelReference(route),
+          permissions: reviewerPermissionsValue,
+        },
+      },
+    });
+  }
   return JSON.stringify({
     model: modelReference(options.selection.synthesis),
     providers: {
@@ -319,26 +320,4 @@ export const multiReviewConfig = (options: {
       ),
     },
   });
-};
-
-export const multiReviewSupervisorPrompt = (options: {
-  readonly roster: readonly { readonly participant: string; readonly route: string }[];
-  readonly baseBrief: string;
-}): string => {
-  const roster =
-    options.roster.length === 0
-      ? '- none'
-      : options.roster
-          .map(({ participant, route }) => `- ${participant} (${modelReference(route)})`)
-          .join('\n');
-  return (
-    'You are the multi-model review supervisor. Run independent reviews with the configured models and then ' +
-    'synthesize their reports into one final review. Do not inspect the repository, read files, or run shell commands ' +
-    'yourself; use the subagent and submit_review tools. Participants:\n' +
-    `${roster}\n\nFrozen review brief:\n${options.baseBrief}\n\n` +
-    'Give each reviewer this same brief and let it review independently; use whatever orchestration you judge best. ' +
-    'Reviewers return their own reports. Then synthesize those reports into one review, preserving substantive ' +
-    'disagreements rather than forcing consensus. Submit your final decision and publishable Markdown with ' +
-    'submit_review; the Markdown must begin with "## Review:". If a submission is rejected, correct it in the same session.'
-  );
 };

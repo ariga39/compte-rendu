@@ -2413,9 +2413,14 @@ describe('Core Worker', () => {
     }
   });
 
-  it.each([true, false])(
-    'publishes a structured vote only when evidence agrees (matching=%s)',
-    async (matching) => {
+  it.each([
+    { matching: true, markdown: '## Review:\nChange the boundary check.' },
+    { matching: false, markdown: '## Review:\nChange the boundary check.' },
+    { matching: true, markdown: 'TLDR: Request changes — the boundary excludes 100.' },
+    { matching: true, markdown: 'Request changes: the boundary excludes 100.' },
+  ])(
+    'publishes a structured vote only when evidence agrees ($matching, $markdown)',
+    async ({ matching, markdown }) => {
       const database = new SqliteD1Database();
       const store = createD1ReviewStateStore(database);
       const claim = await store.claimReview({
@@ -2446,7 +2451,10 @@ describe('Core Worker', () => {
         },
       );
       const callback = JSON.parse(await successfulCallback(claim.runId));
-      callback.result = { version: 2, decision: 'request_changes', markdown: callback.result };
+      callback.result = { version: 2, decision: 'request_changes', markdown };
+      callback.evidence.validatedReview = await evidenceField(
+        Buffer.from(markdown).toString('base64'),
+      );
       const manifest = JSON.parse(
         Buffer.from(callback.evidence.manifest.content, 'base64').toString(),
       );
@@ -2467,7 +2475,11 @@ describe('Core Worker', () => {
       if (matching) {
         expect(response.status).toBe(202);
         expect(reviews).toEqual([
-          expect.objectContaining({ event: 'REQUEST_CHANGES', commit_id: eligibleEvent.headSha }),
+          expect.objectContaining({
+            event: 'REQUEST_CHANGES',
+            commit_id: eligibleEvent.headSha,
+            body: expect.stringContaining(markdown),
+          }),
         ]);
         expect(await createD1ReviewStateStore(database).getRunOutcome(claim.runId)).toMatchObject({
           status: 'completed',

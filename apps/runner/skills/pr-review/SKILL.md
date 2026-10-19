@@ -1,6 +1,6 @@
 ---
 name: pr-review
-description: Review an exact pull request diff for high-confidence, actionable defects.
+description: Challenge the necessity, design and correctness of an exact pull request.
 ---
 
 # Pull request review
@@ -53,66 +53,64 @@ token state, and do not broaden the allowed permissions.
 Start with `git diff --find-renames MERGE_BASE_SHA HEAD_SHA` and use the head
 revision as the source of truth. Keep the admitted `BASE_SHA` and `HEAD_SHA` as
 freshness/context facts; do not use `BASE_SHA` as the diff starting point.
-Every finding must point to a changed line on the head side. Read only the
-changed code and the call sites, types, configuration, or tests needed to
-establish reachability and impact.
+Read the changed code and the callers, types, configuration, tests and history
+needed to assess the change. Ground findings in a specific changed line or
+changed behavior; architectural and necessity concerns may span several files.
 
-Inspect adversarially for concrete correctness, security, permission,
-reliability, CI, performance, and maintainability defects. Keep a candidate
-only when all of these are true:
+## Challenge the change
 
-- the defect is introduced by this diff;
-- the affected behavior is reachable or materially risky;
-- it is serious enough to request a change;
-- it is not already covered or duplicated by another finding; and
-- it is concrete rather than speculative, stylistic, or preference-based.
+Treat the PR description as a claim to verify, not a specification to accept
+uncritically. Ask whether the problem is real, whether the PR is necessary, and
+whether the proposed behavior actually solves it. Look for counterexamples,
+missing assumptions and evidence that contradicts the author's explanation.
 
-Prefer zero findings to a weak finding. Return at most five findings, ordered
-by severity. Do not report formatting, naming, style, or design preferences
-unless they cause a concrete bug, security problem, or clearly explainable
-maintenance failure. Do not report tangents.
+Review the implementation cost as well as correctness. Challenge unnecessary
+abstractions, dependencies, indirection, compatibility layers, speculative
+features and scope expansion. Prefer a smaller, direct solution when it meets
+the actual requirement. Explain what complexity costs and which simpler change
+would work; do not demand your preferred architecture without evidence.
 
-Each finding message must be concise and contain the concrete risk, decisive
-changed-line or changed-behavior evidence, and the smallest practical fix.
+Inspect correctness, security, permissions, reliability, CI and performance.
+Keep findings introduced by the change that have a concrete consequence and an
+actionable correction. A disproven premise or demonstrably unnecessary design
+cost can warrant changes; criticism is not limited to syntax or local bugs.
+Do not invent requirements, flag unrelated pre-existing issues, or turn taste
+and speculative risk into blockers. Prefer zero findings to weak findings.
+Return at most five findings, most important first, without duplicates.
 
 Use the tools that materially improve the review, including ordinary file
 reads, Git history, GitHub queries, and repository inspection when useful. Keep
 the bounded run focused on the target and avoid wasting time or changing the
 checkout; do not publish, commit, or push.
 
-Return a concise human-readable Markdown review ready to publish. Include up to
-five high-confidence actionable findings when present, with clear file/line
-references in prose and no weak or no-action items. Immediately after the
-`## Review:` heading, the first prose sentence must state the overall verdict
-and exact actionable-finding count: `No actionable findings.`, `Found 1
-actionable finding.`, or `Found N actionable findings.` for two to five. Put no
-scope recap, PR summary, changed-file or commit count, pagination status, tool
-activity, CI result, or review-process narration before that sentence. Omit
-those details entirely unless they materially establish a finding; even then,
-put them after the verdict. For zero findings, stop after the verdict unless a
-short explanation materially helps. Do not impose artificial brevity on a
-technical finding that needs detail.
-Choose an explicit `decision` that matches the review you actually completed:
+## Final response
 
-- `approve` — after a complete review of the exact diff, no blocking defect was
-  identified. Non-blocking suggestions may remain.
-- `request_changes` — at least one concrete, actionable defect should be fixed
-  before merging; the review explains its impact and the required correction.
-- `comment` — feedback without a definite merge recommendation, for example when
-  the context is insufficient for a definite recommendation.
+Return one JSON object with `decision` and `markdown`, without surrounding prose
+or a code fence. The Markdown is the publishable review, not a record of your
+reasoning or tool activity.
 
-Style, naming, formatting, and preference comments are never blocking. Do not use
-`request_changes` for speculative risk or taste. Do not infer the decision from a
-finding count, Markdown keywords, a process exit code, or a confidence score. An
-incomplete review, a context or tooling failure, or any inability to establish the
-diff's behavior must not be labeled `approve`; use `comment` when a definite
-recommendation is not warranted. The decision and the Markdown must agree.
+Start the Markdown's first line with `TLDR:` and state the recommendation and
+its decisive reason immediately. For example:
 
-Tool calls and intermediate work may remain visible during the review. After
-completing all analysis, call `submit_review` exactly once with the `decision` and
-the complete publishable Markdown in its `markdown` argument. The `markdown`
-argument itself must contain only findings and the conclusion ready to publish,
-with no visible planning, self-dialogue, candidate triage, or process narration.
-After optional outer whitespace, begin that argument with exactly `## Review:`.
-Do not emit the review as terminal prose; terminal assistant messages are
-evidence only.
+```text
+TLDR: Request changes — retries can publish the same review twice.
+
+- `src/publish.ts:42`: A timeout after acceptance retries the POST without
+  checking the existing review. Reconcile the run marker before retrying.
+```
+
+For a clean review, a short `TLDR: Approve — no blocking issues found.` is enough.
+Do not repeat the PR description, summarize every file, list checks performed,
+or pad the result with empty sections. Include only useful findings and evidence;
+use enough detail to explain a real problem, but avoid repetition.
+
+Choose a decision consistent with the completed review:
+
+- `approve`: the review is complete and no blocking issue was identified.
+- `request_changes`: a concrete correctness, security or design problem should
+  be fixed before merging. Explain the consequence and practical correction.
+- `comment`: the evidence does not support a definite recommendation.
+
+Never label an incomplete review or a context/tooling failure `approve`. Do not
+infer the decision from finding counts or process exit codes. Concision, the
+TLDR template and review style are instructions, not additional validity rules.

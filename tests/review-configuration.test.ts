@@ -130,3 +130,17 @@ it('protects settings through ingress and preserves valid settings on invalid or
     database.close();
   }
 });
+
+it('accepts one reviewer as a persisted review configuration', async () => {
+  const database = new SqliteD1Database();
+  try {
+    const chosen = { reviewers: ['deepseek-review'], synthesis: 'deepseek-review' };
+    const core = createCoreWorker(environment(database));
+    const response = await core.fetch(settingsRequest('PUT', { revision: 0, selection: chosen }));
+    expect(response.status).toBe(200);
+    const restored = await createCoreWorker(environment(database)).fetch(settingsRequest('GET'));
+    expect(await restored.json()).toEqual({ revision: 1, selection: chosen });
+  } finally {
+    database.close();
+  }
+});

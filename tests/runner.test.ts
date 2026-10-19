@@ -2,7 +2,6 @@ import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from '
 import { createServer, request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 import {
   createRunner as createProductionRunner,
@@ -15,21 +14,47 @@ import { SqliteD1Database } from './support/d1-database';
 
 delete process.env.REVIEW_MODEL_CONFIG;
 
+const defaultReviewMarkdown = '## Review:\n\nNo findings.';
+
 const sessionExportJson = (
   id: string,
   options: {
     readonly outcome?: string;
     readonly finish?: string;
     readonly terminalIdle?: boolean;
+    readonly decision?: string;
+    readonly markdown?: string;
+    readonly text?: string | null;
+    readonly messageId?: string;
+    readonly agent?: string;
+    readonly model?: { readonly providerID: string; readonly id: string };
   } = {},
-) =>
-  JSON.stringify({
-    info: { id, outcome: options.outcome ?? 'succeeded' },
+) => {
+  const agent = options.agent ?? 'review';
+  const model = options.model ?? { providerID: 'opencode-go', id: 'deepseek-flash' };
+  const text =
+    options.text === null
+      ? undefined
+      : (options.text ??
+        JSON.stringify({
+          decision: options.decision ?? 'comment',
+          markdown: options.markdown ?? defaultReviewMarkdown,
+        }));
+  return JSON.stringify({
+    info: { id, outcome: options.outcome ?? 'succeeded', agent, model },
     messages: [
-      { type: 'assistant', finish: options.finish ?? 'stop' },
+      {
+        type: 'assistant',
+        id: options.messageId ?? 'msg-final',
+        agent,
+        model,
+        finish: options.finish ?? 'stop',
+        ...(text === undefined ? {} : { content: [{ type: 'text', text }] }),
+      },
       ...(options.terminalIdle === false ? [] : [{ type: 'idle', outcome: 'succeeded' }]),
     ],
   });
+};
 
 const structuredResult = (markdown: string, decision = 'comment') => ({
   version: 2,
@@ -56,48 +81,16 @@ const standardModelConfig = JSON.stringify({
   },
 });
 
-const submitReviewEvent = (
-  markdown = '## Review:\n\nNo findings.',
-  options: {
-    readonly callID?: string;
-    readonly status?: string;
-    readonly decision?: string;
-    readonly sessionID?: string;
-  } = {},
-) => {
-  const status = options.status ?? 'completed';
-  const input = { decision: options.decision ?? 'comment', markdown };
-  return JSON.stringify({
-    type: 'tool_use',
-    sessionID: options.sessionID ?? 'scenario-session',
+const finalMarkdownJsonl = (markdown = defaultReviewMarkdown, sessionID = 'scenario-session') =>
+  JSON.stringify({
+    type: 'text',
+    sessionID,
     part: {
-      type: 'tool',
-      id: options.callID ?? 'call-submit-review',
-      tool: 'submit_review',
-      state:
-        status === 'completed'
-          ? { status: 'completed', input, output: 'Review submitted.', title: 'Review submitted.' }
-          : { status, input, error: 'submission failed' },
+      type: 'text',
+      messageID: 'msg-final',
+      text: JSON.stringify({ decision: 'comment', markdown }),
     },
   });
-};
-
-const finalMarkdownJsonl = (
-  markdown = '## Review:\n\nNo findings.',
-  sessionID = 'scenario-session',
-) =>
-  [
-    JSON.stringify({
-      type: 'text',
-      sessionID,
-      part: {
-        type: 'text',
-        messageID: 'msg-final',
-        text: 'I finished reviewing the pull request.',
-      },
-    }),
-    submitReviewEvent(markdown, { sessionID }),
-  ].join('\n');
 
 const writeEvidenceFixture = async (
   args: readonly string[],
@@ -343,6 +336,7 @@ const runAgentScenario = async (scenario: {
   let createArgs: readonly string[] | undefined;
   let agentArgs: readonly string[] | undefined;
   let secretArgs: readonly string[] | undefined;
+  let skillText: string | undefined;
   const allowedResources: string[] = [];
   const removedRuleIds: string[] = [];
   const runner = createRunner({
@@ -388,7 +382,23 @@ const runAgentScenario = async (scenario: {
       ) {
         await writeFile(args[2], scenario.sessionExport, { mode: 0o600 });
       }
-      if (args[0] === 'create') createArgs = args;
+      if (args[0] === 'create') {
+        createArgs = args;
+        const configRootArg = args.find((value) => value.startsWith('XDG_CONFIG_HOME='));
+        if (configRootArg !== undefined) {
+          try {
+            skillText = await readFile(
+              join(
+                configRootArg.slice('XDG_CONFIG_HOME='.length),
+                'opencode/skills/pr-review/SKILL.md',
+              ),
+              'utf8',
+            );
+          } catch {
+            skillText = undefined;
+          }
+        }
+      }
       if (args[0] === 'secret' && args[1] === 'set-custom') {
         secretArgs = args;
         await scenario.onModelSecret?.(args);
@@ -479,6 +489,7 @@ const runAgentScenario = async (scenario: {
     createArgs,
     agentArgs,
     secretArgs,
+    skillText,
     allowedResources,
     removedRuleIds,
   };
@@ -491,15 +502,17 @@ type ReminderRound = {
   readonly truncated?: boolean;
   readonly advanceMs?: number;
   readonly exportFinish?: string;
+  readonly finalText?: string | null;
 };
 
 const runReminderScenario = async (scenario: {
   runId: string;
   rounds: readonly ReminderRound[];
+  sessionId?: string;
 }) => {
   const baseSha = '1111111111111111111111111111111111111111';
   const headSha = '2222222222222222222222222222222222222222';
-  const sessionId = 'session-reminder';
+  const sessionId = scenario.sessionId ?? 'session-reminder';
   const sandboxName = `compte-rendu-${runnerJobFields.id}`;
   const agentCommands: string[][] = [];
   const agentTimeouts: Array<number | undefined> = [];
@@ -534,6 +547,9 @@ const runReminderScenario = async (scenario: {
           args[2],
           sessionExportJson(sessionId, {
             finish: scenario.rounds[Math.max(agentRuns - 1, 0)]?.exportFinish,
+            ...(scenario.rounds[Math.max(agentRuns - 1, 0)]?.finalText === undefined
+              ? {}
+              : { text: scenario.rounds[Math.max(agentRuns - 1, 0)]!.finalText }),
           }),
           { mode: 0o600 },
         );
@@ -545,6 +561,9 @@ const runReminderScenario = async (scenario: {
           : args.includes('export')
             ? sessionExportJson(sessionId, {
                 finish: scenario.rounds[Math.max(agentRuns - 1, 0)]?.exportFinish,
+                ...(scenario.rounds[Math.max(agentRuns - 1, 0)]?.finalText === undefined
+                  ? {}
+                  : { text: scenario.rounds[Math.max(agentRuns - 1, 0)]!.finalText }),
               })
             : args.includes('session')
               ? `[{"id":"${sessionId}"}]\n`
@@ -602,16 +621,6 @@ const completedWithoutSubmitJsonl = (sessionId: string) =>
       text: 'I completed the review without submitting.',
     },
   });
-
-const submitReminderJsonl = (sessionId: string, markdown: string) =>
-  [
-    JSON.stringify({
-      type: 'text',
-      sessionID: sessionId,
-      part: { type: 'text', messageID: 'msg-reminder', text: 'Submitting the review now.' },
-    }),
-    submitReviewEvent(markdown, { callID: 'call-reminder', sessionID: sessionId }),
-  ].join('\n');
 
 describe('Runner Job HTTP interface', () => {
   it('does not claim durable work until local Job admission is fully configured', async () => {
@@ -736,7 +745,7 @@ describe('Runner Job HTTP interface', () => {
           : args.includes('session')
             ? '[{"id":"session-1"}]\n'
             : args.includes('export')
-              ? ''
+              ? sessionExportJson('session-1')
               : options.captureStdout === true
                 ? finalMarkdownJsonl(undefined, 'session-1')
                 : '',
@@ -1323,12 +1332,13 @@ describe('Runner Job HTTP interface', () => {
     expect(manifest.terminal).not.toHaveProperty('cause');
   });
 
-  it('publishes the completed submit_review tool Markdown instead of terminal narration', async () => {
+  it('publishes the final assistant JSON Markdown instead of terminal narration', async () => {
     const finalMarkdown = '\n  ## Review:\n\nNo findings.  \n';
     const output = finalMarkdownJsonl(finalMarkdown);
     const { terminal, manifest } = await runAgentScenario({
-      runId: 'run-109-submit-review-tool',
+      runId: 'run-109-final-text',
       output,
+      sessionExport: sessionExportJson('scenario-session', { markdown: finalMarkdown }),
     });
 
     expect(terminal).toMatchObject({
@@ -1355,36 +1365,39 @@ describe('Runner Job HTTP interface', () => {
   });
 
   it.each([
-    ['missing submission', 'text-only', 'zero-results'],
-    ['errored submission', 'errored', 'zero-results'],
-    ['empty submission', 'empty', 'empty-final-text'],
-    ['invalid Markdown', 'invalid-markdown', 'result-schema-failure'],
-    ['duplicate submissions', 'duplicate', 'multiple-results'],
-    ['malformed completed submission', 'missing-call-id', 'result-schema-failure'],
-  ] as const)('rejects %s as invalid output', async (_name, kind, cause) => {
-    const terminalEvent = JSON.stringify({
-      type: 'step_finish',
-      part: { type: 'step-finish', messageID: 'msg-final', reason: 'stop' },
-    });
-    const narrationEvent = JSON.stringify({
-      type: 'text',
-      part: { type: 'text', messageID: 'msg-final', text: 'Terminal narration.' },
-    });
-    const output =
-      kind === 'text-only'
-        ? `${narrationEvent}\n${terminalEvent}`
-        : kind === 'errored'
-          ? `${narrationEvent}\n${submitReviewEvent('## Review:\n\nNo findings.', { status: 'error' })}\n${terminalEvent}`
-          : kind === 'empty'
-            ? `${narrationEvent}\n${submitReviewEvent('')}\n${terminalEvent}`
-            : kind === 'invalid-markdown'
-              ? `${narrationEvent}\n${submitReviewEvent('not a review')}\n${terminalEvent}`
-              : kind === 'missing-call-id'
-                ? `${narrationEvent}\n${JSON.stringify({ type: 'tool_use', sessionID: 'scenario-session', part: { type: 'tool', tool: 'submit_review', state: { status: 'completed', input: { decision: 'comment', markdown: '## Review:\n\nNo findings.' } } } })}\n${terminalEvent}`
-                : `${narrationEvent}\n${submitReviewEvent()}\n${submitReviewEvent('## Review:\n\nSecond.', { callID: 'call-submit-review-2' })}\n${terminalEvent}`;
+    [
+      'missing final result',
+      sessionExportJson('scenario-session', { text: null }),
+      'empty-final-text',
+    ],
+    ['empty final result', sessionExportJson('scenario-session', { text: '' }), 'empty-final-text'],
+    [
+      'invalid final JSON',
+      sessionExportJson('scenario-session', { text: 'not json' }),
+      'result-schema-failure',
+    ],
+    [
+      'invalid final decision',
+      sessionExportJson('scenario-session', {
+        text: JSON.stringify({ decision: 'maybe', markdown: '## Review:\n\nNo findings.' }),
+      }),
+      'result-schema-failure',
+    ],
+    [
+      'missing terminal idle',
+      sessionExportJson('scenario-session', { terminalIdle: false }),
+      'missing-terminal-message',
+    ],
+    [
+      'a length finish',
+      sessionExportJson('scenario-session', { finish: 'length' }),
+      'missing-terminal-message',
+    ],
+  ])('rejects %s as invalid output', async (_name, sessionExport, cause) => {
     const { terminal } = await runAgentScenario({
-      runId: `run-109-${kind}`,
-      output,
+      runId: `run-109-${String(_name).replace(/\W+/g, '-')}`,
+      output: finalMarkdownJsonl(),
+      sessionExport,
     });
 
     expect(terminal).toMatchObject({
@@ -1396,13 +1409,96 @@ describe('Runner Job HTTP interface', () => {
     expect(terminal).not.toHaveProperty('result');
   });
 
-  it('reminds the same review session once when a completed run omitted submit_review', async () => {
+  it('rejects a malformed final assistant instead of using earlier text', async () => {
+    const validText = JSON.stringify({ decision: 'comment', markdown: defaultReviewMarkdown });
+    const sessionExport = JSON.stringify({
+      info: {
+        id: 'scenario-session',
+        outcome: 'succeeded',
+        agent: 'review',
+        model: { providerID: 'opencode-go', id: 'deepseek-flash' },
+      },
+      messages: [
+        {
+          type: 'assistant',
+          id: 'msg-earlier',
+          agent: 'review',
+          model: { providerID: 'opencode-go', id: 'deepseek-flash' },
+          finish: 'stop',
+          content: [{ type: 'text', text: validText }],
+        },
+        { type: 'idle', outcome: 'succeeded' },
+        {
+          type: 'assistant',
+          id: 'msg-final',
+          agent: 'review',
+          model: { providerID: 'opencode-go', id: 'deepseek-flash' },
+          finish: 'stop',
+          content: 'not-an-array',
+        },
+        { type: 'idle', outcome: 'succeeded' },
+      ],
+    });
+    const { terminal } = await runAgentScenario({
+      runId: 'run-malformed-final-assistant',
+      output: finalMarkdownJsonl(),
+      sessionExport,
+    });
+    expect(terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'invalid-output', cause: 'missing-terminal-message' },
+    });
+    expect(terminal).not.toHaveProperty('result');
+  });
+
+  it('rejects a malformed known text part in the final assistant', async () => {
+    const sessionExport = JSON.stringify({
+      info: {
+        id: 'scenario-session',
+        outcome: 'succeeded',
+        agent: 'review',
+        model: { providerID: 'opencode-go', id: 'deepseek-flash' },
+      },
+      messages: [
+        {
+          type: 'assistant',
+          id: 'msg-final',
+          agent: 'review',
+          model: { providerID: 'opencode-go', id: 'deepseek-flash' },
+          finish: 'stop',
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ decision: 'comment', markdown: defaultReviewMarkdown }),
+            },
+            { type: 'text', text: 123 },
+          ],
+        },
+        { type: 'idle', outcome: 'succeeded' },
+      ],
+    });
+    const { terminal } = await runAgentScenario({
+      runId: 'run-malformed-text-part',
+      output: finalMarkdownJsonl(),
+      sessionExport,
+    });
+    expect(terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'invalid-output', cause: 'result-schema-failure' },
+    });
+    expect(terminal).not.toHaveProperty('result');
+  });
+
+  it('reminds the same review session once when a completed run omitted the final review JSON', async () => {
     const reminderMarkdown = '## Review:\n\nReminder submission.';
     const result = await runReminderScenario({
       runId: 'run-reminder-success',
       rounds: [
-        { output: completedWithoutSubmitJsonl('session-reminder') },
-        { output: submitReminderJsonl('session-reminder', reminderMarkdown) },
+        { output: completedWithoutSubmitJsonl('session-reminder'), finalText: null },
+        {
+          output: finalMarkdownJsonl(reminderMarkdown, 'session-reminder'),
+          finalText: JSON.stringify({ decision: 'comment', markdown: reminderMarkdown }),
+        },
       ],
     });
 
@@ -1433,71 +1529,169 @@ describe('Runner Job HTTP interface', () => {
     const evidencePath = join(sharedEvidenceRoot, result.terminal.evidenceId as string);
     const combined = await readFile(join(evidencePath, 'opencode.jsonl'), 'utf8');
     expect(combined).toContain('I completed the review without submitting.');
-    expect(combined).toContain('Submitting the review now.');
+    expect(combined).toContain('Reminder submission.');
     await expect(readFile(join(evidencePath, 'validated-review.md'), 'utf8')).resolves.toBe(
       reminderMarkdown,
     );
   });
 
-  it('reports zero-results after a single reminder still omits submit_review', async () => {
+  it('accepts a V2 final-text session with one correction turn', async () => {
+    const sessionId = 'ses_synthetic_final_text';
+    const markdown = '## Review:\nNo blocking defects.';
+    const finalText = JSON.stringify({ decision: 'approve', markdown });
+    const firstTurn = JSON.stringify({
+      type: 'text',
+      sessionID: sessionId,
+      part: {
+        type: 'text',
+        messageID: 'msg_synthetic_first',
+        text: 'Review complete.',
+      },
+    });
+    const secondTurn = JSON.stringify({
+      type: 'text',
+      sessionID: sessionId,
+      part: {
+        type: 'text',
+        messageID: 'msg_synthetic_final',
+        text: finalText,
+      },
+    });
     const result = await runReminderScenario({
-      runId: 'run-reminder-still-missing',
-      rounds: [{ output: completedWithoutSubmitJsonl('session-reminder') }],
+      runId: 'run-captured-v2-final-text',
+      sessionId,
+      rounds: [
+        { output: firstTurn, finalText: null },
+        { output: secondTurn, finalText },
+      ],
+    });
+
+    expect(result.agentRuns).toBe(2);
+    expect(result.agentCommands[1]).toEqual(
+      expect.arrayContaining(['--session', sessionId, '--agent', 'review']),
+    );
+    expect(result.terminal).toMatchObject({
+      status: 'succeeded',
+      result: structuredResult(markdown, 'approve'),
+      evidence: { status: 'complete' },
+    });
+  });
+
+  it('publishes after a known recovered provider error and a same-session correction', async () => {
+    const markdown = '## Review:\n\nRecovered and corrected.';
+    const session = 'session-reminder';
+    const error = JSON.stringify({
+      type: 'error',
+      sessionID: session,
+      error: { type: 'provider.invalid-output', status: 200 },
+    });
+    const result = await runReminderScenario({
+      runId: 'run-recovered-correction',
+      rounds: [
+        {
+          output: `${error}\n${completedWithoutSubmitJsonl(session)}`,
+          exitCode: 1,
+          finalText: null,
+        },
+        {
+          output: finalMarkdownJsonl(markdown, session),
+          exitCode: 0,
+          finalText: JSON.stringify({ decision: 'comment', markdown }),
+        },
+      ],
+    });
+
+    expect(result.agentRuns).toBe(2);
+    expect(result.agentCommands[1]).toEqual(
+      expect.arrayContaining(['--session', session, '--agent', 'review']),
+    );
+    expect(result.terminal).toMatchObject({
+      status: 'succeeded',
+      result: structuredResult(markdown),
+      evidence: { status: 'complete' },
+      sandbox: { cleanup: 'destroyed' },
+    });
+  });
+
+  it('rejects a generic exit-one correction after an initial known provider error', async () => {
+    const session = 'session-reminder';
+    const markdown = '## Review:\n\nCorrection process failed.';
+    const error = JSON.stringify({
+      type: 'error',
+      sessionID: session,
+      error: { type: 'provider.invalid-output', status: 200 },
+    });
+    const result = await runReminderScenario({
+      runId: 'run-recovered-then-generic-correction',
+      rounds: [
+        {
+          output: `${error}\n${completedWithoutSubmitJsonl(session)}`,
+          exitCode: 1,
+          finalText: null,
+        },
+        {
+          output: finalMarkdownJsonl(markdown, session),
+          exitCode: 1,
+          finalText: JSON.stringify({ decision: 'comment', markdown }),
+        },
+      ],
     });
 
     expect(result.agentRuns).toBe(2);
     expect(result.terminal).toMatchObject({
       status: 'failed',
-      failure: { reason: 'invalid-output', cause: 'zero-results' },
+      failure: { reason: 'invalid-output', cause: 'process-exit' },
     });
     expect(result.terminal).not.toHaveProperty('result');
   });
 
-  it.each([
-    ['duplicate submissions', 'multiple-results'],
-    ['an invalid result', 'result-schema-failure'],
-    ['an agent error event', 'agent-error'],
-  ] as const)('does not remind the session after a completed run with %s', async (kind, cause) => {
-    const session = 'session-reminder';
-    const textEvent = JSON.stringify({
-      type: 'text',
-      sessionID: session,
-      part: { type: 'text', messageID: 'msg-final', text: 'Completed.' },
-    });
-    const stopEvent = JSON.stringify({
-      type: 'step_finish',
-      sessionID: session,
-      part: { type: 'step-finish', messageID: 'msg-final', reason: 'stop' },
-    });
-    const markdown = '## Review:\n\nNo findings.';
-    const output =
-      kind === 'duplicate submissions'
-        ? [
-            textEvent,
-            submitReviewEvent(markdown),
-            submitReviewEvent(markdown, { callID: 'call-submit-review-2' }),
-            stopEvent,
-          ].join('\n')
-        : kind === 'an invalid result'
-          ? [textEvent, submitReviewEvent('not a review'), stopEvent].join('\n')
-          : [textEvent, JSON.stringify({ type: 'error' }), stopEvent].join('\n');
-
+  it('does not correct or recover a generic exit-one run', async () => {
     const result = await runReminderScenario({
-      runId: `run-reminder-no-${kind.replace(/\W+/g, '-')}`,
-      rounds: [{ output }],
+      runId: 'run-generic-exit-one',
+      rounds: [
+        {
+          output: completedWithoutSubmitJsonl('session-reminder'),
+          exitCode: 1,
+          finalText: null,
+        },
+      ],
     });
 
     expect(result.agentRuns).toBe(1);
     expect(result.terminal).toMatchObject({
       status: 'failed',
-      failure: { reason: 'invalid-output', cause },
+      failure: { reason: 'invalid-output', cause: 'process-exit' },
     });
+    expect(result.terminal).not.toHaveProperty('result');
+  });
+
+  it('fails after one correction when the final result is still missing', async () => {
+    const result = await runReminderScenario({
+      runId: 'run-reminder-still-missing',
+      rounds: [
+        { output: completedWithoutSubmitJsonl('session-reminder'), finalText: null },
+        { output: completedWithoutSubmitJsonl('session-reminder'), finalText: null },
+      ],
+    });
+
+    expect(result.agentRuns).toBe(2);
+    expect(result.terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'invalid-output', cause: 'empty-final-text' },
+    });
+    expect(result.terminal).not.toHaveProperty('result');
   });
 
   it('does not remind when the completed run timed out', async () => {
     const result = await runReminderScenario({
       runId: 'run-reminder-timeout',
-      rounds: [{ output: completedWithoutSubmitJsonl('session-reminder'), timedOut: true }],
+      rounds: [
+        {
+          output: completedWithoutSubmitJsonl('session-reminder'),
+          finalText: null,
+          timedOut: true,
+        },
+      ],
     });
 
     expect(result.agentRuns).toBe(1);
@@ -1597,6 +1791,7 @@ describe('Runner Job HTTP interface', () => {
         rounds: [
           {
             output: completedWithoutSubmitJsonl('session-reminder'),
+            finalText: null,
             advanceMs: agentBudgetMs + 1,
           },
         ],
@@ -1605,7 +1800,7 @@ describe('Runner Job HTTP interface', () => {
       expect(result.agentRuns).toBe(1);
       expect(result.terminal).toMatchObject({
         status: 'failed',
-        failure: { reason: 'invalid-output', cause: 'zero-results' },
+        failure: { reason: 'invalid-output', cause: 'empty-final-text' },
       });
     } finally {
       vi.useRealTimers();
@@ -1623,9 +1818,13 @@ describe('Runner Job HTTP interface', () => {
         rounds: [
           {
             output: completedWithoutSubmitJsonl('session-reminder'),
+            finalText: null,
             advanceMs: agentBudgetMs - 30_000,
           },
-          { output: submitReminderJsonl('session-reminder', reminderMarkdown) },
+          {
+            output: finalMarkdownJsonl(reminderMarkdown, 'session-reminder'),
+            finalText: JSON.stringify({ decision: 'comment', markdown: reminderMarkdown }),
+          },
         ],
       });
 
@@ -1644,7 +1843,13 @@ describe('Runner Job HTTP interface', () => {
   it('does not remind a session whose exported final turn was truncated', async () => {
     const result = await runReminderScenario({
       runId: 'run-v2-no-reminder-after-length',
-      rounds: [{ output: completedWithoutSubmitJsonl('session-reminder'), exportFinish: 'length' }],
+      rounds: [
+        {
+          output: completedWithoutSubmitJsonl('session-reminder'),
+          finalText: null,
+          exportFinish: 'length',
+        },
+      ],
     });
     expect(result.agentRuns).toBe(1);
     expect(result.terminal).toMatchObject({ status: 'failed', sandbox: { cleanup: 'destroyed' } });
@@ -1660,16 +1865,31 @@ describe('Runner Job HTTP interface', () => {
         sessionID: session,
         part: { type: 'text', messageID: 'msg-reminder', text: 'Submitting the review.' },
       }),
-      submitReviewEvent('## Review:\n\nReminder without a stop.', {
-        callID: 'call-reminder',
+      JSON.stringify({
+        type: 'text',
         sessionID: session,
+        part: {
+          type: 'text',
+          messageID: 'msg-reminder',
+          text: JSON.stringify({
+            decision: 'comment',
+            markdown: '## Review:\n\nReminder without a stop.',
+          }),
+        },
       }),
     ].join('\n');
     const result = await runReminderScenario({
       runId: 'run-reminder-no-stop',
       rounds: [
-        { output: completedWithoutSubmitJsonl(session) },
-        { output: reminderWithoutStop, exportFinish: 'length' },
+        { output: completedWithoutSubmitJsonl(session), finalText: null },
+        {
+          output: reminderWithoutStop,
+          finalText: JSON.stringify({
+            decision: 'comment',
+            markdown: '## Review:\n\nReminder without a stop.',
+          }),
+          exportFinish: 'length',
+        },
       ],
     });
 
@@ -1685,8 +1905,14 @@ describe('Runner Job HTTP interface', () => {
     const result = await runReminderScenario({
       runId: 'run-reminder-session-mismatch',
       rounds: [
-        { output: completedWithoutSubmitJsonl('session-reminder') },
-        { output: submitReminderJsonl('session-other', '## Review:\n\nOther session.') },
+        { output: completedWithoutSubmitJsonl('session-reminder'), finalText: null },
+        {
+          output: finalMarkdownJsonl('## Review:\n\nOther session.', 'session-other'),
+          finalText: JSON.stringify({
+            decision: 'comment',
+            markdown: '## Review:\n\nOther session.',
+          }),
+        },
       ],
     });
 
@@ -1702,7 +1928,7 @@ describe('Runner Job HTTP interface', () => {
     const result = await runReminderScenario({
       runId: 'run-reminder-malformed',
       rounds: [
-        { output: completedWithoutSubmitJsonl('session-reminder') },
+        { output: completedWithoutSubmitJsonl('session-reminder'), finalText: null },
         { output: 'not-jsonl' },
       ],
     });
@@ -1718,7 +1944,7 @@ describe('Runner Job HTTP interface', () => {
     const result = await runReminderScenario({
       runId: 'run-reminder-agent-error',
       rounds: [
-        { output: completedWithoutSubmitJsonl('session-reminder') },
+        { output: completedWithoutSubmitJsonl('session-reminder'), finalText: null },
         { output: JSON.stringify({ type: 'error' }) },
       ],
     });
@@ -1761,25 +1987,7 @@ describe('Runner Job HTTP interface', () => {
       }),
       finalMarkdownJsonl(markdown),
     ].join('\n');
-    const exported = JSON.stringify({
-      info: { id: 'scenario-session', outcome: 'succeeded' },
-      messages: [
-        { type: 'assistant', finish: 'error', content: [] },
-        {
-          type: 'assistant',
-          finish: 'tool-calls',
-          content: [
-            {
-              type: 'tool',
-              name: 'submit_review',
-              state: { status: 'completed', input: { decision: 'comment', markdown } },
-            },
-          ],
-        },
-        { type: 'assistant', finish: 'stop', content: [] },
-        { type: 'idle', outcome: 'succeeded' },
-      ],
-    });
+    const exported = sessionExportJson('scenario-session', { markdown });
     const { terminal, manifest } = await runAgentScenario({
       runId: 'run-recovered-cli',
       output,
@@ -1806,86 +2014,61 @@ describe('Runner Job HTTP interface', () => {
     ).resolves.toBe(markdown);
   });
 
-  it.each([
-    'unknown-error',
-    'foreign-error-session',
-    'export-mismatch',
-    'missing-export-submission',
-    'duplicate-export-submission',
-    'malformed-assistant',
-    'failed-export',
-    'foreign-export-session',
-    'duplicate-jsonl-submission',
-    'malformed-jsonl',
-    'fatal-exit',
-    'timeout',
-    'truncated',
-  ] as const)('does not accept apparent OpenCode recovery with %s', async (scenario) => {
-    const markdown = '## Review:\n\nRecovered review.';
-    const callbacks: Request[] = [];
-    const error = JSON.stringify({
-      type: 'error',
-      sessionID: scenario === 'foreign-error-session' ? 'another-session' : 'scenario-session',
-      error: {
-        type: scenario === 'unknown-error' ? 'unknown.failure' : 'provider.invalid-output',
-        status: 200,
-      },
-    });
-    const output = [
-      error,
-      finalMarkdownJsonl(markdown),
-      ...(scenario === 'duplicate-jsonl-submission'
-        ? [submitReviewEvent(markdown, { callID: 'second-submission' })]
-        : []),
-      ...(scenario === 'malformed-jsonl' ? ['not-json'] : []),
-    ].join('\n');
-    const submission = {
-      type: 'tool',
-      name: 'submit_review',
-      state: {
-        status: 'completed',
-        input: {
-          decision: 'comment',
-          markdown: scenario === 'export-mismatch' ? '## Review:\n\nDifferent.' : markdown,
-        },
-      },
-    };
-    const exported = JSON.stringify({
-      info: {
-        id: scenario === 'foreign-export-session' ? 'foreign-session' : 'scenario-session',
-        outcome: scenario === 'failed-export' ? 'failed' : 'succeeded',
-      },
-      messages: [
-        ...(scenario === 'malformed-assistant'
-          ? [{ type: 'assistant', content: { tool: submission } }]
-          : []),
-        {
-          type: 'assistant',
-          finish: 'stop',
-          content:
-            scenario === 'missing-export-submission'
-              ? []
-              : scenario === 'duplicate-export-submission'
-                ? [submission, submission]
-                : [submission],
-        },
-        { type: 'idle', outcome: 'succeeded' },
-      ],
-    });
-    const { terminal, manifest } = await runAgentScenario({
-      runId: `run-recovery-${scenario}`,
-      output,
-      exitCode: scenario === 'fatal-exit' ? 137 : 1,
-      timedOut: scenario === 'timeout',
-      truncated: scenario === 'truncated',
-      sessionExport: exported,
-      callbackRequests: callbacks,
-    });
-    expect(terminal).toMatchObject({ status: 'failed', sandbox: { cleanup: 'destroyed' } });
-    expect(terminal).not.toHaveProperty('result');
-    expect(manifest).not.toHaveProperty('result');
-    expect(await callbacks[0]!.json()).not.toHaveProperty('result');
-  });
+  type RecoveryScenario = {
+    readonly errorSession?: string;
+    readonly exportOutcome?: string;
+    readonly exportId?: string;
+    readonly text?: string | null;
+    readonly malformedJsonl?: boolean;
+    readonly exitCode?: number;
+    readonly timedOut?: boolean;
+    readonly truncated?: boolean;
+  };
+  const recoveryScenarios: readonly (readonly [string, RecoveryScenario])[] = [
+    ['a foreign error session', { errorSession: 'another-session' }],
+    ['a failed export', { exportOutcome: 'failed' }],
+    ['a foreign export session', { exportId: 'foreign-session' }],
+    ['a missing final result', { text: null }],
+    ['an invalid final result', { text: 'not json' }],
+    ['malformed JSONL', { malformedJsonl: true }],
+    ['a fatal exit', { exitCode: 137 }],
+    ['a timeout', { timedOut: true }],
+    ['truncated output', { truncated: true }],
+  ];
+  it.each(recoveryScenarios)(
+    'does not accept apparent OpenCode recovery with %s',
+    async (_name, scenario) => {
+      const markdown = '## Review:\n\nRecovered review.';
+      const callbacks: Request[] = [];
+      const error = JSON.stringify({
+        type: 'error',
+        sessionID: scenario.errorSession ?? 'scenario-session',
+        error: { type: 'provider.invalid-output', status: 200 },
+      });
+      const output = [
+        error,
+        finalMarkdownJsonl(markdown),
+        ...('malformedJsonl' in scenario ? ['not-json'] : []),
+      ].join('\n');
+      const exported = sessionExportJson(scenario.exportId ?? 'scenario-session', {
+        outcome: scenario.exportOutcome,
+        ...(scenario.text === undefined ? { markdown } : { text: scenario.text }),
+      });
+      const { terminal, manifest } = await runAgentScenario({
+        runId: `run-recovery-${String(_name).replace(/\W+/g, '-')}`,
+        output,
+        exitCode: scenario.exitCode ?? 1,
+        timedOut: scenario.timedOut,
+        truncated: scenario.truncated,
+        sessionExport: exported,
+        callbackRequests: callbacks,
+      });
+      expect(terminal).toMatchObject({ status: 'failed', sandbox: { cleanup: 'destroyed' } });
+      expect(terminal).not.toHaveProperty('result');
+      expect(manifest).not.toHaveProperty('result');
+      expect(await callbacks[0]!.json()).not.toHaveProperty('result');
+    },
+  );
 
   it('reports an agent-error cause for an explicit agent error event', async () => {
     const { terminal, manifest } = await runAgentScenario({
@@ -1906,16 +2089,24 @@ describe('Runner Job HTTP interface', () => {
   it('reports missing-terminal-message when OpenCode emits no terminal assistant message', async () => {
     const { terminal, manifest } = await runAgentScenario({
       runId: 'run-90-missing-terminal-message',
-      output: JSON.stringify({ type: 'step-start' }),
+      output: JSON.stringify({
+        type: 'text',
+        sessionID: 'scenario-session',
+        part: { type: 'text', messageID: 'msg-final', text: 'No terminal result.' },
+      }),
+      sessionExport: JSON.stringify({
+        info: { id: 'scenario-session', outcome: 'succeeded' },
+        messages: [{ type: 'idle', outcome: 'succeeded' }],
+      }),
     });
 
     expect(terminal).toMatchObject({
       status: 'failed',
-      failure: { reason: 'invalid-output', cause: 'zero-results' },
+      failure: { reason: 'invalid-output', cause: 'missing-terminal-message' },
     });
     expect(manifest).toMatchObject({
-      execution: { status: 'failed', reason: 'invalid-output', cause: 'zero-results' },
-      terminal: { status: 'failed', reason: 'invalid-output', cause: 'zero-results' },
+      execution: { status: 'failed', reason: 'invalid-output', cause: 'missing-terminal-message' },
+      terminal: { status: 'failed', reason: 'invalid-output', cause: 'missing-terminal-message' },
     });
   });
 
@@ -1925,28 +2116,35 @@ describe('Runner Job HTTP interface', () => {
       const output = [
         JSON.stringify({
           type: 'text',
+          sessionID: 'scenario-session',
           part: { type: 'text', messageID: 'msg-final', text: '# Partial review' },
         }),
         JSON.stringify({
           type: 'step_finish',
+          sessionID: 'scenario-session',
           part: { type: 'step-finish', messageID: 'msg-final', reason },
         }),
       ].join('\n');
       const { terminal, manifest } = await runAgentScenario({
         runId: `run-105-${reason}-terminal`,
         output,
+        sessionExport: sessionExportJson('scenario-session', { finish: reason }),
       });
 
       expect(terminal).toMatchObject({
         status: 'failed',
-        failure: { reason: 'invalid-output', cause: 'zero-results' },
+        failure: { reason: 'invalid-output', cause: 'missing-terminal-message' },
         evidence: { status: 'complete' },
         sandbox: { cleanup: 'destroyed' },
       });
       expect(terminal).not.toHaveProperty('result');
       expect(manifest).toMatchObject({
-        execution: { status: 'failed', reason: 'invalid-output', cause: 'zero-results' },
-        terminal: { status: 'failed', reason: 'invalid-output', cause: 'zero-results' },
+        execution: {
+          status: 'failed',
+          reason: 'invalid-output',
+          cause: 'missing-terminal-message',
+        },
+        terminal: { status: 'failed', reason: 'invalid-output', cause: 'missing-terminal-message' },
       });
     },
   );
@@ -2829,21 +3027,7 @@ describe('Runner Job HTTP interface', () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
     const finalMarkdown = '## Review:\n\nNo findings.';
-    const agentJsonl = [
-      JSON.stringify({
-        type: 'text',
-        part: {
-          type: 'text',
-          messageID: 'msg-final',
-          text: 'I finished reviewing the pull request.',
-        },
-      }),
-      submitReviewEvent(finalMarkdown, { sessionID: 'session-89' }),
-      JSON.stringify({
-        type: 'step_finish',
-        part: { type: 'step-finish', messageID: 'msg-final', reason: 'stop' },
-      }),
-    ].join('\n');
+    const agentJsonl = finalMarkdownJsonl(finalMarkdown, 'session-89');
     try {
       const runner = createRunner({
         authToken: 'runner-test-token',
@@ -2976,12 +3160,29 @@ describe('Runner Job HTTP interface', () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
     const sessionExport = JSON.stringify({
-      info: { id: 'large-session', outcome: 'succeeded' },
+      info: {
+        id: 'large-session',
+        outcome: 'succeeded',
+        agent: 'review',
+        model: { providerID: 'opencode-go', id: 'deepseek-flash' },
+      },
       messages: [
         {
           type: 'assistant',
+          id: 'msg-large',
+          agent: 'review',
+          model: { providerID: 'opencode-go', id: 'deepseek-flash' },
           finish: 'stop',
-          parts: [{ type: 'text', text: 'x'.repeat(70 * 1024) }],
+          content: [
+            {
+              type: 'text',
+              text:
+                JSON.stringify({
+                  decision: 'comment',
+                  markdown: '## Review:\n\nNo findings.',
+                }) + ' '.repeat(70 * 1024),
+            },
+          ],
         },
         { type: 'idle', outcome: 'succeeded' },
       ],
@@ -3644,27 +3845,12 @@ describe('Runner Job HTTP interface', () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
     const finalMarkdown = '## Review:\n\nNo findings.';
-    const resultLine = [
-      JSON.stringify({
-        type: 'text',
-        part: {
-          type: 'text',
-          messageID: 'msg-final',
-          text: 'I finished reviewing the pull request.',
-        },
-      }),
-      submitReviewEvent(finalMarkdown, { sessionID: 'fixture-session' }),
-      JSON.stringify({
-        type: 'step_finish',
-        part: { type: 'step-finish', messageID: 'msg-final', reason: 'stop' },
-      }),
-    ].join('\n');
+    const resultLine = finalMarkdownJsonl(finalMarkdown, 'fixture-session');
     let createArgs: readonly string[] | undefined;
     let fetchArgs: readonly string[] | undefined;
     let agentArgs: readonly string[] | undefined;
     let configRootAtSandboxBoundary: string | undefined;
     let skillAtSandboxBoundary: string | undefined;
-    let submitReviewToolAvailableAtSandboxBoundary = false;
     let sandboxEnvironment: NodeJS.ProcessEnv | undefined;
     const process = async (
       _command: string,
@@ -3688,8 +3874,6 @@ describe('Runner Job HTTP interface', () => {
             join(configRoot, 'opencode/skills/pr-review/SKILL.md'),
             'utf8',
           );
-          await readFile(join(configRoot, 'opencode/plugins/submit_review/index.js'), 'utf8');
-          submitReviewToolAvailableAtSandboxBoundary = true;
         }
       }
       if (args.includes('fetch')) fetchArgs = args;
@@ -3701,7 +3885,7 @@ describe('Runner Job HTTP interface', () => {
           : args.includes('session')
             ? '[{"id":"fixture-session"}]\n'
             : args.includes('export')
-              ? ''
+              ? sessionExportJson('fixture-session', { markdown: finalMarkdown })
               : options.captureStdout === true
                 ? `${resultLine}\n`
                 : '',
@@ -3792,30 +3976,13 @@ describe('Runner Job HTTP interface', () => {
     expect(skillAtSandboxBoundary).toContain('completion (`pageInfo.hasNextPage` false)');
     expect(skillAtSandboxBoundary).toContain('Re-read the pull request base and');
     expect(skillAtSandboxBoundary).toContain('head OIDs after pagination');
-    expect(skillAtSandboxBoundary).toContain(
-      'concise human-readable Markdown review ready to publish',
-    );
-    expect(skillAtSandboxBoundary).toMatch(/up to\s+five high-confidence actionable findings/);
-    expect(skillAtSandboxBoundary).toContain(
-      'the first prose sentence must state the overall verdict',
-    );
-    expect(skillAtSandboxBoundary).toContain('exact actionable-finding count');
-    expect(skillAtSandboxBoundary).toContain('No actionable findings.');
-    expect(skillAtSandboxBoundary?.replace(/\s+/g, ' ')).toContain('Found 1 actionable finding.');
-    expect(skillAtSandboxBoundary).toContain('pagination status');
-    expect(skillAtSandboxBoundary?.replace(/\s+/g, ' ')).toContain(
-      'Tool calls and intermediate work may remain visible during the review.',
-    );
-    expect(skillAtSandboxBoundary?.replace(/\s+/g, ' ')).toContain(
-      'After completing all analysis, call `submit_review` exactly once with the `decision` and the complete publishable Markdown in its `markdown` argument. The `markdown` argument itself must contain only findings and the conclusion ready to publish, with no visible planning, self-dialogue, candidate triage, or process narration. After optional outer whitespace, begin that argument with exactly `## Review:`. Do not emit the review as terminal prose; terminal assistant messages are evidence only.',
-    );
-    expect(submitReviewToolAvailableAtSandboxBoundary).toBe(true);
-    expect(skillAtSandboxBoundary).not.toContain(
-      'The final response must be exactly one bare JSON object',
-    );
-    expect(skillAtSandboxBoundary).not.toContain('schema-valid');
-    expect(skillAtSandboxBoundary).not.toContain('web or repository inspection');
-    expect(skillAtSandboxBoundary).not.toContain('```');
+    expect(skillAtSandboxBoundary).toContain('Return at most five findings');
+    expect(skillAtSandboxBoundary).toContain('Challenge the change');
+    expect(skillAtSandboxBoundary).toContain('TLDR:');
+    expect(skillAtSandboxBoundary).toContain('decision');
+    expect(skillAtSandboxBoundary).toContain('markdown');
+    expect(skillAtSandboxBoundary).not.toContain('submit_review');
+    expect(skillAtSandboxBoundary).not.toContain('## Review:');
     const shellGuidance = skillAtSandboxBoundary?.replace(/\s+/g, ' ') ?? '';
     expect(shellGuidance).toContain('as direct shell commands');
     expect(shellGuidance).toContain(
@@ -3871,7 +4038,6 @@ describe('Runner Job HTTP interface', () => {
     expect(config.agents.review.mode).toBe('primary');
     expect(config.agents.review.description).toBe('Pull request reviewer');
     expect(permissions[0]).toEqual({ action: '*', resource: '*', effect: 'deny' });
-    expect(rule('submit_review', '*', 'allow')).toBeDefined();
     expect(rule('shell', 'gh api graphql *', 'allow')).toBeDefined();
     expect(rule('shell', 'gh pr view *', 'allow')).toBeDefined();
     expect(rule('shell', 'git diff *', 'allow')).toBeDefined();
@@ -3891,22 +4057,18 @@ describe('Runner Job HTTP interface', () => {
     expect(agentArgs?.join(' ')).toContain('acme/reviewed');
     expect(agentArgs?.join(' ')).toContain('pull request #42');
     expect(agentArgs?.join(' ')).toContain('GH_TOKEN');
-    expect(agentArgs?.join(' ')).toContain('independently cursor-paginate');
-    expect(agentArgs?.join(' ')).toContain('after pagination');
-    expect(agentArgs?.join(' ')).toContain(baseSha);
-    expect(agentArgs?.join(' ')).toContain(headSha);
-    expect(agentArgs?.join(' ')).toContain(
-      'concise human-readable Markdown review ready to publish',
-    );
-    expect(agentArgs?.join(' ')).toContain("pr-review skill's verdict-first output contract");
-    expect(agentArgs?.join(' ')).toContain(
-      'Tool calls and intermediate work may remain visible during the review.',
-    );
-    expect(agentArgs?.join(' ')).toContain(
-      'After completing all analysis, call `submit_review` exactly once with the `decision` and the complete publishable Markdown in its `markdown` argument. The `markdown` argument itself must contain only findings and the conclusion ready to publish, with no visible planning, self-dialogue, candidate triage, or process narration. After optional outer whitespace, begin that argument with exactly `## Review:`. Do not emit the review as terminal prose; terminal assistant messages are evidence only.',
-    );
-    expect(agentArgs?.join(' ')).not.toContain('Return exactly one bare JSON object');
-    expect(agentArgs?.join(' ')).not.toContain('schema-valid');
+    const deliveredPrompt = agentArgs?.join(' ') ?? '';
+    expect(deliveredPrompt).toContain('cursor-paginate');
+    expect(deliveredPrompt).toContain('re-read the base and head OIDs');
+    expect(deliveredPrompt).toContain(baseSha);
+    expect(deliveredPrompt).toContain(headSha);
+    expect(deliveredPrompt).toContain('Challenge the premise');
+    expect(deliveredPrompt).toContain('TLDR:');
+    expect(deliveredPrompt).toContain('Return your final answer as one JSON object');
+    expect(deliveredPrompt).toContain('decision');
+    expect(deliveredPrompt).toContain('markdown');
+    expect(deliveredPrompt).not.toContain('submit_review');
+    expect(deliveredPrompt).not.toContain('## Review:');
     await expect(
       readFile(join(configRootAtSandboxBoundary!, 'opencode/skills/pr-review/SKILL.md'), 'utf8'),
     ).rejects.toThrow();
@@ -3924,6 +4086,9 @@ describe('Runner Job HTTP interface', () => {
       runId: 'run-deployment-model',
       output: finalMarkdownJsonl(),
       modelConfig: JSON.stringify({ id: 'opencode-go/test-model-7', definition }),
+      sessionExport: sessionExportJson('scenario-session', {
+        model: { providerID: 'opencode-go', id: 'test-model-7' },
+      }),
     });
 
     expect(result.terminal.status).toBe('succeeded');
@@ -3956,6 +4121,9 @@ describe('Runner Job HTTP interface', () => {
       runId: 'run-deployment-model-catalog',
       output: finalMarkdownJsonl(),
       modelConfig: JSON.stringify({ id: 'opencode-go/test-model-catalog' }),
+      sessionExport: sessionExportJson('scenario-session', {
+        model: { providerID: 'opencode-go', id: 'test-model-catalog' },
+      }),
     });
 
     expect(result.terminal.status).toBe('succeeded');
@@ -3978,6 +4146,9 @@ describe('Runner Job HTTP interface', () => {
       modelConfig: JSON.stringify({
         id: 'opencode-go/test-model-7',
         baseUrl: 'https://model.example.test/v1',
+      }),
+      sessionExport: sessionExportJson('scenario-session', {
+        model: { providerID: 'opencode-go', id: 'test-model-7' },
       }),
     });
 
@@ -4023,6 +4194,9 @@ describe('Runner Job HTTP interface', () => {
         baseUrl: 'https://model.example.test:8443/v1',
         definition,
       }),
+      sessionExport: sessionExportJson('scenario-session', {
+        model: { providerID: 'opencode-go', id: 'test-model-7' },
+      }),
     });
 
     expect(result.terminal.status).toBe('succeeded');
@@ -4052,45 +4226,22 @@ describe('Runner Job HTTP interface', () => {
     });
   });
 
-  it('returns submitted Markdown after terminal progress output', async () => {
-    const finalPartOne =
-      '## Review:\n\nThe change is sound; ordinary braces like `{example}` are part of the prose.';
-    const finalPartTwo = '- No blocking findings.';
-    const finalReview = `${finalPartOne}\n${finalPartTwo}`;
+  it('returns final assistant JSON after terminal progress output', async () => {
+    const finalReview = '## Review:\n\nThe change is sound; `{example}` is prose.';
     const progressEvent = JSON.stringify({
       type: 'text',
+      sessionID: 'scenario-session',
       part: {
         type: 'text',
         messageID: 'msg-progress',
         text: 'Inspecting the pull request...',
       },
     });
-    const finalPartOneEvent = JSON.stringify({
-      type: 'text',
-      part: { type: 'text', messageID: 'msg-final', text: finalPartOne },
-    });
-    const finalPartTwoEvent = JSON.stringify({
-      type: 'text',
-      part: { type: 'text', messageID: 'msg-final', text: finalPartTwo },
-    });
-    const submitEvent = JSON.stringify({
-      type: 'tool_use',
-      sessionID: 'scenario-session',
-      part: {
-        type: 'tool',
-        id: 'call-final-review',
-        tool: 'submit_review',
-        state: {
-          status: 'completed',
-          input: { decision: 'comment', markdown: finalReview },
-          output: 'Review submitted.',
-          title: 'Review submitted.',
-        },
-      },
-    });
+    const finalEvent = finalMarkdownJsonl(finalReview, 'scenario-session');
     const { terminal, manifest } = await runAgentScenario({
-      runId: 'run-109-submitted-markdown-review',
-      output: `${progressEvent}\n${finalPartOneEvent}\n${finalPartTwoEvent}\n${submitEvent}`,
+      runId: 'run-109-final-text-after-progress',
+      output: `${progressEvent}\n${finalEvent}`,
+      sessionExport: sessionExportJson('scenario-session', { markdown: finalReview }),
     });
 
     expect(terminal).toMatchObject({
@@ -4160,8 +4311,8 @@ describe('Runner Job HTTP interface', () => {
       sandbox: { cleanup: 'destroyed' },
     });
     expect(agentPrompt).toContain(`git diff --find-renames ${mergeBaseSha} ${headSha}`);
-    expect(agentPrompt).toContain(`base ${baseSha}`);
-    expect(agentPrompt).toContain(`head ${headSha}`);
+    expect(agentPrompt).toContain(baseSha);
+    expect(agentPrompt).toContain(headSha);
   });
 
   it('preserves the expected diff when the merge base equals the admitted base', async () => {
@@ -4218,6 +4369,8 @@ describe('Runner Job HTTP interface', () => {
       sandbox: { cleanup: 'destroyed' },
     });
     expect(agentPrompt).toContain(`git diff --find-renames ${baseSha} ${headSha}`);
+    expect(agentPrompt).toContain(baseSha);
+    expect(agentPrompt).toContain(headSha);
   });
 
   it.each([
@@ -7512,6 +7665,9 @@ describe('Runner LLM service mode', () => {
         callbackRequests: [],
         modelConfig: serviceModelConfig,
         llmServiceSocket: socketPath,
+        sessionExport: sessionExportJson('scenario-session', {
+          model: { providerID: 'opencode-go', id: 'deepseek-review' },
+        }),
         onModelSecret: async (args) => {
           const command = args[args.indexOf('--command') + 1];
           const path = command.slice("/usr/bin/cat '".length, -1);
@@ -8542,42 +8698,17 @@ describe('Runner multi-model review', () => {
     },
     messages: [
       {
-        type: 'assistant',
-        finish: 'tool-calls',
-        agent: 'multi-review-supervisor',
-        model: { providerID: 'compte-rendu', id: 'deepseek-v4.1-flash' },
-        content: [
-          {
-            type: 'tool',
-            name: 'submit_review',
-            state: {
-              status: 'completed',
-              input: {
-                decision: 'request_changes',
-                markdown: synthesisMarkdown,
-                coverage: [
-                  {
-                    findingId: 'reviewer-0-f1',
-                    outcome: 'retained',
-                    finalId: 'reviewer-0-f1',
-                  },
-                  {
-                    findingId: 'reviewer-1-f1',
-                    outcome: 'merged',
-                    finalId: 'reviewer-0-f1',
-                  },
-                ],
-              },
-            },
-          },
-        ],
-      },
-      {
+        id: 'msg-root-final',
         type: 'assistant',
         finish: 'stop',
         agent: 'multi-review-supervisor',
         model: { providerID: 'compte-rendu', id: 'deepseek-v4.1-flash' },
-        content: [{ type: 'text', text: 'Synthesis submitted.' }],
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({ decision: 'request_changes', markdown: synthesisMarkdown }),
+          },
+        ],
       },
       { type: 'idle', outcome: 'succeeded' },
     ],
@@ -8622,6 +8753,15 @@ describe('Runner multi-model review', () => {
           output: '<subagent sessionID="ses_multi_child_b" state="completed">done</subagent>',
           metadata: { metadata: { sessionID: 'ses_multi_child_b', status: 'completed' } },
         },
+      },
+    }),
+    JSON.stringify({
+      type: 'text',
+      sessionID: rootSession,
+      part: {
+        type: 'text',
+        messageID: 'msg-root-final',
+        text: JSON.stringify({ decision: 'request_changes', markdown: synthesisMarkdown }),
       },
     }),
   ].join('\n');
@@ -8682,13 +8822,48 @@ describe('Runner multi-model review', () => {
     readonly timedOut?: boolean;
     readonly truncated?: boolean;
   };
+  const completedRootExport = JSON.stringify({
+    ...JSON.parse(rootExport),
+    messages: [
+      {
+        type: 'assistant',
+        finish: 'stop',
+        agent: 'multi-review-supervisor',
+        model: { providerID: 'compte-rendu', id: 'deepseek-v4.1-flash' },
+        content: [{ type: 'text', text: 'Completed synthesis without submitting.' }],
+      },
+      { type: 'idle', outcome: 'succeeded' },
+    ],
+  });
+  const multiReminderJsonl = [
+    JSON.stringify({
+      type: 'text',
+      sessionID: rootSession,
+      part: { type: 'text', messageID: 'msg-multi-reminder', text: 'Submitting synthesis.' },
+    }),
+    JSON.stringify({
+      type: 'text',
+      sessionID: rootSession,
+      part: {
+        type: 'text',
+        messageID: 'msg-root-continuation',
+        text: JSON.stringify({ decision: 'request_changes', markdown: synthesisMarkdown }),
+      },
+    }),
+  ].join('\n');
+
   type MultiScenarioOverrides = {
     readonly children?: readonly (typeof defaultChildren)[number][];
     readonly pages?: readonly SessionPageResponse[];
     readonly exports?: Readonly<Record<string, string>>;
     readonly rootJsonl?: string;
+    readonly agentRounds?: readonly string[];
     readonly rootExport?: string;
+    readonly preReminderRootExport?: string;
+    readonly continuedRootExport?: string;
     readonly runId?: string;
+    readonly selection?: typeof selection;
+    readonly agentExitCode?: number;
   };
 
   const runScenario = async (overrides: MultiScenarioOverrides = {}) => {
@@ -8697,9 +8872,16 @@ describe('Runner multi-model review', () => {
     let sessionPage = 0;
     let expectedCursor: string | undefined;
     const rootJsonlValue = overrides.rootJsonl ?? rootJsonl;
+    const agentOutputs = overrides.agentRounds ?? [rootJsonlValue];
+    let agentRuns = 0;
+    const archivedRootExport = overrides.continuedRootExport ?? overrides.rootExport ?? rootExport;
     const exportValue = (sessionId: string) =>
       overrides.exports?.[sessionId] ??
-      (sessionId === rootSession ? (overrides.rootExport ?? rootExport) : defaultExport(sessionId));
+      (sessionId === rootSession
+        ? agentRuns > 1
+          ? archivedRootExport
+          : (overrides.rootExport ?? rootExport)
+        : defaultExport(sessionId));
     const controlRoot = await mkdtemp(join(tmpdir(), 'cr-multi-control-'));
     const socketPath = join(controlRoot, 'control.sock');
     const issued: Array<{ jobId: string; routes: string[]; token: string }> = [];
@@ -8742,8 +8924,8 @@ describe('Runner multi-model review', () => {
 
     let createArgs: readonly string[] | undefined;
     let agentArgs: readonly string[] | undefined;
-    let submitPlugin: string | undefined;
-    let contractPlugin: string | undefined;
+    let skillText: string | undefined;
+    const agentCommands: string[][] = [];
     const callbacks: Request[] = [];
     const runner = createRunner({
       evidenceRoot: join(controlRoot, 'evidence'),
@@ -8761,28 +8943,40 @@ describe('Runner multi-model review', () => {
           createArgs = args;
           const configRootArg = args.find((value) => value.startsWith('XDG_CONFIG_HOME='));
           if (configRootArg !== undefined) {
-            const configRoot = configRootArg.slice('XDG_CONFIG_HOME='.length);
             try {
-              submitPlugin = await readFile(
-                join(configRoot, 'opencode', 'plugins', 'submit_review', 'index.js'),
-                'utf8',
-              );
-              contractPlugin = await readFile(
-                join(configRoot, 'opencode', 'plugins', 'submit_review', 'contract.js'),
+              skillText = await readFile(
+                join(
+                  configRootArg.slice('XDG_CONFIG_HOME='.length),
+                  'opencode/skills/pr-review/SKILL.md',
+                ),
                 'utf8',
               );
             } catch {
-              submitPlugin = undefined;
-              contractPlugin = undefined;
+              skillText = undefined;
             }
           }
         }
         const isAgent = args[0] === 'exec' && args.includes('--agent');
         if (isAgent) {
-          agentArgs = args;
-          await writeFile(options.stdoutFilePath!, `${rootJsonlValue}\n`, { mode: 0o600 });
-          await writeFile(options.stderrFilePath!, 'agent stderr\n', { mode: 0o600 });
-          return { exitCode: 0, stdout: rootJsonlValue, timedOut: false, truncated: false };
+          const output = agentOutputs[Math.min(agentRuns, agentOutputs.length - 1)]!;
+          agentRuns += 1;
+          agentArgs ??= args;
+          agentCommands.push([...args]);
+          await writeFile(options.stdoutFilePath!, `${output}\n`, {
+            ...(options.fileAppend === true ? { flag: 'a' } : {}),
+            mode: 0o600,
+          });
+          if (options.stderrFilePath !== undefined)
+            await writeFile(options.stderrFilePath, 'agent stderr\n', {
+              ...(options.fileAppend === true ? { flag: 'a' } : {}),
+              mode: 0o600,
+            });
+          return {
+            exitCode: overrides.agentExitCode ?? 0,
+            stdout: output,
+            timedOut: false,
+            truncated: false,
+          };
         }
         if (args[0] === 'exec' && args.includes('api') && args.includes('session.list')) {
           const cursor = args.find((argument) => argument.startsWith('cursor='))?.slice(7);
@@ -8801,6 +8995,14 @@ describe('Runner multi-model review', () => {
             stdout: page.stdout ?? '',
             timedOut: page.timedOut ?? false,
             truncated: page.truncated ?? false,
+          };
+        }
+        if (args[0] === 'exec' && args.includes('session') && args.includes('export')) {
+          return {
+            exitCode: 0,
+            stdout: overrides.preReminderRootExport ?? overrides.rootExport ?? rootExport,
+            timedOut: false,
+            truncated: false,
           };
         }
         if (args[0] === 'exec' && args.includes('session') && args.includes('list')) {
@@ -8843,7 +9045,7 @@ describe('Runner multi-model review', () => {
           },
           body: JSON.stringify({
             ...runnerJobFields,
-            reviewConfiguration: selection,
+            reviewConfiguration: overrides.selection ?? selection,
             runId: overrides.runId ?? 'run-multi-success',
             attempt: 1,
             repositoryUrl: 'https://github.com/acme/reviewed.git',
@@ -8889,10 +9091,10 @@ describe('Runner multi-model review', () => {
         revoked,
         createArgs,
         agentArgs,
+        agentCommands,
+        skillText,
         evidencePath,
         childExports,
-        submitPlugin,
-        contractPlugin,
         sessionPageContents,
         multiReviewDocument:
           multiReviewText === undefined ? undefined : JSON.parse(multiReviewText),
@@ -8902,45 +9104,6 @@ describe('Runner multi-model review', () => {
       await new Promise<void>((resolve) => server.close(() => resolve()));
       await rm(controlRoot, { recursive: true, force: true });
     }
-  };
-
-  type SubmitTool = {
-    readonly input: unknown;
-    execute(
-      input: unknown,
-      context: { readonly sessionID?: string },
-    ): Promise<{ readonly content: string }>;
-  };
-  // Load the exact submit tool and contract files the Sandbox received, with
-  // their real relative import, and drive the public execute contract.
-  const loadDeliveredSubmitTool = async (delivered: {
-    readonly submitPlugin?: string;
-    readonly contractPlugin?: string;
-  }): Promise<SubmitTool> => {
-    const root = await mkdtemp(join(tmpdir(), 'cr-delivered-submit-'));
-    await mkdir(join(root, 'submit_review'), { recursive: true, mode: 0o700 });
-    await writeFile(
-      join(root, 'submit_review', 'contract.js'),
-      delivered.contractPlugin ?? '',
-      'utf8',
-    );
-    await writeFile(join(root, 'submit_review', 'index.js'), delivered.submitPlugin ?? '', 'utf8');
-    const module = (await import(
-      /* @vite-ignore */ pathToFileURL(join(root, 'submit_review', 'index.js')).href
-    )) as { default: { setup: (ctx: unknown) => Promise<void> } };
-    let tool: SubmitTool | undefined;
-    await module.default.setup({
-      tool: {
-        transform: (transform: (editor: { add: (value: SubmitTool) => void }) => void) =>
-          transform({
-            add: (value) => {
-              tool = value;
-            },
-          }),
-      },
-    });
-    if (tool === undefined) throw new Error('submit_review tool was not registered');
-    return tool;
   };
 
   it('runs the frozen roster through native foreground subagents and publishes one synthesis', async () => {
@@ -8994,10 +9157,11 @@ describe('Runner multi-model review', () => {
     const supervisorPromptText = (result.agentArgs ?? []).join(' ');
     expect(supervisorPromptText).toContain('reviewer-0');
     expect(supervisorPromptText).toContain('reviewer-1');
-    expect(supervisorPromptText).toContain('Frozen review brief');
-    expect(supervisorPromptText).not.toContain(
-      'call submit_review exactly once with a findings array',
-    );
+    expect(supervisorPromptText).toContain('Review task');
+    expect(supervisorPromptText).toContain('synthesize');
+    expect(supervisorPromptText).toContain('TLDR:');
+    expect(supervisorPromptText).toContain('Return your final answer as one JSON object');
+    expect(supervisorPromptText).not.toContain('submit_review');
 
     expect(result.manifest.multiReview).toMatchObject({
       revision: 3,
@@ -9100,6 +9264,187 @@ describe('Runner multi-model review', () => {
     }
   });
 
+  it('reminds the same multi supervisor session when normal completion omitted the synthesis', async () => {
+    const result = await runScenario({
+      runId: 'run-multi-reminder-success',
+      agentRounds: [rootJsonl, multiReminderJsonl],
+      preReminderRootExport: completedRootExport,
+      continuedRootExport: rootExport,
+    });
+
+    expect(result.agentCommands).toHaveLength(2);
+    expect(result.agentCommands[0]).toEqual(
+      expect.arrayContaining([
+        '--model',
+        'compte-rendu/deepseek-v4.1-flash',
+        '--agent',
+        'multi-review-supervisor',
+      ]),
+    );
+    expect(result.agentCommands[1]).toEqual(
+      expect.arrayContaining([
+        '--session',
+        rootSession,
+        '--model',
+        'compte-rendu/deepseek-v4.1-flash',
+        '--agent',
+        'multi-review-supervisor',
+      ]),
+    );
+    expect(result.issued[0]?.routes).toEqual(['deepseek-v4.1-flash', 'step-5-preview']);
+    expect(result.terminal).toMatchObject({
+      status: 'succeeded',
+      result: structuredResult(synthesisMarkdown, 'request_changes'),
+      evidence: { status: 'complete' },
+      sandbox: { cleanup: 'destroyed' },
+    });
+    expect(result.manifest.sessionIds).toEqual([rootSession]);
+    expect(result.manifest.multiReview).toMatchObject({
+      synthesis: { decision: 'request_changes', markdown: synthesisMarkdown },
+    });
+    expect(result.callbacks).toHaveLength(1);
+    const callback = (await result.callbacks[0]!.json()) as {
+      status: string;
+      result: unknown;
+    };
+    expect(callback).toMatchObject({
+      status: 'succeeded',
+      result: structuredResult(synthesisMarkdown, 'request_changes'),
+    });
+  });
+
+  it('delivers one shared review contract to a single reviewer and a multi roster', async () => {
+    const single = await runAgentScenario({
+      runId: 'run-shared-prompt-single',
+      output: finalMarkdownJsonl(),
+    });
+    const multi = await runScenario({ runId: 'run-shared-prompt-multi' });
+    const singlePrompt = single.agentArgs?.join(' ') ?? '';
+    const multiPrompt = multi.agentArgs?.join(' ') ?? '';
+
+    for (const prompt of [singlePrompt, multiPrompt]) {
+      expect(prompt).toContain('Challenge the premise');
+      expect(prompt).toContain('Challenge avoidable complexity');
+      expect(prompt).toContain('TLDR:');
+      expect(prompt).toContain('Return your final answer as one JSON object');
+      expect(prompt).toContain('decision');
+      expect(prompt).toContain('markdown');
+      expect(prompt).not.toContain('submit_review');
+      expect(prompt).not.toContain('## Review:');
+    }
+    expect(singlePrompt).toContain('There is one configured reviewer');
+    expect(singlePrompt).not.toContain('reviewer-1');
+    expect(multiPrompt).toContain('reviewer-0');
+    expect(multiPrompt).toContain('reviewer-1');
+    expect(multiPrompt).toContain('synthesize');
+    expect(single.skillText).toBe(multi.skillText);
+    expect(single.skillText).toContain('TLDR:');
+    expect(single.skillText).not.toContain('submit_review');
+  });
+
+  it('uses only the reviewer route for a one-model roster with a distinct synthesis alias', async () => {
+    const reviewer = 'deepseek-v4.1-flash';
+    const finalText = JSON.stringify({ decision: 'request_changes', markdown: synthesisMarkdown });
+    const directExport = JSON.stringify({
+      info: {
+        id: rootSession,
+        agent: 'review',
+        model: { providerID: 'compte-rendu', id: reviewer },
+        outcome: 'succeeded',
+      },
+      messages: [
+        {
+          id: 'msg-root-final',
+          type: 'assistant',
+          finish: 'stop',
+          agent: 'review',
+          model: { providerID: 'compte-rendu', id: reviewer },
+          content: [{ type: 'text', text: finalText }],
+        },
+        { type: 'idle', outcome: 'succeeded' },
+      ],
+    });
+    const directJsonl = JSON.stringify({
+      type: 'text',
+      sessionID: rootSession,
+      part: { type: 'text', messageID: 'msg-root-final', text: finalText },
+    });
+    const result = await runScenario({
+      runId: 'run-one-reviewer-distinct-synthesis',
+      selection: {
+        revision: 4,
+        selection: { reviewers: [reviewer], synthesis: 'step-5-preview' },
+      },
+      agentRounds: [directJsonl],
+      rootExport: directExport,
+      children: [],
+    });
+
+    expect(result.issued).toHaveLength(1);
+    expect(result.issued[0]?.routes).toEqual([reviewer]);
+    expect(result.agentArgs).toEqual(
+      expect.arrayContaining(['--model', `compte-rendu/${reviewer}`, '--agent', 'review']),
+    );
+    expect(result.terminal).toMatchObject({
+      status: 'succeeded',
+      result: { version: 2, decision: 'request_changes', markdown: synthesisMarkdown },
+    });
+    expect(result.manifest.model).toBe(`compte-rendu/${reviewer}`);
+    expect(result.manifest.multiReview.synthesis.model).toBe(`compte-rendu/${reviewer}`);
+    expect((result.multiReviewDocument as { synthesis: { model: string } }).synthesis.model).toBe(
+      `compte-rendu/${reviewer}`,
+    );
+    const create = result.createArgs ?? [];
+    const configEnv = create.find((value) => value.startsWith('OPENCODE_CONFIG_CONTENT='));
+    const config = JSON.parse(configEnv!.slice('OPENCODE_CONFIG_CONTENT='.length));
+    expect(config.agents.review).toMatchObject({
+      mode: 'primary',
+      model: `compte-rendu/${reviewer}`,
+    });
+    expect(config.agents['multi-review-supervisor']).toBeUndefined();
+    expect(config.agents['reviewer-0']).toBeUndefined();
+  });
+
+  it('recovers a known provider error for a multi review from its exported final result', async () => {
+    const error = JSON.stringify({
+      type: 'error',
+      sessionID: rootSession,
+      error: { type: 'provider.invalid-output', status: 200 },
+    });
+    const result = await runScenario({
+      runId: 'run-multi-recovered-provider',
+      agentRounds: [`${error}\n${rootJsonl}`],
+      agentExitCode: 1,
+    });
+
+    expect(result.terminal).toMatchObject({
+      status: 'succeeded',
+      result: { version: 2, decision: 'request_changes', markdown: synthesisMarkdown },
+    });
+    expect(result.manifest.multiReview.synthesis).toMatchObject({
+      decision: 'request_changes',
+      markdown: synthesisMarkdown,
+    });
+    expect(result.manifest.multiReview.reviewers).toHaveLength(2);
+  });
+
+  it('does not generically recover a multi review with an invalid exported result', async () => {
+    const error = JSON.stringify({
+      type: 'error',
+      sessionID: rootSession,
+      error: { type: 'provider.invalid-output', status: 200 },
+    });
+    const result = await runScenario({
+      runId: 'run-multi-recovered-invalid',
+      agentRounds: [`${error}\n${rootJsonl}`],
+      agentExitCode: 1,
+      rootExport: completedRootExport,
+    });
+
+    expect(result.terminal.status).toBe('failed');
+    expect(result.terminal).not.toHaveProperty('result');
+  });
+
   it('publishes the actual generated multi callback through Core with root-only session evidence', async () => {
     const database = new SqliteD1Database();
     const stateStore = createD1ReviewStateStore(database);
@@ -9174,37 +9519,30 @@ describe('Runner multi-model review', () => {
 
   const wrongRootAssistantModel = JSON.parse(rootExport);
   wrongRootAssistantModel.messages[0].model.id = 'step-5-preview';
-  const malformedKnownRootSubmit = JSON.parse(rootExport);
-  malformedKnownRootSubmit.messages[0].content[0] = {
-    type: 'tool',
-    name: 'submit_review',
-    state: 'completed',
-  };
   const rootWrongAgent = JSON.parse(rootExport);
   rootWrongAgent.info.agent = 'reviewer-0';
   const rootInvalidDecision = JSON.parse(rootExport);
-  rootInvalidDecision.messages[0].content[0].state.input = {
+  rootInvalidDecision.messages[0].content[0].text = JSON.stringify({
     decision: 'maybe',
     markdown: synthesisMarkdown,
-  };
+  });
   const rootZeroSubmission = JSON.parse(rootExport);
-  rootZeroSubmission.messages[0].content[0].state.status = 'error';
-  const rootMultipleSubmissions = JSON.parse(rootExport);
-  rootMultipleSubmissions.messages[0].content.push(
-    JSON.parse(JSON.stringify(rootMultipleSubmissions.messages[0].content[0])),
-  );
+  rootZeroSubmission.messages[0].content[0].text = 'Prose without review JSON.';
   const rootNoTerminalIdle = JSON.parse(rootExport);
   rootNoTerminalIdle.messages = rootNoTerminalIdle.messages.slice(0, -1);
+  const rootMalformedFinalAssistant = JSON.parse(rootExport);
+  rootMalformedFinalAssistant.messages = [
+    ...JSON.parse(rootExport).messages,
+    { type: 'assistant', finish: 'stop', content: 'not-an-array' },
+    { type: 'idle', outcome: 'succeeded' },
+  ];
+  const rootMalformedTextPart = JSON.parse(rootExport);
+  rootMalformedTextPart.messages[0].content.push({ type: 'text', text: 123 });
 
   const failureCases: ReadonlyArray<readonly [string, MultiScenarioOverrides, string]> = [
     [
       'a root assistant with the wrong model',
       { rootExport: JSON.stringify(wrongRootAssistantModel) },
-      'result-schema-failure',
-    ],
-    [
-      'a malformed known root submit_review',
-      { rootExport: JSON.stringify(malformedKnownRootSubmit) },
       'result-schema-failure',
     ],
     [
@@ -9223,14 +9561,19 @@ describe('Runner multi-model review', () => {
       'missing-terminal-message',
     ],
     [
-      'a root with no completed submission',
+      'a root without review JSON',
       { rootExport: JSON.stringify(rootZeroSubmission) },
-      'zero-results',
+      'result-schema-failure',
     ],
     [
-      'a root with two completed submissions',
-      { rootExport: JSON.stringify(rootMultipleSubmissions) },
-      'multiple-results',
+      'a malformed final assistant',
+      { rootExport: JSON.stringify(rootMalformedFinalAssistant) },
+      'missing-terminal-message',
+    ],
+    [
+      'a malformed known text part',
+      { rootExport: JSON.stringify(rootMalformedTextPart) },
+      'result-schema-failure',
     ],
   ];
 
@@ -9277,12 +9620,12 @@ describe('Runner multi-model review', () => {
 
   it('accepts unrelated extra fields in the final submission and publishes only decision and markdown', async () => {
     const withExtras = JSON.parse(rootExport);
-    withExtras.messages[0].content[0].state.input = {
+    withExtras.messages[0].content[0].text = JSON.stringify({
       decision: 'request_changes',
       markdown: synthesisMarkdown,
       findings: [{ id: 'f1', location: 'x', claim: 'c', impact: 'i', evidence: 'e' }],
       coverage: [],
-    };
+    });
     const result = await runScenario({ rootExport: JSON.stringify(withExtras) });
 
     expect(result.terminal).toMatchObject({
@@ -9294,37 +9637,22 @@ describe('Runner multi-model review', () => {
     ).toBeUndefined();
   });
 
-  it('rejects an invalid final decision in the delivered tool and accepts a corrected call', async () => {
-    const delivered = await runScenario();
-    const tool = await loadDeliveredSubmitTool(delivered);
+  it('uses only the last assistant message and ignores earlier invalid text', async () => {
+    const intermediate = JSON.parse(rootExport);
+    intermediate.messages.unshift({
+      id: 'msg-root-intermediate',
+      type: 'assistant',
+      finish: 'stop',
+      agent: 'multi-review-supervisor',
+      model: { providerID: 'compte-rendu', id: 'deepseek-v4.1-flash' },
+      content: [{ type: 'text', text: '{"decision":"maybe"}' }],
+    });
+    const result = await runScenario({ rootExport: JSON.stringify(intermediate) });
 
-    await expect(
-      tool.execute({ decision: 'maybe', markdown: synthesisMarkdown }, { sessionID: rootSession }),
-    ).rejects.toThrow();
-    await expect(
-      tool.execute(
-        { decision: 'request_changes', markdown: synthesisMarkdown },
-        { sessionID: rootSession },
-      ),
-    ).resolves.toEqual({ content: 'Review submitted.' });
-    await expect(
-      tool.execute(
-        { decision: 'comment', markdown: synthesisMarkdown },
-        { sessionID: rootSession },
-      ),
-    ).rejects.toThrow();
-  });
-
-  it('accepts raw unrelated extra fields at the delivered tool boundary', async () => {
-    const delivered = await runScenario();
-    const tool = await loadDeliveredSubmitTool(delivered);
-
-    await expect(
-      tool.execute(
-        { decision: 'comment', markdown: synthesisMarkdown, findings: [] },
-        { sessionID: rootSession },
-      ),
-    ).resolves.toEqual({ content: 'Review submitted.' });
+    expect(result.terminal).toMatchObject({
+      status: 'succeeded',
+      result: { version: 2, decision: 'request_changes', markdown: synthesisMarkdown },
+    });
   });
 
   it('archives available child sessions without capping them at the roster', async () => {

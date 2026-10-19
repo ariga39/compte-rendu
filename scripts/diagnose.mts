@@ -259,22 +259,6 @@ const SessionExport = Schema.Struct({
   messages: Schema.Array(Schema.Unknown),
 });
 const Timestamp = Schema.Union([Schema.String, Schema.Number]);
-const ToolTime = Schema.Union([
-  Timestamp,
-  Schema.Struct({ start: Schema.optional(Timestamp), end: Schema.optional(Timestamp) }),
-]);
-const SubmitReviewEvent = Schema.Struct({
-  type: Schema.Literal('tool_use'),
-  part: Schema.Struct({
-    type: Schema.Literal('tool'),
-    tool: Schema.Literal('submit_review'),
-    state: Schema.Struct({
-      status: Schema.Literal('completed'),
-      time: Schema.optional(ToolTime),
-    }),
-  }),
-});
-
 type EvidenceFieldValue = typeof EvidenceField.Type;
 type R2Value = typeof R2Object.Type;
 
@@ -315,11 +299,6 @@ const timestamp = (value: unknown): string | undefined => {
     ? DateTime.formatIso(parsed.value)
     : undefined;
 };
-
-const timestampFromToolTime = (value: unknown) =>
-  typeof value === 'object' && value !== null && 'end' in value
-    ? timestamp(value.end)
-    : timestamp(value);
 
 const workflowTableTimestamp = (value: string) => {
   const valid = decode(WorkflowTableDate, value);
@@ -406,25 +385,7 @@ const validatedEvidence = async (value: R2Value) => {
         value.evidence.validatedReview.content.length === 0))
   )
     return undefined;
-  const submissionCompletedAt = (() => {
-    const bytes = decodeArtifact(value.evidence.opencodeJsonl.content);
-    if (bytes === undefined) return undefined;
-    return new TextDecoder()
-      .decode(bytes)
-      .split('\n')
-      .flatMap((line) => {
-        try {
-          const event = decode(SubmitReviewEvent, JSON.parse(line));
-          return event?.part.state.time === undefined
-            ? []
-            : [timestampFromToolTime(event.part.state.time)];
-        } catch {
-          return [];
-        }
-      })
-      .find((at): at is string => at !== undefined);
-  })();
-  return { value, manifest, sessionIds, sessionExport, submissionCompletedAt };
+  return { value, manifest, sessionIds, sessionExport };
 };
 
 export const runDiagnostic = async (argument: string, sources: DiagnosticSources) => {
@@ -610,11 +571,10 @@ export const runDiagnostic = async (argument: string, sources: DiagnosticSources
           source: 'runner',
           event: 'execution started',
         },
-    (d1?.run?.evidence?.submissionCompletedAt ?? evidenceDetails?.submissionCompletedAt) ===
-    undefined
+    d1?.run?.evidence?.submissionCompletedAt === undefined
       ? undefined
       : {
-          at: d1?.run?.evidence?.submissionCompletedAt ?? evidenceDetails!.submissionCompletedAt!,
+          at: d1.run.evidence.submissionCompletedAt,
           source: 'runner',
           event: 'review submitted',
         },
@@ -702,8 +662,7 @@ export const runDiagnostic = async (argument: string, sources: DiagnosticSources
             sessionIds: evidenceDetails.sessionIds,
             timestamps: {
               executionStartedAt: manifest?.startedAt,
-              submissionCompletedAt:
-                d1?.run?.evidence?.submissionCompletedAt ?? evidenceDetails.submissionCompletedAt,
+              submissionCompletedAt: d1?.run?.evidence?.submissionCompletedAt,
               terminalAt: exportTimestamps.at(-1),
               cleanupCompletedAt: d1?.run?.evidence?.cleanupCompletedAt ?? manifest?.finishedAt,
             },
