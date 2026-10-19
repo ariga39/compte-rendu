@@ -77,6 +77,8 @@ The decision is the review's original conclusion at the time it ran, not current
 
 ## Timestamps and older records
 
+Absolute timestamps are shown in UTC.
+
 Times are the latest recorded observations, not live guarantees. Older reviews may have gaps because some steps were not recorded at the time; those gaps are shown as not recorded.
 
 ## Updates and refresh
