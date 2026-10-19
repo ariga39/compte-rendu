@@ -1190,6 +1190,42 @@ work around that sanitization by logging request bodies, git URLs with
 credentials, Sandbox files, OpenCode stdout/stderr, model prompts, or session
 artifacts.
 
+For a self-hosted Runner, read its systemd journal alongside the matching LLM
+service journal. Use an explicit UTC time window and retain the job/run IDs:
+
+```sh
+journalctl --user -u <RUNNER_UNIT> --utc --since '<START UTC>' --until '<END UTC>'
+journalctl --user -u <INSTANCE_NAME>-llm.service --utc --since '<START UTC>' --until '<END UTC>'
+```
+
+Interpret the boundaries separately:
+
+- Checkout command records carry the exit code and bounded, sanitized error
+  output on failure. An exit code such as 128 alone does not identify a GitHub,
+  authentication, DNS, TLS, disk, or network fault. Check cancellation, timeout,
+  process errors, and output truncation before drawing a conclusion.
+- LLM request records correlate `jobId` and `requestId`, route/provider, HTTP
+  status, received bytes, duration, terminal markers, and outcome. See
+  [LLM diagnostics](llm-service.md). A stream failure received from a gateway
+  does not establish whether the gateway or its upstream caused it.
+- Claim failures report whether polling continues or is halted. An ambiguous
+  owned claim must remain halted; do not resume it by discarding the response
+  or clearing database ownership without reconciling that exact job.
+- Callback records distinguish an HTTP rejection, transport error, timeout,
+  accepted delivery, and exhausted delivery attempts. A local terminal job is
+  not proof that Core accepted its result. Preserve its local evidence if
+  callback delivery failed; do not publish a second review manually.
+- Cleanup is a separate outcome. A failed remove command can be followed by a
+  confirmed exact-name absence; consult the final cleanup result, not an
+  isolated exit code. Unknown or truncated inspection output does not prove
+  destruction. A failed or unconfirmed cleanup can block the next job for the
+  same PR even when other PRs continue normally.
+
+The dashboard remains a projection of Core's persisted state, not a live Runner
+probe. PostHog is lifecycle telemetry, not the diagnostic source for command or
+transport failures. Preserve a failed run's identifiers and local evidence before
+restarting services; a restart cannot recreate error output that was never kept.
+
 When enabled, Core also sends only three personless PostHog events:
 `review scheduled`, `review claimed`, and `review finished`. Each event uses
 the existing opaque `run_id` as `distinct_id` and disables person profiles.

@@ -1,5 +1,6 @@
 import type { ChildProcess } from 'node:child_process';
 import { Option, Schema } from 'effect';
+import type { RunnerProcessErrorCode } from '@compte-rendu/contracts';
 
 export const SandboxRuntimeKind = Schema.Literals(['sbx', 'openshell']);
 export type SandboxRuntimeKind = Schema.Schema.Type<typeof SandboxRuntimeKind>;
@@ -94,6 +95,13 @@ export type RunnerProcessResult = {
   readonly streamError?: boolean;
   readonly timedOut: boolean;
   readonly truncated: boolean;
+  /**
+   * True when the process could not be spawned or its invocation threw, as
+   * opposed to running and returning an exit status. Diagnostics report this
+   * plus an optional allowlisted errorCode; never the raw error message.
+   */
+  readonly processError?: boolean;
+  readonly errorCode?: RunnerProcessErrorCode;
 };
 
 export type RunnerProcessOptions = {

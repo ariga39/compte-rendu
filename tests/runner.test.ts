@@ -323,11 +323,13 @@ const runAgentScenario = async (scenario: {
   onModelSecret?: (args: readonly string[]) => Promise<void>;
   callbackStatuses?: readonly number[];
   callbackHangs?: boolean;
+  callbackThrows?: string;
   callbackTimeoutMs?: number;
   modelConfig?: string;
   llmServiceSocket?: string;
   sessionExport?: string;
   evidenceRoot?: string;
+  logEvents?: unknown[];
   onRunner?: (runner: ReturnType<typeof createRunner>) => void;
   terminalAttempts?: number;
 }) => {
@@ -355,12 +357,23 @@ const runAgentScenario = async (scenario: {
         ? undefined
         : async (input: RequestInfo | URL, init?: RequestInit) => {
             scenario.callbackRequests!.push(new Request(input, init));
+            if (scenario.callbackThrows !== undefined) {
+              throw new Error(scenario.callbackThrows);
+            }
             if (scenario.callbackHangs === true) {
               return new Promise<Response>(() => undefined);
             }
             const status =
               scenario.callbackStatuses?.[scenario.callbackRequests!.length - 1] ?? 202;
             return new Response(null, { status });
+          },
+    log:
+      scenario.logEvents === undefined
+        ? undefined
+        : {
+            record: async (event) => {
+              scenario.logEvents!.push(event);
+            },
           },
     process: async (_command, args, options = {}) => {
       await writeEvidenceFixture(args, options, scenario.output);
@@ -3390,6 +3403,11 @@ describe('Runner Job HTTP interface', () => {
       command: 'create',
       exitCode: 1,
       timedOut: false,
+      truncated: false,
+      stderrTruncated: false,
+      streamError: false,
+      abortRequested: false,
+      processError: false,
       stderr: 'mkfs.ext4: command not found [redacted] [redacted]',
     });
     expect(events).toContainEqual({
@@ -3400,7 +3418,22 @@ describe('Runner Job HTTP interface', () => {
       command: 'remove-sandbox',
       exitCode: 1,
       timedOut: false,
+      truncated: false,
+      stderrTruncated: false,
+      streamError: false,
+      abortRequested: false,
+      processError: false,
       stderr: 'sandbox not found',
+    });
+    // A terminal diagnostic after cleanup lets operators distinguish a local
+    // failure from a Core delivery problem without reading raw evidence.
+    expect(events).toContainEqual({
+      phase: 'runner',
+      outcome: 'terminal',
+      runId: 'run-72-setup-diagnostics',
+      jobId: runnerJobFields.id,
+      status: 'failed',
+      cleanup: 'failed',
     });
     expect(JSON.stringify(events)).not.toContain(repositoryReadToken);
     expect(JSON.stringify(events)).not.toContain(resolverCommand);
@@ -7823,6 +7856,627 @@ describe('Runner LLM lifecycle failures', () => {
       expect(done.terminal).toMatchObject({ status: 'aborted', sandbox: { cleanup: 'destroyed' } });
       await runner?.close();
       await f.close();
+    }
+  });
+});
+
+describe('Runner transport diagnostics', () => {
+  const baseSha = '1111111111111111111111111111111111111111';
+  const headSha = '2222222222222222222222222222222222222222';
+  type LogEvent = Record<string, unknown>;
+  const claimEvents = (events: readonly LogEvent[]) =>
+    events.filter((event) => event.outcome === 'claim');
+
+  const runClaimLogScenario = async (options: {
+    readonly respond: () => Response | Promise<Response>;
+    readonly waitMs?: number;
+  }) => {
+    const events: LogEvent[] = [];
+    let claims = 0;
+    const runner = createRunner({
+      evidenceRoot: sharedEvidenceRoot,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      modelConfig: standardModelConfig,
+      concurrency: 2,
+      callbackUrl: 'https://ingress.test/runner-callback',
+      callbackToken: 'callback-token',
+      callbackFetch: async () => new Response(null, { status: 202 }),
+      progressFetch: async () => new Response(null, { status: 202 }),
+      claimUrl: 'https://ingress.test/runner-claim',
+      claimIntervalMs: 1,
+      claimTimeoutMs: 5,
+      log: {
+        record: async (event) => {
+          events.push(event as LogEvent);
+        },
+      },
+      claimFetch: async () => {
+        claims += 1;
+        return options.respond();
+      },
+      process: async (_command, args, processOptions = {}) => {
+        await writeEvidenceFixture(args, processOptions, finalMarkdownJsonl());
+        return {
+          exitCode: 0,
+          stdout: args.includes('rev-parse')
+            ? `${baseSha}\n${headSha}\n`
+            : args.includes('session')
+              ? '[{"id":"scenario-session"}]\n'
+              : processOptions.captureStdout === true
+                ? `${finalMarkdownJsonl()}\n`
+                : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, options.waitMs ?? 40));
+    await runner.close();
+    return { events, claims: () => claims };
+  };
+
+  it('does not log an empty claim poll', async () => {
+    const { events, claims } = await runClaimLogScenario({
+      respond: () => new Response(null, { status: 204 }),
+    });
+
+    expect(claims()).toBeGreaterThanOrEqual(2);
+    expect(claimEvents(events)).toHaveLength(0);
+  });
+
+  it('classifies claim HTTP errors and keeps polling', async () => {
+    const { events, claims } = await runClaimLogScenario({
+      respond: () => new Response(null, { status: 503 }),
+    });
+
+    expect(claims()).toBeGreaterThanOrEqual(2);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        phase: 'runner',
+        outcome: 'claim',
+        reason: 'http-error',
+        status: 503,
+        pollingHalted: false,
+      }),
+    );
+  });
+
+  it('classifies a claim timeout without exposing the endpoint', async () => {
+    const { events } = await runClaimLogScenario({
+      respond: () => new Promise<Response>(() => undefined),
+    });
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        phase: 'runner',
+        outcome: 'claim',
+        reason: 'timeout',
+        pollingHalted: false,
+      }),
+    );
+    expect(JSON.stringify(events)).not.toContain('ingress.test');
+    expect(JSON.stringify(events)).not.toContain('runner-claim');
+  });
+
+  it('classifies a claim transport error without logging the thrown message', async () => {
+    const canary = 'claim-transport-secret-canary';
+    const { events, claims } = await runClaimLogScenario({
+      respond: () => {
+        throw new Error(`claim failed ${canary}`);
+      },
+    });
+
+    expect(claims()).toBeGreaterThanOrEqual(2);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        phase: 'runner',
+        outcome: 'claim',
+        reason: 'transport-error',
+        pollingHalted: false,
+      }),
+    );
+    expect(JSON.stringify(events)).not.toContain(canary);
+  });
+
+  it('classifies an oversized claim response and halts polling', async () => {
+    const { events, claims } = await runClaimLogScenario({
+      respond: () => new Response('x'.repeat(64 * 1024 + 1), { status: 200 }),
+    });
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        phase: 'runner',
+        outcome: 'claim',
+        reason: 'oversized-response',
+        pollingHalted: true,
+      }),
+    );
+    expect(claims()).toBe(1);
+  });
+
+  it('classifies a malformed claim response and halts polling', async () => {
+    const { events, claims } = await runClaimLogScenario({
+      respond: () => new Response('not-json', { status: 200 }),
+    });
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        phase: 'runner',
+        outcome: 'claim',
+        reason: 'malformed-response',
+        pollingHalted: true,
+      }),
+    );
+    expect(claims()).toBe(1);
+  });
+
+  it('classifies an invalid claim payload and halts polling', async () => {
+    const { events, claims } = await runClaimLogScenario({
+      respond: () => new Response('{}', { status: 200 }),
+    });
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        phase: 'runner',
+        outcome: 'claim',
+        reason: 'invalid-response',
+        pollingHalted: true,
+      }),
+    );
+    expect(claims()).toBe(1);
+  });
+
+  it('classifies a rejected claimed admission and halts polling', async () => {
+    let calls = 0;
+    const claimedJob = (id: string) => ({
+      ...runnerJobFields,
+      id,
+      runId: 'run-claim-admission',
+      attempt: 1,
+      repositoryUrl: 'https://github.com/acme/reviewed.git',
+      baseSha,
+      headSha,
+    });
+    const { events, claims } = await runClaimLogScenario({
+      respond: () => {
+        calls += 1;
+        return Response.json(
+          claimedJob(calls === 1 ? 'runner-claim-first' : 'runner-claim-second'),
+          {
+            status: 200,
+          },
+        );
+      },
+      waitMs: 60,
+    });
+
+    expect(claims()).toBe(2);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        phase: 'runner',
+        outcome: 'claim',
+        reason: 'admission-rejected',
+        pollingHalted: true,
+      }),
+    );
+  });
+
+  const runCallbackLogScenario = async (options: {
+    readonly runId: string;
+    readonly callbackStatuses?: readonly number[];
+    readonly callbackThrows?: string;
+    readonly callbackHangs?: boolean;
+    readonly callbackTimeoutMs?: number;
+  }) => {
+    const events: LogEvent[] = [];
+    const result = await runAgentScenario({
+      runId: options.runId,
+      output: finalMarkdownJsonl(),
+      callbackRequests: [],
+      callbackStatuses: options.callbackStatuses,
+      callbackThrows: options.callbackThrows,
+      callbackHangs: options.callbackHangs,
+      callbackTimeoutMs: options.callbackTimeoutMs,
+      logEvents: events,
+    });
+    return { terminal: result.terminal, events };
+  };
+
+  it('records an accepted callback attempt and a terminal diagnostic', async () => {
+    const runId = 'run-callback-log-accepted';
+    const { terminal, events } = await runCallbackLogScenario({ runId });
+
+    expect(terminal.status).toBe('succeeded');
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        phase: 'runner',
+        outcome: 'callback',
+        runId,
+        jobId: runnerJobFields.id,
+        attempt: 1,
+        result: 'accepted',
+        status: 202,
+      }),
+    );
+    expect(events.some((event) => event.outcome === 'callback-delivery-failed')).toBe(false);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        phase: 'runner',
+        outcome: 'terminal',
+        runId,
+        jobId: runnerJobFields.id,
+        status: 'succeeded',
+        cleanup: 'destroyed',
+      }),
+    );
+  });
+
+  it('records every callback HTTP error and an explicit delivery failure', async () => {
+    const runId = 'run-callback-log-http';
+    const { terminal, events } = await runCallbackLogScenario({
+      runId,
+      callbackStatuses: [503, 503],
+    });
+
+    expect(terminal.status).toBe('succeeded');
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        outcome: 'callback',
+        attempt: 1,
+        result: 'http-error',
+        status: 503,
+      }),
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        outcome: 'callback',
+        attempt: 2,
+        result: 'http-error',
+        status: 503,
+      }),
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        phase: 'runner',
+        outcome: 'callback-delivery-failed',
+        runId,
+        jobId: runnerJobFields.id,
+      }),
+    );
+  });
+
+  it('records callback timeouts and an explicit delivery failure', async () => {
+    const runId = 'run-callback-log-timeout';
+    const { terminal, events } = await runCallbackLogScenario({
+      runId,
+      callbackHangs: true,
+      callbackTimeoutMs: 5,
+    });
+
+    expect(terminal.status).toBe('succeeded');
+    expect(events).toContainEqual(
+      expect.objectContaining({ outcome: 'callback', attempt: 1, result: 'timeout' }),
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({ outcome: 'callback', attempt: 2, result: 'timeout' }),
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({ outcome: 'callback-delivery-failed', runId }),
+    );
+  });
+
+  it('records callback transport errors without logging the thrown message or endpoint', async () => {
+    const canary = 'callback-transport-secret-canary';
+    const runId = 'run-callback-log-transport';
+    const { events } = await runCallbackLogScenario({
+      runId,
+      callbackThrows: `callback failed ${canary}`,
+    });
+
+    expect(events).toContainEqual(
+      expect.objectContaining({ outcome: 'callback', attempt: 1, result: 'transport-error' }),
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({ outcome: 'callback-delivery-failed', runId }),
+    );
+    expect(JSON.stringify(events)).not.toContain(canary);
+    expect(JSON.stringify(events)).not.toContain('ingress.test');
+  });
+
+  it('records abortRequested on commands after cancellation', async () => {
+    const events: LogEvent[] = [];
+    const zeroResults = JSON.stringify({
+      type: 'text',
+      sessionID: 'scenario-session',
+      part: { type: 'text', messageID: 'msg-final', text: 'Completed without submitting.' },
+    });
+    let started!: () => void;
+    const startedPromise = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const runner = createRunner({
+      evidenceRoot: sharedEvidenceRoot,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      log: {
+        record: async (event) => {
+          events.push(event as LogEvent);
+        },
+      },
+      process: async (_command, args, processOptions = {}) => {
+        const isAgent = args[0] === 'exec' && args.includes('--agent');
+        if (isAgent) {
+          started();
+          await gate;
+          await writeEvidenceFixture(args, processOptions, zeroResults);
+          return { exitCode: 0, stdout: `${zeroResults}\n`, timedOut: false, truncated: false };
+        }
+        await writeEvidenceFixture(args, processOptions, '');
+        return {
+          exitCode: 0,
+          stdout: args.includes('rev-parse') ? `${baseSha}\n${headSha}\n` : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
+    });
+    const submitted = await runner.handle(
+      new Request('http://runner/jobs', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer runner-test-token',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          ...runnerJobFields,
+          runId: 'run-abort-command-log',
+          attempt: 1,
+          repositoryUrl: 'https://github.com/acme/reviewed.git',
+          baseSha,
+          headSha,
+        }),
+      }),
+    );
+    const { id } = (await submitted.json()) as { id: string };
+    await startedPromise;
+    const aborted = runner.handle(
+      new Request(`http://runner/jobs/${id}`, {
+        method: 'DELETE',
+        headers: { authorization: 'Bearer runner-test-token' },
+      }),
+    );
+    release();
+    expect((await aborted).status).toBe(200);
+    await waitForTerminal(runner, id);
+
+    const commands = events.filter((event) => event.outcome === 'command');
+    expect(commands.some((event) => event.abortRequested === true)).toBe(true);
+    for (const command of commands) {
+      expect(command).toHaveProperty('truncated');
+      expect(command).toHaveProperty('stderrTruncated');
+      expect(command).toHaveProperty('streamError');
+      expect(command).toHaveProperty('abortRequested');
+      expect(command).toHaveProperty('processError');
+    }
+  });
+
+  const runProcessThrowScenario = async (errorCode?: string) => {
+    const canary = 'process-throw-secret-canary';
+    const events: LogEvent[] = [];
+    const runner = createRunner({
+      evidenceRoot: sharedEvidenceRoot,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      log: {
+        record: async (event) => {
+          events.push(event as LogEvent);
+        },
+      },
+      process: async (_command, args) => {
+        if (args[0] === 'create') {
+          const error = new Error(`spawn failed ${canary}`) as Error & { code?: string };
+          if (errorCode !== undefined) error.code = errorCode;
+          throw error;
+        }
+        return {
+          exitCode: 0,
+          stdout: args.includes('rev-parse') ? `${baseSha}\n${headSha}\n` : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
+    });
+    const submitted = await runner.handle(
+      new Request('http://runner/jobs', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer runner-test-token',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          ...runnerJobFields,
+          runId: 'run-process-throw-log',
+          attempt: 1,
+          repositoryUrl: 'https://github.com/acme/reviewed.git',
+          baseSha,
+          headSha,
+        }),
+      }),
+    );
+    const { id } = (await submitted.json()) as { id: string };
+    await waitForTerminal(runner, id);
+    return { events, canary };
+  };
+
+  it('classifies a thrown process invocation with its safe Node error code', async () => {
+    const { events, canary } = await runProcessThrowScenario('ENOENT');
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        phase: 'runner',
+        outcome: 'command',
+        command: 'create',
+        processError: true,
+        errorCode: 'ENOENT',
+      }),
+    );
+    expect(JSON.stringify(events)).not.toContain(canary);
+  });
+
+  it('omits an unrecognized process error code rather than guessing', async () => {
+    const { events, canary } = await runProcessThrowScenario('EWEIRDCODE');
+
+    const createEvent = events.find(
+      (event) => event.outcome === 'command' && event.command === 'create',
+    );
+    expect(createEvent).toMatchObject({ processError: true });
+    expect(createEvent).not.toHaveProperty('errorCode');
+    expect(JSON.stringify(events)).not.toContain(canary);
+  });
+
+  it('records a real spawn ENOENT through the default process runner', async () => {
+    const evidenceRoot = await mkdtemp(join(tmpdir(), 'cr-spawn-enoent-'));
+    const emptyPath = await mkdtemp(join(tmpdir(), 'cr-empty-path-'));
+    const events: LogEvent[] = [];
+    const originalPath = process.env.PATH;
+    const runner = createRunner({
+      evidenceRoot,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      log: {
+        record: async (event) => {
+          events.push(event as LogEvent);
+        },
+      },
+      callbackFetch: async () => new Response(null, { status: 202 }),
+    });
+    try {
+      // With no PATH the real `git` binary cannot be spawned, so the default
+      // process runner observes a genuine ENOENT before any network or Sandbox.
+      process.env.PATH = emptyPath;
+      const submitted = await runner.handle(
+        new Request('http://runner/jobs', {
+          method: 'POST',
+          headers: {
+            authorization: 'Bearer runner-test-token',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            ...runnerJobFields,
+            runId: 'run-enoent-log',
+            attempt: 1,
+            repositoryUrl: 'https://github.com/acme/reviewed.git',
+            baseSha,
+            headSha,
+          }),
+        }),
+      );
+      const { id } = (await submitted.json()) as { id: string };
+      const terminal = await waitForTerminal(runner, id, 200);
+
+      expect(terminal).toMatchObject({
+        status: 'failed',
+        failure: { reason: 'checkout' },
+        sandbox: { cleanup: 'destroyed' },
+      });
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          phase: 'runner',
+          outcome: 'command',
+          command: 'clone',
+          exitCode: 1,
+          processError: true,
+          errorCode: 'ENOENT',
+        }),
+      );
+      // Only the safe code is logged, never the raw spawn message or the path.
+      expect(JSON.stringify(events)).not.toContain('no such file');
+      expect(JSON.stringify(events)).not.toContain('syscall');
+      expect(JSON.stringify(events)).not.toContain(emptyPath);
+    } finally {
+      process.env.PATH = originalPath;
+      await rm(emptyPath, { recursive: true, force: true });
+      await rm(evidenceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('records a one-time grant recovery failure and preserves the claim gate', async () => {
+    const evidenceRoot = await mkdtemp(join(tmpdir(), 'cr-claim-grant-'));
+    await mkdir(join(evidenceRoot, 'llm-grant-pending'), { recursive: true, mode: 0o700 });
+    await writeFile(join(evidenceRoot, 'llm-grant-pending', 'marker.marker'), 'job-grant-gate', {
+      mode: 0o600,
+    });
+    const events: LogEvent[] = [];
+    let claims = 0;
+    const runner = createRunner({
+      evidenceRoot,
+      authToken: 'runner-test-token',
+      modelConfig: JSON.stringify({
+        id: 'opencode-go/review',
+        baseUrl: 'http://host.docker.internal:32773/v1',
+        definition: { name: 'Review' },
+      }),
+      llmServiceSocket: join(evidenceRoot, 'missing-control.sock'),
+      claimUrl: 'https://ingress.test/runner-claim',
+      claimIntervalMs: 1,
+      claimFetch: async () => {
+        claims += 1;
+        return new Response(null, { status: 204 });
+      },
+      log: {
+        record: async (event) => {
+          events.push(event as LogEvent);
+        },
+      },
+    });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 40));
+
+      expect(events.filter((event) => event.outcome === 'claim')).toEqual([
+        expect.objectContaining({ reason: 'grant-recovery-failed', pollingHalted: true }),
+      ]);
+      expect(claims).toBe(0);
+    } finally {
+      await runner.close();
+      await rm(evidenceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('records a one-time runtime preflight failure and halts claiming', async () => {
+    const events: LogEvent[] = [];
+    let claims = 0;
+    const runner = createRunner({
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      sandboxRuntime: 'openshell',
+      openshell: { gateway: 'review', modelProvider: 'review', image: 'review:test' },
+      claimUrl: 'https://ingress.test/runner-claim',
+      claimIntervalMs: 1,
+      claimFetch: async () => {
+        claims += 1;
+        return new Response(null, { status: 204 });
+      },
+      log: {
+        record: async (event) => {
+          events.push(event as LogEvent);
+        },
+      },
+      process: async () => ({ exitCode: 1, stdout: '', timedOut: false, truncated: false }),
+    });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 40));
+
+      expect(events.filter((event) => event.outcome === 'claim')).toEqual([
+        expect.objectContaining({ reason: 'runtime-preflight-failed', pollingHalted: true }),
+      ]);
+      expect(claims).toBe(0);
+    } finally {
+      await runner.close();
     }
   });
 });
