@@ -2767,7 +2767,12 @@ export const createRunner = (options: RunnerOptions = {}) => {
               stderrTruncated: agent?.stderrTruncated ?? false,
               streamError: agent?.streamError ?? false,
             },
-            sessionIds: job.sessionIds,
+            // The archived `opencode session list` enumerates roots only, and
+            // Core requires the manifest list to match it exactly. A multi job
+            // keeps every child in `job.sessionIds` for archive, validation and
+            // redaction, but serializes only the root here; child provenance
+            // remains in multiReview and multi-review.json.
+            sessionIds: multiSelection === undefined ? job.sessionIds : job.sessionIds.slice(0, 1),
             ...(multiSelection === undefined
               ? {}
               : {
