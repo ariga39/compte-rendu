@@ -317,7 +317,7 @@ No extra output-token cap is injected: supported client limits are forwarded.
 
 OpenCode 2 can recover a `provider.invalid-output` stream error while its CLI
 still exits with code 1. Runner accepts this observed compatibility case only
-when the complete, matching session export ends with a succeeded outcome,
+for exit codes 0 or 1 when the complete, matching session export ends with a succeeded outcome,
 succeeded final idle, and final assistant `finish: stop`, and contains exactly
 one completed `submit_review` matching the JSONL submission. Every recoverable
 error must belong to that same session and have the observed HTTP 200 error
@@ -357,6 +357,9 @@ journalctl --user -u <LLM_UNIT> --since '2026-10-19 01:45:00 UTC' --until '2026-
   `[DONE]` alone does not establish completion.
 - `upstream-error-event`, `invalid-stream`, or `stream-too-large`: the service
   rejected the stream for the stated reason.
+- `credential-or-request-failure`: credential resolution or request setup failed.
+- `provider-error`: the provider adapter failed before a usable response or
+  terminated its parser unexpectedly. The raw error is deliberately omitted.
 - `completed`: the upstream stream completed and was consumed by the service's
   response bridge. This is not proof of a successful review or publication.
 
