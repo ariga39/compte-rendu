@@ -279,8 +279,9 @@ issuance within that job. Grants expire exactly `4 × REVIEW_ATTEMPT_BUDGET_MS`
 after issuance and have no renewal API. Revocation/expiry also cancels active inference.
 
 The loopback listener exposes only `POST /v1/chat/completions` and
-`POST /v1/responses`, with `Authorization: Bearer <job token>`. Both require
-`stream: true`. Review tool execution stays in the agent. Unsupported top-level fields
+`POST /v1/responses`, with `Authorization: Bearer <job token>`. Both endpoints always return SSE: the service forces upstream `stream: true` and
+`store: false`. Clients must consume a streaming response; non-streaming output
+is not supported. Review tool execution stays in the agent. Unsupported top-level fields
 are rejected instead of silently ignored. Nested protocol payloads are handled by LiteLLM. Upstream HTTP
 errors become sanitized failures; interrupted streams are not successful results.
 
