@@ -1,6 +1,8 @@
 import { defineConfig } from 'vite-plus';
+import { reviewContractBundle } from './scripts/review-contract-bundle.mts';
 
 export default defineConfig({
+  plugins: [reviewContractBundle()],
   test: {
     include: ['tests/**/*.test.ts'],
     exclude: ['tests/runtime/**'],

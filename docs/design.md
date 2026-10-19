@@ -257,6 +257,13 @@ substantive disagreements explicit rather than forcing consensus. Structural
 validation does not prove the model's semantic judgment. Missing or invalid
 participant evidence fails the whole job without a review vote.
 
+The submission tool and Runner use the same Effect schemas and finding-coverage
+validator. The build bundles this contract for the Sandbox plugins; jobs do not
+install validation dependencies. Invalid submissions are rejected while the
+session is still active and may be corrected before its one successful submission.
+Coverage is internal provenance (retained, merged, or disputed findings); internal
+IDs need not appear in the published Markdown.
+
 The job retains its frozen selection, child exports and `multi-review.json` along
 with the usual final result. There is one terminal callback and one publication.
 Cancellation revokes the job grant and destroys the shared Sandbox; stopping an
@@ -540,6 +547,14 @@ Review-quality and queue probes use the checked-in GitHub publication shim in
 `tests/support/github-publication-shim.ts`: it delegates supplied read behavior
 and captures review and reaction writes locally. Real GitHub publication is
 tested only when publication behavior changes.
+
+Changes to the submission contract must exercise the delivered plugins, including
+rejection followed by a corrected submission in the same session, and pass the
+accepted result through Runner and Core's publication seam. Before merging changes
+to OpenCode plugin integration, also run the pinned OpenCode executable against a
+local scripted provider and verify the exported session is accepted by Runner.
+Production reviews are not a substitute for this compatibility check. A broken
+product review path must not be its own merge gate; use independent local review.
 
 The isolated publication probe is runnable with a mode-0600 jobs file and an
 evidence directory:
