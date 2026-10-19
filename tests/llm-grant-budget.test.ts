@@ -1,14 +1,14 @@
+import { REVIEW_ATTEMPT_BUDGET_MS } from '../packages/contracts/src/index';
 import { afterEach, expect, it, vi } from 'vitest';
 import { createLlmService } from '../apps/llm-service/src/service';
 
-// Exercise the public grant lifecycle with a shorter shared review budget.
-vi.mock('../packages/contracts/src/index', () => ({ REVIEW_ATTEMPT_BUDGET_MS: 15 * 60 * 1000 }));
-
 afterEach(() => vi.useRealTimers());
 
-it('uses a one-hour grant and revocation lifetime for a fifteen-minute review budget', async () => {
+it('derives grant and revocation lifetime from the shared review budget', async () => {
   vi.useFakeTimers();
-  vi.setSystemTime(new Date('2026-10-18T12:00:00Z'));
+  const issuedAt = new Date('2026-10-18T12:00:00Z').getTime();
+  vi.setSystemTime(issuedAt);
+  const lifetime = 4 * REVIEW_ATTEMPT_BUDGET_MS;
   const service = createLlmService({
     routes: [{ id: 'review', path: '/v1/chat/completions' }],
     upstream: async () => new Response('ok'),
@@ -23,7 +23,7 @@ it('uses a one-hour grant and revocation lifetime for a fifteen-minute review bu
   try {
     const granted = await issue('active');
     const { token, expiresAt } = await granted.json();
-    expect(expiresAt).toBe('2026-10-18T13:00:00.000Z');
+    expect(expiresAt).toBe(new Date(issuedAt + lifetime).toISOString());
     const inference = () =>
       service.inference(
         new Request('http://inference/v1/chat/completions', {
@@ -38,7 +38,7 @@ it('uses a one-hour grant and revocation lifetime for a fifteen-minute review bu
         body: JSON.stringify({ jobId: 'cancelled-before-issue' }),
       }),
     );
-    await vi.advanceTimersByTimeAsync(3599999);
+    await vi.advanceTimersByTimeAsync(lifetime - 1);
     const before = await inference();
     expect(before.status).toBe(200);
     await before.text();

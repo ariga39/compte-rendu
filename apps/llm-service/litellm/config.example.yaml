@@ -1,0 +1,25 @@
+# Host-only backend. The Node service remains the job-token boundary.
+# Set the two environment variables in a private EnvironmentFile (mode 0600).
+model_list:
+  - model_name: deepseek-review
+    litellm_params:
+      model: openai/deepseek-v4.1-flash
+      api_base: https://opencode.ai/inference/go/openai/v1
+      api_key: os.environ/OPENCODE_GO_API_KEY
+  - model_name: step-review
+    litellm_params:
+      model: openai/step-5-preview
+      api_base: https://opencode.ai/inference/go/openai/v1
+      api_key: os.environ/OPENCODE_GO_API_KEY
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  # Only the trusted Node service reaches this loopback backend. It constructs
+  # headers itself; sandbox request headers are never forwarded to this backend.
+  forward_client_headers_to_llm_api: true
+
+litellm_settings:
+  telemetry: false
+  num_retries: 0
+  request_timeout: 120
+  turn_off_message_logging: true

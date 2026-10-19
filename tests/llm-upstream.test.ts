@@ -1,171 +1,633 @@
-import { zstdDecompressSync } from 'node:zlib';
 import { expect, it, vi } from 'vitest';
-import { createPiUpstream } from '../apps/llm-service/src/upstream';
+import { createLiteLlmUpstream, type LiteLlmRoute } from '../apps/llm-service/src/upstream';
 
-const decodeProviderBody = (body: unknown): Record<string, unknown> => {
-  if (typeof body === 'string') return JSON.parse(body) as Record<string, unknown>;
-  if (body instanceof Uint8Array)
-    return JSON.parse(new TextDecoder().decode(zstdDecompressSync(body))) as Record<
-      string,
-      unknown
-    >;
-  throw new Error('unexpected provider body');
+const chatRoute = (model = 'deepseek-flash'): LiteLlmRoute => ({
+  id: 'review',
+  model,
+  protocol: 'chat-completions',
+});
+
+const responsesRoute = (model = 'gpt-6.1-sol'): LiteLlmRoute => ({
+  id: 'subscription',
+  model,
+  protocol: 'responses',
+});
+
+const chatWire = (content = 'Looks good', extra = ''): string =>
+  `data: {"id":"c1","choices":[{"index":0,"delta":{"content":"${content}"},"finish_reason":null}]}\n\n` +
+  `data: {"id":"c1","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"unknown_frame":{"kept":true}}${extra}\n\n` +
+  'data: {"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n' +
+  'data: [DONE]\n\n';
+
+const responsesWire = (type = 'response.completed'): string =>
+  'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"Reviewed","unknown_event_field":{"kept":true}}\n\n' +
+  `event: ${type}\ndata: {"type":"${type}","response":{"id":"resp-1","status":"${
+    type === 'response.completed' ? 'completed' : 'incomplete'
+  }","output":[],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}\n\n`;
+
+const parseBody = (body: unknown): Record<string, unknown> => {
+  if (typeof body !== 'string') throw new Error('expected JSON body');
+  return JSON.parse(body) as Record<string, unknown>;
 };
 
-it('streams native Chat Completions through the configured model and upstream credential', async () => {
-  const upstream = createPiUpstream({
-    routes: [
-      {
-        id: 'review',
-        provider: 'openai-compatible',
-        protocol: 'chat-completions',
-        model: 'deepseek-flash',
-        baseUrl: 'https://provider.invalid/v1',
+const request = (
+  overrides: Partial<Parameters<typeof createLiteLlmUpstream>[0]> = {},
+  route: LiteLlmRoute = chatRoute(),
+) =>
+  createLiteLlmUpstream({
+    baseUrl: 'http://127.0.0.1:4000',
+    routes: [route],
+    credential: async () => 'backend-key',
+    ...overrides,
+  });
+
+it('forwards native Chat Completions fields and usage frames with the LiteLLM model alias', async () => {
+  let captured: { url: string; headers: Headers; body: Record<string, unknown> } | undefined;
+  const messages = [
+    {
+      role: 'user',
+      content: [
+        { type: 'text', text: 'Review this change' },
+        {
+          type: 'image_url',
+          image_url: { url: 'data:image/png;base64,aW1hZ2U=', detail: 'high' },
+        },
+      ],
+    },
+    {
+      role: 'assistant',
+      content: 'Earlier answer',
+      reasoning_content: 'private reasoning',
+      reasoning_details: [{ type: 'reasoning.encrypted', id: 'rs_1', data: 'opaque' }],
+      tool_calls: [
+        { id: 'call_1', type: 'function', function: { name: 'submit_review', arguments: '{}' } },
+      ],
+    },
+    { role: 'tool', tool_call_id: 'call_1', content: 'ok' },
+  ];
+  const tools = [
+    {
+      type: 'function',
+      function: {
+        name: 'submit_review',
+        parameters: { type: 'object', properties: { decision: { type: 'string' } } },
       },
-    ],
-    credential: async () => 'upstream-secret',
+    },
+  ];
+  const upstream = request({
     fetch: async (url, init) => {
-      expect(url instanceof Request ? url.url : url.toString()).toBe(
-        'https://provider.invalid/v1/chat/completions',
-      );
-      expect(new Headers(init?.headers).get('authorization')).toBe('Bearer upstream-secret');
-      if (typeof init?.body !== 'string') throw new Error('expected JSON body');
-      const body = JSON.parse(init.body);
-      expect(body.model).toBe('deepseek-flash');
-      expect(body.store).toBe(false);
-      expect(body.messages).toEqual([{ role: 'user', content: 'Review this change' }]);
-      return new Response(
-        'data: {"id":"c1","choices":[{"index":0,"delta":{"content":"Looks good"},"finish_reason":null}]}\n\ndata: {"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
-        { headers: { 'content-type': 'text/event-stream' } },
-      );
+      captured = {
+        url: url instanceof Request ? url.url : url.toString(),
+        headers: new Headers(init?.headers),
+        body: parseBody(init?.body),
+      };
+      return new Response(chatWire(), { headers: { 'content-type': 'text/event-stream' } });
     },
   });
   const response = await upstream(
     'review',
     {
       model: 'review',
-      stream: true,
-      store: false,
-      messages: [{ role: 'user', content: 'Review this change' }],
+      stream: false,
+      store: true,
+      messages,
+      tools,
+      tool_choice: 'auto',
+      parallel_tool_calls: true,
+      temperature: 0.2,
+      top_p: 0.9,
+      max_completion_tokens: 321,
+      prompt_cache_key: 'client-cache-key',
+      reasoning_effort: 'high',
+      stream_options: { include_usage: true },
     },
     new AbortController().signal,
+    'job-chat',
   );
   expect(response.status).toBe(200);
-  expect(await response.text()).toContain('Looks good');
+  const text = await response.text();
+  expect(text).toContain('Looks good');
+  expect(text).toContain('"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}');
+  expect(text).toContain('"unknown_frame":{"kept":true}');
+
+  expect(captured?.url).toBe('http://127.0.0.1:4000/v1/chat/completions');
+  expect(captured?.headers.get('authorization')).toBe('Bearer backend-key');
+  expect(captured?.headers.get('x-opencode-session')).toBe('job-chat');
+  expect(captured?.headers.get('session_id')).toBe('job-chat');
+  expect(captured?.body.model).toBe('deepseek-flash');
+  expect(captured?.body.stream).toBe(true);
+  expect(captured?.body.store).toBe(false);
+  expect(captured?.body.messages).toEqual(messages);
+  expect(captured?.body.tools).toEqual(tools);
+  expect(captured?.body.prompt_cache_key).toBe('client-cache-key');
+  expect(captured?.body.max_completion_tokens).toBe(321);
 });
 
-it('rejects unsupported or server-executed tools before sending a provider request', async () => {
-  const upstream = createPiUpstream({
-    routes: [
-      {
-        id: 'review',
-        provider: 'openai-compatible',
-        protocol: 'chat-completions',
-        model: 'deepseek-flash',
-        baseUrl: 'https://provider.invalid/v1',
-      },
-    ],
-    credential: async () => 'secret',
-    fetch: async () => {
-      throw new Error('must not reach upstream');
+it('forwards native Responses fields, preserving images, reasoning, signatures, and custom tools', async () => {
+  let captured: { url: string; headers: Headers; body: Record<string, unknown> } | undefined;
+  const input = [
+    {
+      type: 'message',
+      role: 'user',
+      content: [
+        { type: 'input_text', text: 'Review' },
+        {
+          type: 'input_image',
+          image_url: 'data:image/png;base64,aW1hZ2U=',
+          detail: 'high',
+        },
+      ],
     },
-  });
-  for (const extra of [
-    { stream: false },
-    { store: true },
-    { base_url: 'https://evil.invalid' },
-    { tools: [{ type: 'web_search' }] },
-  ]) {
-    const response = await upstream(
-      'review',
-      {
-        model: 'review',
-        stream: true,
-        messages: [{ role: 'user', content: 'Hi' }],
-        ...extra,
+    { type: 'reasoning', id: 'rs_1', encrypted_content: 'opaque', summary: [] },
+    {
+      type: 'message',
+      role: 'assistant',
+      id: 'msg_1',
+      phase: 'final_answer',
+      content: [{ type: 'output_text', text: 'Earlier', annotations: [] }],
+    },
+    {
+      type: 'custom_tool_call',
+      call_id: 'c1',
+      id: 'ctc_1',
+      name: 'run_code',
+      input: 'print(1)',
+    },
+    { type: 'custom_tool_call_output', call_id: 'c1', output: '1' },
+  ];
+  const tools = [
+    {
+      type: 'custom',
+      name: 'run_code',
+      description: 'Run',
+      format: { type: 'grammar', syntax: 'lark', definition: 'start: /.+/' },
+    },
+    { type: 'function', name: 'submit_review', parameters: { type: 'object', properties: {} } },
+  ];
+  const upstream = request(
+    {
+      fetch: async (url, init) => {
+        captured = {
+          url: url instanceof Request ? url.url : url.toString(),
+          headers: new Headers(init?.headers),
+          body: parseBody(init?.body),
+        };
+        return new Response(responsesWire(), {
+          headers: { 'content-type': 'text/event-stream' },
+        });
       },
-      new AbortController().signal,
-    );
-    expect(response.status).toBe(400);
-  }
+    },
+    responsesRoute(),
+  );
+  const response = await upstream(
+    'subscription',
+    {
+      model: 'subscription',
+      stream: true,
+      store: false,
+      instructions: 'Review carefully.',
+      input,
+      tools,
+      tool_choice: { type: 'function', name: 'submit_review' },
+      prompt_cache_key: 'client-cache-key',
+      reasoning: { effort: 'high', summary: 'auto' },
+      text: { format: { type: 'json_schema', name: 'review', schema: {} } },
+      include: ['reasoning.encrypted_content'],
+      client_metadata: { client: 'sandbox' },
+    },
+    new AbortController().signal,
+    'job-responses',
+  );
+  expect(response.status).toBe(200);
+  const text = await response.text();
+  expect(text).toContain('"unknown_event_field":{"kept":true}');
+  expect(text).toContain('"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}');
+
+  expect(captured?.url).toBe('http://127.0.0.1:4000/v1/responses');
+  expect(captured?.headers.get('authorization')).toBe('Bearer backend-key');
+  expect(captured?.headers.get('x-opencode-session')).toBe('job-responses');
+  expect(captured?.headers.get('session_id')).toBe('job-responses');
+  expect(captured?.body.model).toBe('gpt-6.1-sol');
+  expect(captured?.body.stream).toBe(true);
+  expect(captured?.body.store).toBe(false);
+  expect(captured?.body.input).toEqual(input);
+  expect(captured?.body.tools).toEqual(tools);
+  expect(captured?.body.prompt_cache_key).toBe('client-cache-key');
+  expect(captured?.body.client_metadata).toEqual({ client: 'sandbox' });
 });
 
-it('does not report a truncated upstream stream as successful completion', async () => {
-  const upstream = createPiUpstream({
-    routes: [
-      {
-        id: 'review',
-        provider: 'openai-compatible',
-        protocol: 'chat-completions',
-        model: 'deepseek-flash',
-        baseUrl: 'https://provider.invalid/v1',
+it('preserves provider-generated nested payload fields unchanged', async () => {
+  let captured: Record<string, unknown> | undefined;
+  const messages = [
+    {
+      role: 'assistant',
+      content: null,
+      provider_specific_fields: { vendor: 'provider', cache: { cached_tokens: 12 } },
+      reasoning_details: [{ type: 'reasoning.encrypted', id: 'rs_1', data: 'opaque' }],
+      tool_calls: [
+        {
+          id: 'call_1',
+          type: 'function',
+          function: {
+            name: 'submit_review',
+            arguments: '{}',
+            provider_specific_fields: { signature: 'opaque-signature' },
+          },
+        },
+      ],
+    },
+  ];
+  const tools = [
+    {
+      type: 'function',
+      function: {
+        name: 'submit_review',
+        parameters: { type: 'object', properties: {} },
+        provider_specific_fields: { dialect: 'vendor' },
       },
-    ],
-    credential: async () => 'secret',
-    fetch: async () =>
-      new Response(
-        'data: {"choices":[{"index":0,"delta":{"content":"Partial"},"finish_reason":null}]}\n\n',
-        { headers: { 'content-type': 'text/event-stream' } },
-      ),
+      cache_control: { type: 'ephemeral' },
+    },
+  ];
+  const upstream = request({
+    fetch: async (_url, init) => {
+      captured = parseBody(init?.body);
+      return new Response(chatWire(), { headers: { 'content-type': 'text/event-stream' } });
+    },
   });
   const response = await upstream(
     'review',
-    { model: 'review', stream: true, messages: [] },
+    {
+      model: 'review',
+      messages,
+      tools,
+      reasoning_effort: 'high',
+    },
+    new AbortController().signal,
+    'job-nested',
+  );
+  await expect(response.text()).resolves.toContain('Looks good');
+  expect(captured?.messages).toEqual(messages);
+  expect(captured?.tools).toEqual(tools);
+});
+
+it('accepts native Responses incomplete as a terminal stream', async () => {
+  const upstream = request(
+    {
+      fetch: async () =>
+        new Response(responsesWire('response.incomplete'), {
+          headers: { 'content-type': 'text/event-stream' },
+        }),
+    },
+    responsesRoute(),
+  );
+  const response = await upstream(
+    'subscription',
+    { model: 'subscription', input: 'Review', prompt_cache_key: 'cache' },
+    new AbortController().signal,
+    'job-incomplete',
+  );
+  await expect(response.text()).resolves.toContain('response.incomplete');
+});
+
+it.each([
+  'api_base',
+  'api_key',
+  'headers',
+  'provider',
+  'metadata',
+  'base_url',
+  'extra_body',
+  'custom_llm_provider',
+])('rejects the %s routing or credential override before contacting LiteLLM', async (field) => {
+  let calls = 0;
+  const fetch = async () => {
+    calls += 1;
+    return new Response(chatWire(), { headers: { 'content-type': 'text/event-stream' } });
+  };
+  const override = field === 'headers' ? { 'x-secret': 'canary' } : 'canary';
+  const chat = request({ fetch });
+  const chatResponse = await chat(
+    'review',
+    { model: 'review', messages: [{ role: 'user', content: 'Review' }], [field]: override },
+    new AbortController().signal,
+  );
+  expect(chatResponse.status).toBe(400);
+  expect(await chatResponse.text()).not.toContain('canary');
+
+  const responses = request({ fetch }, responsesRoute());
+  const responsesResponse = await responses(
+    'subscription',
+    { model: 'subscription', input: 'Review', [field]: override },
+    new AbortController().signal,
+  );
+  expect(responsesResponse.status).toBe(400);
+  expect(await responsesResponse.text()).not.toContain('canary');
+  expect(calls).toBe(0);
+});
+
+it('rejects malformed native requests before contacting LiteLLM', async () => {
+  let calls = 0;
+  const upstream = request({
+    fetch: async () => {
+      calls += 1;
+      return new Response(chatWire(), { headers: { 'content-type': 'text/event-stream' } });
+    },
+  });
+  for (const body of [
+    { model: 'review', messages: [], input: 'wrong protocol' },
+    { model: 'review' },
+    { messages: [] },
+    { model: 7, messages: [] },
+  ]) {
+    const response = await upstream('review', body, new AbortController().signal);
+    expect(response.status).toBe(400);
+  }
+  const responses = request(
+    {
+      fetch: async () => {
+        calls += 1;
+        return new Response(responsesWire(), {
+          headers: { 'content-type': 'text/event-stream' },
+        });
+      },
+    },
+    responsesRoute(),
+  );
+  expect(
+    (await responses('subscription', { model: 'subscription' }, new AbortController().signal))
+      .status,
+  ).toBe(400);
+  expect(calls).toBe(0);
+});
+
+it('does not forward raw upstream error events to the client', async () => {
+  const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+  try {
+    const upstream = request(
+      {
+        fetch: async () =>
+          new Response(
+            'event: response.failed\ndata: {"type":"response.failed","message":"private-upstream-canary"}\n\n',
+            { headers: { 'content-type': 'text/event-stream' } },
+          ),
+      },
+      responsesRoute(),
+    );
+    const response = await upstream(
+      'subscription',
+      { model: 'subscription', input: 'Review' },
+      new AbortController().signal,
+      'job-error-event',
+    );
+    await expect(response.text()).rejects.toThrow('model stream failed');
+    expect(JSON.stringify(logs.mock.calls)).not.toContain('private-upstream-canary');
+    expect(JSON.stringify(logs.mock.calls)).toContain('upstream-error-event');
+  } finally {
+    logs.mockRestore();
+  }
+});
+
+it.each(['event: error', 'event: response.failed'])(
+  'rejects the SSE %s event independently of JSON fields',
+  async (event) => {
+    const upstream = request({
+      fetch: async () =>
+        new Response(`${event}\ndata: {"message":"private-event-canary"}\n\n`, {
+          headers: { 'content-type': 'text/event-stream' },
+        }),
+    });
+    const response = await upstream(
+      'review',
+      { model: 'review', messages: [] },
+      new AbortController().signal,
+    );
+    await expect(response.text()).rejects.toThrow('model stream failed');
+  },
+);
+
+it('rejects a Chat error payload without forwarding its diagnostic', async () => {
+  const upstream = request({
+    fetch: async () =>
+      new Response('data: {"error":{"message":"private-payload-canary"}}\n\n', {
+        headers: { 'content-type': 'text/event-stream' },
+      }),
+  });
+  const response = await upstream(
+    'review',
+    { model: 'review', messages: [] },
     new AbortController().signal,
   );
   await expect(response.text()).rejects.toThrow('model stream failed');
 });
 
-it('preserves native Responses events for subscription clients', async () => {
-  const credential =
-    'header.' +
-    Buffer.from(
-      JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'test-account' } }),
-    ).toString('base64url') +
-    '.signature';
-  const wire =
-    'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-test","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n';
-  const upstream = createPiUpstream({
-    routes: [
-      {
-        id: 'subscription',
-        provider: 'openai-codex',
-        protocol: 'codex-responses',
-        model: 'gpt-6.1-sol',
-        baseUrl: 'https://chatgpt.com/backend-api',
-      },
-    ],
-    credential: async () => credential,
-    fetch: async (url, init) => {
-      expect(url instanceof Request ? url.url : url.toString()).toBe(
-        'https://chatgpt.com/backend-api/codex/responses',
-      );
-      expect(new Headers(init?.headers).get('authorization')).toBe('Bearer ' + credential);
-      return new Response(wire, { headers: { 'content-type': 'text/event-stream' } });
+it.each([
+  ['[DONE] without a Chat finish marker', 'data: [DONE]\n\n'],
+  [
+    'a Chat finish marker without [DONE]',
+    'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
+  ],
+  ['an empty Chat stream', ''],
+])('does not report %s as a completed response', async (_name, wire) => {
+  const upstream = request({
+    fetch: async () => new Response(wire, { headers: { 'content-type': 'text/event-stream' } }),
+  });
+  const response = await upstream(
+    'review',
+    { model: 'review', messages: [] },
+    new AbortController().signal,
+  );
+  await expect(response.text()).rejects.toThrow('model stream failed');
+});
+
+it('does not accept a Responses terminal frame as Chat completion', async () => {
+  const upstream = request({
+    fetch: async () =>
+      new Response(
+        'data: {"type":"response.completed","response":{"status":"completed"}}\n\ndata: [DONE]\n\n',
+        { headers: { 'content-type': 'text/event-stream' } },
+      ),
+  });
+  const response = await upstream(
+    'review',
+    { model: 'review', messages: [] },
+    new AbortController().signal,
+  );
+  await expect(response.text()).rejects.toThrow('model stream failed');
+});
+
+it('does not accept Chat completion markers as Responses completion', async () => {
+  const upstream = request(
+    {
+      fetch: async () =>
+        new Response(
+          'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+          { headers: { 'content-type': 'text/event-stream' } },
+        ),
+    },
+    responsesRoute(),
+  );
+  const response = await upstream(
+    'subscription',
+    { model: 'subscription', input: 'Review' },
+    new AbortController().signal,
+  );
+  await expect(response.text()).rejects.toThrow('model stream failed');
+});
+
+it('does not start an upstream fetch for an already-aborted request', async () => {
+  let calls = 0;
+  const upstream = request({
+    fetch: async () => {
+      calls += 1;
+      return new Response(chatWire(), { headers: { 'content-type': 'text/event-stream' } });
+    },
+  });
+  const controller = new AbortController();
+  controller.abort();
+  const response = await upstream(
+    'review',
+    { model: 'review', messages: [] },
+    controller.signal,
+    'job-pre-aborted',
+  );
+  expect(response.status).toBe(502);
+  expect(calls).toBe(0);
+});
+
+it('does not report a Responses stream without a terminal event as complete', async () => {
+  const upstream = request(
+    {
+      fetch: async () =>
+        new Response(
+          'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"Partial"}\n\n',
+          { headers: { 'content-type': 'text/event-stream' } },
+        ),
+    },
+    responsesRoute(),
+  );
+  const response = await upstream(
+    'subscription',
+    { model: 'subscription', input: 'Review' },
+    new AbortController().signal,
+  );
+  await expect(response.text()).rejects.toThrow('model stream failed');
+});
+
+it('records incomplete-stream diagnostics without leaking prompts, credentials, or content', async () => {
+  const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+  try {
+    const upstream = request({
+      credential: async () => 'credential-canary',
+      fetch: async () =>
+        new Response(
+          'data: {"choices":[{"index":0,"delta":{"content":"response-canary"},"finish_reason":null}]}\n\n',
+          { headers: { 'content-type': 'text/event-stream' } },
+        ),
+    });
+    const response = await upstream(
+      'review',
+      { model: 'review', messages: [{ role: 'user', content: 'prompt-canary' }] },
+      new AbortController().signal,
+      'job-diagnostic',
+    );
+    await expect(response.text()).rejects.toThrow('model stream failed');
+    const output = JSON.stringify(logs.mock.calls);
+    expect(output).toContain('llm.request.finished');
+    expect(output).toContain('job-diagnostic');
+    expect(output).toContain('incomplete-stream');
+    expect(output).toContain('receivedBytes');
+    expect(output).toContain('requestId');
+    for (const secret of ['credential-canary', 'response-canary', 'prompt-canary'])
+      expect(output).not.toContain(secret);
+  } finally {
+    logs.mockRestore();
+  }
+});
+
+it.each([
+  [
+    'completed',
+    'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+    200,
+  ],
+  ['upstream-error-event', 'event: error\ndata: {"message":"private-error-canary"}\n\n', 200],
+  ['upstream-http-error', 'private-error-canary', 429],
+  ['invalid-stream', 'data: not-json-private-error-canary\n\n', 200],
+] as const)('distinguishes %s in terminal diagnostics', async (outcome, wire, status) => {
+  const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+  try {
+    const upstream = request({
+      fetch: async () =>
+        new Response(wire, { status, headers: { 'content-type': 'text/event-stream' } }),
+    });
+    const response = await upstream(
+      'review',
+      { model: 'review', messages: [] },
+      new AbortController().signal,
+      'job-classification',
+    );
+    if (outcome === 'completed') await expect(response.text()).resolves.toContain('[DONE]');
+    else if (status !== 200) {
+      expect(response.status).toBe(502);
+      expect(await response.text()).not.toContain('private-error-canary');
+    } else await expect(response.text()).rejects.toThrow('model stream failed');
+    const finished = logs.mock.calls.filter((call) => call.includes('llm.request.finished'));
+    expect(finished).toHaveLength(1);
+    expect(finished[0]?.[2]).toMatchObject({
+      jobId: 'job-classification',
+      outcome,
+      upstreamStatus: status,
+    });
+    expect(JSON.stringify(logs.mock.calls)).not.toContain('private-error-canary');
+  } finally {
+    logs.mockRestore();
+  }
+});
+
+it('returns a sanitized failure when the upstream transport fails', async () => {
+  const upstream = request({
+    fetch: async () => {
+      throw new Error('private-network-canary');
     },
   });
   const response = await upstream(
-    'subscription',
-    { model: 'subscription', stream: true, input: [], store: false },
+    'review',
+    { model: 'review', messages: [] },
     new AbortController().signal,
+    'job-network',
   );
-  expect(response.status).toBe(200);
-  expect(await response.text()).toBe(wire);
+  expect(response.status).toBe(502);
+  expect(await response.text()).not.toContain('private-network-canary');
+});
+
+it('rejects an unavailable credential before contacting LiteLLM', async () => {
+  const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+  try {
+    let calls = 0;
+    const upstream = request({
+      credential: async () => '',
+      fetch: async () => {
+        calls += 1;
+        return new Response(chatWire(), { headers: { 'content-type': 'text/event-stream' } });
+      },
+    });
+    const response = await upstream(
+      'review',
+      { model: 'review', messages: [] },
+      new AbortController().signal,
+      'job-credential',
+    );
+    expect(response.status).toBe(502);
+    expect(calls).toBe(0);
+    expect(JSON.stringify(logs.mock.calls)).toContain('credential-or-request-failure');
+  } finally {
+    logs.mockRestore();
+  }
 });
 
 it('cancels the upstream request when a client abandons the stream', async () => {
   let observedSignal: AbortSignal | null = null;
-  const request = createPiUpstream({
-    routes: [
-      {
-        id: 'review',
-        provider: 'openai-compatible',
-        protocol: 'chat-completions',
-        model: 'deepseek-flash',
-        baseUrl: 'https://provider.invalid/v1',
-      },
-    ],
-    credential: async () => 'secret',
+  const upstream = request({
     fetch: async (_url, init) => {
       observedSignal = init?.signal ?? null;
       return new Response(
@@ -182,205 +644,15 @@ it('cancels the upstream request when a client abandons the stream', async () =>
       );
     },
   });
-  const response = await request(
+  const response = await upstream(
     'review',
-    { model: 'review', stream: true, messages: [] },
+    { model: 'review', messages: [] },
     new AbortController().signal,
   );
   const reader = response.body!.getReader();
   await reader.read();
   await reader.cancel();
   expect(observedSignal).toHaveProperty('aborted', true);
-});
-
-it('does not forward raw upstream error events to the sandbox', async () => {
-  const request = createPiUpstream({
-    routes: [
-      {
-        id: 'review',
-        provider: 'openai-compatible',
-        protocol: 'chat-completions',
-        model: 'deepseek-flash',
-        baseUrl: 'https://provider.invalid/v1',
-      },
-    ],
-    credential: async () => 'secret',
-    fetch: async () =>
-      new Response('data: {"error":{"message":"private upstream diagnostic"}}\n\n', {
-        headers: { 'content-type': 'text/event-stream' },
-      }),
-  });
-  const response = await request(
-    'review',
-    { model: 'review', stream: true, messages: [] },
-    new AbortController().signal,
-  );
-  await expect(response.body!.getReader().read()).rejects.toThrow('model stream failed');
-});
-
-it.each(['error', 'response.failed'])(
-  'rejects a subscription SSE %s event independently of JSON fields',
-  async (event) => {
-    const access =
-      'header.' +
-      Buffer.from(
-        JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'test-account' } }),
-      ).toString('base64url') +
-      '.signature';
-    const request = createPiUpstream({
-      routes: [
-        {
-          id: 'subscription',
-          provider: 'openai-codex',
-          protocol: 'codex-responses',
-          model: 'gpt-6.1-sol',
-          baseUrl: 'https://chatgpt.com/backend-api',
-        },
-      ],
-      credential: async () => access,
-      fetch: async () =>
-        new Response(`event: ${event}\ndata: {"message":"private upstream diagnostic"}\n\n`, {
-          headers: { 'content-type': 'text/event-stream' },
-        }),
-    });
-    const response = await request(
-      'subscription',
-      { model: 'subscription', stream: true, input: [], store: false },
-      new AbortController().signal,
-    );
-    await expect(response.body!.getReader().read()).rejects.toThrow('model stream failed');
-  },
-);
-
-it.each(['', 'data: [DONE]\n\n'])(
-  'records incomplete stream diagnostics without content even with terminator %j',
-  async (terminator) => {
-    const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    try {
-      const upstream = createPiUpstream({
-        routes: [
-          {
-            id: 'review',
-            provider: 'openai-compatible',
-            protocol: 'chat-completions',
-            model: 'test-model',
-            baseUrl: 'https://provider.invalid/v1',
-          },
-        ],
-        credential: async () => 'credential-canary',
-        fetch: async () =>
-          new Response(
-            'data: {"choices":[{"index":0,"delta":{"content":"response-canary"},"finish_reason":null}]}\n\n' +
-              terminator,
-            { headers: { 'content-type': 'text/event-stream' } },
-          ),
-      });
-      const response = await upstream(
-        'review',
-        { model: 'review', stream: true, messages: [{ role: 'user', content: 'prompt-canary' }] },
-        new AbortController().signal,
-        'job-diagnostic',
-      );
-      await expect(response.text()).rejects.toThrow('model stream failed');
-      const output = JSON.stringify(logs.mock.calls);
-      expect(output).toContain('llm.request.finished');
-      expect(output).toContain('job-diagnostic');
-      expect(output).toContain('incomplete-stream');
-      expect(output).toContain('receivedBytes');
-      expect(output).toContain('requestId');
-      for (const secret of ['credential-canary', 'response-canary', 'prompt-canary'])
-        expect(output).not.toContain(secret);
-    } finally {
-      logs.mockRestore();
-    }
-  },
-);
-
-it.each([
-  [
-    'completed',
-    'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
-    200,
-  ],
-  ['upstream-error-event', 'event: error\ndata: {"message":"private-error-canary"}\n\n', 200],
-  ['upstream-http-error', 'private-error-canary', 429],
-  ['invalid-stream', 'data: not-json-private-error-canary\n\n', 200],
-] as const)('distinguishes %s in terminal diagnostics', async (outcome, wire, status) => {
-  const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined);
-  try {
-    const upstream = createPiUpstream({
-      routes: [
-        {
-          id: 'review',
-          provider: 'openai-compatible',
-          protocol: 'chat-completions',
-          model: 'model',
-          baseUrl: 'https://provider.invalid/v1',
-        },
-      ],
-      credential: async () => 'secret',
-      fetch: async () =>
-        new Response(wire, { status, headers: { 'content-type': 'text/event-stream' } }),
-    });
-    const response = await upstream(
-      'review',
-      { model: 'review', stream: true, messages: [] },
-      new AbortController().signal,
-      'job-classification',
-    );
-    if (outcome === 'completed') await expect(response.text()).resolves.toContain('[DONE]');
-    else if (status !== 200) expect(response.status).toBe(502);
-    else await expect(response.text()).rejects.toThrow('model stream failed');
-    const finished = logs.mock.calls.filter((call) => call.includes('llm.request.finished'));
-    expect(finished).toHaveLength(1);
-    expect(finished[0]?.[2]).toMatchObject({
-      jobId: 'job-classification',
-      outcome,
-      upstreamStatus: status,
-    });
-    expect(JSON.stringify(logs.mock.calls)).not.toContain('private-error-canary');
-  } finally {
-    logs.mockRestore();
-  }
-});
-
-it('distinguishes the provider SDK abort from an upstream network failure', async () => {
-  vi.useFakeTimers();
-  const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined);
-  try {
-    const upstream = createPiUpstream({
-      routes: [
-        {
-          id: 'review',
-          provider: 'openai-compatible',
-          protocol: 'chat-completions',
-          model: 'model',
-          baseUrl: 'https://provider.invalid/v1',
-        },
-      ],
-      credential: async () => 'secret',
-      fetch: async (_url, init) =>
-        new Promise<Response>((_resolve, reject) => {
-          init?.signal?.addEventListener('abort', () => reject(new Error('private-error-canary')), {
-            once: true,
-          });
-        }),
-    });
-    const pending = upstream(
-      'review',
-      { model: 'review', stream: true, messages: [] },
-      new AbortController().signal,
-      'job-timeout',
-    );
-    await vi.advanceTimersByTimeAsync(120001);
-    expect((await pending).status).toBe(502);
-    const output = JSON.stringify(logs.mock.calls);
-    expect(output).toContain('provider-request-aborted');
-    expect(output).not.toContain('private-error-canary');
-  } finally {
-    logs.mockRestore();
-    vi.useRealTimers();
-  }
 });
 
 it.each(['client-cancelled', 'request-aborted', 'upstream-stream-error'] as const)(
@@ -390,17 +662,7 @@ it.each(['client-cancelled', 'request-aborted', 'upstream-stream-error'] as cons
     try {
       let source: ReadableStreamDefaultController<Uint8Array> | undefined;
       const controller = new AbortController();
-      const upstream = createPiUpstream({
-        routes: [
-          {
-            id: 'review',
-            provider: 'openai-compatible',
-            protocol: 'chat-completions',
-            model: 'model',
-            baseUrl: 'https://provider.invalid/v1',
-          },
-        ],
-        credential: async () => 'secret',
+      const upstream = request({
         fetch: async (_url, init) =>
           new Response(
             new ReadableStream<Uint8Array>({
@@ -429,7 +691,7 @@ it.each(['client-cancelled', 'request-aborted', 'upstream-stream-error'] as cons
       });
       const response = await upstream(
         'review',
-        { model: 'review', stream: true, messages: [] },
+        { model: 'review', messages: [] },
         controller.signal,
         'job-stream-end',
       );
@@ -464,17 +726,7 @@ it('records the service deadline when its own timeout signal aborts', async () =
   });
   const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined);
   try {
-    const upstream = createPiUpstream({
-      routes: [
-        {
-          id: 'review',
-          provider: 'openai-compatible',
-          protocol: 'chat-completions',
-          model: 'model',
-          baseUrl: 'https://provider.invalid/v1',
-        },
-      ],
-      credential: async () => 'secret',
+    const upstream = request({
       fetch: async (_url, init) =>
         new Promise<Response>((_resolve, reject) => {
           init?.signal?.addEventListener('abort', () => reject(new Error('private-error')), {
@@ -484,11 +736,11 @@ it('records the service deadline when its own timeout signal aborts', async () =
     });
     const pending = upstream(
       'review',
-      { model: 'review', stream: true, messages: [] },
+      { model: 'review', messages: [] },
       new AbortController().signal,
       'job-service-timeout',
     );
-    await vi.advanceTimersByTimeAsync(120001);
+    await vi.advanceTimersByTimeAsync(120_001);
     expect((await pending).status).toBe(502);
     const finished = logs.mock.calls.filter((call) => call.includes('llm.request.finished'));
     expect(finished).toHaveLength(1);
@@ -503,1364 +755,25 @@ it('records the service deadline when its own timeout signal aborts', async () =
   }
 });
 
-it('converts Chat Completions history and tools into the provider request', async () => {
-  let captured: Record<string, unknown> | undefined;
-  const upstream = createPiUpstream({
-    routes: [
-      {
-        id: 'review',
-        provider: 'openai-compatible',
-        protocol: 'chat-completions',
-        model: 'deepseek-flash',
-        baseUrl: 'https://provider.invalid/v1',
-      },
-    ],
-    credential: async () => 'secret',
-    fetch: async (_url, init) => {
-      if (typeof init?.body !== 'string') throw new Error('expected JSON body');
-      captured = JSON.parse(init.body) as Record<string, unknown>;
-      return new Response(
-        'data: {"id":"c1","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}\n\ndata: {"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
-        { headers: { 'content-type': 'text/event-stream' } },
-      );
-    },
-  });
-  const response = await upstream(
-    'review',
-    {
-      model: 'review',
-      stream: true,
-      store: false,
-      temperature: 0.2,
-      top_p: 0.9,
-      messages: [
-        { role: 'system', content: 'You review.' },
-        { role: 'user', content: 'Review this change' },
-        {
-          role: 'assistant',
-          content: null,
-          reasoning_content: 'Checked the changed lines before choosing this tool.',
-          tool_calls: [
-            {
-              id: 'call_1',
-              type: 'function',
-              function: { name: 'submit_review', arguments: '{"decision":"approve"}' },
-            },
-          ],
-        },
-        { role: 'tool', tool_call_id: 'call_1', name: 'submit_review', content: 'ok' },
-      ],
-      tools: [
-        {
-          type: 'function',
-          function: {
-            name: 'submit_review',
-            description: 'Submit',
-            parameters: {
-              type: 'object',
-              properties: { decision: { type: 'string' } },
-              required: ['decision'],
-              additionalProperties: false,
-            },
-            strict: true,
+it('bounds the upstream stream at sixteen mebibytes', async () => {
+  const chunk = new Uint8Array(16 * 1024 * 1024 + 1);
+  const upstream = request({
+    fetch: async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(chunk);
+            controller.close();
           },
-        },
-      ],
-    },
-    new AbortController().signal,
-  );
-  await expect(response.text()).resolves.toContain('ok');
-  const request = captured as Record<string, any>;
-  expect(request.model).toBe('deepseek-flash');
-  expect(request.store).toBe(false);
-  expect(request.temperature).toBe(0.2);
-  expect(request.top_p).toBe(0.9);
-  expect(request.stream_options).toEqual({ include_usage: true });
-  expect(request).not.toHaveProperty('max_tokens');
-  expect(request).not.toHaveProperty('max_completion_tokens');
-  expect(request.messages[0]).toMatchObject({ role: 'system', content: 'You review.' });
-  expect(request.messages[1]).toEqual({ role: 'user', content: 'Review this change' });
-  expect(request.messages[2].reasoning_content).toBe(
-    'Checked the changed lines before choosing this tool.',
-  );
-  expect(request.messages[2].tool_calls).toEqual([
-    {
-      id: 'call_1',
-      type: 'function',
-      function: { name: 'submit_review', arguments: '{"decision":"approve"}' },
-    },
-  ]);
-  expect(request.messages[3]).toMatchObject({
-    role: 'tool',
-    tool_call_id: 'call_1',
-    content: 'ok',
-  });
-  expect(request.tools[0]).toMatchObject({
-    type: 'function',
-    function: {
-      name: 'submit_review',
-      strict: true,
-      parameters: {
-        type: 'object',
-        properties: { decision: { type: 'string' } },
-        required: ['decision'],
-        additionalProperties: false,
-      },
-    },
-  });
-});
-
-it('rejects malformed or unsupported Chat Completions semantics before upstream', async () => {
-  const upstream = createPiUpstream({
-    routes: [
-      {
-        id: 'review',
-        provider: 'openai-compatible',
-        protocol: 'chat-completions',
-        model: 'model',
-        baseUrl: 'https://provider.invalid/v1',
-      },
-    ],
-    credential: async () => 'secret',
-    fetch: async () => {
-      throw new Error('must not reach upstream');
-    },
-  });
-  for (const body of [
-    {
-      messages: [
-        {
-          role: 'assistant',
-          content: null,
-          tool_calls: [
-            { id: 'c', type: 'function', function: { name: 'x', arguments: 'not-json' } },
-          ],
-        },
-      ],
-    },
-    { messages: [{ role: 'alien', content: 'x' }] },
-    { messages: [{ role: 'tool', tool_call_id: 'missing', content: 'x' }] },
-    { messages: [{ role: 'user', content: [{ type: 'audio', data: 'x' }] }] },
-  ]) {
-    const response = await upstream(
-      'review',
-      { model: 'review', stream: true, ...body },
-      new AbortController().signal,
-    );
-    expect(response.status).toBe(400);
-  }
-});
-
-it('converts Responses input and tools, preserving function call ids and outputs', async () => {
-  let captured: Record<string, unknown> | undefined;
-  const credential =
-    'header.' +
-    Buffer.from(
-      JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'test-account' } }),
-    ).toString('base64url') +
-    '.signature';
-  const wire =
-    'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n';
-  const upstream = createPiUpstream({
-    routes: [
-      {
-        id: 'subscription',
-        provider: 'openai-codex',
-        protocol: 'codex-responses',
-        model: 'gpt-6.1-sol',
-        baseUrl: 'https://chatgpt.com/backend-api',
-      },
-    ],
-    credential: async () => credential,
-    fetch: async (_url, init) => {
-      captured = decodeProviderBody(init?.body);
-      return new Response(wire, { headers: { 'content-type': 'text/event-stream' } });
-    },
-  });
-  const response = await upstream(
-    'subscription',
-    {
-      model: 'subscription',
-      stream: true,
-      store: false,
-      instructions: 'Review carefully.',
-      input: [
-        {
-          type: 'message',
-          role: 'user',
-          content: [{ type: 'input_text', text: 'Review this change' }],
-        },
-        {
-          type: 'function_call',
-          call_id: 'call_1',
-          name: 'submit_review',
-          arguments: '{"decision":"approve"}',
-        },
-        { type: 'function_call_output', call_id: 'call_1', output: 'ok' },
-      ],
-      tools: [
-        {
-          type: 'function',
-          name: 'submit_review',
-          description: 'Submit',
-          parameters: {
-            type: 'object',
-            properties: { decision: { type: 'string' } },
-            required: ['decision'],
-            additionalProperties: false,
-          },
-        },
-      ],
-    },
-    new AbortController().signal,
-  );
-  await expect(response.text()).resolves.toBe(wire);
-  const request = captured as Record<string, any>;
-  expect(request.instructions).toBe('Review carefully.');
-  expect(request.store).toBe(false);
-  expect(request).not.toHaveProperty('max_output_tokens');
-  expect(request.input).toEqual([
-    { role: 'user', content: [{ type: 'input_text', text: 'Review this change' }] },
-    {
-      type: 'function_call',
-      call_id: 'call_1',
-      name: 'submit_review',
-      arguments: '{"decision":"approve"}',
-    },
-    { type: 'function_call_output', call_id: 'call_1', output: 'ok' },
-  ]);
-  expect(request.tools[0]).toMatchObject({ type: 'function', name: 'submit_review' });
-});
-
-it('preserves Responses custom grammar tools and their call history', async () => {
-  let captured: Record<string, unknown> | undefined;
-  const credential =
-    'header.' +
-    Buffer.from(
-      JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'test-account' } }),
-    ).toString('base64url') +
-    '.signature';
-  const wire =
-    'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n';
-  const upstream = createPiUpstream({
-    routes: [
-      {
-        id: 'subscription',
-        provider: 'openai-codex',
-        protocol: 'codex-responses',
-        model: 'gpt-6.1-sol',
-        baseUrl: 'https://chatgpt.com/backend-api',
-      },
-    ],
-    credential: async () => credential,
-    fetch: async (_url, init) => {
-      captured = decodeProviderBody(init?.body);
-      return new Response(wire, { headers: { 'content-type': 'text/event-stream' } });
-    },
-  });
-  const response = await upstream(
-    'subscription',
-    {
-      model: 'subscription',
-      stream: true,
-      store: false,
-      input: [
-        { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'run' }] },
-        { type: 'custom_tool_call', call_id: 'c1', name: 'run_code', input: 'print(1)' },
-        { type: 'custom_tool_call_output', call_id: 'c1', output: '1' },
-      ],
-      tools: [
-        {
-          type: 'custom',
-          name: 'run_code',
-          description: 'Run',
-          format: { type: 'grammar', syntax: 'lark', definition: 'start: /.+/' },
-        },
-      ],
-    },
-    new AbortController().signal,
-  );
-  await expect(response.text()).resolves.toBe(wire);
-  const request = captured as Record<string, any>;
-  expect(request.tools[0]).toMatchObject({
-    type: 'custom',
-    name: 'run_code',
-    format: { type: 'grammar', syntax: 'lark', definition: 'start: /.+/' },
-  });
-  expect(request.input).toEqual([
-    { role: 'user', content: [{ type: 'input_text', text: 'run' }] },
-    { type: 'custom_tool_call', call_id: 'c1', name: 'run_code', input: 'print(1)' },
-    { type: 'custom_tool_call_output', call_id: 'c1', output: '1' },
-  ]);
-});
-
-it('rejects unsupported Responses input items before upstream', async () => {
-  const credential =
-    'header.' +
-    Buffer.from(
-      JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'test-account' } }),
-    ).toString('base64url') +
-    '.signature';
-  const upstream = createPiUpstream({
-    routes: [
-      {
-        id: 'subscription',
-        provider: 'openai-codex',
-        protocol: 'codex-responses',
-        model: 'gpt-6.1-sol',
-        baseUrl: 'https://chatgpt.com/backend-api',
-      },
-    ],
-    credential: async () => credential,
-    fetch: async () => {
-      throw new Error('must not reach upstream');
-    },
-  });
-  const response = await upstream(
-    'subscription',
-    { model: 'subscription', stream: true, store: false, input: [{ type: 'mystery' }] },
-    new AbortController().signal,
-  );
-  expect(response.status).toBe(400);
-});
-
-it('replays encrypted reasoning and pairs function call item ids with their outputs', async () => {
-  let captured: Record<string, unknown> | undefined;
-  const credential =
-    'header.' +
-    Buffer.from(
-      JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'test-account' } }),
-    ).toString('base64url') +
-    '.signature';
-  const wire =
-    'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n';
-  const upstream = createPiUpstream({
-    routes: [
-      {
-        id: 'subscription',
-        provider: 'openai-codex',
-        protocol: 'codex-responses',
-        model: 'gpt-6.1-sol',
-        baseUrl: 'https://chatgpt.com/backend-api',
-      },
-    ],
-    credential: async () => credential,
-    fetch: async (_url, init) => {
-      captured = decodeProviderBody(init?.body);
-      return new Response(wire, { headers: { 'content-type': 'text/event-stream' } });
-    },
-  });
-  const response = await upstream(
-    'subscription',
-    {
-      model: 'subscription',
-      stream: true,
-      store: false,
-      input: [
-        { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Review' }] },
-        { type: 'reasoning', id: 'rs_1', encrypted_content: 'encrypted-reasoning', summary: [] },
-        {
-          type: 'function_call',
-          call_id: 'call_1',
-          id: 'fc_item_1',
-          name: 'submit_review',
-          arguments: '{"decision":"approve"}',
-        },
-        { type: 'function_call_output', call_id: 'call_1', output: 'ok' },
-      ],
-      tools: [
-        {
-          type: 'function',
-          name: 'submit_review',
-          description: 'Submit',
-          parameters: { type: 'object', properties: { decision: { type: 'string' } } },
-        },
-      ],
-    },
-    new AbortController().signal,
-  );
-  await expect(response.text()).resolves.toBe(wire);
-  const request = captured as Record<string, any>;
-  expect(request.input).toEqual([
-    { role: 'user', content: [{ type: 'input_text', text: 'Review' }] },
-    { type: 'reasoning', id: 'rs_1', encrypted_content: 'encrypted-reasoning', summary: [] },
-    {
-      type: 'function_call',
-      call_id: 'call_1',
-      id: 'fc_item_1',
-      name: 'submit_review',
-      arguments: '{"decision":"approve"}',
-    },
-    { type: 'function_call_output', call_id: 'call_1', output: 'ok' },
-  ]);
-});
-
-it('preserves custom tool call ctc_ item ids when replaying grammar tool history', async () => {
-  let captured: Record<string, unknown> | undefined;
-  const credential =
-    'header.' +
-    Buffer.from(
-      JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'test-account' } }),
-    ).toString('base64url') +
-    '.signature';
-  const wire =
-    'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n';
-  const upstream = createPiUpstream({
-    routes: [
-      {
-        id: 'subscription',
-        provider: 'openai-codex',
-        protocol: 'codex-responses',
-        model: 'gpt-6.1-sol',
-        baseUrl: 'https://chatgpt.com/backend-api',
-      },
-    ],
-    credential: async () => credential,
-    fetch: async (_url, init) => {
-      captured = decodeProviderBody(init?.body);
-      return new Response(wire, { headers: { 'content-type': 'text/event-stream' } });
-    },
-  });
-  const response = await upstream(
-    'subscription',
-    {
-      model: 'subscription',
-      stream: true,
-      store: false,
-      input: [
-        { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'run' }] },
-        {
-          type: 'custom_tool_call',
-          call_id: 'c1',
-          id: 'ctc_1',
-          name: 'run_code',
-          input: 'print(1)',
-        },
-        { type: 'custom_tool_call_output', call_id: 'c1', output: '1' },
-      ],
-      tools: [
-        {
-          type: 'custom',
-          name: 'run_code',
-          description: 'Run',
-          format: { type: 'grammar', syntax: 'lark', definition: 'start: /.+/' },
-        },
-      ],
-    },
-    new AbortController().signal,
-  );
-  await expect(response.text()).resolves.toBe(wire);
-  const request = captured as Record<string, any>;
-  expect(request.input).toEqual([
-    { role: 'user', content: [{ type: 'input_text', text: 'run' }] },
-    { type: 'custom_tool_call', call_id: 'c1', id: 'ctc_1', name: 'run_code', input: 'print(1)' },
-    { type: 'custom_tool_call_output', call_id: 'c1', output: '1' },
-  ]);
-});
-
-it('preserves assistant message item id and phase when replaying text', async () => {
-  let captured: Record<string, unknown> | undefined;
-  const credential =
-    'header.' +
-    Buffer.from(
-      JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'test-account' } }),
-    ).toString('base64url') +
-    '.signature';
-  const wire =
-    'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n';
-  const upstream = createPiUpstream({
-    routes: [
-      {
-        id: 'subscription',
-        provider: 'openai-codex',
-        protocol: 'codex-responses',
-        model: 'gpt-6.1-sol',
-        baseUrl: 'https://chatgpt.com/backend-api',
-      },
-    ],
-    credential: async () => credential,
-    fetch: async (_url, init) => {
-      captured = decodeProviderBody(init?.body);
-      return new Response(wire, { headers: { 'content-type': 'text/event-stream' } });
-    },
-  });
-  const response = await upstream(
-    'subscription',
-    {
-      model: 'subscription',
-      stream: true,
-      store: false,
-      input: [
-        { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Review' }] },
-        {
-          type: 'message',
-          role: 'assistant',
-          id: 'msg_1',
-          phase: 'final_answer',
-          content: [{ type: 'output_text', text: 'Looks good' }],
-        },
-      ],
-    },
-    new AbortController().signal,
-  );
-  await expect(response.text()).resolves.toBe(wire);
-  const request = captured as Record<string, any>;
-  expect(request.input).toEqual([
-    { role: 'user', content: [{ type: 'input_text', text: 'Review' }] },
-    {
-      type: 'message',
-      role: 'assistant',
-      id: 'msg_1',
-      phase: 'final_answer',
-      status: 'completed',
-      content: [{ type: 'output_text', text: 'Looks good', annotations: [] }],
-    },
-  ]);
-});
-
-it('replays Chat reasoning_details and treats null reasoning_content as absent', async () => {
-  let captured: Record<string, unknown> | undefined;
-  const details = [
-    {
-      type: 'reasoning.encrypted',
-      id: 'rs_1',
-      data: 'encrypted-detail',
-      format: 'openai-responses-v1',
-    },
-  ];
-  const upstream = createPiUpstream({
-    routes: [
-      {
-        id: 'review',
-        provider: 'openai-compatible',
-        protocol: 'chat-completions',
-        model: 'deepseek-flash',
-        baseUrl: 'https://provider.invalid/v1',
-      },
-    ],
-    credential: async () => 'secret',
-    fetch: async (_url, init) => {
-      if (typeof init?.body !== 'string') throw new Error('expected JSON body');
-      captured = JSON.parse(init.body) as Record<string, unknown>;
-      return new Response(
-        'data: {"id":"c1","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}\n\ndata: {"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+        }),
         { headers: { 'content-type': 'text/event-stream' } },
-      );
-    },
+      ),
   });
   const response = await upstream(
     'review',
-    {
-      model: 'review',
-      stream: true,
-      store: false,
-      messages: [
-        { role: 'user', content: 'Review this change' },
-        {
-          role: 'assistant',
-          content: 'Previous answer',
-          reasoning_content: null,
-          reasoning_details: details,
-        },
-        { role: 'user', content: 'Continue' },
-      ],
-    },
+    { model: 'review', messages: [] },
     new AbortController().signal,
+    'job-too-large',
   );
-  await expect(response.text()).resolves.toContain('ok');
-  const request = captured as Record<string, any>;
-  expect(request.messages[1]).toEqual({
-    role: 'assistant',
-    content: 'Previous answer',
-    reasoning_details: details,
-  });
-  expect(request.messages[1]).not.toHaveProperty('reasoning_content');
-});
-
-it('preserves explicit strict function tools in Responses payloads', async () => {
-  let captured: Record<string, unknown> | undefined;
-  const credential =
-    'header.' +
-    Buffer.from(
-      JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'test-account' } }),
-    ).toString('base64url') +
-    '.signature';
-  const wire =
-    'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n';
-  const upstream = createPiUpstream({
-    routes: [
-      {
-        id: 'subscription',
-        provider: 'openai-codex',
-        protocol: 'codex-responses',
-        model: 'gpt-6.1-sol',
-        baseUrl: 'https://chatgpt.com/backend-api',
-      },
-    ],
-    credential: async () => credential,
-    fetch: async (_url, init) => {
-      captured = decodeProviderBody(init?.body);
-      return new Response(wire, { headers: { 'content-type': 'text/event-stream' } });
-    },
-  });
-  const response = await upstream(
-    'subscription',
-    {
-      model: 'subscription',
-      stream: true,
-      store: false,
-      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Review' }] }],
-      tools: [
-        {
-          type: 'function',
-          name: 'submit_review',
-          description: 'Submit',
-          strict: true,
-          parameters: {
-            type: 'object',
-            properties: { decision: { type: 'string' } },
-            required: ['decision'],
-            additionalProperties: false,
-          },
-        },
-      ],
-    },
-    new AbortController().signal,
-  );
-  await expect(response.text()).resolves.toBe(wire);
-  const request = captured as Record<string, any>;
-  expect(request.tools[0]).toMatchObject({ type: 'function', name: 'submit_review', strict: true });
-});
-
-it('preserves the explicit Chat max_tokens field in the provider payload', async () => {
-  let captured: Record<string, unknown> | undefined;
-  const upstream = createPiUpstream({
-    routes: [
-      {
-        id: 'review',
-        provider: 'openai-compatible',
-        protocol: 'chat-completions',
-        model: 'deepseek-flash',
-        baseUrl: 'https://provider.invalid/v1',
-      },
-    ],
-    credential: async () => 'secret',
-    fetch: async (_url, init) => {
-      if (typeof init?.body !== 'string') throw new Error('expected JSON body');
-      captured = JSON.parse(init.body) as Record<string, unknown>;
-      return new Response(
-        'data: {"id":"c1","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}\n\ndata: {"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
-        { headers: { 'content-type': 'text/event-stream' } },
-      );
-    },
-  });
-  const response = await upstream(
-    'review',
-    {
-      model: 'review',
-      stream: true,
-      store: false,
-      max_tokens: 321,
-      messages: [{ role: 'user', content: 'Review' }],
-    },
-    new AbortController().signal,
-  );
-  await expect(response.text()).resolves.toContain('ok');
-  const request = captured as Record<string, unknown>;
-  expect(request.max_tokens).toBe(321);
-  expect(request).not.toHaveProperty('max_completion_tokens');
-});
-
-it('preserves an object tool_choice in the Responses payload', async () => {
-  let captured: Record<string, unknown> | undefined;
-  const credential =
-    'header.' +
-    Buffer.from(
-      JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'test-account' } }),
-    ).toString('base64url') +
-    '.signature';
-  const wire =
-    'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n';
-  const upstream = createPiUpstream({
-    routes: [
-      {
-        id: 'subscription',
-        provider: 'openai-codex',
-        protocol: 'codex-responses',
-        model: 'gpt-6.1-sol',
-        baseUrl: 'https://chatgpt.com/backend-api',
-      },
-    ],
-    credential: async () => credential,
-    fetch: async (_url, init) => {
-      captured = decodeProviderBody(init?.body);
-      return new Response(wire, { headers: { 'content-type': 'text/event-stream' } });
-    },
-  });
-  const response = await upstream(
-    'subscription',
-    {
-      model: 'subscription',
-      stream: true,
-      store: false,
-      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Review' }] }],
-      tools: [
-        {
-          type: 'function',
-          name: 'submit_review',
-          parameters: { type: 'object', properties: {} },
-        },
-      ],
-      tool_choice: { type: 'function', name: 'submit_review' },
-    },
-    new AbortController().signal,
-  );
-  await expect(response.text()).resolves.toBe(wire);
-  expect((captured as Record<string, unknown>).tool_choice).toEqual({
-    type: 'function',
-    name: 'submit_review',
-  });
-});
-
-it('preserves native custom tool definitions and call items when no grammar is supplied', async () => {
-  let captured: Record<string, unknown> | undefined;
-  const credential =
-    'header.' +
-    Buffer.from(
-      JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'test-account' } }),
-    ).toString('base64url') +
-    '.signature';
-  const wire =
-    'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n';
-  const upstream = createPiUpstream({
-    routes: [
-      {
-        id: 'subscription',
-        provider: 'openai-codex',
-        protocol: 'codex-responses',
-        model: 'gpt-6.1-sol',
-        baseUrl: 'https://chatgpt.com/backend-api',
-      },
-    ],
-    credential: async () => credential,
-    fetch: async (_url, init) => {
-      captured = decodeProviderBody(init?.body);
-      return new Response(wire, { headers: { 'content-type': 'text/event-stream' } });
-    },
-  });
-  const response = await upstream(
-    'subscription',
-    {
-      model: 'subscription',
-      stream: true,
-      store: false,
-      input: [
-        { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'run' }] },
-        {
-          type: 'custom_tool_call',
-          call_id: 'c1',
-          id: 'ctc_1',
-          name: 'run_code',
-          input: 'print(1)',
-        },
-        { type: 'custom_tool_call_output', call_id: 'c1', output: '1' },
-      ],
-      tools: [{ type: 'custom', name: 'run_code', description: 'Run' }],
-    },
-    new AbortController().signal,
-  );
-  await expect(response.text()).resolves.toBe(wire);
-  const request = captured as Record<string, any>;
-  expect(request.tools[0]).toEqual({ type: 'custom', name: 'run_code', description: 'Run' });
-  expect(request.input[1]).toEqual({
-    type: 'custom_tool_call',
-    call_id: 'c1',
-    id: 'ctc_1',
-    name: 'run_code',
-    input: 'print(1)',
-  });
-  expect(request.input[2]).toEqual({
-    type: 'custom_tool_call_output',
-    call_id: 'c1',
-    output: '1',
-  });
-});
-
-it('preserves a supplied Responses prompt_cache_key', async () => {
-  let captured: Record<string, unknown> | undefined;
-  const credential =
-    'header.' +
-    Buffer.from(
-      JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'test-account' } }),
-    ).toString('base64url') +
-    '.signature';
-  const wire =
-    'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n';
-  const upstream = createPiUpstream({
-    routes: [
-      {
-        id: 'subscription',
-        provider: 'openai-codex',
-        protocol: 'codex-responses',
-        model: 'gpt-6.1-sol',
-        baseUrl: 'https://chatgpt.com/backend-api',
-      },
-    ],
-    credential: async () => credential,
-    fetch: async (_url, init) => {
-      captured = decodeProviderBody(init?.body);
-      return new Response(wire, { headers: { 'content-type': 'text/event-stream' } });
-    },
-  });
-  const response = await upstream(
-    'subscription',
-    {
-      model: 'subscription',
-      stream: true,
-      store: false,
-      prompt_cache_key: 'client-cache-key',
-      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Review' }] }],
-    },
-    new AbortController().signal,
-  );
-  await expect(response.text()).resolves.toBe(wire);
-  expect((captured as Record<string, unknown>).prompt_cache_key).toBe('client-cache-key');
-});
-
-it('preserves supported inline Chat images in the provider payload', async () => {
-  let captured: Record<string, unknown> | undefined;
-  const image = 'data:image/png;base64,' + Buffer.from('image-bytes').toString('base64');
-  const upstream = createPiUpstream({
-    routes: [
-      {
-        id: 'review',
-        provider: 'openai-compatible',
-        protocol: 'chat-completions',
-        model: 'vision-model',
-        baseUrl: 'https://provider.invalid/v1',
-      },
-    ],
-    credential: async () => 'secret',
-    fetch: async (_url, init) => {
-      if (typeof init?.body !== 'string') throw new Error('expected JSON body');
-      captured = JSON.parse(init.body) as Record<string, unknown>;
-      return new Response(
-        'data: {"id":"c1","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}\n\ndata: {"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
-        { headers: { 'content-type': 'text/event-stream' } },
-      );
-    },
-  });
-  const response = await upstream(
-    'review',
-    {
-      model: 'review',
-      stream: true,
-      store: false,
-      messages: [
-        {
-          role: 'user',
-          content: [
-            { type: 'text', text: 'Describe this image' },
-            { type: 'image_url', image_url: { url: image } },
-          ],
-        },
-      ],
-    },
-    new AbortController().signal,
-  );
-  await expect(response.text()).resolves.toContain('ok');
-  const request = captured as Record<string, any>;
-  expect(request.messages[0].content).toEqual([
-    { type: 'text', text: 'Describe this image' },
-    { type: 'image_url', image_url: { url: image } },
-  ]);
-});
-
-it('treats a null Chat reasoning_content as absent', async () => {
-  let captured: Record<string, unknown> | undefined;
-  const upstream = createPiUpstream({
-    routes: [
-      {
-        id: 'review',
-        provider: 'openai-compatible',
-        protocol: 'chat-completions',
-        model: 'deepseek-flash',
-        baseUrl: 'https://provider.invalid/v1',
-      },
-    ],
-    credential: async () => 'secret',
-    fetch: async (_url, init) => {
-      if (typeof init?.body !== 'string') throw new Error('expected JSON body');
-      captured = JSON.parse(init.body) as Record<string, unknown>;
-      return new Response(
-        'data: {"id":"c1","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}\n\ndata: {"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
-        { headers: { 'content-type': 'text/event-stream' } },
-      );
-    },
-  });
-  const response = await upstream(
-    'review',
-    {
-      model: 'review',
-      stream: true,
-      store: false,
-      messages: [
-        { role: 'user', content: 'Review this change' },
-        { role: 'assistant', content: 'Previous answer', reasoning_content: null },
-        { role: 'user', content: 'Continue' },
-      ],
-    },
-    new AbortController().signal,
-  );
-  await expect(response.text()).resolves.toContain('ok');
-  const request = captured as Record<string, any>;
-  expect(request.messages[1]).toEqual({ role: 'assistant', content: 'Previous answer' });
-});
-
-it('retains empty signed reasoning items through replay', async () => {
-  let captured: Record<string, unknown> | undefined;
-  const credential =
-    'header.' +
-    Buffer.from(
-      JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'test-account' } }),
-    ).toString('base64url') +
-    '.signature';
-  const wire =
-    'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n';
-  const upstream = createPiUpstream({
-    routes: [
-      {
-        id: 'subscription',
-        provider: 'openai-codex',
-        protocol: 'codex-responses',
-        model: 'gpt-6.1-sol',
-        baseUrl: 'https://chatgpt.com/backend-api',
-      },
-    ],
-    credential: async () => credential,
-    fetch: async (_url, init) => {
-      captured = decodeProviderBody(init?.body);
-      return new Response(wire, { headers: { 'content-type': 'text/event-stream' } });
-    },
-  });
-  const response = await upstream(
-    'subscription',
-    {
-      model: 'subscription',
-      stream: true,
-      store: false,
-      input: [
-        { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Review' }] },
-        {
-          type: 'reasoning',
-          id: 'rs_empty',
-          encrypted_content: 'opaque',
-          summary: [],
-          status: 'completed',
-        },
-        { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Done' }] },
-      ],
-    },
-    new AbortController().signal,
-  );
-  await expect(response.text()).resolves.toBe(wire);
-  const request = captured as Record<string, any>;
-  expect(request.input).toEqual([
-    { role: 'user', content: [{ type: 'input_text', text: 'Review' }] },
-    {
-      type: 'reasoning',
-      id: 'rs_empty',
-      encrypted_content: 'opaque',
-      summary: [],
-      status: 'completed',
-    },
-    {
-      type: 'message',
-      role: 'assistant',
-      id: 'msg_pi_1',
-      status: 'completed',
-      content: [{ type: 'output_text', text: 'Done', annotations: [] }],
-    },
-  ]);
-});
-
-it('preserves an explicit Chat max_completion_tokens field on a provider that prefers max_tokens', async () => {
-  let captured: Record<string, unknown> | undefined;
-  const upstream = createPiUpstream({
-    routes: [
-      {
-        id: 'review',
-        provider: 'openai-compatible',
-        protocol: 'chat-completions',
-        model: 'deepseek-flash',
-        baseUrl: 'https://api.deepseek.com/v1',
-      },
-    ],
-    credential: async () => 'secret',
-    fetch: async (_url, init) => {
-      if (typeof init?.body !== 'string') throw new Error('expected JSON body');
-      captured = JSON.parse(init.body) as Record<string, unknown>;
-      return new Response(
-        'data: {"id":"c1","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}\n\ndata: {"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
-        { headers: { 'content-type': 'text/event-stream' } },
-      );
-    },
-  });
-  const response = await upstream(
-    'review',
-    {
-      model: 'review',
-      stream: true,
-      store: false,
-      max_completion_tokens: 321,
-      messages: [{ role: 'user', content: 'Review' }],
-    },
-    new AbortController().signal,
-  );
-  await expect(response.text()).resolves.toContain('ok');
-  const request = captured as Record<string, unknown>;
-  expect(request.max_completion_tokens).toBe(321);
-  expect(request).not.toHaveProperty('max_tokens');
-});
-
-it.each(['reasoning', 'reasoning_text'])(
-  'replays the Chat %s reasoning alias with its original field signature',
-  async (field) => {
-    let captured: Record<string, unknown> | undefined;
-    const upstream = createPiUpstream({
-      routes: [
-        {
-          id: 'review',
-          provider: 'openai-compatible',
-          protocol: 'chat-completions',
-          model: 'deepseek-flash',
-          baseUrl: 'https://provider.invalid/v1',
-        },
-      ],
-      credential: async () => 'secret',
-      fetch: async (_url, init) => {
-        if (typeof init?.body !== 'string') throw new Error('expected JSON body');
-        captured = JSON.parse(init.body) as Record<string, unknown>;
-        return new Response(
-          'data: {"id":"c1","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}\n\ndata: {"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
-          { headers: { 'content-type': 'text/event-stream' } },
-        );
-      },
-    });
-    const response = await upstream(
-      'review',
-      {
-        model: 'review',
-        stream: true,
-        store: false,
-        messages: [
-          { role: 'user', content: 'Review this change' },
-          { role: 'assistant', content: 'Previous answer', [field]: 'kept reasoning' },
-          { role: 'user', content: 'Continue' },
-        ],
-      },
-      new AbortController().signal,
-    );
-    await expect(response.text()).resolves.toContain('ok');
-    const request = captured as Record<string, any>;
-    expect(request.messages[1]).toEqual({
-      role: 'assistant',
-      content: 'Previous answer',
-      [field]: 'kept reasoning',
-    });
-  },
-);
-
-it('maps Responses input_image data URLs and image tool outputs to inline images', async () => {
-  let captured: Record<string, unknown> | undefined;
-  const credential =
-    'header.' +
-    Buffer.from(
-      JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'test-account' } }),
-    ).toString('base64url') +
-    '.signature';
-  const wire =
-    'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n';
-  const upstream = createPiUpstream({
-    routes: [
-      {
-        id: 'subscription',
-        provider: 'openai-codex',
-        protocol: 'codex-responses',
-        model: 'gpt-6.1-sol',
-        baseUrl: 'https://chatgpt.com/backend-api',
-      },
-    ],
-    credential: async () => credential,
-    fetch: async (_url, init) => {
-      captured = decodeProviderBody(init?.body);
-      return new Response(wire, { headers: { 'content-type': 'text/event-stream' } });
-    },
-  });
-  const image = 'data:image/png;base64,' + Buffer.from('image-bytes').toString('base64');
-  const response = await upstream(
-    'subscription',
-    {
-      model: 'subscription',
-      stream: true,
-      store: false,
-      input: [
-        {
-          type: 'message',
-          role: 'user',
-          content: [
-            { type: 'input_text', text: 'Describe' },
-            { type: 'input_image', image_url: image, detail: 'high' },
-          ],
-        },
-        { type: 'function_call', call_id: 'c1', name: 'look', arguments: '{}' },
-        {
-          type: 'function_call_output',
-          call_id: 'c1',
-          output: [{ type: 'input_image', image_url: image }],
-        },
-      ],
-      tools: [{ type: 'function', name: 'look', parameters: { type: 'object', properties: {} } }],
-    },
-    new AbortController().signal,
-  );
-  await expect(response.text()).resolves.toBe(wire);
-  const request = captured as Record<string, any>;
-  expect(request.input[0]).toEqual({
-    role: 'user',
-    content: [
-      { type: 'input_text', text: 'Describe' },
-      { type: 'input_image', image_url: image, detail: 'high' },
-    ],
-  });
-  expect(request.input[2]).toEqual({
-    type: 'function_call_output',
-    call_id: 'c1',
-    output: [{ type: 'input_image', image_url: image, detail: 'auto' }],
-  });
-});
-
-it('preserves assistant message identity and phase across multi-part text content', async () => {
-  let captured: Record<string, unknown> | undefined;
-  const credential =
-    'header.' +
-    Buffer.from(
-      JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'test-account' } }),
-    ).toString('base64url') +
-    '.signature';
-  const wire =
-    'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n';
-  const upstream = createPiUpstream({
-    routes: [
-      {
-        id: 'subscription',
-        provider: 'openai-codex',
-        protocol: 'codex-responses',
-        model: 'gpt-6.1-sol',
-        baseUrl: 'https://chatgpt.com/backend-api',
-      },
-    ],
-    credential: async () => credential,
-    fetch: async (_url, init) => {
-      captured = decodeProviderBody(init?.body);
-      return new Response(wire, { headers: { 'content-type': 'text/event-stream' } });
-    },
-  });
-  const response = await upstream(
-    'subscription',
-    {
-      model: 'subscription',
-      stream: true,
-      store: false,
-      input: [
-        { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Review' }] },
-        {
-          type: 'message',
-          role: 'assistant',
-          id: 'msg_multi',
-          phase: 'commentary',
-          content: [
-            { type: 'output_text', text: 'First part' },
-            { type: 'output_text', text: 'Second part' },
-          ],
-        },
-      ],
-    },
-    new AbortController().signal,
-  );
-  await expect(response.text()).resolves.toBe(wire);
-  const request = captured as Record<string, any>;
-  expect(request.input[1]).toEqual({
-    type: 'message',
-    role: 'assistant',
-    id: 'msg_multi',
-    phase: 'commentary',
-    status: 'completed',
-    content: [{ type: 'output_text', text: 'First partSecond part', annotations: [] }],
-  });
-});
-
-it('rejects remote Chat image URLs without invoking the upstream transport', async () => {
-  let fetchCalls = 0;
-  const remote = 'https://images.invalid/picture.png';
-  const upstream = createPiUpstream({
-    routes: [
-      {
-        id: 'review',
-        provider: 'openai-compatible',
-        protocol: 'chat-completions',
-        model: 'vision-model',
-        baseUrl: 'https://provider.invalid/v1',
-      },
-    ],
-    credential: async () => 'secret',
-    fetch: async () => {
-      fetchCalls++;
-      throw new Error('must not reach upstream');
-    },
-  });
-  const response = await upstream(
-    'review',
-    {
-      model: 'review',
-      stream: true,
-      store: false,
-      messages: [
-        {
-          role: 'user',
-          content: [
-            { type: 'text', text: 'Describe' },
-            { type: 'image_url', image_url: { url: remote } },
-          ],
-        },
-      ],
-    },
-    new AbortController().signal,
-  );
-  expect(response.status).toBe(400);
-  expect(fetchCalls).toBe(0);
-});
-
-it('accepts inline images in Chat tool results and forwards them to the provider', async () => {
-  let captured: Record<string, unknown> | undefined;
-  const image = 'data:image/png;base64,' + Buffer.from('tool-image').toString('base64');
-  const upstream = createPiUpstream({
-    routes: [
-      {
-        id: 'review',
-        provider: 'openai-compatible',
-        protocol: 'chat-completions',
-        model: 'vision-model',
-        baseUrl: 'https://provider.invalid/v1',
-      },
-    ],
-    credential: async () => 'secret',
-    fetch: async (_url, init) => {
-      if (typeof init?.body !== 'string') throw new Error('expected JSON body');
-      captured = JSON.parse(init.body) as Record<string, unknown>;
-      return new Response(
-        'data: {"id":"c1","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}\n\ndata: {"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
-        { headers: { 'content-type': 'text/event-stream' } },
-      );
-    },
-  });
-  const response = await upstream(
-    'review',
-    {
-      model: 'review',
-      stream: true,
-      store: false,
-      messages: [
-        {
-          role: 'assistant',
-          content: null,
-          tool_calls: [
-            { id: 'call_1', type: 'function', function: { name: 'screenshot', arguments: '{}' } },
-          ],
-        },
-        {
-          role: 'tool',
-          tool_call_id: 'call_1',
-          name: 'screenshot',
-          content: [
-            { type: 'text', text: 'captured' },
-            { type: 'image_url', image_url: { url: image } },
-          ],
-        },
-      ],
-      tools: [
-        {
-          type: 'function',
-          function: { name: 'screenshot', parameters: { type: 'object', properties: {} } },
-        },
-      ],
-    },
-    new AbortController().signal,
-  );
-  await expect(response.text()).resolves.toContain('ok');
-  const request = captured as Record<string, any>;
-  expect(request.messages[1]).toMatchObject({
-    role: 'tool',
-    tool_call_id: 'call_1',
-    content: 'captured',
-  });
-  expect(request.messages[2]).toEqual({
-    role: 'user',
-    content: [
-      { type: 'text', text: 'Attached image(s) from tool result:' },
-      { type: 'image_url', image_url: { url: image } },
-    ],
-  });
-});
-
-it('preserves Chat image_url detail on the generated provider payload', async () => {
-  let captured: Record<string, unknown> | undefined;
-  const image = 'data:image/png;base64,' + Buffer.from('image-bytes').toString('base64');
-  const upstream = createPiUpstream({
-    routes: [
-      {
-        id: 'review',
-        provider: 'openai-compatible',
-        protocol: 'chat-completions',
-        model: 'vision-model',
-        baseUrl: 'https://provider.invalid/v1',
-      },
-    ],
-    credential: async () => 'secret',
-    fetch: async (_url, init) => {
-      if (typeof init?.body !== 'string') throw new Error('expected JSON body');
-      captured = JSON.parse(init.body) as Record<string, unknown>;
-      return new Response(
-        'data: {"id":"c1","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}\n\ndata: {"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
-        { headers: { 'content-type': 'text/event-stream' } },
-      );
-    },
-  });
-  const response = await upstream(
-    'review',
-    {
-      model: 'review',
-      stream: true,
-      store: false,
-      messages: [
-        {
-          role: 'user',
-          content: [
-            { type: 'text', text: 'Describe' },
-            { type: 'image_url', image_url: { url: image, detail: 'high' } },
-          ],
-        },
-      ],
-    },
-    new AbortController().signal,
-  );
-  await expect(response.text()).resolves.toContain('ok');
-  const request = captured as Record<string, any>;
-  expect(request.messages[0]).toEqual({
-    role: 'user',
-    content: [
-      { type: 'text', text: 'Describe' },
-      { type: 'image_url', image_url: { url: image, detail: 'high' } },
-    ],
-  });
+  await expect(response.text()).rejects.toThrow('model stream failed');
 });

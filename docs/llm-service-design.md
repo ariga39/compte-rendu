@@ -220,3 +220,19 @@ multi-model orchestration is a later consumer, not part of this implementation.
 
 Acceptance must include live protocol/network/refresh probes plus targeted failure
 fixtures. Existing loopback PoCs did not establish these operational properties.
+
+## LiteLLM backend adoption
+
+Model protocol adaptation and upstream credentials move to a pinned, loopback-only
+LiteLLM Proxy. The Node HTTP/control service retains job grants, route authorization,
+trusted job session headers, cancellation and sanitized diagnostics. It forwards
+native request payloads instead of converting them into pi-ai Context. LiteLLM
+configuration owns upstream model names/base URLs/keys; Node routes name its aliases.
+No PostgreSQL, LiteLLM virtual-key migration or usage database is required for this
+slice. Existing Runner route IDs and socket contracts remain unchanged.
+
+This supersedes the pi-ai-specific refresh implementation above. LiteLLM 1.106.0
+subscription refresh uses non-atomic file writes without a refresh lock; it does
+not inherit our former serialized/atomic credential guarantees. Subscription
+routes are optional and require separate activation validation. The deployment
+in this slice keeps the existing API-key DeepSeek and Step routes.
