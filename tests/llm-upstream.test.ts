@@ -1,4 +1,4 @@
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import { createPiUpstream } from '../apps/llm-service/src/upstream';
 
 it('streams native Chat Completions through the configured model and upstream credential', async () => {
@@ -238,5 +238,208 @@ it.each(['error', 'response.failed'])(
       new AbortController().signal,
     );
     await expect(response.body!.getReader().read()).rejects.toThrow('model stream failed');
+  },
+);
+
+it.each(['', 'data: [DONE]\n\n'])(
+  'records incomplete stream diagnostics without content even with terminator %j',
+  async (terminator) => {
+    const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      const upstream = createPiUpstream({
+        routes: [
+          {
+            id: 'review',
+            provider: 'openai-compatible',
+            protocol: 'chat-completions',
+            model: 'test-model',
+            baseUrl: 'https://provider.invalid/v1',
+          },
+        ],
+        credential: async () => 'credential-canary',
+        fetch: async () =>
+          new Response(
+            'data: {"choices":[{"index":0,"delta":{"content":"response-canary"},"finish_reason":null}]}\n\n' +
+              terminator,
+            { headers: { 'content-type': 'text/event-stream' } },
+          ),
+      });
+      const response = await upstream(
+        'review',
+        { model: 'review', stream: true, messages: [{ role: 'user', content: 'prompt-canary' }] },
+        new AbortController().signal,
+        'job-diagnostic',
+      );
+      await expect(response.text()).rejects.toThrow('model stream failed');
+      const output = JSON.stringify(logs.mock.calls);
+      expect(output).toContain('llm.request.finished');
+      expect(output).toContain('job-diagnostic');
+      expect(output).toContain('incomplete-stream');
+      expect(output).toContain('receivedBytes');
+      expect(output).toContain('requestId');
+      for (const secret of ['credential-canary', 'response-canary', 'prompt-canary'])
+        expect(output).not.toContain(secret);
+    } finally {
+      logs.mockRestore();
+    }
+  },
+);
+
+it.each([
+  [
+    'completed',
+    'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+    200,
+  ],
+  ['upstream-error-event', 'event: error\ndata: {"message":"private-error-canary"}\n\n', 200],
+  ['upstream-http-error', 'private-error-canary', 429],
+  ['invalid-stream', 'data: not-json-private-error-canary\n\n', 200],
+] as const)('distinguishes %s in terminal diagnostics', async (outcome, wire, status) => {
+  const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+  try {
+    const upstream = createPiUpstream({
+      routes: [
+        {
+          id: 'review',
+          provider: 'openai-compatible',
+          protocol: 'chat-completions',
+          model: 'model',
+          baseUrl: 'https://provider.invalid/v1',
+        },
+      ],
+      credential: async () => 'secret',
+      fetch: async () =>
+        new Response(wire, { status, headers: { 'content-type': 'text/event-stream' } }),
+    });
+    const response = await upstream(
+      'review',
+      { model: 'review', stream: true, messages: [] },
+      new AbortController().signal,
+      'job-classification',
+    );
+    if (outcome === 'completed') await expect(response.text()).resolves.toContain('[DONE]');
+    else if (status !== 200) expect(response.status).toBe(502);
+    else await expect(response.text()).rejects.toThrow('model stream failed');
+    const finished = logs.mock.calls.filter((call) => call.includes('llm.request.finished'));
+    expect(finished).toHaveLength(1);
+    expect(finished[0]?.[2]).toMatchObject({
+      jobId: 'job-classification',
+      outcome,
+      upstreamStatus: status,
+    });
+    expect(JSON.stringify(logs.mock.calls)).not.toContain('private-error-canary');
+  } finally {
+    logs.mockRestore();
+  }
+});
+
+it('distinguishes the provider SDK abort from an upstream network failure', async () => {
+  vi.useFakeTimers();
+  const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+  try {
+    const upstream = createPiUpstream({
+      routes: [
+        {
+          id: 'review',
+          provider: 'openai-compatible',
+          protocol: 'chat-completions',
+          model: 'model',
+          baseUrl: 'https://provider.invalid/v1',
+        },
+      ],
+      credential: async () => 'secret',
+      fetch: async (_url, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(new Error('private-error-canary')), {
+            once: true,
+          });
+        }),
+    });
+    const pending = upstream(
+      'review',
+      { model: 'review', stream: true, messages: [] },
+      new AbortController().signal,
+      'job-timeout',
+    );
+    await vi.advanceTimersByTimeAsync(120001);
+    expect((await pending).status).toBe(502);
+    const output = JSON.stringify(logs.mock.calls);
+    expect(output).toContain('provider-request-aborted');
+    expect(output).not.toContain('private-error-canary');
+  } finally {
+    logs.mockRestore();
+    vi.useRealTimers();
+  }
+});
+
+it.each(['client-cancelled', 'request-aborted', 'upstream-stream-error'] as const)(
+  'identifies %s after response headers without leaking transport errors',
+  async (outcome) => {
+    const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      let source: ReadableStreamDefaultController<Uint8Array> | undefined;
+      const controller = new AbortController();
+      const upstream = createPiUpstream({
+        routes: [
+          {
+            id: 'review',
+            provider: 'openai-compatible',
+            protocol: 'chat-completions',
+            model: 'model',
+            baseUrl: 'https://provider.invalid/v1',
+          },
+        ],
+        credential: async () => 'secret',
+        fetch: async (_url, init) =>
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(target) {
+                source = target;
+                target.enqueue(
+                  new TextEncoder().encode(
+                    'data: {"choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":null}]}\n\n',
+                  ),
+                );
+                init?.signal?.addEventListener(
+                  'abort',
+                  () => {
+                    try {
+                      target.error(new Error('transport-secret'));
+                    } catch {
+                      /* Already closed by cancellation. */
+                    }
+                  },
+                  { once: true },
+                );
+              },
+            }),
+            { headers: { 'content-type': 'text/event-stream' } },
+          ),
+      });
+      const response = await upstream(
+        'review',
+        { model: 'review', stream: true, messages: [] },
+        controller.signal,
+        'job-stream-end',
+      );
+      const reader = response.body!.getReader();
+      expect((await reader.read()).done).toBe(false);
+      if (outcome === 'client-cancelled') await reader.cancel();
+      else {
+        if (outcome === 'request-aborted') controller.abort();
+        else source!.error(new Error('transport-secret'));
+        await expect(reader.read()).rejects.toThrow('model stream failed');
+      }
+      const finished = logs.mock.calls.filter((call) => call.includes('llm.request.finished'));
+      expect(finished).toHaveLength(1);
+      expect(finished[0]?.[2]).toMatchObject({
+        outcome,
+        upstreamStatus: 200,
+        jobId: 'job-stream-end',
+      });
+      expect(JSON.stringify(logs.mock.calls)).not.toContain('transport-secret');
+    } finally {
+      logs.mockRestore();
+    }
   },
 );

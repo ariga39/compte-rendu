@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { Effect, Schema } from 'effect';
 import { EventSourceParserStream } from 'eventsource-parser/stream';
 import {
@@ -115,9 +116,23 @@ export const createPiUpstream = (options: PiUpstreamOptions) => {
       )(body).pipe(Effect.match({ onSuccess: () => true, onFailure: () => false }));
       if (!valid)
         return Response.json({ error: { message: 'unsupported model request' } }, { status: 400 });
-      const key = yield* Effect.tryPromise(() => options.credential(route, signal));
-      return yield* Effect.tryPromise(() =>
-        relay(route, body, key, signal, options.fetch ?? globalThis.fetch, sessionId),
+      const diagnostic = requestDiagnostic(route, sessionId, signal);
+      return yield* Effect.tryPromise(async () => {
+        const key = await options.credential(route, signal);
+        return relay(
+          route,
+          body,
+          key,
+          signal,
+          options.fetch ?? globalThis.fetch,
+          diagnostic,
+          sessionId,
+        );
+      }).pipe(
+        Effect.catch(() => {
+          diagnostic.finish('credential-or-request-failure');
+          return Effect.succeed(failure());
+        }),
       );
     },
     Effect.catch(() => Effect.succeed(failure())),
@@ -128,17 +143,76 @@ export const createPiUpstream = (options: PiUpstreamOptions) => {
     );
 };
 
+type StreamOutcome =
+  | 'completed'
+  | 'credential-or-request-failure'
+  | 'upstream-http-error'
+  | 'provider-request-aborted'
+  | 'upstream-fetch-error'
+  | 'upstream-stream-error'
+  | 'upstream-error-event'
+  | 'invalid-stream'
+  | 'stream-too-large'
+  | 'incomplete-stream'
+  | 'client-cancelled'
+  | 'request-aborted'
+  | 'service-timeout'
+  | 'provider-error';
+
+const requestDiagnostic = (route: ModelRoute, jobId: string | undefined, signal: AbortSignal) => {
+  const startedAt = Date.now();
+  const identity = {
+    requestId: randomUUID(),
+    jobId: jobId ?? null,
+    route: route.id,
+    provider: route.provider,
+    protocol: route.protocol,
+  };
+  const state = {
+    receivedBytes: 0,
+    upstreamStatus: null as number | null,
+    finishMarker: false,
+    doneMarker: false,
+  };
+  let finished = false;
+  Effect.runSync(Effect.logInfo('llm.request.started', identity));
+  return {
+    state,
+    finish(outcome: StreamOutcome) {
+      if (finished) return;
+      finished = true;
+      const finalOutcome = signal.aborted
+        ? signal.reason instanceof DOMException && signal.reason.name === 'TimeoutError'
+          ? 'service-timeout'
+          : 'request-aborted'
+        : outcome;
+      Effect.runSync(
+        Effect.logInfo('llm.request.finished', {
+          ...identity,
+          ...state,
+          durationMs: Date.now() - startedAt,
+          outcome: finalOutcome,
+        }),
+      );
+    },
+  };
+};
+
 const relay = (
   route: ModelRoute,
   body: Record<string, unknown>,
   key: string,
   signal: AbortSignal,
   fetchUpstream: typeof globalThis.fetch,
+  diagnostic: ReturnType<typeof requestDiagnostic>,
   sessionId?: string,
 ): Promise<Response> =>
   new Promise((resolve) => {
     const controller = new AbortController();
-    const abort = () => controller.abort();
+    const abort = () => {
+      diagnostic.finish('request-aborted');
+      controller.abort();
+    };
     signal.addEventListener('abort', abort, { once: true });
     if (signal.aborted) abort();
     const model = {
@@ -165,13 +239,22 @@ const relay = (
       signal.removeEventListener('abort', abort);
       controller.abort();
     };
+    let streamOutcome: StreamOutcome = 'upstream-stream-error';
+    let upstreamEof = false;
     const intercept: typeof globalThis.fetch = async (url, init) => {
       const upstream = await fetchUpstream(url, {
         ...init,
         signal: AbortSignal.any([controller.signal, ...(init?.signal ? [init.signal] : [])]),
         redirect: 'error',
+      }).catch(() => {
+        diagnostic.finish(
+          init?.signal?.aborted ? 'provider-request-aborted' : 'upstream-fetch-error',
+        );
+        throw new Error('upstream request failed');
       });
+      diagnostic.state.upstreamStatus = upstream.status;
       if (!upstream.ok || !upstream.body) {
+        diagnostic.finish('upstream-http-error');
         await upstream.body?.cancel();
         settle(failure());
         throw new Error('upstream rejected request');
@@ -183,7 +266,11 @@ const relay = (
           new TransformStream<Uint8Array, string>({
             transform(chunk, output) {
               received += chunk.byteLength;
-              if (received > 16 * 1024 * 1024) throw new Error('model stream too large');
+              diagnostic.state.receivedBytes = received;
+              if (received > 16 * 1024 * 1024) {
+                streamOutcome = 'stream-too-large';
+                throw new Error('model stream too large');
+              }
               output.enqueue(decoder.decode(chunk, { stream: true }));
             },
           }),
@@ -192,13 +279,24 @@ const relay = (
         .pipeThrough(
           new TransformStream({
             transform(event, output) {
-              if (event.event === 'error' || event.event === 'response.failed')
+              if (event.event === 'error' || event.event === 'response.failed') {
+                streamOutcome = 'upstream-error-event';
                 throw new Error('upstream error');
+              }
+              if (event.data === '[DONE]') diagnostic.state.doneMarker = true;
               if (event.data !== '[DONE]') {
+                streamOutcome = 'invalid-stream';
                 const decoded = Schema.decodeUnknownSync(
                   Schema.fromJsonString(
                     Schema.Struct({
                       type: Schema.optionalKey(Schema.String),
+                      choices: Schema.optionalKey(
+                        Schema.Array(
+                          Schema.Struct({
+                            finish_reason: Schema.optionalKey(Schema.NullOr(Schema.String)),
+                          }),
+                        ),
+                      ),
                       error: Schema.optionalKey(Schema.Unknown),
                       response: Schema.optionalKey(
                         Schema.Struct({ status: Schema.optionalKey(Schema.String) }),
@@ -206,13 +304,21 @@ const relay = (
                     }),
                   ),
                 )(event.data);
+                streamOutcome = 'upstream-stream-error';
+                if (
+                  decoded.choices?.some((choice) => choice.finish_reason != null) ||
+                  decoded.type === 'response.completed'
+                )
+                  diagnostic.state.finishMarker = true;
                 if (
                   decoded.error != null ||
                   decoded.type === 'error' ||
                   decoded.type === 'response.failed' ||
                   decoded.response?.status === 'failed'
-                )
+                ) {
+                  streamOutcome = 'upstream-error-event';
                   throw new Error('upstream error');
+                }
               }
               const frame =
                 (event.event ? `event: ${event.event}\n` : '') +
@@ -233,9 +339,11 @@ const relay = (
           try {
             const next = await reader.read();
             if (next.done) {
+              upstreamEof = true;
               await writer.close().catch(() => undefined);
               await parserDone;
               if (!completed) throw new Error('incomplete model stream');
+              diagnostic.finish('completed');
               output.close();
               stop();
               return;
@@ -245,6 +353,13 @@ const relay = (
             });
             output.enqueue(next.value);
           } catch {
+            diagnostic.finish(
+              upstreamEof
+                ? 'incomplete-stream'
+                : init?.signal?.aborted
+                  ? 'provider-request-aborted'
+                  : streamOutcome,
+            );
             stop();
             await reader.cancel().catch(() => undefined);
             await writer.abort().catch(() => undefined);
@@ -252,6 +367,7 @@ const relay = (
           }
         },
         async cancel() {
+          diagnostic.finish('client-cancelled');
           stop();
           await reader.cancel().catch(() => undefined);
           await writer.abort().catch(() => undefined);
@@ -288,15 +404,18 @@ const relay = (
       for await (const event of events) {
         if (event.type === 'done') completed = true;
         if (event.type === 'error') {
+          if (!settled) diagnostic.finish('provider-error');
           settle(failure());
         }
       }
       if (!settled) {
+        diagnostic.finish('provider-error');
         settle(failure());
         stop();
       }
     })();
     void parserDone.catch(() => {
+      diagnostic.finish('provider-error');
       settle(failure());
       stop();
     });

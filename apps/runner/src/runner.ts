@@ -320,6 +320,14 @@ const submitReminderPrompt =
   'You already completed the review in this session. Use your existing analysis and conclusion; do not redo the review and do not call any other tool. Call `submit_review` exactly once with the `decision` (`approve` for no blocking defect, `request_changes` for a concrete actionable blocking defect, or `comment` for feedback without a definite recommendation) and the complete publishable Markdown in its `markdown` argument. Do not label an incomplete review or a context/tooling failure as `approve`.';
 
 const OpenCodeErrorEvent = Schema.Struct({ type: Schema.Literal('error') });
+const OpenCodeRecoverableError = Schema.Struct({
+  type: Schema.Literal('error'),
+  sessionID: Schema.NonEmptyString,
+  error: Schema.Struct({
+    type: Schema.Literal('provider.invalid-output'),
+    status: Schema.Literal(200),
+  }),
+});
 // OpenCode 2 emits tool parts as `part.id` with an explicit state machine. A
 // rejected attempt carries `status: 'error'` and is not a submission; only a
 // `status: 'completed'` part with valid arguments is accepted, and more than
@@ -632,14 +640,16 @@ const readJson = async (request: Request) => {
 
 type ParsedAgentResult = {
   readonly result?: StructuredReviewResult;
+  readonly recoveredErrors?: number;
   readonly cause?: RunnerFailureCauseValue;
 };
 
-const parseResult = (stdout: string): ParsedAgentResult => {
+const parseResult = (stdout: string, recoverySessionId?: string): ParsedAgentResult => {
   if (new TextEncoder().encode(stdout).byteLength > MAX_AGENT_OUTPUT_BYTES) {
     return { cause: 'output-truncated' };
   }
   let submission: StructuredReviewResult | undefined;
+  let recoveredErrors = 0;
   for (const line of stdout.split(/\r?\n/).filter((value) => value.length > 0)) {
     let event: unknown;
     try {
@@ -648,6 +658,15 @@ const parseResult = (stdout: string): ParsedAgentResult => {
       return { cause: 'malformed-jsonl' };
     }
     if (Option.isSome(Schema.decodeUnknownOption(OpenCodeErrorEvent)(event))) {
+      const recoverable = Schema.decodeUnknownOption(OpenCodeRecoverableError)(event);
+      if (
+        recoverySessionId !== undefined &&
+        Option.isSome(recoverable) &&
+        recoverable.value.sessionID === recoverySessionId
+      ) {
+        recoveredErrors += 1;
+        continue;
+      }
       return { cause: 'agent-error' };
     }
     if (Option.isNone(Schema.decodeUnknownOption(OpenCodeKnownSubmitReview)(event))) continue;
@@ -667,7 +686,9 @@ const parseResult = (stdout: string): ParsedAgentResult => {
     if (submission !== undefined) return { cause: 'multiple-results' };
     submission = { version: 2, decision: decoded.value.decision, markdown: decoded.value.markdown };
   }
-  return submission === undefined ? { cause: 'zero-results' } : { result: submission };
+  return submission === undefined
+    ? { cause: 'zero-results' }
+    : { result: submission, recoveredErrors };
 };
 
 const sessionSucceeded = (value: unknown, sessionId: string): boolean => {
@@ -696,6 +717,54 @@ const sessionSucceeded = (value: unknown, sessionId: string): boolean => {
     }
   }
   return lastAssistantFinish === 'stop';
+};
+
+// OpenCode 2 can recover a provider stream error but retain exit code 1.
+// Only this observed error class can be reconciled, using the full export as
+// independent evidence of both terminal success and the exact unique result.
+const recoveredOpenCodeResult = (
+  stdout: string,
+  value: unknown,
+  sessionId: string,
+): StructuredReviewResult | undefined => {
+  if (!sessionSucceeded(value, sessionId)) return undefined;
+  const parsed = parseResult(stdout, sessionId);
+  if (parsed.result === undefined || !parsed.recoveredErrors) return undefined;
+  const exported = Schema.decodeUnknownOption(OpenCodeSessionExport)(value);
+  if (Option.isNone(exported)) return undefined;
+  const assistantSchema = Schema.Struct({
+    type: Schema.Literal('assistant'),
+    content: Schema.Array(Schema.Unknown),
+  });
+  const toolSchema = Schema.Struct({
+    type: Schema.Literal('tool'),
+    name: Schema.Literal('submit_review'),
+  });
+  const submissionSchema = Schema.Struct({
+    state: Schema.Struct({ status: Schema.String, input: Schema.optional(Schema.Unknown) }),
+  });
+  let count = 0;
+  for (const message of exported.value.messages) {
+    if (Option.isNone(Schema.decodeUnknownOption(OpenCodeAssistantMessage)(message))) continue;
+    const assistant = Schema.decodeUnknownOption(assistantSchema)(message);
+    if (Option.isNone(assistant)) return undefined;
+    for (const part of assistant.value.content) {
+      if (Option.isNone(Schema.decodeUnknownOption(toolSchema)(part))) continue;
+      const tool = Schema.decodeUnknownOption(submissionSchema)(part);
+      if (Option.isNone(tool)) return undefined;
+      if (tool.value.state.status === 'error') continue;
+      if (tool.value.state.status !== 'completed') return undefined;
+      const submission = Schema.decodeUnknownOption(OpenCodeSubmission)(tool.value.state.input);
+      if (
+        Option.isNone(submission) ||
+        submission.value.decision !== parsed.result.decision ||
+        submission.value.markdown !== parsed.result.markdown
+      )
+        return undefined;
+      count += 1;
+    }
+  }
+  return count === 1 ? parsed.result : undefined;
 };
 
 const sessionIdsFrom = (stdout: string): string[] | undefined => {
@@ -2109,7 +2178,41 @@ export const createRunner = (options: RunnerOptions = {}) => {
       }
       if (agent !== undefined && failure === undefined) {
         job.submissionCompletedAt = await currentIso();
-        if (agent.timedOut) {
+        let recovered: StructuredReviewResult | undefined;
+        if (
+          !agent.timedOut &&
+          !agent.truncated &&
+          !agent.streamError &&
+          (agent.exitCode === 0 || agent.exitCode === 1) &&
+          evidenceComplete &&
+          sessionTerminal &&
+          submissionSessionId !== undefined
+        ) {
+          try {
+            recovered = recoveredOpenCodeResult(
+              agent.stdout,
+              JSON.parse(
+                await readFile(
+                  join(evidencePath, `opencode-export-${submissionSessionId}.json`),
+                  'utf8',
+                ),
+              ),
+              submissionSessionId,
+            );
+          } catch {
+            /* Missing or malformed evidence cannot establish recovery. */
+          }
+        }
+        if (recovered !== undefined) {
+          result = recovered;
+          await Effect.runPromise(
+            Effect.logInfo('Runner accepted recovered OpenCode session', {
+              jobId: job.input.id,
+              sessionId: submissionSessionId,
+              exitCode: agent.exitCode,
+            }),
+          );
+        } else if (agent.timedOut) {
           executionCause = 'timeout';
           failure = { reason: 'timeout', cause: executionCause };
         } else if (agent.exitCode !== 0) {
@@ -2131,15 +2234,15 @@ export const createRunner = (options: RunnerOptions = {}) => {
           } else {
             result = parsed.result;
           }
-          if (result !== undefined && evidenceReady) {
-            try {
-              await writeFile(join(evidencePath, 'validated-review.md'), result.markdown, {
-                mode: 0o600,
-              });
-            } catch {
-              evidenceComplete = false;
-              evidenceFailure = 'archive-incomplete';
-            }
+        }
+        if (result !== undefined && evidenceReady) {
+          try {
+            await writeFile(join(evidencePath, 'validated-review.md'), result.markdown, {
+              mode: 0o600,
+            });
+          } catch {
+            evidenceComplete = false;
+            evidenceFailure = 'archive-incomplete';
           }
         }
       }
