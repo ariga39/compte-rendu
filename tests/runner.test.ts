@@ -1725,6 +1725,147 @@ describe('Runner Job HTTP interface', () => {
     });
   });
 
+  it('publishes a recovered OpenCode review despite its sticky exit code', async () => {
+    const markdown = '## Review:\n\nNo findings after recovery.';
+    const callbacks: Request[] = [];
+    const output = [
+      JSON.stringify({
+        type: 'error',
+        sessionID: 'scenario-session',
+        error: {
+          type: 'provider.invalid-output',
+          message: 'OpenAI Chat stream ended without finish_reason',
+          status: 200,
+        },
+      }),
+      finalMarkdownJsonl(markdown),
+    ].join('\n');
+    const exported = JSON.stringify({
+      info: { id: 'scenario-session', outcome: 'succeeded' },
+      messages: [
+        { type: 'assistant', finish: 'error', content: [] },
+        {
+          type: 'assistant',
+          finish: 'tool-calls',
+          content: [
+            {
+              type: 'tool',
+              name: 'submit_review',
+              state: { status: 'completed', input: { decision: 'comment', markdown } },
+            },
+          ],
+        },
+        { type: 'assistant', finish: 'stop', content: [] },
+        { type: 'idle', outcome: 'succeeded' },
+      ],
+    });
+    const { terminal, manifest } = await runAgentScenario({
+      runId: 'run-recovered-cli',
+      output,
+      exitCode: 1,
+      sessionExport: exported,
+      callbackRequests: callbacks,
+    });
+    expect(terminal).toMatchObject({
+      status: 'succeeded',
+      result: structuredResult(markdown),
+      sandbox: { cleanup: 'destroyed' },
+    });
+    expect(manifest).toMatchObject({
+      terminal: { status: 'succeeded' },
+      result: structuredResult(markdown),
+    });
+    const callback = await callbacks[0]!.json();
+    expect(callback).toMatchObject({ status: 'succeeded', result: structuredResult(markdown) });
+    await expect(
+      readFile(
+        join(sharedEvidenceRoot, terminal.evidenceId as string, 'validated-review.md'),
+        'utf8',
+      ),
+    ).resolves.toBe(markdown);
+  });
+
+  it.each([
+    'unknown-error',
+    'foreign-error-session',
+    'export-mismatch',
+    'missing-export-submission',
+    'duplicate-export-submission',
+    'malformed-assistant',
+    'failed-export',
+    'foreign-export-session',
+    'duplicate-jsonl-submission',
+    'malformed-jsonl',
+    'fatal-exit',
+    'timeout',
+    'truncated',
+  ] as const)('does not accept apparent OpenCode recovery with %s', async (scenario) => {
+    const markdown = '## Review:\n\nRecovered review.';
+    const callbacks: Request[] = [];
+    const error = JSON.stringify({
+      type: 'error',
+      sessionID: scenario === 'foreign-error-session' ? 'another-session' : 'scenario-session',
+      error: {
+        type: scenario === 'unknown-error' ? 'unknown.failure' : 'provider.invalid-output',
+        status: 200,
+      },
+    });
+    const output = [
+      error,
+      finalMarkdownJsonl(markdown),
+      ...(scenario === 'duplicate-jsonl-submission'
+        ? [submitReviewEvent(markdown, { callID: 'second-submission' })]
+        : []),
+      ...(scenario === 'malformed-jsonl' ? ['not-json'] : []),
+    ].join('\n');
+    const submission = {
+      type: 'tool',
+      name: 'submit_review',
+      state: {
+        status: 'completed',
+        input: {
+          decision: 'comment',
+          markdown: scenario === 'export-mismatch' ? '## Review:\n\nDifferent.' : markdown,
+        },
+      },
+    };
+    const exported = JSON.stringify({
+      info: {
+        id: scenario === 'foreign-export-session' ? 'foreign-session' : 'scenario-session',
+        outcome: scenario === 'failed-export' ? 'failed' : 'succeeded',
+      },
+      messages: [
+        ...(scenario === 'malformed-assistant'
+          ? [{ type: 'assistant', content: { tool: submission } }]
+          : []),
+        {
+          type: 'assistant',
+          finish: 'stop',
+          content:
+            scenario === 'missing-export-submission'
+              ? []
+              : scenario === 'duplicate-export-submission'
+                ? [submission, submission]
+                : [submission],
+        },
+        { type: 'idle', outcome: 'succeeded' },
+      ],
+    });
+    const { terminal, manifest } = await runAgentScenario({
+      runId: `run-recovery-${scenario}`,
+      output,
+      exitCode: scenario === 'fatal-exit' ? 137 : 1,
+      timedOut: scenario === 'timeout',
+      truncated: scenario === 'truncated',
+      sessionExport: exported,
+      callbackRequests: callbacks,
+    });
+    expect(terminal).toMatchObject({ status: 'failed', sandbox: { cleanup: 'destroyed' } });
+    expect(terminal).not.toHaveProperty('result');
+    expect(manifest).not.toHaveProperty('result');
+    expect(await callbacks[0]!.json()).not.toHaveProperty('result');
+  });
+
   it('reports an agent-error cause for an explicit agent error event', async () => {
     const { terminal, manifest } = await runAgentScenario({
       runId: 'run-90-agent-error',

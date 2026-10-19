@@ -313,6 +313,58 @@ addition to grant expiry. Native response output is streamed with backpressure a
 (to bound the provider parser's retained output as well as network queues).
 No extra output-token cap is injected: supported client limits are forwarded.
 
+## OpenCode recovery and terminal state
+
+OpenCode 2 can recover a `provider.invalid-output` stream error while its CLI
+still exits with code 1. Runner accepts this observed compatibility case only
+when the complete, matching session export ends with a succeeded outcome,
+succeeded final idle, and final assistant `finish: stop`, and contains exactly
+one completed `submit_review` matching the JSONL submission. Every recoverable
+error must belong to that same session and have the observed HTTP 200 error
+shape. Unknown errors, other nonzero exits, timeout, truncation, duplicate or
+inconsistent results, and incomplete evidence still fail without publication.
+
+The original CLI exit code and error events remain in the evidence. A sanitized
+`Runner accepted recovered OpenCode session` log records the job/session identity
+when reconciliation succeeds. CLI exit or client disconnection alone never proves
+that a server-managed session has stopped; the exported terminal state is required.
+Grant revocation and confirmed Sandbox destruction still run before final success.
+
+## Diagnosing interrupted model streams
+
+The service emits `llm.request.started` and `llm.request.finished` records to its
+systemd journal. Match `jobId` to the Runner job identity and `requestId` to one
+model request; an agent can make several requests during the same job. Terminal
+records include route/provider/protocol, elapsed milliseconds, upstream HTTP
+status, received bytes, and observed completion and `[DONE]` markers. They omit
+credentials, request/response bodies, URLs, and raw upstream error messages.
+
+Use the instance's LLM service unit, for example:
+
+```sh
+journalctl --user -u <LLM_UNIT> --since '2026-10-19 01:45:00 UTC' --until '2026-10-19 02:00:00 UTC' -o cat
+```
+
+- `service-timeout`: the service's two-minute deadline expired.
+- `provider-request-aborted`: the provider SDK cancelled its request. This alone
+  does not establish why; the SDK also enforces a request timeout.
+- `request-aborted` / `client-cancelled`: the caller, grant lifecycle, or service
+  shutdown cancelled the request, or the response consumer cancelled its stream.
+- `upstream-http-error` / `upstream-fetch-error`: HTTP rejection or a failure
+  before upstream response headers arrived.
+- `upstream-stream-error`: reading the upstream body failed.
+- `incomplete-stream`: upstream EOF arrived without successful native completion.
+  `[DONE]` alone does not establish completion.
+- `upstream-error-event`, `invalid-stream`, or `stream-too-large`: the service
+  rejected the stream for the stated reason.
+- `completed`: the upstream stream completed and was consumed by the service's
+  response bridge. This is not proof of a successful review or publication.
+
+These records locate the boundary observed by this service. An upstream read
+failure does not distinguish a custom gateway failure from its provider's failure;
+correlate the timestamp with gateway/provider logs before attributing a cause.
+Historical failures without these records remain inconclusive.
+
 ## Verification and remaining integration
 
 Tests exercise the HTTP/control boundaries, token lifecycle, route restrictions,
