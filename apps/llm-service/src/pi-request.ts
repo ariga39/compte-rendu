@@ -68,29 +68,40 @@ const textOf = (value: unknown, what: string): string =>
 const assistantContent = (value: unknown): TextContent[] =>
   value === null || value === undefined ? [] : textContent(value, 'assistant');
 
+const inlineImage = (url: string, what: string): ImageContent => {
+  const match = /^data:([^;,]+);base64,(.*)$/s.exec(url);
+  if (match === null) return unsupported(`${what} must be a base64 data URL`);
+  return {
+    type: 'image',
+    data: match[2] ?? '',
+    mimeType: match[1] ?? 'application/octet-stream',
+  };
+};
+
+const contentParts = (value: unknown, what: string): (TextContent | ImageContent)[] => {
+  if (!Array.isArray(value)) return unsupported(`${what} must be parts`);
+  return value.map((part): TextContent | ImageContent => {
+    if (!Predicate.isObject(part)) return unsupported(`${what} part must be an object`);
+    if (
+      (part.type === 'text' || part.type === 'input_text' || part.type === 'output_text') &&
+      typeof part.text === 'string'
+    )
+      return { type: 'text', text: part.text };
+    const url =
+      part.type === 'image_url' && Predicate.isObject(part.image_url)
+        ? part.image_url.url
+        : part.type === 'input_image'
+          ? part.image_url
+          : undefined;
+    if (typeof url === 'string') return inlineImage(url, `${what} image`);
+    return unsupported(`unsupported ${what} part`);
+  });
+};
+
 const userContent = (value: unknown): string | (TextContent | ImageContent)[] => {
   if (typeof value === 'string') return value;
   if (!Array.isArray(value)) return unsupported('user content must be a string or parts');
-  const parts = value.map((part): TextContent | ImageContent => {
-    if (!Predicate.isObject(part)) return unsupported('user content part must be an object');
-    if ((part.type === 'text' || part.type === 'input_text') && typeof part.text === 'string')
-      return { type: 'text', text: part.text };
-    if (
-      part.type === 'image_url' &&
-      Predicate.isObject(part.image_url) &&
-      typeof part.image_url.url === 'string'
-    ) {
-      const match = /^data:([^;,]+);base64,(.*)$/s.exec(part.image_url.url);
-      if (match === null) return unsupported('user image_url must be a base64 data URL');
-      return {
-        type: 'image',
-        data: match[2] ?? '',
-        mimeType: match[1] ?? 'application/octet-stream',
-      };
-    }
-    return unsupported('unsupported user content part');
-  });
-  return parts;
+  return contentParts(value, 'user content');
 };
 
 const parseJsonObject = (raw: unknown, what: string): Record<string, unknown> => {
@@ -172,6 +183,46 @@ const parseToolCalls = (value: unknown): ToolCall[] => {
   });
 };
 
+const chatImageDetails = (messages: readonly unknown[]): (string | undefined)[] => {
+  const details: (string | undefined)[] = [];
+  for (const message of messages) {
+    if (!Predicate.isObject(message) || !Array.isArray(message.content)) continue;
+    for (const part of message.content) {
+      if (
+        !Predicate.isObject(part) ||
+        part.type !== 'image_url' ||
+        !Predicate.isObject(part.image_url)
+      )
+        continue;
+      details.push(typeof part.image_url.detail === 'string' ? part.image_url.detail : undefined);
+    }
+  }
+  return details;
+};
+
+const applyChatImageDetails = (
+  messages: unknown,
+  details: readonly (string | undefined)[],
+): unknown => {
+  if (!Array.isArray(messages) || details.length === 0) return messages;
+  let cursor = 0;
+  return messages.map((message) => {
+    if (!Predicate.isObject(message) || !Array.isArray(message.content)) return message;
+    const content = message.content.map((part) => {
+      if (
+        !Predicate.isObject(part) ||
+        part.type !== 'image_url' ||
+        !Predicate.isObject(part.image_url)
+      )
+        return part;
+      const detail = details[cursor++];
+      if (detail === undefined) return part;
+      return { ...part, image_url: { ...part.image_url, detail } };
+    });
+    return { ...message, content };
+  });
+};
+
 const maxTokens = (body: Record<string, unknown>): number | undefined => {
   const first = body.max_tokens;
   const second = body.max_completion_tokens;
@@ -237,6 +288,7 @@ export const prepareChatCompletions = (
 ): PreparedPiRequest => {
   const rawMessages = body.messages;
   if (!Array.isArray(rawMessages)) unsupported('messages must be an array');
+  const imageDetails = chatImageDetails(rawMessages);
   const { tools, strictByName } = chatTools(body.tools);
   const messages: Message[] = [];
   const toolNames = new Map<string, string>();
@@ -257,9 +309,16 @@ export const prepareChatCompletions = (
       continue;
     }
     if (raw.role === 'assistant') {
-      const reasoning = Schema.decodeUnknownSync(Schema.optional(Schema.NullOr(Schema.String)))(
-        raw.reasoning_content,
-      );
+      const reasoningField = ['reasoning_content', 'reasoning', 'reasoning_text'].find((field) => {
+        const value = Schema.decodeUnknownSync(Schema.optional(Schema.NullOr(Schema.String)))(
+          raw[field],
+        );
+        return value !== undefined && value !== null && value.length > 0;
+      });
+      const reasoning =
+        reasoningField === undefined
+          ? undefined
+          : Schema.decodeUnknownSync(Schema.NullOr(Schema.String))(raw[reasoningField]);
       const details = chatReasoningDetails(raw.reasoning_details);
       const thinking =
         details !== undefined
@@ -270,13 +329,13 @@ export const prepareChatCompletions = (
                 thinkingSignature: JSON.stringify(details),
               },
             ]
-          : reasoning === undefined || reasoning === null
+          : reasoningField === undefined || reasoning === null || reasoning === undefined
             ? []
             : [
                 {
                   type: 'thinking' as const,
                   thinking: reasoning,
-                  thinkingSignature: 'reasoning_content',
+                  thinkingSignature: reasoningField,
                 },
               ];
       const calls = parseToolCalls(raw.tool_calls);
@@ -305,7 +364,10 @@ export const prepareChatCompletions = (
         role: 'toolResult',
         toolCallId: raw.tool_call_id,
         toolName: name,
-        content: textContent(raw.content, 'tool'),
+        content:
+          typeof raw.content === 'string'
+            ? textContent(raw.content, 'tool')
+            : contentParts(raw.content, 'tool content'),
         isError: false,
         timestamp: Date.now(),
       });
@@ -347,7 +409,7 @@ export const prepareChatCompletions = (
         ? 'max_completion_tokens'
         : undefined;
   const patch =
-    strict === undefined && explicitMaxField === undefined
+    strict === undefined && explicitMaxField === undefined && imageDetails.length === 0
       ? undefined
       : (payload: Record<string, unknown>): Record<string, unknown> => {
           const next = strict === undefined ? { ...payload } : strict(payload);
@@ -355,6 +417,8 @@ export const prepareChatCompletions = (
             next[explicitMaxField] = max;
             delete next[explicitMaxField === 'max_tokens' ? 'max_completion_tokens' : 'max_tokens'];
           }
+          if (imageDetails.length > 0)
+            next.messages = applyChatImageDetails(next.messages, imageDetails);
           return next;
         };
 
@@ -364,14 +428,16 @@ export const prepareChatCompletions = (
 interface ResponsesToolSet {
   readonly tools: Tool[];
   readonly strictByName: Map<string, boolean>;
+  readonly customWithoutGrammar: ReadonlySet<string>;
   readonly grammar: boolean;
 }
 
 const responsesTools = (value: unknown): ResponsesToolSet => {
   const tools: Tool[] = [];
   const strictByName = new Map<string, boolean>();
+  const customWithoutGrammar = new Set<string>();
   let grammar = false;
-  if (value === undefined) return { tools, strictByName, grammar };
+  if (value === undefined) return { tools, strictByName, customWithoutGrammar, grammar };
   if (!Array.isArray(value)) unsupported('tools must be an array');
   for (const tool of value) {
     if (!Predicate.isObject(tool) || typeof tool.name !== 'string' || tool.name.length === 0)
@@ -387,6 +453,7 @@ const responsesTools = (value: unknown): ResponsesToolSet => {
     }
     if (tool.type === 'custom') {
       if (tool.format === undefined) {
+        customWithoutGrammar.add(tool.name);
         tools.push({
           name: tool.name,
           description,
@@ -428,7 +495,7 @@ const responsesTools = (value: unknown): ResponsesToolSet => {
     }
     unsupported('unsupported tool type');
   }
-  return { tools, strictByName, grammar };
+  return { tools, strictByName, customWithoutGrammar, grammar };
 };
 
 const ResponsesReasoningItem = Schema.StructWithRest(
@@ -464,12 +531,13 @@ const textSignature = (item: Record<string, unknown>): string | undefined => {
 
 const signedAssistantContent = (content: unknown, signature: string | undefined): TextContent[] => {
   const parts = assistantContent(content);
-  if (signature === undefined) return parts;
-  const first = parts.findIndex((part) => part.type === 'text');
-  if (first === -1) return parts;
-  return parts.map((part, index) =>
-    index === first ? { ...part, textSignature: signature } : part,
-  );
+  if (parts.length === 0) return parts;
+  const joined: TextContent = {
+    type: 'text',
+    text: parts.map((part) => part.text).join(''),
+    ...(signature === undefined ? {} : { textSignature: signature }),
+  };
+  return [joined];
 };
 
 const reasoningThinking = (value: unknown) => {
@@ -482,10 +550,15 @@ const reasoningThinking = (value: unknown) => {
   };
 };
 
-const responsesMessages = (target: PiTarget, input: unknown): Message[] => {
+const responsesMessages = (
+  target: PiTarget,
+  input: unknown,
+  customWithoutGrammar: ReadonlySet<string>,
+): { messages: Message[]; customCallItemIds: Map<string, string | undefined> } => {
   const messages: Message[] = [];
   const toolNames = new Map<string, string>();
   const callIds = new Map<string, string>();
+  const customCallItemIds = new Map<string, string | undefined>();
   const appendAssistant = (): AssistantMessage => {
     const message: AssistantMessage = {
       role: 'assistant',
@@ -504,7 +577,7 @@ const responsesMessages = (target: PiTarget, input: unknown): Message[] => {
 
   if (typeof input === 'string') {
     if (input.length > 0) messages.push({ role: 'user', content: input, timestamp: Date.now() });
-    return messages;
+    return { messages, customCallItemIds };
   }
   if (!Array.isArray(input)) unsupported('input must be a string or an array');
   for (const item of input) {
@@ -568,6 +641,7 @@ const responsesMessages = (target: PiTarget, input: unknown): Message[] => {
       }
       toolNames.set(item.call_id, call.name);
       callIds.set(item.call_id, call.id);
+      if (customWithoutGrammar.has(item.name)) customCallItemIds.set(item.call_id, itemId);
       if (pending === undefined) pending = appendAssistant();
       pending.content.push(call);
       pending.stopReason = 'toolUse';
@@ -584,7 +658,10 @@ const responsesMessages = (target: PiTarget, input: unknown): Message[] => {
         role: 'toolResult',
         toolCallId: callIds.get(item.call_id) ?? item.call_id,
         toolName: name,
-        content: textContent(item.output, 'tool output'),
+        content:
+          typeof item.output === 'string'
+            ? textContent(item.output, 'tool output')
+            : contentParts(item.output, 'tool output'),
         isError: false,
         timestamp: Date.now(),
       });
@@ -592,7 +669,42 @@ const responsesMessages = (target: PiTarget, input: unknown): Message[] => {
     }
     unsupported('unsupported input item type');
   }
-  return messages;
+  return { messages, customCallItemIds };
+};
+
+const collectImageDetails = (input: unknown): (string | undefined)[] => {
+  const details: (string | undefined)[] = [];
+  if (!Array.isArray(input)) return details;
+  for (const item of input) {
+    if (!Predicate.isObject(item)) continue;
+    const parts = Array.isArray(item.content)
+      ? item.content
+      : Array.isArray(item.output)
+        ? item.output
+        : [];
+    for (const part of parts) {
+      if (!Predicate.isObject(part) || part.type !== 'input_image') continue;
+      details.push(typeof part.detail === 'string' ? part.detail : undefined);
+    }
+  }
+  return details;
+};
+
+const applyImageDetails = (input: unknown, details: readonly (string | undefined)[]): unknown => {
+  if (!Array.isArray(input) || details.length === 0) return input;
+  let cursor = 0;
+  const visit = (parts: unknown[]): unknown[] =>
+    parts.map((part) => {
+      if (!Predicate.isObject(part) || part.type !== 'input_image') return part;
+      const detail = details[cursor++];
+      return detail === undefined ? part : { ...part, detail };
+    });
+  return input.map((item) => {
+    if (!Predicate.isObject(item)) return item;
+    if (Array.isArray(item.content)) return { ...item, content: visit(item.content) };
+    if (Array.isArray(item.output)) return { ...item, output: visit(item.output) };
+    return item;
+  });
 };
 
 const responsesReasoning = (value: unknown, options: Record<string, unknown>): void => {
@@ -616,8 +728,13 @@ export const prepareResponses = (
   target: PiTarget,
   body: Record<string, unknown>,
 ): PreparedPiRequest => {
-  const { tools, strictByName } = responsesTools(body.tools);
-  const messages = responsesMessages(target, body.input);
+  const { tools, strictByName, customWithoutGrammar } = responsesTools(body.tools);
+  const imageDetails = collectImageDetails(body.input);
+  const { messages, customCallItemIds } = responsesMessages(
+    target,
+    body.input,
+    customWithoutGrammar,
+  );
   const systemPrompt =
     typeof body.instructions === 'string' && body.instructions.length > 0
       ? body.instructions
@@ -672,7 +789,48 @@ export const prepareResponses = (
     if (textFormat !== undefined)
       next.text = { ...(Predicate.isObject(next.text) ? next.text : {}), format: textFormat };
     const strict = strictPatch(strictByName);
-    return strict === undefined ? next : strict(next);
+    const patched = strict === undefined ? next : strict(next);
+    if (imageDetails.length > 0) patched.input = applyImageDetails(patched.input, imageDetails);
+    if (customWithoutGrammar.size === 0) return patched;
+    if (Array.isArray(patched.tools)) {
+      patched.tools = patched.tools.map((tool) => {
+        if (!Predicate.isObject(tool) || typeof tool.name !== 'string') return tool;
+        if (!customWithoutGrammar.has(tool.name)) return tool;
+        return { type: 'custom', name: tool.name, description: tool.description };
+      });
+    }
+    if (Array.isArray(patched.input)) {
+      const customCalls = new Set<string>();
+      patched.input = patched.input.map((item) => {
+        if (!Predicate.isObject(item)) return item;
+        if (item.type === 'function_call' && typeof item.name === 'string') {
+          if (!customWithoutGrammar.has(item.name)) return item;
+          if (typeof item.call_id === 'string') customCalls.add(item.call_id);
+          const args = parseJsonObject(item.arguments, 'tool call arguments');
+          const input = typeof args.input === 'string' ? args.input : JSON.stringify(args);
+          const itemId = customCallItemIds.get(String(item.call_id));
+          return {
+            type: 'custom_tool_call',
+            ...(itemId === undefined ? {} : { id: itemId }),
+            call_id: item.call_id,
+            name: item.name,
+            input,
+          };
+        }
+        if (
+          item.type === 'function_call_output' &&
+          typeof item.call_id === 'string' &&
+          customCalls.has(item.call_id)
+        )
+          return {
+            type: 'custom_tool_call_output',
+            call_id: item.call_id,
+            output: item.output,
+          };
+        return item;
+      });
+    }
+    return patched;
   };
 
   return { context: normalizeContext(contextInput), options, patch };
