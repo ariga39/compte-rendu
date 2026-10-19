@@ -305,6 +305,12 @@ tools (plus Responses custom tools) are supported. Unsupported top-level fields
 or hosted tool types are rejected instead of silently ignored. Upstream HTTP
 errors become sanitized failures; interrupted streams are not successful results.
 
+Incoming messages and tools are converted to pi-ai Context, and the selected
+provider constructs the upstream request. Protocol-specific options not represented
+by pi-ai options are applied explicitly to that generated payload; the original
+request body does not replace it. The service relays native response events for
+the matching protocol. This does not persist per-job token usage.
+
 Control bodies are bounded at 16 KiB; inference bodies at 16 MiB. The larger bound
 allows substantial review context/tool transcripts while bounding per-request
 buffering, and is independent of the Runner claim/callback body limits. Each model

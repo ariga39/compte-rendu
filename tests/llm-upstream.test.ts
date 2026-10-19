@@ -1,5 +1,16 @@
+import { zstdDecompressSync } from 'node:zlib';
 import { expect, it, vi } from 'vitest';
 import { createPiUpstream } from '../apps/llm-service/src/upstream';
+
+const decodeProviderBody = (body: unknown): Record<string, unknown> => {
+  if (typeof body === 'string') return JSON.parse(body) as Record<string, unknown>;
+  if (body instanceof Uint8Array)
+    return JSON.parse(new TextDecoder().decode(zstdDecompressSync(body))) as Record<
+      string,
+      unknown
+    >;
+  throw new Error('unexpected provider body');
+};
 
 it('streams native Chat Completions through the configured model and upstream credential', async () => {
   const upstream = createPiUpstream({
@@ -490,4 +501,1013 @@ it('records the service deadline when its own timeout signal aborts', async () =
     timeout.mockRestore();
     vi.useRealTimers();
   }
+});
+
+it('converts Chat Completions history and tools into the provider request', async () => {
+  let captured: Record<string, unknown> | undefined;
+  const upstream = createPiUpstream({
+    routes: [
+      {
+        id: 'review',
+        provider: 'openai-compatible',
+        protocol: 'chat-completions',
+        model: 'deepseek-flash',
+        baseUrl: 'https://provider.invalid/v1',
+      },
+    ],
+    credential: async () => 'secret',
+    fetch: async (_url, init) => {
+      if (typeof init?.body !== 'string') throw new Error('expected JSON body');
+      captured = JSON.parse(init.body) as Record<string, unknown>;
+      return new Response(
+        'data: {"id":"c1","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}\n\ndata: {"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+        { headers: { 'content-type': 'text/event-stream' } },
+      );
+    },
+  });
+  const response = await upstream(
+    'review',
+    {
+      model: 'review',
+      stream: true,
+      store: false,
+      temperature: 0.2,
+      top_p: 0.9,
+      messages: [
+        { role: 'system', content: 'You review.' },
+        { role: 'user', content: 'Review this change' },
+        {
+          role: 'assistant',
+          content: null,
+          reasoning_content: 'Checked the changed lines before choosing this tool.',
+          tool_calls: [
+            {
+              id: 'call_1',
+              type: 'function',
+              function: { name: 'submit_review', arguments: '{"decision":"approve"}' },
+            },
+          ],
+        },
+        { role: 'tool', tool_call_id: 'call_1', name: 'submit_review', content: 'ok' },
+      ],
+      tools: [
+        {
+          type: 'function',
+          function: {
+            name: 'submit_review',
+            description: 'Submit',
+            parameters: {
+              type: 'object',
+              properties: { decision: { type: 'string' } },
+              required: ['decision'],
+              additionalProperties: false,
+            },
+            strict: true,
+          },
+        },
+      ],
+    },
+    new AbortController().signal,
+  );
+  await expect(response.text()).resolves.toContain('ok');
+  const request = captured as Record<string, any>;
+  expect(request.model).toBe('deepseek-flash');
+  expect(request.store).toBe(false);
+  expect(request.temperature).toBe(0.2);
+  expect(request.top_p).toBe(0.9);
+  expect(request.stream_options).toEqual({ include_usage: true });
+  expect(request).not.toHaveProperty('max_tokens');
+  expect(request).not.toHaveProperty('max_completion_tokens');
+  expect(request.messages[0]).toMatchObject({ role: 'system', content: 'You review.' });
+  expect(request.messages[1]).toEqual({ role: 'user', content: 'Review this change' });
+  expect(request.messages[2].reasoning_content).toBe(
+    'Checked the changed lines before choosing this tool.',
+  );
+  expect(request.messages[2].tool_calls).toEqual([
+    {
+      id: 'call_1',
+      type: 'function',
+      function: { name: 'submit_review', arguments: '{"decision":"approve"}' },
+    },
+  ]);
+  expect(request.messages[3]).toMatchObject({
+    role: 'tool',
+    tool_call_id: 'call_1',
+    content: 'ok',
+  });
+  expect(request.tools[0]).toMatchObject({
+    type: 'function',
+    function: {
+      name: 'submit_review',
+      strict: true,
+      parameters: {
+        type: 'object',
+        properties: { decision: { type: 'string' } },
+        required: ['decision'],
+        additionalProperties: false,
+      },
+    },
+  });
+});
+
+it('rejects malformed or unsupported Chat Completions semantics before upstream', async () => {
+  const upstream = createPiUpstream({
+    routes: [
+      {
+        id: 'review',
+        provider: 'openai-compatible',
+        protocol: 'chat-completions',
+        model: 'model',
+        baseUrl: 'https://provider.invalid/v1',
+      },
+    ],
+    credential: async () => 'secret',
+    fetch: async () => {
+      throw new Error('must not reach upstream');
+    },
+  });
+  for (const body of [
+    {
+      messages: [
+        {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            { id: 'c', type: 'function', function: { name: 'x', arguments: 'not-json' } },
+          ],
+        },
+      ],
+    },
+    { messages: [{ role: 'alien', content: 'x' }] },
+    { messages: [{ role: 'tool', tool_call_id: 'missing', content: 'x' }] },
+    { messages: [{ role: 'user', content: [{ type: 'audio', data: 'x' }] }] },
+  ]) {
+    const response = await upstream(
+      'review',
+      { model: 'review', stream: true, ...body },
+      new AbortController().signal,
+    );
+    expect(response.status).toBe(400);
+  }
+});
+
+it('converts Responses input and tools, preserving function call ids and outputs', async () => {
+  let captured: Record<string, unknown> | undefined;
+  const credential =
+    'header.' +
+    Buffer.from(
+      JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'test-account' } }),
+    ).toString('base64url') +
+    '.signature';
+  const wire =
+    'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n';
+  const upstream = createPiUpstream({
+    routes: [
+      {
+        id: 'subscription',
+        provider: 'openai-codex',
+        protocol: 'codex-responses',
+        model: 'gpt-6.1-sol',
+        baseUrl: 'https://chatgpt.com/backend-api',
+      },
+    ],
+    credential: async () => credential,
+    fetch: async (_url, init) => {
+      captured = decodeProviderBody(init?.body);
+      return new Response(wire, { headers: { 'content-type': 'text/event-stream' } });
+    },
+  });
+  const response = await upstream(
+    'subscription',
+    {
+      model: 'subscription',
+      stream: true,
+      store: false,
+      instructions: 'Review carefully.',
+      input: [
+        {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: 'Review this change' }],
+        },
+        {
+          type: 'function_call',
+          call_id: 'call_1',
+          name: 'submit_review',
+          arguments: '{"decision":"approve"}',
+        },
+        { type: 'function_call_output', call_id: 'call_1', output: 'ok' },
+      ],
+      tools: [
+        {
+          type: 'function',
+          name: 'submit_review',
+          description: 'Submit',
+          parameters: {
+            type: 'object',
+            properties: { decision: { type: 'string' } },
+            required: ['decision'],
+            additionalProperties: false,
+          },
+        },
+      ],
+    },
+    new AbortController().signal,
+  );
+  await expect(response.text()).resolves.toBe(wire);
+  const request = captured as Record<string, any>;
+  expect(request.instructions).toBe('Review carefully.');
+  expect(request.store).toBe(false);
+  expect(request).not.toHaveProperty('max_output_tokens');
+  expect(request.input).toEqual([
+    { role: 'user', content: [{ type: 'input_text', text: 'Review this change' }] },
+    {
+      type: 'function_call',
+      call_id: 'call_1',
+      name: 'submit_review',
+      arguments: '{"decision":"approve"}',
+    },
+    { type: 'function_call_output', call_id: 'call_1', output: 'ok' },
+  ]);
+  expect(request.tools[0]).toMatchObject({ type: 'function', name: 'submit_review' });
+});
+
+it('preserves Responses custom grammar tools and their call history', async () => {
+  let captured: Record<string, unknown> | undefined;
+  const credential =
+    'header.' +
+    Buffer.from(
+      JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'test-account' } }),
+    ).toString('base64url') +
+    '.signature';
+  const wire =
+    'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n';
+  const upstream = createPiUpstream({
+    routes: [
+      {
+        id: 'subscription',
+        provider: 'openai-codex',
+        protocol: 'codex-responses',
+        model: 'gpt-6.1-sol',
+        baseUrl: 'https://chatgpt.com/backend-api',
+      },
+    ],
+    credential: async () => credential,
+    fetch: async (_url, init) => {
+      captured = decodeProviderBody(init?.body);
+      return new Response(wire, { headers: { 'content-type': 'text/event-stream' } });
+    },
+  });
+  const response = await upstream(
+    'subscription',
+    {
+      model: 'subscription',
+      stream: true,
+      store: false,
+      input: [
+        { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'run' }] },
+        { type: 'custom_tool_call', call_id: 'c1', name: 'run_code', input: 'print(1)' },
+        { type: 'custom_tool_call_output', call_id: 'c1', output: '1' },
+      ],
+      tools: [
+        {
+          type: 'custom',
+          name: 'run_code',
+          description: 'Run',
+          format: { type: 'grammar', syntax: 'lark', definition: 'start: /.+/' },
+        },
+      ],
+    },
+    new AbortController().signal,
+  );
+  await expect(response.text()).resolves.toBe(wire);
+  const request = captured as Record<string, any>;
+  expect(request.tools[0]).toMatchObject({
+    type: 'custom',
+    name: 'run_code',
+    format: { type: 'grammar', syntax: 'lark', definition: 'start: /.+/' },
+  });
+  expect(request.input).toEqual([
+    { role: 'user', content: [{ type: 'input_text', text: 'run' }] },
+    { type: 'custom_tool_call', call_id: 'c1', name: 'run_code', input: 'print(1)' },
+    { type: 'custom_tool_call_output', call_id: 'c1', output: '1' },
+  ]);
+});
+
+it('rejects unsupported Responses input items before upstream', async () => {
+  const credential =
+    'header.' +
+    Buffer.from(
+      JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'test-account' } }),
+    ).toString('base64url') +
+    '.signature';
+  const upstream = createPiUpstream({
+    routes: [
+      {
+        id: 'subscription',
+        provider: 'openai-codex',
+        protocol: 'codex-responses',
+        model: 'gpt-6.1-sol',
+        baseUrl: 'https://chatgpt.com/backend-api',
+      },
+    ],
+    credential: async () => credential,
+    fetch: async () => {
+      throw new Error('must not reach upstream');
+    },
+  });
+  const response = await upstream(
+    'subscription',
+    { model: 'subscription', stream: true, store: false, input: [{ type: 'mystery' }] },
+    new AbortController().signal,
+  );
+  expect(response.status).toBe(400);
+});
+
+it('replays encrypted reasoning and pairs function call item ids with their outputs', async () => {
+  let captured: Record<string, unknown> | undefined;
+  const credential =
+    'header.' +
+    Buffer.from(
+      JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'test-account' } }),
+    ).toString('base64url') +
+    '.signature';
+  const wire =
+    'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n';
+  const upstream = createPiUpstream({
+    routes: [
+      {
+        id: 'subscription',
+        provider: 'openai-codex',
+        protocol: 'codex-responses',
+        model: 'gpt-6.1-sol',
+        baseUrl: 'https://chatgpt.com/backend-api',
+      },
+    ],
+    credential: async () => credential,
+    fetch: async (_url, init) => {
+      captured = decodeProviderBody(init?.body);
+      return new Response(wire, { headers: { 'content-type': 'text/event-stream' } });
+    },
+  });
+  const response = await upstream(
+    'subscription',
+    {
+      model: 'subscription',
+      stream: true,
+      store: false,
+      input: [
+        { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Review' }] },
+        { type: 'reasoning', id: 'rs_1', encrypted_content: 'encrypted-reasoning', summary: [] },
+        {
+          type: 'function_call',
+          call_id: 'call_1',
+          id: 'fc_item_1',
+          name: 'submit_review',
+          arguments: '{"decision":"approve"}',
+        },
+        { type: 'function_call_output', call_id: 'call_1', output: 'ok' },
+      ],
+      tools: [
+        {
+          type: 'function',
+          name: 'submit_review',
+          description: 'Submit',
+          parameters: { type: 'object', properties: { decision: { type: 'string' } } },
+        },
+      ],
+    },
+    new AbortController().signal,
+  );
+  await expect(response.text()).resolves.toBe(wire);
+  const request = captured as Record<string, any>;
+  expect(request.input).toEqual([
+    { role: 'user', content: [{ type: 'input_text', text: 'Review' }] },
+    { type: 'reasoning', id: 'rs_1', encrypted_content: 'encrypted-reasoning', summary: [] },
+    {
+      type: 'function_call',
+      call_id: 'call_1',
+      id: 'fc_item_1',
+      name: 'submit_review',
+      arguments: '{"decision":"approve"}',
+    },
+    { type: 'function_call_output', call_id: 'call_1', output: 'ok' },
+  ]);
+});
+
+it('preserves custom tool call ctc_ item ids when replaying grammar tool history', async () => {
+  let captured: Record<string, unknown> | undefined;
+  const credential =
+    'header.' +
+    Buffer.from(
+      JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'test-account' } }),
+    ).toString('base64url') +
+    '.signature';
+  const wire =
+    'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n';
+  const upstream = createPiUpstream({
+    routes: [
+      {
+        id: 'subscription',
+        provider: 'openai-codex',
+        protocol: 'codex-responses',
+        model: 'gpt-6.1-sol',
+        baseUrl: 'https://chatgpt.com/backend-api',
+      },
+    ],
+    credential: async () => credential,
+    fetch: async (_url, init) => {
+      captured = decodeProviderBody(init?.body);
+      return new Response(wire, { headers: { 'content-type': 'text/event-stream' } });
+    },
+  });
+  const response = await upstream(
+    'subscription',
+    {
+      model: 'subscription',
+      stream: true,
+      store: false,
+      input: [
+        { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'run' }] },
+        {
+          type: 'custom_tool_call',
+          call_id: 'c1',
+          id: 'ctc_1',
+          name: 'run_code',
+          input: 'print(1)',
+        },
+        { type: 'custom_tool_call_output', call_id: 'c1', output: '1' },
+      ],
+      tools: [
+        {
+          type: 'custom',
+          name: 'run_code',
+          description: 'Run',
+          format: { type: 'grammar', syntax: 'lark', definition: 'start: /.+/' },
+        },
+      ],
+    },
+    new AbortController().signal,
+  );
+  await expect(response.text()).resolves.toBe(wire);
+  const request = captured as Record<string, any>;
+  expect(request.input).toEqual([
+    { role: 'user', content: [{ type: 'input_text', text: 'run' }] },
+    { type: 'custom_tool_call', call_id: 'c1', id: 'ctc_1', name: 'run_code', input: 'print(1)' },
+    { type: 'custom_tool_call_output', call_id: 'c1', output: '1' },
+  ]);
+});
+
+it('preserves assistant message item id and phase when replaying text', async () => {
+  let captured: Record<string, unknown> | undefined;
+  const credential =
+    'header.' +
+    Buffer.from(
+      JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'test-account' } }),
+    ).toString('base64url') +
+    '.signature';
+  const wire =
+    'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n';
+  const upstream = createPiUpstream({
+    routes: [
+      {
+        id: 'subscription',
+        provider: 'openai-codex',
+        protocol: 'codex-responses',
+        model: 'gpt-6.1-sol',
+        baseUrl: 'https://chatgpt.com/backend-api',
+      },
+    ],
+    credential: async () => credential,
+    fetch: async (_url, init) => {
+      captured = decodeProviderBody(init?.body);
+      return new Response(wire, { headers: { 'content-type': 'text/event-stream' } });
+    },
+  });
+  const response = await upstream(
+    'subscription',
+    {
+      model: 'subscription',
+      stream: true,
+      store: false,
+      input: [
+        { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Review' }] },
+        {
+          type: 'message',
+          role: 'assistant',
+          id: 'msg_1',
+          phase: 'final_answer',
+          content: [{ type: 'output_text', text: 'Looks good' }],
+        },
+      ],
+    },
+    new AbortController().signal,
+  );
+  await expect(response.text()).resolves.toBe(wire);
+  const request = captured as Record<string, any>;
+  expect(request.input).toEqual([
+    { role: 'user', content: [{ type: 'input_text', text: 'Review' }] },
+    {
+      type: 'message',
+      role: 'assistant',
+      id: 'msg_1',
+      phase: 'final_answer',
+      status: 'completed',
+      content: [{ type: 'output_text', text: 'Looks good', annotations: [] }],
+    },
+  ]);
+});
+
+it('replays Chat reasoning_details and treats null reasoning_content as absent', async () => {
+  let captured: Record<string, unknown> | undefined;
+  const details = [
+    {
+      type: 'reasoning.encrypted',
+      id: 'rs_1',
+      data: 'encrypted-detail',
+      format: 'openai-responses-v1',
+    },
+  ];
+  const upstream = createPiUpstream({
+    routes: [
+      {
+        id: 'review',
+        provider: 'openai-compatible',
+        protocol: 'chat-completions',
+        model: 'deepseek-flash',
+        baseUrl: 'https://provider.invalid/v1',
+      },
+    ],
+    credential: async () => 'secret',
+    fetch: async (_url, init) => {
+      if (typeof init?.body !== 'string') throw new Error('expected JSON body');
+      captured = JSON.parse(init.body) as Record<string, unknown>;
+      return new Response(
+        'data: {"id":"c1","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}\n\ndata: {"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+        { headers: { 'content-type': 'text/event-stream' } },
+      );
+    },
+  });
+  const response = await upstream(
+    'review',
+    {
+      model: 'review',
+      stream: true,
+      store: false,
+      messages: [
+        { role: 'user', content: 'Review this change' },
+        {
+          role: 'assistant',
+          content: 'Previous answer',
+          reasoning_content: null,
+          reasoning_details: details,
+        },
+        { role: 'user', content: 'Continue' },
+      ],
+    },
+    new AbortController().signal,
+  );
+  await expect(response.text()).resolves.toContain('ok');
+  const request = captured as Record<string, any>;
+  expect(request.messages[1]).toEqual({
+    role: 'assistant',
+    content: 'Previous answer',
+    reasoning_details: details,
+  });
+  expect(request.messages[1]).not.toHaveProperty('reasoning_content');
+});
+
+it('preserves explicit strict function tools in Responses payloads', async () => {
+  let captured: Record<string, unknown> | undefined;
+  const credential =
+    'header.' +
+    Buffer.from(
+      JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'test-account' } }),
+    ).toString('base64url') +
+    '.signature';
+  const wire =
+    'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n';
+  const upstream = createPiUpstream({
+    routes: [
+      {
+        id: 'subscription',
+        provider: 'openai-codex',
+        protocol: 'codex-responses',
+        model: 'gpt-6.1-sol',
+        baseUrl: 'https://chatgpt.com/backend-api',
+      },
+    ],
+    credential: async () => credential,
+    fetch: async (_url, init) => {
+      captured = decodeProviderBody(init?.body);
+      return new Response(wire, { headers: { 'content-type': 'text/event-stream' } });
+    },
+  });
+  const response = await upstream(
+    'subscription',
+    {
+      model: 'subscription',
+      stream: true,
+      store: false,
+      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Review' }] }],
+      tools: [
+        {
+          type: 'function',
+          name: 'submit_review',
+          description: 'Submit',
+          strict: true,
+          parameters: {
+            type: 'object',
+            properties: { decision: { type: 'string' } },
+            required: ['decision'],
+            additionalProperties: false,
+          },
+        },
+      ],
+    },
+    new AbortController().signal,
+  );
+  await expect(response.text()).resolves.toBe(wire);
+  const request = captured as Record<string, any>;
+  expect(request.tools[0]).toMatchObject({ type: 'function', name: 'submit_review', strict: true });
+});
+
+it('preserves the explicit Chat max_tokens field in the provider payload', async () => {
+  let captured: Record<string, unknown> | undefined;
+  const upstream = createPiUpstream({
+    routes: [
+      {
+        id: 'review',
+        provider: 'openai-compatible',
+        protocol: 'chat-completions',
+        model: 'deepseek-flash',
+        baseUrl: 'https://provider.invalid/v1',
+      },
+    ],
+    credential: async () => 'secret',
+    fetch: async (_url, init) => {
+      if (typeof init?.body !== 'string') throw new Error('expected JSON body');
+      captured = JSON.parse(init.body) as Record<string, unknown>;
+      return new Response(
+        'data: {"id":"c1","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}\n\ndata: {"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+        { headers: { 'content-type': 'text/event-stream' } },
+      );
+    },
+  });
+  const response = await upstream(
+    'review',
+    {
+      model: 'review',
+      stream: true,
+      store: false,
+      max_tokens: 321,
+      messages: [{ role: 'user', content: 'Review' }],
+    },
+    new AbortController().signal,
+  );
+  await expect(response.text()).resolves.toContain('ok');
+  const request = captured as Record<string, unknown>;
+  expect(request.max_tokens).toBe(321);
+  expect(request).not.toHaveProperty('max_completion_tokens');
+});
+
+it('preserves an object tool_choice in the Responses payload', async () => {
+  let captured: Record<string, unknown> | undefined;
+  const credential =
+    'header.' +
+    Buffer.from(
+      JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'test-account' } }),
+    ).toString('base64url') +
+    '.signature';
+  const wire =
+    'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n';
+  const upstream = createPiUpstream({
+    routes: [
+      {
+        id: 'subscription',
+        provider: 'openai-codex',
+        protocol: 'codex-responses',
+        model: 'gpt-6.1-sol',
+        baseUrl: 'https://chatgpt.com/backend-api',
+      },
+    ],
+    credential: async () => credential,
+    fetch: async (_url, init) => {
+      captured = decodeProviderBody(init?.body);
+      return new Response(wire, { headers: { 'content-type': 'text/event-stream' } });
+    },
+  });
+  const response = await upstream(
+    'subscription',
+    {
+      model: 'subscription',
+      stream: true,
+      store: false,
+      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Review' }] }],
+      tools: [
+        {
+          type: 'function',
+          name: 'submit_review',
+          parameters: { type: 'object', properties: {} },
+        },
+      ],
+      tool_choice: { type: 'function', name: 'submit_review' },
+    },
+    new AbortController().signal,
+  );
+  await expect(response.text()).resolves.toBe(wire);
+  expect((captured as Record<string, unknown>).tool_choice).toEqual({
+    type: 'function',
+    name: 'submit_review',
+  });
+});
+
+it('keeps custom tools that have no grammar as function-shaped tools instead of dropping them', async () => {
+  let captured: Record<string, unknown> | undefined;
+  const credential =
+    'header.' +
+    Buffer.from(
+      JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'test-account' } }),
+    ).toString('base64url') +
+    '.signature';
+  const wire =
+    'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n';
+  const upstream = createPiUpstream({
+    routes: [
+      {
+        id: 'subscription',
+        provider: 'openai-codex',
+        protocol: 'codex-responses',
+        model: 'gpt-6.1-sol',
+        baseUrl: 'https://chatgpt.com/backend-api',
+      },
+    ],
+    credential: async () => credential,
+    fetch: async (_url, init) => {
+      captured = decodeProviderBody(init?.body);
+      return new Response(wire, { headers: { 'content-type': 'text/event-stream' } });
+    },
+  });
+  const response = await upstream(
+    'subscription',
+    {
+      model: 'subscription',
+      stream: true,
+      store: false,
+      input: [
+        { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'run' }] },
+        { type: 'custom_tool_call', call_id: 'c1', name: 'run_code', input: 'print(1)' },
+        { type: 'custom_tool_call_output', call_id: 'c1', output: '1' },
+      ],
+      tools: [{ type: 'custom', name: 'run_code', description: 'Run' }],
+    },
+    new AbortController().signal,
+  );
+  await expect(response.text()).resolves.toBe(wire);
+  const request = captured as Record<string, any>;
+  expect(request.tools[0]).toMatchObject({ type: 'function', name: 'run_code' });
+  expect(request.tools[0].function).toBeUndefined();
+  expect(request.input[1]).toMatchObject({
+    type: 'function_call',
+    call_id: 'c1',
+    name: 'run_code',
+    arguments: JSON.stringify({ input: 'print(1)' }),
+  });
+});
+
+it('preserves a supplied Responses prompt_cache_key', async () => {
+  let captured: Record<string, unknown> | undefined;
+  const credential =
+    'header.' +
+    Buffer.from(
+      JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'test-account' } }),
+    ).toString('base64url') +
+    '.signature';
+  const wire =
+    'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n';
+  const upstream = createPiUpstream({
+    routes: [
+      {
+        id: 'subscription',
+        provider: 'openai-codex',
+        protocol: 'codex-responses',
+        model: 'gpt-6.1-sol',
+        baseUrl: 'https://chatgpt.com/backend-api',
+      },
+    ],
+    credential: async () => credential,
+    fetch: async (_url, init) => {
+      captured = decodeProviderBody(init?.body);
+      return new Response(wire, { headers: { 'content-type': 'text/event-stream' } });
+    },
+  });
+  const response = await upstream(
+    'subscription',
+    {
+      model: 'subscription',
+      stream: true,
+      store: false,
+      prompt_cache_key: 'client-cache-key',
+      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Review' }] }],
+    },
+    new AbortController().signal,
+  );
+  await expect(response.text()).resolves.toBe(wire);
+  expect((captured as Record<string, unknown>).prompt_cache_key).toBe('client-cache-key');
+});
+
+it('preserves supported inline Chat images in the provider payload', async () => {
+  let captured: Record<string, unknown> | undefined;
+  const image = 'data:image/png;base64,' + Buffer.from('image-bytes').toString('base64');
+  const upstream = createPiUpstream({
+    routes: [
+      {
+        id: 'review',
+        provider: 'openai-compatible',
+        protocol: 'chat-completions',
+        model: 'vision-model',
+        baseUrl: 'https://provider.invalid/v1',
+      },
+    ],
+    credential: async () => 'secret',
+    fetch: async (_url, init) => {
+      if (typeof init?.body !== 'string') throw new Error('expected JSON body');
+      captured = JSON.parse(init.body) as Record<string, unknown>;
+      return new Response(
+        'data: {"id":"c1","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}\n\ndata: {"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+        { headers: { 'content-type': 'text/event-stream' } },
+      );
+    },
+  });
+  const response = await upstream(
+    'review',
+    {
+      model: 'review',
+      stream: true,
+      store: false,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Describe this image' },
+            { type: 'image_url', image_url: { url: image } },
+          ],
+        },
+      ],
+    },
+    new AbortController().signal,
+  );
+  await expect(response.text()).resolves.toContain('ok');
+  const request = captured as Record<string, any>;
+  expect(request.messages[0].content).toEqual([
+    { type: 'text', text: 'Describe this image' },
+    { type: 'image_url', image_url: { url: image } },
+  ]);
+});
+
+it('treats a null Chat reasoning_content as absent', async () => {
+  let captured: Record<string, unknown> | undefined;
+  const upstream = createPiUpstream({
+    routes: [
+      {
+        id: 'review',
+        provider: 'openai-compatible',
+        protocol: 'chat-completions',
+        model: 'deepseek-flash',
+        baseUrl: 'https://provider.invalid/v1',
+      },
+    ],
+    credential: async () => 'secret',
+    fetch: async (_url, init) => {
+      if (typeof init?.body !== 'string') throw new Error('expected JSON body');
+      captured = JSON.parse(init.body) as Record<string, unknown>;
+      return new Response(
+        'data: {"id":"c1","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}\n\ndata: {"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+        { headers: { 'content-type': 'text/event-stream' } },
+      );
+    },
+  });
+  const response = await upstream(
+    'review',
+    {
+      model: 'review',
+      stream: true,
+      store: false,
+      messages: [
+        { role: 'user', content: 'Review this change' },
+        { role: 'assistant', content: 'Previous answer', reasoning_content: null },
+        { role: 'user', content: 'Continue' },
+      ],
+    },
+    new AbortController().signal,
+  );
+  await expect(response.text()).resolves.toContain('ok');
+  const request = captured as Record<string, any>;
+  expect(request.messages[1]).toEqual({ role: 'assistant', content: 'Previous answer' });
+});
+
+it('retains empty signed reasoning items through replay', async () => {
+  let captured: Record<string, unknown> | undefined;
+  const credential =
+    'header.' +
+    Buffer.from(
+      JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'test-account' } }),
+    ).toString('base64url') +
+    '.signature';
+  const wire =
+    'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n';
+  const upstream = createPiUpstream({
+    routes: [
+      {
+        id: 'subscription',
+        provider: 'openai-codex',
+        protocol: 'codex-responses',
+        model: 'gpt-6.1-sol',
+        baseUrl: 'https://chatgpt.com/backend-api',
+      },
+    ],
+    credential: async () => credential,
+    fetch: async (_url, init) => {
+      captured = decodeProviderBody(init?.body);
+      return new Response(wire, { headers: { 'content-type': 'text/event-stream' } });
+    },
+  });
+  const response = await upstream(
+    'subscription',
+    {
+      model: 'subscription',
+      stream: true,
+      store: false,
+      input: [
+        { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Review' }] },
+        {
+          type: 'reasoning',
+          id: 'rs_empty',
+          encrypted_content: 'opaque',
+          summary: [],
+          status: 'completed',
+        },
+        { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Done' }] },
+      ],
+    },
+    new AbortController().signal,
+  );
+  await expect(response.text()).resolves.toBe(wire);
+  const request = captured as Record<string, any>;
+  expect(request.input).toEqual([
+    { role: 'user', content: [{ type: 'input_text', text: 'Review' }] },
+    {
+      type: 'reasoning',
+      id: 'rs_empty',
+      encrypted_content: 'opaque',
+      summary: [],
+      status: 'completed',
+    },
+    {
+      type: 'message',
+      role: 'assistant',
+      id: 'msg_pi_1',
+      status: 'completed',
+      content: [{ type: 'output_text', text: 'Done', annotations: [] }],
+    },
+  ]);
+});
+
+it('preserves an explicit Chat max_completion_tokens field on a provider that prefers max_tokens', async () => {
+  let captured: Record<string, unknown> | undefined;
+  const upstream = createPiUpstream({
+    routes: [
+      {
+        id: 'review',
+        provider: 'openai-compatible',
+        protocol: 'chat-completions',
+        model: 'deepseek-flash',
+        baseUrl: 'https://api.deepseek.com/v1',
+      },
+    ],
+    credential: async () => 'secret',
+    fetch: async (_url, init) => {
+      if (typeof init?.body !== 'string') throw new Error('expected JSON body');
+      captured = JSON.parse(init.body) as Record<string, unknown>;
+      return new Response(
+        'data: {"id":"c1","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}\n\ndata: {"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+        { headers: { 'content-type': 'text/event-stream' } },
+      );
+    },
+  });
+  const response = await upstream(
+    'review',
+    {
+      model: 'review',
+      stream: true,
+      store: false,
+      max_completion_tokens: 321,
+      messages: [{ role: 'user', content: 'Review' }],
+    },
+    new AbortController().signal,
+  );
+  await expect(response.text()).resolves.toContain('ok');
+  const request = captured as Record<string, unknown>;
+  expect(request.max_completion_tokens).toBe(321);
+  expect(request).not.toHaveProperty('max_tokens');
 });

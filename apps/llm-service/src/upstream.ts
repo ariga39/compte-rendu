@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto';
 import { Effect, Schema } from 'effect';
 import { EventSourceParserStream } from 'eventsource-parser/stream';
 import {
-  normalizeContext,
   createProvider,
   type Model,
   type AssistantMessageEventStream,
@@ -10,6 +9,12 @@ import {
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
 import { opencodeGoProvider } from '@earendil-works/pi-ai/providers/opencode-go';
 import { openaiCodexProvider } from '@earendil-works/pi-ai/providers/openai-codex';
+import {
+  prepareChatCompletions,
+  prepareResponses,
+  usesGrammarTools,
+  type PreparedPiRequest,
+} from './pi-request.ts';
 
 const providers = {
   'opencode-go': opencodeGoProvider(),
@@ -116,11 +121,27 @@ export const createPiUpstream = (options: PiUpstreamOptions) => {
       )(body).pipe(Effect.match({ onSuccess: () => true, onFailure: () => false }));
       if (!valid)
         return Response.json({ error: { message: 'unsupported model request' } }, { status: 400 });
+      let prepared: PreparedPiRequest;
+      try {
+        prepared =
+          route.protocol === 'chat-completions'
+            ? prepareChatCompletions(
+                { provider: route.provider, api: 'openai-completions', model: route.model },
+                body,
+              )
+            : prepareResponses(
+                { provider: route.provider, api: 'openai-codex-responses', model: route.model },
+                body,
+              );
+      } catch {
+        return Response.json({ error: { message: 'unsupported model request' } }, { status: 400 });
+      }
       const diagnostic = requestDiagnostic(route, sessionId, signal);
       return yield* Effect.tryPromise(async () => {
         const key = await options.credential(route, signal);
         return relay(
           route,
+          prepared,
           body,
           key,
           signal,
@@ -200,6 +221,7 @@ const requestDiagnostic = (route: ModelRoute, jobId: string | undefined, signal:
 
 const relay = (
   route: ModelRoute,
+  prepared: PreparedPiRequest,
   body: Record<string, unknown>,
   key: string,
   signal: AbortSignal,
@@ -221,7 +243,7 @@ const relay = (
       provider: route.provider,
       baseUrl: route.baseUrl,
       reasoning: true,
-      input: ['text'],
+      input: ['text', 'image'],
       contextWindow: 0,
       maxTokens: 0,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -387,16 +409,28 @@ const relay = (
       fetch: intercept,
       maxRetries: 0,
       timeoutMs: 120000,
-      onPayload: () => ({ ...body, model: route.model }),
+      ...prepared.options,
+      ...(prepared.patch === undefined
+        ? {}
+        : { onPayload: (payload: unknown) => prepared.patch!(payload as Record<string, unknown>) }),
     };
-    const context = normalizeContext({ messages: [] });
-    const chatModel = { ...model, api: 'openai-completions' } satisfies Model<'openai-completions'>;
+    const context = prepared.context;
+    const chatModel = {
+      ...model,
+      api: 'openai-completions',
+      compat: { supportsDeveloperRole: false },
+    } satisfies Model<'openai-completions'>;
+    const codexModel = {
+      ...model,
+      api: 'openai-codex-responses',
+      ...(usesGrammarTools(body) ? { compat: { supportsOpenAIGrammarTools: true } } : {}),
+    } satisfies Model<'openai-codex-responses'>;
     const events: AssistantMessageEventStream =
       route.provider === 'opencode-go'
         ? providers['opencode-go'].stream(chatModel, context, settings)
         : route.provider === 'openai-compatible'
           ? providers['openai-compatible'].stream(chatModel, context, settings)
-          : providers['openai-codex'].stream({ ...model, api: 'openai-codex-responses' }, context, {
+          : providers['openai-codex'].stream(codexModel, context, {
               ...settings,
               transport: 'sse',
             });
