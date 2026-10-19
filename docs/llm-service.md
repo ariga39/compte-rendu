@@ -311,6 +311,16 @@ by pi-ai options are applied explicitly to that generated payload; the original
 request body does not replace it. The service relays native response events for
 the matching protocol. This does not persist per-job token usage.
 
+Image parts must contain inline base64 data URLs. Remote image URLs are rejected;
+the service does not fetch them. Responses custom tools keep their native wire
+types, including when no grammar is supplied.
+
+For Responses requests, an explicit `prompt_cache_key` remains a client cache
+hint. It does not replace the authenticated grant's job-derived `sessionId` or
+provider routing headers, select credentials, or authorize another route. When
+the hint is omitted, pi-ai derives its default from `sessionId`. Neither a stable
+session ID nor a supplied cache key guarantees a cache hit.
+
 Control bodies are bounded at 16 KiB; inference bodies at 16 MiB. The larger bound
 allows substantial review context/tool transcripts while bounding per-request
 buffering, and is independent of the Runner claim/callback body limits. Each model
