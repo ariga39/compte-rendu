@@ -2,6 +2,7 @@ import type { PublicTaskFailure } from '@compte-rendu/contracts';
 import { DateTime, Effect, Option, Schema } from 'effect';
 import {
   PullRequestFacts,
+  ReviewConfiguration,
   ReviewEvent,
   RunnerReviewResult,
   type ReviewDecision,
@@ -38,6 +39,7 @@ export {
 const ReviewTrigger = Schema.Literals(['automatic', 'manual']);
 
 export const ReviewJob = Schema.Struct({
+  reviewConfiguration: Schema.optional(ReviewConfiguration),
   repositoryId: Schema.Int,
   pullRequestNumber: Schema.Int,
   installationId: Schema.Int,

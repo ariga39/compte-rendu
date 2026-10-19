@@ -28,6 +28,7 @@ import type { D1DatabaseLike } from './review-state-store';
 import type { WorkerEntrypoint } from '@compte-rendu/contracts';
 import { createCloudflareOperationalLog } from './operational-log';
 import { createPostHogLifecycleLog } from './posthog';
+import { handleReviewConfiguration } from './review-configuration';
 import type { OperationalLog } from '@compte-rendu/contracts';
 import { formatReviewFailureComment } from './review-publication-format';
 import {
@@ -43,6 +44,7 @@ export interface CoreWorkerEnv extends Partial<CoreEnv> {
   readonly GITHUB_APP_PRIVATE_KEY: string;
   readonly DASHBOARD_ORIGIN?: string;
   readonly GITHUB_CHECK_NAME?: string;
+  readonly REVIEW_CONFIGURATION_TOKEN?: string;
   readonly EVIDENCE_BUCKET?: R2BucketLike;
   readonly POSTHOG_ENABLED?: string;
   readonly POSTHOG_PROJECT_API_KEY?: string;
@@ -691,6 +693,9 @@ export const createCoreWorker = (
         repositoryId: claim.job.repositoryId,
       });
       const input = {
+        ...(claim.job.reviewConfiguration === undefined
+          ? {}
+          : { reviewConfiguration: claim.job.reviewConfiguration }),
         id: claim.jobId,
         runId: claim.runId,
         attempt: claim.attempt,
@@ -769,6 +774,9 @@ export const createCoreWorker = (
 
   return {
     fetch: async (request, _env, context) => {
+      if (new URL(request.url).pathname === '/review-configuration') {
+        return handleReviewConfiguration(request, env.REVIEW_DB, env.REVIEW_CONFIGURATION_TOKEN);
+      }
       const lifecycleLog = createPostHogLifecycleLog(env, context);
       if (request.method === 'POST' && new URL(request.url).pathname === runnerClaimsPath) {
         try {

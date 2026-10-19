@@ -1,4 +1,6 @@
 import type { ReviewDecision } from '@compte-rendu/contracts';
+import { ReviewConfiguration } from '@compte-rendu/contracts';
+import { Schema } from 'effect';
 import type {
   ReviewDeliveryRecord,
   ReviewJob,
@@ -76,6 +78,7 @@ interface ReplayRunRow {
 }
 
 interface ClaimRow {
+  review_configuration: string | null;
   run_id: string;
   installation_id: number;
   repository_id: number;
@@ -577,8 +580,10 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
             (run_id, delivery_id, installation_id, repository_id,
              pull_request_number, base_sha, head_sha, trigger,
              status, created_at, updated_at, comment_id, check_setup_status,
-             repository_visibility_snapshot, base_ref, head_ref)
-           SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, 'pending', ?, ?, ?
+             repository_visibility_snapshot, base_ref, head_ref, review_configuration)
+           SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, 'pending', ?, ?, ?,
+             (SELECT json_object('revision', revision, 'selection', json(selection))
+              FROM review_configuration WHERE id = 1 AND selection IS NOT NULL)
            WHERE EXISTS (
              SELECT 1 FROM deliveries
              WHERE delivery_id = ? AND status = 'claiming'
@@ -833,7 +838,7 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
          )
          RETURNING run_id, installation_id, repository_id, pull_request_number,
            base_sha, head_sha, trigger, comment_id, runner_job_id, runner_attempt,
-           repository_visibility_snapshot, base_ref, head_ref`,
+           repository_visibility_snapshot, base_ref, head_ref, review_configuration`,
       )
       .bind(jobId, attempt, occurredAt, occurredAt)
       .first<ClaimRow>();
@@ -845,6 +850,13 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
       jobId: row.runner_job_id,
       attempt: row.runner_attempt,
       job: {
+        ...(row.review_configuration === null
+          ? {}
+          : {
+              reviewConfiguration: Schema.decodeUnknownSync(
+                Schema.fromJsonString(ReviewConfiguration),
+              )(row.review_configuration),
+            }),
         repositoryId: row.repository_id,
         pullRequestNumber: row.pull_request_number,
         installationId: row.installation_id,
