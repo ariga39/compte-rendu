@@ -144,10 +144,13 @@ URLs. `selection: null` uses the Runner's configured default model.
 
 One explicit reviewer runs directly; multiple reviewers use a supervisor and
 selected subagents in one sbx Sandbox. Both use the same review prompt and final
-output contract. The supervisor controls dispatch and intermediate reports;
-Runner does not impose a coverage ledger or child submission protocol. Child
+output contract. The prompt requests one independent review per participant,
+in parallel using foreground tasks, followed by synthesis after all reviewers
+return. It forbids follow-up reviews and verification rounds. Runner does not
+impose an internal workflow, coverage ledger or child submission protocol. Child
 exports are best-effort evidence, not extra result gates. The job retains frozen
 selection and `multi-review.json`, with one callback and one publication.
+
 
 The LLM grant permits the routes actually needed by the job. One-reviewer jobs do
 not grant an unused synthesis route. Cancellation revokes that grant and destroys
