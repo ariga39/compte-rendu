@@ -3,13 +3,13 @@
 A small GitHub App that runs AI pull-request reviews on Cloudflare, outside
 GitHub Actions.
 
-The accepted v1 architecture and delivery plan are in
-[docs/design.md](docs/design.md).
+Start with the [documentation index](docs/README.md) and
+[current architecture](docs/design.md).
 
 Operators can install and run the deployed Workers from
 [docs/installation.md](docs/installation.md). Evidence is retained in a
 private R2 bucket with a deployment-configured lifecycle expiration.
-The standalone [LLM service deployment guide](docs/llm-service.md) covers the new
+The standalone [LLM service deployment guide](docs/llm-service.md) covers the
 host-side inference service and its sbx Runner integration.
 
 To print one sanitized correlated diagnosis, pass an explicit deployed

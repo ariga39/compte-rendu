@@ -1,5 +1,9 @@
 # Workers VPC Service HTTP scheme
 
+> Archived research or implementation history. Its observations and recommendations
+> describe the versions and decisions recorded below, not the current product contract.
+> Use the [current documentation](../README.md) for supported behavior and operations.
+
 ## Conclusion
 
 For a plaintext HTTP runner listening at `127.0.0.1:8080`, with the VPC

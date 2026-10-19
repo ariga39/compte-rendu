@@ -1,5 +1,9 @@
 # Dashboard design-system research
 
+> Archived research or implementation history. Its observations and recommendations
+> describe the versions and decisions recorded below, not the current product contract.
+> Use the [current documentation](../README.md) for supported behavior and operations.
+
 Research date: 2026-10-16. Scope: a consistent design-system reference for the
 read-only review dashboard. Baseline stack: SvelteKit 3, Svelte 5, Tailwind 4,
 TypeScript. The research itself did not install packages or change application code.

@@ -1,7 +1,11 @@
 # OpenCode final review output for issue #105
 
+> Archived research or implementation history. Its observations and recommendations
+> describe the versions and decisions recorded below, not the current product contract.
+> Use the [current documentation](../README.md) for supported behavior and operations.
+
 > Historical research. The custom submission-tool recommendation is superseded
-> by the current [final-output contract](design.md#review-result). OpenCode V2
+> by the current [final-output contract](../design.md#review-result). OpenCode V2
 > returns final assistant JSON; Runner validates it and can request one
 > same-session correction before cleanup. Headings and review style are prompt
 > instructions, not schema constraints. V1 structured-output APIs described

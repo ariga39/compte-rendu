@@ -2,8 +2,9 @@
 
 Multi-model execution is available through the sbx/OpenCode Runner and external
 LLM service. Deploy migration `0012_review_configuration.sql` and the compatible
-Core and Runner before enabling a non-null selection. Missing routes or incomplete
-reviewer evidence fail the job without a vote; no legacy reviewer is substituted.
+Core and Runner before enabling a non-null selection. Missing grant routes or an
+invalid final result fail without a vote; no fallback reviewer is substituted.
+Child-session evidence is best effort, not an extra publication gate.
 See [installation](installation.md#multi-model-review-configuration) for rollout.
 
 ## Ownership
@@ -34,7 +35,7 @@ wrangler secret put REVIEW_CONFIGURATION_TOKEN --config <CORE_WRANGLER_CONFIG>
 
 Enter the secret at the prompt. For command-line HTTP clients, load the header from
 a private client configuration file rather than putting the secret in arguments.
-No dashboard editor or browser login is included in this slice. The public
+No dashboard editor or browser login is implemented. The public
 dashboard remains read-only; a future editor must authenticate the operator and
 use this same validation/update operation behind its authenticated server boundary.
 
@@ -89,7 +90,7 @@ Historical runs are not backfilled or relabeled. Runs admitted with legacy
 single-review behavior continue without a multi-model snapshot.
 
 Deploy the migration before upgraded Core code, and upgrade Runner to understand
-the snapshot before enabling any selection. A selected job runs independent
-reviewer sessions and one editorial synthesis inside a single Sandbox. It retains
+the snapshot before enabling any selection. A one-reviewer selection runs directly. A larger selection uses independent
+reviewers and one synthesis inside a single Sandbox. It retains
 its frozen configuration and participant evidence, and publishes only after
 validation, grant revocation and confirmed Sandbox cleanup.

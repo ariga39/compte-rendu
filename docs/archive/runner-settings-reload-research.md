@@ -1,5 +1,9 @@
 # Runner concurrency hot reload: library choice (#161)
 
+> Archived research or implementation history. Its observations and recommendations
+> describe the versions and decisions recorded below, not the current product contract.
+> Use the [current documentation](../README.md) for supported behavior and operations.
+
 Investigated on 2026-10-16. Scope: one TOML settings file, automatic reload,
 validation, and retention of the last valid concurrency setting.
 

@@ -1,5 +1,9 @@
 # Docker Sandboxes OpenCode custom template research
 
+> Archived research or implementation history. Its observations and recommendations
+> describe the versions and decisions recorded below, not the current product contract.
+> Use the [current documentation](../README.md) for supported behavior and operations.
+
 Research date: 2026-08-31. Scope: Docker Sandboxes `sbx` 0.39.0 and an
 x86-64 Linux NUC. Sources are Docker, OpenCode, GitHub CLI, their official
 registries, and the installed `sbx` binary only.

@@ -1,5 +1,9 @@
 # Workers VPC deployment and operations research
 
+> Archived research or implementation history. Its observations and recommendations
+> describe the versions and decisions recorded below, not the current product contract.
+> Use the [current documentation](../README.md) for supported behavior and operations.
+
 Audited on 2026-08-31 against Cloudflare's official documentation and the
 official Wrangler 4.124.0 source/CLI. This note is evidence for updating
 `docs/installation.md`; it is not itself an operator runbook.

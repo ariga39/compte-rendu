@@ -1,5 +1,9 @@
 # Agent sandbox alternatives to Docker Sandboxes (sbx 0.39)
 
+> Archived research or implementation history. Its observations and recommendations
+> describe the versions and decisions recorded below, not the current product contract.
+> Use the [current documentation](../README.md) for supported behavior and operations.
+
 Research date: 2026-10-16. Scope: official documentation and repositories only.
 No production changes or package installs were performed. This note compares
 Google-led Agent Substrate, Kubernetes Agent Sandbox, NVIDIA OpenShell and

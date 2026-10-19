@@ -1,6 +1,7 @@
 # Installation and operations
 
-This is the short operator manual for the two-Worker Compte rendu deployment.
+This guide installs the two Workers, dashboard and self-hosted Runner.
+For diagnosis, upgrades, rollback and uninstall, use [Operations](operations.md).
 It assumes one Cloudflare account, one or more explicitly allowlisted GitHub App installations, and the
 repository checkout that contains this file. It does not create resources or
 credentials by itself.
@@ -10,8 +11,8 @@ from another installation.
 
 ## External LLM service status
 
-The [LLM service deployment guide](llm-service.md) covers the new standalone
-host service: credential preparation, TOML routes, subscription login, systemd
+The [LLM service deployment guide](llm-service.md) covers the standalone
+host service and LiteLLM backend: routes, credentials, optional subscription setup, systemd
 startup, and listener checks. Deploy it independently of the Runner.
 
 For an sbx Runner, follow [Connecting an sbx Runner](llm-service.md#connecting-an-sbx-runner)
@@ -24,14 +25,14 @@ its gateway model provider; this service integration does not yet support it.
 
 The repository deploys these resources:
 
-| Resource           | Configuration name                                                       | Purpose                                                                                                                                       |
-| ------------------ | ------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| Public Worker      | `<INSTANCE_NAME>-ingress`                                                | Serves the public dashboard and receives GitHub webhooks and authenticated Runner claim/callback/progress requests. `workers_dev` is enabled. |
-| Private Worker     | `<INSTANCE_NAME>-core`                                                   | Owns authorization, GitHub API calls, orchestration, and run state. `workers_dev` is disabled.                                                |
-| Service binding    | `CORE` → `<INSTANCE_NAME>-core`                                          | Lets ingress call core without a public core URL.                                                                                             |
-| D1 database        | `<INSTANCE_NAME>-review-state`, binding `REVIEW_DB`                      | Stores delivery, approval, and run state.                                                                                                     |
-| R2 evidence bucket | `<INSTANCE_NAME>-review-evidence`, binding `EVIDENCE_BUCKET`             | Private bucket storing one bounded JSON evidence bundle per Job; lifecycle expiration is configured at deployment.                            |
-| Runner Job service | Self-hosted runner reached through the core `RUNNER` VPC Service binding | Owns one authenticated asynchronous review attempt and fresh Docker Sandbox cleanup.                                                          |
+| Resource           | Configuration name                                                       | Purpose                                                                                                                                                                               |
+| ------------------ | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Public Worker      | `<INSTANCE_NAME>-ingress`                                                | Serves the public dashboard and receives GitHub webhooks and authenticated Runner claim/callback/progress requests. Use the generated workers.dev route or an instance custom domain. |
+| Private Worker     | `<INSTANCE_NAME>-core`                                                   | Owns authorization, GitHub API calls, orchestration, and run state. `workers_dev` is disabled.                                                                                        |
+| Service binding    | `CORE` → `<INSTANCE_NAME>-core`                                          | Lets ingress call core without a public core URL.                                                                                                                                     |
+| D1 database        | `<INSTANCE_NAME>-review-state`, binding `REVIEW_DB`                      | Stores delivery, approval, and run state.                                                                                                                                             |
+| R2 evidence bucket | `<INSTANCE_NAME>-review-evidence`, binding `EVIDENCE_BUCKET`             | Private bucket storing one bounded JSON evidence bundle per Job; lifecycle expiration is configured at deployment.                                                                    |
+| Runner Job service | Self-hosted runner reached through the core `RUNNER` VPC Service binding | Owns one authenticated asynchronous review attempt and fresh Docker Sandbox cleanup.                                                                                                  |
 
 The request path is:
 
@@ -120,34 +121,6 @@ change review scheduling, Runner claims, callbacks, evidence, or publication.
 
 Independent deployed instances require distinct product GitHub Apps because
 each App has one webhook URL and secret; this does not require a router.
-
-## Correlated diagnosis
-
-The one read-only root diagnosis command accepts a GitHub PR URL, delivery ID,
-or run ID and emits one sanitized report assembled from GitHub, D1, and the
-private R2 evidence bucket:
-
-```sh
-DIAGNOSTIC_D1_DATABASE=<INSTANCE_NAME>-review-state \
-DIAGNOSTIC_R2_BUCKET=<INSTANCE_NAME>-review-evidence \
-DIAGNOSTIC_WRANGLER_CONFIG=apps/core/wrangler.<INSTANCE_NAME>.jsonc \
-corepack pnpm diagnose <PR_URL|DELIVERY_ID|RUN_ID>
-```
-
-The command invokes `gh` for GitHub and
-`corepack pnpm dlx wrangler@4.124.0 --config ...` for the deployed D1 and R2
-bindings. There is no default database or bucket name: use the generated
-config and resource names for the intended instance. Authenticate `gh` or
-provide `GH_TOKEN` for repositories that require it. To include a retained
-historical Workflow whose instance ID is the run ID, also set
-`DIAGNOSTIC_WORKFLOW_NAME=<INSTANCE_NAME>-review`.
-
-Missing sources are reported without suppressing available sources. Normal
-diagnosis never uses SSH; it mentions SSH only as a fallback for Runner-host
-loss or cleanup recovery. Output contains sanitized identities, states,
-timestamps, bounded stderr metadata, and artifact presence/size/hash—not
-credentials, repository contents, review bodies, or raw model/session/tool
-output.
 
 ## Access and credentials
 
@@ -418,7 +391,7 @@ for the secret and signature requirements. Never put the App private-key
 value, webhook secret, installation token, model key, or a private-key file
 path in this repository or in an issue/comment.
 
-## First installation
+## Sandbox host and Runner
 
 Before starting, install Docker Sandboxes with `sbx` 0.48.0, complete Docker
 login, ensure the service environment exposes both the Sandboxes daemon and
@@ -528,35 +501,19 @@ host default is `deny-all` and no other global or organization-governance allow
 rules are active. This is long-standing shipped kit behavior, not a 0.48 change;
 the upgrade only made it worth verifying.
 
-### OpenCode 2 rollout
+### Runner configuration
 
-Apply migration `0011_review_decision.sql` and deploy Core before upgrading
-Runners. Existing in-flight string results retain Comment behavior; new Runners
-submit a versioned decision and Markdown. Drain active jobs before replacing the
-Runner artifact or Sandbox template. Build/load the new pinned template before
-starting the upgraded Runner.
+Use the pinned OpenCode 2 image. Runner uses standalone mode with fresh per-job
+state and proxy-only credentials; never copy personal OpenCode auth/state into
+the image or job. It translates `REVIEW_MODEL_CONFIG` to native V2 provider/model
+settings. Final output is JSON `decision` + `markdown`, with one same-session
+correction before cleanup; no submission plugin is installed. See
+[review decisions](review-decisions-design.md).
 
-Runner invokes OpenCode 2 in standalone mode, including session inspection and
-export. Each job gets fresh data/state directories and a placeholder-only auth
-context; never seed the image or job with a personal OpenCode database or legacy
-`auth.json`. Real model credentials remain in the host-side Sandbox proxy.
-`REVIEW_MODEL_CONFIG` remains the operator-facing format. Runner translates it to
-V2 native provider/model settings and agent permissions, including the selected
-model's endpoint override when a custom base URL is configured.
-
-For the final-text output update, deploy Core before Runner: Core must accept
-non-empty Markdown without the former `## Review:` heading requirement. Then
-drain jobs and replace the Runner artifact. The pinned OpenCode 2 image is
-unchanged; no result-tool plugin or validation bundle is installed in new jobs.
-One-model and multi-model jobs use the same final JSON contract and same-session
-correction before cleanup. `TLDR:` and concise adversarial review are prompt
-instructions only. No new secret, dependency or database migration is needed
-for this output change.
-
-A review publishes Approve, Request changes or Comment exactly as submitted.
-Request changes is a successfully delivered review, not a failed execution.
-Repository branch rules determine whether its vote blocks merging; this service
-does not change those rules or automatically dismiss earlier reviews.
+The environment example below is **direct-provider mode**. For the recommended
+host LLM service and configurable multi-model selection, use
+[the service-mode environment](llm-service.md#connecting-an-sbx-runner) instead;
+that mode uses job grants and does not require `MODEL_SECRET_COMMAND`.
 
 The runner listens only on IPv4 loopback port `8080`. It runs as the persistent
 service below on the host that also runs the remotely managed Tunnel connector.
@@ -873,6 +830,8 @@ sbx ls
 
 `sbx ls` must not list `compte-rendu-kvm-probe`.
 
+## Cloudflare provisioning
+
 Create the remotely managed Tunnel first with the pinned `tunnel create`
 command above, and retain its returned `<TUNNEL_ID>`. Retrieve its connector
 token from the Dashboard's **Add a replica** action or the documented API
@@ -961,40 +920,11 @@ uses the temporary invocation described above.
    corepack pnpm dlx wrangler@4.124.0 d1 migrations apply REVIEW_DB --remote --config apps/core/wrangler.<INSTANCE_NAME>.jsonc
    ```
 
-   Apply all tracked migrations in order:
-   `apps/core/migrations/0001_review_state.sql` creates the deliveries,
-   approvals, and review-runs tables plus the active-PR index. It also retains
-   an unused legacy finding-fingerprints table; body-only publication does not
-   populate or use it. `apps/core/migrations/0002_allow_manual_retry.sql` rebuilds
-   `review_runs` while preserving its rows, then permits another run for a
-   head after a failed or superseded run by making uniqueness apply only to
-   `scheduled` and `completed` rows; it retains the active-PR index. D1
-   `0003_runner_evidence.sql` adds only evidence object metadata and execution
-   timestamps, while `0004_runner_admission.sql` adds the claimed Runner Job
-   identity, attempt, and originating manual comment id.
-   `0005_publication_claim.sql` adds the atomic publication claim used to keep
-   concurrent duplicate callbacks from creating duplicate terminal
-   publications. `0006_review_check_runs.sql` stores the GitHub Check Run id and
-   setup state. New admissions begin in pending setup, but Runner claims never
-   wait for this progress-only GitHub API work. Check success records the id,
-   Check API failure records degraded visibility, and an interrupted pending
-   setup remains claimable without manual D1 repair.
-   `0007_check_setup_lease.sql` adds the short ownership lease that prevents an
-   active delivery replay from creating a second Check while allowing a later
-   replay to recover an interrupted setup. The one-minute lease exceeds
-   Cloudflare's 30-second post-response `waitUntil()` execution limit, so an
-   expired owner is no longer running.
-   `0008_runner_cleanup.sql` adds a nullable `runner_cleanup_status` column so a
-   claimed run records whether Docker Sandbox cleanup is `pending`, `destroyed`,
-   or `failed`. Claims and recorded Runner jobs start as `pending`; a validated
-   callback records its outcome. A same-pull-request replacement waits while the
-   prior claimed run is still scheduled/superseded or its cleanup is
-   `pending`/`failed`, so a failed cleanup keeps blocking until a later
-   destroyed confirmation arrives. Historical rows added before this migration
-   keep a null value and retain the previous behavior; there is no backfill or
-   recovery framework. D1 migration files are versioned and
-   applied in order; see
-   [D1 migrations](https://developers.cloudflare.com/d1/reference/migrations/).
+   Apply **all** pending files from [the migration directory](../apps/core/migrations/)
+   in order. They cover run state, ownership/cleanup, evidence, publication,
+   Checks, dashboard visibility/lifecycle, branch refs, decisions and frozen
+   review configuration. Do not edit applied migrations or replace the database.
+   New Core code must not run against an older schema.
 
    The generated core config also retains the legacy Durable Object migration
    history: `v1` provisions `Sandbox` and `ReviewLeaseDurableObject`, then `v2`
@@ -1062,21 +992,16 @@ uses the temporary invocation described above.
 
 8. After both Workers are deployed, configure the final webhook URL as
    `<INGRESS_URL>`, set the matching webhook secret, and confirm the final
-   permissions plus `pull_request` and `issue_comment` subscriptions. Only
+   permissions and all subscriptions listed in [GitHub App setup](#github-app-permissions-and-installation),
+   including `pull_request`, `issue_comment`, `check_run`, `check_suite` and repository metadata events. Only
    then perform the one GitHub App installation or approval for the selected
    repositories. Activate delivery after installation and send a test delivery
    only after activation.
 
-9. Keep the generated configs through installation and the deployed E2E/D1
-   verification session. After verification is complete, remove exactly the
-   two deployment-only configs:
-
-   ```sh
-   rm apps/core/wrangler.<INSTANCE_NAME>.jsonc apps/ingress/wrangler.<INSTANCE_NAME>.jsonc
-   ```
-
-   Render them again for a later deployment; the tracked templates remain
-   unchanged.
+9. Keep the generated, gitignored instance configurations for upgrades. They
+   include choices such as account, domain, assets, Cron and Check branding.
+   The renderer refuses to overwrite them. Back them up privately; do not discard
+   instance settings and regenerate a default configuration for an upgrade.
 
 The deployed variables-versus-secrets inventory is deliberately small:
 
@@ -1227,90 +1152,6 @@ head SHA, and the single installation ID in the generated config.
    `sbx ls` must be empty. Do not treat a successful local tracer or a
    successful HTTP request as evidence that the published review is useful.
 
-## Operations and troubleshooting
-
-The code emits structured operational events without webhook payloads,
-repository contents, diffs, model output, credentials, or session transcripts.
-Use the Cloudflare Worker logs or `wrangler tail` only to correlate identifiers:
-
-```sh
-corepack pnpm dlx wrangler@4.124.0 tail <INSTANCE_NAME>-ingress
-corepack pnpm dlx wrangler@4.124.0 tail <INSTANCE_NAME>-core
-```
-
-Use the GitHub delivery page for `deliveryId` and then search logs for the
-same value. A scheduled core event adds `runId`; a claimed Runner Job adds
-its Job and `sandboxId`. The useful chain is:
-
-```text
-deliveryId → core scheduled → runId → D1 claim/jobId → Runner sandboxId → callback/R2/publication outcome
-```
-
-Identifier values are sanitized by the application before logging. Do not
-work around that sanitization by logging request bodies, git URLs with
-credentials, Sandbox files, OpenCode stdout/stderr, model prompts, or session
-artifacts.
-
-For a self-hosted Runner, read its systemd journal alongside the matching LLM
-service journal. Use an explicit UTC time window and retain the job/run IDs:
-
-```sh
-journalctl --user -u <RUNNER_UNIT> --utc --since '<START UTC>' --until '<END UTC>'
-journalctl --user -u <INSTANCE_NAME>-llm.service --utc --since '<START UTC>' --until '<END UTC>'
-```
-
-Interpret the boundaries separately:
-
-- Checkout command records carry the exit code and bounded, sanitized error
-  output on failure. An exit code such as 128 alone does not identify a GitHub,
-  authentication, DNS, TLS, disk, or network fault. Check cancellation, timeout,
-  process errors, and output truncation before drawing a conclusion.
-- LLM request records correlate `jobId` and `requestId`, route/provider, HTTP
-  status, received bytes, duration, terminal markers, and outcome. See
-  [LLM diagnostics](llm-service.md). A stream failure received from a gateway
-  does not establish whether the gateway or its upstream caused it.
-- Claim failures report whether polling continues or is halted. An ambiguous
-  owned claim must remain halted; do not resume it by discarding the response
-  or clearing database ownership without reconciling that exact job.
-- Callback records distinguish an HTTP rejection, transport error, timeout,
-  accepted delivery, and exhausted delivery attempts. A local terminal job is
-  not proof that Core accepted its result. Preserve its local evidence if
-  callback delivery failed; do not publish a second review manually.
-- Cleanup is a separate outcome. A failed remove command can be followed by a
-  confirmed exact-name absence; consult the final cleanup result, not an
-  isolated exit code. Unknown or truncated inspection output does not prove
-  destruction. A failed or unconfirmed cleanup can block the next job for the
-  same PR even when other PRs continue normally.
-
-The dashboard remains a projection of Core's persisted state, not a live Runner
-probe. PostHog is lifecycle telemetry, not the diagnostic source for command or
-transport failures. Preserve a failed run's identifiers and local evidence before
-restarting services; a restart cannot recreate error output that was never kept.
-
-When enabled, Core also sends only three personless PostHog events:
-`review scheduled`, `review claimed`, and `review finished`. Each event uses
-the existing opaque `run_id` as `distinct_id` and disables person profiles.
-The allowlisted properties contain only lifecycle state, bounded durations,
-deployment/environment, trigger, publication/evidence/cleanup status, and
-closed failure codes. `total_duration_ms` covers durable scheduling through the
-Core terminal/publication boundary. The SDK additionally supplies its standard
-timestamp/UUID and library/server/geolocation-disable metadata; it receives no
-repository, PR thread, review body, or session content. PostHog is a lossy
-secondary surface: its request, configuration, or transport failure is locally
-diagnosable and cannot change D1/GitHub/R2 outcomes. Core uses one immediate
-workerd capture per request and registers it with `waitUntil()`.
-
-| Symptom                               | Check first                                                                              | Safe action                                                                                                                                            |
-| ------------------------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| GitHub delivery is `400`              | `WEBHOOK_SECRET`, `X-Hub-Signature-256`, and the raw configured URL                      | Re-enter the same high-entropy secret in GitHub and ingress, then redeliver. Do not disable signature checking.                                        |
-| Ingress is `503` / `core_unavailable` | Core deployment name, `CORE` service binding, and core availability                      | Deploy or update core first, then ingress. Redeliver the GitHub event.                                                                                 |
-| Core is `503` / scheduling failure    | D1 migration, required core secrets, Runner VPC binding, and the GitHub App installation | Correct the missing binding/credential or installation permission, then redeliver. Do not create a second database.                                    |
-| Run fails at checkout                 | `runId`, `sandboxId`, and runner reason `checkout`                                       | Check Contents read access and installation scope. Never put the installation token in a log or retry an old Sandbox manually.                         |
-| Run fails at agent or cleanup         | Runner records for the same IDs                                                          | Treat a cleanup failure as a failed run until forced Sandbox cleanup succeeds.                                                                         |
-| No review is published                | Publication reason, current PR head SHA, and Pull requests write permission              | If the head changed, issue a new review command. If publication is uncertain, check the existing review marker before retrying.                        |
-| Public fork PR does nothing           | Comment body and commenter permission                                                    | Use the exact `/ai-review` command from a maintainer with `write`, `maintain`, or `admin`; a new head needs a new command.                             |
-| Bot-authored PR does nothing          | Pull request author type, numeric author ID, and `ALLOWED_BOT_AUTHOR_IDS`                | Automatic Bot PRs are ignored unless their positive numeric author ID is configured; use exact `/ai-review` from a maintainer when a review is useful. |
-
 ## Public dashboard
 
 The existing Ingress serves `/`, `/history`, `/help`, and `/jobs/<RUN_ID>`. The Help
@@ -1399,142 +1240,7 @@ TypeScript and the Playwright test runner; `corepack pnpm check` includes its st
 type check. CI runs the same suite. A preinstalled compatible
 Chromium may be selected with `PLAYWRIGHT_CHROMIUM_PATH`; it is only a test setting.
 
-## Update and rollback
-
-For a normal compatible release:
-
-1. Run `corepack pnpm check`, `corepack pnpm test`, and
-   `corepack pnpm build` against the immutable checkout being released.
-2. If there is a new migration, review it and apply it remotely with the D1
-   migration command above. Prefer additive, backward-compatible changes.
-3. Render deployment-only configs again with the same
-   `corepack pnpm render:wrangler <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '<GITHUB_BOT_AUTHOR_IDS_JSON>' ['<POSTHOG_CONFIG_JSON>'] ['<GITHUB_CHECK_NAME>']`
-   inputs, then deploy using `apps/core/wrangler.<INSTANCE_NAME>.jsonc` and
-   `apps/ingress/wrangler.<INSTANCE_NAME>.jsonc`.
-4. Redeliver one controlled GitHub event and inspect the identifier chain.
-
-The core-before-ingress order preserves the service-binding contract. For an
-incompatible change, pause GitHub webhook delivery first, deploy a compatible
-core, then ingress, and reactivate delivery only after verification.
-
-If a release is bad, stop webhook delivery if it is generating new runs. Roll
-back the affected Worker to its last known-good deployment in the Cloudflare
-Workers deployment controls; if both Workers changed, roll back core before
-ingress. Do not delete D1 tables or edit the applied migration ledger to undo
-a release. A schema rollback is a separate, reviewed migration or an operator
-approved D1 recovery action.
-
-## Uninstall and cleanup
-
-This is destructive. Confirm the repository owner wants the run history and
-that no review is in flight before proceeding.
-
-1. Disable the GitHub App webhook.
-2. Uninstall the GitHub App from every selected repository. Confirm no new
-   deliveries arrive, then delete the App registration if it is no longer
-   needed and revoke its private key.
-3. Render deployment-only configs again with the same
-   `corepack pnpm render:wrangler <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '<GITHUB_BOT_AUTHOR_IDS_JSON>' ['<POSTHOG_CONFIG_JSON>'] ['<GITHUB_CHECK_NAME>']`
-   inputs. Delete the public `<INSTANCE_NAME>-ingress` Worker, then the private
-   `<INSTANCE_NAME>-core` Worker, in that order. Deleting the Workers removes
-   their service and VPC bindings. Do not use `--force`.
-
-   ```sh
-   corepack pnpm dlx wrangler@4.124.0 delete --config apps/ingress/wrangler.<INSTANCE_NAME>.jsonc
-   corepack pnpm dlx wrangler@4.124.0 delete --config apps/core/wrangler.<INSTANCE_NAME>.jsonc
-   ```
-
-4. Verify the exact VPC Service ID, delete it, and verify that exact ID is
-   absent from both `get` and `list`:
-
-   ```sh
-   corepack pnpm dlx wrangler@4.124.0 vpc service get <VPC_SERVICE_ID>
-   corepack pnpm dlx wrangler@4.124.0 vpc service list
-   corepack pnpm dlx wrangler@4.124.0 vpc service delete <VPC_SERVICE_ID>
-   corepack pnpm dlx wrangler@4.124.0 vpc service list
-   corepack pnpm dlx wrangler@4.124.0 vpc service get <VPC_SERVICE_ID>  # expect not found
-   ```
-
-5. Stop and uninstall the persistent connector only after the VPC Service is
-   gone:
-
-   ```sh
-   sudo systemctl disable --now cloudflared
-   sudo cloudflared service uninstall
-   ```
-
-6. Verify the exact Tunnel ID, delete it, and verify that exact ID is absent
-   from both `info` and `list`:
-
-   ```sh
-   corepack pnpm dlx wrangler@4.124.0 tunnel info <TUNNEL_ID>
-   corepack pnpm dlx wrangler@4.124.0 tunnel list
-   corepack pnpm dlx wrangler@4.124.0 tunnel delete <TUNNEL_ID>
-   corepack pnpm dlx wrangler@4.124.0 tunnel list
-   corepack pnpm dlx wrangler@4.124.0 tunnel info <TUNNEL_ID>  # expect not found
-   ```
-
-7. Retain or export only the minimal D1 state required by the owner. If it is
-   no longer needed, delete `<INSTANCE_NAME>-review-state` only after the
-   Workers are gone and the retention decision is recorded:
-
-   ```sh
-   corepack pnpm dlx wrangler@4.124.0 d1 delete <INSTANCE_NAME>-review-state
-   ```
-
-   D1 deletion is irreversible for this deployment's live state; stop and
-   confirm the database name at the prompt. Do not delete a different
-   database, and never use a broad wildcard or guessed identifier.
-
-8. Decide separately whether to retain the private
-   `<INSTANCE_NAME>-review-evidence` R2 bucket. Leaving it in place is valid:
-   the deployment's 90-day `reviews/` lifecycle rule continues expiring
-   retained objects after the Workers are gone, so ordinary uninstall does
-   not require bucket deletion.
-
-   If the owner needs a longer-lived archive, export the required objects
-   before their lifecycle expiry. Delete the bucket only when the owner has
-   explicitly decided that no retained review evidence is needed, using the
-   exact derived bucket name and confirming the destructive prompt:
-
-   ```sh
-   corepack pnpm dlx wrangler@4.124.0 r2 bucket delete <INSTANCE_NAME>-review-evidence
-   ```
-
-   Do not remove or shorten the lifecycle merely because the application was
-   uninstalled, and never delete a bucket selected by wildcard or guessed
-   name.
-
-9. Revoke the Cloudflare automation token. For interactive access, run
-   `corepack pnpm dlx wrangler@4.124.0 logout`.
-
-GitHub's installation operation and Cloudflare's Wrangler/D1 commands are the
-authoritative references for these external destructive actions:
-[GitHub App installation](https://docs.github.com/en/apps/using-github-apps/installing-your-own-github-app),
-[Wrangler commands](https://developers.cloudflare.com/workers/wrangler/commands/),
-[R2 bucket operations](https://developers.cloudflare.com/r2/buckets/create-buckets/),
-and [D1 migrations](https://developers.cloudflare.com/d1/reference/migrations/).
-
-## Official references
-
-- [Cloudflare API token permissions](https://developers.cloudflare.com/fundamentals/api/reference/permissions/)
-- [Cloudflare account-scoped custom token for GitHub Actions](https://developers.cloudflare.com/workers/ci-cd/external-cicd/github-actions/)
-- [Cloudflare Wrangler commands](https://developers.cloudflare.com/workers/wrangler/commands/)
-- [Cloudflare Worker secrets](https://developers.cloudflare.com/workers/configuration/secrets/)
-- [Cloudflare D1 migrations](https://developers.cloudflare.com/d1/reference/migrations/)
-- [Cloudflare Service bindings](https://developers.cloudflare.com/workers/runtime-apis/bindings/service-bindings/)
-- [Workers VPC getting started](https://developers.cloudflare.com/workers-vpc/get-started/)
-- [Workers VPC Service configuration](https://developers.cloudflare.com/workers-vpc/configuration/vpc-services/)
-- [Workers VPC Wrangler commands](https://developers.cloudflare.com/workers-vpc/reference/wrangler-commands/)
-- [Workers VPC Tunnel requirements](https://developers.cloudflare.com/workers-vpc/configuration/tunnel/#create-and-run-tunnel-cloudflared)
-- [GitHub App permission selection](https://docs.github.com/en/apps/creating-github-apps/setting-up-a-github-app/choosing-permissions-for-a-github-app)
-- [GitHub permission-to-endpoint reference](https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps)
-- [GitHub webhook validation](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries)
-- [GitHub webhook events and payloads](https://docs.github.com/en/webhooks/webhook-events-and-payloads)
-- [GitHub App installation scope](https://docs.github.com/en/apps/using-github-apps/installing-your-own-github-app)
-- [GitHub App private keys](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/managing-private-keys-for-github-apps)
-
-### GitHub Check name
+## GitHub Check name
 
 Set the optional Core Worker variable `GITHUB_CHECK_NAME` in its Wrangler `vars`
 to brand the Check for each deployment, for example `Ariga39 AI Review`. Omitted

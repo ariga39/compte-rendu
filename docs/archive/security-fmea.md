@@ -1,5 +1,9 @@
 # Current-architecture security FMEA
 
+> Archived research or implementation history. Its observations and recommendations
+> describe the versions and decisions recorded below, not the current product contract.
+> Use the [current documentation](../README.md) for supported behavior and operations.
+
 Audit, 2026-09-02. This is a practical failure-mode analysis of the current D1
 pull/claim implementation, not a penetration test or a claim that the
 underlying platforms are vulnerability-free. Ratings describe residual risk
@@ -345,15 +349,15 @@ unintended backend.
 
 ### Repository evidence
 
-- **R1:** [Current design](design.md)
-- **R2:** [Ingress Worker](../apps/ingress/src/index.ts)
-- **R3:** [Core Worker wiring and callback evidence validation](../apps/core/src/core-worker.ts)
-- **R4:** [Review authorization, state, and publication coordinator](../apps/core/src/index.ts)
-- **R5:** [GitHub App token provider](../apps/core/src/github-app-token.ts) and [GitHub publication adapter](../apps/core/src/github-review-adapter.ts)
-- **R6:** [Runner implementation](../apps/runner/src/runner.ts), [server listener](../apps/runner/src/server.ts), and [Sandbox template](../apps/runner/sandbox-template/Dockerfile)
-- **R7:** [Shared contracts and size limits](../packages/contracts/src/index.ts)
-- **R8:** [D1 state store](../apps/core/src/review-state-store.ts) and [migrations](../apps/core/migrations/0001_review_state.sql)
-- **R9:** [Installation and operations manual](installation.md), [Core config](../apps/core/wrangler.jsonc), and [ingress config](../apps/ingress/wrangler.jsonc)
+- **R1:** [Current design](../design.md)
+- **R2:** [Ingress Worker](../../apps/ingress/src/index.ts)
+- **R3:** [Core Worker wiring and callback evidence validation](../../apps/core/src/core-worker.ts)
+- **R4:** [Review authorization, state, and publication coordinator](../../apps/core/src/index.ts)
+- **R5:** [GitHub App token provider](../../apps/core/src/github-app-token.ts) and [GitHub publication adapter](../../apps/core/src/github-review-adapter.ts)
+- **R6:** [Runner implementation](../../apps/runner/src/runner.ts), [server listener](../../apps/runner/src/server.ts), and [Sandbox template](../../apps/runner/sandbox-template/Dockerfile)
+- **R7:** [Shared contracts and size limits](../../packages/contracts/src/index.ts)
+- **R8:** [D1 state store](../../apps/core/src/review-state-store.ts) and [migrations](../../apps/core/migrations/0001_review_state.sql)
+- **R9:** [Installation and operations manual](../installation.md), [Core config](../../apps/core/wrangler.jsonc), and [ingress config](../../apps/ingress/wrangler.jsonc)
 - **R10:** [Earlier Docker Sandbox threat model](docker-sandbox-security-threat-model.md) (historical conclusions; not authoritative for current Runner behavior)
 
 ### External primary sources
