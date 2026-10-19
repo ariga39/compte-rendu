@@ -235,6 +235,35 @@ and scopes model true external seams and Sandbox cleanup. Small pure transformat
 remain ordinary TypeScript rather than being wrapped for uniformity. Additional
 packages require demonstrated reuse, not anticipated reuse.
 
+## Multi-model review jobs
+
+One review output remains one Core run and one Runner job. Core freezes the
+versioned model selection at admission; changing the operator configuration affects
+new jobs only. The public dashboard remains read-only. See
+[review configuration](review-configuration.md) for the protected operator API.
+
+The sbx/OpenCode adapter executes the selected reviewers as independent foreground
+subagent sessions inside one Sandbox, followed by one supervisor synthesis. All
+participants receive the same immutable PR brief, have read-only review tools,
+and share the job deadline and a grant restricted to the selected LLM routes.
+The supervisor can dispatch the frozen roster and submit a synthesis; it does not
+investigate code, run a second review round, or repair the repository.
+
+The delivered plugin forwards each reviewer's formal submission to the supervisor.
+Runner validates the complete parent/child session exports, selected model and
+agent identities, unique submissions, and coverage of every submitted finding.
+Synthesis preserves unique findings, merges duplicates with provenance, and keeps
+substantive disagreements explicit rather than forcing consensus. Structural
+validation does not prove the model's semantic judgment. Missing or invalid
+participant evidence fails the whole job without a review vote.
+
+The job retains its frozen selection, child exports and `multi-review.json` along
+with the usual final result. There is one terminal callback and one publication.
+Cancellation revokes the job grant and destroys the shared Sandbox; stopping an
+OpenCode client alone is not proof that its server sessions stopped. Historical
+single-model jobs keep their existing behavior, and `selection: null` selects that
+behavior for newly admitted jobs.
+
 ## Deep modules and test seams
 
 The following three interfaces are the agreed candidate test seams. Their

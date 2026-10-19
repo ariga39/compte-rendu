@@ -33,6 +33,40 @@ export default {
               description:
                 'The complete publishable Markdown review, beginning with exactly ## Review: after optional outer whitespace.',
             },
+            findings: {
+              type: 'array',
+              description: 'Reviewer-only stable findings for multi-model provenance.',
+              items: {
+                type: 'object',
+                properties: {
+                  id: { type: 'string' },
+                  location: { type: 'string' },
+                  claim: { type: 'string' },
+                  impact: { type: 'string' },
+                  evidence: { type: 'string' },
+                },
+                required: ['id', 'location', 'claim', 'impact', 'evidence'],
+                additionalProperties: false,
+              },
+            },
+            coverage: {
+              type: 'array',
+              description:
+                'Supervisor-only mapping from every reviewer finding id to its synthesis outcome.',
+              items: {
+                type: 'object',
+                properties: {
+                  findingId: { type: 'string' },
+                  outcome: {
+                    type: 'string',
+                    enum: ['retained', 'merged', 'disagreement'],
+                  },
+                  finalId: { type: 'string' },
+                },
+                required: ['findingId', 'outcome'],
+                additionalProperties: false,
+              },
+            },
           },
           required: ['decision', 'markdown'],
           additionalProperties: false,

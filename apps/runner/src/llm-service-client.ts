@@ -67,15 +67,17 @@ export const createLlmServiceClient = (socketPath: string) => {
     });
   });
   const issue = Effect.fn('RunnerLlmControl.issue')(
-    function* (jobId: string, route: string) {
-      const body = yield* post('/grants', { jobId, routes: [route] }, 201);
+    function* (jobId: string, routes: string | readonly string[]) {
+      const requested = [...new Set(typeof routes === 'string' ? [routes] : routes)];
+      const body = yield* post('/grants', { jobId, routes: requested }, 201);
       const grant = yield* Schema.decodeUnknownEffect(Grant, { onExcessProperty: 'error' })(body);
       return { token: grant.token, expiresAt: grant.expiresAt.getTime() };
     },
     Effect.catch(() => Effect.fail(new Error('LLM service grant unavailable'))),
   );
   return {
-    issue: (jobId: string, route: string) => Effect.runPromise(issue(jobId, route)),
+    issue: (jobId: string, routes: string | readonly string[]) =>
+      Effect.runPromise(issue(jobId, routes)),
     revoke: async (jobId: string): Promise<void> => {
       await Effect.runPromise(post('/grants/revoke', { jobId }, 204));
     },

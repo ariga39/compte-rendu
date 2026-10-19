@@ -1108,6 +1108,55 @@ use the deployed acceptance gate below for that. See
 [`docs/local-runtime-tracer.md`](local-runtime-tracer.md) for the tracer's
 limits.
 
+### Multi-model review configuration
+
+Deploy Core migration `0012_review_configuration.sql` and the multi-model-capable
+Runner before enabling a selection. This execution path requires sbx, OpenCode 2,
+and the external LLM service. Existing single-model jobs keep their original
+behavior. OpenShell does not support this multi-model path yet.
+
+Configure each selected route in the host LLM service first (see
+[LLM service configuration](llm-service.md)). Use distinct, stable route IDs such
+as `deepseek-v4.1-flash` and `step-5-preview`, both using `chat-completions` for
+this OpenCode adapter. Keep `provider = "opencode-go"` when using an OpenCode Go
+custom base URL. Restart the service only when its active requests have drained;
+service route definitions are not hot-reloaded. Preserve old routes until jobs
+that reference them finish.
+
+Set a dedicated `REVIEW_CONFIGURATION_TOKEN` secret on Core. The protected
+`GET /api/review-configuration` and `PUT /api/review-configuration` endpoints on
+the ingress origin require `Authorization: Bearer <operator token>`. They are
+not public dashboard APIs; do not put this token in browser code or URL parameters.
+The Runner callback token does not authorize configuration changes.
+
+Read the current configuration, then send its `revision` with a complete
+replacement selection. For example, if GET returned revision 0:
+
+```json
+{
+  "revision": 0,
+  "selection": {
+    "reviewers": ["deepseek-v4.1-flash", "step-5-preview"],
+    "synthesis": "deepseek-v4.1-flash"
+  }
+}
+```
+
+A successful PUT returns the new revision. A stale revision returns 409: reload
+and reconcile the setting before saving again. Invalid settings are rejected.
+To return new jobs to single-model review, PUT the current revision with
+`"selection": null`. Changes apply only to newly admitted jobs; queued and
+running jobs retain their frozen selection. No Runner restart is required for
+this selection change.
+
+Each job uses one Sandbox and one concurrency slot. Independent reviewer
+sessions run in parallel, then a supervisor combines their submitted findings.
+All sessions share the job deadline and route-restricted grant. The retained
+`multi-review.json`, session exports, and manifest record the frozen selection,
+participant identities, findings, and final coverage. Missing or invalid
+participant evidence produces a failed job, not a partial approval. The public
+dashboard still shows one job and one final decision; it has no settings editor.
+
 ### First-deployment acceptance gate
 
 Use exactly one explicitly allowlisted GitHub App installation and one

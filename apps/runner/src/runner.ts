@@ -49,6 +49,29 @@ import {
 import { createSbxRuntimeFactory } from './sandbox-runtime-sbx.js';
 import { createLlmServiceClient } from './llm-service-client.js';
 import {
+  MULTI_PROVIDER_ID,
+  SUPERVISOR_AGENT_ID,
+  coverageProblem,
+  decodeSessionExport,
+  dedupedRoutes,
+  extractReviewerSubmission,
+  extractSynthesisSubmission,
+  modelReference,
+  multiReviewConfig,
+  multiReviewGuardPlugin,
+  multiReviewSupervisorPrompt,
+  multiReviewerBrief,
+  participants,
+  parseChildSessionPage,
+  sessionSucceeded as multiSessionSucceeded,
+  type ChildSession,
+  type MultiFinding,
+  type MultiReviewSelection,
+  type ReviewerSubmission,
+  type SessionIdentity,
+  type SynthesisSubmission,
+} from './opencode-multi-review.js';
+import {
   createOpenShellPreflight,
   createOpenShellRuntimeFactory,
 } from './sandbox-runtime-openshell.js';
@@ -79,6 +102,7 @@ const GRANT_REVOKE_BUDGET_MS = 15 * 1000;
 const CLEANUP_COMMAND_TIMEOUT_MS = 30 * 1000;
 const ARCHIVE_COMMAND_TIMEOUT_MS = 30 * 1000;
 const ARCHIVE_PHASE_TIMEOUT_MS = 2 * 60 * 1000;
+const MAX_CHILD_SESSION_PAGES = 100;
 const MAX_DIAGNOSTIC_STDERR_BYTES = 4 * 1024;
 const MAX_AGENT_OUTPUT_BYTES = MAX_REVIEW_RESULT_BYTES;
 const MAX_REQUEST_BYTES = 64 * 1024;
@@ -574,6 +598,20 @@ type RunnerJobInputState = {
   repositoryReadToken: string;
 };
 
+type RunnerMultiReviewEvidence = {
+  readonly revision: number;
+  readonly selection: MultiReviewSelection;
+  readonly rootSessionId: string;
+  readonly reviewers: ReadonlyArray<{
+    readonly participant: string;
+    readonly route: string;
+    readonly sessionId: string;
+    readonly model: string;
+    readonly submission: ReviewerSubmission;
+  }>;
+  readonly synthesis: SynthesisSubmission;
+};
+
 type RunnerJob = {
   readonly state: RunnerJobState;
   readonly id: string;
@@ -586,6 +624,7 @@ type RunnerJob = {
   sandboxAttempted: boolean;
   sandboxCreated: boolean;
   sessionIds: string[];
+  multiReview?: RunnerMultiReviewEvidence;
   diagnosticCheckoutToken: string;
   sandboxRuntime?: JobSandboxRuntime;
   githubTokenRoot?: string;
@@ -873,6 +912,7 @@ const redactEvidenceTextFiles = async (
     'opencode.stderr',
     'validated-review.md',
     'opencode-session-list.json',
+    'multi-review.json',
     ...sessionIds.map((id) => `opencode-export-${id}.json`),
   ]) {
     const path = join(evidencePath, name);
@@ -1423,8 +1463,8 @@ export const createRunner = (options: RunnerOptions = {}) => {
         if (sessionIds === undefined || sessionIds.length === 0) {
           complete = false;
         } else {
-          job.sessionIds = sessionIds;
-          for (const sessionId of sessionIds) {
+          job.sessionIds = [...sessionIds];
+          const exportSession = async (sessionId: string): Promise<boolean> => {
             const exportPath = join(evidencePath, `opencode-export-${sessionId}.json`);
             const sandboxExportPath = `${evidenceRoot}/opencode-export-${sessionId}.json`;
             const exported = await runtime.exec(
@@ -1444,12 +1484,91 @@ export const createRunner = (options: RunnerOptions = {}) => {
               copied.exitCode === 0 &&
               !copied.timedOut &&
               copied.streamError !== true;
-            if (!exportReadable || !(await sessionExportMatches(exportPath, sessionId))) {
+            return exportReadable && (await sessionExportMatches(exportPath, sessionId));
+          };
+          for (const sessionId of sessionIds) {
+            if (!(await exportSession(sessionId))) {
               complete = false;
               continue;
             }
             if (sessionId === submissionSessionId) {
-              terminal = await sessionExportSucceeded(exportPath, sessionId);
+              terminal = await sessionExportSucceeded(
+                join(evidencePath, `opencode-export-${sessionId}.json`),
+                sessionId,
+              );
+            }
+          }
+          const multiSelection = job.input.reviewConfiguration?.selection ?? undefined;
+          if (multiSelection !== undefined) {
+            if (sessionIds.length !== 1) {
+              complete = false;
+            } else {
+              const rootSessionId = sessionIds[0]!;
+              // Follow native session.list pagination: request the parent
+              // filter plus the previous page's next cursor, and keep going
+              // until an empty page. Any page that repeats a cursor, repeats a
+              // session id, cannot establish completion, or fails to execute
+              // fails closed. Every raw page is retained as evidence.
+              const listChildSessions = async (): Promise<readonly ChildSession[] | undefined> => {
+                const collected: ChildSession[] = [];
+                const seenIds = new Set<string>();
+                const seenCursors = new Set<string>();
+                let cursor: string | null = null;
+                for (let page = 1; page <= MAX_CHILD_SESSION_PAGES; page += 1) {
+                  const args = [
+                    'opencode',
+                    'api',
+                    '--standalone',
+                    'session.list',
+                    '--param',
+                    `parentID=${rootSessionId}`,
+                  ];
+                  if (cursor !== null) args.push('--param', `cursor=${cursor}`);
+                  const listed = await runtime.exec(args, archiveCommand, {
+                    captureStdout: true,
+                    maxBytes: MAX_AGENT_OUTPUT_BYTES,
+                  });
+                  if (
+                    listed.exitCode !== 0 ||
+                    listed.timedOut ||
+                    listed.truncated ||
+                    listed.stdout.length === 0
+                  ) {
+                    return undefined;
+                  }
+                  await writeFile(
+                    join(evidencePath, `opencode-child-sessions-${page}.json`),
+                    listed.stdout,
+                    { mode: 0o600 },
+                  );
+                  const parsed = parseChildSessionPage(listed.stdout);
+                  if (parsed === undefined) return undefined;
+                  for (const child of parsed.data) {
+                    if (seenIds.has(child.id)) return undefined;
+                    seenIds.add(child.id);
+                    collected.push(child);
+                  }
+                  if (parsed.data.length === 0) return collected;
+                  const next = parsed.cursor.next;
+                  if (next === null) return collected;
+                  if (next === cursor || seenCursors.has(next)) return undefined;
+                  seenCursors.add(next);
+                  cursor = next;
+                }
+                return undefined;
+              };
+              const listed = await listChildSessions();
+              if (listed === undefined || listed.length !== multiSelection.reviewers.length) {
+                complete = false;
+              } else {
+                for (const child of listed) {
+                  if (!(await exportSession(child.id))) {
+                    complete = false;
+                    continue;
+                  }
+                  job.sessionIds.push(child.id);
+                }
+              }
             }
           }
         }
@@ -1961,19 +2080,129 @@ export const createRunner = (options: RunnerOptions = {}) => {
     let agentParsed: ParsedAgentResult | undefined;
     const evidenceId = job.state.evidenceId ?? job.id;
     const evidencePath = join(evidenceRoot, evidenceId);
+    const multiConfiguration = job.input.reviewConfiguration;
+    const multiSelection = multiConfiguration?.selection ?? undefined;
+    const multi = multiSelection !== undefined;
     let evidenceStartedAt: string | undefined;
     let evidenceReady = false;
     let evidenceComplete = false;
     let evidenceFailure: string | undefined;
     let revocationUnconfirmed = false;
+    const validateMultiReview = async (): Promise<
+      { readonly result: StructuredReviewResult } | { readonly cause: RunnerFailureCauseValue }
+    > => {
+      if (multiSelection === undefined) return { cause: 'result-schema-failure' };
+      const rootSessionId = job.sessionIds[0];
+      if (rootSessionId === undefined) return { cause: 'result-schema-failure' };
+      const readExport = async (sessionId: string): Promise<unknown> => {
+        try {
+          return JSON.parse(
+            await readFile(join(evidencePath, `opencode-export-${sessionId}.json`), 'utf8'),
+          ) as unknown;
+        } catch {
+          return undefined;
+        }
+      };
+      const root = await readExport(rootSessionId);
+      if (root === undefined || !multiSessionSucceeded(root, rootSessionId)) {
+        return { cause: 'missing-terminal-message' };
+      }
+      const rootIdentity: SessionIdentity = {
+        agent: SUPERVISOR_AGENT_ID,
+        model: { providerID: MULTI_PROVIDER_ID, id: multiSelection.synthesis },
+      };
+      const rootInfo = decodeSessionExport(root)?.info;
+      if (
+        rootInfo === undefined ||
+        rootInfo.agent !== rootIdentity.agent ||
+        rootInfo.model?.providerID !== rootIdentity.model.providerID ||
+        rootInfo.model.id !== rootIdentity.model.id
+      ) {
+        return { cause: 'result-schema-failure' };
+      }
+      const synthesis = extractSynthesisSubmission(root, rootIdentity);
+      if (synthesis.cause !== undefined) return { cause: synthesis.cause };
+      const synthesisValue = synthesis.value;
+      if (synthesisValue === undefined) return { cause: 'result-schema-failure' };
+
+      const expected = participants(multiSelection);
+      const childIds = job.sessionIds.slice(1);
+      if (childIds.length !== expected.length) return { cause: 'result-schema-failure' };
+      const reviewers: RunnerMultiReviewEvidence['reviewers'][number][] = [];
+      const allFindings: MultiFinding[] = [];
+      const usedSessions = new Set<string>();
+      for (const expectedParticipant of expected) {
+        const matches: Array<{ readonly sessionId: string; readonly exported: unknown }> = [];
+        for (const sessionId of childIds) {
+          if (usedSessions.has(sessionId)) continue;
+          const exported = await readExport(sessionId);
+          if (exported === undefined) continue;
+          const info = decodeSessionExport(exported)?.info;
+          if (
+            info === undefined ||
+            info.parentID !== rootSessionId ||
+            info.agent !== expectedParticipant.participant ||
+            info.model?.providerID !== MULTI_PROVIDER_ID ||
+            info.model.id !== expectedParticipant.route
+          ) {
+            continue;
+          }
+          matches.push({ sessionId, exported });
+        }
+        if (matches.length !== 1) return { cause: 'result-schema-failure' };
+        const match = matches[0]!;
+        usedSessions.add(match.sessionId);
+        if (!multiSessionSucceeded(match.exported, match.sessionId)) {
+          return { cause: 'missing-terminal-message' };
+        }
+        const childIdentity: SessionIdentity = {
+          agent: expectedParticipant.participant,
+          model: { providerID: MULTI_PROVIDER_ID, id: expectedParticipant.route },
+        };
+        const submission = extractReviewerSubmission(match.exported, childIdentity);
+        if (submission.cause !== undefined) return { cause: submission.cause };
+        for (const finding of submission.value.findings) {
+          if (allFindings.some((existing) => existing.id === finding.id)) {
+            return { cause: 'result-schema-failure' };
+          }
+          allFindings.push(finding);
+        }
+        reviewers.push({
+          participant: expectedParticipant.participant,
+          route: expectedParticipant.route,
+          sessionId: match.sessionId,
+          model: modelReference(expectedParticipant.route),
+          submission: submission.value,
+        });
+      }
+      if (usedSessions.size !== childIds.length) return { cause: 'result-schema-failure' };
+      if (
+        coverageProblem(allFindings, synthesisValue.coverage, synthesisValue.markdown) !== undefined
+      ) {
+        return { cause: 'result-schema-failure' };
+      }
+      job.multiReview = {
+        revision: multiConfiguration!.revision,
+        selection: multiSelection,
+        rootSessionId,
+        reviewers,
+        synthesis: synthesisValue,
+      };
+      return {
+        result: {
+          version: 2,
+          decision: synthesisValue.decision,
+          markdown: synthesisValue.markdown,
+        },
+      };
+    };
     try {
       evidenceStartedAt = await currentIso();
       job.executionStartedAt = evidenceStartedAt;
-      if (modelResolverMissing) {
-        failure = { reason: 'agent' };
-        return;
-      }
-      if (modelId === undefined || openCodeConfig === undefined) {
+      if (
+        !multi &&
+        (modelResolverMissing || modelId === undefined || openCodeConfig === undefined)
+      ) {
         failure = { reason: 'agent' };
         return;
       }
@@ -1993,11 +2222,15 @@ export const createRunner = (options: RunnerOptions = {}) => {
         cleanup: { status: 'pending' },
       });
       if (job.abortRequested) return;
-      // The configuration slice must not silently execute a multi-model plan
-      // with the legacy single-review adapter during a staged rollout.
-      if (job.input.reviewConfiguration?.selection != null) {
-        failure = { reason: 'agent' };
-        return;
+      if (multi) {
+        if (
+          sandboxRuntime.kind !== 'sbx' ||
+          llmServiceClient === undefined ||
+          serviceBaseUrl === undefined
+        ) {
+          failure = { reason: 'agent' };
+          return;
+        }
       }
       update(job, { status: 'running', stage: 'checkout' });
       reportStage(job, 'checkout');
@@ -2010,7 +2243,12 @@ export const createRunner = (options: RunnerOptions = {}) => {
       }
       if (job.abortRequested) return;
 
-      if (llmServiceClient !== undefined && modelRouteId !== undefined) {
+      const grantRoutes = multi
+        ? dedupedRoutes(multiSelection)
+        : modelRouteId === undefined
+          ? undefined
+          : [modelRouteId];
+      if (llmServiceClient !== undefined && grantRoutes !== undefined) {
         // Persist the job-id-only marker before the call: an ambiguous response
         // must revoke by job identity and never retry issuance for this job.
         try {
@@ -2022,7 +2260,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         job.grantIssuanceAttempted = true;
         let grant: { token: string; expiresAt: number };
         try {
-          grant = await llmServiceClient.issue(job.id, modelRouteId);
+          grant = await llmServiceClient.issue(job.id, grantRoutes);
         } catch {
           failure = { reason: 'agent' };
           return;
@@ -2041,6 +2279,21 @@ export const createRunner = (options: RunnerOptions = {}) => {
       }
       if (job.abortRequested) return;
 
+      const baseBrief = reviewPrompt(
+        job.input.repositoryName,
+        job.input.pullRequestNumber,
+        job.input.baseSha,
+        mergeBaseSha,
+        job.input.headSha,
+      );
+      const multiBriefs = multi
+        ? Object.fromEntries(
+            participants(multiSelection).map(({ participant }) => [
+              participant,
+              multiReviewerBrief(baseBrief, participant),
+            ]),
+          )
+        : undefined;
       const configRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-opencode-config-'));
       job.configRoot = configRoot;
       await mkdir(join(configRoot, 'opencode', 'skills', 'pr-review'), { recursive: true });
@@ -2055,6 +2308,24 @@ export const createRunner = (options: RunnerOptions = {}) => {
         submitReviewTool,
         'utf8',
       );
+      if (multiBriefs !== undefined) {
+        await mkdir(join(configRoot, 'opencode', 'plugins', 'multi_review_guard'), {
+          recursive: true,
+        });
+        await writeFile(
+          join(configRoot, 'opencode', 'plugins', 'multi_review_guard', 'index.js'),
+          multiReviewGuardPlugin(multiBriefs),
+          'utf8',
+        );
+      }
+
+      const activeOpenCodeConfig = multi
+        ? multiReviewConfig({
+            selection: multiSelection,
+            serviceBaseUrl: serviceBaseUrl!.toString(),
+            shellPermissionRules,
+          })
+        : openCodeConfig;
 
       const runtime = sandboxRuntimeFactory({
         id: job.id,
@@ -2062,7 +2333,10 @@ export const createRunner = (options: RunnerOptions = {}) => {
         imageRef: SANDBOX_TEMPLATE,
         cpu: '4',
         memoryGib: 8,
-        env: [`OPENCODE_CONFIG_CONTENT=${openCodeConfig}`, 'OPENCODE_DISABLE_PROJECT_CONFIG=1'],
+        env: [
+          `OPENCODE_CONFIG_CONTENT=${activeOpenCodeConfig!}`,
+          'OPENCODE_DISABLE_PROJECT_CONFIG=1',
+        ],
         checkoutRoot: join(checkoutRoot, 'checkout'),
         configRoot,
         modelResource,
@@ -2117,6 +2391,10 @@ export const createRunner = (options: RunnerOptions = {}) => {
       update(job, { stage: 'agent' });
       reportStage(job, 'agent');
       const agentBudgetDeadline = (await currentEpochMillis()) + REVIEW_ATTEMPT_BUDGET_MS;
+      const roster = multi ? participants(multiSelection) : [];
+      const agentPrompt = multi ? multiReviewSupervisorPrompt({ roster }) : baseBrief;
+      const agentModel = multi ? modelReference(multiSelection.synthesis) : modelId;
+      const agentName = multi ? SUPERVISOR_AGENT_ID : 'review';
       agent = await runtime.exec(
         [
           'opencode',
@@ -2125,16 +2403,10 @@ export const createRunner = (options: RunnerOptions = {}) => {
           '--format',
           'json',
           '--model',
-          modelId,
+          agentModel!,
           '--agent',
-          'review',
-          reviewPrompt(
-            job.input.repositoryName,
-            job.input.pullRequestNumber,
-            job.input.baseSha,
-            mergeBaseSha,
-            job.input.headSha,
-          ),
+          agentName,
+          agentPrompt,
         ],
         setupCommand,
         {
@@ -2147,6 +2419,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         },
       );
       if (
+        !multi &&
         !job.abortRequested &&
         agent.exitCode === 0 &&
         !agent.timedOut &&
@@ -2192,7 +2465,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
               '--format',
               'json',
               '--model',
-              modelId,
+              modelId!,
               '--agent',
               'review',
               submitReminderPrompt,
@@ -2283,6 +2556,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         job.submissionCompletedAt = await currentIso();
         let recovered: StructuredReviewResult | undefined;
         if (
+          !multi &&
           !agent.timedOut &&
           !agent.truncated &&
           !agent.streamError &&
@@ -2324,6 +2598,14 @@ export const createRunner = (options: RunnerOptions = {}) => {
         } else if (agent.truncated) {
           executionCause = 'output-truncated';
           failure = { reason: 'invalid-output', cause: executionCause };
+        } else if (multi) {
+          const validated = await validateMultiReview();
+          if ('cause' in validated) {
+            executionCause = validated.cause;
+            failure = { reason: 'invalid-output', cause: executionCause };
+          } else {
+            result = validated.result;
+          }
         } else {
           const parsed = agentParsed ?? parseResult(agent.stdout);
           if (parsed.cause !== undefined) {
@@ -2347,6 +2629,81 @@ export const createRunner = (options: RunnerOptions = {}) => {
             evidenceComplete = false;
             evidenceFailure = 'archive-incomplete';
           }
+        }
+      }
+      // Retain the frozen selection and every available parent/child session as
+      // a standalone provenance document, including partial child evidence when
+      // validation failed. It is derived from the already-archived, redacted
+      // exports.
+      if (evidenceReady && multiSelection !== undefined) {
+        try {
+          const readSessionInfo = async (sessionId: string) => {
+            try {
+              const value = JSON.parse(
+                await readFile(join(evidencePath, `opencode-export-${sessionId}.json`), 'utf8'),
+              ) as unknown;
+              return decodeSessionExport(value)?.info;
+            } catch {
+              return undefined;
+            }
+          };
+          const sessions: unknown[] = [];
+          for (const sessionId of job.sessionIds) {
+            const info = await readSessionInfo(sessionId);
+            sessions.push({
+              sessionId,
+              ...(info === undefined
+                ? {}
+                : {
+                    parentID: info.parentID ?? null,
+                    agent: info.agent ?? null,
+                    model: info.model ?? null,
+                    outcome: info.outcome ?? null,
+                  }),
+            });
+          }
+          const document =
+            job.multiReview === undefined
+              ? {
+                  revision: multiConfiguration!.revision,
+                  frozenSelection: {
+                    reviewers: [...multiSelection.reviewers],
+                    synthesis: multiSelection.synthesis,
+                  },
+                  rootSessionId: job.sessionIds[0] ?? null,
+                  sessions,
+                }
+              : {
+                  revision: job.multiReview.revision,
+                  frozenSelection: {
+                    reviewers: [...job.multiReview.selection.reviewers],
+                    synthesis: job.multiReview.selection.synthesis,
+                  },
+                  rootSessionId: job.multiReview.rootSessionId,
+                  sessions,
+                  reviewers: job.multiReview.reviewers.map((reviewer) => ({
+                    participant: reviewer.participant,
+                    route: reviewer.route,
+                    sessionId: reviewer.sessionId,
+                    model: reviewer.model,
+                    submission: reviewer.submission,
+                  })),
+                  synthesis: {
+                    sessionId: job.multiReview.rootSessionId,
+                    model: modelReference(job.multiReview.selection.synthesis),
+                    decision: job.multiReview.synthesis.decision,
+                    markdown: job.multiReview.synthesis.markdown,
+                    coverage: job.multiReview.synthesis.coverage,
+                  },
+                };
+          await writeFile(
+            join(evidencePath, 'multi-review.json'),
+            JSON.stringify(document, null, 2) + '\n',
+            { mode: 0o600 },
+          );
+        } catch {
+          evidenceComplete = false;
+          evidenceFailure = 'archive-incomplete';
         }
       }
       if (failure === undefined && result !== undefined && !evidenceComplete) {
@@ -2399,7 +2756,8 @@ export const createRunner = (options: RunnerOptions = {}) => {
             headSha: job.input.headSha,
             startedAt: evidenceStartedAt,
             finishedAt: await currentIso(),
-            model: modelId,
+            model:
+              multiSelection === undefined ? modelId : modelReference(multiSelection.synthesis),
             image: job.sandboxRuntime?.metadata.imageRef ?? SANDBOX_TEMPLATE,
             openCodeVersion: OPENCODE_VERSION,
             agent: {
@@ -2410,6 +2768,47 @@ export const createRunner = (options: RunnerOptions = {}) => {
               streamError: agent?.streamError ?? false,
             },
             sessionIds: job.sessionIds,
+            ...(multiSelection === undefined
+              ? {}
+              : {
+                  selection: {
+                    revision: multiConfiguration!.revision,
+                    reviewers: [...multiSelection.reviewers],
+                    synthesis: multiSelection.synthesis,
+                  },
+                  // The admission-time frozen selection is recorded even when
+                  // later validation fails, so a failed job still shows which
+                  // roster was attempted.
+                  frozenSelection: {
+                    reviewers: [...multiSelection.reviewers],
+                    synthesis: multiSelection.synthesis,
+                  },
+                  ...(job.multiReview === undefined
+                    ? {}
+                    : {
+                        multiReview: {
+                          revision: job.multiReview.revision,
+                          frozenSelection: {
+                            reviewers: [...job.multiReview.selection.reviewers],
+                            synthesis: job.multiReview.selection.synthesis,
+                          },
+                          rootSessionId: job.multiReview.rootSessionId,
+                          reviewers: job.multiReview.reviewers.map((reviewer) => ({
+                            participant: reviewer.participant,
+                            route: reviewer.route,
+                            sessionId: reviewer.sessionId,
+                            model: reviewer.model,
+                          })),
+                          synthesis: {
+                            sessionId: job.multiReview.rootSessionId,
+                            model: modelReference(job.multiReview.selection.synthesis),
+                            decision: job.multiReview.synthesis.decision,
+                            markdown: job.multiReview.synthesis.markdown,
+                            coverage: job.multiReview.synthesis.coverage,
+                          },
+                        },
+                      }),
+                }),
             validation: {
               status: agent === undefined ? 'not-run' : result === undefined ? 'invalid' : 'valid',
             },
