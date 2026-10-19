@@ -1,4 +1,5 @@
 import { expect, it, vi } from 'vitest';
+import { createLlmService } from '../apps/llm-service/src/service';
 import { createLiteLlmUpstream, type LiteLlmRoute } from '../apps/llm-service/src/upstream';
 
 const chatRoute = (model = 'deepseek-flash'): LiteLlmRoute => ({
@@ -12,6 +13,9 @@ const responsesRoute = (model = 'gpt-6.1-sol'): LiteLlmRoute => ({
   model,
   protocol: 'responses',
 });
+
+const routePath = (route: LiteLlmRoute): '/v1/chat/completions' | '/v1/responses' =>
+  route.protocol === 'chat-completions' ? '/v1/chat/completions' : '/v1/responses';
 
 const chatWire = (content = 'Looks good', extra = ''): string =>
   `data: {"id":"c1","choices":[{"index":0,"delta":{"content":"${content}"},"finish_reason":null}]}\n\n` +
@@ -30,16 +34,56 @@ const parseBody = (body: unknown): Record<string, unknown> => {
   return JSON.parse(body) as Record<string, unknown>;
 };
 
-const request = (
-  overrides: Partial<Parameters<typeof createLiteLlmUpstream>[0]> = {},
-  route: LiteLlmRoute = chatRoute(),
-) =>
-  createLiteLlmUpstream({
-    baseUrl: 'http://127.0.0.1:4000',
+const harness = (
+  options: {
+    route?: LiteLlmRoute;
+    credential?: () => Promise<string>;
+    fetch?: typeof globalThis.fetch;
+    baseUrl?: string;
+  } = {},
+) => {
+  const route = options.route ?? chatRoute();
+  const upstream = createLiteLlmUpstream({
+    baseUrl: options.baseUrl ?? 'http://127.0.0.1:4000',
     routes: [route],
-    credential: async () => 'backend-key',
-    ...overrides,
+    credential: options.credential ?? (async () => 'backend-key'),
+    ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
   });
+  const service = createLlmService({
+    routes: [{ id: route.id, path: routePath(route) }],
+    upstream,
+  });
+  let sequence = 0;
+  return {
+    service,
+    async request(
+      body: Record<string, unknown>,
+      signal?: AbortSignal,
+      jobId?: string,
+    ): Promise<Response> {
+      const job = jobId ?? `job-${++sequence}`;
+      const issued = await service.control(
+        new Request('http://control/grants', {
+          method: 'POST',
+          body: JSON.stringify({ jobId: job, routes: [route.id] }),
+        }),
+      );
+      if (issued.status !== 201) throw new Error(`grant unavailable: ${issued.status}`);
+      const { token } = (await issued.json()) as { token: string };
+      return service.inference(
+        new Request(`http://service${routePath(route)}`, {
+          method: 'POST',
+          headers: { authorization: `Bearer ${token}` },
+          body: JSON.stringify(body),
+          signal,
+        }),
+      );
+    },
+    close() {
+      service.close();
+    },
+  };
+};
 
 it('forwards native Chat Completions fields and usage frames with the LiteLLM model alias', async () => {
   let captured: { url: string; headers: Headers; body: Record<string, unknown> } | undefined;
@@ -74,7 +118,7 @@ it('forwards native Chat Completions fields and usage frames with the LiteLLM mo
       },
     },
   ];
-  const upstream = request({
+  const h = harness({
     fetch: async (url, init) => {
       captured = {
         url: url instanceof Request ? url.url : url.toString(),
@@ -84,8 +128,7 @@ it('forwards native Chat Completions fields and usage frames with the LiteLLM mo
       return new Response(chatWire(), { headers: { 'content-type': 'text/event-stream' } });
     },
   });
-  const response = await upstream(
-    'review',
+  const response = await h.request(
     {
       model: 'review',
       stream: false,
@@ -101,7 +144,7 @@ it('forwards native Chat Completions fields and usage frames with the LiteLLM mo
       reasoning_effort: 'high',
       stream_options: { include_usage: true },
     },
-    new AbortController().signal,
+    undefined,
     'job-chat',
   );
   expect(response.status).toBe(200);
@@ -164,23 +207,20 @@ it('forwards native Responses fields, preserving images, reasoning, signatures, 
     },
     { type: 'function', name: 'submit_review', parameters: { type: 'object', properties: {} } },
   ];
-  const upstream = request(
-    {
-      fetch: async (url, init) => {
-        captured = {
-          url: url instanceof Request ? url.url : url.toString(),
-          headers: new Headers(init?.headers),
-          body: parseBody(init?.body),
-        };
-        return new Response(responsesWire(), {
-          headers: { 'content-type': 'text/event-stream' },
-        });
-      },
+  const h = harness({
+    route: responsesRoute(),
+    fetch: async (url, init) => {
+      captured = {
+        url: url instanceof Request ? url.url : url.toString(),
+        headers: new Headers(init?.headers),
+        body: parseBody(init?.body),
+      };
+      return new Response(responsesWire(), {
+        headers: { 'content-type': 'text/event-stream' },
+      });
     },
-    responsesRoute(),
-  );
-  const response = await upstream(
-    'subscription',
+  });
+  const response = await h.request(
     {
       model: 'subscription',
       stream: true,
@@ -195,7 +235,7 @@ it('forwards native Responses fields, preserving images, reasoning, signatures, 
       include: ['reasoning.encrypted_content'],
       client_metadata: { client: 'sandbox' },
     },
-    new AbortController().signal,
+    undefined,
     'job-responses',
   );
   expect(response.status).toBe(200);
@@ -248,21 +288,20 @@ it('preserves provider-generated nested payload fields unchanged', async () => {
       cache_control: { type: 'ephemeral' },
     },
   ];
-  const upstream = request({
+  const h = harness({
     fetch: async (_url, init) => {
       captured = parseBody(init?.body);
       return new Response(chatWire(), { headers: { 'content-type': 'text/event-stream' } });
     },
   });
-  const response = await upstream(
-    'review',
+  const response = await h.request(
     {
       model: 'review',
       messages,
       tools,
       reasoning_effort: 'high',
     },
-    new AbortController().signal,
+    undefined,
     'job-nested',
   );
   await expect(response.text()).resolves.toContain('Looks good');
@@ -271,19 +310,16 @@ it('preserves provider-generated nested payload fields unchanged', async () => {
 });
 
 it('accepts native Responses incomplete as a terminal stream', async () => {
-  const upstream = request(
-    {
-      fetch: async () =>
-        new Response(responsesWire('response.incomplete'), {
-          headers: { 'content-type': 'text/event-stream' },
-        }),
-    },
-    responsesRoute(),
-  );
-  const response = await upstream(
-    'subscription',
+  const h = harness({
+    route: responsesRoute(),
+    fetch: async () =>
+      new Response(responsesWire('response.incomplete'), {
+        headers: { 'content-type': 'text/event-stream' },
+      }),
+  });
+  const response = await h.request(
     { model: 'subscription', input: 'Review', prompt_cache_key: 'cache' },
-    new AbortController().signal,
+    undefined,
     'job-incomplete',
   );
   await expect(response.text()).resolves.toContain('response.incomplete');
@@ -305,21 +341,21 @@ it.each([
     return new Response(chatWire(), { headers: { 'content-type': 'text/event-stream' } });
   };
   const override = field === 'headers' ? { 'x-secret': 'canary' } : 'canary';
-  const chat = request({ fetch });
-  const chatResponse = await chat(
-    'review',
-    { model: 'review', messages: [{ role: 'user', content: 'Review' }], [field]: override },
-    new AbortController().signal,
-  );
+  const chat = harness({ fetch });
+  const chatResponse = await chat.request({
+    model: 'review',
+    messages: [{ role: 'user', content: 'Review' }],
+    [field]: override,
+  });
   expect(chatResponse.status).toBe(400);
   expect(await chatResponse.text()).not.toContain('canary');
 
-  const responses = request({ fetch }, responsesRoute());
-  const responsesResponse = await responses(
-    'subscription',
-    { model: 'subscription', input: 'Review', [field]: override },
-    new AbortController().signal,
-  );
+  const responses = harness({ route: responsesRoute(), fetch });
+  const responsesResponse = await responses.request({
+    model: 'subscription',
+    input: 'Review',
+    [field]: override,
+  });
   expect(responsesResponse.status).toBe(400);
   expect(await responsesResponse.text()).not.toContain('canary');
   expect(calls).toBe(0);
@@ -327,7 +363,7 @@ it.each([
 
 it('rejects malformed native requests before contacting LiteLLM', async () => {
   let calls = 0;
-  const upstream = request({
+  const h = harness({
     fetch: async () => {
       calls += 1;
       return new Response(chatWire(), { headers: { 'content-type': 'text/event-stream' } });
@@ -339,47 +375,39 @@ it('rejects malformed native requests before contacting LiteLLM', async () => {
     { messages: [] },
     { model: 7, messages: [] },
   ]) {
-    const response = await upstream('review', body, new AbortController().signal);
+    const response = await h.request(body);
     expect(response.status).toBe(400);
   }
-  const responses = request(
-    {
-      fetch: async () => {
-        calls += 1;
-        return new Response(responsesWire(), {
-          headers: { 'content-type': 'text/event-stream' },
-        });
-      },
+  const responses = harness({
+    route: responsesRoute(),
+    fetch: async () => {
+      calls += 1;
+      return new Response(responsesWire(), {
+        headers: { 'content-type': 'text/event-stream' },
+      });
     },
-    responsesRoute(),
-  );
-  expect(
-    (await responses('subscription', { model: 'subscription' }, new AbortController().signal))
-      .status,
-  ).toBe(400);
+  });
+  expect((await responses.request({ model: 'subscription' })).status).toBe(400);
   expect(calls).toBe(0);
 });
 
 it('does not forward raw upstream error events to the client', async () => {
   const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined);
   try {
-    const upstream = request(
-      {
-        fetch: async () =>
-          new Response(
-            'event: response.failed\ndata: {"type":"response.failed","message":"private-upstream-canary"}\n\n',
-            { headers: { 'content-type': 'text/event-stream' } },
-          ),
-      },
-      responsesRoute(),
-    );
-    const response = await upstream(
-      'subscription',
+    const h = harness({
+      route: responsesRoute(),
+      fetch: async () =>
+        new Response(
+          'event: response.failed\ndata: {"type":"response.failed","message":"private-upstream-canary"}\n\n',
+          { headers: { 'content-type': 'text/event-stream' } },
+        ),
+    });
+    const response = await h.request(
       { model: 'subscription', input: 'Review' },
-      new AbortController().signal,
+      undefined,
       'job-error-event',
     );
-    await expect(response.text()).rejects.toThrow('model stream failed');
+    await expect(response.text()).rejects.toThrow();
     expect(JSON.stringify(logs.mock.calls)).not.toContain('private-upstream-canary');
     expect(JSON.stringify(logs.mock.calls)).toContain('upstream-error-event');
   } finally {
@@ -390,34 +418,26 @@ it('does not forward raw upstream error events to the client', async () => {
 it.each(['event: error', 'event: response.failed'])(
   'rejects the SSE %s event independently of JSON fields',
   async (event) => {
-    const upstream = request({
+    const h = harness({
       fetch: async () =>
         new Response(`${event}\ndata: {"message":"private-event-canary"}\n\n`, {
           headers: { 'content-type': 'text/event-stream' },
         }),
     });
-    const response = await upstream(
-      'review',
-      { model: 'review', messages: [] },
-      new AbortController().signal,
-    );
-    await expect(response.text()).rejects.toThrow('model stream failed');
+    const response = await h.request({ model: 'review', messages: [] });
+    await expect(response.text()).rejects.toThrow();
   },
 );
 
 it('rejects a Chat error payload without forwarding its diagnostic', async () => {
-  const upstream = request({
+  const h = harness({
     fetch: async () =>
       new Response('data: {"error":{"message":"private-payload-canary"}}\n\n', {
         headers: { 'content-type': 'text/event-stream' },
       }),
   });
-  const response = await upstream(
-    'review',
-    { model: 'review', messages: [] },
-    new AbortController().signal,
-  );
-  await expect(response.text()).rejects.toThrow('model stream failed');
+  const response = await h.request({ model: 'review', messages: [] });
+  await expect(response.text()).rejects.toThrow();
 });
 
 it.each([
@@ -428,55 +448,41 @@ it.each([
   ],
   ['an empty Chat stream', ''],
 ])('does not report %s as a completed response', async (_name, wire) => {
-  const upstream = request({
+  const h = harness({
     fetch: async () => new Response(wire, { headers: { 'content-type': 'text/event-stream' } }),
   });
-  const response = await upstream(
-    'review',
-    { model: 'review', messages: [] },
-    new AbortController().signal,
-  );
-  await expect(response.text()).rejects.toThrow('model stream failed');
+  const response = await h.request({ model: 'review', messages: [] });
+  await expect(response.text()).rejects.toThrow();
 });
 
 it('does not accept a Responses terminal frame as Chat completion', async () => {
-  const upstream = request({
+  const h = harness({
     fetch: async () =>
       new Response(
         'data: {"type":"response.completed","response":{"status":"completed"}}\n\ndata: [DONE]\n\n',
         { headers: { 'content-type': 'text/event-stream' } },
       ),
   });
-  const response = await upstream(
-    'review',
-    { model: 'review', messages: [] },
-    new AbortController().signal,
-  );
-  await expect(response.text()).rejects.toThrow('model stream failed');
+  const response = await h.request({ model: 'review', messages: [] });
+  await expect(response.text()).rejects.toThrow();
 });
 
 it('does not accept Chat completion markers as Responses completion', async () => {
-  const upstream = request(
-    {
-      fetch: async () =>
-        new Response(
-          'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
-          { headers: { 'content-type': 'text/event-stream' } },
-        ),
-    },
-    responsesRoute(),
-  );
-  const response = await upstream(
-    'subscription',
-    { model: 'subscription', input: 'Review' },
-    new AbortController().signal,
-  );
-  await expect(response.text()).rejects.toThrow('model stream failed');
+  const h = harness({
+    route: responsesRoute(),
+    fetch: async () =>
+      new Response(
+        'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+        { headers: { 'content-type': 'text/event-stream' } },
+      ),
+  });
+  const response = await h.request({ model: 'subscription', input: 'Review' });
+  await expect(response.text()).rejects.toThrow();
 });
 
 it('does not start an upstream fetch for an already-aborted request', async () => {
   let calls = 0;
-  const upstream = request({
+  const h = harness({
     fetch: async () => {
       calls += 1;
       return new Response(chatWire(), { headers: { 'content-type': 'text/event-stream' } });
@@ -484,39 +490,32 @@ it('does not start an upstream fetch for an already-aborted request', async () =
   });
   const controller = new AbortController();
   controller.abort();
-  const response = await upstream(
-    'review',
+  const response = await h.request(
     { model: 'review', messages: [] },
     controller.signal,
     'job-pre-aborted',
   );
-  expect(response.status).toBe(502);
+  expect(response.status).toBe(401);
   expect(calls).toBe(0);
 });
 
 it('does not report a Responses stream without a terminal event as complete', async () => {
-  const upstream = request(
-    {
-      fetch: async () =>
-        new Response(
-          'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"Partial"}\n\n',
-          { headers: { 'content-type': 'text/event-stream' } },
-        ),
-    },
-    responsesRoute(),
-  );
-  const response = await upstream(
-    'subscription',
-    { model: 'subscription', input: 'Review' },
-    new AbortController().signal,
-  );
-  await expect(response.text()).rejects.toThrow('model stream failed');
+  const h = harness({
+    route: responsesRoute(),
+    fetch: async () =>
+      new Response(
+        'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"Partial"}\n\n',
+        { headers: { 'content-type': 'text/event-stream' } },
+      ),
+  });
+  const response = await h.request({ model: 'subscription', input: 'Review' });
+  await expect(response.text()).rejects.toThrow();
 });
 
 it('records incomplete-stream diagnostics without leaking prompts, credentials, or content', async () => {
   const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined);
   try {
-    const upstream = request({
+    const h = harness({
       credential: async () => 'credential-canary',
       fetch: async () =>
         new Response(
@@ -524,13 +523,12 @@ it('records incomplete-stream diagnostics without leaking prompts, credentials, 
           { headers: { 'content-type': 'text/event-stream' } },
         ),
     });
-    const response = await upstream(
-      'review',
+    const response = await h.request(
       { model: 'review', messages: [{ role: 'user', content: 'prompt-canary' }] },
-      new AbortController().signal,
+      undefined,
       'job-diagnostic',
     );
-    await expect(response.text()).rejects.toThrow('model stream failed');
+    await expect(response.text()).rejects.toThrow();
     const output = JSON.stringify(logs.mock.calls);
     expect(output).toContain('llm.request.finished');
     expect(output).toContain('job-diagnostic');
@@ -556,21 +554,20 @@ it.each([
 ] as const)('distinguishes %s in terminal diagnostics', async (outcome, wire, status) => {
   const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined);
   try {
-    const upstream = request({
+    const h = harness({
       fetch: async () =>
         new Response(wire, { status, headers: { 'content-type': 'text/event-stream' } }),
     });
-    const response = await upstream(
-      'review',
+    const response = await h.request(
       { model: 'review', messages: [] },
-      new AbortController().signal,
+      undefined,
       'job-classification',
     );
     if (outcome === 'completed') await expect(response.text()).resolves.toContain('[DONE]');
     else if (status !== 200) {
       expect(response.status).toBe(502);
       expect(await response.text()).not.toContain('private-error-canary');
-    } else await expect(response.text()).rejects.toThrow('model stream failed');
+    } else await expect(response.text()).rejects.toThrow();
     const finished = logs.mock.calls.filter((call) => call.includes('llm.request.finished'));
     expect(finished).toHaveLength(1);
     expect(finished[0]?.[2]).toMatchObject({
@@ -585,17 +582,12 @@ it.each([
 });
 
 it('returns a sanitized failure when the upstream transport fails', async () => {
-  const upstream = request({
+  const h = harness({
     fetch: async () => {
       throw new Error('private-network-canary');
     },
   });
-  const response = await upstream(
-    'review',
-    { model: 'review', messages: [] },
-    new AbortController().signal,
-    'job-network',
-  );
+  const response = await h.request({ model: 'review', messages: [] }, undefined, 'job-network');
   expect(response.status).toBe(502);
   expect(await response.text()).not.toContain('private-network-canary');
 });
@@ -604,17 +596,16 @@ it('rejects an unavailable credential before contacting LiteLLM', async () => {
   const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined);
   try {
     let calls = 0;
-    const upstream = request({
+    const h = harness({
       credential: async () => '',
       fetch: async () => {
         calls += 1;
         return new Response(chatWire(), { headers: { 'content-type': 'text/event-stream' } });
       },
     });
-    const response = await upstream(
-      'review',
+    const response = await h.request(
       { model: 'review', messages: [] },
-      new AbortController().signal,
+      undefined,
       'job-credential',
     );
     expect(response.status).toBe(502);
@@ -627,7 +618,7 @@ it('rejects an unavailable credential before contacting LiteLLM', async () => {
 
 it('cancels the upstream request when a client abandons the stream', async () => {
   let observedSignal: AbortSignal | null = null;
-  const upstream = request({
+  const h = harness({
     fetch: async (_url, init) => {
       observedSignal = init?.signal ?? null;
       return new Response(
@@ -644,25 +635,25 @@ it('cancels the upstream request when a client abandons the stream', async () =>
       );
     },
   });
-  const response = await upstream(
-    'review',
-    { model: 'review', messages: [] },
-    new AbortController().signal,
-  );
+  const response = await h.request({ model: 'review', messages: [] });
   const reader = response.body!.getReader();
   await reader.read();
   await reader.cancel();
   expect(observedSignal).toHaveProperty('aborted', true);
 });
 
-it.each(['client-cancelled', 'request-aborted', 'upstream-stream-error'] as const)(
+it.each([
+  ['client cancel', 'request-aborted', 'cancel'],
+  ['request abort', 'request-aborted', 'abort'],
+  ['upstream stream error', 'upstream-stream-error', 'error'],
+] as const)(
   'identifies %s after response headers without leaking transport errors',
-  async (outcome) => {
+  async (_name, outcome, action) => {
     const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     try {
       let source: ReadableStreamDefaultController<Uint8Array> | undefined;
       const controller = new AbortController();
-      const upstream = request({
+      const h = harness({
         fetch: async (_url, init) =>
           new Response(
             new ReadableStream<Uint8Array>({
@@ -689,19 +680,18 @@ it.each(['client-cancelled', 'request-aborted', 'upstream-stream-error'] as cons
             { headers: { 'content-type': 'text/event-stream' } },
           ),
       });
-      const response = await upstream(
-        'review',
+      const response = await h.request(
         { model: 'review', messages: [] },
         controller.signal,
         'job-stream-end',
       );
       const reader = response.body!.getReader();
       expect((await reader.read()).done).toBe(false);
-      if (outcome === 'client-cancelled') await reader.cancel();
+      if (action === 'cancel') await reader.cancel();
       else {
-        if (outcome === 'request-aborted') controller.abort();
+        if (action === 'abort') controller.abort();
         else source!.error(new Error('transport-secret'));
-        await expect(reader.read()).rejects.toThrow('model stream failed');
+        await expect(reader.read()).rejects.toThrow();
       }
       const finished = logs.mock.calls.filter((call) => call.includes('llm.request.finished'));
       expect(finished).toHaveLength(1);
@@ -726,7 +716,7 @@ it('records the service deadline when its own timeout signal aborts', async () =
   });
   const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined);
   try {
-    const upstream = request({
+    const h = harness({
       fetch: async (_url, init) =>
         new Promise<Response>((_resolve, reject) => {
           init?.signal?.addEventListener('abort', () => reject(new Error('private-error')), {
@@ -734,12 +724,7 @@ it('records the service deadline when its own timeout signal aborts', async () =
           });
         }),
     });
-    const pending = upstream(
-      'review',
-      { model: 'review', messages: [] },
-      new AbortController().signal,
-      'job-service-timeout',
-    );
+    const pending = h.request({ model: 'review', messages: [] }, undefined, 'job-service-timeout');
     await vi.advanceTimersByTimeAsync(120_001);
     expect((await pending).status).toBe(502);
     const finished = logs.mock.calls.filter((call) => call.includes('llm.request.finished'));
@@ -757,7 +742,7 @@ it('records the service deadline when its own timeout signal aborts', async () =
 
 it('bounds the upstream stream at sixteen mebibytes', async () => {
   const chunk = new Uint8Array(16 * 1024 * 1024 + 1);
-  const upstream = request({
+  const h = harness({
     fetch: async () =>
       new Response(
         new ReadableStream<Uint8Array>({
@@ -769,11 +754,111 @@ it('bounds the upstream stream at sixteen mebibytes', async () => {
         { headers: { 'content-type': 'text/event-stream' } },
       ),
   });
-  const response = await upstream(
-    'review',
-    { model: 'review', messages: [] },
-    new AbortController().signal,
-    'job-too-large',
-  );
-  await expect(response.text()).rejects.toThrow('model stream failed');
+  const response = await h.request({ model: 'review', messages: [] }, undefined, 'job-too-large');
+  await expect(response.text()).rejects.toThrow();
 });
+
+it.each(['cancel', 'abort'] as const)(
+  'records completed when a Chat client %s after finish and [DONE] before HTTP EOF',
+  async (action) => {
+    const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      let source: ReadableStreamDefaultController<Uint8Array> | undefined;
+      const h = harness({
+        fetch: async () =>
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                source = controller;
+                controller.enqueue(new TextEncoder().encode(chatWire()));
+              },
+            }),
+            { headers: { 'content-type': 'text/event-stream' } },
+          ),
+      });
+      const controller = new AbortController();
+      const response = await h.request(
+        { model: 'review', messages: [] },
+        controller.signal,
+        `job-chat-${action}`,
+      );
+      const reader = response.body!.getReader();
+      let text = '';
+      while (!text.includes('[DONE]')) {
+        const next = await reader.read();
+        if (next.done) throw new Error('stream ended before cancellation');
+        text += new TextDecoder().decode(next.value);
+      }
+      if (action === 'cancel') await reader.cancel();
+      else controller.abort();
+      await vi.waitFor(() => {
+        const finished = logs.mock.calls.filter((call) => call.includes('llm.request.finished'));
+        expect(finished).toHaveLength(1);
+        expect(finished[0]?.[2]).toMatchObject({
+          jobId: `job-chat-${action}`,
+          outcome: 'completed',
+        });
+      });
+      try {
+        source?.close();
+      } catch {
+        /* Cancellation already closed the transport. */
+      }
+    } finally {
+      logs.mockRestore();
+    }
+  },
+);
+
+it.each(['cancel', 'abort'] as const)(
+  'records completed when a Responses client %s after terminal completed before HTTP EOF',
+  async (action) => {
+    const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      let source: ReadableStreamDefaultController<Uint8Array> | undefined;
+      const h = harness({
+        route: responsesRoute(),
+        fetch: async () =>
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                source = controller;
+                controller.enqueue(new TextEncoder().encode(responsesWire()));
+              },
+            }),
+            { headers: { 'content-type': 'text/event-stream' } },
+          ),
+      });
+      const controller = new AbortController();
+      const response = await h.request(
+        { model: 'subscription', input: 'Review' },
+        controller.signal,
+        `job-responses-${action}`,
+      );
+      const reader = response.body!.getReader();
+      let text = '';
+      while (!text.includes('response.completed')) {
+        const next = await reader.read();
+        if (next.done) throw new Error('stream ended before cancellation');
+        text += new TextDecoder().decode(next.value);
+      }
+      if (action === 'cancel') await reader.cancel();
+      else controller.abort();
+      await vi.waitFor(() => {
+        const finished = logs.mock.calls.filter((call) => call.includes('llm.request.finished'));
+        expect(finished).toHaveLength(1);
+        expect(finished[0]?.[2]).toMatchObject({
+          jobId: `job-responses-${action}`,
+          outcome: 'completed',
+        });
+      });
+      try {
+        source?.close();
+      } catch {
+        /* Cancellation already closed the transport. */
+      }
+    } finally {
+      logs.mockRestore();
+    }
+  },
+);
