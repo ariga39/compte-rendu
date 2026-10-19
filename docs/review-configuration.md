@@ -1,9 +1,10 @@
 # Review model configuration
 
-Status: configuration and admission snapshot slice. Multi-model execution is not
-available yet; do not enable a non-null selection in production. A Runner receiving
-one fails the job without a review vote instead of silently running its legacy
-single reviewer.
+Multi-model execution is available through the sbx/OpenCode Runner and external
+LLM service. Deploy migration `0012_review_configuration.sql` and the compatible
+Core and Runner before enabling a non-null selection. Missing routes or incomplete
+reviewer evidence fail the job without a vote; no legacy reviewer is substituted.
+See [installation](installation.md#multi-model-review-configuration) for rollout.
 
 ## Ownership
 
@@ -85,6 +86,7 @@ Historical runs are not backfilled or relabeled. Runs admitted with legacy
 single-review behavior continue without a multi-model snapshot.
 
 Deploy the migration before upgraded Core code, and upgrade Runner to understand
-the snapshot before enabling any selection. This configuration slice intentionally
-keeps multi-model execution disabled until its session, synthesis, evidence and
-cleanup acceptance is complete.
+the snapshot before enabling any selection. A selected job runs independent
+reviewer sessions and one editorial synthesis inside a single Sandbox. It retains
+its frozen configuration and participant evidence, and publishes only after
+validation, grant revocation and confirmed Sandbox cleanup.

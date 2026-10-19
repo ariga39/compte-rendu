@@ -36,6 +36,41 @@ it('issues a usable job grant through the private socket and revokes its inferen
   }
 });
 
+it('permits inference to every requested route, denies others, and revokes them together', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'runner-llm-routes-'));
+  const socket = join(root, 'control.sock');
+  const service = createLlmService({
+    routes: [
+      { id: 'route-a', path: '/v1/chat/completions' },
+      { id: 'route-b', path: '/v1/chat/completions' },
+      { id: 'route-c', path: '/v1/chat/completions' },
+    ],
+    upstream: async (routeId) => new Response(`${routeId} output`),
+  });
+  const server = await startLlmServer({ controlSocket: socket, port: 0, service });
+  try {
+    const client = createLlmServiceClient(socket);
+    const grant = await client.issue('multi-route-job', ['route-a', 'route-b']);
+    const infer = (model: string) =>
+      service.inference(
+        new Request('http://service/v1/chat/completions', {
+          method: 'POST',
+          headers: { authorization: `Bearer ${grant.token}` },
+          body: JSON.stringify({ model }),
+        }),
+      );
+    expect(await (await infer('route-a')).text()).toBe('route-a output');
+    expect(await (await infer('route-b')).text()).toBe('route-b output');
+    expect((await infer('route-c')).status).toBe(403);
+    await client.revoke('multi-route-job');
+    expect((await infer('route-a')).status).toBe(401);
+    expect((await infer('route-b')).status).toBe(401);
+  } finally {
+    await server.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 it.each([
   [201, '{"token":"private-diagnostic","expiresAt":"not-a-date"}'],
   [201, '{"token":"private-diagnostic","expiresAt":"2030-01-01T00:00:00Z","extra":true}'],

@@ -8480,3 +8480,1021 @@ describe('Runner transport diagnostics', () => {
     }
   });
 });
+
+describe('Runner multi-model review', () => {
+  const baseSha = '1111111111111111111111111111111111111111';
+  const headSha = '2222222222222222222222222222222222222222';
+  const rootSession = 'ses_multi_root';
+  const selection = {
+    revision: 3,
+    selection: {
+      reviewers: ['deepseek-v4.1-flash', 'step-5-preview'],
+      synthesis: 'deepseek-v4.1-flash',
+    },
+  };
+  const findings = {
+    'reviewer-0': [
+      {
+        id: 'reviewer-0-f1',
+        location: 'src/example.ts:10',
+        claim: 'The new branch drops the retry budget.',
+        impact: 'A transient failure becomes terminal.',
+        evidence: 'The diff removes the retry wrapper around the request.',
+      },
+    ],
+    'reviewer-1': [
+      {
+        id: 'reviewer-1-f1',
+        location: 'src/other.ts:20',
+        claim: 'The error path is not covered.',
+        impact: 'A regression can ship without a failing test.',
+        evidence: 'No test exercises the new error branch.',
+      },
+    ],
+  } as const;
+  const reviewerMarkdown = {
+    'reviewer-0': '## Review:\n\nRequest changes: retry budget removed.',
+    'reviewer-1': '## Review:\n\nComment: missing error-path coverage.',
+  } as const;
+  const synthesisMarkdown =
+    '## Review:\n\nSynthesized blocking finding reviewer-0-f1 with merged source reviewer-1-f1.';
+  const reviewerDecision = {
+    'reviewer-0': 'request_changes',
+    'reviewer-1': 'comment',
+  } as const;
+
+  const multiChildExports = (childId: string, participant: string, route: string) =>
+    JSON.stringify({
+      info: {
+        id: childId,
+        parentID: rootSession,
+        agent: participant,
+        model: { providerID: 'compte-rendu', id: route },
+        outcome: 'succeeded',
+      },
+      messages: [
+        {
+          type: 'assistant',
+          finish: 'tool-calls',
+          agent: participant,
+          model: { providerID: 'compte-rendu', id: route },
+          content: [
+            {
+              type: 'tool',
+              name: 'submit_review',
+              state: {
+                status: 'completed',
+                input: {
+                  decision: reviewerDecision[participant as keyof typeof reviewerDecision],
+                  markdown: reviewerMarkdown[participant as keyof typeof reviewerMarkdown],
+                  findings: findings[participant as keyof typeof findings],
+                },
+              },
+            },
+          ],
+        },
+        {
+          type: 'assistant',
+          finish: 'stop',
+          agent: participant,
+          model: { providerID: 'compte-rendu', id: route },
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                participant,
+                decision: reviewerDecision[participant as keyof typeof reviewerDecision],
+                findings: findings[participant as keyof typeof findings],
+              }),
+            },
+          ],
+        },
+        { type: 'idle', outcome: 'succeeded' },
+      ],
+    });
+
+  const rootExport = JSON.stringify({
+    info: {
+      id: rootSession,
+      agent: 'multi-review-supervisor',
+      model: { providerID: 'compte-rendu', id: 'deepseek-v4.1-flash' },
+      outcome: 'succeeded',
+    },
+    messages: [
+      {
+        type: 'assistant',
+        finish: 'tool-calls',
+        agent: 'multi-review-supervisor',
+        model: { providerID: 'compte-rendu', id: 'deepseek-v4.1-flash' },
+        content: [
+          {
+            type: 'tool',
+            name: 'submit_review',
+            state: {
+              status: 'completed',
+              input: {
+                decision: 'request_changes',
+                markdown: synthesisMarkdown,
+                coverage: [
+                  {
+                    findingId: 'reviewer-0-f1',
+                    outcome: 'retained',
+                    finalId: 'reviewer-0-f1',
+                  },
+                  {
+                    findingId: 'reviewer-1-f1',
+                    outcome: 'merged',
+                    finalId: 'reviewer-0-f1',
+                  },
+                ],
+              },
+            },
+          },
+        ],
+      },
+      {
+        type: 'assistant',
+        finish: 'stop',
+        agent: 'multi-review-supervisor',
+        model: { providerID: 'compte-rendu', id: 'deepseek-v4.1-flash' },
+        content: [{ type: 'text', text: 'Synthesis submitted.' }],
+      },
+      { type: 'idle', outcome: 'succeeded' },
+    ],
+  });
+
+  const rootJsonl = [
+    JSON.stringify({
+      type: 'tool_use',
+      sessionID: rootSession,
+      part: {
+        type: 'tool',
+        id: 'call-a',
+        tool: 'subagent',
+        state: {
+          status: 'completed',
+          input: {
+            agent: 'reviewer-0',
+            description: 'review A',
+            prompt: 'frozen review brief',
+            background: false,
+          },
+          output: '<subagent sessionID="ses_multi_child_a" state="completed">done</subagent>',
+          metadata: { metadata: { sessionID: 'ses_multi_child_a', status: 'completed' } },
+        },
+      },
+    }),
+    JSON.stringify({
+      type: 'tool_use',
+      sessionID: rootSession,
+      part: {
+        type: 'tool',
+        id: 'call-b',
+        tool: 'subagent',
+        state: {
+          status: 'completed',
+          input: {
+            agent: 'reviewer-1',
+            description: 'review B',
+            prompt: 'frozen review brief',
+            background: false,
+          },
+          output: '<subagent sessionID="ses_multi_child_b" state="completed">done</subagent>',
+          metadata: { metadata: { sessionID: 'ses_multi_child_b', status: 'completed' } },
+        },
+      },
+    }),
+  ].join('\n');
+
+  const multiModelConfig = JSON.stringify({
+    id: 'opencode-go/legacy-single',
+    baseUrl: 'http://host.docker.internal:32773/v1',
+    definition: { name: 'Legacy single' },
+  });
+
+  const defaultChildren = [
+    {
+      id: 'ses_multi_child_a',
+      parentID: rootSession,
+      agent: 'reviewer-0',
+      model: { providerID: 'compte-rendu', id: 'deepseek-v4.1-flash' },
+      outcome: 'succeeded',
+    },
+    {
+      id: 'ses_multi_child_b',
+      parentID: rootSession,
+      agent: 'reviewer-1',
+      model: { providerID: 'compte-rendu', id: 'step-5-preview' },
+      outcome: 'succeeded',
+    },
+  ];
+  const defaultExport = (sessionId: string): string | undefined =>
+    sessionId === rootSession
+      ? rootExport
+      : sessionId === 'ses_multi_child_a'
+        ? multiChildExports('ses_multi_child_a', 'reviewer-0', 'deepseek-v4.1-flash')
+        : sessionId === 'ses_multi_child_b'
+          ? multiChildExports('ses_multi_child_b', 'reviewer-1', 'step-5-preview')
+          : undefined;
+
+  // Native OpenCode 2 session.list returns `{ data, cursor }`, and the final
+  // non-empty page still advertises a `next` cursor, so the enumeration must
+  // follow pagination until an empty page.
+  const childSessionPage = (
+    data: readonly unknown[],
+    next: string | null,
+    previous: string | null = null,
+  ) => JSON.stringify({ data, cursor: { previous, next } });
+  const pagesFor = (children: readonly unknown[]): readonly SessionPageResponse[] => [
+    ...children.map((child, index) => ({
+      stdout: childSessionPage(
+        [child],
+        `cursor-${index + 1}`,
+        index === 0 ? null : `cursor-${index}`,
+      ),
+    })),
+    { stdout: childSessionPage([], null, `cursor-${children.length}`) },
+  ];
+
+  type SessionPageResponse = {
+    readonly stdout?: string;
+    readonly exitCode?: number;
+    readonly timedOut?: boolean;
+    readonly truncated?: boolean;
+  };
+  type MultiScenarioOverrides = {
+    readonly children?: readonly (typeof defaultChildren)[number][];
+    readonly pages?: readonly SessionPageResponse[];
+    readonly exports?: Readonly<Record<string, string>>;
+    readonly rootJsonl?: string;
+    readonly rootExport?: string;
+  };
+
+  const runScenario = async (overrides: MultiScenarioOverrides = {}) => {
+    const children = overrides.children ?? defaultChildren;
+    const pages = overrides.pages ?? pagesFor(children);
+    let sessionPage = 0;
+    let expectedCursor: string | undefined;
+    const rootJsonlValue = overrides.rootJsonl ?? rootJsonl;
+    const exportValue = (sessionId: string) =>
+      overrides.exports?.[sessionId] ??
+      (sessionId === rootSession ? (overrides.rootExport ?? rootExport) : defaultExport(sessionId));
+    const controlRoot = await mkdtemp(join(tmpdir(), 'cr-multi-control-'));
+    const socketPath = join(controlRoot, 'control.sock');
+    const issued: Array<{ jobId: string; routes: string[]; token: string }> = [];
+    const revoked: string[] = [];
+    let counter = 0;
+    const server = createServer(async (incoming, outgoing) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of incoming)
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as Record<
+        string,
+        unknown
+      >;
+      if (incoming.url === '/grants') {
+        const routes = body.routes as string[];
+        const token = `multi-grant-token-${(counter += 1)}`;
+        issued.push({ jobId: String(body.jobId), routes, token });
+        outgoing.writeHead(201, { 'content-type': 'application/json' });
+        outgoing.end(
+          JSON.stringify({
+            token,
+            expiresAt: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
+          }),
+        );
+        return;
+      }
+      if (incoming.url === '/grants/revoke') {
+        revoked.push(String(body.jobId));
+        outgoing.writeHead(204);
+        outgoing.end();
+        return;
+      }
+      outgoing.writeHead(404);
+      outgoing.end();
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(socketPath, resolve);
+    });
+
+    let createArgs: readonly string[] | undefined;
+    let agentArgs: readonly string[] | undefined;
+    let guardPlugin: string | undefined;
+    const callbacks: Request[] = [];
+    const runner = createRunner({
+      evidenceRoot: join(controlRoot, 'evidence'),
+      authToken: 'runner-test-token',
+      modelConfig: multiModelConfig,
+      llmServiceSocket: socketPath,
+      callbackUrl: 'https://ingress.test/runner-callback',
+      callbackToken: 'callback-token',
+      callbackFetch: async (input, init) => {
+        callbacks.push(new Request(input, init));
+        return new Response(null, { status: 202 });
+      },
+      process: async (_command, args, options = {}) => {
+        if (args[0] === 'create') {
+          createArgs = args;
+          const configRootArg = args.find((value) => value.startsWith('XDG_CONFIG_HOME='));
+          if (configRootArg !== undefined) {
+            try {
+              guardPlugin = await readFile(
+                join(
+                  configRootArg.slice('XDG_CONFIG_HOME='.length),
+                  'opencode',
+                  'plugins',
+                  'multi_review_guard',
+                  'index.js',
+                ),
+                'utf8',
+              );
+            } catch {
+              guardPlugin = undefined;
+            }
+          }
+        }
+        const isAgent = args[0] === 'exec' && args.includes('--agent');
+        if (isAgent) {
+          agentArgs = args;
+          await writeFile(options.stdoutFilePath!, `${rootJsonlValue}\n`, { mode: 0o600 });
+          await writeFile(options.stderrFilePath!, 'agent stderr\n', { mode: 0o600 });
+          return { exitCode: 0, stdout: rootJsonlValue, timedOut: false, truncated: false };
+        }
+        if (args[0] === 'exec' && args.includes('api') && args.includes('session.list')) {
+          const cursor = args.find((argument) => argument.startsWith('cursor='))?.slice(7);
+          if (!args.includes(`parentID=${rootSession}`) || cursor !== expectedCursor) {
+            return { exitCode: 1, stdout: '', timedOut: false, truncated: false };
+          }
+          const page = pages[Math.min(sessionPage, pages.length - 1)] ?? {};
+          sessionPage += 1;
+          try {
+            expectedCursor = JSON.parse(page.stdout ?? '').cursor?.next ?? undefined;
+          } catch {
+            expectedCursor = undefined;
+          }
+          return {
+            exitCode: page.exitCode ?? 0,
+            stdout: page.stdout ?? '',
+            timedOut: page.timedOut ?? false,
+            truncated: page.truncated ?? false,
+          };
+        }
+        if (args[0] === 'exec' && args.includes('session') && args.includes('list')) {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify([{ id: rootSession }]),
+            timedOut: false,
+            truncated: false,
+          };
+        }
+        if (args[0] === 'cp') {
+          const source = args[1];
+          const destination = args[2];
+          const childId = /opencode-export-([A-Za-z0-9._:-]+)\.json$/.exec(source)?.[1];
+          if (childId !== undefined && exportValue(childId) !== undefined) {
+            await writeFile(destination, exportValue(childId)!, { mode: 0o600 });
+          } else if (source.endsWith('/data') || source.endsWith('/state')) {
+            await mkdir(destination, { recursive: true, mode: 0o700 });
+            await writeFile(join(destination, 'opencode.db'), 'db', { mode: 0o600 });
+            await writeFile(join(destination, 'review.log'), 'log', { mode: 0o600 });
+          }
+          return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+        }
+        return {
+          exitCode: 0,
+          stdout: args.includes('rev-parse') ? `${baseSha}\n${headSha}\n` : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
+    });
+
+    try {
+      const submitted = await runner.handle(
+        new Request('http://runner/jobs', {
+          method: 'POST',
+          headers: {
+            authorization: 'Bearer runner-test-token',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            ...runnerJobFields,
+            reviewConfiguration: selection,
+            runId: 'run-multi-success',
+            attempt: 1,
+            repositoryUrl: 'https://github.com/acme/reviewed.git',
+            baseSha,
+            headSha,
+          }),
+        }),
+      );
+      const { id } = (await submitted.json()) as { id: string };
+      const terminal = await waitForTerminal(runner, id);
+      const evidencePath = join(controlRoot, 'evidence', terminal.evidenceId as string);
+      const manifest = JSON.parse(await readFile(join(evidencePath, 'manifest.json'), 'utf8'));
+      const childExports: Record<string, unknown> = {};
+      for (const sessionId of ['ses_multi_child_a', 'ses_multi_child_b']) {
+        try {
+          childExports[sessionId] = JSON.parse(
+            await readFile(join(evidencePath, `opencode-export-${sessionId}.json`), 'utf8'),
+          );
+        } catch {
+          childExports[sessionId] = undefined;
+        }
+      }
+      const readEvidence = async (name: string): Promise<string | undefined> => {
+        try {
+          return await readFile(join(evidencePath, name), 'utf8');
+        } catch {
+          return undefined;
+        }
+      };
+      const sessionPages = (await readdir(evidencePath))
+        .filter((name) => /^opencode-child-sessions-\d+\.json$/.test(name))
+        .sort();
+      const sessionPageContents: Record<string, string> = {};
+      for (const name of sessionPages) {
+        sessionPageContents[name] = (await readEvidence(name))!;
+      }
+      const multiReviewText = await readEvidence('multi-review.json');
+      return {
+        terminal,
+        manifest,
+        callbacks,
+        issued,
+        revoked,
+        createArgs,
+        agentArgs,
+        evidencePath,
+        childExports,
+        guardPlugin,
+        sessionPageContents,
+        multiReviewDocument:
+          multiReviewText === undefined ? undefined : JSON.parse(multiReviewText),
+      };
+    } finally {
+      await runner.close();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(controlRoot, { recursive: true, force: true });
+    }
+  };
+
+  type GuardEvent = {
+    readonly tool: string;
+    readonly agent: string;
+    readonly sessionID: string;
+    readonly status?: string;
+    readonly input?: Record<string, unknown>;
+    result?: { content: string };
+  };
+  // Load the exact plugin source the Sandbox received at the create boundary and
+  // drive its public hook contract, so the guard is exercised as a delivered
+  // artifact rather than through internal helpers.
+  const loadGuardHooks = async (source: string) => {
+    const url = `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`;
+    const module = (await import(/* @vite-ignore */ url)) as {
+      default: { setup: (ctx: unknown) => Promise<void> };
+    };
+    const hooks = new Map<string, (event: GuardEvent) => void>();
+    const ctx = {
+      tool: {
+        hook: (name: string, handler: (event: GuardEvent) => void) => {
+          hooks.set(name, handler);
+        },
+      },
+    };
+    await module.default.setup(ctx);
+    return {
+      before: (event: GuardEvent) => hooks.get('execute.before')!(event),
+      after: (event: GuardEvent) => hooks.get('execute.after')!(event),
+    };
+  };
+
+  it('runs the frozen roster through native foreground subagents and publishes one synthesis', async () => {
+    const result = await runScenario();
+
+    expect(result.terminal).toMatchObject({
+      status: 'succeeded',
+      sandbox: { cleanup: 'destroyed' },
+      result: {
+        version: 2,
+        decision: 'request_changes',
+        markdown: synthesisMarkdown,
+      },
+    });
+    expect(result.issued).toHaveLength(1);
+    expect(result.issued[0]?.routes).toEqual(['deepseek-v4.1-flash', 'step-5-preview']);
+    expect(result.revoked).toEqual([runnerJobFields.id]);
+    expect(result.agentArgs).toEqual(
+      expect.arrayContaining([
+        '--model',
+        'compte-rendu/deepseek-v4.1-flash',
+        '--agent',
+        'multi-review-supervisor',
+      ]),
+    );
+    const create = result.createArgs ?? [];
+    const configEnv = create.find((value) => value.startsWith('OPENCODE_CONFIG_CONTENT='));
+    expect(configEnv).toBeDefined();
+    const config = JSON.parse(configEnv!.slice('OPENCODE_CONFIG_CONTENT='.length));
+    expect(config.model).toBe('compte-rendu/deepseek-v4.1-flash');
+    expect(config.providers['compte-rendu']).toMatchObject({
+      canonical: 'opencode-go',
+      package: '@opencode/ai/providers/openai-compatible',
+    });
+    expect(Object.keys(config.providers['compte-rendu'].models).sort()).toEqual([
+      'deepseek-v4.1-flash',
+      'step-5-preview',
+    ]);
+    expect(config.agents['multi-review-supervisor']).toMatchObject({
+      mode: 'primary',
+      permissions: expect.arrayContaining([
+        { action: 'subagent', resource: 'reviewer-0', effect: 'allow' },
+        { action: 'subagent', resource: 'reviewer-1', effect: 'allow' },
+      ]),
+    });
+    expect(config.agents['reviewer-0']).toMatchObject({
+      mode: 'subagent',
+      permissions: expect.arrayContaining([{ action: 'subagent', resource: '*', effect: 'deny' }]),
+    });
+    expect(config.agents['reviewer-1']).toMatchObject({ mode: 'subagent' });
+    expect(result.guardPlugin).toContain('Participant: reviewer-0');
+    expect(result.guardPlugin).toContain('Participant: reviewer-1');
+    expect(result.guardPlugin).toContain('background = false');
+
+    expect(result.manifest.multiReview).toMatchObject({
+      revision: 3,
+      synthesis: { decision: 'request_changes', markdown: synthesisMarkdown },
+    });
+    expect(result.manifest.multiReview.reviewers).toHaveLength(2);
+    expect(
+      result.manifest.multiReview.reviewers.map(
+        (reviewer: { sessionId: string; route: string }) => ({
+          sessionId: reviewer.sessionId,
+          route: reviewer.route,
+        }),
+      ),
+    ).toEqual([
+      { sessionId: 'ses_multi_child_a', route: 'deepseek-v4.1-flash' },
+      { sessionId: 'ses_multi_child_b', route: 'step-5-preview' },
+    ]);
+    expect(result.manifest.multiReview.synthesis.coverage).toEqual([
+      { findingId: 'reviewer-0-f1', outcome: 'retained', finalId: 'reviewer-0-f1' },
+      { findingId: 'reviewer-1-f1', outcome: 'merged', finalId: 'reviewer-0-f1' },
+    ]);
+    expect(result.manifest.files).toEqual(
+      expect.arrayContaining([
+        'opencode-export-ses_multi_root.json',
+        'opencode-export-ses_multi_child_a.json',
+        'opencode-export-ses_multi_child_b.json',
+      ]),
+    );
+    expect(result.manifest.frozenSelection).toEqual({
+      reviewers: ['deepseek-v4.1-flash', 'step-5-preview'],
+      synthesis: 'deepseek-v4.1-flash',
+    });
+
+    // The external process fixture rejects an incorrect parent or continuation
+    // cursor. Successful results and retained evidence prove pagination works.
+    expect(result.manifest.files).toEqual(
+      expect.arrayContaining([
+        'opencode-child-sessions-1.json',
+        'opencode-child-sessions-2.json',
+        'opencode-child-sessions-3.json',
+        'multi-review.json',
+      ]),
+    );
+    expect(result.sessionPageContents['opencode-child-sessions-1.json']).toContain(
+      'ses_multi_child_a',
+    );
+    const multiReviewDocument = result.multiReviewDocument as {
+      revision: number;
+      frozenSelection: { reviewers: string[]; synthesis: string };
+      rootSessionId: string;
+      reviewers: Array<{ sessionId: string; route: string }>;
+      synthesis: { coverage: unknown[] };
+    };
+    expect(multiReviewDocument).toMatchObject({
+      revision: 3,
+      frozenSelection: {
+        reviewers: ['deepseek-v4.1-flash', 'step-5-preview'],
+        synthesis: 'deepseek-v4.1-flash',
+      },
+      rootSessionId: rootSession,
+    });
+    expect(multiReviewDocument.reviewers.map((reviewer) => reviewer.sessionId)).toEqual([
+      'ses_multi_child_a',
+      'ses_multi_child_b',
+    ]);
+    expect(multiReviewDocument.synthesis.coverage).toHaveLength(2);
+
+    expect(result.callbacks).toHaveLength(1);
+    const callback = (await result.callbacks[0]!.json()) as {
+      status: string;
+      result: unknown;
+      evidence: { manifest: { content: string } };
+    };
+    expect(callback.status).toBe('succeeded');
+    expect(callback.result).toEqual({
+      version: 2,
+      decision: 'request_changes',
+      markdown: synthesisMarkdown,
+    });
+    const callbackManifest = JSON.parse(
+      Buffer.from(callback.evidence.manifest.content, 'base64').toString('utf8'),
+    );
+    expect(callbackManifest.multiReview.reviewers).toHaveLength(2);
+    expect(callbackManifest.multiReview.synthesis.coverage).toHaveLength(2);
+
+    for (const child of ['ses_multi_child_a', 'ses_multi_child_b']) {
+      const exported = result.childExports[child] as {
+        info: { parentID?: string; outcome?: string };
+      };
+      expect(exported.info.parentID).toBe(rootSession);
+      expect(exported.info.outcome).toBe('succeeded');
+    }
+  });
+
+  const childExportValue = (participant: 'reviewer-0' | 'reviewer-1') =>
+    JSON.parse(
+      multiChildExports(
+        participant === 'reviewer-0' ? 'ses_multi_child_a' : 'ses_multi_child_b',
+        participant,
+        participant === 'reviewer-0' ? 'deepseek-v4.1-flash' : 'step-5-preview',
+      ),
+    );
+  const exportsWithA = (value: string): Record<string, string> => ({
+    [rootSession]: rootExport,
+    ses_multi_child_a: value,
+    ses_multi_child_b: defaultExport('ses_multi_child_b')!,
+  });
+  const wrongModel = childExportValue('reviewer-0');
+  wrongModel.info.model.id = 'step-5-preview';
+  const incomplete = childExportValue('reviewer-0');
+  incomplete.info.outcome = 'failed';
+  incomplete.messages[incomplete.messages.length - 1] = { type: 'idle', outcome: 'failed' };
+  const duplicate = childExportValue('reviewer-0');
+  duplicate.messages[0].content.push({ ...duplicate.messages[0].content[0] });
+  const uncoveredRoot = JSON.parse(rootExport);
+  uncoveredRoot.messages[0].content[0].state.input.coverage =
+    uncoveredRoot.messages[0].content[0].state.input.coverage.slice(0, 1);
+  const wrongAssistantAgent = childExportValue('reviewer-0');
+  wrongAssistantAgent.messages[0].agent = 'reviewer-1';
+  const wrongAssistantModel = childExportValue('reviewer-0');
+  wrongAssistantModel.messages[1].model.id = 'step-5-preview';
+  const missingAssistantIdentity = childExportValue('reviewer-0');
+  delete missingAssistantIdentity.messages[0].agent;
+  const malformedKnownChildSubmit = childExportValue('reviewer-0');
+  malformedKnownChildSubmit.messages[0].content[0] = {
+    type: 'tool',
+    name: 'submit_review',
+    state: 'completed',
+  };
+  const wrongRootAssistantModel = JSON.parse(rootExport);
+  wrongRootAssistantModel.messages[0].model.id = 'step-5-preview';
+  const malformedKnownRootSubmit = JSON.parse(rootExport);
+  malformedKnownRootSubmit.messages[0].content[0] = {
+    type: 'tool',
+    name: 'submit_review',
+    state: 'completed',
+  };
+  const missingFinalInMarkdownRoot = JSON.parse(rootExport);
+  missingFinalInMarkdownRoot.messages[0].content[0].state.input.markdown =
+    '## Review:\n\nSynthesis omitted the final id.';
+  const missingDisagreementInMarkdownRoot = JSON.parse(rootExport);
+  missingDisagreementInMarkdownRoot.messages[0].content[0].state.input.markdown =
+    '## Review:\n\nOnly reviewer-0-f1 is disclosed.';
+  missingDisagreementInMarkdownRoot.messages[0].content[0].state.input.coverage = [
+    { findingId: 'reviewer-0-f1', outcome: 'retained', finalId: 'reviewer-0-f1' },
+    { findingId: 'reviewer-1-f1', outcome: 'disagreement' },
+  ];
+  const disagreementRoot = JSON.parse(rootExport);
+  disagreementRoot.messages[0].content[0].state.input.markdown =
+    '## Review:\n\nDisagreement: reviewer-0-f1 stands while reviewer-1-f1 is preserved.';
+  disagreementRoot.messages[0].content[0].state.input.coverage = [
+    { findingId: 'reviewer-0-f1', outcome: 'retained', finalId: 'reviewer-0-f1' },
+    { findingId: 'reviewer-1-f1', outcome: 'disagreement' },
+  ];
+
+  const failureCases: ReadonlyArray<readonly [string, MultiScenarioOverrides, string]> = [
+    [
+      'a missing child',
+      {
+        children: [defaultChildren[0]!],
+        exports: {
+          [rootSession]: rootExport,
+          ses_multi_child_a: defaultExport('ses_multi_child_a')!,
+        },
+      },
+      'result-schema-failure',
+    ],
+    [
+      'a child with the wrong model',
+      { exports: exportsWithA(JSON.stringify(wrongModel)) },
+      'result-schema-failure',
+    ],
+    [
+      'an incomplete child',
+      { exports: exportsWithA(JSON.stringify(incomplete)) },
+      'missing-terminal-message',
+    ],
+    [
+      'a duplicate child submission',
+      { exports: exportsWithA(JSON.stringify(duplicate)) },
+      'multiple-results',
+    ],
+    [
+      'an uncovered finding',
+      { rootExport: JSON.stringify(uncoveredRoot) },
+      'result-schema-failure',
+    ],
+    [
+      'a child assistant with the wrong agent',
+      { exports: exportsWithA(JSON.stringify(wrongAssistantAgent)) },
+      'result-schema-failure',
+    ],
+    [
+      'a child assistant with the wrong model',
+      { exports: exportsWithA(JSON.stringify(wrongAssistantModel)) },
+      'result-schema-failure',
+    ],
+    [
+      'a child assistant missing its identity',
+      { exports: exportsWithA(JSON.stringify(missingAssistantIdentity)) },
+      'result-schema-failure',
+    ],
+    [
+      'a malformed known child submit_review',
+      { exports: exportsWithA(JSON.stringify(malformedKnownChildSubmit)) },
+      'result-schema-failure',
+    ],
+    [
+      'a root assistant with the wrong model',
+      { rootExport: JSON.stringify(wrongRootAssistantModel) },
+      'result-schema-failure',
+    ],
+    [
+      'a malformed known root submit_review',
+      { rootExport: JSON.stringify(malformedKnownRootSubmit) },
+      'result-schema-failure',
+    ],
+    [
+      'a retained final id missing from the synthesis markdown',
+      { rootExport: JSON.stringify(missingFinalInMarkdownRoot) },
+      'result-schema-failure',
+    ],
+    [
+      'a disagreement finding id missing from the synthesis markdown',
+      { rootExport: JSON.stringify(missingDisagreementInMarkdownRoot) },
+      'result-schema-failure',
+    ],
+    [
+      'a repeated session.list cursor',
+      {
+        pages: [
+          { stdout: childSessionPage([defaultChildren[0]], 'cursor-1') },
+          { stdout: childSessionPage([defaultChildren[1]], 'cursor-1', 'cursor-0') },
+        ],
+      },
+      'result-schema-failure',
+    ],
+    [
+      'a duplicate child session id across pages',
+      {
+        pages: [
+          { stdout: childSessionPage([defaultChildren[0]], 'cursor-1') },
+          { stdout: childSessionPage([defaultChildren[0]], 'cursor-2', 'cursor-0') },
+          { stdout: childSessionPage([], null, 'cursor-1') },
+        ],
+      },
+      'result-schema-failure',
+    ],
+    [
+      'excess child sessions',
+      {
+        children: [
+          defaultChildren[0]!,
+          defaultChildren[1]!,
+          {
+            id: 'ses_multi_child_c',
+            parentID: rootSession,
+            agent: 'reviewer-2',
+            model: { providerID: 'compte-rendu', id: 'another-model' },
+            outcome: 'succeeded',
+          },
+        ],
+      },
+      'result-schema-failure',
+    ],
+    [
+      'a truncated session.list page',
+      {
+        pages: [{ stdout: childSessionPage([defaultChildren[0]], 'cursor-1'), truncated: true }],
+      },
+      'result-schema-failure',
+    ],
+    ['a failed session.list page', { pages: [{ exitCode: 1 }] }, 'result-schema-failure'],
+    [
+      'incomplete session.list pagination without a cursor',
+      { pages: [{ stdout: JSON.stringify({ data: [defaultChildren[0]] }) }] },
+      'result-schema-failure',
+    ],
+  ];
+
+  it.each(failureCases)('fails closed for %s', async (_name, overrides, cause) => {
+    const result = await runScenario(overrides);
+    expect(result.terminal).toMatchObject({
+      status: 'failed',
+      sandbox: { cleanup: 'destroyed' },
+      failure: { reason: 'invalid-output', cause },
+    });
+    expect(result.terminal).not.toHaveProperty('result');
+    const callback = (await result.callbacks[0]!.json()) as {
+      status: string;
+      result?: unknown;
+    };
+    expect(callback.status).toBe('failed');
+    expect(callback.result).toBeUndefined();
+  });
+
+  it('retains the frozen selection and partial child evidence after a failed review', async () => {
+    const result = await runScenario({ exports: exportsWithA(JSON.stringify(wrongModel)) });
+
+    expect(result.terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'invalid-output', cause: 'result-schema-failure' },
+    });
+    expect(result.manifest.frozenSelection).toEqual({
+      reviewers: ['deepseek-v4.1-flash', 'step-5-preview'],
+      synthesis: 'deepseek-v4.1-flash',
+    });
+    const document = result.multiReviewDocument as {
+      revision: number;
+      frozenSelection: { reviewers: string[]; synthesis: string };
+      rootSessionId: string;
+      sessions: Array<{ sessionId: string; parentID?: string }>;
+    };
+    expect(document).toMatchObject({
+      revision: 3,
+      frozenSelection: {
+        reviewers: ['deepseek-v4.1-flash', 'step-5-preview'],
+        synthesis: 'deepseek-v4.1-flash',
+      },
+      rootSessionId: rootSession,
+    });
+    expect(document.sessions.map((session) => session.sessionId)).toEqual([
+      rootSession,
+      'ses_multi_child_a',
+      'ses_multi_child_b',
+    ]);
+    expect(result.manifest.files).toEqual(
+      expect.arrayContaining([
+        'opencode-export-ses_multi_child_a.json',
+        'opencode-export-ses_multi_child_b.json',
+        'multi-review.json',
+      ]),
+    );
+  });
+  it('preserves an explicit disagreement whose finding id appears in the synthesis', async () => {
+    const disagreementMarkdown = disagreementRoot.messages[0].content[0].state.input.markdown;
+    const result = await runScenario({ rootExport: JSON.stringify(disagreementRoot) });
+
+    expect(result.terminal).toMatchObject({
+      status: 'succeeded',
+      result: { version: 2, decision: 'request_changes', markdown: disagreementMarkdown },
+    });
+    expect(result.manifest.multiReview.synthesis.coverage).toEqual([
+      { findingId: 'reviewer-0-f1', outcome: 'retained', finalId: 'reviewer-0-f1' },
+      { findingId: 'reviewer-1-f1', outcome: 'disagreement' },
+    ]);
+  });
+
+  it('enforces the frozen dispatch and report transport through the delivered guard', async () => {
+    const delivered = await runScenario();
+    const guard = await loadGuardHooks(delivered.guardPlugin ?? '');
+    const root = rootSession;
+    const supervisor = 'multi-review-supervisor';
+
+    // A regular reviewer submit_review is not the supervisor gate.
+    expect(() =>
+      guard.before({
+        tool: 'submit_review',
+        agent: 'reviewer-0',
+        sessionID: 'ses_multi_child_a',
+      }),
+    ).not.toThrow();
+
+    // The supervisor cannot submit until every reviewer has formally submitted.
+    expect(() =>
+      guard.before({ tool: 'submit_review', agent: supervisor, sessionID: root }),
+    ).toThrow('all reviewers must submit first');
+
+    // Only the supervisor dispatches; the participant must be a known, unique roster member.
+    expect(() =>
+      guard.before({
+        tool: 'subagent',
+        agent: 'reviewer-0',
+        sessionID: root,
+        input: { agent: 'reviewer-0' },
+      }),
+    ).toThrow('only the supervisor');
+    expect(() =>
+      guard.before({
+        tool: 'subagent',
+        agent: supervisor,
+        sessionID: root,
+        input: { agent: 'reviewer-9' },
+      }),
+    ).toThrow('invalid or repeated reviewer');
+
+    const firstDispatch = { agent: 'reviewer-0', prompt: 'malicious prompt', background: true };
+    guard.before({
+      tool: 'subagent',
+      agent: supervisor,
+      sessionID: root,
+      input: firstDispatch,
+    });
+    expect(firstDispatch.prompt).toContain('Participant: reviewer-0');
+    expect(firstDispatch.prompt).not.toContain('malicious prompt');
+    expect(firstDispatch.background).toBe(false);
+    expect(() =>
+      guard.before({
+        tool: 'subagent',
+        agent: supervisor,
+        sessionID: root,
+        input: { agent: 'reviewer-0' },
+      }),
+    ).toThrow('invalid or repeated reviewer');
+    expect(() =>
+      guard.before({
+        tool: 'subagent',
+        agent: supervisor,
+        sessionID: 'ses_other_root',
+        input: { agent: 'reviewer-1' },
+      }),
+    ).toThrow('unexpected supervisor session');
+
+    guard.before({
+      tool: 'subagent',
+      agent: supervisor,
+      sessionID: root,
+      input: { agent: 'reviewer-1' },
+    });
+
+    const firstSubmission = {
+      decision: 'request_changes',
+      markdown: '## Review:\n\na',
+      findings: [],
+    };
+    guard.after({
+      tool: 'submit_review',
+      agent: 'reviewer-0',
+      sessionID: 'ses_multi_child_a',
+      status: 'completed',
+      input: firstSubmission,
+    });
+    const subagentResult = { content: 'CHILD_NARRATIVE_CANARY' };
+    guard.after({
+      tool: 'subagent',
+      agent: supervisor,
+      sessionID: root,
+      status: 'completed',
+      input: { agent: 'reviewer-0' },
+      result: subagentResult,
+    });
+    expect(JSON.parse(subagentResult.content)).toMatchObject({
+      participant: 'reviewer-0',
+      sessionId: 'ses_multi_child_a',
+      submission: firstSubmission,
+    });
+    expect(subagentResult.content).not.toContain('CHILD_NARRATIVE_CANARY');
+
+    // An errored child submission is not a formal report, so the root stays blocked.
+    guard.after({
+      tool: 'submit_review',
+      agent: 'reviewer-1',
+      sessionID: 'ses_multi_child_b',
+      status: 'error',
+      input: { decision: 'comment', markdown: '## Review:\n\nb', findings: [] },
+    });
+    expect(() =>
+      guard.before({ tool: 'submit_review', agent: supervisor, sessionID: root }),
+    ).toThrow('all reviewers must submit first');
+
+    guard.after({
+      tool: 'submit_review',
+      agent: 'reviewer-1',
+      sessionID: 'ses_multi_child_b',
+      status: 'completed',
+      input: { decision: 'comment', markdown: '## Review:\n\nb', findings: [] },
+    });
+    expect(() =>
+      guard.before({ tool: 'submit_review', agent: supervisor, sessionID: 'ses_other_root' }),
+    ).toThrow('all reviewers must submit first');
+    expect(() =>
+      guard.before({ tool: 'submit_review', agent: supervisor, sessionID: root }),
+    ).not.toThrow();
+  });
+});
