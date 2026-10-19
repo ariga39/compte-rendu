@@ -270,7 +270,22 @@ export const createSbxRuntimeFactory = (options: SbxRuntimeOptions): SandboxRunt
         command: 'remove-sandbox',
         includeStderr: true,
       });
-      if (removed.exitCode !== 0 || removed.timedOut) clean = false;
+      if (removed.exitCode !== 0 || removed.timedOut) {
+        const inspected = await command(
+          ['inspect', spec.name, '--json'],
+          { stage: 'cleanup', command: 'confirm-sandbox-absent', includeStderr: true },
+          { captureStdout: true, captureStderr: true },
+        );
+        const absent =
+          inspected.exitCode === 1 &&
+          !inspected.timedOut &&
+          !inspected.truncated &&
+          !inspected.stderrTruncated &&
+          !inspected.streamError &&
+          inspected.stdout.trim() === '' &&
+          inspected.stderr?.split('\n').includes(`error: sandbox '${spec.name}' not found`);
+        if (!absent) clean = false;
+      }
       const remaining = await listPolicies(command, false, {
         stage: 'cleanup',
         command: 'inspect-network-policy',
