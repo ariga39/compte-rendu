@@ -123,9 +123,15 @@ For a normal compatible release:
    `corepack pnpm build` against the immutable checkout being released.
 2. If there is a new migration, review it and apply it remotely with the D1
    migration command in the installation guide. Prefer additive, backward-compatible changes.
-3. Back up and reuse the existing gitignored instance configurations, preserving
-   account, domain, assets, Cron, bindings and branding. Render only if the files
-   are absent, then restore all instance-specific settings. Deploy using `apps/core/wrangler.<INSTANCE_NAME>.jsonc` and
+3. Back up the existing gitignored instance configurations. Compare the tracked
+   `apps/core/wrangler.jsonc` and `apps/ingress/wrangler.jsonc` templates between
+   the deployed and target revisions, then merge the relevant changes into the
+   retained instance files: new bindings/variables, migrations, compatibility
+   settings, assets and Cron changes. Preserve instance account/resource IDs,
+   domains, allowlists, branding and deliberate overrides; reconcile changed
+   defaults rather than blindly replacing them. Render only when instance files
+   are absent, then restore those instance settings from the backup. Deploy using
+   `apps/core/wrangler.<INSTANCE_NAME>.jsonc` and
    `apps/ingress/wrangler.<INSTANCE_NAME>.jsonc`.
 4. If Runner changed, finish the drain procedure below, back up its artifact,
    install the tested merged build and restart it. Verify the artifact hash,

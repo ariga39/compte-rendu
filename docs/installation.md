@@ -1002,6 +1002,8 @@ uses the temporary invocation described above.
    include choices such as account, domain, assets, Cron and Check branding.
    The renderer refuses to overwrite them. Back them up privately; do not discard
    instance settings and regenerate a default configuration for an upgrade.
+   On each upgrade, merge tracked template changes into those retained files as
+   described in [Update and rollback](operations.md#update-and-rollback).
 
 The deployed variables-versus-secrets inventory is deliberately small:
 
@@ -1256,10 +1258,14 @@ original name; Check Suite lookup uses the newly configured name. If repository
 branch protection requires the old Check name, update that requirement when
 switching names.
 
-The renderer accepts the name as its final optional argument. Include the Bot
-allowlist and PostHog arguments when supplying it; use `[]` and
-`{"enabled":false}` when those options are unused. Retain the same name in your
-update and rollback commands. For example:
+For an existing deployment, edit `vars.GITHUB_CHECK_NAME` in its retained
+`apps/core/wrangler.<INSTANCE_NAME>.jsonc` and deploy Core. Preserve this setting
+when merging template updates or restoring a rollback configuration; do not run
+the renderer over existing files.
+
+For the first render only, the renderer accepts the name as its final optional
+argument. Include the Bot allowlist and PostHog arguments when supplying it; use
+`[]` and `{"enabled":false}` when those options are unused. For example:
 
 ```sh
 corepack pnpm render:wrangler ariga39-ai-reviewers <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '[]' '{"enabled":false}' 'Ariga39 AI Review'
