@@ -128,7 +128,7 @@ For a normal compatible release:
    the deployed and target revisions, then merge the relevant changes into the
    retained instance files: new bindings/variables, migrations, compatibility
    settings, assets and Cron changes. Preserve instance account/resource IDs,
-   domains, allowlists, branding and deliberate overrides; reconcile changed
+   `DASHBOARD_ORIGIN`, domains, allowlists, branding and deliberate overrides; reconcile changed
    defaults rather than blindly replacing them. Render only when instance files
    are absent, then restore those instance settings from the backup. Deploy using
    `apps/core/wrangler.<INSTANCE_NAME>.jsonc` and
