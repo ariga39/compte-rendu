@@ -34,10 +34,12 @@ export const reviewPrompt = (input: ReviewPromptInput): string => {
     'Stay read-only; do not execute repository code, edit, commit, push, or publish.';
   const execution =
     reviewers.length > 1
-      ? 'Obtain independent reviews using these configured reviewers, then synthesize one final review:\n' +
+      ? 'Start all configured reviewers in parallel for one independent review each, then synthesize one final review:\n' +
         reviewers.map(({ participant, model }) => `- ${participant}: ${model}`).join('\n') +
-        '\nGive each reviewer the same review task below. You control orchestration. ' +
-        'Delegate repository inspection to the reviewers; compare their evidence, remove duplicates and weak claims, and preserve substantive disagreements rather than forcing consensus.\n'
+        '\nGive each reviewer the same review task below. Delegate repository inspection to the reviewers. ' +
+        'Once their reviews return, only synthesize the supplied results: compare their evidence, remove duplicates and weak claims, and preserve substantive disagreements rather than forcing consensus. ' +
+        'Do not request follow-up reviews or verification rounds, and do not inspect the repository again to verify their conclusions. ' +
+        'Express unresolved uncertainty in the final review instead of starting another round.\n'
       : 'There is one configured reviewer. Perform the review directly and return its final conclusion; no extra delegation or synthesis turn is needed.\n';
   return `${execution}\nReview task:\n${task}\n\nFinal output:\n${outputInstruction}`;
 };

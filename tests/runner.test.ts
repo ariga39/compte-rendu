@@ -9159,6 +9159,16 @@ describe('Runner multi-model review', () => {
     expect(supervisorPromptText).toContain('reviewer-1');
     expect(supervisorPromptText).toContain('Review task');
     expect(supervisorPromptText).toContain('synthesize');
+    expect(supervisorPromptText).toContain('Start all configured reviewers in parallel');
+    expect(supervisorPromptText).toContain(
+      'Once their reviews return, only synthesize the supplied results',
+    );
+    expect(supervisorPromptText).toContain(
+      'Do not request follow-up reviews or verification rounds',
+    );
+    expect(supervisorPromptText).toContain(
+      'do not inspect the repository again to verify their conclusions',
+    );
     expect(supervisorPromptText).toContain('TLDR:');
     expect(supervisorPromptText).toContain('Return your final answer as one JSON object');
     expect(supervisorPromptText).not.toContain('submit_review');
