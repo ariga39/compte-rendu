@@ -216,3 +216,33 @@ test('detail shows reported model usage, partial totals and unknown fields for a
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({ path: test.info().outputPath('model-usage-mobile.png'), fullPage: true });
 });
+
+test('detail keeps distinct route and model pairs when their names contain colons', async ({
+  page,
+  harness,
+  base,
+}) => {
+  const models = [
+    { route: 'a:b', model: null },
+    { route: 'a', model: 'b:null' },
+  ].map((identity) => ({
+    ...identity,
+    requests: 1,
+    incompleteRequests: 0,
+    inputTokens: null,
+    uncachedInputTokens: null,
+    cacheReadTokens: null,
+    cacheWriteTokens: null,
+    outputTokens: null,
+    reasoningTokens: null,
+  }));
+  harness.setHandler(() =>
+    ok({ ...detailData(publicTask('colon-models')), usage: { version: 1, models } }),
+  );
+  await page.goto(`${base}/jobs/colon-models`);
+  const usage = page.getByRole('region', { name: 'Models and tokens' });
+  await expect(usage.getByRole('heading', { name: 'Model not reported' })).toBeVisible();
+  await expect(usage.getByRole('heading', { name: 'b:null', exact: true })).toBeVisible();
+  await expect(usage).toContainText('Route: a:b');
+  await expect(usage).toContainText('Route: a ·');
+});

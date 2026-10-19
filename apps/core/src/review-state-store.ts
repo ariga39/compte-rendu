@@ -190,7 +190,7 @@ const runOutcomeSelect = `
 `;
 
 interface PublicRunDbRow {
-  model_usage: string | null;
+  model_usage?: string | null;
   review_decision: ReviewDecision | null;
   run_id: string;
   status: ReviewRunStatus;
@@ -289,7 +289,7 @@ const mapMetadataRow = (row: MetadataDbRow): RepositoryMetadataRow => ({
 
 const publicRunColumns = `
   r.run_id, r.status, r.installation_id, r.repository_id, r.pull_request_number,
-  r.base_sha, r.head_sha, r.base_ref, r.head_ref, r.review_decision, r.model_usage,
+  r.base_sha, r.head_sha, r.base_ref, r.head_ref, r.review_decision,
   r.created_at, r.claimed_at, r.terminal_at, r.result_received_at, r.publication_started_at, r.runner_job_id, r.failure_phase, r.failure_reason,
   r.evidence_status, r.runner_cleanup_status, r.publication_claimed_at,
   r.progress_stage, r.progress_received_at, r.progress_milestones,
@@ -1145,7 +1145,7 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
 
   getPublicRun: async (runId) => {
     const row = await database
-      .prepare(`SELECT ${publicRunColumns} ${publicRunFrom} WHERE r.run_id = ?`)
+      .prepare(`SELECT ${publicRunColumns}, r.model_usage ${publicRunFrom} WHERE r.run_id = ?`)
       .bind(runId)
       .first<PublicRunDbRow>();
     return row === null ? undefined : mapPublicRun(row);

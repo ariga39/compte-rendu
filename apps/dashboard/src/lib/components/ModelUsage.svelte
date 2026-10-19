@@ -25,7 +25,7 @@
     {#if usage.truncated}
       <p class="muted">Only the first 32 model entries were recorded. These totals are incomplete.</p>
     {/if}
-    {#each usage.models as model (model.route + ':' + model.model)}
+    {#each usage.models as model (JSON.stringify([model.route, model.model]))}
       <div class="model-block">
         <h3>{model.model ?? 'Model not reported'}</h3>
         <p class="muted">Route: {model.route} · {number.format(model.requests)} {model.requests === 1 ? 'request' : 'requests'}</p>
