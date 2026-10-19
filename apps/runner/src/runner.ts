@@ -23,6 +23,7 @@ import {
   ReviewResult,
   RunnerFailureCause,
   RunnerJobInput,
+  RunnerProcessErrorCode,
   RunnerResultCallback,
   StructuredReviewResult,
   type RunnerProgressSnapshot,
@@ -384,6 +385,16 @@ const OpenCodeAssistantMessage = Schema.Struct({
   finish: Schema.optional(Schema.Unknown),
 });
 
+// A spawn failure or thrown process invocation is classified with a fixed
+// Schema-decoded allowlist of Node codes rather than its raw message, so
+// diagnostics stay safe and comparable. An unrecognized code is omitted
+// instead of guessed.
+const ProcessErrorCodeShape = Schema.Struct({ code: RunnerProcessErrorCode });
+const safeProcessErrorCode = (error: unknown): RunnerProcessErrorCode | undefined => {
+  const decoded = Schema.decodeUnknownOption(ProcessErrorCodeShape)(error);
+  return Option.isSome(decoded) ? decoded.value.code : undefined;
+};
+
 const stop = (child: ChildProcess, signal: NodeJS.Signals = 'SIGTERM') => {
   try {
     child.kill(signal);
@@ -407,6 +418,8 @@ const runProcess: RunnerProcess = (command, args, options = {}) =>
     let streamError = false;
     let truncated = false;
     let timedOut = false;
+    let processError = false;
+    let errorCode: RunnerProcessErrorCode | undefined;
     let settled = false;
     let timeout: ReturnType<typeof setTimeout> | undefined;
     let killTimeout: ReturnType<typeof setTimeout> | undefined;
@@ -477,6 +490,8 @@ const runProcess: RunnerProcess = (command, args, options = {}) =>
           streamError,
           timedOut,
           truncated,
+          ...(processError ? { processError: true } : {}),
+          ...(errorCode === undefined ? {} : { errorCode }),
         });
       let streams = 0;
       const streamFinished = () => {
@@ -500,7 +515,9 @@ const runProcess: RunnerProcess = (command, args, options = {}) =>
         stdio: ['ignore', captureStdout ? 'pipe' : 'ignore', captureStderr ? 'pipe' : 'ignore'],
       });
       options.onChild?.(child);
-    } catch {
+    } catch (error) {
+      processError = true;
+      errorCode = safeProcessErrorCode(error);
       finish(1);
       return;
     }
@@ -532,7 +549,12 @@ const runProcess: RunnerProcess = (command, args, options = {}) =>
       stop(child);
       killTimeout = setTimeout(() => stop(child, 'SIGKILL'), 5_000);
     }, options.timeoutMs ?? SETUP_TIMEOUT_MS);
-    child.once('error', () => finish(1));
+    const handleSpawnError: (error: Error) => void = (error) => {
+      processError = true;
+      errorCode = safeProcessErrorCode(error);
+      finish(1);
+    };
+    child.once('error', handleSpawnError);
     child.once('close', (exitCode) => finish(exitCode));
   });
 
@@ -1037,6 +1059,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
   const jobsByRun = new Map<string, RunnerJob>();
   let claiming = false;
   let claimPollingHalted = false;
+  let claimGateFailureLogged = false;
   let requestNextJob: (() => void) | undefined;
   // Admission and claim stay gated until startup recovery has resolved every
   // own pending grant marker; an unresolved identity keeps the gate closed.
@@ -1182,12 +1205,21 @@ export const createRunner = (options: RunnerOptions = {}) => {
       : new TextDecoder().decode(bytes.subarray(0, MAX_DIAGNOSTIC_STDERR_BYTES));
   };
 
+  // A logger failure must never change the Runner Job outcome.
+  const recordLog = async (event: OperationalLogEvent) => {
+    if (log === undefined) return;
+    try {
+      await log.record(sanitizeOperationalLogEvent(event));
+    } catch {
+      // Diagnostics must not change the Runner Job outcome.
+    }
+  };
+
   const recordCommand = async (
     job: RunnerJob,
     diagnostic: RunnerDiagnostic,
     result: RunnerProcessResult,
   ) => {
-    if (log === undefined) return;
     const event: OperationalLogEvent = {
       phase: 'runner',
       outcome: 'command',
@@ -1196,6 +1228,12 @@ export const createRunner = (options: RunnerOptions = {}) => {
       command: diagnostic.command,
       exitCode: result.exitCode,
       timedOut: result.timedOut,
+      truncated: result.truncated === true,
+      stderrTruncated: result.stderrTruncated === true,
+      streamError: result.streamError === true,
+      abortRequested: job.abortRequested,
+      processError: result.processError === true,
+      ...(result.errorCode === undefined ? {} : { errorCode: result.errorCode }),
       ...(diagnostic.includeStderr === true ||
       (diagnostic.stage === 'checkout' && (result.exitCode !== 0 || result.timedOut))
         ? (() => {
@@ -1204,11 +1242,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
           })()
         : {}),
     };
-    try {
-      await log.record(sanitizeOperationalLogEvent(event));
-    } catch {
-      // Diagnostics must not change the Runner Job outcome.
-    }
+    await recordLog(event);
   };
 
   const runTracked = async (
@@ -1253,8 +1287,16 @@ export const createRunner = (options: RunnerOptions = {}) => {
           if (job.abortRequested) stop(child);
         },
       });
-    } catch {
-      result = { exitCode: 1, stdout: '', timedOut: false, truncated: false };
+    } catch (error) {
+      const errorCode = safeProcessErrorCode(error);
+      result = {
+        exitCode: 1,
+        stdout: '',
+        timedOut: false,
+        truncated: false,
+        processError: true,
+        ...(errorCode === undefined ? {} : { errorCode }),
+      };
     }
     job.child = undefined;
     if (diagnostic !== undefined) await recordCommand(job, diagnostic, result);
@@ -1292,8 +1334,16 @@ export const createRunner = (options: RunnerOptions = {}) => {
           Math.min(processOptions.timeoutMs ?? ARCHIVE_COMMAND_TIMEOUT_MS, remaining),
         ),
       });
-    } catch {
-      result = { exitCode: 1, stdout: '', timedOut: false, truncated: false };
+    } catch (error) {
+      const errorCode = safeProcessErrorCode(error);
+      result = {
+        exitCode: 1,
+        stdout: '',
+        timedOut: false,
+        truncated: false,
+        processError: true,
+        ...(errorCode === undefined ? {} : { errorCode }),
+      };
     }
     if (diagnostic !== undefined) await recordCommand(job, diagnostic, result);
     return result;
@@ -1634,8 +1684,16 @@ export const createRunner = (options: RunnerOptions = {}) => {
           maxBytes: processOptions.maxBytes ?? MAX_DIAGNOSTIC_STDERR_BYTES,
           timeoutMs: CLEANUP_COMMAND_TIMEOUT_MS,
         });
-      } catch {
-        result = { exitCode: 1, stdout: '', timedOut: false, truncated: false };
+      } catch (error) {
+        const errorCode = safeProcessErrorCode(error);
+        result = {
+          exitCode: 1,
+          stdout: '',
+          timedOut: false,
+          truncated: false,
+          processError: true,
+          ...(errorCode === undefined ? {} : { errorCode }),
+        };
       }
       if (diagnostic !== undefined) await recordCommand(job, diagnostic, result);
       return result;
@@ -1809,6 +1867,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const controller = new AbortController();
       let timeout: ReturnType<typeof setTimeout> | undefined;
+      let timedOut = false;
       try {
         const response = await Promise.race([
           callbackFetch(callbackUrl, {
@@ -1822,14 +1881,43 @@ export const createRunner = (options: RunnerOptions = {}) => {
           }),
           new Promise<Response>((_, reject) => {
             timeout = setTimeout(() => {
+              timedOut = true;
               controller.abort();
               reject(new Error('runner callback request timed out'));
             }, callbackTimeoutMs);
           }),
         ]);
-        if (response.ok) return callbackTooLarge;
+        if (response.ok) {
+          await recordLog({
+            phase: 'runner',
+            outcome: 'callback',
+            runId: job.input.runId,
+            jobId: job.id,
+            attempt: attempt + 1,
+            result: 'accepted',
+            status: response.status,
+          });
+          return callbackTooLarge;
+        }
+        await recordLog({
+          phase: 'runner',
+          outcome: 'callback',
+          runId: job.input.runId,
+          jobId: job.id,
+          attempt: attempt + 1,
+          result: 'http-error',
+          status: response.status,
+        });
       } catch {
         // The local evidence remains the recovery copy when callback delivery is lost.
+        await recordLog({
+          phase: 'runner',
+          outcome: 'callback',
+          runId: job.input.runId,
+          jobId: job.id,
+          attempt: attempt + 1,
+          result: timedOut ? 'timeout' : 'transport-error',
+        });
       } finally {
         if (timeout !== undefined) clearTimeout(timeout);
       }
@@ -1837,6 +1925,13 @@ export const createRunner = (options: RunnerOptions = {}) => {
         await new Promise<void>((resolve) => setTimeout(resolve, 0));
       }
     }
+    // Local terminal state is not Core delivery: make the exhausted delivery explicit.
+    await recordLog({
+      phase: 'runner',
+      outcome: 'callback-delivery-failed',
+      runId: job.input.runId,
+      jobId: job.id,
+    });
     return callbackTooLarge;
   };
 
@@ -2378,6 +2473,24 @@ export const createRunner = (options: RunnerOptions = {}) => {
             ? { status: 'failed', failure: finalFailure, result: undefined }
             : { status: 'succeeded', result, failure: undefined },
       );
+      const terminalStatus = job.state.status;
+      if (
+        terminalStatus === 'succeeded' ||
+        terminalStatus === 'failed' ||
+        terminalStatus === 'aborted'
+      ) {
+        // One terminal diagnostic after callback and cleanup so operators can
+        // tell a local terminal state (and its cleanup result) apart from a
+        // delivery or inspection problem.
+        await recordLog({
+          phase: 'runner',
+          outcome: 'terminal',
+          runId: job.input.runId,
+          jobId: job.id,
+          status: terminalStatus,
+          cleanup: job.state.sandbox.cleanup,
+        });
+      }
       job.diagnosticCheckoutToken = '';
       job.grantToken = '';
       job.resolveDone();
@@ -2528,8 +2641,21 @@ export const createRunner = (options: RunnerOptions = {}) => {
     }
   };
 
+  // A startup gate that stops claiming is a real queue-stall reason. Record it
+  // once, not on every poll, and keep the existing gate behavior unchanged.
+  const recordClaimGateFailure = async (
+    reason: 'grant-recovery-failed' | 'runtime-preflight-failed',
+  ) => {
+    if (claimGateFailureLogged) return;
+    claimGateFailureLogged = true;
+    await recordLog({ phase: 'runner', outcome: 'claim', reason, pollingHalted: true });
+  };
+
   const claimNextJob = async () => {
-    if (grantRecovery !== undefined && !(await grantRecovery)) return;
+    if (grantRecovery !== undefined && !(await grantRecovery)) {
+      await recordClaimGateFailure('grant-recovery-failed');
+      return;
+    }
     if (
       claiming ||
       claimPollingHalted ||
@@ -2550,6 +2676,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
 
     if (!(await ensurePreflight())) {
       claimPollingHalted = true;
+      await recordClaimGateFailure('runtime-preflight-failed');
       return;
     }
     if (claiming || claimPollingHalted || !hasCapacity()) return;
@@ -2557,8 +2684,22 @@ export const createRunner = (options: RunnerOptions = {}) => {
     claiming = true;
     let continuePolling = true;
     let admittedJob = false;
+    let claimFailure:
+      | {
+          readonly reason:
+            | 'http-error'
+            | 'timeout'
+            | 'transport-error'
+            | 'invalid-response'
+            | 'oversized-response'
+            | 'malformed-response'
+            | 'admission-rejected';
+          readonly status?: number;
+        }
+      | undefined;
     const controller = new AbortController();
     let timeout: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
     try {
       const response = await Promise.race([
         claimFetch(claimUrl, {
@@ -2572,6 +2713,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         }),
         new Promise<Response>((_, reject) => {
           timeout = setTimeout(() => {
+            timedOut = true;
             controller.abort();
             reject(new Error('Runner claim request timed out'));
           }, claimTimeoutMs);
@@ -2582,21 +2724,48 @@ export const createRunner = (options: RunnerOptions = {}) => {
         claimPollingHalted = true;
         const body = await response.arrayBuffer();
         if (body.byteLength > MAX_REQUEST_BYTES) {
+          claimFailure = { reason: 'oversized-response' };
           throw new Error('Claimed Runner Job exceeded the request bound');
         }
-        const input = await Schema.decodeUnknownPromise(RunnerJobInput)(
-          JSON.parse(new TextDecoder().decode(body)),
+        let payload: unknown;
+        try {
+          payload = JSON.parse(new TextDecoder().decode(body));
+        } catch {
+          claimFailure = { reason: 'malformed-response' };
+          throw new Error('Claimed Runner Job was not JSON');
+        }
+        const input = await Schema.decodeUnknownPromise(RunnerJobInput)(payload).catch(
+          () => undefined,
         );
+        if (input === undefined) {
+          claimFailure ??= { reason: 'invalid-response' };
+          throw new Error('Claimed Runner Job failed schema validation');
+        }
         const admitted = await admitJob(input, true);
-        if (admitted.status !== 202) throw new Error('Claimed Runner Job could not be admitted');
+        if (admitted.status !== 202) {
+          claimFailure ??= { reason: 'admission-rejected' };
+          throw new Error('Claimed Runner Job could not be admitted');
+        }
         claimPollingHalted = false;
         admittedJob = true;
+      } else if (response.status !== 204) {
+        claimFailure = { reason: 'http-error', status: response.status };
       }
     } catch {
       // The next idle poll is the bounded transport retry for claim availability.
+      claimFailure ??= { reason: timedOut ? 'timeout' : 'transport-error' };
     } finally {
       if (timeout !== undefined) clearTimeout(timeout);
       claiming = false;
+      if (claimFailure !== undefined) {
+        await recordLog({
+          phase: 'runner',
+          outcome: 'claim',
+          reason: claimFailure.reason,
+          ...(claimFailure.status === undefined ? {} : { status: claimFailure.status }),
+          pollingHalted: claimPollingHalted,
+        });
+      }
       if ((continuePolling || admittedJob) && hasCapacity()) {
         scheduleClaim();
       }

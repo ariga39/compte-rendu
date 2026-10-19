@@ -360,6 +360,11 @@ export type ReviewEventName = ReviewEvent['event'];
 export type ReviewEvent = typeof ReviewEvent.Type;
 export type PullRequestFacts = typeof PullRequestFacts.Type;
 
+// Fixed allowlist of Node process spawn error codes that Runner diagnostics may
+// report. Codes are decoded with Schema and never carry the raw error message.
+export const RunnerProcessErrorCode = Schema.Literals(['ENOENT', 'EACCES', 'EPERM']);
+export type RunnerProcessErrorCode = typeof RunnerProcessErrorCode.Type;
+
 export type OperationalLogEvent =
   | {
       readonly phase: 'ingress';
@@ -443,7 +448,55 @@ export type OperationalLogEvent =
       readonly command: string;
       readonly exitCode: number;
       readonly timedOut: boolean;
+      readonly truncated: boolean;
+      readonly stderrTruncated: boolean;
+      readonly streamError: boolean;
+      readonly abortRequested: boolean;
+      // True when the process failed to spawn or its promise threw rather than
+      // returning an exit status; errorCode is a fixed allowlisted Node code,
+      // never a raw message.
+      readonly processError: boolean;
+      readonly errorCode?: RunnerProcessErrorCode;
       readonly stderr?: string;
+    }
+  | {
+      readonly phase: 'runner';
+      readonly outcome: 'callback';
+      readonly runId: string;
+      readonly jobId: string;
+      readonly attempt: number;
+      readonly result: 'accepted' | 'http-error' | 'timeout' | 'transport-error';
+      readonly status?: number;
+    }
+  | {
+      readonly phase: 'runner';
+      readonly outcome: 'callback-delivery-failed';
+      readonly runId: string;
+      readonly jobId: string;
+    }
+  | {
+      readonly phase: 'runner';
+      readonly outcome: 'claim';
+      readonly reason:
+        | 'http-error'
+        | 'timeout'
+        | 'transport-error'
+        | 'invalid-response'
+        | 'oversized-response'
+        | 'malformed-response'
+        | 'admission-rejected'
+        | 'grant-recovery-failed'
+        | 'runtime-preflight-failed';
+      readonly status?: number;
+      readonly pollingHalted: boolean;
+    }
+  | {
+      readonly phase: 'runner';
+      readonly outcome: 'terminal';
+      readonly runId: string;
+      readonly jobId: string;
+      readonly status: 'succeeded' | 'failed' | 'aborted';
+      readonly cleanup: 'pending' | 'destroyed' | 'failed';
     };
 
 export const sanitizeOperationalLogIdentifier = (value: string | undefined) => {
@@ -477,7 +530,14 @@ export const sanitizeOperationalLogEvent = (event: OperationalLogEvent): Operati
   }
 
   if (event.phase === 'runner') {
-    return { ...event, runId: sanitizeOperationalLogIdentifier(event.runId) ?? 'redacted' };
+    if (event.outcome === 'claim') return event;
+    return {
+      ...event,
+      runId: sanitizeOperationalLogIdentifier(event.runId) ?? 'redacted',
+      ...('jobId' in event
+        ? { jobId: sanitizeOperationalLogIdentifier(event.jobId) ?? 'redacted' }
+        : {}),
+    };
   }
 
   return event;
