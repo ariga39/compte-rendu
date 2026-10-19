@@ -8,6 +8,9 @@ import {
   type RunnerProcess,
   type RunnerProcessResult,
 } from '../apps/runner/src/runner';
+import { createCoreWorker } from '../apps/core/src/core-worker';
+import { createD1ReviewStateStore } from '../apps/core/src/index';
+import { SqliteD1Database } from './support/d1-database';
 
 delete process.env.REVIEW_MODEL_CONFIG;
 
@@ -8728,6 +8731,7 @@ describe('Runner multi-model review', () => {
     readonly exports?: Readonly<Record<string, string>>;
     readonly rootJsonl?: string;
     readonly rootExport?: string;
+    readonly runId?: string;
   };
 
   const runScenario = async (overrides: MultiScenarioOverrides = {}) => {
@@ -8882,7 +8886,7 @@ describe('Runner multi-model review', () => {
           body: JSON.stringify({
             ...runnerJobFields,
             reviewConfiguration: selection,
-            runId: 'run-multi-success',
+            runId: overrides.runId ?? 'run-multi-success',
             attempt: 1,
             repositoryUrl: 'https://github.com/acme/reviewed.git',
             baseSha,
@@ -9055,6 +9059,9 @@ describe('Runner multi-model review', () => {
       reviewers: ['deepseek-v4.1-flash', 'step-5-preview'],
       synthesis: 'deepseek-v4.1-flash',
     });
+    // The top-level session list mirrors the archived root-only session list,
+    // while every child stays in the multiReview provenance and exports.
+    expect(result.manifest.sessionIds).toEqual([rootSession]);
 
     // The external process fixture rejects an incorrect parent or continuation
     // cursor. Successful results and retained evidence prove pagination works.
@@ -9107,6 +9114,7 @@ describe('Runner multi-model review', () => {
     );
     expect(callbackManifest.multiReview.reviewers).toHaveLength(2);
     expect(callbackManifest.multiReview.synthesis.coverage).toHaveLength(2);
+    expect(callbackManifest.sessionIds).toEqual([rootSession]);
 
     for (const child of ['ses_multi_child_a', 'ses_multi_child_b']) {
       const exported = result.childExports[child] as {
@@ -9114,6 +9122,78 @@ describe('Runner multi-model review', () => {
       };
       expect(exported.info.parentID).toBe(rootSession);
       expect(exported.info.outcome).toBe('succeeded');
+    }
+  });
+
+  it('publishes the actual generated multi callback through Core with root-only session evidence', async () => {
+    const database = new SqliteD1Database();
+    const stateStore = createD1ReviewStateStore(database);
+    try {
+      const claim = await stateStore.claimReview({
+        deliveryId: 'delivery-multi-final',
+        job: {
+          repositoryId: 11,
+          installationId: 7,
+          pullRequestNumber: 42,
+          baseSha,
+          headSha,
+          trigger: 'automatic',
+        },
+        occurredAt: '2026-09-01T00:00:00.000Z',
+      });
+      if (claim.kind !== 'claimed') throw new Error('multi review run was not claimed');
+      await stateStore.recordRunnerJob({
+        runId: claim.runId,
+        jobId: runnerJobFields.id,
+        attempt: 1,
+      });
+
+      const result = await runScenario({ runId: claim.runId });
+      expect(result.terminal).toMatchObject({ status: 'succeeded' });
+      const callback = result.callbacks[0]!;
+
+      const reviews: unknown[] = [];
+      const env = {
+        REVIEW_DB: database,
+        GITHUB_APP_ID: '1234567',
+        GITHUB_APP_PRIVATE_KEY: 'test-private-key',
+        EVIDENCE_BUCKET: { put: async () => undefined },
+      };
+      const worker = createCoreWorker(env, {
+        github: {
+          loadReviewTarget: async () => ({ headSha }),
+          createReview: async ({ payload }) => {
+            reviews.push(payload);
+            return { kind: 'created', review: payload };
+          },
+        },
+      });
+
+      const response = await worker.fetch(
+        new Request('https://core.internal/runner-results', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-compte-rendu-runner-callback': 'verified',
+          },
+          body: await callback.clone().text(),
+        }),
+        env,
+        { waitUntil: () => undefined },
+      );
+
+      expect(response.status).toBe(202);
+      // A 202 alone also covers an evidence rejection that marks the run failed,
+      // so observe the stored published outcome and the publication payload.
+      expect(await stateStore.getRunOutcome(claim.runId)).toMatchObject({
+        status: 'completed',
+        decision: 'request_changes',
+      });
+      expect(reviews).toHaveLength(1);
+      expect(reviews[0]).toMatchObject({ event: 'REQUEST_CHANGES', commit_id: headSha });
+      expect((reviews[0] as { body: string }).body).toContain(synthesisMarkdown);
+    } finally {
+      database.close();
     }
   });
 
