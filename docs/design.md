@@ -151,7 +151,6 @@ impose an internal workflow, coverage ledger or child submission protocol. Child
 exports are best-effort evidence, not extra result gates. The job retains frozen
 selection and `multi-review.json`, with one callback and one publication.
 
-
 The LLM grant permits the routes actually needed by the job. One-reviewer jobs do
 not grant an unused synthesis route. Cancellation revokes that grant and destroys
 the shared Sandbox: closing an OpenCode client does not stop its server sessions.
