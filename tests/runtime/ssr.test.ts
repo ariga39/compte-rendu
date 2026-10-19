@@ -2,6 +2,33 @@
 import { expect, it } from 'vitest';
 import { SELF } from 'cloudflare:test';
 
+it('renders a branded missing-review page with a route back to history', async () => {
+  const response = await SELF.fetch('https://reviews.test/jobs/does-not-exist');
+  expect(response.status).toBe(404);
+  const html = await response.text();
+  expect(html).toContain('SSR Review');
+  expect(html).toContain('Review not found');
+  expect(html).toContain('Back to history');
+  expect(html).toContain('href="/history"');
+});
+
+it('offers a full-page retry when the database is unavailable during SSR', async () => {
+  const { env } = await import('cloudflare:test');
+  await env.REVIEW_DB.exec('ALTER TABLE review_runs RENAME TO unavailable_review_runs');
+  try {
+    const response = await SELF.fetch('https://reviews.test/history');
+    expect(response.status).toBe(503);
+    const html = await response.text();
+    expect(html).toContain('Reviews are temporarily unavailable');
+    expect(html).toContain('Try again');
+    expect(html).toContain('data-sveltekit-reload');
+    expect(html).not.toContain('no such table');
+  } finally {
+    await env.REVIEW_DB.exec('ALTER TABLE unavailable_review_runs RENAME TO review_runs');
+  }
+  expect((await SELF.fetch('https://reviews.test/history')).status).toBe(200);
+});
+
 it('returns usable overview and help HTML without executing JavaScript', async () => {
   const response = await SELF.fetch('https://reviews.test/');
   expect(response.status).toBe(200);
@@ -13,6 +40,71 @@ it('returns usable overview and help HTML without executing JavaScript', async (
   const help = await SELF.fetch('https://reviews.test/help');
   expect(help.status).toBe(200);
   expect(await help.text()).toContain('Review decisions');
+  const assetPath = html.match(/href="([^"]+\/_app\/immutable\/[^"]+\.css)"/)?.[1];
+  expect(assetPath).toBeDefined();
+  const asset = await SELF.fetch(new URL(assetPath!, 'https://reviews.test/').href);
+  expect(asset.status).toBe(200);
+  expect(asset.headers.get('cache-control')).toContain('immutable');
+});
+
+it('enforces webhook and Runner authentication at the built SvelteKit entry', async () => {
+  for (const path of ['/runner-claim', '/runner-callback', '/runner-progress']) {
+    const response = await SELF.fetch(`https://reviews.test${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    });
+    expect(response.status).toBe(401);
+  }
+  for (const path of ['/review-configuration', '/review', '/jobs']) {
+    const response = await SELF.fetch(`https://reviews.test${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    });
+    expect(response.status).toBe(404);
+  }
+  const body = JSON.stringify({
+    action: 'opened',
+    number: 42,
+    installation: { id: 7 },
+    repository: { id: 11, visibility: 'public' },
+    pull_request: {
+      draft: true,
+      user: { login: 'maintainer', type: 'User' },
+      base: { sha: '1'.repeat(40), repo: { id: 11 } },
+      head: { sha: '2'.repeat(40), repo: { id: 11 } },
+    },
+  });
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode('test-webhook-secret'),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  const signature = Array.from(
+    new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(body))),
+    (byte) => byte.toString(16).padStart(2, '0'),
+  ).join('');
+  for (const path of ['/', '/webhooks/github']) {
+    for (const [digest, expected] of [
+      ['0'.repeat(64), 400],
+      [signature, 202],
+    ] as const) {
+      const response = await SELF.fetch(`https://reviews.test${path}`, {
+        method: 'POST',
+        body,
+        headers: {
+          'content-type': 'application/json',
+          'x-github-event': 'pull_request',
+          'x-github-delivery': 'ssr-auth-check',
+          'x-hub-signature-256': `sha256=${digest}`,
+        },
+      });
+      expect(response.status).toBe(expected);
+    }
+  }
 });
 
 it('renders persisted public review details and tokens while keeping private review identity out of HTML', async () => {

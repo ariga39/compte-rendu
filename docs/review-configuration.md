@@ -22,15 +22,16 @@ constants. The examples below assume the operator has configured the correspondi
 
 ## Operator API
 
-The ingress forwards `/api/review-configuration` to Core. Core requires a dedicated
+The public SvelteKit Worker routes `/api/review-configuration` to its Core module,
+which requires a dedicated
 `REVIEW_CONFIGURATION_TOKEN` bearer secret for both reads and writes. Missing or
 incorrect credentials receive 401. Runner, callback and GitHub webhook credentials
 do not grant access. Leave the secret unset to disable this interface.
 
-Configure the secret with the existing instance-specific Core Wrangler config:
+Configure the secret with the instance-specific public Worker Wrangler config:
 
 ```sh
-wrangler secret put REVIEW_CONFIGURATION_TOKEN --config <CORE_WRANGLER_CONFIG>
+wrangler secret put REVIEW_CONFIGURATION_TOKEN --config apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc
 ```
 
 Enter the secret at the prompt. For command-line HTTP clients, load the header from

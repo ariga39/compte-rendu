@@ -133,7 +133,7 @@ describe('local Worker runtime tracer', () => {
     });
   });
 
-  it('rejects an invalid signature before CORE and leaves no runtime outcome', async () => {
+  it('rejects an invalid signature before admission and leaves no runtime outcome', async () => {
     const request = await signedWebhook(invalidDeliveryId);
     request.headers.set('x-hub-signature-256', `sha256=${'0'.repeat(64)}`);
 
@@ -144,7 +144,7 @@ describe('local Worker runtime tracer', () => {
     expect(await runtimeHarness.readDeliveryOutcome(invalidDeliveryId)).toBeUndefined();
   });
 
-  it('routes a signed Check re-run through both Workers to a fresh current-revision Job', async () => {
+  it('routes a signed Check re-run through the unified application to a fresh current-revision Job', async () => {
     const fixture = await SELF.fetch('https://tracer.internal/__test/failed-review', {
       method: 'POST',
     });

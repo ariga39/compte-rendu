@@ -101,7 +101,7 @@ corepack pnpm render:wrangler petit-chiba <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNN
   '{"enabled":true,"projectApiKey":"phc_<PROJECT_KEY>","host":"https://us.i.posthog.com","deployment":"petit-chiba","environment":"production"}'
 ```
 
-The renderer writes these values only to the generated, gitignored Core
+The renderer writes these values only to the generated, gitignored public Worker
 configuration: `POSTHOG_ENABLED`, `POSTHOG_PROJECT_API_KEY`, `POSTHOG_HOST`,
 `POSTHOG_DEPLOYMENT`, and `POSTHOG_ENVIRONMENT`. Omit the object, or set
 `enabled` to `false`, to send no PostHog requests. An enabled configuration
@@ -1040,7 +1040,7 @@ Restart the services only when active requests have drained;
 service route definitions are not hot-reloaded. Preserve old routes until jobs
 that reference them finish.
 
-Set a dedicated `REVIEW_CONFIGURATION_TOKEN` secret on Core. The protected
+Set a dedicated `REVIEW_CONFIGURATION_TOKEN` secret on the public SvelteKit Worker. The protected
 `GET /api/review-configuration` and `PUT /api/review-configuration` endpoints on
 the ingress origin require `Authorization: Bearer <operator token>`. They are
 not public dashboard APIs; do not put this token in browser code or URL parameters.
@@ -1199,7 +1199,7 @@ intact. Retain only aggregate completion counts in private rollout records.
 
 ### Compatible rollout and acceptance
 
-Deploy additive D1 migrations, then Core and Ingress, before updating the Runner.
+Deploy additive D1 migrations, then the public SvelteKit Worker, before updating the Runner.
 Older terminal callbacks remain accepted; their missing stage data is shown as
 not recorded. Drain active Runner work before its restart, preserving runtime,
 model, credentials, and configured concurrency. Runner stage reporting is bounded
@@ -1223,10 +1223,10 @@ Chromium may be selected with `PLAYWRIGHT_CHROMIUM_PATH`; it is only a test sett
 
 ## GitHub Check name
 
-Set the optional Core Worker variable `GITHUB_CHECK_NAME` in its Wrangler `vars`
+Set the optional public Worker variable `GITHUB_CHECK_NAME` in its Wrangler `vars`
 to brand the Check for each deployment, for example `Ariga39 AI Review`. Omitted
 or blank values use `Compte-rendu review`. The dashboard header and browser title
-use the same Core setting, fetched via `/api/dashboard-config`; no separate
+use the same Worker setting, fetched via `/api/dashboard-config`; no separate
 frontend setting or rebuild is needed. This endpoint exposes only the display name.
 The same name is used for creation, recovery, and Check Suite lookup.
 
