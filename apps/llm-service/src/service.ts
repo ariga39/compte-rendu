@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { Effect, Schema } from 'effect';
 import { REVIEW_ATTEMPT_BUDGET_MS } from '@compte-rendu/contracts';
+import { createUsageCollector, type UpstreamUsage } from './usage.js';
 
 const GRANT_TTL_MS = 4 * REVIEW_ATTEMPT_BUDGET_MS;
 const CONTROL_MAX_BYTES = 16 * 1024;
@@ -21,6 +22,7 @@ export interface LlmServiceOptions {
     body: Record<string, unknown>,
     signal: AbortSignal,
     sessionId?: string,
+    observe?: (usage: UpstreamUsage) => void,
   ) => Promise<Response>;
 }
 
@@ -35,6 +37,7 @@ const GrantRequest = Schema.Struct({
   routes: Schema.Array(Schema.NonEmptyString),
 });
 const RevokeRequest = Schema.Struct({ jobId: Schema.NonEmptyString });
+const UsageRequest = Schema.Struct({ jobId: Schema.NonEmptyString });
 const ModelRequest = Schema.Struct({ model: Schema.NonEmptyString });
 
 interface Grant {
@@ -43,6 +46,8 @@ interface Grant {
   readonly routes: ReadonlySet<string>;
   readonly expiresAt: number;
   revoked: boolean;
+  usageFrozen: boolean;
+  readonly usage: ReturnType<typeof createUsageCollector>;
   readonly active: Set<AbortController>;
   expiryTimer: ReturnType<typeof setTimeout> | null;
 }
@@ -127,6 +132,7 @@ export const createLlmService = (options: LlmServiceOptions): LlmService => {
   const retire = (grant: Grant) => {
     grant.expiryTimer = null;
     abortGrant(grant);
+    grant.usageFrozen = true;
     if (grants.get(grant.jobId) === grant) grants.delete(grant.jobId);
     if (grant.tokenHash !== null) byToken.delete(grant.tokenHash);
   };
@@ -158,6 +164,8 @@ export const createLlmService = (options: LlmServiceOptions): LlmService => {
       routes: new Set(decoded.routes),
       expiresAt,
       revoked: false,
+      usageFrozen: false,
+      usage: createUsageCollector(),
       active: new Set(),
       expiryTimer: null,
     };
@@ -179,6 +187,7 @@ export const createLlmService = (options: LlmServiceOptions): LlmService => {
     if (existing) {
       existing.revoked = true;
       abortGrant(existing);
+      existing.usageFrozen = true;
     } else {
       const tombstone: Grant = {
         jobId: decoded.jobId,
@@ -186,6 +195,8 @@ export const createLlmService = (options: LlmServiceOptions): LlmService => {
         routes: new Set(),
         expiresAt: Date.now() + GRANT_TTL_MS,
         revoked: true,
+        usageFrozen: true,
+        usage: createUsageCollector(),
         active: new Set(),
         expiryTimer: null,
       };
@@ -195,14 +206,32 @@ export const createLlmService = (options: LlmServiceOptions): LlmService => {
     return new Response(null, { status: 204 });
   });
 
+  const usage = Effect.fn('LlmService.usage')(function* (request: Request) {
+    const body = yield* Effect.tryPromise(() => readBody(request, CONTROL_MAX_BYTES));
+    if (body.kind === 'too-large') return error(413, 'request too large');
+    const raw = parseJson(body.text);
+    if (raw === undefined) return error(400, 'invalid request');
+    const decoded = yield* decodeStrict(UsageRequest, raw);
+    if (decoded === undefined) return error(400, 'invalid request');
+    const grant = grants.get(decoded.jobId);
+    if (grant === undefined || grant.tokenHash === null) return error(404, 'not found');
+    return json(grant.usage.snapshot(), 200);
+  });
+
   const control = Effect.fn('LlmService.control')(function* (request: Request) {
     if (closed) return error(503, 'service closed');
     const url = new URL(request.url);
-    if (url.pathname !== '/grants' && url.pathname !== '/grants/revoke') {
+    if (
+      url.pathname !== '/grants' &&
+      url.pathname !== '/grants/revoke' &&
+      url.pathname !== '/grants/usage'
+    ) {
       return error(404, 'not found');
     }
     if (request.method !== 'POST') return error(405, 'method not allowed');
-    return yield* url.pathname === '/grants' ? issue(request) : revoke(request);
+    if (url.pathname === '/grants') return yield* issue(request);
+    if (url.pathname === '/grants/revoke') return yield* revoke(request);
+    return yield* usage(request);
   });
 
   const bridge = (source: Response, controller: AbortController, cleanup: () => void): Response => {
@@ -302,6 +331,10 @@ export const createLlmService = (options: LlmServiceOptions): LlmService => {
     request.signal.addEventListener('abort', onRequestAbort, { once: true });
     if (request.signal.aborted) onRequestAbort();
     grant.active.add(controller);
+    const observe = (observed: UpstreamUsage) => {
+      if (grant.usageFrozen) return;
+      grant.usage.record(route.id, observed);
+    };
     const deadline = setTimeout(
       () => controller.abort(new Error('grant expired')),
       Math.max(0, grant.expiresAt - Date.now()),
@@ -316,7 +349,13 @@ export const createLlmService = (options: LlmServiceOptions): LlmService => {
 
     const upstream = yield* Effect.tryPromise({
       try: () =>
-        options.upstream(route.id, raw as Record<string, unknown>, controller.signal, grant.jobId),
+        options.upstream(
+          route.id,
+          raw as Record<string, unknown>,
+          controller.signal,
+          grant.jobId,
+          observe,
+        ),
       catch: () => undefined,
     }).pipe(
       Effect.match({

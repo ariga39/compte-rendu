@@ -32,12 +32,11 @@ Archive superseded plans with their dates, sources and results intact.
 These are not shipped guarantees. Historical alternatives and optional hardening
 suggestions are not automatically backlog commitments.
 
-| Gap                                                                | Issue                                                      |
-| ------------------------------------------------------------------ | ---------------------------------------------------------- |
-| Crash-time owned Sandbox reconciliation                            | [#66](https://github.com/ariga39/compte-rendu/issues/66)   |
-| Drawer focus fallback after the selected row disappears            | [#170](https://github.com/ariga39/compte-rendu/issues/170) |
-| Operator maintenance drain without interrupting admitted jobs      | [#194](https://github.com/ariga39/compte-rendu/issues/194) |
-| Supported recovery after terminal callback delivery is exhausted   | [#195](https://github.com/ariga39/compte-rendu/issues/195) |
-| Metadata refresh backlog visibility and capacity validation        | [#196](https://github.com/ariga39/compte-rendu/issues/196) |
-| Consistent overview counters and current-row snapshot              | [#197](https://github.com/ariga39/compte-rendu/issues/197) |
-| Actual model and per-job token accounting (next requested feature) | [#198](https://github.com/ariga39/compte-rendu/issues/198) |
+| Gap                                                              | Issue                                                      |
+| ---------------------------------------------------------------- | ---------------------------------------------------------- |
+| Crash-time owned Sandbox reconciliation                          | [#66](https://github.com/ariga39/compte-rendu/issues/66)   |
+| Drawer focus fallback after the selected row disappears          | [#170](https://github.com/ariga39/compte-rendu/issues/170) |
+| Operator maintenance drain without interrupting admitted jobs    | [#194](https://github.com/ariga39/compte-rendu/issues/194) |
+| Supported recovery after terminal callback delivery is exhausted | [#195](https://github.com/ariga39/compte-rendu/issues/195) |
+| Metadata refresh backlog visibility and capacity validation      | [#196](https://github.com/ariga39/compte-rendu/issues/196) |
+| Consistent overview counters and current-row snapshot            | [#197](https://github.com/ariga39/compte-rendu/issues/197) |

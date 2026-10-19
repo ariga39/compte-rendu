@@ -190,6 +190,7 @@ const runOutcomeSelect = `
 `;
 
 interface PublicRunDbRow {
+  model_usage: string | null;
   review_decision: ReviewDecision | null;
   run_id: string;
   status: ReviewRunStatus;
@@ -226,6 +227,7 @@ interface PublicRunDbRow {
 }
 
 const mapPublicRun = (row: PublicRunDbRow): PublicRunRow => ({
+  modelUsage: row.model_usage,
   decision: row.review_decision,
   runId: row.run_id,
   status: row.status,
@@ -287,7 +289,7 @@ const mapMetadataRow = (row: MetadataDbRow): RepositoryMetadataRow => ({
 
 const publicRunColumns = `
   r.run_id, r.status, r.installation_id, r.repository_id, r.pull_request_number,
-  r.base_sha, r.head_sha, r.base_ref, r.head_ref, r.review_decision,
+  r.base_sha, r.head_sha, r.base_ref, r.head_ref, r.review_decision, r.model_usage,
   r.created_at, r.claimed_at, r.terminal_at, r.result_received_at, r.publication_started_at, r.runner_job_id, r.failure_phase, r.failure_reason,
   r.evidence_status, r.runner_cleanup_status, r.publication_claimed_at,
   r.progress_stage, r.progress_received_at, r.progress_milestones,
@@ -1149,6 +1151,16 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
     return row === null ? undefined : mapPublicRun(row);
   },
 
+  recordModelUsage: async ({ runId, jobId, attempt, usage }) => {
+    const result = await database
+      .prepare(
+        `UPDATE review_runs SET model_usage = ?
+       WHERE run_id = ? AND runner_job_id = ? AND runner_attempt = ? AND model_usage IS NULL`,
+      )
+      .bind(JSON.stringify(usage), runId, jobId, attempt)
+      .run();
+    return result.meta.changes > 0;
+  },
   recordProgress: (input) => recordLifecycleSnapshot(database, input, false),
   recordTerminalLifecycle: (input) => recordLifecycleSnapshot(database, input, true),
 

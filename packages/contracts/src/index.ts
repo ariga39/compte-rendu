@@ -1,4 +1,6 @@
 import { Schema } from 'effect';
+import { ModelUsageSummary } from './model-usage.ts';
+export { ModelUsageSummary } from './model-usage.ts';
 
 export const DEFAULT_REVIEW_NAME = 'Compte-rendu review';
 export const PublicDashboardConfig = Schema.Struct({ name: Schema.String });
@@ -178,6 +180,7 @@ const CallbackFailure = Schema.Struct({
   cause: Schema.optional(RunnerFailureCause),
 });
 const CallbackIdentity = {
+  usage: Schema.optionalKey(ModelUsageSummary),
   id: Schema.NonEmptyString,
   runId: Schema.NonEmptyString,
   attempt: Schema.Int,
@@ -662,6 +665,7 @@ export const PublicMilestone = Schema.Struct({
 export type PublicMilestone = typeof PublicMilestone.Type;
 
 export const PublicTaskDetail = Schema.Struct({
+  usage: Schema.optionalKey(Schema.NullOr(ModelUsageSummary)),
   generatedAt: Schema.NonEmptyString,
   task: PublicTaskState,
   milestones: Schema.Array(PublicMilestone),

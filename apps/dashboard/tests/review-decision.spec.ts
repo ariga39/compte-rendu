@@ -142,6 +142,9 @@ test('an unknown decision shows an em dash in the detail without hiding public i
   await expect(drawer).toBeVisible();
   await expect(drawer.locator('[data-testid="detail-decision"]')).toHaveText('—');
   expect(await drawer.textContent()).toContain('acme/widgets #7');
+  await expect(drawer.getByRole('region', { name: 'Models and tokens' })).toContainText(
+    'Usage not recorded for this review.',
+  );
 });
 
 test('an anonymous review still shows its decision without exposing identity', async ({
@@ -162,4 +165,54 @@ test('an anonymous review still shows its decision without exposing identity', a
   const text = (await row.textContent()) ?? '';
   expect(text).toContain('Anonymous review');
   expect(text).not.toContain('acme/widgets');
+});
+
+test('detail shows reported model usage, partial totals and unknown fields for an anonymous review', async ({
+  page,
+  harness,
+  base,
+}) => {
+  const task = publicTask('usage', { identity: { kind: 'anonymous' }, status: 'failed' });
+  harness.setHandler(() =>
+    ok({
+      ...detailData(task),
+      usage: {
+        version: 1,
+        models: [
+          {
+            route: 'reviewer',
+            model: 'deepseek-v4.1-flash',
+            requests: 2,
+            incompleteRequests: 1,
+            inputTokens: { total: 1200, reportedRequests: 2 },
+            uncachedInputTokens: { total: 300, reportedRequests: 2 },
+            cacheReadTokens: { total: 900, reportedRequests: 2 },
+            cacheWriteTokens: null,
+            outputTokens: { total: 80, reportedRequests: 1 },
+            reasoningTokens: { total: 30, reportedRequests: 1 },
+          },
+        ],
+      },
+    }),
+  );
+  await page.goto(`${base}/jobs/usage`);
+  const usage = page.getByRole('region', { name: 'Models and tokens' });
+  await expect(usage).toContainText('deepseek-v4.1-flash');
+  await expect(usage).toContainText('Route: reviewer');
+  await expect(usage).toContainText('1,200');
+  await expect(usage).toContainText('300');
+  await expect(usage).toContainText('900');
+  await expect(usage).toContainText('Cache write');
+  await expect(usage).toContainText('Not reported');
+  await expect(usage).toContainText('1 of 2 requests');
+  await expect(usage).toContainText('1 interrupted request');
+  await expect(page.getByRole('heading', { name: 'Anonymous review' })).toBeVisible();
+  await page.screenshot({
+    path: test.info().outputPath('model-usage-desktop.png'),
+    fullPage: true,
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(usage).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: test.info().outputPath('model-usage-mobile.png'), fullPage: true });
 });

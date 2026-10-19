@@ -194,6 +194,82 @@ const capturePostHogTransport = (status = 200) => {
 };
 
 describe('Core Worker', () => {
+  it('persists job model usage from an owned failed callback without exposing private repository identity', async () => {
+    const database = new SqliteD1Database();
+    const store = createD1ReviewStateStore(database);
+    const review = await store.claimReview({
+      deliveryId: 'usage-run',
+      job: {
+        repositoryId: 11,
+        pullRequestNumber: 42,
+        installationId: 7,
+        baseSha: '1'.repeat(40),
+        headSha: '2'.repeat(40),
+        trigger: 'automatic',
+        repositoryVisibility: 'private',
+      },
+      occurredAt: '2026-10-19T00:00:00.000Z',
+    });
+    if (review.kind !== 'claimed') throw new Error('not admitted');
+    await store.claimNextJob!({
+      jobId: 'usage-job',
+      attempt: 1,
+      occurredAt: '2026-10-19T00:00:01.000Z',
+    });
+    const env = { ...coreEnv(database), EVIDENCE_BUCKET: { put: async () => undefined } };
+    const worker = createCoreWorker(env, { stateStore: store, github: {} });
+    const usage = {
+      version: 1,
+      models: [
+        {
+          route: 'reviewer',
+          model: 'deepseek-v4.1-flash',
+          requests: 2,
+          incompleteRequests: 1,
+          inputTokens: { total: 1200, reportedRequests: 2 },
+          uncachedInputTokens: { total: 300, reportedRequests: 2 },
+          cacheReadTokens: { total: 900, reportedRequests: 2 },
+          cacheWriteTokens: null,
+          outputTokens: { total: 80, reportedRequests: 1 },
+          reasoningTokens: { total: 30, reportedRequests: 1 },
+        },
+      ],
+    };
+    const callback = { ...JSON.parse(await failedCallback(review.runId, 'usage-job')), usage };
+    const post = (body: unknown) =>
+      worker.fetch(
+        new Request('https://core.internal/runner-results', {
+          method: 'POST',
+          headers: { 'x-compte-rendu-runner-callback': 'verified' },
+          body: JSON.stringify(body),
+        }),
+      );
+    const detail = async () =>
+      (
+        await createCoreWorker(env).fetch(
+          new Request(`https://core.internal/api/jobs/${review.runId}`),
+        )
+      ).json();
+    expect((await post({ ...callback, id: 'foreign-job' })).status).toBe(409);
+    expect(await detail()).toMatchObject({ usage: null });
+    expect(
+      (
+        await post({
+          ...callback,
+          usage: { ...usage, models: [{ ...usage.models[0], requests: -1 }] },
+        })
+      ).status,
+    ).toBe(400);
+    expect((await post(callback)).status).toBe(202);
+    expect((await post({ ...callback, usage: { version: 1, models: [] } })).status).toBe(202);
+    expect(await detail()).toMatchObject({
+      usage,
+      task: { identity: { kind: 'anonymous' }, status: 'failed' },
+    });
+    expect(JSON.stringify(await detail())).not.toContain('repositoryId');
+    database.close();
+  });
+
   it('captures an enabled scheduled lifecycle event after the response is accepted', async () => {
     const database = new SqliteD1Database();
     const { fetcher, requests, waitUntilTasks } = capturePostHogTransport();
@@ -1044,6 +1120,7 @@ describe('Core Worker', () => {
         '0009_dashboard_lifecycle.sql',
         '0010_review_branch_refs.sql',
         '0012_review_configuration.sql',
+        '0013_model_usage.sql',
       ]);
       const migratedStore = createD1ReviewStateStore(database);
       if (migratedStore.claimNextJob === undefined) throw new Error('claim route is unavailable');

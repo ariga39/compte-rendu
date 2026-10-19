@@ -10,6 +10,7 @@
     StructuredListRow,
   } from 'carbon-components-svelte';
   import Badge from '#lib/components/Badge.svelte';
+  import ModelUsage from '#lib/components/ModelUsage.svelte';
   import Toolbar from '#lib/components/Toolbar.svelte';
   import { createDashboard, createExpiryClock } from '#lib/dashboard.svelte.ts';
   import {
@@ -253,6 +254,8 @@
     <p class="muted">
       {dash.data.task.decision ? DECISION_NOTE : DECISION_UNKNOWN}
     </p>
+
+    <ModelUsage usage={dash.data.detail.usage} />
 
     {@render revisionGrid()}
 

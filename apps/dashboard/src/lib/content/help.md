@@ -96,3 +96,19 @@ A review from a repository confirmed public shows its repository, pull request, 
 ## GitHub Check link
 
 A review Check on GitHub can show a Details link to its review page when that link is available. Older checks may not have one. A link always points to the same review.
+
+## Models and tokens
+
+Review details show models reported by the model service and their token usage.
+A route is the configured model alias. The reported model name can differ from
+that alias; if the service did not report a name, it is shown as unknown.
+
+- **Input total** includes cached input. **Uncached input** is input total minus cache reads.
+- **Cache read** is reused input; **Cache write** is input stored in the cache, when reported.
+- **Output total** includes **Reasoning** tokens when the provider reports that breakdown.
+
+These breakdowns overlap; do not add every row together. A partial count says how
+many requests reported it. **Not reported** is different from zero. Failed or
+interrupted reviews can still have recorded usage. Older reviews and reviews that
+bypass the model service show no usage; this does not mean they consumed no tokens.
+Statistics appear after execution ends. No monetary cost is estimated.

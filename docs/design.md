@@ -197,11 +197,14 @@ skills/MCP/SSH settings. Resource/time limits and egress are enforced outside th
 model; a prompt alone is not a security boundary.
 
 D1 stores product state, ownership, lifecycle timestamps, decision, frozen model
-selection, repository disclosure metadata and evidence object metadata. It does
+selection, bounded per-model token summaries, repository disclosure metadata and evidence object metadata. It does
 not store raw repository contents, credentials or session transcripts. The bounded
 callback contains named manifest/JSONL/stderr/Markdown/root-session evidence;
 private R2 retains that bundle. The host retains fuller recovery evidence,
-including child sessions and OpenCode state. Public dashboard APIs expose neither.
+including child sessions and OpenCode state. Public dashboard APIs expose neither. After grant revocation, Runner collects native
+service usage and carries it through the owned terminal callback. Core stores the
+first summary once; dashboard details read it from D1. Unknown/partial statistics
+do not become zero and are not publication gates. See [usage semantics](llm-service.md#per-job-model-and-token-usage).
 
 ## Public dashboard
 

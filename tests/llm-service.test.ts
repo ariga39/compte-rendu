@@ -1,5 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { createLlmService } from '../apps/llm-service/src/service';
+import type { UpstreamUsage } from '../apps/llm-service/src/usage';
 
 afterEach(() => {
   vi.useRealTimers();
@@ -45,6 +46,356 @@ it('issues a two-hour grant and forwards an authorized model request', async () 
   expect(calls).toEqual([{ routeId: 'review', body: { model: 'review', messages: [] } }]);
 
   service.close();
+});
+
+it('returns grant-attributed model usage through the control socket', async () => {
+  const service = createLlmService({
+    routes: [{ id: 'review', path: '/v1/chat/completions' }],
+    upstream: async (_routeId, _body, _signal, _sessionId, observe) => {
+      observe?.({
+        model: 'deepseek-v4.1-flash',
+        inputTokens: 10,
+        cacheReadTokens: 4,
+        cacheWriteTokens: 2,
+        outputTokens: 3,
+        reasoningTokens: 1,
+        complete: true,
+      });
+      return new Response('data: ok\n\n', {
+        headers: { 'content-type': 'text/event-stream' },
+      });
+    },
+  });
+  try {
+    const issued = await service.control(
+      new Request('http://control/grants', {
+        method: 'POST',
+        body: JSON.stringify({ jobId: 'job-usage', routes: ['review'] }),
+      }),
+    );
+    const { token } = (await issued.json()) as { token: string };
+    const inference = await service.inference(
+      new Request('http://service/v1/chat/completions', {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}` },
+        body: JSON.stringify({ model: 'review', messages: [] }),
+      }),
+    );
+    await inference.text();
+
+    const usage = await service.control(
+      new Request('http://control/grants/usage', {
+        method: 'POST',
+        body: JSON.stringify({ jobId: 'job-usage' }),
+      }),
+    );
+    expect(usage.status).toBe(200);
+    expect(await usage.json()).toEqual({
+      version: 1,
+      models: [
+        {
+          route: 'review',
+          model: 'deepseek-v4.1-flash',
+          requests: 1,
+          incompleteRequests: 0,
+          inputTokens: { total: 10, reportedRequests: 1 },
+          uncachedInputTokens: { total: 6, reportedRequests: 1 },
+          cacheReadTokens: { total: 4, reportedRequests: 1 },
+          cacheWriteTokens: { total: 2, reportedRequests: 1 },
+          outputTokens: { total: 3, reportedRequests: 1 },
+          reasoningTokens: { total: 1, reportedRequests: 1 },
+        },
+      ],
+    });
+  } finally {
+    service.close();
+  }
+});
+
+it('isolates usage between grants and records only the verified job identity', async () => {
+  const service = createLlmService({
+    routes: [{ id: 'review', path: '/v1/chat/completions' }],
+    upstream: async (_routeId, _body, _signal, jobId, observe) => {
+      observe?.({
+        model: 'deepseek-v4.1-flash',
+        inputTokens: jobId === 'job-a' ? 3 : 7,
+        cacheReadTokens: null,
+        cacheWriteTokens: null,
+        outputTokens: 1,
+        reasoningTokens: null,
+        complete: true,
+      });
+      return new Response('ok');
+    },
+  });
+  try {
+    const issue = (jobId: string) =>
+      service.control(
+        new Request('http://control/grants', {
+          method: 'POST',
+          body: JSON.stringify({ jobId, routes: ['review'] }),
+        }),
+      );
+    const use = async (jobId: string, token: string) => {
+      const response = await service.inference(
+        new Request('http://service/v1/chat/completions', {
+          method: 'POST',
+          headers: { authorization: `Bearer ${token}` },
+          body: JSON.stringify({ model: 'review' }),
+        }),
+      );
+      await response.text();
+    };
+    const a = (await (await issue('job-a')).json()) as { token: string };
+    const b = (await (await issue('job-b')).json()) as { token: string };
+    await use('job-a', a.token);
+    await use('job-b', b.token);
+
+    const usage = async (jobId: string) =>
+      (await (
+        await service.control(
+          new Request('http://control/grants/usage', {
+            method: 'POST',
+            body: JSON.stringify({ jobId }),
+          }),
+        )
+      ).json()) as { models: Array<{ inputTokens: { total: number } }> };
+    expect((await usage('job-a')).models[0]?.inputTokens.total).toBe(3);
+    expect((await usage('job-b')).models[0]?.inputTokens.total).toBe(7);
+  } finally {
+    service.close();
+  }
+});
+
+it('returns unknown and zero token counts distinctly with reported-request denominators', async () => {
+  let call = 0;
+  const service = createLlmService({
+    routes: [{ id: 'review', path: '/v1/chat/completions' }],
+    upstream: async (_routeId, _body, _signal, _jobId, observe) => {
+      call += 1;
+      observe?.(
+        call === 1
+          ? {
+              model: 'deepseek-v4.1-flash',
+              inputTokens: 10,
+              cacheReadTokens: 4,
+              cacheWriteTokens: 2,
+              outputTokens: 0,
+              reasoningTokens: 0,
+              complete: true,
+            }
+          : {
+              model: 'deepseek-v4.1-flash',
+              inputTokens: 20,
+              cacheReadTokens: null,
+              cacheWriteTokens: null,
+              outputTokens: null,
+              reasoningTokens: null,
+              complete: false,
+            },
+      );
+      return new Response('ok');
+    },
+  });
+  try {
+    const issued = await service.control(
+      new Request('http://control/grants', {
+        method: 'POST',
+        body: JSON.stringify({ jobId: 'job-counts', routes: ['review'] }),
+      }),
+    );
+    const { token } = (await issued.json()) as { token: string };
+    for (let index = 0; index < 2; index += 1) {
+      const response = await service.inference(
+        new Request('http://service/v1/chat/completions', {
+          method: 'POST',
+          headers: { authorization: `Bearer ${token}` },
+          body: JSON.stringify({ model: 'review' }),
+        }),
+      );
+      await response.text();
+    }
+    const usage = await service.control(
+      new Request('http://control/grants/usage', {
+        method: 'POST',
+        body: JSON.stringify({ jobId: 'job-counts' }),
+      }),
+    );
+    expect(await usage.json()).toEqual({
+      version: 1,
+      models: [
+        {
+          route: 'review',
+          model: 'deepseek-v4.1-flash',
+          requests: 2,
+          incompleteRequests: 1,
+          inputTokens: { total: 30, reportedRequests: 2 },
+          uncachedInputTokens: { total: 6, reportedRequests: 1 },
+          cacheReadTokens: { total: 4, reportedRequests: 1 },
+          cacheWriteTokens: { total: 2, reportedRequests: 1 },
+          outputTokens: { total: 0, reportedRequests: 1 },
+          reasoningTokens: { total: 0, reportedRequests: 1 },
+        },
+      ],
+    });
+  } finally {
+    service.close();
+  }
+});
+
+it('freezes usage after revoke, after observing the aborted request', async () => {
+  let observe: ((usage: UpstreamUsage) => void) | undefined;
+  let aborted = false;
+  const service = createLlmService({
+    routes: [{ id: 'review', path: '/v1/chat/completions' }],
+    upstream: async (_routeId, _body, signal, _jobId, observer) => {
+      observe = observer;
+      signal.addEventListener(
+        'abort',
+        () => {
+          aborted = true;
+          observer?.({
+            model: 'deepseek-v4.1-flash',
+            inputTokens: 9,
+            cacheReadTokens: 3,
+            cacheWriteTokens: null,
+            outputTokens: 2,
+            reasoningTokens: null,
+            complete: false,
+          });
+        },
+        { once: true },
+      );
+      return new Response(new ReadableStream<Uint8Array>({}, { highWaterMark: 0 }), {
+        headers: { 'content-type': 'text/event-stream' },
+      });
+    },
+  });
+  try {
+    const issued = await service.control(
+      new Request('http://control/grants', {
+        method: 'POST',
+        body: JSON.stringify({ jobId: 'job-freeze', routes: ['review'] }),
+      }),
+    );
+    const { token } = (await issued.json()) as { token: string };
+    await service.inference(
+      new Request('http://service/v1/chat/completions', {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}` },
+        body: JSON.stringify({ model: 'review' }),
+      }),
+    );
+    await service.control(
+      new Request('http://control/grants/revoke', {
+        method: 'POST',
+        body: JSON.stringify({ jobId: 'job-freeze' }),
+      }),
+    );
+    expect(aborted).toBe(true);
+    observe?.({
+      model: 'deepseek-v4.1-flash',
+      inputTokens: 999,
+      cacheReadTokens: null,
+      cacheWriteTokens: null,
+      outputTokens: null,
+      reasoningTokens: null,
+      complete: true,
+    });
+    const usage = await service.control(
+      new Request('http://control/grants/usage', {
+        method: 'POST',
+        body: JSON.stringify({ jobId: 'job-freeze' }),
+      }),
+    );
+    expect(usage.status).toBe(200);
+    expect(await usage.json()).toMatchObject({
+      version: 1,
+      models: [
+        {
+          requests: 1,
+          incompleteRequests: 1,
+          inputTokens: { total: 9, reportedRequests: 1 },
+          cacheReadTokens: { total: 3, reportedRequests: 1 },
+        },
+      ],
+    });
+  } finally {
+    service.close();
+  }
+});
+
+it('bounds usage rows at insertion and marks an overflowing summary truncated', async () => {
+  let model = 0;
+  const service = createLlmService({
+    routes: [{ id: 'review', path: '/v1/chat/completions' }],
+    upstream: async (_routeId, _body, _signal, _jobId, observe) => {
+      model += 1;
+      observe?.({
+        model: `model-${model}`,
+        inputTokens: 1,
+        cacheReadTokens: null,
+        cacheWriteTokens: null,
+        outputTokens: 1,
+        reasoningTokens: null,
+        complete: true,
+      });
+      return new Response('ok');
+    },
+  });
+  try {
+    const issued = await service.control(
+      new Request('http://control/grants', {
+        method: 'POST',
+        body: JSON.stringify({ jobId: 'job-overflow', routes: ['review'] }),
+      }),
+    );
+    const { token } = (await issued.json()) as { token: string };
+    for (let index = 0; index < 33; index += 1) {
+      const response = await service.inference(
+        new Request('http://service/v1/chat/completions', {
+          method: 'POST',
+          headers: { authorization: `Bearer ${token}` },
+          body: JSON.stringify({ model: 'review' }),
+        }),
+      );
+      await response.text();
+    }
+    const usage = await service.control(
+      new Request('http://control/grants/usage', {
+        method: 'POST',
+        body: JSON.stringify({ jobId: 'job-overflow' }),
+      }),
+    );
+    const body = (await usage.json()) as { models: unknown[]; truncated?: boolean };
+    expect(body.models).toHaveLength(32);
+    expect(body.truncated).toBe(true);
+  } finally {
+    service.close();
+  }
+});
+
+it('rejects malformed usage control bodies and unknown or tombstoned jobs', async () => {
+  const service = createLlmService({
+    routes: [{ id: 'review', path: '/v1/chat/completions' }],
+    upstream: async () => new Response('ok'),
+  });
+  try {
+    const call = (body: string) =>
+      service.control(new Request('http://control/grants/usage', { method: 'POST', body }));
+    expect((await call('not json')).status).toBe(400);
+    expect((await call(JSON.stringify({ jobId: 'unknown' }))).status).toBe(404);
+    expect((await call(JSON.stringify({ jobId: 'unknown', extra: true }))).status).toBe(400);
+    await service.control(
+      new Request('http://control/grants/revoke', {
+        method: 'POST',
+        body: JSON.stringify({ jobId: 'tombstone' }),
+      }),
+    );
+    expect((await call(JSON.stringify({ jobId: 'tombstone' }))).status).toBe(404);
+  } finally {
+    service.close();
+  }
 });
 
 it('rejects a grant at its two-hour expiry boundary', async () => {

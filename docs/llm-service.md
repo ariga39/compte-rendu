@@ -279,6 +279,8 @@ The Unix socket exposes only:
 - `POST /grants` with `{ "jobId": "...", "routes": ["deepseek-review"] }`:
   returns 201 and `{ "token": "...", "expiresAt": "ISO timestamp" }`.
 - `POST /grants/revoke` with `{ "jobId": "..." }`: returns 204, idempotently.
+- `POST /grants/usage` with `{ "jobId": "..." }`: returns the bounded usage summary,
+  or 404 when the grant is unknown or retired.
 
 The socket is mode 0600, inside a private directory. Its filesystem permissions
 are the control-plane authentication. HTTP bearer tokens cannot administer grants.
@@ -302,8 +304,8 @@ Messages, tools, reasoning, image parts and provider-native replay data are
 forwarded without conversion to an intermediate agent Context. LiteLLM performs
 provider adaptation. Our service validates the request envelope and forbids
 client routing/credential overrides; it retains bounded SSE error sanitization
-and completion checks. Normal response events and usage remain native. This
-change does not add persistent per-job usage storage.
+and completion checks. Normal response events and usage remain native. A separate bounded summary is
+collected for Runner and persisted by Core; see [per-job usage](#per-job-model-and-token-usage).
 
 A client `prompt_cache_key` remains a cache hint, not job identity or authority.
 The authenticated grant supplies routing session headers. Neither guarantees a
@@ -379,6 +381,45 @@ completion markers and cancellation. Release acceptance also runs the real
 pinned LiteLLM backend against configured model routes; a synthetic upstream
 fixture proves protocol plumbing but does not prove a useful model review.
 
-OpenShell service integration, persistent job usage reporting and new coding-agent
-runtimes remain separate work. ChatGPT subscription activation needs its own
+OpenShell service integration and new coding-agent runtimes remain separate work.
+Per-job usage is persisted by Core as described below; the grant service itself
+does not keep a crash-recovery usage journal. ChatGPT subscription activation needs its own
 login, refresh and model/tool acceptance; it is not enabled by this migration.
+
+## Per-job model and token usage
+
+The Node service observes native Chat Completions and Responses usage frames;
+it does not convert prompts or add usage options to client requests. Chat clients
+can request `stream_options.include_usage = true`. Upstreams may omit usage even
+on success. Each request contributes its last reported snapshot once, rather than
+summing repeated streaming snapshots. Usage received before an error or cancellation
+is retained as partial observation.
+
+Usage belongs to the verified grant's job, grouped by route and upstream-reported
+model. Prefer LiteLLM's `x-litellm-model-name` response header, which identifies
+the selected deployment; fall back to the response's model field when absent.
+LiteLLM normally rewrites that body field to the requested alias. Neither name
+is proof of the underlying model weights. Missing model identities remain unknown. The private
+control socket accepts `POST /grants/usage` with `{ "jobId": "..." }`; this is not
+an inference/public API. Runner reads the summary after revoking the grant, saves
+it in its manifest and callback, and Core persists it for DB-only dashboard reads.
+Duplicate callbacks do not add token counts again.
+
+Counters record input total, uncached input, cache reads, cache writes, output
+total and reasoning. Uncached input means input total minus cache reads; cache
+writes, when supplied, are part of uncached input. Reasoning is part of output.
+Do not add these breakdowns to their parent totals. Each counter includes the
+number of requests that reported it: absent fields are unknown, not zero. No
+prices or monetary estimates are calculated.
+
+This requires LLM-service mode. Direct-provider/OpenShell jobs and older records
+have no service usage summary. The service retains summaries only for the grant's
+existing lifetime; restart or expiry before Runner retrieval can lose statistics.
+Usage failure does not invalidate an otherwise valid review or prevent cleanup.
+The summary is bounded to 32 route/model rows and explicitly marks truncation;
+no prompts, tool arguments, raw responses or credentials enter the public summary.
+
+For rollout, apply migration `0013_model_usage.sql` with the other tracked migrations
+and deploy Core first. In an idle maintenance window, update the Node LLM service
+and Runner, then publish the dashboard build. LiteLLM configuration and credentials
+need no change. See [operations](operations.md) for shared-host drain requirements.

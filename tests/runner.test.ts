@@ -7572,6 +7572,24 @@ describe('Runner LLM service mode', () => {
     const revoked: string[] = [];
     const active = new Map<string, string>();
     let counter = 0;
+    const callbacks: Request[] = [];
+    const usage = {
+      version: 1,
+      models: [
+        {
+          route: 'deepseek-review',
+          model: 'deepseek-v4.1-flash',
+          requests: 1,
+          incompleteRequests: 0,
+          inputTokens: { total: 120, reportedRequests: 1 },
+          uncachedInputTokens: { total: 20, reportedRequests: 1 },
+          cacheReadTokens: { total: 100, reportedRequests: 1 },
+          cacheWriteTokens: null,
+          outputTokens: { total: 40, reportedRequests: 1 },
+          reasoningTokens: null,
+        },
+      ],
+    };
 
     const unixPost = (path: string, payload: unknown, headers: Record<string, string> = {}) =>
       new Promise<{ status: number; body: string }>((resolve, reject) => {
@@ -7631,6 +7649,12 @@ describe('Runner LLM service mode', () => {
         outgoing.end();
         return;
       }
+      if (incoming.url === '/grants/usage') {
+        const available = revoked.includes(String(body.jobId));
+        outgoing.writeHead(available ? 200 : 409, { 'content-type': 'application/json' });
+        outgoing.end(JSON.stringify(available ? usage : { error: 'grant still active' }));
+        return;
+      }
       if (incoming.method === 'POST' && incoming.url === '/v1/chat/completions') {
         const authorization = incoming.headers.authorization;
         const token =
@@ -7662,7 +7686,7 @@ describe('Runner LLM service mode', () => {
       const scenario = await runAgentScenario({
         runId: 'run-llm-service-success',
         output: finalMarkdownJsonl(),
-        callbackRequests: [],
+        callbackRequests: callbacks,
         modelConfig: serviceModelConfig,
         llmServiceSocket: socketPath,
         sessionExport: sessionExportJson('scenario-session', {
@@ -7689,6 +7713,14 @@ describe('Runner LLM service mode', () => {
         status: 'succeeded',
         sandbox: { cleanup: 'destroyed' },
       });
+      expect(await callbacks[0].clone().json()).toMatchObject({ usage });
+      const manifest = JSON.parse(
+        await readFile(
+          join(sharedEvidenceRoot, scenario.terminal.evidenceId as string, 'manifest.json'),
+          'utf8',
+        ),
+      );
+      expect(manifest.usage).toEqual(usage);
       const jobId = runnerJobFields.id;
       expect(usableDuringReview).toBe(true);
       expect(issued).toHaveLength(1);
@@ -7876,6 +7908,31 @@ describe('Runner LLM lifecycle failures', () => {
       }
     },
   );
+  it('keeps a valid review and cleanup successful when optional usage is unavailable', async () => {
+    const f = await fixture();
+    const callbacks: Request[] = [];
+    try {
+      const result = await runAgentScenario({
+        runId: 'usage-unavailable',
+        output: finalMarkdownJsonl(),
+        modelConfig,
+        llmServiceSocket: f.socket,
+        evidenceRoot: join(f.root, 'evidence'),
+        callbackRequests: callbacks,
+        sessionExport: sessionExportJson('scenario-session', {
+          model: { providerID: 'opencode-go', id: 'deepseek-review' },
+        }),
+      });
+      expect(result.terminal).toMatchObject({
+        status: 'succeeded',
+        sandbox: { cleanup: 'destroyed' },
+      });
+      expect(await callbacks[0].clone().json()).not.toHaveProperty('usage');
+      expect(await f.inferenceStatus()).toBe(401);
+    } finally {
+      await f.close();
+    }
+  });
   it('fails without a vote when revocation is unavailable, then recovers before a fresh Runner can claim', async () => {
     const f = await fixture();
     f.rejectRevoke(true);

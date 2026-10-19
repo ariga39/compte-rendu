@@ -411,6 +411,14 @@ export const createCoreWorker = (
     if (outcome.runnerJobId !== callback.id || outcome.runnerAttempt !== callback.attempt) {
       return new Response(null, { status: 409 });
     }
+    if (callback.usage !== undefined) {
+      await stateStore.recordModelUsage?.({
+        runId: callback.runId,
+        jobId: callback.id,
+        attempt: callback.attempt,
+        usage: callback.usage,
+      });
+    }
     await stateStore.recordResultReceived?.({
       runId: callback.runId,
       jobId: callback.id,
