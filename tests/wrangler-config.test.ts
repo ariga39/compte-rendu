@@ -56,28 +56,20 @@ type DeploymentFixture = {
   runWithBotAuthorIds: (instanceName: string, botAuthorIds: string) => string;
   runWithCheckName: (instanceName: string, name: string) => string;
   runWithPostHog: (instanceName: string, posthog: string) => string;
-  outputs: (instanceName: string) => { core: string; ingress: string };
-  read: (instanceName: string) => { core: string; ingress: string };
+  outputs: (instanceName: string) => { application: string };
+  read: (instanceName: string) => { application: string };
 };
 
 const withDeploymentFixture = <T>(callback: (fixture: DeploymentFixture) => T): T => {
   const root = mkdtempSync(join(tmpdir(), 'compte-rendu-render-'));
-  const coreDirectory = join(root, 'apps/core');
-  const ingressDirectory = join(root, 'apps/ingress');
-  mkdirSync(coreDirectory, { recursive: true });
-  mkdirSync(ingressDirectory, { recursive: true });
+  const directory = join(root, 'apps/dashboard');
+  mkdirSync(directory, { recursive: true });
   copyFileSync(
-    resolve(repositoryRoot, 'apps/core/wrangler.jsonc'),
-    join(coreDirectory, 'wrangler.jsonc'),
+    resolve(repositoryRoot, 'apps/dashboard/wrangler.jsonc'),
+    join(directory, 'wrangler.jsonc'),
   );
-  copyFileSync(
-    resolve(repositoryRoot, 'apps/ingress/wrangler.jsonc'),
-    join(ingressDirectory, 'wrangler.jsonc'),
-  );
-
   const outputs = (instanceName: string) => ({
-    core: join(coreDirectory, `wrangler.${instanceName}.jsonc`),
-    ingress: join(ingressDirectory, `wrangler.${instanceName}.jsonc`),
+    application: join(directory, `wrangler.${instanceName}.jsonc`),
   });
   const invoke = (
     instanceName: string,
@@ -106,8 +98,7 @@ const withDeploymentFixture = <T>(callback: (fixture: DeploymentFixture) => T): 
   const read = (instanceName: string) => {
     const paths = outputs(instanceName);
     return {
-      core: readFileSync(paths.core, 'utf8'),
-      ingress: readFileSync(paths.ingress, 'utf8'),
+      application: readFileSync(paths.application, 'utf8'),
     };
   };
 
@@ -144,8 +135,7 @@ describe('Wrangler deployment tooling', () => {
   it('renders gitignored configs through the documented root pnpm command', () => {
     const instanceName = 'package-script-invocation';
     const outputPaths = {
-      core: resolve(repositoryRoot, 'apps/core', `wrangler.${instanceName}.jsonc`),
-      ingress: resolve(repositoryRoot, 'apps/ingress', `wrangler.${instanceName}.jsonc`),
+      application: resolve(repositoryRoot, 'apps/dashboard', `wrangler.${instanceName}.jsonc`),
     };
     const documentedCommand = readFileSync(
       resolve(repositoryRoot, 'docs/installation.md'),
@@ -153,8 +143,7 @@ describe('Wrangler deployment tooling', () => {
     ).match(/^corepack pnpm render:wrangler.*$/m)?.[0];
 
     expect(documentedCommand).toBeDefined();
-    expect(existsSync(outputPaths.core)).toBe(false);
-    expect(existsSync(outputPaths.ingress)).toBe(false);
+    expect(existsSync(outputPaths.application)).toBe(false);
 
     const rendererArguments = documentedCommand!
       .replace('corepack pnpm ', '')
@@ -177,12 +166,7 @@ describe('Wrangler deployment tooling', () => {
       expect(
         execFileSync(
           'git',
-          [
-            'check-ignore',
-            '--no-index',
-            `apps/core/wrangler.${instanceName}.jsonc`,
-            `apps/ingress/wrangler.${instanceName}.jsonc`,
-          ],
+          ['check-ignore', '--no-index', `apps/dashboard/wrangler.${instanceName}.jsonc`],
           {
             cwd: repositoryRoot,
             encoding: 'utf8',
@@ -190,13 +174,14 @@ describe('Wrangler deployment tooling', () => {
           },
         ),
       ).toContain(`wrangler.${instanceName}.jsonc`);
-      expect(readFileSync(outputPaths.core, 'utf8')).toContain(`"name": "${instanceName}-core"`);
-      expect(readFileSync(outputPaths.ingress, 'utf8')).toContain(
+      expect(readFileSync(outputPaths.application, 'utf8')).toContain(
+        `"name": "${instanceName}-ingress"`,
+      );
+      expect(readFileSync(outputPaths.application, 'utf8')).toContain(
         `"ALLOWED_INSTALLATION_IDS": "${allowedInstallationIds}"`,
       );
     } finally {
-      rmSync(outputPaths.core, { force: true });
-      rmSync(outputPaths.ingress, { force: true });
+      rmSync(outputPaths.application, { force: true });
     }
   });
 
@@ -207,23 +192,25 @@ describe('Wrangler deployment tooling', () => {
       const first = read('petit-chiba');
       const second = read('second-instance');
 
-      expect(first.core).toContain('"name": "petit-chiba-core"');
-      expect(first.core).toContain('"database_name": "petit-chiba-review-state"');
-      expect(first.core).toContain('"main": "src/worker.ts"');
-      expect(first.core).toContain('"migrations_dir": "migrations"');
-      expect(first.core).toContain('"binding": "RUNNER"');
-      expect(first.core).toContain(`"GITHUB_APP_ID": "${githubAppId}"`);
-      expect(first.core).toContain(`"database_id": "${d1DatabaseId}"`);
-      expect(first.ingress).toContain('"name": "petit-chiba-ingress"');
-      expect(first.ingress).toContain('"service": "petit-chiba-core"');
-      expect(first.ingress).toContain(`"ALLOWED_INSTALLATION_IDS": "${allowedInstallationIds}"`);
-      expect(parseConfigText(first.ingress).vars?.ALLOWED_BOT_AUTHOR_IDS).toBe('[]');
+      expect(first.application).toContain('"name": "petit-chiba-ingress"');
+      expect(first.application).toContain('"database_name": "petit-chiba-review-state"');
+      expect(first.application).toContain('"main": "worker.ts"');
+      expect(first.application).toContain('"migrations_dir": "../core/migrations"');
+      expect(first.application).toContain('"binding": "RUNNER"');
+      expect(first.application).toContain(`"GITHUB_APP_ID": "${githubAppId}"`);
+      expect(first.application).toContain(`"database_id": "${d1DatabaseId}"`);
+      expect(first.application).toContain('"name": "petit-chiba-ingress"');
+      expect(first.application).not.toContain('"binding": "CORE"');
+      expect(first.application).toContain(
+        `"ALLOWED_INSTALLATION_IDS": "${allowedInstallationIds}"`,
+      );
+      expect(parseConfigText(first.application).vars?.ALLOWED_BOT_AUTHOR_IDS).toBe('[]');
 
-      expect(second.core).toContain('"name": "second-instance-core"');
-      expect(second.core).toContain('"database_name": "second-instance-review-state"');
-      expect(second.ingress).toContain('"service": "second-instance-core"');
-      expect(first.core).not.toContain('second-instance');
-      expect(second.core).not.toContain('petit-chiba');
+      expect(second.application).toContain('"name": "second-instance-ingress"');
+      expect(second.application).toContain('"database_name": "second-instance-review-state"');
+      expect(second.application).not.toContain('"binding": "CORE"');
+      expect(first.application).not.toContain('second-instance');
+      expect(second.application).not.toContain('petit-chiba');
     });
   });
 
@@ -231,7 +218,7 @@ describe('Wrangler deployment tooling', () => {
     withDeploymentFixture(({ runWithBotAuthorIds: run, read }) => {
       run('trusted-bots', allowedBotAuthorIds);
 
-      expect(read('trusted-bots').ingress).toContain(
+      expect(read('trusted-bots').application).toContain(
         `"ALLOWED_BOT_AUTHOR_IDS": "${allowedBotAuthorIds}"`,
       );
     });
@@ -240,9 +227,9 @@ describe('Wrangler deployment tooling', () => {
   it('renders per-instance Check names safely and leaves omitted names at the default', () => {
     withDeploymentFixture(({ run, runWithCheckName, read }) => {
       run('default-review');
-      expect(parseConfigText(read('default-review').core).vars?.GITHUB_CHECK_NAME).toBe('');
+      expect(parseConfigText(read('default-review').application).vars?.GITHUB_CHECK_NAME).toBe('');
       runWithCheckName('named-review', 'Ariga39 "AI" Review $$ $&');
-      expect(parseConfigText(read('named-review').core).vars?.GITHUB_CHECK_NAME).toBe(
+      expect(parseConfigText(read('named-review').application).vars?.GITHUB_CHECK_NAME).toBe(
         'Ariga39 "AI" Review $$ $&',
       );
     });
@@ -261,7 +248,7 @@ describe('Wrangler deployment tooling', () => {
         }),
       );
 
-      const config = parseConfigText(read('posthog-instance').core);
+      const config = parseConfigText(read('posthog-instance').application);
       expect(config.vars).toMatchObject({
         POSTHOG_ENABLED: 'true',
         POSTHOG_PROJECT_API_KEY: 'phc_instance_key',
@@ -269,7 +256,7 @@ describe('Wrangler deployment tooling', () => {
         POSTHOG_DEPLOYMENT: 'posthog-instance',
         POSTHOG_ENVIRONMENT: 'production',
       });
-      expect(read('posthog-instance').core).not.toContain('PERSONAL_API_KEY');
+      expect(read('posthog-instance').application).not.toContain('PERSONAL_API_KEY');
     });
   });
 
@@ -278,8 +265,7 @@ describe('Wrangler deployment tooling', () => {
       for (const instanceName of ['', 'unsafe/name', 'a'.repeat(51)]) {
         expect(() => run(instanceName)).toThrow();
         const paths = outputs(instanceName);
-        expect(existsSync(paths.core)).toBe(false);
-        expect(existsSync(paths.ingress)).toBe(false);
+        expect(existsSync(paths.application)).toBe(false);
       }
     });
   });
@@ -287,24 +273,21 @@ describe('Wrangler deployment tooling', () => {
   it('requires a Runner VPC Service UUID at the real renderer CLI seam', () => {
     withDeploymentFixture(({ runWithoutRunnerId: run, outputs }) => {
       expect(() => run('missing-runner-vpc')).toThrow();
-      expect(existsSync(outputs('missing-runner-vpc').core)).toBe(false);
-      expect(existsSync(outputs('missing-runner-vpc').ingress)).toBe(false);
+      expect(existsSync(outputs('missing-runner-vpc').application)).toBe(false);
     });
   });
 
   it('requires an installation allowlist at the real renderer CLI seam', () => {
     withDeploymentFixture(({ runWithoutInstallationIds: run, outputs }) => {
       expect(() => run('missing-installation-allowlist')).toThrow();
-      expect(existsSync(outputs('missing-installation-allowlist').core)).toBe(false);
-      expect(existsSync(outputs('missing-installation-allowlist').ingress)).toBe(false);
+      expect(existsSync(outputs('missing-installation-allowlist').application)).toBe(false);
     });
   });
 
   it('rejects malformed installation IDs before creating output', () => {
     withDeploymentFixture(({ runWithInstallationIds: run, outputs }) => {
       expect(() => run('malformed-installation-allowlist', 'not-json')).toThrow();
-      expect(existsSync(outputs('malformed-installation-allowlist').core)).toBe(false);
-      expect(existsSync(outputs('malformed-installation-allowlist').ingress)).toBe(false);
+      expect(existsSync(outputs('malformed-installation-allowlist').application)).toBe(false);
     });
   });
 
@@ -312,7 +295,7 @@ describe('Wrangler deployment tooling', () => {
     withDeploymentFixture(({ runWithRunnerId: run, read }) => {
       run('canonical-vpc', canonicalRunnerVpcServiceId);
 
-      expect(read('canonical-vpc').core).toContain(
+      expect(read('canonical-vpc').application).toContain(
         `"service_id": "${canonicalRunnerVpcServiceId}"`,
       );
     });
@@ -323,8 +306,7 @@ describe('Wrangler deployment tooling', () => {
     withDeploymentFixture(({ runWithRunnerId: run, outputs }) => {
       expect(() => run('unsupported-v6', unsupportedRunnerVpcServiceId)).toThrow();
 
-      expect(existsSync(outputs('unsupported-v6').core)).toBe(false);
-      expect(existsSync(outputs('unsupported-v6').ingress)).toBe(false);
+      expect(existsSync(outputs('unsupported-v6').application)).toBe(false);
     });
   });
 
@@ -338,54 +320,34 @@ describe('Wrangler deployment tooling', () => {
     });
   });
 
-  it('keeps tracked templates neutral and free of real deployment IDs', () => {
-    const core = parseConfig('apps/core/wrangler.jsonc');
-    const ingress = parseConfig('apps/ingress/wrangler.jsonc');
-
-    expect(core.workers_dev).toBe(false);
-    expect(ingress.workers_dev).toBe(true);
-    expect(ingress.vars?.ALLOWED_INSTALLATION_IDS).toBe('REPLACE_WITH_GITHUB_INSTALLATION_IDS');
-    expect(ingress.vars?.ALLOWED_BOT_AUTHOR_IDS).toBe('REPLACE_WITH_GITHUB_BOT_AUTHOR_IDS');
-    expect(core.secrets?.required).toEqual(['GITHUB_APP_PRIVATE_KEY', 'RUNNER_AUTH_TOKEN']);
-    expect(ingress.secrets?.required).toEqual(['WEBHOOK_SECRET', 'RUNNER_CALLBACK_TOKEN']);
-    expect(core.vars?.GITHUB_APP_ID).toBe('REPLACE_WITH_GITHUB_APP_ID');
-    expect(core.d1_databases?.[0]?.database_id).toBe('REPLACE_WITH_D1_DATABASE_ID');
-    expect(core.r2_buckets).toEqual([
+  it('keeps the unified template neutral and includes the required deployment resources', () => {
+    const config = parseConfig('apps/dashboard/wrangler.jsonc');
+    expect(config.workers_dev).toBe(true);
+    expect(config.vars?.ALLOWED_INSTALLATION_IDS).toBe('REPLACE_WITH_GITHUB_INSTALLATION_IDS');
+    expect(config.vars?.ALLOWED_BOT_AUTHOR_IDS).toBe('REPLACE_WITH_GITHUB_BOT_AUTHOR_IDS');
+    expect(config.secrets?.required).toEqual([
+      'GITHUB_APP_PRIVATE_KEY',
+      'RUNNER_AUTH_TOKEN',
+      'WEBHOOK_SECRET',
+      'RUNNER_CALLBACK_TOKEN',
+    ]);
+    expect(config.vars?.GITHUB_APP_ID).toBe('REPLACE_WITH_GITHUB_APP_ID');
+    expect(config.d1_databases?.[0]?.database_id).toBe('REPLACE_WITH_D1_DATABASE_ID');
+    expect(config.r2_buckets).toEqual([
       { binding: 'EVIDENCE_BUCKET', bucket_name: 'compte-rendu-review-evidence' },
     ]);
-  });
-
-  it('retains ordered Durable Object retirement migrations in tracked and rendered config', () => {
-    const expectedMigrations = [
-      {
-        tag: 'v1',
-        new_sqlite_classes: ['Sandbox', 'ReviewLeaseDurableObject'],
-      },
-      {
-        tag: 'v2',
-        deleted_classes: ['Sandbox', 'ReviewLeaseDurableObject'],
-      },
-    ];
-    const tracked = parseConfig('apps/core/wrangler.jsonc');
-    expect(tracked.migrations).toEqual(expectedMigrations);
-    expect(tracked.triggers).toEqual({ crons: ['* * * * *'] });
-    expect(tracked.vars?.DASHBOARD_ORIGIN).toBe('');
-    expect(tracked.containers).toBeUndefined();
-    expect(tracked.durable_objects).toBeUndefined();
-
     withDeploymentFixture(({ run, read }) => {
-      run('retired-objects');
-      const rendered = parseConfigText(read('retired-objects').core);
-      expect(parseConfigText(read('retired-objects').ingress).assets).toEqual({
-        directory: '../dashboard/build',
+      run('unified');
+      const rendered = parseConfigText(read('unified').application);
+      expect(rendered.assets).toEqual({
+        directory: '.svelte-kit/cloudflare',
         binding: 'ASSETS',
         run_worker_first: true,
         html_handling: 'none',
       });
-
-      expect(rendered.migrations).toEqual(expectedMigrations);
       expect(rendered.triggers).toEqual({ crons: ['* * * * *'] });
       expect(rendered.vars?.DASHBOARD_ORIGIN).toBe('');
+      expect(rendered.migrations).toBeUndefined();
       expect(rendered.containers).toBeUndefined();
       expect(rendered.durable_objects).toBeUndefined();
     });

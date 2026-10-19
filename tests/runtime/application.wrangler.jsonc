@@ -1,0 +1,27 @@
+{
+  "name": "compte-rendu-application-test",
+  "main": "../../apps/dashboard/worker.ts",
+  "compatibility_date": "2026-08-22",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "../../apps/dashboard/.svelte-kit/cloudflare",
+    "binding": "ASSETS",
+    "run_worker_first": true,
+  },
+  "vars": {
+    "GITHUB_APP_ID": "1",
+    "GITHUB_APP_PRIVATE_KEY": "test-key",
+    "WEBHOOK_SECRET": "test-webhook-secret",
+    "ALLOWED_INSTALLATION_IDS": "[7]",
+    "RUNNER_CALLBACK_TOKEN": "test-callback-token",
+    "GITHUB_CHECK_NAME": "SSR Review",
+  },
+  "d1_databases": [
+    {
+      "binding": "REVIEW_DB",
+      "database_name": "ssr-test",
+      "database_id": "ssr-test",
+      "migrations_dir": "../../apps/core/migrations",
+    },
+  ],
+}

@@ -16,3 +16,7 @@ apps/*/wrangler.*.jsonc
 apps/dashboard/build/
 apps/dashboard/test-results/
 apps/dashboard/playwright-report/
+
+apps/dashboard/wrangler.*.jsonc
+!apps/dashboard/wrangler.build.jsonc
+apps/dashboard/test-results-ssr/

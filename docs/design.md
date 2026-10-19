@@ -74,9 +74,9 @@ unknown decision; their text is not reclassified. See [review decisions](review-
 
 ```mermaid
 flowchart LR
-  G[GitHub] --> I[Ingress: webhook and public dashboard]
+  G[GitHub] --> I[SvelteKit Worker: webhook, API and SSR dashboard]
   B[Browser] --> I
-  I -->|Service binding| C[Core]
+  I --> C[Internal review coordinator]
   C --> D[(D1)]
   C --> E[(Private R2)]
   C --> G
@@ -87,17 +87,18 @@ flowchart LR
   L --> P[Loopback LiteLLM]
 ```
 
-| Component            | Owns                                                                                                           |
-| -------------------- | -------------------------------------------------------------------------------------------------------------- |
-| `apps/ingress`       | Webhook verification, installation filtering, public forwarding and static dashboard assets                    |
-| `apps/core`          | Authorization, durable queue, GitHub App access/publication, lifecycle, public projection and metadata refresh |
-| `apps/runner`        | Checkout, sandbox lifecycle, agent execution, evidence, grant revocation and terminal callback                 |
-| `apps/llm-service`   | Per-job grants, route authorization, cancellation and sanitized transport diagnostics                          |
-| LiteLLM Proxy        | Upstream models, URLs, credentials and protocol adaptation                                                     |
-| `apps/dashboard`     | Static SvelteKit/Carbon UI with self-hosted IBM Plex Mono                                                      |
-| `packages/contracts` | Shared Effect schemas and transport types                                                                      |
+| Component            | Owns                                                                                                                       |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `apps/ingress`       | Webhook verification, installation filtering, request authentication and normalization, called inside the SvelteKit Worker |
+| `apps/core`          | Authorization, durable queue, GitHub App access/publication, lifecycle, public projection and metadata refresh             |
+| `apps/runner`        | Checkout, sandbox lifecycle, agent execution, evidence, grant revocation and terminal callback                             |
+| `apps/llm-service`   | Per-job grants, route authorization, cancellation and sanitized transport diagnostics                                      |
+| LiteLLM Proxy        | Upstream models, URLs, credentials and protocol adaptation                                                                 |
+| `apps/dashboard`     | Single Worker entry point, SSR SvelteKit/Carbon UI and self-hosted IBM Plex Mono                                           |
+| `packages/contracts` | Shared Effect schemas and transport types                                                                                  |
 
-Core has no public route. Ingress is public; Runner and inference/control services
+Core and ingress are internal modules of one public SvelteKit Worker; only the
+allowlisted HTTP endpoints are exposed. Runner and inference/control services
 are private. New work is pulled from D1, not submitted through the VPC binding.
 There is no Cloudflare Workflow or message queue. See [installation](installation.md)
 and [LLM service](llm-service.md) for configuration, grants and deployment order.

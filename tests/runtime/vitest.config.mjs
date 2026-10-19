@@ -41,19 +41,6 @@ const workerPoolOptions = {
   miniflare: {
     workers: [
       {
-        name: 'compte-rendu-tracer-core',
-        scriptPath: `${coreBundleDirectory}/core-entry.mjs`,
-        modules: true,
-        compatibilityDate: '2026-08-22',
-        d1Databases: { REVIEW_DB: 'compte-rendu-tracer-review-state' },
-        bindings: {
-          GITHUB_APP_ID: 'test-app-id',
-          GITHUB_APP_PRIVATE_KEY: 'test-private-key',
-          RUNNER_AUTH_TOKEN: 'test-runner-token',
-        },
-        serviceBindings: { RUNNER: 'compte-rendu-tracer-runner-capture' },
-      },
-      {
         name: 'compte-rendu-tracer-runner-capture',
         scriptPath: 'tests/runtime/runner-capture-entry.mjs',
         modules: true,

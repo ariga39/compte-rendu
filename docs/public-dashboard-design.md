@@ -45,8 +45,12 @@ a task failed. An uncertain publication may already have posted a review.
 
 ## Interface and navigation
 
-SvelteKit builds a static shell served by the existing Ingress `ASSETS` binding.
-It contains no task identities. Carbon Svelte supplies components and spacing;
+The single SvelteKit Worker renders overview, history and detail HTML from the
+same DB-backed public projection used by the JSON API. Known-private and unknown
+repository identities remain anonymous in HTML as well as JSON. Responses use
+`Cache-Control: no-store`. TanStack Query prefetch/dehydrate/hydrate transfers
+the initial cache without a duplicate task fetch; browser navigation and refresh
+continue through Query. See [SSR implementation](single-worker-ssr.md). Carbon Svelte supplies components and spacing;
 IBM Plex Mono is served locally for all text. Tables have named columns, readable
 cell spacing, text status labels, keyboard focus and horizontal overflow on narrow
 screens. Loading, empty, stale, failure and missing-task states remain distinct.

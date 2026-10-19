@@ -12,7 +12,7 @@ private R2 evidence bucket:
 ```sh
 DIAGNOSTIC_D1_DATABASE=<INSTANCE_NAME>-review-state \
 DIAGNOSTIC_R2_BUCKET=<INSTANCE_NAME>-review-evidence \
-DIAGNOSTIC_WRANGLER_CONFIG=apps/core/wrangler.<INSTANCE_NAME>.jsonc \
+DIAGNOSTIC_WRANGLER_CONFIG=apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc \
 corepack pnpm diagnose <PR_URL|DELIVERY_ID|RUN_ID>
 ```
 
@@ -39,7 +39,6 @@ Use the Cloudflare Worker logs or `wrangler tail` only to correlate identifiers:
 
 ```sh
 corepack pnpm dlx wrangler@4.124.0 tail <INSTANCE_NAME>-ingress
-corepack pnpm dlx wrangler@4.124.0 tail <INSTANCE_NAME>-core
 ```
 
 Use the GitHub delivery page for `deliveryId` and then search logs for the
@@ -104,16 +103,15 @@ secondary surface: its request, configuration, or transport failure is locally
 diagnosable and cannot change D1/GitHub/R2 outcomes. Core uses one immediate
 workerd capture per request and registers it with `waitUntil()`.
 
-| Symptom                               | Check first                                                                              | Safe action                                                                                                                                            |
-| ------------------------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| GitHub delivery is `400`              | `WEBHOOK_SECRET`, `X-Hub-Signature-256`, and the raw configured URL                      | Re-enter the same high-entropy secret in GitHub and ingress, then redeliver. Do not disable signature checking.                                        |
-| Ingress is `503` / `core_unavailable` | Core deployment name, `CORE` service binding, and core availability                      | Deploy or update core first, then ingress. Redeliver the GitHub event.                                                                                 |
-| Core is `503` / scheduling failure    | D1 migration, required core secrets, Runner VPC binding, and the GitHub App installation | Correct the missing binding/credential or installation permission, then redeliver. Do not create a second database.                                    |
-| Run fails at checkout                 | `runId`, `sandboxId`, and runner reason `checkout`                                       | Check Contents read access and installation scope. Never put the installation token in a log or retry an old Sandbox manually.                         |
-| Run fails at agent or cleanup         | Runner records for the same IDs                                                          | Treat a cleanup failure as a failed run until forced Sandbox cleanup succeeds.                                                                         |
-| No review is published                | Publication reason, current PR head SHA, and Pull requests write permission              | If the head changed, issue a new review command. If publication is uncertain, check the existing review marker before retrying.                        |
-| Public fork PR does nothing           | Comment body and commenter permission                                                    | Use the exact `/ai-review` command from a maintainer with `write`, `maintain`, or `admin`; a new head needs a new command.                             |
-| Bot-authored PR does nothing          | Pull request author type, numeric author ID, and `ALLOWED_BOT_AUTHOR_IDS`                | Automatic Bot PRs are ignored unless their positive numeric author ID is configured; use exact `/ai-review` from a maintainer when a review is useful. |
+| Symptom                            | Check first                                                                              | Safe action                                                                                                                                            |
+| ---------------------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| GitHub delivery is `400`           | `WEBHOOK_SECRET`, `X-Hub-Signature-256`, and the raw configured URL                      | Re-enter the same high-entropy secret in GitHub and ingress, then redeliver. Do not disable signature checking.                                        |
+| Core is `503` / scheduling failure | D1 migration, required core secrets, Runner VPC binding, and the GitHub App installation | Correct the missing binding/credential or installation permission, then redeliver. Do not create a second database.                                    |
+| Run fails at checkout              | `runId`, `sandboxId`, and runner reason `checkout`                                       | Check Contents read access and installation scope. Never put the installation token in a log or retry an old Sandbox manually.                         |
+| Run fails at agent or cleanup      | Runner records for the same IDs                                                          | Treat a cleanup failure as a failed run until forced Sandbox cleanup succeeds.                                                                         |
+| No review is published             | Publication reason, current PR head SHA, and Pull requests write permission              | If the head changed, issue a new review command. If publication is uncertain, check the existing review marker before retrying.                        |
+| Public fork PR does nothing        | Comment body and commenter permission                                                    | Use the exact `/ai-review` command from a maintainer with `write`, `maintain`, or `admin`; a new head needs a new command.                             |
+| Bot-authored PR does nothing       | Pull request author type, numeric author ID, and `ALLOWED_BOT_AUTHOR_IDS`                | Automatic Bot PRs are ignored unless their positive numeric author ID is configured; use exact `/ai-review` from a maintainer when a review is useful. |
 
 ## Update and rollback
 
@@ -124,15 +122,14 @@ For a normal compatible release:
 2. If there is a new migration, review it and apply it remotely with the D1
    migration command in the installation guide. Prefer additive, backward-compatible changes.
 3. Back up the existing gitignored instance configurations. Compare the tracked
-   `apps/core/wrangler.jsonc` and `apps/ingress/wrangler.jsonc` templates between
+   `apps/dashboard/wrangler.jsonc` template between
    the deployed and target revisions, then merge the relevant changes into the
    retained instance files: new bindings/variables, migrations, compatibility
    settings, assets and Cron changes. Preserve instance account/resource IDs,
    `DASHBOARD_ORIGIN`, domains, allowlists, branding and deliberate overrides; reconcile changed
    defaults rather than blindly replacing them. Render only when instance files
    are absent, then restore those instance settings from the backup. Deploy using
-   `apps/core/wrangler.<INSTANCE_NAME>.jsonc` and
-   `apps/ingress/wrangler.<INSTANCE_NAME>.jsonc`.
+   `apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc`.
 4. If Runner changed, finish the drain procedure below, back up its artifact,
    install the tested merged build and restart it. Verify the artifact hash,
    service health, configured concurrency and grant recovery status.
@@ -140,15 +137,25 @@ For a normal compatible release:
    a controlled review's exact revision, output and visible GitHub publication;
    do not create reviews solely for screenshots.
 
-The core-before-ingress order preserves the service-binding contract. For an
-incompatible change, pause GitHub webhook delivery first, deploy a compatible
-core, then ingress, and reactivate delivery only after verification.
+### Migrating an existing two-Worker installation
+
+Keep the public Worker name/domain, D1 and R2 IDs, VPC service, allowlists,
+branding, `DASHBOARD_ORIGIN` and all existing credentials. Render the new dashboard
+configuration only when absent, then transfer those retained values. Put the
+GitHub App private key and Runner auth secret on the public Worker using secure
+operator input; never write them to its config. Build and deploy the merged
+SvelteKit Worker. Check SSR, webhook signatures, Runner authentication and Cron.
+
+Disable the old Core Worker's Cron when the unified Worker takes ownership of
+metadata refresh. Retain the previous deployments and private configuration for
+rollback until verification completes. The old Core's Durable Object retirement
+migration history belongs to that Worker; do not copy it into the public Worker.
+To roll back this migration, restore the previous ingress deployment and Core
+Cron together. Database and bucket contents remain in place.
 
 If a release is bad, stop webhook delivery if it is generating new runs. Roll
 back the affected Worker to its last known-good deployment in the Cloudflare
-Workers deployment controls. If both Workers changed, choose an order that
-preserves their service-binding/schema compatibility; do not assume arbitrary
-old/new combinations work. Do not delete D1 tables or edit the applied migration ledger to undo
+Workers deployment controls. Use the matching application build and compatible database schema. Do not delete D1 tables or edit the applied migration ledger to undo
 a release. A schema rollback is a separate, reviewed migration or an operator
 approved D1 recovery action.
 
@@ -183,13 +190,12 @@ that no review is in flight before proceeding.
 2. Uninstall the GitHub App from every selected repository. Confirm no new
    deliveries arrive, then delete the App registration if it is no longer
    needed and revoke its private key.
-3. Use the retained deployment-only instance configurations. Delete the public `<INSTANCE_NAME>-ingress` Worker, then the private
-   `<INSTANCE_NAME>-core` Worker, in that order. Deleting the Workers removes
-   their service and VPC bindings. Do not use `--force`.
+3. Use the retained deployment-only configuration to delete the public Worker.
+   If an old Core Worker was retained after migration, remove it separately only
+   after confirming it has no active consumers. Do not use `--force`.
 
    ```sh
-   corepack pnpm dlx wrangler@4.124.0 delete --config apps/ingress/wrangler.<INSTANCE_NAME>.jsonc
-   corepack pnpm dlx wrangler@4.124.0 delete --config apps/core/wrangler.<INSTANCE_NAME>.jsonc
+   corepack pnpm dlx wrangler@4.124.0 delete --config apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc
    ```
 
 4. Verify the exact VPC Service ID, delete it, and verify that exact ID is

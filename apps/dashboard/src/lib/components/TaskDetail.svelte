@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { DehydratedState } from "@tanstack/svelte-query";
   import {
     Accordion,
     AccordionItem,
@@ -48,12 +49,14 @@
 
   let {
     runId,
+    dehydrated,
     variant = 'page',
     back = null,
     onClose = null,
     nav = null,
   }: {
     runId: string;
+    dehydrated?: DehydratedState;
     variant?: 'page' | 'drawer';
     back?: { href: string; onBack: (event: MouseEvent) => void } | null;
     onClose?: (() => void) | null;
@@ -64,6 +67,7 @@
   const fullPageHref = $derived(`/jobs/${encodedRunId}`);
 
   const dash = createDashboard<DetailModel>({
+    dehydrated: () => dehydrated,
     key: () => `/jobs/${runId}`,
     urls: () => [`/api/jobs/${encodedRunId}`],
     build: (results, timing) => buildDetail(results, timing),

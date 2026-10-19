@@ -1,4 +1,4 @@
-import { createQuery } from '@tanstack/svelte-query';
+import { createQuery, useHydrate, type DehydratedState } from '@tanstack/svelte-query';
 import { fetchJson, NotFoundError, PollError, type ApiResult } from './api';
 import { isPageVisible } from './query.svelte';
 
@@ -10,6 +10,7 @@ export interface DashboardOptions<T> {
   build: (results: ApiResult[], timing: { dispatchAt: number; observedAt: number }) => T;
   isActive: (value: T) => boolean;
   detail?: boolean;
+  dehydrated?: () => DehydratedState | undefined;
 }
 
 export interface Dashboard<T> {
@@ -40,15 +41,27 @@ export function createDashboard<T>(options: DashboardOptions<T>): Dashboard<T> {
     nextAllowedAt = 0;
   }
 
-  const query = createQuery<T>(() => {
+  useHydrate(options.dehydrated?.());
+  const query = createQuery<
+    { results: ApiResult[]; startedAt: number; receivedAt: number },
+    Error,
+    T
+  >(() => {
     const key = options.key();
     return {
       queryKey: ['dashboard', key],
-      enabled: isPageVisible() || settledKey === key,
+      refetchOnMount: false,
+      enabled: typeof window !== 'undefined' && (isPageVisible() || settledKey === key),
+      select: ({ results, startedAt, receivedAt }) => {
+        const observedAt = performance.now();
+        const elapsed = Math.max(0, receivedAt - startedAt) + Math.max(0, Date.now() - receivedAt);
+        return options.build(results, { dispatchAt: observedAt - elapsed, observedAt });
+      },
       queryFn: async ({ signal }) => {
         beginAttempt(key);
         const urls = options.urls();
         const dispatchAt = performance.now();
+        const startedAt = Date.now();
         const controller = new AbortController();
         const onAbort = () => controller.abort(signal.reason);
         if (signal.aborted) onAbort();
@@ -78,14 +91,14 @@ export function createDashboard<T>(options: DashboardOptions<T>): Dashboard<T> {
             }
             throw new PollError(retryAfterMs);
           }
-          const candidate = options.build(results, { dispatchAt, observedAt });
+          options.build(results, { dispatchAt, observedAt });
           if (options.key() === key) {
             settledKey = key;
             failures = 0;
             jitter = Math.random() * 0.1;
             nextAllowedAt = 0;
           }
-          return candidate;
+          return { results, startedAt, receivedAt: Date.now() };
         } catch (caught) {
           controller.abort(caught);
           const cancelled = signal.aborted && !timedOut;
@@ -112,7 +125,12 @@ export function createDashboard<T>(options: DashboardOptions<T>): Dashboard<T> {
         let base = POLL_IDLE_MS;
         if (currentFailures > 0)
           base = Math.min(MAX_BACKOFF_MS, 30000 * 2 ** (currentFailures - 1));
-        else if (activeQuery.state.data !== undefined && options.isActive(activeQuery.state.data))
+        else if (
+          activeQuery.state.data !== undefined &&
+          options.isActive(
+            options.build(activeQuery.state.data.results, { dispatchAt: 0, observedAt: 0 }),
+          )
+        )
           base = POLL_ACTIVE_MS;
         let delay = base + base * jitter;
         const remaining = statsKey === options.key() ? nextAllowedAt - Date.now() : 0;
@@ -137,7 +155,9 @@ export function createDashboard<T>(options: DashboardOptions<T>): Dashboard<T> {
     get error() {
       if (query.error instanceof NotFoundError) return 'notfound';
       if (!query.error) return null;
-      return navigator.onLine === false ? 'offline' : 'unavailable';
+      return typeof navigator !== 'undefined' && navigator.onLine === false
+        ? 'offline'
+        : 'unavailable';
     },
     get lastGoodAt() {
       return query.dataUpdatedAt;

@@ -13,5 +13,10 @@
     "forceConsistentCasingInFileNames": true,
     "allowImportingTsExtensions": true
   },
-  "include": ["./**/*.ts", "../playwright.config.ts"]
+  "include": [
+    "./**/*.ts",
+    "../playwright.config.ts",
+    "../playwright.ssr.config.ts",
+    "../ssr-tests/**/*.ts"
+  ]
 }

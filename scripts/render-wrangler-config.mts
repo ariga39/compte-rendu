@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join, resolve } from 'node:path';
 import { Schema } from 'effect';
@@ -94,107 +94,85 @@ const renderDeploymentConfigs = (
     }
   }
 
-  const coreDirectory = join(process.cwd(), 'apps/core');
-  const ingressDirectory = join(process.cwd(), 'apps/ingress');
-  const coreOutput = join(coreDirectory, `wrangler.${instanceName}.jsonc`);
-  const ingressOutput = join(ingressDirectory, `wrangler.${instanceName}.jsonc`);
-  if (existsSync(coreOutput) || existsSync(ingressOutput)) {
-    throw new Error('generated Wrangler config already exists');
-  }
-
-  let core = readFileSync(join(coreDirectory, 'wrangler.jsonc'), 'utf8');
-  core = replaceRequired(core, '"name": "compte-rendu-core"', `"name": "${instanceName}-core"`);
-  core = replaceRequired(
-    core,
+  const directory = join(process.cwd(), 'apps/dashboard');
+  const output = join(directory, `wrangler.${instanceName}.jsonc`);
+  if (existsSync(output)) throw new Error('generated Wrangler config already exists');
+  let application = readFileSync(join(directory, 'wrangler.jsonc'), 'utf8');
+  application = replaceRequired(
+    application,
+    '"name": "compte-rendu-ingress"',
+    `"name": "${instanceName}-ingress"`,
+  );
+  application = replaceRequired(
+    application,
     '"database_name": "compte-rendu-review-state"',
     `"database_name": "${instanceName}-review-state"`,
   );
-  core = replaceRequired(
-    core,
+  application = replaceRequired(
+    application,
     '"bucket_name": "compte-rendu-review-evidence"',
     `"bucket_name": "${instanceName}${longestDerivedSuffix}"`,
   );
-  core = replaceRequired(
-    core,
+  application = replaceRequired(
+    application,
     '"service_id": "REPLACE_WITH_RUNNER_VPC_SERVICE_ID"',
     `"service_id": "${runnerVpcServiceId}"`,
   );
-  core = replaceRequired(
-    core,
+  application = replaceRequired(
+    application,
     '"GITHUB_APP_ID": "REPLACE_WITH_GITHUB_APP_ID"',
     `"GITHUB_APP_ID": "${githubAppId}"`,
   );
-  core = replaceRequired(
-    core,
+  application = replaceRequired(
+    application,
     '"POSTHOG_ENABLED": "false"',
     `"POSTHOG_ENABLED": "${parsedPostHogConfig.enabled ? 'true' : 'false'}"`,
   );
-  core = replaceRequired(
-    core,
+  application = replaceRequired(
+    application,
     '"POSTHOG_PROJECT_API_KEY": ""',
     `"POSTHOG_PROJECT_API_KEY": ${JSON.stringify(posthogProjectApiKey)}`,
   );
-  core = replaceRequired(
-    core,
+  application = replaceRequired(
+    application,
     '"POSTHOG_HOST": ""',
     `"POSTHOG_HOST": ${JSON.stringify(posthogHost)}`,
   );
-  core = replaceRequired(
-    core,
+  application = replaceRequired(
+    application,
     '"POSTHOG_DEPLOYMENT": ""',
     `"POSTHOG_DEPLOYMENT": ${JSON.stringify(posthogDeployment)}`,
   );
-  core = replaceRequired(
-    core,
+  application = replaceRequired(
+    application,
     '"POSTHOG_ENVIRONMENT": "production"',
     `"POSTHOG_ENVIRONMENT": "${posthogEnvironment}"`,
   );
-  core = replaceRequired(
-    core,
+  application = replaceRequired(
+    application,
     '"database_id": "REPLACE_WITH_D1_DATABASE_ID"',
     `"database_id": "${d1DatabaseId}"`,
   );
 
-  core = replaceRequired(
-    core,
+  application = replaceRequired(
+    application,
     '"GITHUB_CHECK_NAME": ""',
     `"GITHUB_CHECK_NAME": ${JSON.stringify(checkName)}`,
   );
 
-  let ingress = readFileSync(join(ingressDirectory, 'wrangler.jsonc'), 'utf8');
-  ingress = replaceRequired(
-    ingress,
-    '"name": "compte-rendu-ingress"',
-    `"name": "${instanceName}-ingress"`,
-  );
-  ingress = replaceRequired(
-    ingress,
-    '"service": "compte-rendu-core"',
-    `"service": "${instanceName}-core"`,
-  );
-  ingress = replaceRequired(
-    ingress,
+  application = replaceRequired(
+    application,
     '"ALLOWED_INSTALLATION_IDS": "REPLACE_WITH_GITHUB_INSTALLATION_IDS"',
     `"ALLOWED_INSTALLATION_IDS": ${JSON.stringify(JSON.stringify(parsedInstallationIds))}`,
   );
-  ingress = replaceRequired(
-    ingress,
+  application = replaceRequired(
+    application,
     '"ALLOWED_BOT_AUTHOR_IDS": "REPLACE_WITH_GITHUB_BOT_AUTHOR_IDS"',
     `"ALLOWED_BOT_AUTHOR_IDS": ${JSON.stringify(JSON.stringify(parsedBotAuthorIds))}`,
   );
 
-  let coreCreated = false;
-  try {
-    writeFileSync(coreOutput, core, { encoding: 'utf8', flag: 'wx' });
-    coreCreated = true;
-    writeFileSync(ingressOutput, ingress, { encoding: 'utf8', flag: 'wx' });
-  } catch (error) {
-    if (coreCreated) {
-      unlinkSync(coreOutput);
-    }
-    throw error;
-  }
-  return { core: coreOutput, ingress: ingressOutput };
+  writeFileSync(output, application, { encoding: 'utf8', flag: 'wx' });
+  return { application: output };
 };
 
 const main = (args: readonly string[]) => {

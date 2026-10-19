@@ -1,0 +1,58 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "compte-rendu-ingress",
+  "main": "worker.ts",
+  "compatibility_date": "2026-08-25",
+  "workers_dev": true,
+  "triggers": {
+    "crons": ["* * * * *"],
+  },
+  "vars": {
+    "GITHUB_APP_ID": "REPLACE_WITH_GITHUB_APP_ID",
+    "DASHBOARD_ORIGIN": "",
+    "GITHUB_CHECK_NAME": "",
+    "POSTHOG_ENABLED": "false",
+    "POSTHOG_PROJECT_API_KEY": "",
+    "POSTHOG_HOST": "",
+    "POSTHOG_DEPLOYMENT": "",
+    "POSTHOG_ENVIRONMENT": "production",
+    "ALLOWED_INSTALLATION_IDS": "REPLACE_WITH_GITHUB_INSTALLATION_IDS",
+    "ALLOWED_BOT_AUTHOR_IDS": "REPLACE_WITH_GITHUB_BOT_AUTHOR_IDS",
+  },
+  "secrets": {
+    "required": [
+      "GITHUB_APP_PRIVATE_KEY",
+      "RUNNER_AUTH_TOKEN",
+      "WEBHOOK_SECRET",
+      "RUNNER_CALLBACK_TOKEN",
+    ],
+  },
+  "d1_databases": [
+    {
+      "binding": "REVIEW_DB",
+      "database_name": "compte-rendu-review-state",
+      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "migrations_dir": "../core/migrations",
+    },
+  ],
+  "r2_buckets": [
+    {
+      "binding": "EVIDENCE_BUCKET",
+      "bucket_name": "compte-rendu-review-evidence",
+    },
+  ],
+  "vpc_services": [
+    {
+      "binding": "RUNNER",
+      "service_id": "REPLACE_WITH_RUNNER_VPC_SERVICE_ID",
+      "remote": true,
+    },
+  ],
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": ".svelte-kit/cloudflare",
+    "binding": "ASSETS",
+    "run_worker_first": true,
+    "html_handling": "none",
+  },
+}

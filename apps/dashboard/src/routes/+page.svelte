@@ -1,4 +1,5 @@
 <script lang="ts">
+  let { data } = $props();
   import { Button, Column, Grid, Row } from 'carbon-components-svelte';
   import StatCard from '#lib/components/StatCard.svelte';
   import TaskDrawer from '#lib/components/TaskDrawer.svelte';
@@ -17,6 +18,7 @@
   import type { OverviewModel } from '#lib/types.ts';
 
   const dash = createDashboard<OverviewModel>({
+    dehydrated: () => data.dehydrated,
     key: () => '/',
     urls: () => ['/api/dashboard', '/api/jobs?view=current'],
     build: (results, timing) => buildOverview(results, timing),

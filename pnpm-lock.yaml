@@ -14,7 +14,7 @@ importers:
     devDependencies:
       '@cloudflare/vitest-pool-workers':
         specifier: 0.22.0
-        version: 0.22.0(@vitest/runner@4.1.11)(@vitest/snapshot@4.1.11)(vitest@4.1.11)
+        version: 0.22.0(@cloudflare/workers-types@5.20261018.1)(@vitest/runner@4.1.11)(@vitest/snapshot@4.1.11)(vitest@4.1.11(@types/node@24.19.2)(@vitest/browser-preview@4.1.11)(@voidzero-dev/vite-plus-core@0.3.0(@types/node@24.19.2)(esbuild@0.28.1)(jiti@2.7.0)(typescript@6.0.3)))
       effect:
         specifier: 4.0.0-rc.111
         version: 4.0.0-rc.111
@@ -58,12 +58,15 @@ importers:
         specifier: 4.0.0-rc.111
         version: 4.0.0-rc.111
     devDependencies:
+      '@cloudflare/workers-types':
+        specifier: 5.20261018.1
+        version: 5.20261018.1
       '@playwright/test':
         specifier: 1.61.1
         version: 1.61.1
-      '@sveltejs/adapter-static':
-        specifier: 4.0.0
-        version: 4.0.0(@sveltejs/kit@3.1.0(@sveltejs/vite-plugin-svelte@7.3.1(@voidzero-dev/vite-plus-core@0.3.0(@types/node@24.19.2)(esbuild@0.28.1)(jiti@2.7.0)(typescript@6.0.3))(svelte@5.57.2))(@voidzero-dev/vite-plus-core@0.3.0(@types/node@24.19.2)(esbuild@0.28.1)(jiti@2.7.0)(typescript@6.0.3))(svelte@5.57.2)(typescript@6.0.3))
+      '@sveltejs/adapter-cloudflare':
+        specifier: 8.0.1
+        version: 8.0.1(@sveltejs/kit@3.1.0(@sveltejs/vite-plugin-svelte@7.3.1(@voidzero-dev/vite-plus-core@0.3.0(@types/node@24.19.2)(esbuild@0.28.1)(jiti@2.7.0)(typescript@6.0.3))(svelte@5.57.2))(@voidzero-dev/vite-plus-core@0.3.0(@types/node@24.19.2)(esbuild@0.28.1)(jiti@2.7.0)(typescript@6.0.3))(svelte@5.57.2)(typescript@6.0.3))(wrangler@4.124.0(@cloudflare/workers-types@5.20261018.1))
       '@sveltejs/kit':
         specifier: 3.1.0
         version: 3.1.0(@sveltejs/vite-plugin-svelte@7.3.1(@voidzero-dev/vite-plus-core@0.3.0(@types/node@24.19.2)(esbuild@0.28.1)(jiti@2.7.0)(typescript@6.0.3))(svelte@5.57.2))(@voidzero-dev/vite-plus-core@0.3.0(@types/node@24.19.2)(esbuild@0.28.1)(jiti@2.7.0)(typescript@6.0.3))(svelte@5.57.2)(typescript@6.0.3)
@@ -91,6 +94,9 @@ importers:
       vite:
         specifier: npm:@voidzero-dev/vite-plus-core@0.3.0
         version: '@voidzero-dev/vite-plus-core@0.3.0(@types/node@24.19.2)(esbuild@0.28.1)(jiti@2.7.0)(typescript@6.0.3)'
+      wrangler:
+        specifier: 4.124.0
+        version: 4.124.0(@cloudflare/workers-types@5.20261018.1)
 
   apps/ingress:
     dependencies:
@@ -200,6 +206,9 @@ packages:
     engines: {node: '>=16'}
     cpu: [x64]
     os: [win32]
+
+  '@cloudflare/workers-types@5.20261018.1':
+    resolution: {integrity: sha512-0o+tp586a2/IJELadYMnuh6kQapnwLsEpsR7yV/eFxp76QdC46ACMmLMILCTwU1hcd/y2b+bnCopuPUeas6OAg==}
 
   '@cspotcode/source-map-support@0.8.1':
     resolution: {integrity: sha512-IchNf6dN4tHoMFIn/7OE8LWZ19Y6q/67Bmf6vnGREv8RSbBVb9LPJxEcnwrcwX6ixSvaiGoomAUvu4YSxXrVgw==}
@@ -911,10 +920,11 @@ packages:
     peerDependencies:
       acorn: ^8.9.0
 
-  '@sveltejs/adapter-static@4.0.0':
-    resolution: {integrity: sha512-aF1J23R1ebKqUxQ4/qLr/Lxu63NFmLAtg8UZl3HFLxaoA1D/nhTVGcD9lTqx65iUbjNR2iOL0TgOxSX82x6Paw==}
+  '@sveltejs/adapter-cloudflare@8.0.1':
+    resolution: {integrity: sha512-KISMvrFOLpn7sm7wQr26XhkVIBYQLq1wYcFZvNgHqWxyN/kVZb/ldu7+jJtWi+Ai0mNw+OPRecHadzEB5TGQ6A==}
     peerDependencies:
       '@sveltejs/kit': ^3.0.0-next.0
+      wrangler: ^4.118.0
 
   '@sveltejs/kit@3.1.0':
     resolution: {integrity: sha512-JTWlq2HQlkqx6vIoxhC0R6sc4WVqbQoRyEmr5YlqKmiYbzY1U3awtSWTmjMLlS056a49AmkQR6rnNANXIE8B0Q==}
@@ -1911,7 +1921,7 @@ snapshots:
     optionalDependencies:
       workerd: 1.20260815.1
 
-  '@cloudflare/vitest-pool-workers@0.22.0(@vitest/runner@4.1.11)(@vitest/snapshot@4.1.11)(vitest@4.1.11)':
+  '@cloudflare/vitest-pool-workers@0.22.0(@cloudflare/workers-types@5.20261018.1)(@vitest/runner@4.1.11)(@vitest/snapshot@4.1.11)(vitest@4.1.11(@types/node@24.19.2)(@vitest/browser-preview@4.1.11)(@voidzero-dev/vite-plus-core@0.3.0(@types/node@24.19.2)(esbuild@0.28.1)(jiti@2.7.0)(typescript@6.0.3)))':
     dependencies:
       '@vitest/runner': 4.1.11
       '@vitest/snapshot': 4.1.11
@@ -1919,7 +1929,7 @@ snapshots:
       esbuild: 0.28.1
       miniflare: 5.20260815.0-alpha
       vitest: 4.1.11(@types/node@24.19.2)(@vitest/browser-preview@4.1.11)(@voidzero-dev/vite-plus-core@0.3.0(@types/node@24.19.2)(esbuild@0.28.1)(jiti@2.7.0)(typescript@6.0.3))
-      wrangler: 4.124.0
+      wrangler: 4.124.0(@cloudflare/workers-types@5.20261018.1)
       zod: 4.4.3
     transitivePeerDependencies:
       - '@cloudflare/workers-types'
@@ -1940,6 +1950,8 @@ snapshots:
 
   '@cloudflare/workerd-windows-64@1.20260815.1':
     optional: true
+
+  '@cloudflare/workers-types@5.20261018.1': {}
 
   '@cspotcode/source-map-support@0.8.1':
     dependencies:
@@ -2162,7 +2174,7 @@ snapshots:
   '@jridgewell/trace-mapping@0.3.9':
     dependencies:
       '@jridgewell/resolve-uri': 3.1.2
-      '@jridgewell/sourcemap-codec': 1.5.5
+      '@jridgewell/sourcemap-codec': 1.6.0
 
   '@msgpackr-extract/msgpackr-extract-darwin-arm64@3.0.4':
     optional: true
@@ -2356,9 +2368,12 @@ snapshots:
     dependencies:
       acorn: 8.19.0
 
-  '@sveltejs/adapter-static@4.0.0(@sveltejs/kit@3.1.0(@sveltejs/vite-plugin-svelte@7.3.1(@voidzero-dev/vite-plus-core@0.3.0(@types/node@24.19.2)(esbuild@0.28.1)(jiti@2.7.0)(typescript@6.0.3))(svelte@5.57.2))(@voidzero-dev/vite-plus-core@0.3.0(@types/node@24.19.2)(esbuild@0.28.1)(jiti@2.7.0)(typescript@6.0.3))(svelte@5.57.2)(typescript@6.0.3))':
+  '@sveltejs/adapter-cloudflare@8.0.1(@sveltejs/kit@3.1.0(@sveltejs/vite-plugin-svelte@7.3.1(@voidzero-dev/vite-plus-core@0.3.0(@types/node@24.19.2)(esbuild@0.28.1)(jiti@2.7.0)(typescript@6.0.3))(svelte@5.57.2))(@voidzero-dev/vite-plus-core@0.3.0(@types/node@24.19.2)(esbuild@0.28.1)(jiti@2.7.0)(typescript@6.0.3))(svelte@5.57.2)(typescript@6.0.3))(wrangler@4.124.0(@cloudflare/workers-types@5.20261018.1))':
     dependencies:
+      '@cloudflare/workers-types': 5.20261018.1
+      '@rolldown/pluginutils': 1.0.1
       '@sveltejs/kit': 3.1.0(@sveltejs/vite-plugin-svelte@7.3.1(@voidzero-dev/vite-plus-core@0.3.0(@types/node@24.19.2)(esbuild@0.28.1)(jiti@2.7.0)(typescript@6.0.3))(svelte@5.57.2))(@voidzero-dev/vite-plus-core@0.3.0(@types/node@24.19.2)(esbuild@0.28.1)(jiti@2.7.0)(typescript@6.0.3))(svelte@5.57.2)(typescript@6.0.3)
+      wrangler: 4.124.0(@cloudflare/workers-types@5.20261018.1)
 
   '@sveltejs/kit@3.1.0(@sveltejs/vite-plugin-svelte@7.3.1(@voidzero-dev/vite-plus-core@0.3.0(@types/node@24.19.2)(esbuild@0.28.1)(jiti@2.7.0)(typescript@6.0.3))(svelte@5.57.2))(@voidzero-dev/vite-plus-core@0.3.0(@types/node@24.19.2)(esbuild@0.28.1)(jiti@2.7.0)(typescript@6.0.3))(svelte@5.57.2)(typescript@6.0.3)':
     dependencies:
@@ -3246,7 +3261,7 @@ snapshots:
       '@cloudflare/workerd-linux-arm64': 1.20260815.1
       '@cloudflare/workerd-windows-64': 1.20260815.1
 
-  wrangler@4.124.0:
+  wrangler@4.124.0(@cloudflare/workers-types@5.20261018.1):
     dependencies:
       '@cloudflare/kv-asset-handler': 0.5.0
       '@cloudflare/unenv-preset': 2.16.1(unenv@2.0.0-rc.24)(workerd@1.20260815.1)
@@ -3257,6 +3272,7 @@ snapshots:
       unenv: 2.0.0-rc.24
       workerd: 1.20260815.1
     optionalDependencies:
+      '@cloudflare/workers-types': 5.20261018.1
       fsevents: 2.3.3
     transitivePeerDependencies:
       - bufferutil

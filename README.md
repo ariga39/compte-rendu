@@ -18,7 +18,7 @@ database, bucket, and generated config:
 ```sh
 DIAGNOSTIC_D1_DATABASE=petit-chiba-review-state \
 DIAGNOSTIC_R2_BUCKET=petit-chiba-review-evidence \
-DIAGNOSTIC_WRANGLER_CONFIG=apps/core/wrangler.petit-chiba.jsonc \
+DIAGNOSTIC_WRANGLER_CONFIG=apps/dashboard/wrangler.petit-chiba.jsonc \
 corepack pnpm diagnose <PR_URL|DELIVERY_ID|RUN_ID>
 ```
 

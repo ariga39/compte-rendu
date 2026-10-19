@@ -1,9 +1,12 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "compte-rendu-tracer-ingress",
-  "main": "ingress-entry.ts",
+  "main": ".generated/core-entry.mjs",
   "compatibility_date": "2026-08-22",
   "vars": {
+    "GITHUB_APP_ID": "test-app-id",
+    "GITHUB_APP_PRIVATE_KEY": "test-private-key",
+    "RUNNER_AUTH_TOKEN": "test-runner-token",
     "WEBHOOK_SECRET": "runtime-test-webhook-secret",
     "ALLOWED_INSTALLATION_IDS": "[7]",
     "RUNNER_CALLBACK_TOKEN": "runtime-test-runner-callback-token",
@@ -18,8 +21,8 @@
   ],
   "services": [
     {
-      "binding": "CORE",
-      "service": "compte-rendu-tracer-core",
+      "binding": "RUNNER",
+      "service": "compte-rendu-tracer-runner-capture",
     },
   ],
 }
