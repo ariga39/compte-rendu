@@ -1,6 +1,6 @@
 # Installation and operations
 
-This guide installs the two Workers, dashboard and self-hosted Runner.
+This guide installs one SvelteKit Worker and the self-hosted Runner.
 For diagnosis, upgrades, rollback and uninstall, use [Operations](operations.md).
 It assumes one Cloudflare account, one or more explicitly allowlisted GitHub App installations, and the
 repository checkout that contains this file. It does not create resources or
@@ -25,28 +25,25 @@ its gateway model provider; this service integration does not yet support it.
 
 The repository deploys these resources:
 
-| Resource           | Configuration name                                                       | Purpose                                                                                                                                                                               |
-| ------------------ | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Public Worker      | `<INSTANCE_NAME>-ingress`                                                | Serves the public dashboard and receives GitHub webhooks and authenticated Runner claim/callback/progress requests. Use the generated workers.dev route or an instance custom domain. |
-| Private Worker     | `<INSTANCE_NAME>-core`                                                   | Owns authorization, GitHub API calls, orchestration, and run state. `workers_dev` is disabled.                                                                                        |
-| Service binding    | `CORE` → `<INSTANCE_NAME>-core`                                          | Lets ingress call core without a public core URL.                                                                                                                                     |
-| D1 database        | `<INSTANCE_NAME>-review-state`, binding `REVIEW_DB`                      | Stores delivery, approval, and run state.                                                                                                                                             |
-| R2 evidence bucket | `<INSTANCE_NAME>-review-evidence`, binding `EVIDENCE_BUCKET`             | Private bucket storing one bounded JSON evidence bundle per Job; lifecycle expiration is configured at deployment.                                                                    |
-| Runner Job service | Self-hosted runner reached through the core `RUNNER` VPC Service binding | Owns one authenticated asynchronous review attempt and fresh Docker Sandbox cleanup.                                                                                                  |
+| Resource           | Configuration name                                                           | Purpose                                                                                                                                                                               |
+| ------------------ | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Public Worker      | `<INSTANCE_NAME>-ingress`                                                    | Serves the public dashboard and receives GitHub webhooks and authenticated Runner claim/callback/progress requests. Use the generated workers.dev route or an instance custom domain. |
+| D1 database        | `<INSTANCE_NAME>-review-state`, binding `REVIEW_DB`                          | Stores delivery, approval, and run state.                                                                                                                                             |
+| R2 evidence bucket | `<INSTANCE_NAME>-review-evidence`, binding `EVIDENCE_BUCKET`                 | Private bucket storing one bounded JSON evidence bundle per Job; lifecycle expiration is configured at deployment.                                                                    |
+| Runner Job service | Self-hosted runner reached through the Worker’s `RUNNER` VPC Service binding | Owns one authenticated asynchronous review attempt and fresh Docker Sandbox cleanup.                                                                                                  |
 
 The request path is:
 
 ```text
 GitHub webhook
     → <INSTANCE_NAME>-ingress (public, verifies WEBHOOK_SECRET)
-    → CORE service binding
-    → <INSTANCE_NAME>-core (private)
+    → internal authorization and review coordinator
        → REVIEW_DB / EVIDENCE_BUCKET / RUNNER VPC Service (targeted cancellation only)
        → GitHub App installation token for GitHub API operations
 
 Idle Runner
     → <INSTANCE_NAME>-ingress `/runner-claim` (RUNNER_CALLBACK_TOKEN)
-    → <INSTANCE_NAME>-core atomic D1 claim
+    → internal coordinator atomic D1 claim
     → Runner Job execution and cleanup
     → <INSTANCE_NAME>-ingress `/runner-callback` (same token)
 ```
@@ -58,25 +55,18 @@ only then permits the newer queued run to be claimed. Core does not use this
 binding to submit new Jobs. The Tunnel and VPC Service remain required for
 that cancellation path.
 
-Cloudflare service bindings are internal Worker-to-Worker calls and can be
-used to isolate a Worker from the public Internet. The target Worker must be
-deployed before the Worker that declares the binding:
-[Service bindings](https://developers.cloudflare.com/workers/runtime-apis/bindings/service-bindings/).
-
-The tracked configs at
-[`apps/core/wrangler.jsonc`](../apps/core/wrangler.jsonc) and
-[`apps/ingress/wrangler.jsonc`](../apps/ingress/wrangler.jsonc) are neutral
-templates. From the repository root, render deployment-only sibling configs
-for the chosen instance:
+The tracked [`apps/dashboard/wrangler.jsonc`](../apps/dashboard/wrangler.jsonc)
+is the neutral deployment template. Core and ingress remain internal code modules;
+there is no Worker-to-Worker `CORE` binding. From the repository root, render one
+deployment-only sibling configuration for the chosen instance:
 
 ```sh
 corepack pnpm render:wrangler <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '<GITHUB_BOT_AUTHOR_IDS_JSON>'
 ```
 
 For example, instance `petit-chiba` produces
-`apps/core/wrangler.petit-chiba.jsonc` and
-`apps/ingress/wrangler.petit-chiba.jsonc`, with names derived as
-`petit-chiba-core`, `petit-chiba-ingress`, `petit-chiba-review-state`, and
+`apps/dashboard/wrangler.petit-chiba.jsonc`, with names derived as
+`petit-chiba-ingress`, `petit-chiba-review-state`, and
 `petit-chiba-review-evidence`. Instance names never require editing the repository or
 the tracked templates. The renderer keeps the tracked placeholders unchanged
 and refuses to overwrite an existing generated config.
@@ -86,7 +76,7 @@ numeric GitHub App installation IDs, for example `[123456789]`. It is written
 only to the generated ingress config as `ALLOWED_INSTALLATION_IDS`; the tracked
 template remains a placeholder. Ingress fails closed with HTTP `503` when the
 value is missing or malformed, and ignores signed events from installations outside the
-allowlist before contacting `CORE`.
+allowlist before calling the internal coordinator.
 
 `<GITHUB_BOT_AUTHOR_IDS_JSON>` is an optional JSON array of positive numeric
 GitHub user IDs, for example `[49699333]`. The renderer writes it to
@@ -380,7 +370,7 @@ Enable the App webhook with:
   fixed hostname.
 - Webhook secret: one high-entropy value, entered into both GitHub and the
   ingress `WEBHOOK_SECRET` Worker secret.
-- Active delivery: enabled only after both Workers are deployed and the
+- Active delivery: enabled only after the Worker is deployed and the
   ingress secret is present.
 
 GitHub signs deliveries with the configured secret in
@@ -908,16 +898,15 @@ uses the temporary invocation described above.
    corepack pnpm render:wrangler <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '<GITHUB_BOT_AUTHOR_IDS_JSON>' ['<POSTHOG_CONFIG_JSON>'] ['<GITHUB_CHECK_NAME>']
    ```
 
-   This writes `apps/core/wrangler.<INSTANCE_NAME>.jsonc` and
-   `apps/ingress/wrangler.<INSTANCE_NAME>.jsonc`. Use these generated paths
+   This writes `apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc`. Use these generated paths
    for every deployment operation below; never modify the tracked templates.
 
 4. Apply the tracked D1 migration remotely. Use the binding name from the
    generated config, not a guessed database identifier:
 
    ```sh
-   corepack pnpm dlx wrangler@4.124.0 d1 migrations list REVIEW_DB --remote --config apps/core/wrangler.<INSTANCE_NAME>.jsonc
-   corepack pnpm dlx wrangler@4.124.0 d1 migrations apply REVIEW_DB --remote --config apps/core/wrangler.<INSTANCE_NAME>.jsonc
+   corepack pnpm dlx wrangler@4.124.0 d1 migrations list REVIEW_DB --remote --config apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc
+   corepack pnpm dlx wrangler@4.124.0 d1 migrations apply REVIEW_DB --remote --config apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc
    ```
 
    Apply **all** pending files from [the migration directory](../apps/core/migrations/)
@@ -926,12 +915,10 @@ uses the temporary invocation described above.
    review configuration. Do not edit applied migrations or replace the database.
    New Core code must not run against an older schema.
 
-   The generated core config also retains the legacy Durable Object migration
-   history: `v1` provisions `Sandbox` and `ReviewLeaseDurableObject`, then `v2`
-   deletes both classes. Do not remove, rename, or reorder these migration
-   entries. Applying `v2` permanently deletes any stored objects for those
-   retired classes; export anything the owner must retain before deploying the
-   core Worker. Existing environments receive only the unapplied `v2` step.
+   Legacy Durable Object migration history belongs only to the retired Core
+   Worker. The unified public Worker does not own those classes; do not copy
+   their migration entries into its configuration. See the existing-installation
+   migration procedure in [Operations](operations.md#update-and-rollback).
 
 5. Enter the two core secrets. Each command prompts for the value; do not
    append a value to the command line, use `echo`, or redirect a secret from a
@@ -943,54 +930,47 @@ uses the temporary invocation described above.
 
    The local repository-operations App and private key are not the product
    identity; do not reuse them. Do not install or approve the App yet; after
-   both Workers are deployed, complete the final webhook configuration and
+   the Worker is deployed, complete the final webhook configuration and
    installation sequence in step 8. Follow GitHub's
    [private-key guidance](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/managing-private-keys-for-github-apps)
    when generating and downloading the key.
 
    ```sh
-   corepack pnpm dlx wrangler@4.124.0 secret put GITHUB_APP_PRIVATE_KEY --config apps/core/wrangler.<INSTANCE_NAME>.jsonc
-   corepack pnpm dlx wrangler@4.124.0 secret put RUNNER_AUTH_TOKEN --config apps/core/wrangler.<INSTANCE_NAME>.jsonc
+   corepack pnpm dlx wrangler@4.124.0 secret put GITHUB_APP_PRIVATE_KEY --config apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc
+   corepack pnpm dlx wrangler@4.124.0 secret put RUNNER_AUTH_TOKEN --config apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc
    ```
 
    The private key and Runner authentication credential belong only to
-   `<INSTANCE_NAME>-core`; the model credential remains on the runner host.
+   `<INSTANCE_NAME>-ingress`; the model credential remains on the runner host.
    Cloudflare's `secret put` creates and deploys a new Worker version
    immediately, so complete the D1 migration before these commands. Worker
    secrets are encrypted bindings and are intentionally separate from
    plaintext `vars`:
    [Worker secrets](https://developers.cloudflare.com/workers/configuration/secrets/).
 
-6. Deploy the private core Worker first:
+6. Enter the webhook and Runner callback secrets into the same Worker:
 
    ```sh
-   corepack pnpm dlx wrangler@4.124.0 deploy --config apps/core/wrangler.<INSTANCE_NAME>.jsonc
+   corepack pnpm dlx wrangler@4.124.0 secret put WEBHOOK_SECRET --config apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc
+   corepack pnpm dlx wrangler@4.124.0 secret put RUNNER_CALLBACK_TOKEN --config apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc
    ```
 
-   Confirm the deployment reports the `RUNNER` VPC Service, `REVIEW_DB`, and
-   `EVIDENCE_BUCKET` bindings without a missing-secret or
-   missing-D1 error.
+   `WEBHOOK_SECRET` must match the GitHub App. `RUNNER_CALLBACK_TOKEN` must
+   match the Runner and authenticates claim, callback and progress requests.
 
-7. Enter the ingress webhook secret only after core is deployed, then deploy
-   public ingress second:
+7. Build and deploy the single SvelteKit Worker:
 
    ```sh
-   corepack pnpm dlx wrangler@4.124.0 secret put WEBHOOK_SECRET --config apps/ingress/wrangler.<INSTANCE_NAME>.jsonc
-   corepack pnpm dlx wrangler@4.124.0 secret put RUNNER_CALLBACK_TOKEN --config apps/ingress/wrangler.<INSTANCE_NAME>.jsonc
-   corepack pnpm dlx wrangler@4.124.0 deploy --config apps/ingress/wrangler.<INSTANCE_NAME>.jsonc
+   corepack pnpm build
+   corepack pnpm dlx wrangler@4.124.0 deploy --config apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc
    ```
 
-   The `secret put` command itself creates an ingress version; the explicit
-   deploy then publishes the current checkout with the same secret. The
-   `WEBHOOK_SECRET` value must match the GitHub App webhook secret exactly.
-   `RUNNER_CALLBACK_TOKEN` must be the same static bearer value configured on
-   the Runner and authenticates both `/runner-claim` and `/runner-callback`.
-   Record the resulting public ingress URL as the operator's
-   `<INGRESS_URL>`. The `CORE` binding points to the already deployed
-   `<INSTANCE_NAME>-core`; deploying in the opposite order can fail because the
-   target service does not exist yet.
+   Confirm `RUNNER`, `REVIEW_DB`, `EVIDENCE_BUCKET`, `ASSETS` and the Cron
+   trigger are present. Record the public URL as `<INGRESS_URL>`; the retained
+   name is `<INSTANCE_NAME>-ingress` so existing domains and callback URLs remain
+   stable. No separate Core Worker deployment is needed.
 
-8. After both Workers are deployed, configure the final webhook URL as
+8. After the Worker is deployed, configure the final webhook URL as
    `<INGRESS_URL>`, set the matching webhook secret, and confirm the final
    permissions and all subscriptions listed in [GitHub App setup](#github-app-permissions-and-installation),
    including `pull_request`, `issue_comment`, `check_run`, `check_suite` and repository metadata events. Only
@@ -1007,10 +987,9 @@ uses the temporary invocation described above.
 
 The deployed variables-versus-secrets inventory is deliberately small:
 
-| Worker                    | Plain variable                                       | Secrets                                       | Non-secret bindings                                  |
-| ------------------------- | ---------------------------------------------------- | --------------------------------------------- | ---------------------------------------------------- |
-| `<INSTANCE_NAME>-ingress` | `ALLOWED_INSTALLATION_IDS`, `ALLOWED_BOT_AUTHOR_IDS` | `WEBHOOK_SECRET`, `RUNNER_CALLBACK_TOKEN`     | `CORE` → `<INSTANCE_NAME>-core`                      |
-| `<INSTANCE_NAME>-core`    | `GITHUB_APP_ID`                                      | `GITHUB_APP_PRIVATE_KEY`, `RUNNER_AUTH_TOKEN` | `REVIEW_DB`, `EVIDENCE_BUCKET`, `RUNNER` VPC Service |
+| Worker                    | Plain variable                                               | Secrets                                                                                  | Non-secret bindings                                |
+| ------------------------- | ------------------------------------------------------------ | ---------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| `<INSTANCE_NAME>-ingress` | `GITHUB_APP_ID`, allowlists, branding and telemetry settings | `GITHUB_APP_PRIVATE_KEY`, `RUNNER_AUTH_TOKEN`, `WEBHOOK_SECRET`, `RUNNER_CALLBACK_TOKEN` | `REVIEW_DB`, `EVIDENCE_BUCKET`, `RUNNER`, `ASSETS` |
 
 `GITHUB_APP_ID`, `ALLOWED_INSTALLATION_IDS`, and `ALLOWED_BOT_AUTHOR_IDS` are
 deployment configuration, not secrets. Supply them only through the renderer:
@@ -1034,7 +1013,7 @@ corepack pnpm build
 git diff --check
 ```
 
-These checks can prove local behavior such as a signed webhook reaching CORE,
+These checks can prove local behavior such as a signed webhook reaching the internal coordinator,
 D1 queue/claim state changes, Runner pull capture, and the relevant public
 behavior.
 They do not prove the deployed
@@ -1116,7 +1095,7 @@ head SHA, and the single installation ID in the generated config.
    terminal and to retain the exact recorded base/head SHAs:
 
    ```sh
-   corepack pnpm dlx wrangler@4.124.0 d1 execute REVIEW_DB --remote --config apps/core/wrangler.<INSTANCE_NAME>.jsonc --command "SELECT delivery_id, status, base_sha, head_sha FROM deliveries WHERE delivery_id = '<DELIVERY_ID>'; SELECT run_id, status, base_sha, head_sha, runner_job_id, runner_attempt, evidence_key, evidence_status, evidence_size, evidence_sha256, execution_started_at, submission_completed_at, cleanup_completed_at FROM review_runs WHERE delivery_id = '<DELIVERY_ID>';"
+   corepack pnpm dlx wrangler@4.124.0 d1 execute REVIEW_DB --remote --config apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc --command "SELECT delivery_id, status, base_sha, head_sha FROM deliveries WHERE delivery_id = '<DELIVERY_ID>'; SELECT run_id, status, base_sha, head_sha, runner_job_id, runner_attempt, evidence_key, evidence_status, evidence_size, evidence_sha256, execution_started_at, submission_completed_at, cleanup_completed_at FROM review_runs WHERE delivery_id = '<DELIVERY_ID>';"
    ```
 
    The expected terminal state for this successful gate is `completed` for
@@ -1181,10 +1160,10 @@ Run `corepack pnpm build` before deploying Ingress: the SvelteKit dashboard
 workspace emits `apps/dashboard/build`, served by the existing Ingress `ASSETS`
 binding. Keep the `assets` block when updating an existing generated Wrangler
 config. `run_worker_first: true` preserves API, webhook and authenticated Runner
-routing; Ingress explicitly serves the static page shell for dashboard routes.
+routing; SvelteKit renders dashboard pages on the server before browser hydration.
 The build contains no repository or task data; browsers read the public Core
 API through Ingress.
-Keep the Core Cron Trigger `* * * * *` in the deployment-specific Wrangler
+Keep the Worker Cron Trigger `* * * * *` in the deployment-specific Wrangler
 configuration as well as the tracked template. The scheduled handler refreshes
 shared repository metadata independently of dashboard traffic. It checks due
 repositories in bounded batches with a two-minute target interval. Public
@@ -1259,7 +1238,7 @@ branch protection requires the old Check name, update that requirement when
 switching names.
 
 For an existing deployment, edit `vars.GITHUB_CHECK_NAME` in its retained
-`apps/core/wrangler.<INSTANCE_NAME>.jsonc` and deploy Core. Preserve this setting
+`apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc` and deploy the Worker. Preserve this setting
 when merging template updates or restoring a rollback configuration; do not run
 the renderer over existing files.
 

@@ -2,7 +2,7 @@ import { DEFAULT_REVIEW_NAME, PublicDashboardConfig } from '@compte-rendu/contra
 import { Schema } from 'effect';
 import type { LayoutLoad } from './$types';
 
-export const ssr = false;
+export const ssr = true;
 export const prerender = false;
 
 export const load: LayoutLoad = async ({ fetch }) => {

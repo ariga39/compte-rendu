@@ -1,4 +1,5 @@
 <script lang="ts">
+  let { data } = $props();
   import { afterNavigate } from '$app/navigation';
   import { page } from '$app/state';
   import TaskDetail from '#lib/components/TaskDetail.svelte';
@@ -29,4 +30,4 @@
   }
 </script>
 
-<TaskDetail {runId} variant="page" back={{ href: backHref, onBack }} />
+<TaskDetail {runId} dehydrated={data.dehydrated} variant="page" back={{ href: backHref, onBack }} />

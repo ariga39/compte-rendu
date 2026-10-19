@@ -13,6 +13,7 @@ export function isPageVisible(): boolean {
  * both events and re-evaluate the focus state on every one.
  */
 export function installFocusTracking(): void {
+  if (typeof document === 'undefined') return;
   focusManager.setEventListener((handleFocus) => {
     if (typeof document === 'undefined') return;
     const listener = () => {
@@ -35,9 +36,10 @@ export function createDashboardQueryClient(): QueryClient {
   return new QueryClient({
     defaultOptions: {
       queries: {
+        enabled: typeof window !== 'undefined',
         retry: false,
         staleTime: 0,
-        gcTime: 0,
+        gcTime: typeof window !== 'undefined' ? 0 : Infinity,
         refetchOnMount: true,
         refetchIntervalInBackground: false,
       },

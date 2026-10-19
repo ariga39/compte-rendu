@@ -4,7 +4,7 @@ import { extname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test as base, expect, type Page } from '@playwright/test';
 
-const buildRoot = resolve(fileURLToPath(new URL('../build', import.meta.url)));
+const buildRoot = resolve(fileURLToPath(new URL('../.svelte-kit/output/client', import.meta.url)));
 
 const contentTypes: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -46,7 +46,11 @@ export interface Harness {
 }
 
 async function staticFile(pathname: string) {
-  const relative = pathname === '/' ? '/index.html' : pathname;
+  if (pathname === '/' || pathname === '/index.html') {
+    const data = await readFile(new URL('../.svelte-kit/client-shell.html', import.meta.url));
+    return { data, type: 'text/html; charset=utf-8' };
+  }
+  const relative = pathname;
   if (relative.includes('..')) return null;
   const candidate = resolve(buildRoot, `.${relative}`);
   if (candidate !== buildRoot && !candidate.startsWith(`${buildRoot}/`)) return null;
@@ -102,6 +106,11 @@ async function startHarness(): Promise<{ harness: Harness; server: Server }> {
   const server = createServer((req, res) => {
     void (async () => {
       const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+      // Client-only fixture: page data is supplied by the mocked public API.
+      if (url.pathname.endsWith('/__data.json')) {
+        respond(res, { status: 200, json: { type: 'data', nodes: [null, null, null] } });
+        return;
+      }
       if (url.pathname === '/favicon.ico') {
         res.writeHead(204);
         res.end();

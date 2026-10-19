@@ -8,7 +8,8 @@
     "test:dashboard": "corepack pnpm --filter @compte-rendu/dashboard test:dashboard",
     "render:wrangler": "node --experimental-strip-types scripts/render-wrangler-config.mts",
     "diagnose": "node --experimental-strip-types scripts/diagnose.mts",
-    "build": "vp run --filter './apps/dashboard' --filter './apps/core' --filter './apps/ingress' --filter './apps/runner' --filter './apps/llm-service' --fail-if-no-match build"
+    "build": "vp run --filter './apps/dashboard' --filter './apps/runner' --filter './apps/llm-service' --fail-if-no-match build",
+    "test:ssr": "vitest run --config tests/runtime/ssr.config.mts && corepack pnpm --filter @compte-rendu/dashboard test:ssr"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "0.22.0",

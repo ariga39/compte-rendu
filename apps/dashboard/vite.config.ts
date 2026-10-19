@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import adapter from '@sveltejs/adapter-static';
+import adapter from '@sveltejs/adapter-cloudflare';
 import { sveltekit } from '@sveltejs/kit/vite';
 import { mdsvex } from 'mdsvex';
 import rehypeSlug from 'rehype-slug';
@@ -17,6 +17,11 @@ const stripCarbonRemoteFontFaces = (): Plugin => ({
   },
 });
 
+const cloudflareAdapter = adapter({
+  config: 'wrangler.build.jsonc',
+  platformProxy: { configPath: 'wrangler.build.jsonc' },
+});
+
 const commitSha = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
 
 export default defineConfig(async () => ({
@@ -24,7 +29,15 @@ export default defineConfig(async () => ({
   plugins: [
     stripCarbonRemoteFontFaces(),
     ...(await sveltekit({
-      adapter: adapter({ fallback: 'index.html', strict: false }),
+      adapter: {
+        ...cloudflareAdapter,
+        async adapt(builder) {
+          // Browser interaction fixtures use SvelteKit's generated client shell.
+          // It is outside the deployed assets; workerd tests exercise real SSR.
+          await builder.generateFallback('.svelte-kit/client-shell.html');
+          await cloudflareAdapter.adapt(builder);
+        },
+      },
       prerender: { entries: [] },
       extensions: ['.svelte', '.md'],
       preprocess: [mdsvex({ extensions: ['.md'], rehypePlugins: [rehypeSlug] })],

@@ -1,11 +1,14 @@
-import { createCoreWorker, type CoreWorkerEnv } from '../../apps/core/src/core-worker';
+import {
+  createApplication,
+  type ApplicationEnv,
+} from '../../apps/dashboard/src/lib/server/application';
 import { createD1ReviewStateStore } from '../../apps/core/src/index';
 
 interface RunnerCaptureBinding {
   readonly fetch: (request: Request) => Promise<Response>;
 }
 
-interface RuntimeCoreEnv extends CoreWorkerEnv {
+interface RuntimeCoreEnv extends ApplicationEnv {
   readonly RUNNER: RunnerCaptureBinding;
 }
 
@@ -53,7 +56,7 @@ export default {
       return Response.json({ runId: claim.runId, checkRunId: 321 });
     }
 
-    const worker = createCoreWorker(
+    const worker = createApplication(
       { ...env },
       {
         github: {
@@ -74,6 +77,6 @@ export default {
         }),
       },
     );
-    return worker.fetch(request, env);
+    return worker.fetch(request);
   },
 };

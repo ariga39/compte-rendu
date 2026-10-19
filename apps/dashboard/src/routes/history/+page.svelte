@@ -1,4 +1,5 @@
 <script lang="ts">
+  let { data } = $props();
   import { afterNavigate, beforeNavigate, goto } from '$app/navigation';
   import { page } from '$app/state';
   import { Button, Select, SelectItem } from 'carbon-components-svelte';
@@ -30,6 +31,7 @@
   let selected = $derived(selectedTaskId());
 
   const dash = createDashboard<HistoryModel>({
+    dehydrated: () => data.dehydrated,
     key: () => `/history${search}`,
     urls: () => [historyRequestUrl(search)],
     build: (results, timing) => buildHistory(results, timing),
