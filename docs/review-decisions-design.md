@@ -1,6 +1,7 @@
 # Explicit review decisions
 
-Status: implementation design, 2026-10-18. Production activation requires the rollout below.
+Current result and publication contract. See [architecture](design.md) for the
+job lifecycle and [operations](operations.md) for release procedures.
 
 ## Product behavior
 
@@ -90,14 +91,12 @@ the existing publication failure/uncertainty state.
 
 Keep execution/publication status separate from the review decision. A successfully
 published Request changes review is a completed task, not a failed model run.
-The Check continues to describe whether the review was delivered; its title and
-summary should also state the decision. Repository review requirements govern
+The Check continues to describe whether the review was delivered; its title states the decision and its summary confirms delivery. Repository review requirements govern
 merge approval. This feature does not change branch protection or auto-merge.
 
-The dashboard should show a Decision column/badge with the exact labels above,
-and show the same field in the detail drawer and Help. Keep Status for Queued,
-In progress, Published, Failed, and Superseded. Pending and historical unknown decisions display an em dash. A separate decision
-filter is outside this slice.
+The dashboard shows a Decision column with the exact labels above,
+and the same field in the detail drawer and Help. Keep Status for Queued,
+In progress, Published, Failed, and Superseded. Pending and historical unknown decisions display an em dash. A decision filter is not implemented.
 Public APIs remain DB-only and retain the existing private-repository redaction.
 Do not expose finding text or repository identity through the new field.
 
@@ -132,9 +131,9 @@ framework is needed for this feature.
 - A published Request changes run completes successfully while displaying its
   decision; runtime failure publishes no vote.
 - Legacy callbacks retain Comment behavior; historical rows remain unknown.
-- Exercise Request changes followed by a fixed revision's Approve on a dedicated
-  test PR, retaining actual GitHub review states. Test repository protection
-  separately before claiming either vote blocks or permits merging.
+- Tests establish decision mapping/publication, not repository branch protection.
+  Validate protection on the target repository before claiming a vote blocks or
+  permits merging.
 
 ## First-party references
 

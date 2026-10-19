@@ -1,5 +1,9 @@
 # OpenCode 1 vs 2: auth and Runner-compatibility research
 
+> Archived research or implementation history. Its observations and recommendations
+> describe the versions and decisions recorded below, not the current product contract.
+> Use the [current documentation](../README.md) for supported behavior and operations.
+
 Research date: 2026-10-18. Bounded primary-source inspection of the official
 install channels, release metadata, published docs, and the tagged source of the
 pinned release and of verified v2 release 2.0.32. No credential, private key, repository content, or raw session is included in this
@@ -7,7 +11,7 @@ note. Isolated synthetic session exports were inspected; live probes used existi
 host-side credential resolvers without copying resolved keys into the Sandbox.
 
 The user requests a V2 adaptation. This note records verified facts and required
-prerequisites; the implementation follows the combined [review decision design](review-decisions-design.md).
+prerequisites; the implementation follows the combined [review decision design](../review-decisions-design.md).
 
 ## Channels and versions (verified today)
 

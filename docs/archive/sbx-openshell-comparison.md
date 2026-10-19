@@ -1,5 +1,9 @@
 # Docker sbx versus NVIDIA OpenShell for static PR review
 
+> Archived research or implementation history. Its observations and recommendations
+> describe the versions and decisions recorded below, not the current product contract.
+> Use the [current documentation](../README.md) for supported behavior and operations.
+
 Research date: 2026-10-16. Official sources and current Runner code inspected;
 no installation, production change or comparative performance test performed.
 

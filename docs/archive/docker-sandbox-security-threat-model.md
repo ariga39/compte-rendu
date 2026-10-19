@@ -1,5 +1,9 @@
 # Docker Sandbox threat model for the PR-review runner
 
+> Archived research or implementation history. Its observations and recommendations
+> describe the versions and decisions recorded below, not the current product contract.
+> Use the [current documentation](../README.md) for supported behavior and operations.
+
 Research date: 2026-08-31. Sources are Docker's current Sandboxes documentation,
 OpenCode's official documentation source at commit
 [`10765ff`](https://github.com/anomalyco/opencode/tree/10765ff2a9da8c3b88e4de873aa383a49c318912),
@@ -207,7 +211,7 @@ Documented by Docker:
 - `sbx rm` deletes the VM and its contents.
 
 Runner-specific facts visible in
-[`runner.ts`](../apps/runner/src/runner.ts): it uses `--clone` and
+[`runner.ts`](../../apps/runner/src/runner.ts): it uses `--clone` and
 `--no-share-skills`, removes the Git remote and checkout credential before VM
 creation, scopes the model custom secret to one sandbox, registers the
 sandbox-scoped built-in `github` service with a host command that reads the

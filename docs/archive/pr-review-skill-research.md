@@ -1,5 +1,9 @@
 # PR review skill source synthesis
 
+> Archived research or implementation history. Its observations and recommendations
+> describe the versions and decisions recorded below, not the current product contract.
+> Use the [current documentation](../README.md) for supported behavior and operations.
+
 Research date: 2026-08-26. Sources are pinned to the commits current at research time.
 
 ## Source 1: poi OpenCode review workflow

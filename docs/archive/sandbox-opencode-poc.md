@@ -1,5 +1,9 @@
 # Sandbox/OpenCode remote PoC
 
+> Archived research or implementation history. Its observations and recommendations
+> describe the versions and decisions recorded below, not the current product contract.
+> Use the [current documentation](../README.md) for supported behavior and operations.
+
 This note records the reusable outcome of the 2026-08-26 Cloudflare Sandbox
 1.0/OpenCode proof of concept. It separates Cloudflare's documented platform
 properties from observations made during this PoC. It intentionally omits
@@ -15,7 +19,7 @@ using OpenCode `1.18.22` and model
 exactly `PONG`, exited with code `0`, and had empty stderr. The observed command
 duration was approximately `8.55` seconds. These are **PoC observations**, not
 Cloudflare service guarantees. The repository pins the observed OpenCode
-version in [`apps/core/Dockerfile`](../apps/core/Dockerfile).
+version in [`apps/core/Dockerfile`](https://github.com/ariga39/compte-rendu/blob/163b59bc79b0499c2d5fa41cb7df3be418390c43/apps/core/Dockerfile).
 
 The successful minimal invocation was:
 

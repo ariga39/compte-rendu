@@ -1,607 +1,255 @@
-# Compte rendu — v1 design
+# Architecture and behavior
 
-## Purpose
-
-Compte rendu is a small GitHub App that reviews pull requests outside GitHub
-Actions. Its first release proves one complete product path:
-
-1. receive a GitHub pull-request event;
-2. decide whether that exact PR revision may be reviewed;
-3. durably queue the review in D1 for the self-hosted Runner;
-4. publish the review's Markdown body to the same revision; and
-5. terminate the run and reclaim the Sandbox.
-
-The project optimizes for a working, safe review loop. It is not a general CI
-platform.
-
-## v1 scope
-
-Included:
-
-- GitHub.com repositories on which the GitHub App is installed;
-- non-Bot-authored private-repository PRs, reviewed automatically;
-- non-Bot-authored public same-repository PRs, reviewed automatically;
-- Bot-authored PRs, ignored automatically by default, with an instance option
-  to admit only explicitly allowlisted stable numeric GitHub author IDs;
-- public fork PRs, reviewed only after a maintainer issues `/ai-review` for the
-  current head SHA;
-- `issue_comment.created` events containing the manual review command;
-- standard Check Run and Check Suite re-requests for failed reviews;
-- `opened`, `reopened`, `synchronize`, and `ready_for_review` PR events;
-- one self-hosted Runner Job/OpenCode execution path;
-- one concise human-readable Markdown review, guided by at most five
-  high-confidence findings when present;
-- one GitHub Check Run showing queued, running, and terminal review state;
-- a visible terminal notification: the Review itself on success or one pull
-  request comment when the Review fails;
-- D1 run history and delivery deduplication;
-- a public read-only dashboard with protected repository identities; and
-- runner-owned Sandbox cleanup for each attempt.
-
-Deferred:
-
-- running repository tests or build scripts;
-- an administration UI, billing, and cross-installation analytics;
-- multiple model or agent adapters;
-- automatic approval or request-changes reviews; and
-- a generic CI/workflow product.
+Compte rendu is a GitHub App for static pull-request review outside GitHub Actions.
+One admitted review is one durable Core run, one Runner job and one final GitHub
+review. Multiple models are participants within that job, not separate published
+reviews. This document describes the implementation; historical proposals are in
+[the archive](archive/README.md).
 
 ## Product behaviour
 
-### Automatic review
+### Admission
 
-A non-draft PR whose GitHub author type is not `Bot`, or whose `Bot` author ID
-is explicitly allowlisted by the ingress instance, is eligible for automatic
-review when either:
+Ingress verifies the webhook HMAC, body bounds and installation allowlist before
+forwarding a normalized event to Core. Automatic review accepts non-draft
+`opened`, `reopened`, `synchronize` and `ready_for_review` events when the base
+repository is private or the head belongs to the same repository. Bot authors
+are excluded unless their stable numeric ID is in `ALLOWED_BOT_AUTHOR_IDS`.
+Human events and manual requests do not consult that Bot allowlist.
 
-- its base repository is private; or
-- its head repository ID equals its base repository ID.
+Public fork PRs and non-allowlisted Bot PRs require `/ai-review` from a user with
+current `write`, `maintain` or `admin` permission. Approval binds to the observed
+head SHA; a new head needs new authorization. Manual feedback uses GitHub
+reactions: `eyes` for admission, `confused` for denial/draft/supersession, and `-1`
+for an admitted run that fails. The published review is the success signal.
 
-The second rule covers branches created in a public base repository by people.
-Ingress ignores automatic pull-request events whose `pull_request.user.type`
-is `Bot` unless its stable positive numeric `pull_request.user.id` is in the
-instance's `ALLOWED_BOT_AUTHOR_IDS` JSON array. Missing or malformed bot
-configuration, missing IDs, and IDs not in the array remain ignored before
-Core can schedule a Runner Job. This avoids routine Dependabot, Renovate, and
-other non-allowlisted Bot-authored PRs consuming Sandbox and model capacity.
-It uses GitHub's actor type and numeric ID rather than a login-name or app-slug
-list. Human events and manual `/ai-review` events do not consult this bot
-allowlist.
+`check_run.rerequested` and `check_suite.rerequested` can retry a failed review
+under the same current maintainer checks. A retry creates a fresh run and Sandbox.
+Duplicate deliveries and already active/completed same-revision reviews do not
+create another review. Unknown Checks or uncertain authorization never start work.
 
-### External public PR
+### Checks and publication
 
-A public fork or non-allowlisted Bot-authored PR does not start a Sandbox or
-model call when opened or updated. A maintainer with `write`, `maintain`, or
-`admin` permission may comment `/ai-review`. Approval applies only to the head
-SHA observed when the command is handled. A later `synchronize` event requires
-a new command.
+Check setup is best effort after durable admission, outside the webhook response
+path. Its D1 ownership lease prevents concurrent setup; late setup catches up to
+the persisted run. Check failure does not prevent execution or terminal feedback.
+A Check is queued until claim, in progress after claim, and successful only after
+publication. Failure and supersession complete it as failure and cancelled.
+`details_url` points to that run's dashboard page. The configurable Check name
+also supplies the dashboard title.
 
-The originating numeric `issue_comment` id is retained for manual-command
-feedback. A successfully authorized and scheduled manual command gets the
-GitHub `eyes` reaction. A conclusive denial, missing pull request, or draft
-gets `confused` and does not start a Runner Job. An accepted run that ends in a
-failure gets `-1`; a run superseded by a newer head gets `confused`. A
-successful run adds no reaction beyond `eyes`, because its published
-review is the completion signal. Automatic jobs have no command
-reaction. Feedback uses GitHub's issue-comment reaction endpoint; repeating a
-same-app, same-content write is the replay-idempotency mechanism and does not
-introduce feedback state.
-
-After durable admission, Core starts best-effort Check Run setup outside the
-webhook response path. The Check is bound to the immutable head SHA with the
-Core run id as `external_id`. Only the newly admitted run starts setup;
-an atomic D1 claim lets delivery replay recover setup that never began without
-starting a concurrent second attempt. Its one-minute lease is longer than
-Cloudflare's 30-second post-response [`waitUntil()` limit](https://developers.cloudflare.com/workers/runtime-apis/context/#waituntil),
-so replay cannot take ownership while the original background invocation can
-still run. When late setup finishes, it reconciles
-the persisted run so the Check catches up to
-`in_progress`, `success`, `failure`, or `cancelled` rather than remaining
-`queued`. When available, it moves from `queued` to
-`in_progress` when the Runner claims the Job, then to `success` only after the
-Review is published. A terminal execution or publication failure completes it
-as `failure`; a run replaced by a newer head completes as `cancelled`. A slow,
-interrupted, or failed Check setup never blocks Runner admission. Checks are
-progress display, not the terminal notification: success publishes the Review
-body, while failure publishes one ordinary pull request comment. GitHub Check
-API failure degrades progress visibility but never suppresses either terminal
-publication.
-
-### Re-running a failed review from Checks
-
-GitHub's standard individual Check and Check Suite re-run controls are manual
-review requests. Only `check_run.rerequested` and `check_suite.rerequested`
-are accepted. Core resolves the original review through the persisted Check
-Run ID and external run ID, matching the repository and installation. Suite
-re-requests resolve the latest product Check through GitHub first. Webhook PR
-lists are not required, so fork Check payloads with empty lists still work.
-
-The original run must be failed. The requester must have the same current
-`write`, `maintain`, or `admin` permission required by `/ai-review`. Core reads
-the PR's current facts and uses the existing manual admission and deduplication
-path. Each accepted re-run gets a new run and the normal fresh Job/Sandbox;
-old failure history is retained. Duplicate deliveries and an already active or
-completed review of the current revision do not create another review.
-Missing actors, unknown or mismatched Checks, and uncertain authorization never
-start work. A Check request has no comment reaction; its new Check and terminal
-Review or failure comment provide feedback. `/ai-review` remains available.
+Core is the only GitHub publisher. It derives repository, PR and commit from the
+admitted run, rechecks the head, and uses a publication claim plus run marker to
+suppress duplicates. New structured results also verify the returned/recovered
+review author, commit and state. A changed head is superseded without a stale
+vote. GitHub reads and the subsequent POST are not atomic; an ambiguous response
+is not proof that no review was published.
 
 ### Review result
 
-The OpenCode 2 agent returns its final review as a JSON object containing
-`decision` (`approve`, `request_changes`, or `comment`) and non-empty,
-size-bounded `markdown`. No custom result-submission tool is installed or
-required. Runner reads the final assistant output and validates it with the
-shared Effect schema, together with the exact session identity, successful
-outcome, final assistant stop and final successful idle message. Intermediate
-analysis and tool output are not review results.
+OpenCode 2 returns final assistant JSON with `decision` (`approve`,
+`request_changes`, `comment`) and non-empty, bounded `markdown`. Runner extracts
+it from the completed session export, checking exact session/model/agent identity,
+successful outcome, final assistant `stop` and final successful `idle`. Intermediate
+analysis and tools are not results. There is no custom submission tool.
 
-A normally completed session with missing or invalid final JSON can receive one
-correction in the same live Sandbox and session. This applies to one-model and
-multi-model reviews alike; both invocations share the original execution
-deadline, model and agent. Correction settles before grant revocation, final
-export, archival and destruction. Abort, timeout, truncation and ambiguous
-session identity do not trigger correction. An unresolved invalid result fails
-without a vote. Runner does not extract JSON from surrounding prose, infer a
-decision, or rewrite the review.
+A normally completed session with missing/invalid final JSON can receive one
+correction in the same live Sandbox, session, model and agent. Both calls share
+the original deadline. Abort, timeout, truncation, abnormal completion or ambiguous
+session identity do not authorize correction. Validation settles before grant
+revocation, final export and destruction. Unresolved invalid output publishes no
+vote; Runner neither extracts JSON substrings from prose nor infers a decision.
 
-The common prompt asks for concise, adversarial review of the change's necessity,
-correctness and implementation cost, and a first line beginning `TLDR:` with the
-conclusion. Those are model instructions, not schema checks or failure gates.
-An otherwise valid result is not rejected for a missing heading or different
-wording. Review quality and prompt adherence are evaluated from retained output.
+The shared prompt asks for concise, adversarial review of necessity, correctness
+and implementation cost, starting with `TLDR:`. These are instructions, not
+schema checks. A different heading does not invalidate a structural result.
 
-New results are versioned `{version: 2, decision, markdown}`. Core validates the
-manifest result against the callback and exact Markdown bytes, checks revision
-freshness, and publishes the corresponding GitHub `APPROVE`, `REQUEST_CHANGES`,
-or `COMMENT` review. Publication/recovery for new results checks the App author,
-commit and review state. Legacy string callbacks retain COMMENT behavior during
-rollout; historical decisions remain unknown. A published Request changes is a
-successful review delivery; repository rules determine merge eligibility.
-See [review decisions](review-decisions-design.md) for vote semantics and rollout.
-
-## Public dashboard
-
-The [dashboard design](public-dashboard-design.md) defines the public read model,
-privacy projection, lifecycle reporting, and refresh behavior. Existing Ingress
-serves the UI; Core reads D1 and returns only the public projection. Neither
-page reads nor browser refreshes call GitHub or Runner. Repository metadata is
-maintained independently by Core's scheduled handler. Execution progress is
-reported by the owned Runner job; product outcome and cleanup remain distinct.
-
-The approved dashboard test seams are public Worker HTTP requests (including a
-fresh Worker against the same D1 database), authenticated Runner progress and
-terminal callbacks, and browser-visible interactions. The existing store query
-seam may arrange and observe persisted runs; tests do not assert private SQL
-columns or helper call order. Clock and external GitHub/process adapters provide
-controlled failures and races without changing the public observations.
-
-### Dashboard frontend
-
-The public dashboard uses SvelteKit file routes and Carbon Svelte components in
-`apps/dashboard`, with self-hosted IBM Plex Mono throughout. Its static client build is served by the
-existing Ingress Worker through `ASSETS`; Core remains the only source of public
-task data. No task identities are rendered into build artifacts. Browser
-behavior tests exercise the built frontend, including automatic refresh,
-identity expiry, history navigation and anonymous task detail. The client query
-lifecycle (polling schedule, focus/visibility/reconnect refresh, cancellation,
-failure backoff and in-memory cache eviction) is owned by TanStack Svelte Query;
-responses are never persisted and the cache is discarded once a page is
-unobserved.
+Runner carries `{version: 2, decision, markdown}` in its callback and manifest;
+Core checks agreement with the exact Markdown artifact before mapping the vote to
+`APPROVE`, `REQUEST_CHANGES` or `COMMENT`. A delivered Request changes review is
+successful execution. Historical string results retain COMMENT behavior and an
+unknown decision; their text is not reclassified. See [review decisions](review-decisions-design.md).
 
 ## Deployment shape
 
-The pnpm monorepo contains two Cloudflare Worker services and one self-hosted
-Runner Job process:
-
-```text
-GitHub webhook ────────────────┐
-                              v
-self-hosted Runner ──────> review-ingress (public)
-  ^  claim/callback             |
-  |                             | Service Binding
-  | targeted DELETE             v
-  `──── Workers VPC ───── review-core (no public route)
-                              |- GitHub App
-                              |- D1
-                              `- private R2 evidence bucket
-
-self-hosted Runner → fresh Docker Sandbox/OpenCode
+```mermaid
+flowchart LR
+  G[GitHub] --> I[Ingress: webhook and public dashboard]
+  B[Browser] --> I
+  I -->|Service binding| C[Core]
+  C --> D[(D1)]
+  C --> E[(Private R2)]
+  C --> G
+  R[Runner] -->|Claim, progress, callback| I
+  C -->|VPC: targeted cancellation| R
+  R --> S[Fresh Sandbox / OpenCode]
+  S --> L[Host LLM grant service]
+  L --> P[Loopback LiteLLM]
 ```
 
-`review-ingress` verifies the webhook and converts it to a small internal
-event. `review-core` owns policy, GitHub App authentication, the D1 queue,
-review publication, evidence metadata, and run records. Webhook acceptance
-only durably schedules a run; it does not wait for GitHub Check setup, mint a
-GitHub read token, or admit a Runner Job. A Runner with available capacity calls
-the authenticated public `/runner-claim` route through ingress. Core atomically
-claims the oldest eligible unclaimed run, records one immutable Job id/attempt,
-then resolves the
-repository and mints the scoped read token. The claim also moves an available
-persisted Check Run to `in_progress`. The Runner owns execution and cleanup,
-then sends one authenticated result callback through the same public ingress.
-Core stores the bounded named-field evidence bundle in private R2 before
-confirming publication, then completes the Check when one is available. There
-is no Workflow.
+| Component            | Owns                                                                                                           |
+| -------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `apps/ingress`       | Webhook verification, installation filtering, public forwarding and static dashboard assets                    |
+| `apps/core`          | Authorization, durable queue, GitHub App access/publication, lifecycle, public projection and metadata refresh |
+| `apps/runner`        | Checkout, sandbox lifecycle, agent execution, evidence, grant revocation and terminal callback                 |
+| `apps/llm-service`   | Per-job grants, route authorization, cancellation and sanitized transport diagnostics                          |
+| LiteLLM Proxy        | Upstream models, URLs, credentials and protocol adaptation                                                     |
+| `apps/dashboard`     | Static SvelteKit/Carbon UI with self-hosted IBM Plex Mono                                                      |
+| `packages/contracts` | Shared Effect schemas and transport types                                                                      |
 
-The repository layout is intentionally small:
+Core has no public route. Ingress is public; Runner and inference/control services
+are private. New work is pulled from D1, not submitted through the VPC binding.
+There is no Cloudflare Workflow or message queue. See [installation](installation.md)
+and [LLM service](llm-service.md) for configuration, grants and deployment order.
 
-```text
-apps/
-  ingress/
-  core/
-  runner/
-packages/
-  contracts/
-docs/
-```
+## Runner Job and pull interface
 
-Vite+ supplies the shared TypeScript/test/lint toolchain and pnpm supplies the
-workspace and dependency lockfile. Runtime code uses the pinned Effect 4 RC.
-Effect Schema validates webhook and OpenCode event contracts; Effect services
-and scopes model true external seams and Sandbox cleanup. Small pure transformations
-remain ordinary TypeScript rather than being wrapped for uniformity. Additional
-packages require demonstrated reuse, not anticipated reuse.
+`POST /runner-claim` returns an immutable `RunnerJobInput` or 204. Ingress
+protects claim, progress and callback with `RUNNER_CALLBACK_TOKEN`. Core atomically
+claims an eligible scheduled row, records job identity/attempt, then resolves the
+repository and mints a repository-scoped read token. Progress and callbacks must
+match that persisted owner. Core's VPC `DELETE /jobs/:id` cancels reachable jobs.
+
+Runner reserves capacity for in-flight claims and holds slots through archival,
+cleanup and callback delivery. It fills `RUNNER_CONCURRENCY` (positive integer,
+default 1); malformed startup configuration fails before admission. An optional
+TOML `RUNNER_SETTINGS_FILE` overrides concurrency and reloads through smol-toml,
+chokidar and Effect Schema. Invalid updates retain the last good value; increases
+wake claims and decreases preserve admitted jobs/reserved claims. Other settings
+are not hot-reloaded. Claims are single-flight; ambiguous claim responses halt
+polling rather than risk duplicate ownership.
+
+Jobs for the same repository/PR remain serialized until the prior Sandbox is
+confirmed destroyed. Unrelated PRs may progress. Each job checks immutable base
+and head commits, derives a merge base, and performs GitHub-read preflight before
+OpenCode starts. Checkout disables hooks, submodules and LFS smudge and removes
+the authenticated remote before agent execution.
+
+The agent budget is 30 minutes. One same-session correction gets at most two
+minutes of its remainder; it is not another attempt. Callback delivery has a
+bounded timeout and one immediate retry. An oversized evidence bundle becomes a
+small terminal incomplete-evidence failure, not truncated successful evidence.
+
+Normal success, failure, timeout and cancellation finalize evidence and destroy
+the Sandbox before callback. A hard Runner crash can leave resources and claimed
+rows behind; terminal progress and automatic crash recovery are not guaranteed.
+Orphan reconciliation remains [#66](https://github.com/ariga39/compte-rendu/issues/66).
 
 ## Multi-model review jobs
 
-One review output remains one Core run and one Runner job. Core freezes the
-versioned model selection at admission; changing the operator configuration affects
-new jobs only. The public dashboard remains read-only. See
-[review configuration](review-configuration.md) for the protected operator API.
+Core freezes the operator's model selection and revision when admitting a run.
+Configuration changes affect new admissions, not queued/running jobs. The protected
+[configuration API](review-configuration.md) stores route IDs, not credentials or
+URLs. `selection: null` uses the Runner's configured default model.
 
-The sbx/OpenCode adapter gives a supervisor the selected reviewer agents inside
-one Sandbox. Its task is to obtain independent reviews of the same immutable PR
-revision and synthesize one final review. The agent controls dispatch, retries,
-and how it exchanges intermediate reports; Runner does not enforce an internal
-workflow or require child agents to submit structured findings. All sessions
-share the job deadline, read-only repository permissions, and a grant restricted
-to the selected LLM routes.
+One explicit reviewer runs directly; multiple reviewers use a supervisor and
+selected subagents in one sbx Sandbox. Both use the same review prompt and final
+output contract. The supervisor controls dispatch and intermediate reports;
+Runner does not impose a coverage ledger or child submission protocol. Child
+exports are best-effort evidence, not extra result gates. The job retains frozen
+selection and `multi-review.json`, with one callback and one publication.
 
-Only the final review is a product output contract: `decision` and `markdown`.
-Runner uses the same structural output contract for every roster size. A
-single configured reviewer is the one-model case, not a separate review prompt.
-The final assistant JSON is validated before publication; the original Markdown
-is preserved exactly. The schema checks the decision, non-empty body and size,
-not headings or review style. Intermediate
-reports and child-session records are evidence, not additional acceptance gates.
-There is no required finding-ID ledger or coverage array. The supervisor is
-instructed to preserve useful findings and explain substantive disagreements;
-structural validation does not prove the quality of that judgment.
+The LLM grant permits the routes actually needed by the job. One-reviewer jobs do
+not grant an unused synthesis route. Cancellation revokes that grant and destroys
+the shared Sandbox: closing an OpenCode client does not stop its server sessions.
+This selection/service path currently supports sbx, not OpenShell.
 
-The job retains its frozen selection, child exports and `multi-review.json` along
-with the usual final result. There is one terminal callback and one publication.
-Cancellation revokes the job grant and destroys the shared Sandbox; stopping an
-OpenCode client alone is not proof that its server sessions stopped. Historical
-single-model jobs keep their existing behavior, and `selection: null` selects that
-behavior for newly admitted jobs.
+## Sandbox runtime modules
 
-## Deep modules and test seams
+Each job has a runtime with `setup`, `exec`, `copyOut` and `destroy`. The runtime
+owns backend commands, credentials/egress and confirmed teardown; Runner retains
+budgets, aborts, redaction, diagnostics and product lifecycle. Metadata is updated
+as resources are created so partial setup can still be archived and cleaned.
 
-The following three interfaces are the agreed candidate test seams. Their
-implementations may have private helpers, but callers and behavioural tests do
-not reach through these interfaces.
+- **sbx (default):** pinned custom image, `shell` launcher and cloned workspace.
+  The shell kit avoids the built-in OpenCode kit's implicit network allowances.
+  Explicit per-job rules rely on the host's deny-all policy and absence of other
+  global/organization allows. Direct-model mode uses host secret resolution;
+  service mode injects a short-lived job grant instead of an upstream key.
+- **OpenShell:** fixed `/workspace/{checkout,config,evidence}`, preconfigured model
+  provider and job-owned GitHub provider. Startup preflight checks the configured
+  provider. Cleanup verifies ownership nonce and exact recorded identities;
+  malformed/uncertain get/list/delete results cannot confirm destruction.
 
-### Webhook ingress
+Runtime selection is startup configuration. Unknown kinds and incomplete
+OpenShell configuration fail before claims; no silent fallback to sbx occurs.
+See [security boundaries](security.md) for backend-specific assumptions.
 
-```ts
-handleWebhook(request: Request): Promise<Response>
-```
+## Credentials and evidence
 
-Its interface includes signature verification, accepted event types, payload
-limits, delivery identity, and retry response semantics. Success means the core
-accepted a normalized event. Invalid input is rejected without contacting the
-core; a core failure is retryable and is not acknowledged as accepted.
+The GitHub App private key stays in Core. Runner receives one short-lived token
+limited to the target repository and read permissions, used for checkout and the
+runtime's GitHub proxy. Sandbox agents see a proxy placeholder, not the real
+GitHub credential. Cleanup removes the job's credential sources and scoped rules.
 
-### Core Worker wiring
+In LLM service mode, supplier credentials stay in LiteLLM; Sandbox inference uses
+a job grant valid for four review budgets, with no renewal. Grant revocation and
+Sandbox cleanup are independent. An unconfirmed revocation fails the job even
+when Sandbox destruction succeeds. Direct-model and OpenShell provider modes have
+the separate credential paths documented in the installation guide.
 
-```ts
-createCoreWorker(env: CoreEnv): WorkerEntrypoint
-```
+Repository text and GitHub context are untrusted evidence. The agent is read-only:
+no repository programs, builds/tests, edits, commits or publication. Fresh
+standalone OpenCode configuration excludes repository config and host
+skills/MCP/SSH settings. Resource/time limits and egress are enforced outside the
+model; a prompt alone is not a security boundary.
 
-The private core Worker accepts normalized `POST /review-events` requests and
-the internal forwarding routes for Runner claim and callback. A webhook
-returns `202` only after the event is durably classified in D1. Check setup is
-then registered as best-effort background work and cannot delay that response
-or block Runner admission. The authenticated public `/runner-claim` route
-forwards to Core, whose atomic D1 claim returns one immutable Job input only
-after the Job identity is recorded and the repository URL/read token are
-resolved. Malformed input returns `400`; storage or binding uncertainty returns
-`503`. The existing authenticated VPC `DELETE /jobs/:id` remains the
-cancellation seam for a reachable Runner; the callback is accepted only
-through the shared static-token ingress route.
+D1 stores product state, ownership, lifecycle timestamps, decision, frozen model
+selection, repository disclosure metadata and evidence object metadata. It does
+not store raw repository contents, credentials or session transcripts. The bounded
+callback contains named manifest/JSONL/stderr/Markdown/root-session evidence;
+private R2 retains that bundle. The host retains fuller recovery evidence,
+including child sessions and OpenCode state. Public dashboard APIs expose neither.
 
-### Review coordinator
+## Public dashboard
 
-```ts
-handleReviewEvent(event: ReviewEvent): Promise<ReviewDisposition>
-completeReview(input: { runId: string; output: unknown }): Promise<ReviewDisposition>
-```
+[Dashboard behavior](public-dashboard-design.md) defines overview, filtered history,
+detail drawers, privacy and refresh. Every public read uses D1 only and triggers
+no GitHub or Runner request. Core refreshes repository metadata independently via
+its scheduled handler. Only currently verified public identity is disclosed;
+private, unknown or expired identities are anonymous.
 
-This is the main deep module. Behind the interface it deduplicates deliveries,
-loads repository facts, applies policy, records approvals, starts or supersedes
-runs, verifies the current head SHA, and publishes validated callback output.
-`completeReview` accepts only the run identity and untrusted agent output;
-repository, pull request, installation, and target SHA are loaded from durable
-state. GitHub, D1, Runner, and clock adapters sit at internal seams.
-
-Observable dispositions are deliberately few: rejected, ignored, awaiting
-approval, scheduled, completed, or failed.
-
-### Sandbox runtime modules
-
-The Runner executes every review through a small per-job runtime interface with
-four operations: `setup`, `exec`, `copyOut`, and `destroy`. Two adapters
-implement it: the production default Docker `sbx` adapter and the NVIDIA
-OpenShell adapter. Runtime selection comes from validated startup configuration
-(`RUNNER_SANDBOX_RUNTIME`, default `sbx`); an unknown kind or an incomplete
-OpenShell configuration fails before any claim or admission. The adapters own
-runtime-specific creation, execution, file transfer, credential/egress setup and
-confirmed teardown; the Runner keeps checkout, review orchestration, evidence,
-callback, and every deadline/abort/diagnostic.
-
-A per-job runtime object is created before `setup`, so a throw during partial
-setup still has cleanup state. It exposes read-only lifecycle metadata
-(`created`, backend `id`, `name`, `runtime`, `imageRef`, `evidenceRoot`) that is
-updated the moment the sandbox resource exists; the Runner archives partial
-evidence and records the manifest's `runtime`, `image`, and sandbox id from that
-metadata. Provider names, secret placeholders, network-rule bookkeeping and
-token files stay inside each adapter's closure.
-
-OpenShell uses fixed in-sandbox paths (`/workspace/checkout`, `/workspace/config`,
-`/workspace/evidence`), attaches a pre-provisioned model provider plus a unique
-per-job GitHub provider created with the read token passed through the child
-environment only, and confirms deletion by polling `sandbox get` for the exact
-owned identity. A transport error, malformed identity, or timeout is never
-treated as deletion; the documented lost driver-operation ownership after a
-gateway crash fails closed. The Docker `sbx` adapter preserves the existing
-`shell` launcher, per-job model secret and GitHub service, scoped network
-policy, and force-confirmed cleanup commands.
-
-### Runner Job and pull interface
-
-```ts
-POST /runner-claim -> 200 RunnerJobInput | 204
-```
-
-The public Runner interface has one authenticated pull route, `/runner-claim`,
-and the existing authenticated callback route, `/runner-callback`. Both use
-the same `RUNNER_CALLBACK_TOKEN` at ingress. Core's D1 `review_runs` rows are
-the sole durable queue: an atomic claim selects the oldest `scheduled` row
-whose `runner_job_id` is still null, records one immutable Job id/attempt, and
-only then resolves the repository URL and mints the scoped read token. A job
-is one immutable review attempt; the Runner reports terminal status through the
-callback after validation and Docker Sandbox cleanup. Core does not run a
-generic scheduler, use Cloudflare Queues/Redis, or reconcile orphaned rows.
-The Runner fills available slots up to the configured positive-integer
-`RUNNER_CONCURRENCY` (default 1; an invalid setting fails before any claim or
-admission). It runs independent pull-request reviews in parallel, keeps each
-slot occupied through evidence archival, Sandbox cleanup, and the terminal
-callback, and asks for the next Job only while capacity remains; a slot
-reserved by an in-flight claim cannot be taken by a direct admission. Same
-repository/PR work stays serialized until the prior Sandbox is confirmed
-destroyed, while unrelated pull requests progress. A fresh Runner process
-may claim a later unclaimed row even when an abandoned scheduled row retains a
-Job id.
-An optional `RUNNER_SETTINGS_FILE` selects a data-only TOML file whose positive
-integer `concurrency` overrides the startup environment value. Initial loading
-validates before admission or claim. `smol-toml` parses the file, `chokidar`
-observes saves/replacements, and Effect Schema validates each candidate before
-it replaces the effective limit. Reload failure keeps the last valid value.
-Increasing the limit wakes the existing guarded claim path; decreasing it
-preserves admitted Jobs and already reserved claims until they finish. This
-changes no same-PR, cleanup, callback, or ambiguous-claim halt behavior. The
-watcher rereads when ready, rejects stale read completions, and closes through
-`Runner.close()`. No model, credential, or runtime setting is reloaded.
-
-The shared review policy gives each Runner attempt a 30-minute agent budget and
-treats a failed Review Attempt as terminal: there is one attempt and no fresh
-attempt after failure. The optional same-session submission reminder uses at
-most two minutes of the remaining agent budget and is skipped when that budget
-is exhausted or the Job is aborted. It creates no new checkout or Sandbox.
-The Runner has one fixed finite execution ceiling for hang prevention. Callback
-transport gives each request its own timeout and may make one immediate retry
-of the same result; local evidence stays available when both deliveries fail.
-If the fixed callback bundle exceeds the 32 MiB request bound, the Runner sends
-one small terminal incomplete-evidence failure instead of truncating or
-uploading that bundle.
-
-The Runner reads its required `REVIEW_MODEL_CONFIG` deployment JSON at startup.
-It selects one `opencode-go` model and may register that model's metadata for
-the pinned OpenCode catalog. Missing or invalid configuration prevents Job
-claims and admission. An optional HTTPS `baseUrl` selects a gateway for that
-provider; the Runner derives the Docker credential-proxy host and exact model
-network destination from the same URL. The API key remains in the host secret
-resolver. Review permissions are unaffected.
-
-The review Sandbox runs OpenCode non-interactively inside the microVM, without
-per-call approval prompts. Its static-review policy allows the packaged skill,
-read/search and narrowly bounded read-only
-Git/GitHub commands. The reviewer has direct GitHub read capability through
-Docker's sandbox-scoped built-in `github` service and `api.github.com` egress. After
-fetching and verifying the immutable admitted base and head commits, the
-Runner derives one valid merge base with `git merge-base`. Missing, invalid,
-or unavailable merge-base history fails the Job before Sandbox/OpenCode. The
-review prompt and packaged skill require querying the complete current
-pull-request context, then reviewing `git diff --find-renames MERGE_BASE_SHA
-HEAD_SHA`; the admitted base/head OIDs remain freshness and context facts.
-GitHub responses and repository text are untrusted evidence, not
-instructions. After the GitHub egress policy is allowed and before OpenCode
-starts, the Runner performs an `installation/repositories` preflight through
-the GitHub CLI. A failed preflight fails the Job and prevents agent
-invocation.
-
-Review safety is enforced outside OpenCode: the Sandbox is cloned without
-shared host skills, host MCP settings, or SSH-agent access; network access is
-limited to the configured model host/port and `api.github.com:443`; CPU,
-memory, and deadline are fixed; and the Sandbox, secret, network policy, and temporary credential
-sources are destroyed during terminal cleanup. Exact base/head verification,
-current-head publication checks, and one valid submitted Markdown body remain
-required. Agent tool access does not grant publication authority.
+Status is product state; assignment and stage timestamps are observations, not
+proof of process liveness. Review decision and cleanup remain separate. TanStack
+Svelte Query owns adaptive polling, focus/reconnect refresh and ephemeral cache;
+there is no websocket or persisted browser response cache.
 
 ## Fail-closed rules
 
-Fail-closed is limited to decisions that could create an unauthorized review,
-publish against the wrong revision, expose credentials, or leak a running
-Sandbox:
+Reject uncertain authorization, revision freshness, credential handling, agent
+output and cleanup. Invalid input cannot authorize publication or silently switch
+models. Cleanup failure keeps same-PR replacement blocked until destruction is
+confirmed. Check/analytics/progress delivery is best effort and must not become
+an execution gate. Do not extend fail-closed into unrelated speculative controls.
 
-- bad or unverifiable webhook: reject;
-- unknown event or incomplete repository identity: ignore without a run;
-- uncertain contributor policy or maintainer permission: do not run;
-- duplicate delivery or already completed head SHA: do not create another run;
-- runner claim, callback, or authentication failure: do not publish a result;
-- checkout SHA or merge-base verification failure: stop before invoking the
-  agent;
-- invalid agent output: do not publish that output;
-- current GitHub head SHA differs at publication time: mark superseded and do
-  not publish;
-- cleanup failure: mark the job failed until forced Sandbox cleanup succeeds.
+## Deep modules and test seams
 
-Callback transport loss does not erase local evidence. It is handled only by
-the Runner's one bounded immediate retry; D1 is the sole product queue and
-there is no outbox, cron, or generic retry framework.
+Tests observe public behavior through these established seams:
 
-## Clean break
+| Seam                              | Observable behavior                                                                                             |
+| --------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Webhook ingress HTTP              | Signature/payload/installation checks, normalization and retry response                                         |
+| Core Worker HTTP with D1          | Durable admission/claim, callback/progress ownership, publication and public projection across Worker instances |
+| Review coordinator                | Policy, deduplication, freshness, terminal publication through external adapters                                |
+| Runner HTTP/process/runtime ports | Admission, capacity, agent result, evidence, deadlines and confirmed cleanup                                    |
+| LLM control/inference HTTP        | Grants, route authorization, native streaming, cancellation and sanitization                                    |
+| Store query interface             | Persisted run/disclosure queries and atomic ownership transitions                                               |
+| Built dashboard in browser        | Navigation, filters, privacy expiry, refresh and accessibility                                                  |
 
-Every run reaches one terminal product state:
+Use behavior-based TDD with narrow external adapters, not private-helper or
+internal-call-order assertions. Runtime code follows the pinned Effect 4 RC and
+[Effect guidance](https://github.com/Effect-TS/skills). Vite+/pnpm supply the locked
+toolchain. See [local runtime tracer](local-runtime-tracer.md) for workerd coverage.
 
-```text
-completed | failed | superseded | denied
-```
+Output-contract changes require a pinned real OpenCode executable against a
+scripted provider, including invalid output followed by same-session correction,
+then Runner→Core publication acceptance. Production reviews do not substitute for
+this compatibility check; a broken product review path cannot gate its own fix.
+`tests/support/github-publication-shim.ts` and
+`scripts/github-publication-probe.mts` capture writes locally for unpublished
+probes. Real GitHub publication is needed when publication behavior changes.
 
-The Runner Job lifecycle is independent of whether status persistence or review
-publication succeeds:
-
-1. claim the authenticated Job while the Runner is idle and set its deadline;
-2. create the Sandbox;
-3. perform fixed checkout and remove the checkout credential;
-4. run the review agent with its scoped GitHub read capability;
-5. destroy the Sandbox in the normal completion path; and
-6. let the runner force destruction if the normal path is interrupted; and
-7. send the terminal result callback, retaining local evidence if delivery is
-   unavailable.
-
-No run resumes inside an old Sandbox. A new PR head supersedes, rather than
-mutates, an older run.
-
-## Credentials
-
-- Ingress receives the webhook secret and the one static
-  `RUNNER_CALLBACK_TOKEN` used by both public Runner routes.
-- The GitHub App private key is a core Worker secret and never enters D1,
-  source control, logs, an agent prompt, or a Sandbox.
-- Core mints one short-lived, repository-scoped read token with only the
-  contents/issues/pull_requests/metadata read permissions. For each Job, the
-  Runner writes that installation token to a temporary host-side file and
-  registers a fresh sandbox-scoped built-in `github` service with a host-side
-  command that reads the file and `--refresh on-demand`. The service exposes
-  only Docker's proxy sentinel in the Sandbox and injects the current token
-  for GitHub requests. The Runner uses that same token for full-history
-  checkout. Checkout disables submodules, hooks, and LFS smudge; it then
-  removes the credential and authenticated remote before the agent starts.
-  The token file, service registration, network policy, Sandbox, and
-  temporary source are removed during terminal cleanup, with expiry as the
-  fallback.
-- The model credential is resolved on the trusted runner host through Docker's
-  custom-secret proxy and never enters the Worker request.
-- Repository-provided OpenCode configuration and host skills/MCP/SSH settings
-  are not loaded or shared in v1; the review agent uses only the static-review
-  tool policy inside the isolated microVM.
-
-The callback contains only named evidence fields for `manifest.json`,
-`opencode.jsonl`, `opencode.stderr`, `validated-review.md`,
-`opencode-session-list.json`, and one matching `opencode-export-SESSION.json`.
-The complete local recovery tree may retain OpenCode DB/state/log artifacts;
-those are never serialized into the callback bundle.
-
-## Minimal persistence
-
-D1 stores only queryable product state:
-
-- GitHub delivery ID and processing result;
-- installation and repository IDs;
-- PR number, base SHA, head SHA, base ref, head ref, trigger, status, and
-  timestamps;
-- maintainer approval bound to repository, PR number, and head SHA; and
-- review completion state needed for idempotency.
-- evidence object key, status, size, SHA-256, and execution/submission/cleanup
-  timestamps.
-
-The originating manual comment id is carried in the immutable manual job
-input needed by the Runner Job; it is not a separate feedback table.
-
-The bounded named-field bundle itself is stored as one private R2 JSON object
-per Job. D1 does not store its content. It does not store repository contents,
-complete diffs, credentials, model transcripts, or finding fingerprints for
-inline comments.
-
-## Behaviour-based TDD
-
-Development uses one vertical red-green slice at a time. Tests exercise the
-three public seams above and describe externally visible behaviour. They may
-replace true external systems with narrow adapters, but do not mock internal
-modules, assert call order/count, inspect private state, or require a particular
-implementation decomposition.
-
-Before implementing a slice, the implementer reads the applicable Effect 4
-guidance from <https://github.com/Effect-TS/skills>. Repository instructions and
-the lockfile pin the chosen RC so agent-generated code does not drift between
-Effect versions.
-
-Review-quality and queue probes use the checked-in GitHub publication shim in
-`tests/support/github-publication-shim.ts`: it delegates supplied read behavior
-and captures review and reaction writes locally. Real GitHub publication is
-tested only when publication behavior changes.
-
-Changes to the final-output contract must exercise final assistant JSON and
-same-session correction through the public Runner boundary, then pass the
-accepted result through Core's publication seam. Run the pinned OpenCode
-executable against a local scripted provider to verify final text and export
-identity, including a missing/invalid result followed by correction. Production
-reviews are not a substitute for this compatibility check. A broken product
-review path must not be its own merge gate; use independent local review.
-
-The isolated publication probe is runnable with a mode-0600 jobs file and an
-evidence directory:
-
-```sh
-RUNNER_CALLBACK_TOKEN='caller-supplied-token' \
-  node --experimental-strip-types scripts/github-publication-probe.mts \
-  ./probe-jobs.json ./probe-evidence
-```
-
-The jobs file is an array of `{ repositoryId, installationId, job }` entries,
-where `job` is a `RunnerJobInput`. The probe listens only on `127.0.0.1` and
-serves authenticated `POST /runner-claim` and `POST /runner-callback`. It
-writes raw callbacks and captured review requests as mode-0600 files beside
-Runner/session evidence; it has no GitHub write path. The exported probe
-factory accepts a read adapter when a probe needs live read-only behavior.
-
-The initial tracer bullets are:
-
-1. a valid signed eligible PR webhook is accepted and schedules one run;
-2. an invalid signature produces no core event;
-3. a public fork PR waits for approval, then schedules only its approved SHA;
-4. a completed agent result is published only while the head SHA is current;
-5. success, agent failure, and deadline expiry all eventually destroy the
-   Sandbox.
-
-These are behaviours, not a commitment to exhaustive test cases. Tests are
-added when they protect a product behaviour or a previously observed defect.
-
-## Delivery slices
-
-Work is split into small ordered issues and PRs:
-
-1. bootstrap the Vite+/pnpm monorepo and CI;
-2. deliver signed webhook ingress through the core service binding;
-3. deliver eligibility policy and SHA-bound manual approval;
-4. deliver D1 idempotency and run state;
-5. deliver Runner Job execution with fixed checkout and OpenCode output;
-6. deliver current-SHA validation and GitHub review publication; and
-7. deploy one repository and verify the complete path.
-
-Each PR is merged when its main behaviour is correct and reviewed. Non-critical
-improvements become follow-up issues rather than expanding the active PR.
-Deferred scope is also recorded as issues and may continue after the v1 path is
-working; "deferred" means non-blocking, not discarded.
+A terminal state and eventual Sandbox destruction are the product objective,
+not proof of crash recovery. Keep missing behavior in issues rather than describing
+it as delivered. Merge bounded changes when their main behavior is correct and
+reviewed; non-critical findings become follow-up issues.

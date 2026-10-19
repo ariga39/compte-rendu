@@ -320,13 +320,14 @@ No extra output-token cap is injected: supported client limits are forwarded.
 ## OpenCode recovery and terminal state
 
 OpenCode 2 can recover a `provider.invalid-output` stream error while its CLI
-still exits with code 1. Runner accepts this observed compatibility case only
-for exit codes 0 or 1 when the complete, matching session export ends with a succeeded outcome,
-succeeded final idle, and final assistant `finish: stop`, and contains exactly
-one completed `submit_review` matching the JSONL submission. Every recoverable
-error must belong to that same session and have the observed HTTP 200 error
-shape. Unknown errors, other nonzero exits, timeout, truncation, duplicate or
-inconsistent results, and incomplete evidence still fail without publication.
+still exits with code 1. Runner accepts that observed case only when the exact
+session export proves successful completion and its final assistant JSON passes
+the shared decision/Markdown contract. Each recoverable error must have the
+observed HTTP 200 shape and belong to the same session. If final JSON needs a
+correction, recovery eligibility is checked for each invocation: an earlier
+known error cannot excuse a generic failure in the correction round. Unknown
+errors, other nonzero exits, timeout, truncation, identity mismatch and incomplete
+required evidence fail without publication. See [final output](review-decisions-design.md#final-output-and-publication).
 
 The original CLI exit code and error events remain in the evidence. A sanitized
 `Runner accepted recovered OpenCode session` log records the job/session identity
@@ -370,7 +371,7 @@ failure does not distinguish a custom gateway failure from its provider's failur
 correlate the timestamp with gateway/provider logs before attributing a cause.
 Historical failures without these records remain inconclusive.
 
-## Verification and remaining integration
+## Verification and current limitations
 
 Tests cover grant authorization/revocation, native request forwarding, trusted
 session headers, private backend credentials, sanitized HTTP/SSE failures,

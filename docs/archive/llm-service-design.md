@@ -1,10 +1,14 @@
 # External LLM service design
 
+> Archived research or implementation history. Its observations and recommendations
+> describe the versions and decisions recorded below, not the current product contract.
+> Use the [current documentation](../README.md) for supported behavior and operations.
+
 Initial decision: 2026-10-18. The service and sbx Runner integration are deployed.
 The original design below records the pi-ai implementation. The
 [LiteLLM adoption decision](#litellm-backend-adoption) supersedes its provider,
 configuration and credential-refresh details; the job grant boundary remains.
-See [service setup and current scope](llm-service.md) for deployment instructions.
+See [service setup and current scope](../llm-service.md) for deployment instructions.
 
 ## Boundary and deployment
 

@@ -1,5 +1,9 @@
 # PostHog observability fit
 
+> Archived research or implementation history. Its observations and recommendations
+> describe the versions and decisions recorded below, not the current product contract.
+> Use the [current documentation](../README.md) for supported behavior and operations.
+
 Research date: 2026-09-04. Sources are current repository behavior and
 first-party PostHog documentation only.
 
@@ -34,13 +38,13 @@ distinguishable by the configured deployment alias
 This follows the product's existing boundaries: D1 is the sole durable queue
 and product state, private R2 stores the bounded named-field evidence bundle,
 the Runner retains local raw recovery evidence, and GitHub is the visible
-publication surface ([design](design.md#deployment-shape), [minimal
-persistence](design.md#minimal-persistence), [clean break](design.md#clean-break)).
+publication surface ([design](../design.md#deployment-shape), [minimal
+persistence](../design.md#credentials-and-evidence), [clean break](../design.md#runner-job-and-pull-interface)).
 The existing `OperationalLogEvent` contract is not the analytics input: it
 lacks claim timing and trigger data, while its Runner variant can contain
 command and `stderr`. Keep lifecycle analytics on its own closed contract and
 never forward operational events wholesale
-([contract](../packages/contracts/src/index.ts)).
+([contract](../../packages/contracts/src/index.ts)).
 
 ## Runtime and product fit
 

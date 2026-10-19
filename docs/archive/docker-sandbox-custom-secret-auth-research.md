@@ -1,5 +1,9 @@
 # Docker Sandbox GitHub authentication decision for issue #99
 
+> Archived research or implementation history. Its observations and recommendations
+> describe the versions and decisions recorded below, not the current product contract.
+> Use the [current documentation](../README.md) for supported behavior and operations.
+
 Research date: 2026-09-01. Scope: Docker Sandboxes 0.39.0, its official CLI
 help, current Docker documentation, release notes, and reports in Docker's
 official `sbx-releases` tracker. No credential value or private infrastructure
