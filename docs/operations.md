@@ -143,7 +143,9 @@ Keep the public Worker name/domain, D1 and R2 IDs, VPC service, allowlists,
 branding, `DASHBOARD_ORIGIN` and all existing credentials. Render the new dashboard
 configuration only when absent, then transfer those retained values. Put the
 GitHub App private key and Runner auth secret on the public Worker using secure
-operator input; never write them to its config. Build and deploy the merged
+operator input; never write them to its config. If model configuration is enabled,
+transfer the existing `REVIEW_CONFIGURATION_TOKEN` to the public Worker too; it
+is optional and must stay unset when that operator API is disabled. Build and deploy the merged
 SvelteKit Worker. Check SSR, webhook signatures, Runner authentication and Cron.
 
 Disable the old Core Worker's Cron when the unified Worker takes ownership of

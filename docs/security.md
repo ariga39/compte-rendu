@@ -7,18 +7,21 @@ record historical assumptions and observations, not current deployment policy.
 
 ## Trust boundaries
 
-| Boundary                      | Control                                                                                    |
-| ----------------------------- | ------------------------------------------------------------------------------------------ |
-| GitHub → Ingress              | HMAC verification, bounded payload, installation allowlist and event policy                |
-| Maintainer → review admission | Current GitHub permission and immutable head checks                                        |
-| Runner → Core                 | Authenticated claim/progress/callback, persisted job/attempt ownership                     |
-| Agent → GitHub                | Repository-scoped read token injected through the runtime proxy; no publication credential |
-| Agent → model                 | Direct-provider proxy, or restricted expiring job grant to the private LLM service         |
-| Node LLM service → LiteLLM    | Private backend credential and loopback endpoint; trusted route/job headers                |
-| Runner → host resources       | Per-job runtime ownership, bounded commands, deadlines, redaction and confirmed teardown   |
-| Core → public dashboard       | DB-only projection; unknown/private/expired repository identity removed server-side        |
+| Boundary                       | Control                                                                                    |
+| ------------------------------ | ------------------------------------------------------------------------------------------ |
+| GitHub → public Worker         | HMAC verification, bounded payload, installation allowlist and event policy                |
+| Maintainer → review admission  | Current GitHub permission and immutable head checks                                        |
+| Runner → public Worker         | Authenticated claim/progress/callback, persisted job/attempt ownership                     |
+| Agent → GitHub                 | Repository-scoped read token injected through the runtime proxy; no publication credential |
+| Agent → model                  | Direct-provider proxy, or restricted expiring job grant to the private LLM service         |
+| Node LLM service → LiteLLM     | Private backend credential and loopback endpoint; trusted route/job headers                |
+| Runner → host resources        | Per-job runtime ownership, bounded commands, deadlines, redaction and confirmed teardown   |
+| Core module → public dashboard | DB-only projection; unknown/private/expired repository identity removed server-side        |
 
-Core alone owns the GitHub App private key and publishes reviews. The model's
+The public SvelteKit Worker holds the GitHub App private key and Runner secrets.
+Its Core module publishes reviews; it is an internal code boundary, not a separate
+private Worker. Only the allowlisted public API, authenticated Runner routes and
+signed webhook routes reach that module. The model's
 result cannot choose the target repository, commit, URL or publisher. Core checks
 freshness and agreement between callback, manifest and Markdown. Publication
 recovery verifies the App author, commit and expected review state; a marker alone
