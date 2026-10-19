@@ -2,6 +2,17 @@
 import { expect, it } from 'vitest';
 import { SELF } from 'cloudflare:test';
 
+it('lets an invalid history link return to the first page without retrying the bad cursor', async () => {
+  const response = await SELF.fetch('https://reviews.test/history?cursor=garbage');
+  expect(response.status).toBe(400);
+  const html = await response.text();
+  expect(html).toContain('Invalid history link');
+  expect(html).toContain('href="/history"');
+  expect(html).toContain('Back to history');
+  expect(html).not.toContain('Try again');
+  expect((await SELF.fetch('https://reviews.test/history')).status).toBe(200);
+});
+
 it('renders a branded missing-review page with a route back to history', async () => {
   const response = await SELF.fetch('https://reviews.test/jobs/does-not-exist');
   expect(response.status).toBe(404);
@@ -189,6 +200,7 @@ it('renders persisted public review details and tokens while keeping private rev
     expect(html).toContain('deepseek-flash');
     expect(html).toContain('1,234');
     expect(html).toContain('Request changes');
+    expect(html).toContain('UTC</time>');
     if (visibility === 'public') {
       expect(html).toContain('acme/public-review');
       expect(html).toContain('feature/public-branch');

@@ -20,10 +20,12 @@ export async function loadDashboard(fetcher: typeof fetch, key: string, urls: st
             }
             if (!response.ok)
               error(
-                response.status === 404 ? 404 : 503,
-                response.status === 404
-                  ? 'Review not found.'
-                  : 'Reviews are temporarily unavailable.',
+                response.status >= 400 && response.status < 500 ? response.status : 503,
+                response.status === 400
+                  ? 'Invalid history link.'
+                  : response.status === 404
+                    ? 'Review not found.'
+                    : 'Reviews are temporarily unavailable.',
               );
             return {
               ok: true,

@@ -11,6 +11,21 @@ import { expect, test, type ApiHandler, type ApiPayload } from './fixtures';
 
 const NOW = '2026-10-16T12:00:00.000Z';
 
+test.describe('consistent absolute timestamps', () => {
+  test.use({ locale: 'ja-JP', timezoneId: 'Asia/Tokyo' });
+  test('shows the same English UTC timestamp in a non-UTC browser', async ({
+    page,
+    harness,
+    base,
+  }) => {
+    harness.setHandler(() => ok(detailData(task({ status: 'completed', dispatch: null }))));
+    await page.goto(`${base}/jobs/run-1`);
+    await expect(page.locator(`time[datetime="${NOW}"]`).first()).toHaveText(
+      'Oct 16, 2026, 12:00:00 PM UTC',
+    );
+  });
+});
+
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const reconnect = (page: Page) =>
   page.evaluate(() => {
