@@ -2,14 +2,28 @@ import { Effect, Schema } from 'effect';
 import { EventSourceParserStream } from 'eventsource-parser/stream';
 import {
   normalizeContext,
+  createProvider,
   type Model,
   type AssistantMessageEventStream,
 } from '@earendil-works/pi-ai';
-import { stream as chatStream } from '@earendil-works/pi-ai/api/openai-completions';
-import { stream as responsesStream } from '@earendil-works/pi-ai/api/openai-codex-responses';
+import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
+import { opencodeGoProvider } from '@earendil-works/pi-ai/providers/opencode-go';
+import { openaiCodexProvider } from '@earendil-works/pi-ai/providers/openai-codex';
+
+const providers = {
+  'opencode-go': opencodeGoProvider(),
+  'openai-codex': openaiCodexProvider(),
+  'openai-compatible': createProvider<'openai-completions'>({
+    id: 'openai-compatible',
+    auth: { apiKey: { name: 'Service-managed API key', resolve: async () => ({ auth: {} }) } },
+    models: [],
+    api: openAICompletionsApi(),
+  }),
+};
 
 export interface ModelRoute {
   readonly id: string;
+  readonly provider: 'opencode-go' | 'openai-compatible' | 'openai-codex';
   readonly protocol: 'chat-completions' | 'codex-responses';
   readonly model: string;
   readonly baseUrl: string;
@@ -87,9 +101,14 @@ const failure = () =>
 
 export const createPiUpstream = (options: PiUpstreamOptions) => {
   const run = Effect.fn('LlmUpstream.request')(
-    function* (routeId: string, body: Record<string, unknown>, signal: AbortSignal) {
+    function* (
+      routeId: string,
+      body: Record<string, unknown>,
+      signal: AbortSignal,
+      sessionId?: string,
+    ) {
       const route = options.routes.find((candidate) => candidate.id === routeId);
-      if (!route) return failure();
+      if (!route || (route.provider === 'opencode-go' && !sessionId)) return failure();
       const valid = yield* Schema.decodeUnknownEffect(
         route.protocol === 'chat-completions' ? ChatRequest : ResponsesRequest,
         { onExcessProperty: 'error' },
@@ -98,13 +117,15 @@ export const createPiUpstream = (options: PiUpstreamOptions) => {
         return Response.json({ error: { message: 'unsupported model request' } }, { status: 400 });
       const key = yield* Effect.tryPromise(() => options.credential(route, signal));
       return yield* Effect.tryPromise(() =>
-        relay(route, body, key, signal, options.fetch ?? globalThis.fetch),
+        relay(route, body, key, signal, options.fetch ?? globalThis.fetch, sessionId),
       );
     },
     Effect.catch(() => Effect.succeed(failure())),
   );
-  return (route: string, body: Record<string, unknown>, signal: AbortSignal) =>
-    Effect.runPromise(run(route, body, AbortSignal.any([signal, AbortSignal.timeout(120000)])));
+  return (route: string, body: Record<string, unknown>, signal: AbortSignal, sessionId?: string) =>
+    Effect.runPromise(
+      run(route, body, AbortSignal.any([signal, AbortSignal.timeout(120000)]), sessionId),
+    );
 };
 
 const relay = (
@@ -113,6 +134,7 @@ const relay = (
   key: string,
   signal: AbortSignal,
   fetchUpstream: typeof globalThis.fetch,
+  sessionId?: string,
 ): Promise<Response> =>
   new Promise((resolve) => {
     const controller = new AbortController();
@@ -122,7 +144,7 @@ const relay = (
     const model = {
       id: route.model,
       name: route.model,
-      provider: 'review-service',
+      provider: route.provider,
       baseUrl: route.baseUrl,
       reasoning: true,
       input: ['text'],
@@ -244,24 +266,24 @@ const relay = (
     };
     const settings = {
       apiKey: key,
+      sessionId,
       signal: controller.signal,
       fetch: intercept,
       maxRetries: 0,
       timeoutMs: 120000,
       onPayload: () => ({ ...body, model: route.model }),
     };
+    const context = normalizeContext({ messages: [] });
+    const chatModel = { ...model, api: 'openai-completions' } satisfies Model<'openai-completions'>;
     const events: AssistantMessageEventStream =
-      route.protocol === 'chat-completions'
-        ? chatStream(
-            { ...model, api: 'openai-completions' },
-            normalizeContext({ messages: [] }),
-            settings,
-          )
-        : responsesStream(
-            { ...model, api: 'openai-codex-responses' },
-            normalizeContext({ messages: [] }),
-            { ...settings, transport: 'sse' },
-          );
+      route.provider === 'opencode-go'
+        ? providers['opencode-go'].stream(chatModel, context, settings)
+        : route.provider === 'openai-compatible'
+          ? providers['openai-compatible'].stream(chatModel, context, settings)
+          : providers['openai-codex'].stream({ ...model, api: 'openai-codex-responses' }, context, {
+              ...settings,
+              transport: 'sse',
+            });
     parserDone = (async () => {
       for await (const event of events) {
         if (event.type === 'done') completed = true;

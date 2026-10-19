@@ -100,7 +100,7 @@ it('excludes a second subscription service and login until the owner closes', as
   await writeFile(credentialFile, '{}', { mode: 0o600 });
   await writeFile(
     config,
-    `controlSocket = "${dir}/control.sock"\nport = ${port}\n[[routes]]\nid = "subscription"\nprotocol = "codex-responses"\nmodel = "gpt-6.1-sol"\nbaseUrl = "https://chatgpt.com/backend-api"\ncredentialFile = "${credentialFile}"\n`,
+    `controlSocket = "${dir}/control.sock"\nport = ${port}\n[[routes]]\nid = "subscription"\nprovider = "openai-codex"\nprotocol = "codex-responses"\nmodel = "gpt-6.1-sol"\nbaseUrl = "https://chatgpt.com/backend-api"\ncredentialFile = "${credentialFile}"\n`,
   );
   const owner = await startConfiguredService(config);
   try {
@@ -121,6 +121,52 @@ it('excludes a second subscription service and login until the owner closes', as
   try {
     const restarted = await startConfiguredService(config);
     await restarted.close();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+it('starts an explicitly selected provider and rejects missing or incompatible provider configuration', async () => {
+  const { startConfiguredService } = await import('../apps/llm-service/src/bootstrap');
+  const { writeFile } = await import('node:fs/promises');
+  const dir = await mkdtemp(join(tmpdir(), 'llm-provider-'));
+  const file = join(dir, 'service.toml');
+  const key = join(dir, 'key');
+  const probe = await startLlmServer({
+    controlSocket: join(dir, 'probe.sock'),
+    port: 0,
+    service: {
+      control: async () => new Response(),
+      inference: async () => new Response(),
+      close: () => {},
+    },
+  });
+  const port = probe.port;
+  await probe.close();
+  const config = (provider: string | undefined, protocol = 'chat-completions') =>
+    `controlSocket = "${dir}/control.sock"\nport = ${port}\n[[routes]]\nid = "review"\n${provider === undefined ? '' : `provider = "${provider}"\n`}protocol = "${protocol}"\nmodel = "example"\nbaseUrl = "https://provider.invalid/v1"\ncredentialFile = "${key}"\n`;
+  try {
+    await writeFile(key, 'private-test-key', { mode: 0o600 });
+    await writeFile(file, config('openai-compatible'));
+    const server = await startConfiguredService(file);
+    try {
+      expect(
+        (await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, { method: 'POST' })).status,
+      ).toBe(401);
+    } finally {
+      await server.close();
+    }
+    for (const value of [
+      config(undefined),
+      config('unknown'),
+      config('openai-codex'),
+      config('opencode-go', 'codex-responses'),
+    ]) {
+      await writeFile(file, value);
+      await expect(startConfiguredService(file)).rejects.toThrow(
+        'invalid LLM service configuration',
+      );
+    }
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

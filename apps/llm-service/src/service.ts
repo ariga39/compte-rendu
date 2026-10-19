@@ -20,6 +20,7 @@ export interface LlmServiceOptions {
     routeId: string,
     body: Record<string, unknown>,
     signal: AbortSignal,
+    sessionId?: string,
   ) => Promise<Response>;
 }
 
@@ -314,7 +315,8 @@ export const createLlmService = (options: LlmServiceOptions): LlmService => {
     };
 
     const upstream = yield* Effect.tryPromise({
-      try: () => options.upstream(route.id, raw as Record<string, unknown>, controller.signal),
+      try: () =>
+        options.upstream(route.id, raw as Record<string, unknown>, controller.signal, grant.jobId),
       catch: () => undefined,
     }).pipe(
       Effect.match({

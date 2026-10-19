@@ -40,6 +40,7 @@ port = 8090
 
 [[routes]]
 id = "deepseek-review"
+provider = "openai-compatible"
 protocol = "chat-completions"
 model = "deepseek-v4.1-flash"
 baseUrl = "https://your-provider.example/v1"
@@ -47,6 +48,7 @@ credentialFile = "/home/runner/.config/compte-rendu-llm/deepseek-key"
 
 [[routes]]
 id = "subscription-review"
+provider = "openai-codex"
 protocol = "codex-responses"
 model = "gpt-6.1-sol"
 baseUrl = "https://chatgpt.com/backend-api"
@@ -57,6 +59,24 @@ Names are examples, not a claim that every account offers those models. Each
 route is fixed at startup. Clients send the route ID as `model`; the service
 replaces it with the configured upstream model. No runtime hot reload or model
 fallback is implemented. The client must use the route's matching HTTP protocol.
+
+Choose `provider` independently of `baseUrl`. It is required; existing configuration
+files must add it before upgrading. Supported combinations are:
+
+| Provider            | Protocol           | pi-ai adapter                                       |
+| ------------------- | ------------------ | --------------------------------------------------- |
+| `opencode-go`       | `chat-completions` | Native OpenCode Go provider                         |
+| `openai-compatible` | `chat-completions` | Custom provider using pi-ai’s OpenAI-compatible API |
+| `openai-codex`      | `codex-responses`  | Native ChatGPT subscription provider                |
+
+For OpenCode Go, use `provider = "opencode-go"`. The official base URL is
+`https://opencode.ai/inference/go/openai/v1`; a custom gateway URL works with the
+same provider selection. The service passes the authenticated grant’s job ID as
+pi-ai’s `sessionId`, so its native provider supplies the required routing header.
+Requests within a job retain that identity; client-supplied session headers are
+not forwarded. A custom URL does not turn an OpenCode Go route into a generic
+provider. Use `openai-compatible` only for an explicitly generic endpoint.
+Unknown providers or incompatible provider/protocol pairs fail at startup.
 
 The model API key file contains only the key. Keep credential directories mode
 0700 and files mode 0600; files readable by other users are rejected. TOML contains

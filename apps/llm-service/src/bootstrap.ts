@@ -14,6 +14,7 @@ const Config = Schema.Struct({
   routes: Schema.Array(
     Schema.Struct({
       id: Schema.NonEmptyString,
+      provider: Schema.Literals(['opencode-go', 'openai-compatible', 'openai-codex']),
       protocol: Schema.Literals(['chat-completions', 'codex-responses']),
       model: Schema.NonEmptyString,
       baseUrl: Schema.NonEmptyString,
@@ -31,6 +32,8 @@ export const readLlmConfig = (file: string) =>
       if (new Set(config.routes.map((route) => route.id)).size !== config.routes.length)
         throw new Error('duplicate route');
       for (const route of config.routes) {
+        if ((route.provider === 'openai-codex') !== (route.protocol === 'codex-responses'))
+          throw new Error('incompatible provider protocol');
         const url = new URL(route.baseUrl);
         if (
           url.username ||

@@ -12,6 +12,7 @@ it('uses a host-only credential file without exposing its contents to the client
     await writeFile(credentialFile, 'private-key\n', { mode: 0o600 });
     const route = {
       id: 'review',
+      provider: 'openai-compatible' as const,
       protocol: 'chat-completions' as const,
       model: 'deepseek-flash',
       baseUrl: 'https://provider.invalid/v1',
@@ -77,6 +78,7 @@ it('serializes subscription refresh and preserves the rotated credential across 
     };
     const route = {
       id: 'subscription',
+      provider: 'openai-codex' as const,
       protocol: 'codex-responses' as const,
       model: 'gpt-6.1-sol',
       baseUrl: 'https://chatgpt.com/backend-api',
@@ -148,6 +150,7 @@ it('uses a dedicated device login for subsequent subscription inference', async 
     });
     const route = {
       id: 'subscription',
+      provider: 'openai-codex' as const,
       protocol: 'codex-responses' as const,
       model: 'gpt-6.1-sol',
       baseUrl: 'https://chatgpt.com/backend-api',
