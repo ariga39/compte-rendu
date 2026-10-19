@@ -1,9 +1,10 @@
 # External LLM service design
 
-Decision date: 2026-10-18. **Standalone service and sbx Runner integration
-implemented; production rollout pending.** See [service setup and current scope](llm-service.md).
-This service precedes multi-model review. Earlier provider probes establish only
-narrow protocol compatibility, not production acceptance.
+Initial decision: 2026-10-18. The service and sbx Runner integration are deployed.
+The original design below records the pi-ai implementation. The
+[LiteLLM adoption decision](#litellm-backend-adoption) supersedes its provider,
+configuration and credential-refresh details; the job grant boundary remains.
+See [service setup and current scope](llm-service.md) for deployment instructions.
 
 ## Boundary and deployment
 
@@ -231,7 +232,7 @@ configuration owns upstream model names/base URLs/keys; Node routes name its ali
 No PostgreSQL, LiteLLM virtual-key migration or usage database is required for this
 slice. Existing Runner route IDs and socket contracts remain unchanged.
 
-This supersedes the pi-ai-specific refresh implementation above. LiteLLM 1.106.0
+This supersedes the pi-ai provider integration and refresh implementation above. LiteLLM 1.106.0
 subscription refresh uses non-atomic file writes without a refresh lock; it does
 not inherit our former serialized/atomic credential guarantees. Subscription
 routes are optional and require separate activation validation. The deployment
