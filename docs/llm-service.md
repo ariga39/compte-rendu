@@ -212,7 +212,8 @@ tool calls and session header. Keep the old artifact, TOML, and its complete
 runtime dependency tree in a separate release directory for rollback. The old
 Node bundle externalizes pi-ai: copying its JavaScript alone is insufficient,
 and installing this revision in its workspace removes the required package.
-Drain both instances before replacing Node configuration/artifacts: restarting
+For this one-time migration from pi-ai, drain both instances before replacing
+Node configuration/artifacts: restarting
 Node invalidates grants and interrupts active requests. Restarting LiteLLM also
 interrupts active model calls. `concurrency = 0` is not a valid drain mechanism.
 
@@ -320,7 +321,8 @@ review trigger. Stop the LLM service only after its callers are drained.
 The Unix socket exposes only:
 
 - `POST /grants` with `{ "jobId": "...", "routes": ["deepseek-review"] }`:
-  returns 201 and `{ "token": "...", "expiresAt": "ISO timestamp" }`.
+  returns 201 and `{ "token": "...", "expiresAt": "ISO timestamp" }`, or sanitized
+  503 when the current configuration cannot prepare a grant.
 - `POST /grants/revoke` with `{ "jobId": "..." }`: returns 204, idempotently.
 - `POST /grants/usage` with `{ "jobId": "..." }`: returns the bounded usage summary,
   or 404 when the grant is unknown or retired.
