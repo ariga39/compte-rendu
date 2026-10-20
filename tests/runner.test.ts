@@ -9429,6 +9429,9 @@ describe('Runner multi-model review', () => {
     expect(multiPrompt).toContain('reviewer-0');
     expect(multiPrompt).toContain('reviewer-1');
     expect(multiPrompt).toContain('synthesize');
+    expect(multiPrompt).toContain(
+      'Give each reviewer both the Review task and Final output sections below in full',
+    );
   });
 
   it('uses only the reviewer route for a one-model roster with a distinct synthesis alias', async () => {

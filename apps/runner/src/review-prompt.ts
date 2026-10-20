@@ -72,7 +72,7 @@ export const reviewPrompt = (input: ReviewPromptInput): string => {
     reviewers.length > 1
       ? 'Start all configured reviewers in parallel using foreground subagent tasks (background: false) for one independent review each. Wait for every configured reviewer to return, then synthesize one final review:\n' +
         reviewers.map(({ participant, model }) => `- ${participant}: ${model}`).join('\n') +
-        '\nGive each reviewer the same review task below. Delegate repository inspection to the reviewers. ' +
+        '\nGive each reviewer both the Review task and Final output sections below in full. Delegate repository inspection to the reviewers. ' +
         'Once their reviews return, only synthesize the supplied results: compare their evidence, remove duplicates and weak claims, and preserve substantive disagreements rather than forcing consensus. ' +
         'Do not request follow-up reviews or verification rounds, and do not inspect the repository again to verify their conclusions. ' +
         'Express unresolved uncertainty in the final review instead of starting another round.\n'
