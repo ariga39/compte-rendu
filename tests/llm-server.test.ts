@@ -1043,6 +1043,11 @@ it('skips invalid catalog entries while retaining valid sibling models', async (
   const port = await probePort(dir);
   const publicUrl = 'https://public.example/zen/go/v1/models';
   const overlongId = 'a'.repeat(120);
+  let releaseRefresh = () => {};
+  const refreshGate = new Promise<void>((resolve) => {
+    releaseRefresh = resolve;
+  });
+  let initialCatalog = true;
   let publicBody: unknown = {
     data: [
       { id: 'valid-a' },
@@ -1053,7 +1058,9 @@ it('skips invalid catalog entries while retaining valid sibling models', async (
       { id: overlongId },
     ],
   };
-  const publicCatalog = createServer((_incoming, outgoing) => {
+  const publicCatalog = createServer(async (_incoming, outgoing) => {
+    if (!initialCatalog) await refreshGate;
+    initialCatalog = false;
     outgoing.writeHead(200, { 'content-type': 'application/json' });
     outgoing.end(JSON.stringify(publicBody));
   });
@@ -1147,6 +1154,7 @@ it('skips invalid catalog entries while retaining valid sibling models', async (
       }
 
       publicBody = { data: 'not-an-array' };
+      releaseRefresh();
       await eventually(async () => (await catalog()).lastRefreshError === 'refresh failed');
       const retained = await catalog();
       expect(retained.ids).toEqual(['backend-ok', 'opencode/valid-a', 'opencode/valid-b']);
@@ -1155,6 +1163,7 @@ it('skips invalid catalog entries while retaining valid sibling models', async (
       expect(afterMalformed.status).toBe(200);
       await afterMalformed.text();
     } finally {
+      releaseRefresh();
       await server.close();
     }
   } finally {
