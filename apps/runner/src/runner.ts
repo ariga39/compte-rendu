@@ -67,6 +67,7 @@ import {
 } from './sandbox-runtime-openshell.js';
 import { recoverCallback, ReplayCallbackRequest } from './callback-recovery.js';
 import { reviewPrompt, reviewCorrectionPrompt } from './review-prompt.js';
+import { topicReviewSkills } from './topic-review-skills.js';
 import {
   readRunnerSettingsSync,
   watchRunnerSettings,
@@ -2146,6 +2147,13 @@ export const createRunner = (options: RunnerOptions = {}) => {
       });
       const configRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-opencode-config-'));
       job.configRoot = configRoot;
+      for (const skill of topicReviewSkills) {
+        const directory = join(configRoot, 'opencode', 'skills', skill.name);
+        await mkdir(directory, { recursive: true });
+        await writeFile(join(directory, 'SKILL.md'), skill.body);
+        await writeFile(join(directory, 'LICENSE.md'), skill.license);
+        await writeFile(join(directory, 'NOTICE.md'), skill.notice);
+      }
       const activeOpenCodeConfig = multi
         ? multiReviewConfig({
             selection: multiSelection,

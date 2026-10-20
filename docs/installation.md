@@ -434,6 +434,11 @@ corepack pnpm install --frozen-lockfile
 corepack pnpm --filter @compte-rendu/runner build
 ```
 
+The Runner bundle includes four topic review skills and their credits, licenses
+and attribution notices. Each job receives them in its isolated OpenCode config;
+no host skill installation, runtime download or extra file transfer is needed.
+See [review skill boundaries](design.md) for their scope and source attribution.
+
 ### Offline Sandbox template deployment
 
 The Runner uses the versioned custom template

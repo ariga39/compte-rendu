@@ -219,9 +219,15 @@ instructions: context collection, static inspection, finding criteria and final
 output. Single-reviewer and multi-reviewer jobs receive the same review contract;
 only their execution instructions differ. The format-correction reminder reuses
 the same output requirements. There is no separate generic `pr-review` skill.
-Domain-specific review methods belong in topic skills loaded when relevant;
-no topic skills are currently bundled. The shared prompt explains when and how
-to use any available topic skills:
+Domain-specific methods live in four bundled topic skills: `test-quality`,
+`error-handling`, `github-actions-security`, and `security-misuse-resistance`.
+The standalone Runner embeds each skill's Markdown, license and attribution
+notice, and stages them under the job's isolated
+`XDG_CONFIG_HOME/opencode/skills/<name>/` before Sandbox setup. Both runtimes
+receive the same resources through their existing config mount/upload.
+OpenCode discovers the descriptions and loads the chosen body through its native
+skill tool; the prompt does not inline all four bodies.
+The shared prompt explains when and how to use them:
 
 - Choose by the changed behavior and actual technology, not file extension.
   Load only methods and references relevant to the review.
@@ -244,7 +250,11 @@ check its assumptions against the shared prompt and other bundled skills.
 Each skill should state its applicable domain and provide methods, evidence
 questions and examples; it must not introduce a separate verdict policy.
 The [candidate comparison](archive/review-skills-expanded-research.md) records
-upstream content requiring adaptation. No candidates are installed by this change.
+the upstream methods and adaptation decisions. Each bundled `SKILL.md` includes
+credits, a pinned source and the changes made; `LICENSE.md` and `NOTICE.md` travel
+with it. The Trail of Bits adaptation remains CC-BY-SA-4.0; the other three carry
+their upstream Apache-2.0 license. These content licenses are not a relicensing
+of unrelated application code.
 
 D1 stores product state, ownership, lifecycle timestamps, decision, frozen model
 selection, bounded per-model token summaries, repository disclosure metadata and evidence object metadata. It does
