@@ -499,6 +499,19 @@ it('supersedes a stale queued round without dismissing votes or reporting failur
     expect(f.checks[0]).toMatchObject({ status: 'completed', conclusion: 'cancelled' });
     expect(f.logs).not.toContainEqual(expect.objectContaining({ reason: 'review_reset_failed' }));
     expect((await f.claim()).status).toBe(204);
+    const runId = f.checks[0]!.external_id;
+    expect((await f.store.getRunOutcome(runId))?.runnerJobId).toBeUndefined();
+    const detail = await f.worker.fetch(
+      new Request(`https://core.internal/api/jobs/${runId}`),
+      f.env,
+    );
+    expect(await detail.json()).toMatchObject({ task: { cleanup: 'unknown' } });
+    expect(
+      (await f.send({ ...event, deliveryId: 'next-round', headSha: f.controls.currentHead }))
+        .status,
+    ).toBe(202);
+    await f.settle();
+    expect((await f.claim()).status).toBe(200);
   } finally {
     await f.settle();
     f.database.close();

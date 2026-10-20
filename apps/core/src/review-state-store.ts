@@ -1080,24 +1080,41 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
     return results.every((result) => result.meta.changes === 1);
   },
 
-  markRunSuperseded: async ({ runId, occurredAt }) => {
-    const results = await database.batch([
-      database
-        .prepare(
-          `UPDATE review_runs SET status = 'superseded', updated_at = ?, terminal_at = COALESCE(terminal_at, ?)
+  markRunSuperseded: async ({ runId, occurredAt, releaseRunnerClaim }) => {
+    const update =
+      releaseRunnerClaim === undefined
+        ? database
+            .prepare(
+              `UPDATE review_runs SET status = 'superseded', updated_at = ?, terminal_at = COALESCE(terminal_at, ?)
            WHERE run_id = ? AND status = 'scheduled'`,
-        )
-        .bind(occurredAt, occurredAt, runId),
+            )
+            .bind(occurredAt, occurredAt, runId)
+        : database
+            .prepare(
+              `UPDATE review_runs SET status = 'superseded', updated_at = ?, terminal_at = COALESCE(terminal_at, ?),
+             runner_job_id = NULL, runner_attempt = NULL, runner_cleanup_status = NULL
+           WHERE run_id = ? AND status IN ('scheduled', 'superseded')
+             AND runner_job_id = ? AND runner_attempt = ?`,
+            )
+            .bind(
+              occurredAt,
+              occurredAt,
+              runId,
+              releaseRunnerClaim.jobId,
+              releaseRunnerClaim.attempt,
+            );
+    const results = await database.batch([
+      update,
       database
         .prepare(
           `UPDATE deliveries SET status = 'superseded', updated_at = ?
            WHERE delivery_id = (
-             SELECT delivery_id FROM review_runs WHERE run_id = ?
+             SELECT delivery_id FROM review_runs WHERE run_id = ? AND status = 'superseded'
            ) AND status = 'scheduled'`,
         )
         .bind(occurredAt, runId),
     ]);
-    return results.every((result) => result.meta.changes === 1);
+    return results[0]?.meta.changes === 1;
   },
 
   completeRunPublication: async ({ runId, occurredAt, fingerprints, decision }) => {
