@@ -9459,6 +9459,8 @@ describe('Runner multi-model review', () => {
     expect(multiPrompt).toContain('reviewer-0');
     expect(multiPrompt).toContain('reviewer-1');
     expect(multiPrompt).toContain('synthesize');
+    expect(multiPrompt).toContain('As supervisor, do not load the skill yourself');
+    expect(multiPrompt).toContain('The Review task is for the independent reviewers');
     expect(multiPrompt).toContain('Do not load skills or inspect code during synthesis');
     expect(multiPrompt).toContain(
       'Give each reviewer both the Review task and Final output sections below in full',

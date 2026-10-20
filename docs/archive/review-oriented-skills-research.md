@@ -1,5 +1,13 @@
 # 代码审查 Skill 调研：宽覆盖、浅深度的现有资产
 
+> Archived research, not current product policy. The topic-skill proposals below
+> were explored and prototyped but were not shipped. PR #222 adopts only the
+> general `code-review` skill, drawing on OpenCode, Codex, Vercel and Sentry.
+> The shared prompt owns scope, permissions, orchestration and output; the skill
+> supplies review methods. See [current design](../design.md) for the implemented contract.
+> Historical recommendations and validation notes below describe their original
+> research stage, not the current skill inventory or a review-quality benchmark.
+
 > 范围：主动核查 `sanyuan0704/sanyuan-skills` 与 `awesome-skills/code-review-skill`；`gstack`、`wshobson`、`Sentry` 采用 primary 已确认事实及 `/tmp` 缓存，未另扩搜索。固定于 2026-10-20 HEAD；仅研究，未安装、未改编。
 
 ## 采用标准

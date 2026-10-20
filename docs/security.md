@@ -110,3 +110,5 @@ configured; they are not the product state or an authorization dependency.
 - Grant and upstream boundaries: `apps/llm-service/src/service.ts`, `upstream.ts`
 - Agent permissions and prompt: `apps/runner/src/opencode-multi-review.ts`,
   `review-prompt.ts`
+- Bundled review method and provenance: `apps/runner/skills/code-review/SKILL.md`,
+  `apps/runner/src/review-skill.ts` (packaged with `LICENSE.md` and `NOTICE.md`)
