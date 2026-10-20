@@ -559,8 +559,8 @@ export const createGitHubPublicationAdapter = (
         }
       }
       if (!complete) throw new Error('GitHub review listing exceeded the safe page limit');
-      if ((await currentHead(repositoryId, pullRequestNumber, installationId)) !== headSha)
-        throw new ReviewConfirmationFailed('Review target changed');
+      const targetHead = await currentHead(repositoryId, pullRequestNumber, installationId);
+      if (targetHead !== headSha) return { kind: 'stale', currentHeadSha: targetHead };
       for (const review of candidates) {
         let value: unknown;
         try {
