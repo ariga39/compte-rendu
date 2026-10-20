@@ -64,7 +64,6 @@ const decodeCatalog = (
   text: string,
 ): { readonly ids: readonly string[]; readonly rejected: number } => {
   const decoded = Schema.decodeUnknownSync(Schema.fromJsonString(CatalogEnvelope))(text);
-  if (decoded.data.length > MAX_CATALOG_MODELS) throw new Error('catalog too large');
   const ids: string[] = [];
   let rejected = 0;
   for (const entry of decoded.data) {

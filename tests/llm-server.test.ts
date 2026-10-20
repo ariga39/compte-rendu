@@ -1256,6 +1256,108 @@ it('bounds the retained catalog across refreshes', async () => {
   }
 });
 
+it('retains a usable prefix of a source larger than the catalog limit', async () => {
+  const { startConfiguredService } = await import('../apps/llm-service/src/bootstrap');
+  const dir = await mkdtemp(join(tmpdir(), 'llm-discovery-cap-'));
+  const credentialFile = join(dir, 'litellm-key');
+  const config = join(dir, 'service.toml');
+  const port = await probePort(dir);
+  const firstBatch = Array.from({ length: 1001 }, (_value, index) => `model-a-${index}`);
+  const secondBatch = Array.from({ length: 600 }, (_value, index) => `model-b-${index}`);
+  let models = firstBatch;
+  const upstream = createServer(async (incoming, outgoing) => {
+    if (incoming.url === '/v1/models') {
+      outgoing.writeHead(200, { 'content-type': 'application/json' });
+      outgoing.end(JSON.stringify({ data: models.map((id) => ({ id })) }));
+      return;
+    }
+    await readIncoming(incoming);
+    outgoing.writeHead(200, { 'content-type': 'text/event-stream' });
+    outgoing.end(
+      'data: {"choices":[{"index":0,"delta":{"content":"Ready"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+    );
+  });
+  await new Promise<void>((resolve, reject) => {
+    upstream.once('error', reject);
+    upstream.listen(0, '127.0.0.1', resolve);
+  });
+  const address = upstream.address();
+  if (!address || typeof address === 'string') throw new Error('fake LiteLLM unavailable');
+  try {
+    await writeFile(credentialFile, 'backend-key\n', { mode: 0o600 });
+    await writeFile(
+      config,
+      `controlSocket = "${dir}/control.sock"\nport = ${port}\nroutes = []\n\n[upstream]\nbaseUrl = "http://127.0.0.1:${address.port}"\ncredentialFile = "${credentialFile}"\n\n[discovery]\nrefreshIntervalMs = 20\n`,
+    );
+    const server = await startConfiguredService(config);
+    try {
+      await eventually(async () => {
+        const current = JSON.parse(
+          (await controlGet(join(dir, 'control.sock'), '/models')).body,
+        ) as { ids: string[]; lastRefreshError: string | null };
+        return current.ids.length === 1000 && current.lastRefreshError === 'catalog limit reached';
+      });
+      const current = JSON.parse((await controlGet(join(dir, 'control.sock'), '/models')).body) as {
+        ids: string[];
+        lastAttemptAt: string | null;
+        lastSuccessAt: string | null;
+        lastRefreshError: string | null;
+      };
+      expect(current.ids).toHaveLength(1000);
+      expect(current.ids).toContain('model-a-999');
+      expect(current.ids).not.toContain('model-a-1000');
+      expect(current.lastSuccessAt).toBeNull();
+      const grant = await controlCall(join(dir, 'control.sock'), '/grants', {
+        jobId: 'large-catalog-job',
+        routes: ['model-a-999'],
+      });
+      expect(grant.status).toBe(201);
+      const { token } = JSON.parse(grant.body) as { token: string };
+      const infer = (model: string) =>
+        fetch(`http://127.0.0.1:${server.port}/v1/chat/completions`, {
+          method: 'POST',
+          headers: { authorization: `Bearer ${token}` },
+          body: JSON.stringify({ model, messages: [] }),
+        });
+      expect(
+        (
+          await controlCall(join(dir, 'control.sock'), '/grants', {
+            jobId: 'excess-model-job',
+            routes: ['model-a-1000'],
+          })
+        ).status,
+      ).toBe(400);
+      expect((await infer('model-a-1000')).status).toBe(403);
+      models = secondBatch;
+      await eventually(async () => {
+        const next = JSON.parse((await controlGet(join(dir, 'control.sock'), '/models')).body) as {
+          lastAttemptAt: string | null;
+        };
+        return next.lastAttemptAt !== current.lastAttemptAt;
+      });
+      const after = JSON.parse((await controlGet(join(dir, 'control.sock'), '/models')).body) as {
+        ids: string[];
+        lastSuccessAt: string | null;
+        lastRefreshError: string | null;
+      };
+      expect(after.lastRefreshError).toBe('catalog limit reached');
+      expect(after.lastSuccessAt).toBe(current.lastSuccessAt);
+      expect(after.ids).toEqual(current.ids);
+      const response = await infer('model-a-999');
+      expect(response.status).toBe(200);
+      await response.text();
+    } finally {
+      await server.close();
+    }
+  } finally {
+    await new Promise<void>((resolve) => {
+      upstream.closeAllConnections();
+      upstream.close(() => resolve());
+    });
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 it('bounds discovery interval and public prefix configuration', async () => {
   const { readLlmConfig } = await import('../apps/llm-service/src/bootstrap');
   const dir = await mkdtemp(join(tmpdir(), 'llm-discovery-bounds-'));
