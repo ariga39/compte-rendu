@@ -1,10 +1,12 @@
 # 扩展评审技能研究：专项与综合
 
-> 后续实现：本次比较之后，Runner 已接入 `test-quality`、`error-handling`、
-> `github-actions-security` 与 `security-misuse-resistance` 四项改编，
-> 随包携带 credits、LICENSE 和 NOTICE。边界见 [当前设计](../design.md)。
-> 已用 OpenCode 2.0.32 与本地合成模型端点验证四项的发现和原生加载；
-> 尚未做真实 PR 审查质量对比。以下保留初次研究阶段的候选取舍。
+> Archived research, not current product policy. The topic-skill proposals below
+> were explored and prototyped but were not shipped. PR #222 adopts only the
+> general `code-review` skill, drawing on OpenCode, Codex, Vercel and Sentry.
+> The shared prompt owns scope, permissions, orchestration and output; the skill
+> supplies review methods. See [current design](../design.md) for the implemented contract.
+> Historical recommendations and validation notes below describe their original
+> research stage, not the current skill inventory or a review-quality benchmark.
 
 > 研究日期 2026-10-20。范围：在既有 sharp-edges、Supabase、Web Interface Guidelines 三项之外，比较可补充“综合评审 + 正确性/测试/性能/错误处理”的候选。只判断方法与适配，不按 star、厂商或“官方”身份评分。未安装技能、未改运行时。外部内容固定在下列 commit。此前的三项只作对照，不重复发现过程。
 
