@@ -83,7 +83,10 @@ selection inside the same database statement that creates the run. Its revision
 and selection are frozen before the job is queued. Runner claim responses carry
 that snapshot as `reviewConfiguration`.
 
-Changing the selection needs no Core or Runner restart. Previously queued and
+Changing the selection needs no Core or Runner restart. For a new model on an
+already configured provider, add a fresh LLM route using the
+[restart-free model change procedure](llm-service.md#change-a-review-model-without-restarting)
+before saving the selection. Previously queued and
 running jobs retain their snapshots; new jobs use the new revision. Updating a
 selection does not create a job, restart a review or bypass the existing same-PR
 guard. A new explicit retry uses the configuration active at its own admission.

@@ -200,6 +200,196 @@ it('starts a normal service that forwards to the configured LiteLLM upstream', a
   }
 });
 
+it('snapshots rewritten routes for new grants without restarting or changing old grants', async () => {
+  const { startConfiguredService } = await import('../apps/llm-service/src/bootstrap');
+  const dir = await mkdtemp(join(tmpdir(), 'llm-hot-routes-'));
+  const credentialFile = join(dir, 'litellm-key');
+  const config = join(dir, 'service.toml');
+  const port = await probePort(dir);
+  const received: Array<{ url: string; model: string }> = [];
+  const upstream = createServer(async (incoming, outgoing) => {
+    const body = JSON.parse(await readIncoming(incoming)) as { model: string };
+    received.push({ url: incoming.url ?? '', model: body.model });
+    outgoing.writeHead(200, { 'content-type': 'text/event-stream' });
+    outgoing.end(
+      'data: {"choices":[{"index":0,"delta":{"content":"Ready"},"finish_reason":null}]}\n\n' +
+        'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n' +
+        'data: [DONE]\n\n',
+    );
+  });
+  await new Promise<void>((resolve, reject) => {
+    upstream.once('error', reject);
+    upstream.listen(0, '127.0.0.1', resolve);
+  });
+  const address = upstream.address();
+  if (!address || typeof address === 'string') throw new Error('fake LiteLLM unavailable');
+  const route = (id: string, model: string) =>
+    `[[routes]]\nid = "${id}"\nmodel = "${model}"\nprotocol = "chat-completions"\n`;
+  const writeConfig = (routes: string) =>
+    writeFile(
+      config,
+      `controlSocket = "${dir}/control.sock"\nport = ${port}\n\n[upstream]\nbaseUrl = "http://127.0.0.1:${address.port}"\ncredentialFile = "${credentialFile}"\n\n${routes}`,
+    );
+  try {
+    await writeFile(credentialFile, 'backend-key\n', { mode: 0o600 });
+    await writeConfig(route('deepseek-review', 'deepseek-flash'));
+    const server = await startConfiguredService(config);
+    const infer = (token: string, model: string) =>
+      fetch(`http://127.0.0.1:${server.port}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}` },
+        body: JSON.stringify({ model, messages: [] }),
+      });
+    try {
+      const oldGrant = await controlCall(join(dir, 'control.sock'), '/grants', {
+        jobId: 'job-old-snapshot',
+        routes: ['deepseek-review'],
+      });
+      expect(oldGrant.status).toBe(201);
+      const oldToken = (JSON.parse(oldGrant.body) as { token: string }).token;
+      const oldBefore = await infer(oldToken, 'deepseek-review');
+      expect(oldBefore.status).toBe(200);
+      await oldBefore.text();
+      expect(received.at(-1)).toEqual({
+        url: '/v1/chat/completions',
+        model: 'deepseek-flash',
+      });
+
+      await writeConfig(
+        route('deepseek-review', 'deepseek-flash') + route('step-review', 'step-5-preview'),
+      );
+      const newGrant = await controlCall(join(dir, 'control.sock'), '/grants', {
+        jobId: 'job-new-snapshot',
+        routes: ['step-review'],
+      });
+      expect(newGrant.status).toBe(201);
+      const newToken = (JSON.parse(newGrant.body) as { token: string }).token;
+      const newResponse = await infer(newToken, 'step-review');
+      expect(newResponse.status).toBe(200);
+      await newResponse.text();
+      expect(received.at(-1)).toEqual({
+        url: '/v1/chat/completions',
+        model: 'step-5-preview',
+      });
+      expect((await infer(newToken, 'deepseek-review')).status).toBe(403);
+
+      await writeConfig(route('step-review', 'step-5-preview'));
+      const oldAfter = await infer(oldToken, 'deepseek-review');
+      expect(oldAfter.status).toBe(200);
+      await oldAfter.text();
+      expect(received.at(-1)).toEqual({
+        url: '/v1/chat/completions',
+        model: 'deepseek-flash',
+      });
+      expect((await infer(oldToken, 'step-review')).status).toBe(403);
+    } finally {
+      await server.close();
+    }
+  } finally {
+    await new Promise<void>((resolve) => upstream.close(() => resolve()));
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+it('rejects new grants while routes are invalid and recovers without restarting', async () => {
+  const { startConfiguredService } = await import('../apps/llm-service/src/bootstrap');
+  const dir = await mkdtemp(join(tmpdir(), 'llm-invalid-routes-'));
+  const credentialFile = join(dir, 'litellm-key');
+  const config = join(dir, 'service.toml');
+  const port = await probePort(dir);
+  const received: string[] = [];
+  const upstream = createServer(async (incoming, outgoing) => {
+    const body = JSON.parse(await readIncoming(incoming)) as { model: string };
+    received.push(body.model);
+    outgoing.writeHead(200, { 'content-type': 'text/event-stream' });
+    outgoing.end(
+      'data: {"choices":[{"index":0,"delta":{"content":"Ready"},"finish_reason":null}]}\n\n' +
+        'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n' +
+        'data: [DONE]\n\n',
+    );
+  });
+  await new Promise<void>((resolve, reject) => {
+    upstream.once('error', reject);
+    upstream.listen(0, '127.0.0.1', resolve);
+  });
+  const address = upstream.address();
+  if (!address || typeof address === 'string') throw new Error('fake LiteLLM unavailable');
+  const route = (id: string, model: string) =>
+    `[[routes]]\nid = "${id}"\nmodel = "${model}"\nprotocol = "chat-completions"\n`;
+  const writeConfig = (routes: string) =>
+    writeFile(
+      config,
+      `controlSocket = "${dir}/control.sock"\nport = ${port}\n\n[upstream]\nbaseUrl = "http://127.0.0.1:${address.port}"\ncredentialFile = "${credentialFile}"\n\n${routes}`,
+    );
+  try {
+    await writeFile(credentialFile, 'backend-key\n', { mode: 0o600 });
+    await writeConfig(route('deepseek-review', 'deepseek-flash'));
+    const server = await startConfiguredService(config);
+    const infer = (token: string, model: string) =>
+      fetch(`http://127.0.0.1:${server.port}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}` },
+        body: JSON.stringify({ model, messages: [] }),
+      });
+    try {
+      const oldGrant = await controlCall(join(dir, 'control.sock'), '/grants', {
+        jobId: 'job-before-invalid',
+        routes: ['deepseek-review'],
+      });
+      expect(oldGrant.status).toBe(201);
+      const oldToken = (JSON.parse(oldGrant.body) as { token: string }).token;
+
+      await writeFile(config, 'routes = [\n');
+      const rejected = await controlCall(join(dir, 'control.sock'), '/grants', {
+        jobId: 'job-invalid',
+        routes: ['deepseek-review'],
+      });
+      expect(rejected.status).toBe(503);
+      expect(JSON.parse(rejected.body)).toEqual({
+        error: { message: 'service unavailable' },
+      });
+
+      const oldAfterInvalid = await infer(oldToken, 'deepseek-review');
+      expect(oldAfterInvalid.status).toBe(200);
+      await oldAfterInvalid.text();
+      expect(received).toEqual(['deepseek-flash']);
+
+      await writeConfig(
+        route('deepseek-review', 'deepseek-flash') + route('step-review', 'step-5-preview'),
+      );
+      const recovered = await controlCall(join(dir, 'control.sock'), '/grants', {
+        jobId: 'job-recovered',
+        routes: ['step-review'],
+      });
+      expect(recovered.status).toBe(201);
+      const recoveredToken = (JSON.parse(recovered.body) as { token: string }).token;
+      const recoveredResponse = await infer(recoveredToken, 'step-review');
+      expect(recoveredResponse.status).toBe(200);
+      await recoveredResponse.text();
+      expect(received).toEqual(['deepseek-flash', 'step-5-preview']);
+
+      await writeFile(
+        config,
+        `controlSocket = "${dir}/control.sock"\nport = ${port}\n\n[upstream]\nbaseUrl = "http://127.0.0.1:1"\ncredentialFile = "${credentialFile}"\n\n${route('step-review', 'step-5-preview')}`,
+      );
+      const changedBackend = await controlCall(join(dir, 'control.sock'), '/grants', {
+        jobId: 'job-changed-backend',
+        routes: ['step-review'],
+      });
+      expect(changedBackend.status).toBe(503);
+      const recoveredStill = await infer(recoveredToken, 'step-review');
+      expect(recoveredStill.status).toBe(200);
+      await recoveredStill.text();
+      expect(received).toEqual(['deepseek-flash', 'step-5-preview', 'step-5-preview']);
+    } finally {
+      await server.close();
+    }
+  } finally {
+    await new Promise<void>((resolve) => upstream.close(() => resolve()));
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 it('rejects obsolete provider routes and malformed upstream settings', async () => {
   const { startConfiguredService } = await import('../apps/llm-service/src/bootstrap');
   const dir = await mkdtemp(join(tmpdir(), 'llm-provider-'));

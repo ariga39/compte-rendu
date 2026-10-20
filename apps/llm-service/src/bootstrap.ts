@@ -2,7 +2,7 @@ import { readFile, stat } from 'node:fs/promises';
 import { Effect, Schema } from 'effect';
 import { parse } from 'smol-toml';
 import { startLlmServer } from './http-server';
-import { createLlmService, type LlmRoutePath } from './service';
+import { createLlmService, type LlmGrantConfiguration, type LlmRoute } from './service';
 import { createLiteLlmUpstream } from './upstream';
 
 const AbsolutePath = Schema.String.check(Schema.isPattern(/^\//));
@@ -64,26 +64,45 @@ export const readLlmConfig = (file: string) =>
     }).pipe(Effect.catch(() => Effect.fail(new Error('invalid LLM service configuration')))),
   );
 
-export const startConfiguredService = async (file: string) => {
+const prepareConfiguredGrant = async (
+  file: string,
+  startup: {
+    readonly controlSocket: string;
+    readonly port: number;
+    readonly upstream: { readonly baseUrl: string; readonly credentialFile: string };
+  },
+): Promise<LlmGrantConfiguration> => {
   const config = await readLlmConfig(file);
+  if (
+    config.controlSocket !== startup.controlSocket ||
+    config.port !== startup.port ||
+    config.upstream.baseUrl !== startup.upstream.baseUrl ||
+    config.upstream.credentialFile !== startup.upstream.credentialFile
+  )
+    throw new Error('invalid LLM service configuration');
   await readBackendCredential(config.upstream.credentialFile);
-  const upstream = createLiteLlmUpstream({
-    baseUrl: config.upstream.baseUrl,
-    routes: config.routes,
-    credential: () => readBackendCredential(config.upstream.credentialFile),
-  });
-  const service = createLlmService({
-    routes: config.routes.map((route) => ({
+  return {
+    routes: config.routes.map((route): LlmRoute => ({
       id: route.id,
-      path: (route.protocol === 'responses'
-        ? '/v1/responses'
-        : '/v1/chat/completions') satisfies LlmRoutePath,
+      path: route.protocol === 'responses' ? '/v1/responses' : '/v1/chat/completions',
     })),
-    upstream,
+    upstream: createLiteLlmUpstream({
+      baseUrl: config.upstream.baseUrl,
+      routes: config.routes,
+      credential: () => readBackendCredential(config.upstream.credentialFile),
+    }),
+  };
+};
+
+export const startConfiguredService = async (file: string) => {
+  const startup = await readLlmConfig(file);
+  await readBackendCredential(startup.upstream.credentialFile);
+  const service = createLlmService({
+    prepareGrant: () => prepareConfiguredGrant(file, startup),
   });
   return startLlmServer({
     service,
-    controlSocket: config.controlSocket,
-    port: config.port,
+    controlSocket: startup.controlSocket,
+    port: startup.port,
   });
 };
