@@ -41,6 +41,15 @@ Use the Cloudflare Worker logs or `wrangler tail` only to correlate identifiers:
 corepack pnpm dlx wrangler@4.124.0 tail <INSTANCE_NAME>-ingress
 ```
 
+For scheduled `metadata_refresh` events, watch `dueAtStart` and
+`oldestDueAgeMs` over successive invocations. Persistent growth means the refresh
+cadence is not keeping up; public identity expires after five minutes even when
+refresh fails. `skipped: cooldown` identifies persisted GitHub throttling.
+`budgetExhausted: true` means the ten-second dispatch budget stopped new lookups;
+`durationMs` includes database work and installation-token acquisition. These
+fields are aggregates and contain no repository names or IDs. See the
+[refresh bounds](public-dashboard-design.md#repository-metadata-and-disclosure).
+
 Use the GitHub delivery page for `deliveryId` and then search logs for the
 same value. A scheduled core event adds `runId`; a claimed Runner Job adds
 its Job and `sandboxId`. The useful chain is:

@@ -22,6 +22,7 @@ const DEFAULT_BATCH = 8;
 const DEFAULT_CONCURRENCY = 3;
 const THROTTLE_COOLDOWN_MS = 60 * 1000;
 const REFRESH_TIMEOUT_MS = 2000;
+const REFRESH_DISPATCH_BUDGET_MS = 10000;
 const DEFAULT_LIMIT = 25;
 const MAX_LIMIT = 100;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -364,32 +365,61 @@ export interface RefreshSummary {
   readonly dispatched: number;
   readonly failed: number;
   readonly skipped: 'unavailable' | 'cooldown' | '';
+  readonly dueAtStart: number | null;
+  readonly oldestDueAgeMs: number | null;
+  readonly durationMs: number;
+  readonly budgetExhausted: boolean;
 }
 
 export const refreshRepositoryMetadata = async (
   dependencies: RepositoryRefreshDependencies,
 ): Promise<RefreshSummary> => {
+  const started = DateTime.toEpochMillis(await Effect.runPromise(DateTime.now));
   const store = dependencies.stateStore;
+  let dueAtStart: number | null = null;
+  let oldestDueAgeMs: number | null = null;
+  let dispatched = 0;
+  let failed = 0;
+  let budgetExhausted = false;
+  const elapsed = async () =>
+    Math.max(0, DateTime.toEpochMillis(await Effect.runPromise(DateTime.now)) - started);
+  const withinBudget = async () => {
+    if ((await elapsed()) < REFRESH_DISPATCH_BUDGET_MS) return true;
+    budgetExhausted = true;
+    return false;
+  };
+  const finish = async (skipped: RefreshSummary['skipped']): Promise<RefreshSummary> => ({
+    dispatched,
+    failed,
+    skipped,
+    dueAtStart,
+    oldestDueAgeMs,
+    durationMs: await elapsed(),
+    budgetExhausted,
+  });
   if (
     store.listDueRepositoryMetadata === undefined ||
     store.claimRepositoryRefresh === undefined ||
     store.recordRepositoryRefresh === undefined ||
     store.deferRepositoryRefresh === undefined
   ) {
-    return { dispatched: 0, failed: 0, skipped: 'unavailable' };
+    return finish('unavailable');
   }
   const now = dependencies.now ?? (await nowIso());
+  const backlog = await store.getRepositoryRefreshBacklog?.({ now });
+  dueAtStart = backlog?.due ?? null;
+  oldestDueAgeMs =
+    backlog?.oldestDueAt == null
+      ? null
+      : Math.max(0, Date.parse(now) - Date.parse(backlog.oldestDueAt));
   const cooldown = (await store.getRefreshCooldown?.()) ?? undefined;
-  if (cooldown !== undefined && cooldown > now)
-    return { dispatched: 0, failed: 0, skipped: 'cooldown' };
+  if (cooldown !== undefined && cooldown > now) return finish('cooldown');
   const timeoutMs = dependencies.timeoutMs ?? REFRESH_TIMEOUT_MS;
   const batch = dependencies.batch ?? DEFAULT_BATCH;
   const concurrency = Math.max(1, dependencies.concurrency ?? DEFAULT_CONCURRENCY);
   const due = await store.listDueRepositoryMetadata({ now, limit: batch });
   const staleBefore = await isoFromMs(Date.parse(now) - CLAIM_WINDOW_MS);
   const nextRefreshAt = await isoFromMs(Date.parse(now) + REFRESH_INTERVAL_MS);
-  let dispatched = 0;
-  let failed = 0;
   let throttled = false;
   const processRow = async (row: RepositoryMetadataRow): Promise<void> => {
     if (throttled) return;
@@ -400,7 +430,7 @@ export const refreshRepositoryMetadata = async (
       claimedAt: now,
       staleBefore,
     });
-    if (!claimed) return;
+    if (!claimed || !(await withinBudget())) return;
     if (dependencies.github.getRepositoryMetadata === undefined) return;
     const controller = new AbortController();
     try {
@@ -476,9 +506,10 @@ export const refreshRepositoryMetadata = async (
     }
   };
   for (let index = 0; index < due.length; index += concurrency) {
+    if (!(await withinBudget())) break;
     await Promise.all(due.slice(index, index + concurrency).map(processRow));
   }
-  return { dispatched, failed, skipped: '' };
+  return finish('');
 };
 
 export const validateProgressSnapshot = (snapshot: {

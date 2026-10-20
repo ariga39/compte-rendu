@@ -445,6 +445,9 @@ export interface ReviewStateQueries {
     updatedAt: string;
     nextRefreshAt: string;
   }): Promise<number>;
+  getRepositoryRefreshBacklog?(input: {
+    now: string;
+  }): Promise<{ due: number; oldestDueAt: string | null }>;
   getRefreshCooldown?(): Promise<string | undefined>;
   setRefreshCooldown?(input: { nextAllowedAt: string }): Promise<void>;
 }
