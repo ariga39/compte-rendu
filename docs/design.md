@@ -68,7 +68,10 @@ Runner carries `{version: 2, decision, markdown}` in its callback and manifest;
 Core checks agreement with the exact Markdown artifact before mapping the vote to
 `APPROVE`, `REQUEST_CHANGES` or `COMMENT`. A delivered Request changes review is
 successful execution. Historical string results retain COMMENT behavior and an
-unknown decision; their text is not reclassified. See [review decisions](review-decisions-design.md).
+unknown decision; their text is not reclassified. A new round attempts to dismiss this
+installation’s earlier GitHub approvals/change requests on the PR, with mandatory confirmation before Runner
+admission, preserving historical decisions and review discussion. A failed claim-time reset
+is recorded as `review_reset_failed` and cannot admit the new round. See [review decisions](review-decisions-design.md).
 
 ## Deployment shape
 

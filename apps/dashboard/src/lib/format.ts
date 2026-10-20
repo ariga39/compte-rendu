@@ -160,6 +160,7 @@ export const FAILURE_REASON_LABEL: Record<string, string> = {
   publication_uncertain:
     'Publication could not be confirmed; the review may still have been posted.',
   completion_failed: 'Completion could not be confirmed',
+  review_reset_failed: 'Could not dismiss the previous GitHub review',
   unknown: 'Reason not recorded',
 };
 

@@ -2,6 +2,7 @@ import { Schema } from 'effect';
 import { DEFAULT_REVIEW_NAME, GitHubSha } from '@compte-rendu/contracts';
 import { GitHubNotFoundError, GitHubRequestError, parseRetryAfterMs } from './github-http';
 import type { GitHubAdapter } from './index';
+import { formatReviewPublicationMarker } from './review-publication-format';
 
 const Repository = Schema.Struct({
   full_name: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/)),
@@ -56,6 +57,10 @@ const ConfirmedReview = Schema.Struct({
   user: Schema.Struct({ login: Schema.NonEmptyString, type: Schema.NonEmptyString }),
 });
 const ReviewRecords = Schema.Array(ReviewRecord);
+const ListedReview = Schema.Struct({
+  ...ConfirmedReview.fields,
+  user: Schema.NullOr(ConfirmedReview.fields.user),
+});
 const expectedReviewState = (event: 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT') =>
   event === 'APPROVE'
     ? 'APPROVED'
@@ -517,6 +522,70 @@ export const createGitHubPublicationAdapter = (
       );
       const pullRequest = await Schema.decodeUnknownPromise(PullRequest)(pullRequestValue);
       return { headSha: pullRequest.head.sha };
+    },
+    dismissPreviousReviews: async ({
+      repositoryId,
+      pullRequestNumber,
+      installationId,
+      headSha,
+      previousRunIds,
+    }) => {
+      if (previousRunIds.length === 0) return;
+      if (options.getReviewAuthorLogin === undefined)
+        throw new ReviewConfirmationFailed('Review author unavailable');
+      const login = await options.getReviewAuthorLogin();
+      const markers = new Set(previousRunIds.map(formatReviewPublicationMarker));
+      const path = await pullRequestPath(repositoryId, pullRequestNumber, installationId);
+      const candidates: Array<typeof ConfirmedReview.Type> = [];
+      let complete = false;
+      for (let page = 1; page <= maxReviewPages; page += 1) {
+        const value = await requestJson(
+          installationId,
+          `${path}/reviews?per_page=${pageSize}&page=${page}`,
+        );
+        const reviews = await Schema.decodeUnknownPromise(Schema.Array(ListedReview))(value);
+        for (const review of reviews) {
+          if (
+            review.user?.type === 'Bot' &&
+            review.user.login === login &&
+            (review.state === 'APPROVED' || review.state === 'CHANGES_REQUESTED') &&
+            markers.has(review.body?.split('\n')[0] ?? '')
+          )
+            candidates.push({ ...review, user: review.user });
+        }
+        if (reviews.length < pageSize) {
+          complete = true;
+          break;
+        }
+      }
+      if (!complete) throw new Error('GitHub review listing exceeded the safe page limit');
+      if ((await currentHead(repositoryId, pullRequestNumber, installationId)) !== headSha)
+        throw new ReviewConfirmationFailed('Review target changed');
+      for (const review of candidates) {
+        let value: unknown;
+        try {
+          value = await requestJson(installationId, `${path}/reviews/${review.id}/dismissals`, {
+            method: 'PUT',
+            body: JSON.stringify({
+              event: 'DISMISS',
+              message: 'A new review round has started; this earlier verdict no longer applies.',
+            }),
+          });
+        } catch {
+          // Another reset may have won, or GitHub may have applied a lost response.
+          value = await requestJson(installationId, `${path}/reviews/${review.id}`);
+        }
+        const dismissed = await Schema.decodeUnknownPromise(ConfirmedReview)(value);
+        if (
+          dismissed.id !== review.id ||
+          dismissed.state !== 'DISMISSED' ||
+          dismissed.user.type !== 'Bot' ||
+          dismissed.user.login !== login ||
+          dismissed.body !== review.body ||
+          dismissed.commit_id !== review.commit_id
+        )
+          throw new ReviewConfirmationFailed('Review dismissal was not confirmed');
+      }
     },
     createReview: async ({
       repositoryId,

@@ -287,7 +287,7 @@ Configure the GitHub App with only these repository permissions:
 | Metadata              | Read  | Resolve the repository by numeric ID, validate repository metadata, and check the `/ai-review` commenter's collaborator permission before approving a public fork review.                                                     |
 | Contents              | Read  | Fetch the repository at the exact base/head SHAs in the Sandbox checkout. GitHub documents Contents as the permission for HTTP-based Git access.                                                                              |
 | Pull requests         | Read  | Load PR facts and current head SHA, and find existing reviews for idempotent publication.                                                                                                                                     |
-| Pull requests         | Write | Publish the body-only `APPROVE`, `REQUEST_CHANGES`, or `COMMENT` review.                                                                                                                                                      |
+| Pull requests         | Write | Publish body-only reviews and dismiss this App’s earlier approval/change-request votes when a new round starts.                                                                                                               |
 | Issues                | Write | Make the `issue_comment` webhook available for PR comments, create command reactions, and publish one ordinary PR comment when a Review fails. The handler accepts only a created comment whose body is exactly `/ai-review`. |
 | Checks                | Write | Create one head-SHA-bound Check Run per review run and update its queued, in-progress, success, failure, or cancelled state.                                                                                                  |
 
@@ -303,6 +303,13 @@ The endpoint-to-permission mapping should be checked against GitHub's
 [permission-to-endpoint reference](https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps)
 when GitHub changes an endpoint. The general rule to request the minimum is in
 [choosing permissions for a GitHub App](https://docs.github.com/en/apps/creating-github-apps/setting-up-a-github-app/choosing-permissions-for-a-github-app).
+
+New rounds dismiss only this App's earlier votes on that PR. Protected-branch
+review-dismissal policies can restrict this even with Pull requests write access.
+If GitHub rejects dismissal, the new round fails with `review_reset_failed` before
+Runner admission. Adjust the repository policy for the intended App identity;
+do not grant broader access or disable protections automatically. See
+[GitHub's dismissal permissions](https://docs.github.com/en/rest/pulls/reviews#dismiss-a-review-for-a-pull-request).
 
 Subscribe the App to:
 
