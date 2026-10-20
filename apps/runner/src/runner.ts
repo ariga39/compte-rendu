@@ -66,6 +66,7 @@ import {
   createOpenShellPreflight,
   createOpenShellRuntimeFactory,
 } from './sandbox-runtime-openshell.js';
+import { recoverCallback, ReplayCallbackRequest } from './callback-recovery.js';
 import { reviewPrompt, reviewCorrectionPrompt } from './review-prompt.js';
 import {
   readRunnerSettingsSync,
@@ -788,6 +789,20 @@ const writeManifestAtomically = async (path: string, value: unknown) => {
   await writeFile(temporaryPath, JSON.stringify(value, null, 2) + '\n', { mode: 0o600 });
   await chmod(temporaryPath, 0o600);
   await rename(temporaryPath, path);
+};
+
+// Persist the exact final callback body before transmission. A local write
+// failure must not suppress delivery; the archive is the recovery copy.
+const persistCallbackBody = async (evidencePath: string, body: string) => {
+  try {
+    const path = join(evidencePath, 'callback.json');
+    const temporaryPath = `${path}.tmp`;
+    await writeFile(temporaryPath, body, { mode: 0o600 });
+    await chmod(temporaryPath, 0o600);
+    await rename(temporaryPath, path);
+  } catch {
+    // Delivery still owns the terminal outcome when persistence is unavailable.
+  }
 };
 
 const evidenceFiles = async (root: string, prefix = ''): Promise<string[]> => {
@@ -1856,6 +1871,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
           }),
         )
       : completeBody;
+    await persistCallbackBody(evidencePath, body);
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const controller = new AbortController();
       let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -2881,6 +2897,134 @@ export const createRunner = (options: RunnerOptions = {}) => {
         requestNextJob?.();
       }
       return jsonResponse(200, maintenanceStatus());
+    }
+    if (request.method === 'POST' && path === '/maintenance/replay-callback') {
+      if (
+        callbackUrl === undefined ||
+        callbackUrl.length === 0 ||
+        callbackToken === undefined ||
+        callbackToken.length === 0
+      ) {
+        return jsonResponse(503, {
+          accepted: false,
+          error: 'callback unavailable',
+          reason: 'callback-unavailable',
+        });
+      }
+      const input = await Schema.decodeUnknownPromise(ReplayCallbackRequest)(
+        await readJson(request),
+      ).catch(() => undefined);
+      if (input === undefined) {
+        return jsonResponse(400, {
+          accepted: false,
+          error: 'invalid replay request',
+          reason: 'invalid-request',
+        });
+      }
+      const active = [...jobs.values()].some((job) => {
+        if (job.state.status !== 'queued' && job.state.status !== 'running') return false;
+        return (
+          job.id === input.jobId ||
+          (job.input.runId === input.runId && job.input.attempt === input.attempt) ||
+          job.state.evidenceId === input.evidenceId
+        );
+      });
+      if (active) {
+        return jsonResponse(409, {
+          accepted: false,
+          error: 'job is active',
+          reason: 'active-job',
+        });
+      }
+
+      const recovered = await Effect.runPromise(
+        recoverCallback(evidenceRoot, input).pipe(
+          Effect.match({
+            onFailure: (error) => ({ ok: false as const, reason: error.reason }),
+            onSuccess: (value) => ({ ok: true as const, value }),
+          }),
+        ),
+      );
+      if (!recovered.ok) {
+        const status =
+          recovered.reason === 'missing-evidence'
+            ? 404
+            : recovered.reason === 'oversized-callback'
+              ? 413
+              : 409;
+        return jsonResponse(status, {
+          accepted: false,
+          error: 'callback recovery rejected',
+          reason: recovered.reason,
+        });
+      }
+
+      const controller = new AbortController();
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      let timedOut = false;
+      try {
+        const response = await Promise.race([
+          callbackFetch(callbackUrl, {
+            method: 'POST',
+            headers: {
+              authorization: `Bearer ${callbackToken}`,
+              'content-type': 'application/json',
+            },
+            body: recovered.value.body,
+            signal: controller.signal,
+          }),
+          new Promise<Response>((_, reject) => {
+            timeout = setTimeout(() => {
+              timedOut = true;
+              controller.abort();
+              reject(new Error('runner callback replay timed out'));
+            }, callbackTimeoutMs);
+          }),
+        ]);
+        await response.body?.cancel().catch(() => undefined);
+        if (response.status === 202) {
+          await recordLog({
+            phase: 'runner',
+            outcome: 'callback',
+            runId: input.runId,
+            jobId: input.jobId,
+            attempt: 1,
+            result: 'accepted',
+            status: response.status,
+          });
+          return jsonResponse(202, { accepted: true });
+        }
+        await recordLog({
+          phase: 'runner',
+          outcome: 'callback',
+          runId: input.runId,
+          jobId: input.jobId,
+          attempt: 1,
+          result: 'http-error',
+          status: response.status,
+        });
+        return jsonResponse(502, {
+          accepted: false,
+          error: 'callback delivery rejected',
+          reason: 'http-error',
+        });
+      } catch {
+        await recordLog({
+          phase: 'runner',
+          outcome: 'callback',
+          runId: input.runId,
+          jobId: input.jobId,
+          attempt: 1,
+          result: timedOut ? 'timeout' : 'transport-error',
+        });
+        return jsonResponse(timedOut ? 504 : 502, {
+          accepted: false,
+          error: timedOut ? 'callback delivery timed out' : 'callback delivery failed',
+          reason: timedOut ? 'timeout' : 'transport-error',
+        });
+      } finally {
+        if (timeout !== undefined) clearTimeout(timeout);
+      }
     }
     if (request.method === 'POST' && path === '/jobs') {
       if (

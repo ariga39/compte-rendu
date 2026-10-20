@@ -2856,6 +2856,87 @@ describe('Core Worker', () => {
     },
   );
 
+  it('reconciles a retained callback with an already published review after a Worker restart', async () => {
+    const database = new SqliteD1Database();
+    const stateStore = createD1ReviewStateStore(database);
+    const claimed = await stateStore.claimReview({
+      deliveryId: 'delivery-retained-callback',
+      job: {
+        repositoryId: 11,
+        pullRequestNumber: 42,
+        installationId: 7,
+        baseSha: eligibleEvent.baseSha,
+        headSha: eligibleEvent.headSha,
+        trigger: 'automatic',
+      },
+      occurredAt: '2026-09-01T00:00:00.000Z',
+    });
+    if (claimed.kind !== 'claimed') throw new Error('recovery run was not claimed');
+    await stateStore.recordRunnerJob({ runId: claimed.runId, jobId: 'runner-job-1', attempt: 1 });
+    // Model a crash after GitHub published, before D1 recorded completion.
+    if (stateStore.claimRunPublication === undefined)
+      throw new Error('publication claim unavailable');
+    await stateStore.claimRunPublication({
+      runId: claimed.runId,
+      occurredAt: '2026-09-01T00:00:04.000Z',
+      publishing: true,
+    });
+    const newPublications: unknown[] = [];
+    const markerLookups: unknown[] = [];
+    const worker = createCoreWorker(
+      { ...coreEnv(database), EVIDENCE_BUCKET: { put: async () => undefined } },
+      {
+        github: {
+          loadReviewTarget: async () => ({ headSha: eligibleEvent.headSha }),
+          findReviewByMarker: async (input) => {
+            markerLookups.push(input);
+            return { id: 99 };
+          },
+          createReview: async (input) => {
+            newPublications.push(input);
+            return { kind: 'created', review: input };
+          },
+        },
+      },
+    );
+    const callback = JSON.parse(await successfulCallback(claimed.runId));
+    callback.result = { version: 2, decision: 'request_changes', markdown: callback.result };
+    const manifest = JSON.parse(
+      Buffer.from(callback.evidence.manifest.content, 'base64').toString(),
+    );
+    manifest.result = callback.result;
+    callback.evidence.manifest = await evidenceField(
+      Buffer.from(JSON.stringify(manifest)).toString('base64'),
+    );
+    const request = () =>
+      new Request('https://core.internal/runner-results', {
+        method: 'POST',
+        headers: {
+          'x-compte-rendu-runner-callback': 'verified',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify(callback),
+      });
+    try {
+      expect((await worker.fetch(request())).status).toBe(202);
+      expect((await worker.fetch(request())).status).toBe(202);
+      expect(newPublications).toEqual([]);
+      expect(markerLookups).toContainEqual({
+        repositoryId: 11,
+        pullRequestNumber: 42,
+        installationId: 7,
+        marker: `<!-- compte-rendu:run:${claimed.runId} -->`,
+        expected: { headSha: eligibleEvent.headSha, event: 'REQUEST_CHANGES' },
+      });
+      await expect(stateStore.getRunOutcome(claimed.runId)).resolves.toMatchObject({
+        status: 'completed',
+        decision: 'request_changes',
+      });
+    } finally {
+      database.close();
+    }
+  });
+
   it('keeps duplicate success callbacks retryable until publication completes', async () => {
     const database = new SqliteD1Database();
     const stateStore = createD1ReviewStateStore(database);

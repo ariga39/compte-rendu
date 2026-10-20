@@ -219,10 +219,65 @@ in-memory LLM grants; it cannot resume an old agent job.
 
 A hard crash can leave owned Sandboxes ([#66](https://github.com/ariga39/compte-rendu/issues/66)).
 An exhausted terminal callback can leave Core showing a claimed run even after
-local cleanup. There is no supported callback-recovery command yet
-([#195](https://github.com/ariga39/compte-rendu/issues/195)). Preserve evidence,
-verify exact ownership and publication markers, and reconcile deliberately; never
-clear D1 ownership or rerun an old Sandbox merely to make the dashboard look settled.
+local cleanup. Use the explicit recovery operation below; never clear D1 ownership
+or rerun an old Sandbox merely to make the dashboard look settled.
+
+### Replay a lost terminal callback
+
+Runner retains the exact bounded terminal callback as `callback.json` in the
+job's evidence directory, before attempting delivery. Like the other evidence,
+this file is private (mode 0600); it contains review/session evidence but no
+callback credential. Keep it outside Sandbox mounts and do not upload it to an
+issue. Delivery still proceeds if retaining this extra recovery copy fails.
+
+On the correct Runner host and instance, match the local `manifest.json` with
+the run being recovered: evidence ID, job ID, run ID, attempt, and immutable
+base/head SHAs. Confirm the terminal cleanup is `destroyed`. Create a local
+request file containing these assertions, rather than the callback payload:
+
+```json
+{
+  "evidenceId": "<evidence UUID>",
+  "jobId": "<job ID>",
+  "runId": "<run ID>",
+  "attempt": 1,
+  "baseSha": "<full base SHA>",
+  "headSha": "<full head SHA>"
+}
+```
+
+Using the same private curl configuration and loopback origin as maintenance:
+
+```sh
+curl --fail --silent --show-error --config "$RUNNER_CURL_CONFIG" \
+  --request POST --header 'content-type: application/json' \
+  --data-binary @recovery-request.json \
+  "$RUNNER_ORIGIN/maintenance/replay-callback"
+```
+
+Runner reads only its configured evidence directory, validates the retained
+callback, artifact sizes/hashes, identities, revisions and confirmed cleanup,
+then sends one bounded request through its configured authenticated callback
+URL. It does not start a Sandbox or rerun the model. Missing, inconsistent or
+unconfirmed evidence is rejected; archives from before callback retention was
+introduced cannot be reconstructed by this operation.
+
+Successful delivery returns HTTP 202 with `{"accepted": true}`. Rejections include
+a fixed `reason` without artifact contents: 400 for invalid assertions, 404 for
+an unknown evidence directory, 409 for an active job or unusable evidence, 413
+for an oversized callback, 502 for rejected/failed delivery and 504 for a delivery
+timeout. Missing callback configuration returns 503. An old archive without
+`callback.json` is reported as `missing-callback`; never fabricate that file.
+
+An accepted replay means Core accepted the callback, **not** that a review was
+published. Inspect the job's database-backed dashboard status and GitHub review.
+Core retains its existing ownership and revision checks: an obsolete revision
+may become superseded, and an already failed run is not reopened. For an
+interrupted publication it checks the existing review marker, author, commit
+and review state before publishing. Repeating the operation uses the same run
+and cannot intentionally create a new review attempt. Retained evidence is not
+deleted after acceptance. If delivery remains uncertain, inspect the callback
+and Core diagnostics before retrying; do not edit the evidence or clear ownership.
 
 ## Uninstall and cleanup
 

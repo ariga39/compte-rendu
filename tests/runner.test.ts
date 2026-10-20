@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer, request } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -10190,6 +10191,540 @@ describe('Runner maintenance drain', () => {
       });
     } finally {
       await runner.close();
+    }
+  });
+});
+
+describe('Runner callback recovery', () => {
+  const auth = { authorization: 'Bearer runner-test-token' };
+  const baseSha = '1'.repeat(40);
+  const headSha = '2'.repeat(40);
+  const replayIdentity = (evidenceId: string, overrides: Record<string, unknown> = {}) => ({
+    evidenceId,
+    jobId: runnerJobFields.id,
+    runId: 'run-callback-retained',
+    attempt: 1,
+    baseSha,
+    headSha,
+    ...overrides,
+  });
+
+  it('delivers the callback when the recovery copy cannot be persisted', async () => {
+    const evidenceRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-callback-recovery-'));
+    const callbackRequests: Request[] = [];
+    try {
+      const result = await runAgentScenario({
+        runId: 'run-callback-persist-failure',
+        output: finalMarkdownJsonl(),
+        evidenceRoot,
+        callbackRequests,
+        onAgentStart: async () => {
+          for (const entry of await readdir(evidenceRoot, { withFileTypes: true })) {
+            if (entry.isDirectory()) {
+              await mkdir(join(evidenceRoot, entry.name, 'callback.json.tmp'), {
+                recursive: true,
+              });
+            }
+          }
+        },
+      });
+
+      expect(result.terminal.status).toBe('succeeded');
+      expect(callbackRequests).toHaveLength(1);
+      await expect(
+        stat(join(evidenceRoot, result.terminal.evidenceId as string, 'callback.json')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await rm(evidenceRoot, { recursive: true, force: true });
+    }
+  });
+
+  const replay = (
+    runner: ReturnType<typeof createRunner>,
+    identity: Record<string, unknown>,
+    authorized = true,
+  ) =>
+    runner.handle(
+      new Request('http://runner/maintenance/replay-callback', {
+        method: 'POST',
+        headers: {
+          ...(authorized ? auth : {}),
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify(identity),
+      }),
+    );
+
+  const sha256 = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
+
+  const prepareArchive = async () => {
+    const evidenceRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-callback-recovery-'));
+    const requests: Request[] = [];
+    const result = await runAgentScenario({
+      runId: 'run-callback-retained',
+      output: finalMarkdownJsonl(),
+      evidenceRoot,
+      callbackRequests: requests,
+      callbackStatuses: [503, 503],
+    });
+    const evidenceId = result.terminal.evidenceId as string;
+    return {
+      evidenceRoot,
+      evidenceId,
+      retained: await readFile(join(evidenceRoot, evidenceId, 'callback.json'), 'utf8'),
+    };
+  };
+
+  const replayRunner = (evidenceRoot: string) => {
+    const requests: Request[] = [];
+    let processCalls = 0;
+    const runner = createRunner({
+      authToken: 'runner-test-token',
+      evidenceRoot,
+      claimUrl: '',
+      callbackFetch: async (input, init) => {
+        requests.push(new Request(input, init));
+        return new Response(null, { status: 202 });
+      },
+      process: async () => {
+        processCalls += 1;
+        return { exitCode: 1, stdout: '', timedOut: false, truncated: false };
+      },
+    });
+    return { runner, requests, processCalls: () => processCalls };
+  };
+
+  const rewriteCallback = async (
+    evidenceRoot: string,
+    evidenceId: string,
+    mutate: (callback: Record<string, any>) => void,
+  ) => {
+    const path = join(evidenceRoot, evidenceId, 'callback.json');
+    const callback = JSON.parse(await readFile(path, 'utf8')) as Record<string, any>;
+    mutate(callback);
+    const next = join(evidenceRoot, evidenceId, 'callback.json.next');
+    await writeFile(next, JSON.stringify(callback), { mode: 0o600 });
+    await rename(next, path);
+  };
+
+  const rewriteManifest = (callback: Record<string, any>, mutate: (manifest: any) => void) => {
+    const bytes = Buffer.from(callback.evidence.manifest.content, 'base64');
+    const manifest = JSON.parse(bytes.toString('utf8'));
+    mutate(manifest);
+    const next = Buffer.from(JSON.stringify(manifest));
+    callback.evidence.manifest = {
+      content: next.toString('base64'),
+      size: next.byteLength,
+      sha256: sha256(next),
+    };
+  };
+
+  it('rejects an unauthenticated callback replay before delivery', async () => {
+    let deliveries = 0;
+    const runner = createRunner({
+      authToken: 'runner-test-token',
+      claimUrl: '',
+      callbackFetch: async () => {
+        deliveries += 1;
+        return new Response(null, { status: 202 });
+      },
+    });
+    try {
+      expect(
+        (await replay(runner, replayIdentity('00000000-0000-4000-8000-000000000000'), false))
+          .status,
+      ).toBe(401);
+      const wrongToken = await runner.handle(
+        new Request('http://runner/maintenance/replay-callback', {
+          method: 'POST',
+          headers: { authorization: 'Bearer wrong-token', 'content-type': 'application/json' },
+          body: JSON.stringify(replayIdentity('00000000-0000-4000-8000-000000000000')),
+        }),
+      );
+      expect(wrongToken.status).toBe(401);
+      expect(deliveries).toBe(0);
+    } finally {
+      await runner.close();
+    }
+  });
+
+  it('rejects mismatched identity and revision before delivery', async () => {
+    const archive = await prepareArchive();
+    const { runner, requests } = replayRunner(archive.evidenceRoot);
+    try {
+      for (const identity of [
+        replayIdentity(archive.evidenceId, { jobId: 'other-job' }),
+        replayIdentity(archive.evidenceId, { runId: 'other-run' }),
+        replayIdentity(archive.evidenceId, { attempt: 2 }),
+        replayIdentity(archive.evidenceId, { baseSha: '3'.repeat(40) }),
+        replayIdentity(archive.evidenceId, { headSha: '4'.repeat(40) }),
+      ]) {
+        const response = await replay(runner, identity);
+        expect(response.status).toBe(409);
+      }
+      expect(requests).toHaveLength(0);
+
+      await rewriteCallback(archive.evidenceRoot, archive.evidenceId, (callback) => {
+        rewriteManifest(callback, (manifest) => {
+          manifest.baseSha = '3'.repeat(40);
+        });
+      });
+      const manifestMismatch = await replay(runner, replayIdentity(archive.evidenceId));
+      expect(manifestMismatch.status).toBe(409);
+      expect(await manifestMismatch.json()).toMatchObject({ reason: 'identity-mismatch' });
+      expect(requests).toHaveLength(0);
+    } finally {
+      await runner.close();
+      await rm(archive.evidenceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects unconfirmed cleanup before delivery', async () => {
+    const archive = await prepareArchive();
+    const { runner, requests } = replayRunner(archive.evidenceRoot);
+    try {
+      await rewriteCallback(archive.evidenceRoot, archive.evidenceId, (callback) => {
+        rewriteManifest(callback, (manifest) => {
+          manifest.cleanup.status = 'failed';
+        });
+      });
+      const response = await replay(runner, replayIdentity(archive.evidenceId));
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({ reason: 'cleanup-not-confirmed' });
+      expect(requests).toHaveLength(0);
+    } finally {
+      await runner.close();
+      await rm(archive.evidenceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a manifest result that differs from the retained callback', async () => {
+    const archive = await prepareArchive();
+    const { runner, requests } = replayRunner(archive.evidenceRoot);
+    try {
+      await rewriteCallback(archive.evidenceRoot, archive.evidenceId, (callback) => {
+        rewriteManifest(callback, (manifest) => {
+          manifest.result.decision = 'approve';
+        });
+      });
+      const response = await replay(runner, replayIdentity(archive.evidenceId));
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({ reason: 'result-mismatch' });
+      expect(requests).toHaveLength(0);
+    } finally {
+      await runner.close();
+      await rm(archive.evidenceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects oversized or invalid retained callbacks before delivery', async () => {
+    const archive = await prepareArchive();
+    const { runner, requests } = replayRunner(archive.evidenceRoot);
+    try {
+      const oversizedId = '22222222-2222-4222-8222-222222222222';
+      const oversized = join(archive.evidenceRoot, oversizedId);
+      await mkdir(oversized);
+      await writeFile(join(oversized, 'callback.json'), Buffer.alloc(32 * 1024 * 1024 + 1, 0x20), {
+        mode: 0o600,
+      });
+      const oversizedResponse = await replay(runner, replayIdentity(oversizedId));
+      expect(oversizedResponse.status).toBe(413);
+      expect(await oversizedResponse.json()).toMatchObject({ reason: 'oversized-callback' });
+
+      const invalidId = '33333333-3333-4333-8333-333333333333';
+      const invalid = join(archive.evidenceRoot, invalidId);
+      await mkdir(invalid);
+      await writeFile(join(invalid, 'callback.json'), '{}', { mode: 0o600 });
+      const invalidResponse = await replay(runner, replayIdentity(invalidId));
+      expect(invalidResponse.status).toBe(409);
+      expect(await invalidResponse.json()).toMatchObject({ reason: 'invalid-callback' });
+      expect(requests).toHaveLength(0);
+    } finally {
+      await runner.close();
+      await rm(archive.evidenceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects missing, legacy and non-UUID archives before delivery', async () => {
+    const archive = await prepareArchive();
+    const { runner, requests } = replayRunner(archive.evidenceRoot);
+    try {
+      const missing = await replay(runner, replayIdentity('00000000-0000-4000-8000-000000000000'));
+      expect(missing.status).toBe(404);
+      expect(await missing.json()).toMatchObject({ reason: 'missing-evidence' });
+
+      const legacyId = '11111111-1111-4111-8111-111111111111';
+      await mkdir(join(archive.evidenceRoot, legacyId));
+      const legacy = await replay(runner, replayIdentity(legacyId));
+      expect(legacy.status).toBe(409);
+      expect(await legacy.json()).toMatchObject({ reason: 'missing-callback' });
+
+      const traversal = await replay(runner, replayIdentity('../outside'));
+      expect(traversal.status).toBe(400);
+      expect(await traversal.json()).toMatchObject({ reason: 'invalid-request' });
+      expect(requests).toHaveLength(0);
+    } finally {
+      await runner.close();
+      await rm(archive.evidenceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects replay while the job is still active locally', async () => {
+    const evidenceRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-callback-recovery-'));
+    const callbackRequests: Request[] = [];
+    let releaseAgent: () => void = () => {};
+    const agentGate = new Promise<void>((resolve) => {
+      releaseAgent = resolve;
+    });
+    let signalAgentStarted: () => void = () => {};
+    const agentStarted = new Promise<void>((resolve) => {
+      signalAgentStarted = resolve;
+    });
+    let activeRunner: ReturnType<typeof createRunner> | undefined;
+    try {
+      const scenario = runAgentScenario({
+        runId: 'run-callback-retained',
+        output: finalMarkdownJsonl(),
+        evidenceRoot,
+        callbackRequests,
+        agentGate,
+        onAgentStart: () => signalAgentStarted(),
+        onRunner: (runner) => {
+          activeRunner = runner;
+        },
+      });
+      await agentStarted;
+      const response = await replay(
+        activeRunner!,
+        replayIdentity('00000000-0000-4000-8000-000000000000'),
+      );
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({
+        accepted: false,
+        error: 'job is active',
+        reason: 'active-job',
+      });
+      expect(callbackRequests).toHaveLength(0);
+      releaseAgent();
+      await scenario;
+    } finally {
+      releaseAgent();
+      await rm(evidenceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('records only safe replay diagnostics and accepts only HTTP 202', async () => {
+    const archive = await prepareArchive();
+    await rewriteCallback(archive.evidenceRoot, archive.evidenceId, (callback) => {
+      callback.attempt = 2;
+      rewriteManifest(callback, (manifest) => {
+        manifest.attempt = 2;
+      });
+    });
+    const identity = replayIdentity(archive.evidenceId, { attempt: 2 });
+    const cases = [
+      {
+        fetch: async () => new Response(null, { status: 202 }),
+        expectedStatus: 202,
+        result: 'accepted',
+        upstreamStatus: 202,
+      },
+      {
+        fetch: async () => new Response('secret upstream body', { status: 500 }),
+        expectedStatus: 502,
+        result: 'http-error',
+        upstreamStatus: 500,
+      },
+      {
+        fetch: async () => {
+          throw new Error('token callback-token');
+        },
+        expectedStatus: 502,
+        result: 'transport-error',
+      },
+      {
+        fetch: async () => new Promise<Response>(() => undefined),
+        expectedStatus: 504,
+        result: 'timeout',
+        timeoutMs: 5,
+      },
+    ] as const;
+    try {
+      for (const scenario of cases) {
+        const logEvents: Array<Record<string, unknown>> = [];
+        const runner = createRunner({
+          authToken: 'runner-test-token',
+          evidenceRoot: archive.evidenceRoot,
+          claimUrl: '',
+          callbackTimeoutMs: 'timeoutMs' in scenario ? scenario.timeoutMs : undefined,
+          callbackFetch: scenario.fetch,
+          log: {
+            record: async (event) => {
+              logEvents.push(event as unknown as Record<string, unknown>);
+            },
+          },
+        });
+        try {
+          const response = await replay(runner, identity);
+          expect(response.status).toBe(scenario.expectedStatus);
+          if (scenario.expectedStatus !== 202) {
+            const body = (await response.json()) as Record<string, unknown>;
+            expect(body).toMatchObject({ accepted: false, reason: scenario.result });
+            expect(JSON.stringify(body)).not.toContain('callback-token');
+          }
+          expect(logEvents).toContainEqual({
+            phase: 'runner',
+            outcome: 'callback',
+            runId: 'run-callback-retained',
+            jobId: runnerJobFields.id,
+            attempt: 1,
+            result: scenario.result,
+            ...('upstreamStatus' in scenario ? { status: scenario.upstreamStatus } : {}),
+          });
+          expect(JSON.stringify(logEvents)).not.toContain('callback-token');
+          expect(JSON.stringify(logEvents)).not.toContain('secret upstream body');
+        } finally {
+          await runner.close();
+        }
+      }
+    } finally {
+      await rm(archive.evidenceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects tampered evidence artifacts before delivery', async () => {
+    const archive = await prepareArchive();
+    const { runner, requests } = replayRunner(archive.evidenceRoot);
+    try {
+      await rewriteCallback(archive.evidenceRoot, archive.evidenceId, (callback) => {
+        callback.evidence.opencodeJsonl.content = Buffer.from('tampered').toString('base64');
+      });
+      const response = await replay(runner, replayIdentity(archive.evidenceId));
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({
+        accepted: false,
+        error: 'callback recovery rejected',
+        reason: 'integrity-mismatch',
+      });
+      expect(requests).toHaveLength(0);
+    } finally {
+      await runner.close();
+      await rm(archive.evidenceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('replays the retained callback after a restart without re-executing the job', async () => {
+    const evidenceRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-callback-recovery-'));
+    const originalRequests: Request[] = [];
+    try {
+      const result = await runAgentScenario({
+        runId: 'run-callback-retained',
+        output: finalMarkdownJsonl(),
+        evidenceRoot,
+        callbackRequests: originalRequests,
+        callbackStatuses: [503, 503],
+      });
+      const evidenceId = result.terminal.evidenceId as string;
+      const retained = await readFile(join(evidenceRoot, evidenceId, 'callback.json'), 'utf8');
+
+      const replayRequests: Request[] = [];
+      let processCalls = 0;
+      const restarted = createRunner({
+        authToken: 'runner-test-token',
+        evidenceRoot,
+        claimUrl: '',
+        callbackFetch: async (input, init) => {
+          replayRequests.push(new Request(input, init));
+          return new Response(null, { status: 202 });
+        },
+        process: async () => {
+          processCalls += 1;
+          return { exitCode: 1, stdout: '', timedOut: false, truncated: false };
+        },
+      });
+      try {
+        const response = await replay(restarted, replayIdentity(evidenceId));
+        expect(response.status).toBe(202);
+        expect(await response.json()).toEqual({ accepted: true });
+        expect(replayRequests).toHaveLength(1);
+        expect(replayRequests[0]!.url).toBe('https://ingress.test/runner-callback');
+        expect(replayRequests[0]!.headers.get('authorization')).toBe('Bearer callback-token');
+        expect(await replayRequests[0]!.clone().text()).toBe(retained);
+        expect(processCalls).toBe(0);
+        expect(await readFile(join(evidenceRoot, evidenceId, 'callback.json'), 'utf8')).toBe(
+          retained,
+        );
+      } finally {
+        await restarted.close();
+      }
+    } finally {
+      await rm(evidenceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts a repeated replay and leaves Core to deduplicate publication', async () => {
+    const evidenceRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-callback-recovery-'));
+    const originalRequests: Request[] = [];
+    try {
+      const result = await runAgentScenario({
+        runId: 'run-callback-retained',
+        output: finalMarkdownJsonl(),
+        evidenceRoot,
+        callbackRequests: originalRequests,
+        callbackStatuses: [503, 503],
+      });
+      const evidenceId = result.terminal.evidenceId as string;
+      const retained = await readFile(join(evidenceRoot, evidenceId, 'callback.json'), 'utf8');
+      const replayRequests: Request[] = [];
+      const restarted = createRunner({
+        authToken: 'runner-test-token',
+        evidenceRoot,
+        claimUrl: '',
+        callbackFetch: async (input, init) => {
+          replayRequests.push(new Request(input, init));
+          return new Response(null, { status: 202 });
+        },
+      });
+      try {
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          const response = await replay(restarted, replayIdentity(evidenceId));
+          expect(response.status).toBe(202);
+          expect(await response.json()).toEqual({ accepted: true });
+        }
+        expect(replayRequests).toHaveLength(2);
+        for (const request of replayRequests) {
+          expect(await request.clone().text()).toBe(retained);
+        }
+      } finally {
+        await restarted.close();
+      }
+    } finally {
+      await rm(evidenceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('retains the exact final callback body in the evidence directory before delivery', async () => {
+    const evidenceRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-callback-recovery-'));
+    const callbackRequests: Request[] = [];
+    try {
+      const result = await runAgentScenario({
+        runId: 'run-callback-retained',
+        output: finalMarkdownJsonl(),
+        evidenceRoot,
+        callbackRequests,
+      });
+
+      expect(callbackRequests).toHaveLength(1);
+      const delivered = await callbackRequests[0]!.clone().text();
+      const evidencePath = join(evidenceRoot, result.terminal.evidenceId as string);
+      const retained = await readFile(join(evidencePath, 'callback.json'), 'utf8');
+
+      expect(retained).toBe(delivered);
+      expect(retained).not.toContain('callback-token');
+      expect(retained).not.toContain('https://ingress.test');
+      expect((await stat(join(evidencePath, 'callback.json'))).mode & 0o777).toBe(0o600);
+    } finally {
+      await rm(evidenceRoot, { recursive: true, force: true });
     }
   });
 });
