@@ -29,7 +29,7 @@ export const reviewPrompt = (input: ReviewPromptInput): string => {
     'Challenge the premise: is the claimed problem real, does this PR solve it, and is this change necessary? Do not take the PR description as proof. ' +
     'Seek counterexamples and inspect affected callers, tests, configuration and history to verify claims. ' +
     'Stop once decisive evidence and directly affected behavior are checked; do not perform a repository or history census merely to appear comprehensive. ' +
-    'Keep full PR and review-thread pagination, revision checks and available inspection access; there is no hard tool or time cap, and do not finish before the review is complete. ' +
+    'Keep full PR and review-thread pagination, revision checks and available inspection access; work within the existing execution budget and permitted tools, and do not finish before the review is complete. ' +
     'Challenge avoidable complexity: unnecessary abstractions, dependencies, indirection, broadened scope, and maintenance cost. ' +
     'Ask whether a smaller, more direct implementation would meet the actual requirement. ' +
     'Ground criticism in the repository and concrete consequences, and offer a practical simpler alternative when warranted. ' +

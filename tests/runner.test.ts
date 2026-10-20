@@ -9439,7 +9439,7 @@ describe('Runner multi-model review', () => {
       expect(prompt).toContain('Challenge avoidable complexity');
       expect(prompt).toContain('Stop once decisive evidence and directly affected behavior');
       expect(prompt).toContain('repository or history census');
-      expect(prompt).toContain('no hard tool or time cap');
+      expect(prompt).toContain('within the existing execution budget');
       expect(prompt).toContain('do not finish before the review is complete');
       expect(prompt).toContain('Consolidate observations sharing one root cause');
       expect(prompt).toContain('merge disposition');
@@ -9459,7 +9459,7 @@ describe('Runner multi-model review', () => {
     expect(single.skillText).toContain('Stop extending the investigation once decisive evidence');
     expect(single.skillText).toContain('directly affected behavior');
     expect(single.skillText).toContain('repository or history census');
-    expect(single.skillText).toContain('no hard tool or time cap');
+    expect(single.skillText).toContain('within the existing execution budget');
     expect(single.skillText).toContain('do not stop before the review is complete');
     expect(single.skillText).toContain('Consolidate observations that share one root cause');
     expect(single.skillText).toContain('merge disposition');
