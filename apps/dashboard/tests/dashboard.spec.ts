@@ -45,7 +45,9 @@ const ok = (json: unknown): ApiPayload => ({ status: 200, json });
 const overviewData = (
   counts: PublicOverview['counts'],
   cleanupAttention: number,
-): PublicOverview => ({
+): PublicOverview & PublicHistoryPage => ({
+  tasks: [],
+  nextCursor: null,
   generatedAt: NOW,
   counts,
   cleanupAttention,
@@ -100,10 +102,10 @@ const publicIdentity: Extract<PublicTaskIdentity, { kind: 'public' }> = {
 
 const defaultOverviewHandler: ApiHandler = (url) => {
   if (url.pathname === '/api/dashboard') {
-    return ok(overviewData({ queued: 2, claimed: 1, publishedLast24h: 5, failedLast24h: 1 }, 3));
-  }
-  if (url.searchParams.get('view') === 'current') {
-    return ok(historyPage([task({ runId: 'cur-1', dispatch: 'claimed', claimedAt: NOW })]));
+    return ok({
+      ...overviewData({ queued: 2, claimed: 1, publishedLast24h: 5, failedLast24h: 1 }, 3),
+      ...historyPage([task({ runId: 'cur-1', dispatch: 'claimed', claimedAt: NOW })]),
+    });
   }
   if (url.searchParams.get('view') === 'cleanup') {
     return ok(
@@ -117,14 +119,12 @@ const defaultOverviewHandler: ApiHandler = (url) => {
 
 const publicIdentityOverviewHandler: ApiHandler = (url) => {
   if (url.pathname === '/api/dashboard') {
-    return ok(overviewData({ queued: 2, claimed: 1, publishedLast24h: 5, failedLast24h: 1 }, 0));
-  }
-  if (url.searchParams.get('view') === 'current') {
-    return ok(
-      historyPage([
+    return ok({
+      ...overviewData({ queued: 2, claimed: 1, publishedLast24h: 5, failedLast24h: 1 }, 0),
+      ...historyPage([
         task({ runId: 'cur-1', dispatch: 'claimed', claimedAt: NOW, identity: publicIdentity }),
       ]),
-    );
+    });
   }
   return ok(historyPage([]));
 };
@@ -145,7 +145,7 @@ test('overview requests its read-only endpoints and renders counts and lists', a
   await page.waitForSelector('[data-testid="stats"]');
   const requested = harness.state.requests.slice();
   expect(requested).toContain('/api/dashboard');
-  expect(requested).toContain('/api/jobs?view=current');
+  expect(requested).not.toContain('/api/jobs?view=current');
   expect(requested).not.toContain('/api/jobs?view=cleanup');
   expect(await page.locator('[data-testid="stat"] strong').first().textContent()).toBe('2');
   const text = await page.locator('#content').textContent();
@@ -161,9 +161,11 @@ test('overview links truncated current work to a status-filtered history view', 
   const current25 = Array.from({ length: 25 }, (_, index) => task({ runId: `cur-${index}` }));
   harness.setHandler((url) => {
     if (url.pathname === '/api/dashboard') {
-      return ok(overviewData({ queued: 25, claimed: 0, publishedLast24h: 0, failedLast24h: 0 }, 2));
+      return ok({
+        ...overviewData({ queued: 25, claimed: 0, publishedLast24h: 0, failedLast24h: 0 }, 2),
+        ...historyPage(current25, 'CUR-CURSOR'),
+      });
     }
-    if (url.searchParams.get('view') === 'current') return ok(historyPage(current25, 'CUR-CURSOR'));
     return ok(historyPage(current25, 'CUR-CURSOR'));
   });
   await page.goto(`${base}/`);
@@ -467,14 +469,14 @@ test('navigation cancels the previous in-flight request', async ({ page, harness
     promise: gate.then(() => ok(historyPage([task({ runId: 'x' })]))),
   }));
   await page.goto(`${base}/`);
-  await harness.waitFor(() => harness.state.requests.length >= 2);
+  await harness.waitFor(() => harness.state.requests.length >= 1);
   await page.click('nav a[href="/history"]');
-  await harness.waitFor(() => harness.state.aborted >= 2, 5000);
-  expect(harness.state.active).toBeLessThanOrEqual(3);
+  await harness.waitFor(() => harness.state.aborted >= 1, 5000);
+  expect(harness.state.active).toBeLessThanOrEqual(1);
   release();
 });
 
-test('a failed overview request aborts its stalled siblings and the next refresh does not overlap', async ({
+test('a failed overview snapshot can be retried without overlapping refreshes', async ({
   page,
   harness,
   base,
@@ -485,13 +487,13 @@ test('a failed overview request aborts its stalled siblings and the next refresh
   });
   await page.goto(`${base}/`);
   await page.getByRole('button', { name: 'Retry' }).waitFor();
-  await harness.waitFor(() => harness.state.aborted >= 2, 4000);
+  await harness.waitFor(() => harness.state.aborted >= 1, 4000);
   const afterFailure = harness.state.requests.length;
   harness.setHandler(defaultOverviewHandler);
   await page.getByRole('button', { name: 'Retry' }).click();
   await page.waitForSelector('[data-testid="stats"]');
   expect(harness.state.requests.length).toBeGreaterThan(afterFailure);
-  expect(harness.state.active).toBeLessThanOrEqual(3);
+  expect(harness.state.active).toBeLessThanOrEqual(1);
 });
 
 test('repeated manual refresh clicks stay single-flight', async ({ page, harness, base }) => {
@@ -509,10 +511,10 @@ test('repeated manual refresh clicks stay single-flight', async ({ page, harness
     ),
   }));
   await page.click('[data-testid="refresh"]');
-  await harness.waitFor(() => harness.state.requests.length >= afterInitial + 2);
+  await harness.waitFor(() => harness.state.requests.length >= afterInitial + 1);
   await page.click('[data-testid="refresh"]');
   await sleep(200);
-  expect(harness.state.requests.length).toBe(afterInitial + 2);
+  expect(harness.state.requests.length).toBe(afterInitial + 1);
   release();
 });
 
@@ -524,7 +526,7 @@ test('a request beyond the 15s browser timeout surfaces an error', async ({
   harness.setHandler(() => ({ promise: new Promise<ApiPayload>(() => undefined) }));
   await page.clock.install();
   await page.goto(`${base}/`);
-  await harness.waitFor(() => harness.state.requests.length >= 2, 4000);
+  await harness.waitFor(() => harness.state.requests.length >= 1, 4000);
   await page.clock.runFor(16000);
   await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible({ timeout: 4000 });
 });
@@ -640,10 +642,10 @@ test('identity expires independently of network and navigation', async ({
   const expiring = expiringIdentity(400);
   harness.setHandler((url) => {
     if (url.pathname === '/api/dashboard') {
-      return ok(overviewData({ queued: 1, claimed: 0, publishedLast24h: 0, failedLast24h: 0 }, 0));
-    }
-    if (url.searchParams.get('view') === 'current') {
-      return ok(historyPage([task({ runId: 'r', identity: expiring })]));
+      return ok({
+        ...overviewData({ queued: 1, claimed: 0, publishedLast24h: 0, failedLast24h: 0 }, 0),
+        ...historyPage([task({ runId: 'r', identity: expiring })]),
+      });
     }
     return ok(historyPage([]));
   });
@@ -666,15 +668,13 @@ test('each identity expires at its own deadline without a refresh', async ({
   const second = expiringIdentity(900, 'acme/two');
   harness.setHandler((url) => {
     if (url.pathname === '/api/dashboard') {
-      return ok(overviewData({ queued: 2, claimed: 0, publishedLast24h: 0, failedLast24h: 0 }, 0));
-    }
-    if (url.searchParams.get('view') === 'current') {
-      return ok(
-        historyPage([
+      return ok({
+        ...overviewData({ queued: 2, claimed: 0, publishedLast24h: 0, failedLast24h: 0 }, 0),
+        ...historyPage([
           task({ runId: 'one', identity: first }),
           task({ runId: 'two', identity: second }),
         ]),
-      );
+      });
     }
     return ok(historyPage([]));
   });
@@ -707,12 +707,10 @@ test('each identity expires at its own deadline without a refresh', async ({
 test('an already-expired public identity is not rendered', async ({ page, harness, base }) => {
   harness.setHandler((url) => {
     if (url.pathname === '/api/dashboard') {
-      return ok(overviewData({ queued: 1, claimed: 0, publishedLast24h: 0, failedLast24h: 0 }, 0));
-    }
-    if (url.searchParams.get('view') === 'current') {
-      return ok(
-        historyPage([task({ runId: 'r', identity: { ...publicIdentity, expiresAt: NOW } })]),
-      );
+      return ok({
+        ...overviewData({ queued: 1, claimed: 0, publishedLast24h: 0, failedLast24h: 0 }, 0),
+        ...historyPage([task({ runId: 'r', identity: { ...publicIdentity, expiresAt: NOW } })]),
+      });
     }
     return ok(historyPage([]));
   });
@@ -757,10 +755,10 @@ test('a valid identity expires while offline and does not return without a fresh
   const expiring = expiringIdentity(400);
   harness.setHandler((url) => {
     if (url.pathname === '/api/dashboard') {
-      return ok(overviewData({ queued: 1, claimed: 0, publishedLast24h: 0, failedLast24h: 0 }, 0));
-    }
-    if (url.searchParams.get('view') === 'current') {
-      return ok(historyPage([task({ runId: 'r', identity: expiring })]));
+      return ok({
+        ...overviewData({ queued: 1, claimed: 0, publishedLast24h: 0, failedLast24h: 0 }, 0),
+        ...historyPage([task({ runId: 'r', identity: expiring })]),
+      });
     }
     return ok(historyPage([]));
   });
@@ -796,12 +794,10 @@ test('network delay is subtracted from the identity lifetime conservatively', as
   harness.setHandler((url) => {
     const delayed = sleep(300).then(() => {
       if (url.pathname === '/api/dashboard') {
-        return ok(
-          overviewData({ queued: 1, claimed: 0, publishedLast24h: 0, failedLast24h: 0 }, 0),
-        );
-      }
-      if (url.searchParams.get('view') === 'current') {
-        return ok(historyPage([task({ runId: 'r', identity: lifetime })]));
+        return ok({
+          ...overviewData({ queued: 1, claimed: 0, publishedLast24h: 0, failedLast24h: 0 }, 0),
+          ...historyPage([task({ runId: 'r', identity: lifetime })]),
+        });
       }
       return ok(historyPage([]));
     });
@@ -826,11 +822,9 @@ test('hostile route and task fields cannot inject markup or run scripts', async 
   });
   harness.setHandler((url) => {
     if (url.pathname === '/api/dashboard') {
-      return ok(overviewData({ queued: 1, claimed: 0, publishedLast24h: 0, failedLast24h: 0 }, 0));
-    }
-    if (url.searchParams.get('view') === 'current') {
-      return ok(
-        historyPage([
+      return ok({
+        ...overviewData({ queued: 1, claimed: 0, publishedLast24h: 0, failedLast24h: 0 }, 0),
+        ...historyPage([
           task({
             runId: 'r',
             identity: {
@@ -846,7 +840,7 @@ test('hostile route and task fields cannot inject markup or run scripts', async 
             },
           }),
         ]),
-      );
+      });
     }
     if (url.pathname.startsWith('/api/jobs/')) return ok(detailData(task({ runId: 'r' })));
     return ok(historyPage([]));

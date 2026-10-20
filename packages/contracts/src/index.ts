@@ -658,6 +658,12 @@ export const PublicHistoryPage = Schema.Struct({
 });
 export type PublicHistoryPage = typeof PublicHistoryPage.Type;
 
+export const PublicDashboardSnapshot = Schema.Struct({
+  ...PublicOverview.fields,
+  ...PublicHistoryPage.fields,
+});
+export type PublicDashboardSnapshot = typeof PublicDashboardSnapshot.Type;
+
 export const PublicMilestone = Schema.Struct({
   stage: PublicExecutionStage,
   startedAt: Schema.NonEmptyString,

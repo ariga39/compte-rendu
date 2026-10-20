@@ -223,16 +223,18 @@ test('closing the drawer on the current list focuses the page heading when the r
     claimedAt: NOW,
     cleanup: 'unknown',
   };
-  const overview = (claimed: number): ApiPayload =>
+  const overview = (tasks: PublicTaskState[]): ApiPayload =>
     ok({
       generatedAt: NOW,
-      counts: { queued: 0, claimed, publishedLast24h: 0, failedLast24h: 0 },
+      counts: { queued: 0, claimed: tasks.length, publishedLast24h: 0, failedLast24h: 0 },
       cleanupAttention: 0,
+      tasks,
+      nextCursor: null,
     });
   const current =
     (tasks: PublicTaskState[]): ApiHandler =>
     (url) => {
-      if (url.pathname === '/api/dashboard') return overview(tasks.length);
+      if (url.pathname === '/api/dashboard') return overview(tasks);
       if (url.pathname === '/api/jobs') return ok(historyPage(tasks));
       if (url.pathname.startsWith('/api/jobs/')) {
         const runId = url.pathname.slice('/api/jobs/'.length);

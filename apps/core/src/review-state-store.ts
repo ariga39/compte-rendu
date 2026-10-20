@@ -1114,19 +1114,35 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
     return transitionResults.every((result) => result.meta.changes === 1);
   },
 
-  countPublicOverview: async ({ since }) => {
-    const row = await database
-      .prepare(`SELECT
-      COUNT(CASE WHEN status = 'scheduled' AND runner_job_id IS NULL THEN 1 END) AS queued,
-      COUNT(CASE WHEN status = 'scheduled' AND runner_job_id IS NOT NULL THEN 1 END) AS claimed,
-      COUNT(CASE WHEN status = 'completed' AND created_at >= ? THEN 1 END) AS publishedLast24h,
-      COUNT(CASE WHEN status = 'failed' AND created_at >= ? THEN 1 END) AS failedLast24h,
-      COUNT(CASE WHEN ${cleanupAttentionClause} THEN 1 END) AS cleanupAttention
-      FROM review_runs r`)
-      .bind(since, since)
-      .first<import('./index').PublicOverviewCounts>();
-    if (row === null) throw new Error('dashboard overview unavailable');
-    return row;
+  getPublicOverview: async ({ since, limit }) => {
+    const result = await database
+      .prepare(`WITH totals AS (SELECT
+        COUNT(CASE WHEN status = 'scheduled' AND runner_job_id IS NULL THEN 1 END) AS queued,
+        COUNT(CASE WHEN status = 'scheduled' AND runner_job_id IS NOT NULL THEN 1 END) AS claimed,
+        COUNT(CASE WHEN status = 'completed' AND created_at >= ? THEN 1 END) AS publishedLast24h,
+        COUNT(CASE WHEN status = 'failed' AND created_at >= ? THEN 1 END) AS failedLast24h,
+        COUNT(CASE WHEN ${cleanupAttentionClause} THEN 1 END) AS cleanupAttention
+        FROM review_runs r),
+      current AS (SELECT ${publicRunColumns} ${publicRunFrom}
+        WHERE r.status = 'scheduled'
+        ORDER BY ${dispatchPriority} ASC, r.created_at ASC, r.run_id ASC LIMIT ?)
+      SELECT totals.*, current.* FROM totals LEFT JOIN current ON TRUE
+      ORDER BY CASE WHEN current.runner_job_id IS NOT NULL THEN 0 ELSE 1 END,
+        current.created_at ASC, current.run_id ASC`)
+      .bind(since, since, limit)
+      .all<PublicRunDbRow & import('./index').PublicOverviewCounts>();
+    const first = result.results[0];
+    if (first === undefined) throw new Error('dashboard overview unavailable');
+    return {
+      counts: {
+        queued: first.queued,
+        claimed: first.claimed,
+        publishedLast24h: first.publishedLast24h,
+        failedLast24h: first.failedLast24h,
+        cleanupAttention: first.cleanupAttention,
+      },
+      rows: result.results.filter((row) => row.run_id !== null).map(mapPublicRun),
+    };
   },
 
   listPublicRuns: async ({ limit, cursor, filter, view }) => {

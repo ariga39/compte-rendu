@@ -77,6 +77,77 @@ const verifyMetadata = async (
 const asJson = async <T>(response: Response): Promise<T> => (await response.json()) as T;
 
 describe('public dashboard reads are DB-only', () => {
+  it('returns counts and current rows together while a run finishes', async () => {
+    const database = new SqliteD1Database();
+    const store = createD1ReviewStateStore(database);
+    const claimed = await store.claimReview({
+      deliveryId: 'snapshot-run',
+      job: job({ repositoryVisibility: 'private' }),
+      occurredAt: new Date().toISOString(),
+    });
+    if (claimed.kind !== 'claimed') throw new Error('not claimed');
+    const worker = createCoreWorker(coreEnv(database));
+    const before = await (await get(worker, '/api/dashboard')).json();
+    expect(before).toMatchObject({
+      counts: { queued: 1 },
+      tasks: [{ runId: claimed.runId, identity: { kind: 'anonymous' } }],
+      nextCursor: null,
+    });
+    const [response] = await Promise.all([
+      get(worker, '/api/dashboard'),
+      store.completeRunPublication({
+        runId: claimed.runId,
+        occurredAt: new Date().toISOString(),
+        fingerprints: [],
+      }),
+    ]);
+    const snapshot = await asJson<{
+      counts: { queued: number };
+      tasks: { status: string; dispatch: string }[];
+    }>(response);
+    expect(snapshot.counts.queued).toBe(
+      snapshot.tasks.filter((task) => task.status === 'scheduled' && task.dispatch === 'queued')
+        .length,
+    );
+    expect(await (await get(worker, '/api/dashboard')).json()).toMatchObject({
+      counts: { queued: 0, publishedLast24h: 1 },
+      tasks: [],
+    });
+    database.close();
+  });
+
+  it('keeps overview counts complete while paginating current rows with anonymous identities', async () => {
+    const database = new SqliteD1Database();
+    const store = createD1ReviewStateStore(database);
+    for (let index = 0; index < 26; index += 1) {
+      await store.claimReview({
+        deliveryId: `snapshot-page-${index}`,
+        job: job({ repositoryId: 1000 + index, repositoryVisibility: 'private' }),
+        occurredAt: new Date(Date.now() + index).toISOString(),
+      });
+    }
+    const worker = createCoreWorker(coreEnv(database));
+    const first = await asJson<{
+      counts: { queued: number };
+      tasks: { runId: string; identity: { kind: string } }[];
+      nextCursor: string;
+    }>(await get(worker, '/api/dashboard'));
+    expect(first.counts.queued).toBe(26);
+    expect(first.tasks).toHaveLength(25);
+    expect(first.tasks.every((task) => task.identity.kind === 'anonymous')).toBe(true);
+    expect(first.nextCursor).toEqual(expect.any(String));
+    const second = await asJson<{ tasks: { runId: string }[]; nextCursor: null }>(
+      await get(worker, `/api/jobs?view=current&cursor=${encodeURIComponent(first.nextCursor)}`),
+    );
+    expect(second.tasks).toHaveLength(1);
+    expect(second.nextCursor).toBeNull();
+    expect(first.tasks.map((task) => task.runId)).not.toContain(second.tasks[0]?.runId);
+    expect(
+      (await get(worker, `/api/jobs?cursor=${encodeURIComponent(first.nextCursor)}`)).status,
+    ).toBe(400);
+    database.close();
+  });
+
   it('retains an explicit decision through a fresh Worker without inventing historical votes', async () => {
     const database = new SqliteD1Database();
     const store = createD1ReviewStateStore(database);

@@ -24,6 +24,7 @@ test('SSR renders usable content and hydration reuses the query before a browser
   await expect(page.getByText('No reviews in progress or waiting.')).toBeVisible();
   const before = requests.length;
   await page.getByRole('button', { name: 'Refresh now', exact: true }).click();
-  await expect.poll(() => requests.length).toBe(before + 2);
+  await expect.poll(() => requests.length).toBe(before + 1);
+  expect(requests).not.toContain('/api/jobs');
   expect(errors).toEqual([]);
 });
