@@ -491,6 +491,122 @@ it('rejects duplicate issuance even after revocation', async () => {
   service.close();
 });
 
+it('rechecks revocation after async grant preparation', async () => {
+  let started!: () => void;
+  let release!: () => void;
+  const startedPromise = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const service = createLlmService({
+    prepareGrant: async () => {
+      started();
+      await gate;
+      return {
+        routes: [{ id: 'review', path: '/v1/chat/completions' as const }],
+        upstream: async () => new Response('ok'),
+      };
+    },
+  });
+  try {
+    const issuing = service.control(
+      new Request('http://control.invalid/grants', {
+        method: 'POST',
+        body: JSON.stringify({ jobId: 'job-revoke-race', routes: ['review'] }),
+      }),
+    );
+    await startedPromise;
+    const revoked = await service.control(
+      new Request('http://control.invalid/grants/revoke', {
+        method: 'POST',
+        body: JSON.stringify({ jobId: 'job-revoke-race' }),
+      }),
+    );
+    expect(revoked.status).toBe(204);
+    release();
+    expect((await issuing).status).toBe(409);
+  } finally {
+    service.close();
+  }
+});
+
+it('rechecks closure after async grant preparation', async () => {
+  let started!: () => void;
+  let release!: () => void;
+  const startedPromise = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const service = createLlmService({
+    prepareGrant: async () => {
+      started();
+      await gate;
+      return {
+        routes: [{ id: 'review', path: '/v1/chat/completions' as const }],
+        upstream: async () => new Response('ok'),
+      };
+    },
+  });
+  try {
+    const issuing = service.control(
+      new Request('http://control.invalid/grants', {
+        method: 'POST',
+        body: JSON.stringify({ jobId: 'job-close-race', routes: ['review'] }),
+      }),
+    );
+    await startedPromise;
+    service.close();
+    release();
+    expect((await issuing).status).toBe(503);
+  } finally {
+    service.close();
+  }
+});
+
+it('does not issue duplicates that race through async grant preparation', async () => {
+  let prepared = 0;
+  let bothStarted!: () => void;
+  let release!: () => void;
+  const bothStartedPromise = new Promise<void>((resolve) => {
+    bothStarted = resolve;
+  });
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const service = createLlmService({
+    prepareGrant: async () => {
+      prepared += 1;
+      if (prepared === 2) bothStarted();
+      await gate;
+      return {
+        routes: [{ id: 'review', path: '/v1/chat/completions' as const }],
+        upstream: async () => new Response('ok'),
+      };
+    },
+  });
+  try {
+    const issue = () =>
+      service.control(
+        new Request('http://control.invalid/grants', {
+          method: 'POST',
+          body: JSON.stringify({ jobId: 'job-duplicate-race', routes: ['review'] }),
+        }),
+      );
+    const first = issue();
+    const second = issue();
+    await bothStartedPromise;
+    release();
+    const statuses = (await Promise.all([first, second])).map((response) => response.status);
+    expect(statuses.sort((left, right) => left - right)).toEqual([201, 409]);
+  } finally {
+    service.close();
+  }
+});
+
 it('tombstones a revocation for a job that has not been issued yet', async () => {
   const service = createLlmService({
     routes: [{ id: 'review', path: '/v1/chat/completions' }],

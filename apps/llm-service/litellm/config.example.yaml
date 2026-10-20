@@ -12,6 +12,14 @@ model_list:
       api_base: https://opencode.ai/inference/go/openai/v1
       api_key: os.environ/OPENCODE_GO_API_KEY
 
+  # Future models on this same provider need only a new Node TOML route.
+  # Keep exact aliases above for jobs admitted before switching selection.
+  - model_name: 'review-provider/*'
+    litellm_params:
+      model: 'openai/*'
+      api_base: https://opencode.ai/inference/go/openai/v1
+      api_key: os.environ/OPENCODE_GO_API_KEY
+
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
   # Only the trusted Node service reaches this loopback backend. It constructs

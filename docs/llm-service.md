@@ -69,8 +69,51 @@ Both HTTP and HTTPS require `localhost`, `127.0.0.1`, or `[::1]`; remote backend
 addresses are rejected. The Node service appends the
 selected `/v1/chat/completions` or `/v1/responses` path. A route's `id` is the
 sandbox-facing alias and `model` names the LiteLLM alias. Use `protocol =
-"responses"` for a Responses client. Routes and configuration load at startup;
-no hot reload or automatic provider fallback is introduced.
+"responses"` for a Responses client. The service validates configuration at startup
+and reads the routes again when issuing each job grant. A grant freezes its routes
+and upstream mapping; later edits do not change that grant's requests. Invalid
+configuration rejects new grants with a sanitized error while existing grants
+continue. Correcting the file restores admission without restarting the service.
+Listener addresses and the backend connection are startup settings.
+
+### Change a review model without restarting
+
+For models sharing an already configured provider and credential, configure
+LiteLLM's native provider wildcard once:
+
+```yaml
+model_list:
+  - model_name: 'review-provider/*'
+    litellm_params:
+      model: 'openai/*'
+      api_base: https://opencode.ai/inference/go/openai/v1
+      api_key: os.environ/OPENCODE_GO_API_KEY
+```
+
+Keep the existing exact aliases when adding this entry to an existing installation.
+Use each instance's actual base URL and credential reference. Wildcard routing
+is internal to the loopback backend: the Node service still grants access only
+to the explicit route IDs requested for that job.
+
+After this initial backend setup, a model change needs only configuration:
+
+1. Add a new route to the Node TOML, for example `id = "mimo-review"`,
+   `model = "review-provider/mimo-v2.6-flash"`, and
+   `protocol = "chat-completions"`. Replace the complete file atomically.
+2. Issue a temporary grant and verify an actual model/tool response, then revoke it.
+3. Update the instance's [review selection](review-configuration.md#operator-api)
+   with its current revision, replacing `step-review` with `mimo-review`.
+
+Keep the Step route while queued or executing jobs still reference it. Do not
+repoint an existing ID to a different model: admission freezes route IDs before
+the Runner requests a grant. Neither Runner, Node service nor LiteLLM needs a
+restart for this model change. No automatic provider fallback is introduced.
+
+This does not hot-reload arbitrary LiteLLM settings or introduce a new provider
+credential. LiteLLM 1.106.0's model-management API requires PostgreSQL; this
+no-database deployment uses native wildcard routing instead. Upgrading an older
+Node artifact to support grant-time configuration, or initially configuring the
+wildcard backend, remains a service deployment and requires draining active jobs.
 
 The Node service generates `x-opencode-session` and `session_id` from the
 verified grant's job ID. It does not forward incoming HTTP headers or accept

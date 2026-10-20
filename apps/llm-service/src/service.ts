@@ -15,16 +15,22 @@ export interface LlmRoute {
   readonly path: LlmRoutePath;
 }
 
-export interface LlmServiceOptions {
+export type LlmUpstream = (
+  routeId: string,
+  body: Record<string, unknown>,
+  signal: AbortSignal,
+  sessionId?: string,
+  observe?: (usage: UpstreamUsage) => void,
+) => Promise<Response>;
+
+export interface LlmGrantConfiguration {
   readonly routes: readonly LlmRoute[];
-  readonly upstream: (
-    routeId: string,
-    body: Record<string, unknown>,
-    signal: AbortSignal,
-    sessionId?: string,
-    observe?: (usage: UpstreamUsage) => void,
-  ) => Promise<Response>;
+  readonly upstream: LlmUpstream;
 }
+
+export type LlmServiceOptions =
+  | LlmGrantConfiguration
+  | { readonly prepareGrant: () => Promise<LlmGrantConfiguration> };
 
 export interface LlmService {
   control(request: Request): Promise<Response>;
@@ -43,7 +49,8 @@ const ModelRequest = Schema.Struct({ model: Schema.NonEmptyString });
 interface Grant {
   readonly jobId: string;
   readonly tokenHash: string | null;
-  readonly routes: ReadonlySet<string>;
+  readonly routes: ReadonlyMap<string, LlmRoute>;
+  readonly upstream: LlmUpstream;
   readonly expiresAt: number;
   revoked: boolean;
   usageFrozen: boolean;
@@ -120,7 +127,13 @@ const sanitizeHeaders = (source: Response): Headers => {
 };
 
 export const createLlmService = (options: LlmServiceOptions): LlmService => {
-  const routes = new Map(options.routes.map((route) => [route.id, route] as const));
+  const prepareGrant =
+    'prepareGrant' in options
+      ? options.prepareGrant
+      : async (): Promise<LlmGrantConfiguration> => ({
+          routes: options.routes,
+          upstream: options.upstream,
+        });
   const grants = new Map<string, Grant>();
   const byToken = new Map<string, Grant>();
   let closed = false;
@@ -153,7 +166,25 @@ export const createLlmService = (options: LlmServiceOptions): LlmService => {
     if (decoded === undefined) return error(400, 'invalid request');
     if (closed) return error(503, 'service closed');
     if (grants.has(decoded.jobId)) return error(409, 'grant already issued');
-    if (decoded.routes.some((id) => !routes.has(id))) return error(400, 'unknown route');
+    const prepared = yield* Effect.tryPromise({
+      try: () => prepareGrant(),
+      catch: () => undefined,
+    }).pipe(
+      Effect.match({
+        onSuccess: (value) => value,
+        onFailure: () => undefined,
+      }),
+    );
+    if (prepared === undefined) return error(503, 'service unavailable');
+    if (closed) return error(503, 'service closed');
+    if (grants.has(decoded.jobId)) return error(409, 'grant already issued');
+    const availableRoutes = new Map(prepared.routes.map((route) => [route.id, route] as const));
+    const routes = new Map<string, LlmRoute>();
+    for (const id of decoded.routes) {
+      const route = availableRoutes.get(id);
+      if (route === undefined) return error(400, 'unknown route');
+      routes.set(id, route);
+    }
 
     const token = randomUUID() + randomUUID();
     const tokenHash = hashToken(token);
@@ -161,7 +192,8 @@ export const createLlmService = (options: LlmServiceOptions): LlmService => {
     const grant: Grant = {
       jobId: decoded.jobId,
       tokenHash,
-      routes: new Set(decoded.routes),
+      routes,
+      upstream: prepared.upstream,
       expiresAt,
       revoked: false,
       usageFrozen: false,
@@ -192,7 +224,8 @@ export const createLlmService = (options: LlmServiceOptions): LlmService => {
       const tombstone: Grant = {
         jobId: decoded.jobId,
         tokenHash: null,
-        routes: new Set(),
+        routes: new Map(),
+        upstream: async () => error(503, 'grant unavailable'),
         expiresAt: Date.now() + GRANT_TTL_MS,
         revoked: true,
         usageFrozen: true,
@@ -321,8 +354,8 @@ export const createLlmService = (options: LlmServiceOptions): LlmService => {
     if (closed) return error(503, 'service closed');
     if (grant.revoked || Date.now() >= grant.expiresAt) return error(401, 'unauthorized');
 
-    const route = routes.get(decoded.model);
-    if (route === undefined || route.path !== pathname || !grant.routes.has(route.id)) {
+    const route = grant.routes.get(decoded.model);
+    if (route === undefined || route.path !== pathname) {
       return error(403, 'route forbidden');
     }
 
@@ -349,7 +382,7 @@ export const createLlmService = (options: LlmServiceOptions): LlmService => {
 
     const upstream = yield* Effect.tryPromise({
       try: () =>
-        options.upstream(
+        grant.upstream(
           route.id,
           raw as Record<string, unknown>,
           controller.signal,

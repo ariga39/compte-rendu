@@ -1037,9 +1037,13 @@ Configure each selected route in the host LLM service first (see
 as `deepseek-v4.1-flash` and `step-5-preview`, both using `chat-completions` for
 this OpenCode adapter. Configure the upstream model and full base URL in LiteLLM YAML; keep the
 job-derived OpenCode Go session header through the trusted Node service.
-Restart the services only when active requests have drained;
-service route definitions are not hot-reloaded. Preserve old routes until jobs
-that reference them finish.
+Node route definitions are re-read when issuing each new job grant, without a
+service restart; existing grants keep their mappings. With LiteLLM provider
+wildcards configured, adding another model on that provider also needs no backend
+restart. Follow the [model change procedure](llm-service.md#change-a-review-model-without-restarting).
+Preserve old route IDs and their mappings until queued and running jobs that
+reference them finish. Initial backend setup or binary upgrades still require
+draining active requests before restarting services.
 
 Set a dedicated `REVIEW_CONFIGURATION_TOKEN` secret on the public SvelteKit Worker. The protected
 `GET /api/review-configuration` and `PUT /api/review-configuration` endpoints on
