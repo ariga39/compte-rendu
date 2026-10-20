@@ -106,4 +106,4 @@ configured; they are not the product state or an authorization dependency.
 - Runner and runtimes: `apps/runner/src/runner.ts`, `sandbox-runtime-*.ts`
 - Grant and upstream boundaries: `apps/llm-service/src/service.ts`, `upstream.ts`
 - Agent permissions and prompt: `apps/runner/src/opencode-multi-review.ts`,
-  `review-prompt.ts`, `apps/runner/skills/pr-review/SKILL.md`
+  `review-prompt.ts`

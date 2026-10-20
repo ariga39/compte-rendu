@@ -214,6 +214,14 @@ standalone OpenCode configuration excludes repository config and host
 skills/MCP/SSH settings. Resource/time limits and egress are enforced outside the
 model; a prompt alone is not a security boundary.
 
+`apps/runner/src/review-prompt.ts` is the single source for general review
+instructions: context collection, static inspection, finding criteria and final
+output. Single-reviewer and multi-reviewer jobs receive the same review contract;
+only their execution instructions differ. The format-correction reminder reuses
+the same output requirements. There is no separate generic `pr-review` skill.
+Domain-specific review methods belong in topic skills loaded when relevant;
+this change does not add or install any such skills.
+
 D1 stores product state, ownership, lifecycle timestamps, decision, frozen model
 selection, bounded per-model token summaries, repository disclosure metadata and evidence object metadata. It does
 not store raw repository contents, credentials or session transcripts. The bounded
