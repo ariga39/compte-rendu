@@ -13,7 +13,10 @@ from another installation.
 
 The [LLM service deployment guide](llm-service.md) covers the standalone
 host service and LiteLLM backend: routes, credentials, optional subscription setup, systemd
-startup, and listener checks. Deploy it independently of the Runner.
+startup, automatic model catalog discovery, and listener checks. Deploy it independently of the Runner.
+After enabling discovery for a provider, new models become routable automatically;
+change the [review selection](review-configuration.md) without restarting services.
+The guide covers the full-path catalog setting required for official OpenCode Go.
 
 For an sbx Runner, follow [Connecting an sbx Runner](llm-service.md#connecting-an-sbx-runner)
 to configure the private control socket, route alias and local inference URL.

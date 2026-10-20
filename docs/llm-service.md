@@ -74,56 +74,88 @@ and reads the routes again when issuing each job grant. A grant freezes its rout
 and upstream mapping; later edits do not change that grant's requests. Invalid
 configuration rejects new grants with a sanitized error while existing grants
 continue. Correcting the file restores admission without restarting the service.
-Listener addresses and the backend connection are startup settings.
+Listener addresses, discovery settings and the backend connection are startup settings.
+Replace edited configuration files atomically. Reload failures emit a fixed warning
+without logging configuration contents.
 
 ### Change a review model without restarting
 
-For models sharing an already configured provider and credential, configure
-LiteLLM's native provider wildcard once:
+Configure a provider once using LiteLLM's [native wildcard discovery](https://docs.litellm.ai/docs/proxy/model_discovery). `openai/*` selects the
+OpenAI-compatible wire protocol; `api_base` identifies the actual upstream.
+It does not label the models as OpenAI products.
 
 ```yaml
 model_list:
   - model_name: 'review-provider/*'
     litellm_params:
       model: 'openai/*'
-      api_base: https://opencode.ai/inference/go/openai/v1
+      api_base: https://opencode.ai/zen/go/v1
       api_key: os.environ/OPENCODE_GO_API_KEY
+litellm_settings:
+  check_provider_endpoint: true
 ```
 
-Keep the existing exact aliases when adding this entry to an existing installation.
-Use each instance's actual base URL and credential reference. Wildcard routing
-is internal to the loopback backend: the Node service still grants access only
-to the explicit route IDs requested for that job.
+Keep existing exact aliases for queued and running jobs. Use each instance's
+actual base URL and credential reference. Wildcard routing is internal to the
+loopback backend; a job token still authorizes only its selected model IDs.
 
-After this initial backend setup, a model change needs only configuration:
+Enable catalog discovery in the Node TOML:
 
-1. Add a new route to the Node TOML, for example `id = "mimo-review"`,
-   `model = "review-provider/mimo-v2.6-flash"`, and
-   `protocol = "chat-completions"`. Replace the complete file atomically.
-2. Issue a temporary grant and verify an actual model/tool response, then revoke it.
+```toml
+[discovery]
+refreshIntervalMs = 60000
+```
+
+The service reads LiteLLM's authenticated `/v1/models` at startup and periodically,
+then makes discovered IDs such as `review-provider/mimo-v2.6-flash` routable.
+No per-model TOML entry is needed. A discovery-only installation sets top-level
+`routes = []`; an existing installation keeps its legacy aliases. Discovery generates Chat Completions routes;
+explicit `[[routes]]` entries take precedence, including Responses aliases.
+Read the catalog through the private control socket:
+
+```sh
+curl --unix-socket /run/user/1000/compte-rendu-llm/control.sock http://localhost/models
+```
+
+LiteLLM 1.106.0 has two discovery limitations: its OpenAI adapter discards the
+base URL's path when constructing the catalog URL, and its internal catalog cache
+can delay new model visibility by approximately 1,000 seconds. For the official
+OpenCode Go endpoint, add its public catalog at the full path:
+
+```toml
+[[discovery.publicCatalogs]]
+url = "https://opencode.ai/zen/go/v1/models"
+prefix = "review-provider/"
+```
+
+Public catalogs receive no backend credential. Inference still uses LiteLLM and
+its private upstream credential. A custom gateway exposing `/v1/models` at its
+origin can use native discovery without this extra entry. A catalog lists model
+IDs, not proof that every model supports the tools or protocol required for review.
+
+Once discovery is enabled:
+
+1. Find the new model in the private catalog.
+2. Issue a temporary grant, verify a real model/tool response, then revoke it.
 3. Update the instance's [review selection](review-configuration.md#operator-api)
-   with its current revision, replacing `step-review` with `mimo-review`.
+   using its current revision, replacing Step with `review-provider/mimo-v2.6-flash`.
 
-Keep the Step route while queued or executing jobs still reference it. Do not
-repoint an existing ID to a different model: admission freezes route IDs before
-the Runner requests a grant. Neither Runner, Node service nor LiteLLM needs a
-restart for this model change. No automatic provider fallback is introduced.
+This selection change does not restart Runner, the Node service or LiteLLM.
+Previously admitted jobs retain their model selection and each issued grant
+retains its route snapshot. Do not repoint existing IDs to different models.
 
-This does not hot-reload arbitrary LiteLLM settings or introduce a new provider
-credential. LiteLLM 1.106.0's model-management API requires PostgreSQL; this
-no-database deployment uses native wildcard routing instead. Upgrading an older
-Node artifact to support grant-time configuration, or initially configuring the
-wildcard backend, remains a service deployment and requires draining active jobs.
+The discovered catalog is additive for the service's lifetime. LiteLLM can return
+HTTP 200 with missing entries after a provider error, so omission does not delete
+known routes. Refresh errors retain known models and emit a sanitized diagnostic;
+unknown models remain unauthorized. To stop using a model, remove it from the
+review selection. Catalog membership does not guarantee continued upstream
+availability. The in-memory catalog is rebuilt after restart.
 
-The Node service generates `x-opencode-session` and `session_id` from the
-verified grant's job ID. It does not forward incoming HTTP headers or accept
-client-supplied routing/credential overrides. The example enables LiteLLM header
-forwarding only behind this trusted boundary, preserving OpenCode Go session
-routing for both official and custom endpoints. Keep the LiteLLM master key out
-of every Sandbox and do not expose its management API to agents. The pinned
-LiteLLM generic OpenAI Responses path forwards `x-opencode-session` but drops
-`session_id`; do not assume that header reaches a Responses supplier. Subscription
-session binding requires its separate provider-specific acceptance test.
+Discovery settings, listener settings, new provider credentials and the LiteLLM
+wildcard itself are startup configuration. Enabling this feature on an older
+installation requires a drained deployment once. Subsequent model discovery and
+selection changes require neither restarts nor hand-maintained per-model routes.
+No PostgreSQL or model-management database is required.
 
 ## Optional ChatGPT subscription
 
@@ -319,6 +351,8 @@ review trigger. Stop the LLM service only after its callers are drained.
 ## Public boundaries
 
 The Unix socket exposes only:
+
+- `GET /models` when discovery is enabled: the known model catalog and refresh metadata.
 
 - `POST /grants` with `{ "jobId": "...", "routes": ["deepseek-review"] }`:
   returns 201 and `{ "token": "...", "expiresAt": "ISO timestamp" }`, or sanitized

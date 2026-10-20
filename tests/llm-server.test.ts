@@ -2,7 +2,7 @@ import { request, createServer, type IncomingMessage } from 'node:http';
 import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import { startLlmServer } from '../apps/llm-service/src/http-server';
 
 const controlCall = (socketPath: string, path: string, body: unknown) =>
@@ -25,6 +25,46 @@ const controlCall = (socketPath: string, path: string, body: unknown) =>
     req.on('error', reject);
     req.end(JSON.stringify(body));
   });
+
+const controlGet = (socketPath: string, path: string) =>
+  new Promise<{ status: number; body: string }>((resolve, reject) => {
+    const req = request({ socketPath, path, method: 'GET' }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (data: Buffer) => chunks.push(data));
+      res.on('end', () =>
+        resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString() }),
+      );
+    });
+    req.on('error', reject);
+    req.end();
+  });
+
+const eventually = async (check: () => Promise<boolean>, timeoutMs = 2000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await check()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('condition not met before timeout');
+};
+
+const installCatalogTransport = (catalogUrl: string, fixtureUrl: string) => {
+  const originalFetch = globalThis.fetch;
+  const requests: Array<{ url: string; headers: Headers; redirect: RequestRedirect | undefined }> =
+    [];
+  const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const target =
+      typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+    if (target !== catalogUrl) return originalFetch(input, init);
+    requests.push({
+      url: target,
+      headers: new Headers(init?.headers),
+      redirect: init?.redirect,
+    });
+    return originalFetch(fixtureUrl, init);
+  });
+  return { requests, restore: () => spy.mockRestore() };
+};
 
 const readIncoming = async (incoming: IncomingMessage): Promise<string> => {
   const chunks: Buffer[] = [];
@@ -196,6 +236,880 @@ it('starts a normal service that forwards to the configured LiteLLM upstream', a
     }
   } finally {
     await new Promise<void>((resolve) => upstream.close(() => resolve()));
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+it('discovers backend models at startup and grants them without per-model routes', async () => {
+  const { startConfiguredService } = await import('../apps/llm-service/src/bootstrap');
+  const dir = await mkdtemp(join(tmpdir(), 'llm-discovery-startup-'));
+  const credentialFile = join(dir, 'litellm-key');
+  const config = join(dir, 'service.toml');
+  const port = await probePort(dir);
+  const received: Array<{
+    url: string;
+    authorization: string | undefined;
+    model: string | undefined;
+  }> = [];
+  const upstream = createServer(async (incoming, outgoing) => {
+    const body = incoming.url === '/v1/models' ? undefined : await readIncoming(incoming);
+    received.push({
+      url: incoming.url ?? '',
+      authorization:
+        typeof incoming.headers.authorization === 'string'
+          ? incoming.headers.authorization
+          : undefined,
+      model: body === undefined ? undefined : (JSON.parse(body) as { model: string }).model,
+    });
+    if (incoming.url === '/v1/models') {
+      outgoing.writeHead(200, { 'content-type': 'application/json' });
+      outgoing.end(JSON.stringify({ data: [{ id: 'mimo-v2.6-flash' }] }));
+      return;
+    }
+    outgoing.writeHead(200, { 'content-type': 'text/event-stream' });
+    outgoing.end(
+      'data: {"choices":[{"index":0,"delta":{"content":"Ready"},"finish_reason":null}]}\n\n' +
+        'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n' +
+        'data: [DONE]\n\n',
+    );
+  });
+  await new Promise<void>((resolve, reject) => {
+    upstream.once('error', reject);
+    upstream.listen(0, '127.0.0.1', resolve);
+  });
+  const address = upstream.address();
+  if (!address || typeof address === 'string') throw new Error('fake LiteLLM unavailable');
+  try {
+    await writeFile(credentialFile, 'backend-key\n', { mode: 0o600 });
+    await writeFile(
+      config,
+      `controlSocket = "${dir}/control.sock"\nport = ${port}\nroutes = []\n\n[upstream]\nbaseUrl = "http://127.0.0.1:${address.port}"\ncredentialFile = "${credentialFile}"\n\n[discovery]\nrefreshIntervalMs = 60000\n`,
+    );
+    const server = await startConfiguredService(config);
+    try {
+      expect(received).toEqual([
+        { url: '/v1/models', authorization: 'Bearer backend-key', model: undefined },
+      ]);
+      const granted = await controlCall(join(dir, 'control.sock'), '/grants', {
+        jobId: 'job-discovered',
+        routes: ['mimo-v2.6-flash'],
+      });
+      expect(granted.status).toBe(201);
+      const { token } = JSON.parse(granted.body) as { token: string };
+      const response = await fetch(`http://127.0.0.1:${server.port}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}` },
+        body: JSON.stringify({ model: 'mimo-v2.6-flash', messages: [] }),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.text()).toContain('Ready');
+      expect(received.at(-1)).toEqual({
+        url: '/v1/chat/completions',
+        authorization: 'Bearer backend-key',
+        model: 'mimo-v2.6-flash',
+      });
+    } finally {
+      await server.close();
+    }
+  } finally {
+    await new Promise<void>((resolve) => upstream.close(() => resolve()));
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+it('refreshes discovered routes and exposes control metadata without restarting', async () => {
+  const { startConfiguredService } = await import('../apps/llm-service/src/bootstrap');
+  const dir = await mkdtemp(join(tmpdir(), 'llm-discovery-refresh-'));
+  const credentialFile = join(dir, 'litellm-key');
+  const config = join(dir, 'service.toml');
+  const port = await probePort(dir);
+  let models = ['model-a'];
+  const received: string[] = [];
+  const upstream = createServer(async (incoming, outgoing) => {
+    if (incoming.url === '/v1/models') {
+      outgoing.writeHead(200, { 'content-type': 'application/json' });
+      outgoing.end(JSON.stringify({ data: models.map((id) => ({ id })) }));
+      return;
+    }
+    const body = JSON.parse(await readIncoming(incoming)) as { model: string };
+    received.push(body.model);
+    outgoing.writeHead(200, { 'content-type': 'text/event-stream' });
+    outgoing.end(
+      'data: {"choices":[{"index":0,"delta":{"content":"Ready"},"finish_reason":null}]}\n\n' +
+        'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n' +
+        'data: [DONE]\n\n',
+    );
+  });
+  await new Promise<void>((resolve, reject) => {
+    upstream.once('error', reject);
+    upstream.listen(0, '127.0.0.1', resolve);
+  });
+  const address = upstream.address();
+  if (!address || typeof address === 'string') throw new Error('fake LiteLLM unavailable');
+  try {
+    await writeFile(credentialFile, 'backend-key\n', { mode: 0o600 });
+    await writeFile(
+      config,
+      `controlSocket = "${dir}/control.sock"\nport = ${port}\nroutes = []\n\n[upstream]\nbaseUrl = "http://127.0.0.1:${address.port}"\ncredentialFile = "${credentialFile}"\n\n[discovery]\nrefreshIntervalMs = 25\n`,
+    );
+    const server = await startConfiguredService(config);
+    const infer = (token: string, model: string) =>
+      fetch(`http://127.0.0.1:${server.port}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}` },
+        body: JSON.stringify({ model, messages: [] }),
+      });
+    try {
+      const initial = await controlGet(join(dir, 'control.sock'), '/models');
+      expect(initial.status).toBe(200);
+      expect(JSON.parse(initial.body)).toEqual({
+        ids: ['model-a'],
+        lastAttemptAt: expect.any(String),
+        lastSuccessAt: expect.any(String),
+        lastRefreshError: null,
+      });
+      const oldGrant = await controlCall(join(dir, 'control.sock'), '/grants', {
+        jobId: 'job-refresh-old',
+        routes: ['model-a'],
+      });
+      expect(oldGrant.status).toBe(201);
+      const oldToken = (JSON.parse(oldGrant.body) as { token: string }).token;
+
+      models = ['model-a', 'model-b'];
+      await eventually(async () => {
+        const current = await controlGet(join(dir, 'control.sock'), '/models');
+        return (JSON.parse(current.body) as { ids: string[] }).ids.includes('model-b');
+      });
+
+      const newGrant = await controlCall(join(dir, 'control.sock'), '/grants', {
+        jobId: 'job-refresh-new',
+        routes: ['model-b'],
+      });
+      expect(newGrant.status).toBe(201);
+      const newToken = (JSON.parse(newGrant.body) as { token: string }).token;
+      const newResponse = await infer(newToken, 'model-b');
+      expect(newResponse.status).toBe(200);
+      await newResponse.text();
+      expect(received).toEqual(['model-b']);
+      expect((await infer(oldToken, 'model-b')).status).toBe(403);
+      expect(
+        (
+          await controlCall(join(dir, 'control.sock'), '/grants', {
+            jobId: 'job-refresh-unknown',
+            routes: ['model-unseen'],
+          })
+        ).status,
+      ).toBe(400);
+      const current = await controlGet(join(dir, 'control.sock'), '/models');
+      expect(JSON.parse(current.body)).toEqual({
+        ids: ['model-a', 'model-b'],
+        lastAttemptAt: expect.any(String),
+        lastSuccessAt: expect.any(String),
+        lastRefreshError: null,
+      });
+    } finally {
+      await server.close();
+    }
+  } finally {
+    await new Promise<void>((resolve) => upstream.close(() => resolve()));
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+it('retains known discovered routes on partial or failed refreshes', async () => {
+  const { startConfiguredService } = await import('../apps/llm-service/src/bootstrap');
+  const dir = await mkdtemp(join(tmpdir(), 'llm-discovery-retain-'));
+  const credentialFile = join(dir, 'litellm-key');
+  const config = join(dir, 'service.toml');
+  const port = await probePort(dir);
+  let models = ['model-a'];
+  let mode: 'ok' | 'error' = 'ok';
+  const received: string[] = [];
+  const upstream = createServer(async (incoming, outgoing) => {
+    if (incoming.url === '/v1/models') {
+      if (mode === 'error') {
+        outgoing.writeHead(500).end();
+        return;
+      }
+      outgoing.writeHead(200, { 'content-type': 'application/json' });
+      outgoing.end(JSON.stringify({ data: models.map((id) => ({ id })) }));
+      return;
+    }
+    const body = JSON.parse(await readIncoming(incoming)) as { model: string };
+    received.push(body.model);
+    outgoing.writeHead(200, { 'content-type': 'text/event-stream' });
+    outgoing.end(
+      'data: {"choices":[{"index":0,"delta":{"content":"Ready"},"finish_reason":null}]}\n\n' +
+        'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n' +
+        'data: [DONE]\n\n',
+    );
+  });
+  await new Promise<void>((resolve, reject) => {
+    upstream.once('error', reject);
+    upstream.listen(0, '127.0.0.1', resolve);
+  });
+  const address = upstream.address();
+  if (!address || typeof address === 'string') throw new Error('fake LiteLLM unavailable');
+  try {
+    await writeFile(credentialFile, 'backend-key\n', { mode: 0o600 });
+    await writeFile(
+      config,
+      `controlSocket = "${dir}/control.sock"\nport = ${port}\nroutes = []\n\n[upstream]\nbaseUrl = "http://127.0.0.1:${address.port}"\ncredentialFile = "${credentialFile}"\n\n[discovery]\nrefreshIntervalMs = 20\n`,
+    );
+    const server = await startConfiguredService(config);
+    const infer = (token: string, model: string) =>
+      fetch(`http://127.0.0.1:${server.port}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}` },
+        body: JSON.stringify({ model, messages: [] }),
+      });
+    try {
+      const grant = await controlCall(join(dir, 'control.sock'), '/grants', {
+        jobId: 'job-retain-a',
+        routes: ['model-a'],
+      });
+      expect(grant.status).toBe(201);
+      const token = (JSON.parse(grant.body) as { token: string }).token;
+
+      mode = 'error';
+      await eventually(async () => {
+        const current = JSON.parse(
+          (await controlGet(join(dir, 'control.sock'), '/models')).body,
+        ) as { ids: string[]; lastRefreshError: string | null };
+        return current.lastRefreshError === 'refresh failed';
+      });
+      const afterError = JSON.parse(
+        (await controlGet(join(dir, 'control.sock'), '/models')).body,
+      ) as { ids: string[]; lastRefreshError: string | null };
+      expect(afterError.ids).toEqual(['model-a']);
+      expect((await infer(token, 'model-a')).status).toBe(200);
+
+      models = ['model-b'];
+      mode = 'ok';
+      await eventually(async () => {
+        const current = JSON.parse(
+          (await controlGet(join(dir, 'control.sock'), '/models')).body,
+        ) as { ids: string[] };
+        return current.ids.includes('model-b');
+      });
+      const afterPartial = JSON.parse(
+        (await controlGet(join(dir, 'control.sock'), '/models')).body,
+      ) as { ids: string[]; lastRefreshError: string | null };
+      expect(afterPartial.ids).toEqual(['model-a', 'model-b']);
+      expect(afterPartial.lastRefreshError).toBeNull();
+      expect((await infer(token, 'model-a')).status).toBe(200);
+      const newGrant = await controlCall(join(dir, 'control.sock'), '/grants', {
+        jobId: 'job-retain-b',
+        routes: ['model-b'],
+      });
+      expect(newGrant.status).toBe(201);
+      const newToken = (JSON.parse(newGrant.body) as { token: string }).token;
+      const newResponse = await infer(newToken, 'model-b');
+      expect(newResponse.status).toBe(200);
+      await newResponse.text();
+      expect(received).toEqual(['model-a', 'model-a', 'model-b']);
+    } finally {
+      await server.close();
+    }
+  } finally {
+    await new Promise<void>((resolve) => upstream.close(() => resolve()));
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+it('loads public HTTPS catalogs at the exact configured path without backend auth', async () => {
+  const { startConfiguredService } = await import('../apps/llm-service/src/bootstrap');
+  const dir = await mkdtemp(join(tmpdir(), 'llm-discovery-public-'));
+  const credentialFile = join(dir, 'litellm-key');
+  const config = join(dir, 'service.toml');
+  const port = await probePort(dir);
+  const publicUrl = 'https://public.example/zen/go/v1/models';
+  const publicRequests: Array<{ url: string; authorization: string | undefined }> = [];
+  const publicCatalog = createServer((incoming, outgoing) => {
+    publicRequests.push({
+      url: incoming.url ?? '',
+      authorization:
+        typeof incoming.headers.authorization === 'string'
+          ? incoming.headers.authorization
+          : undefined,
+    });
+    outgoing.writeHead(200, { 'content-type': 'application/json' });
+    outgoing.end(JSON.stringify({ data: [{ id: 'mimo-v2.6-flash' }] }));
+  });
+  await new Promise<void>((resolve, reject) => {
+    publicCatalog.once('error', reject);
+    publicCatalog.listen(0, '127.0.0.1', resolve);
+  });
+  const publicAddress = publicCatalog.address();
+  if (!publicAddress || typeof publicAddress === 'string')
+    throw new Error('fake public catalog unavailable');
+  const transport = installCatalogTransport(
+    publicUrl,
+    `http://127.0.0.1:${publicAddress.port}/zen/go/v1/models`,
+  );
+  const received: Array<{ authorization: string | undefined; model: string }> = [];
+  const upstream = createServer(async (incoming, outgoing) => {
+    if (incoming.url === '/v1/models') {
+      outgoing.writeHead(200, { 'content-type': 'application/json' });
+      outgoing.end(JSON.stringify({ data: [{ id: 'backend-model' }] }));
+      return;
+    }
+    const body = JSON.parse(await readIncoming(incoming)) as { model: string };
+    received.push({
+      authorization:
+        typeof incoming.headers.authorization === 'string'
+          ? incoming.headers.authorization
+          : undefined,
+      model: body.model,
+    });
+    outgoing.writeHead(200, { 'content-type': 'text/event-stream' });
+    outgoing.end(
+      'data: {"choices":[{"index":0,"delta":{"content":"Ready"},"finish_reason":null}]}\n\n' +
+        'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n' +
+        'data: [DONE]\n\n',
+    );
+  });
+  await new Promise<void>((resolve, reject) => {
+    upstream.once('error', reject);
+    upstream.listen(0, '127.0.0.1', resolve);
+  });
+  const address = upstream.address();
+  if (!address || typeof address === 'string') throw new Error('fake LiteLLM unavailable');
+  try {
+    await writeFile(credentialFile, 'backend-key\n', { mode: 0o600 });
+    await writeFile(
+      config,
+      `controlSocket = "${dir}/control.sock"\nport = ${port}\nroutes = []\n\n[upstream]\nbaseUrl = "http://127.0.0.1:${address.port}"\ncredentialFile = "${credentialFile}"\n\n[discovery]\nrefreshIntervalMs = 60000\n\n[[discovery.publicCatalogs]]\nurl = "${publicUrl}"\nprefix = "opencode/"\n`,
+    );
+    const server = await startConfiguredService(config);
+    try {
+      expect(transport.requests).toHaveLength(1);
+      expect(transport.requests[0]?.url).toBe(publicUrl);
+      expect(transport.requests[0]?.headers.get('authorization')).toBeNull();
+      expect(transport.requests[0]?.headers.get('user-agent')).toMatch(/^litellm\//);
+      expect(transport.requests[0]?.redirect).toBe('error');
+      expect(publicRequests).toEqual([{ url: '/zen/go/v1/models', authorization: undefined }]);
+      const catalog = JSON.parse((await controlGet(join(dir, 'control.sock'), '/models')).body) as {
+        ids: string[];
+      };
+      expect(catalog.ids).toEqual(['backend-model', 'opencode/mimo-v2.6-flash']);
+      const grant = await controlCall(join(dir, 'control.sock'), '/grants', {
+        jobId: 'job-public-catalog',
+        routes: ['opencode/mimo-v2.6-flash'],
+      });
+      expect(grant.status).toBe(201);
+      const { token } = JSON.parse(grant.body) as { token: string };
+      const response = await fetch(`http://127.0.0.1:${server.port}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}` },
+        body: JSON.stringify({ model: 'opencode/mimo-v2.6-flash', messages: [] }),
+      });
+      expect(response.status).toBe(200);
+      await response.text();
+      expect(received).toEqual([
+        { authorization: 'Bearer backend-key', model: 'opencode/mimo-v2.6-flash' },
+      ]);
+      expect(transport.requests).toHaveLength(1);
+    } finally {
+      await server.close();
+    }
+  } finally {
+    transport.restore();
+    await new Promise<void>((resolve) => {
+      publicCatalog.closeAllConnections();
+      publicCatalog.close(() => resolve());
+    });
+    await new Promise<void>((resolve) => {
+      upstream.closeAllConnections();
+      upstream.close(() => resolve());
+    });
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+it('stops discovery refreshes on close without waiting for a slow catalog', async () => {
+  const { startConfiguredService } = await import('../apps/llm-service/src/bootstrap');
+  const dir = await mkdtemp(join(tmpdir(), 'llm-discovery-shutdown-'));
+  const credentialFile = join(dir, 'litellm-key');
+  const config = join(dir, 'service.toml');
+  const port = await probePort(dir);
+  let catalogRequests = 0;
+  let delayCatalog = 0;
+  const upstream = createServer(async (incoming, outgoing) => {
+    if (incoming.url === '/v1/models') {
+      catalogRequests += 1;
+      if (delayCatalog > 0) {
+        await new Promise((resolve) => setTimeout(resolve, delayCatalog));
+      }
+      outgoing.writeHead(200, { 'content-type': 'application/json' });
+      outgoing.end(JSON.stringify({ data: [{ id: 'model-a' }] }));
+      return;
+    }
+    outgoing.writeHead(200, { 'content-type': 'text/event-stream' });
+    outgoing.end(
+      'data: {"choices":[{"index":0,"delta":{"content":"Ready"},"finish_reason":null}]}\n\n' +
+        'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n' +
+        'data: [DONE]\n\n',
+    );
+  });
+  await new Promise<void>((resolve, reject) => {
+    upstream.once('error', reject);
+    upstream.listen(0, '127.0.0.1', resolve);
+  });
+  const address = upstream.address();
+  if (!address || typeof address === 'string') throw new Error('fake LiteLLM unavailable');
+  try {
+    await writeFile(credentialFile, 'backend-key\n', { mode: 0o600 });
+    await writeFile(
+      config,
+      `controlSocket = "${dir}/control.sock"\nport = ${port}\nroutes = []\n\n[upstream]\nbaseUrl = "http://127.0.0.1:${address.port}"\ncredentialFile = "${credentialFile}"\n\n[discovery]\nrefreshIntervalMs = 20\n`,
+    );
+    const server = await startConfiguredService(config);
+    delayCatalog = 500;
+    await eventually(async () => catalogRequests >= 2);
+    const started = Date.now();
+    await server.close();
+    expect(Date.now() - started).toBeLessThan(400);
+    const stoppedAt = catalogRequests;
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(catalogRequests).toBe(stoppedAt);
+  } finally {
+    await new Promise<void>((resolve) => {
+      upstream.closeAllConnections();
+      upstream.close(() => resolve());
+    });
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+it('closes discovery when the inference listener cannot start', async () => {
+  const { startConfiguredService } = await import('../apps/llm-service/src/bootstrap');
+  const dir = await mkdtemp(join(tmpdir(), 'llm-discovery-listener-'));
+  const credentialFile = join(dir, 'litellm-key');
+  const config = join(dir, 'service.toml');
+  let catalogRequests = 0;
+  const upstream = createServer(async (incoming, outgoing) => {
+    if (incoming.url === '/v1/models') {
+      catalogRequests += 1;
+      outgoing.writeHead(200, { 'content-type': 'application/json' });
+      outgoing.end(JSON.stringify({ data: [{ id: 'model-a' }] }));
+      return;
+    }
+    outgoing.writeHead(200, { 'content-type': 'text/event-stream' });
+    outgoing.end('data: [DONE]\n\n');
+  });
+  await new Promise<void>((resolve, reject) => {
+    upstream.once('error', reject);
+    upstream.listen(0, '127.0.0.1', resolve);
+  });
+  const address = upstream.address();
+  if (!address || typeof address === 'string') throw new Error('fake LiteLLM unavailable');
+  const occupied = await startLlmServer({
+    controlSocket: join(dir, 'occupied.sock'),
+    port: 0,
+    service: {
+      control: async () => new Response(),
+      inference: async () => new Response(),
+      close: () => {},
+    },
+  });
+  try {
+    await writeFile(credentialFile, 'backend-key\n', { mode: 0o600 });
+    await writeFile(
+      config,
+      `controlSocket = "${dir}/control.sock"\nport = ${occupied.port}\nroutes = []\n\n[upstream]\nbaseUrl = "http://127.0.0.1:${address.port}"\ncredentialFile = "${credentialFile}"\n\n[discovery]\nrefreshIntervalMs = 20\n`,
+    );
+    await expect(startConfiguredService(config)).rejects.toThrow();
+    const stoppedAt = catalogRequests;
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(catalogRequests).toBe(stoppedAt);
+  } finally {
+    await occupied.close();
+    await new Promise<void>((resolve) => {
+      upstream.closeAllConnections();
+      upstream.close(() => resolve());
+    });
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+it('keeps lastSuccessAt from advancing when one source fails and recovers additively', async () => {
+  const { startConfiguredService } = await import('../apps/llm-service/src/bootstrap');
+  const dir = await mkdtemp(join(tmpdir(), 'llm-discovery-partial-'));
+  const credentialFile = join(dir, 'litellm-key');
+  const config = join(dir, 'service.toml');
+  const port = await probePort(dir);
+  const publicUrl = 'https://public.example/zen/go/v1/models';
+  let publicMode: 'error' | 'ok' = 'error';
+  const publicCatalog = createServer((_incoming, outgoing) => {
+    if (publicMode === 'error') {
+      outgoing.writeHead(500).end();
+      return;
+    }
+    outgoing.writeHead(200, { 'content-type': 'application/json' });
+    outgoing.end(JSON.stringify({ data: [{ id: 'mimo-v2.6-flash' }] }));
+  });
+  await new Promise<void>((resolve, reject) => {
+    publicCatalog.once('error', reject);
+    publicCatalog.listen(0, '127.0.0.1', resolve);
+  });
+  const publicAddress = publicCatalog.address();
+  if (!publicAddress || typeof publicAddress === 'string')
+    throw new Error('fake public catalog unavailable');
+  const transport = installCatalogTransport(
+    publicUrl,
+    `http://127.0.0.1:${publicAddress.port}/zen/go/v1/models`,
+  );
+  const upstream = createServer(async (incoming, outgoing) => {
+    if (incoming.url === '/v1/models') {
+      outgoing.writeHead(200, { 'content-type': 'application/json' });
+      outgoing.end(JSON.stringify({ data: [{ id: 'backend-model' }] }));
+      return;
+    }
+    outgoing.writeHead(200, { 'content-type': 'text/event-stream' });
+    outgoing.end('data: [DONE]\n\n');
+  });
+  await new Promise<void>((resolve, reject) => {
+    upstream.once('error', reject);
+    upstream.listen(0, '127.0.0.1', resolve);
+  });
+  const address = upstream.address();
+  if (!address || typeof address === 'string') throw new Error('fake LiteLLM unavailable');
+  try {
+    await writeFile(credentialFile, 'backend-key\n', { mode: 0o600 });
+    await writeFile(
+      config,
+      `controlSocket = "${dir}/control.sock"\nport = ${port}\nroutes = []\n\n[upstream]\nbaseUrl = "http://127.0.0.1:${address.port}"\ncredentialFile = "${credentialFile}"\n\n[discovery]\nrefreshIntervalMs = 20\n\n[[discovery.publicCatalogs]]\nurl = "${publicUrl}"\nprefix = "opencode/"\n`,
+    );
+    const server = await startConfiguredService(config);
+    try {
+      const partial = JSON.parse((await controlGet(join(dir, 'control.sock'), '/models')).body) as {
+        ids: string[];
+        lastAttemptAt: string | null;
+        lastSuccessAt: string | null;
+        lastRefreshError: string | null;
+      };
+      expect(partial).toEqual({
+        ids: ['backend-model'],
+        lastAttemptAt: expect.any(String),
+        lastSuccessAt: null,
+        lastRefreshError: 'refresh failed',
+      });
+
+      publicMode = 'ok';
+      await eventually(async () => {
+        const current = JSON.parse(
+          (await controlGet(join(dir, 'control.sock'), '/models')).body,
+        ) as { lastRefreshError: string | null };
+        return current.lastRefreshError === null;
+      });
+      const recovered = JSON.parse(
+        (await controlGet(join(dir, 'control.sock'), '/models')).body,
+      ) as { ids: string[]; lastSuccessAt: string | null };
+      expect(recovered.ids).toEqual(['backend-model', 'opencode/mimo-v2.6-flash']);
+      expect(recovered.lastSuccessAt).toEqual(expect.any(String));
+    } finally {
+      await server.close();
+    }
+  } finally {
+    transport.restore();
+    await new Promise<void>((resolve) => {
+      publicCatalog.closeAllConnections();
+      publicCatalog.close(() => resolve());
+    });
+    await new Promise<void>((resolve) => {
+      upstream.closeAllConnections();
+      upstream.close(() => resolve());
+    });
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+it('starts with explicit aliases when initial discovery fails and retries in background', async () => {
+  const { startConfiguredService } = await import('../apps/llm-service/src/bootstrap');
+  const dir = await mkdtemp(join(tmpdir(), 'llm-discovery-startup-failure-'));
+  const credentialFile = join(dir, 'litellm-key');
+  const config = join(dir, 'service.toml');
+  const port = await probePort(dir);
+  let catalogMode: 'error' | 'ok' = 'error';
+  let models = ['model-new'];
+  const received: string[] = [];
+  const upstream = createServer(async (incoming, outgoing) => {
+    if (incoming.url === '/v1/models') {
+      if (catalogMode === 'error') {
+        outgoing.writeHead(500).end();
+        return;
+      }
+      outgoing.writeHead(200, { 'content-type': 'application/json' });
+      outgoing.end(JSON.stringify({ data: models.map((id) => ({ id })) }));
+      return;
+    }
+    const body = JSON.parse(await readIncoming(incoming)) as { model: string };
+    received.push(body.model);
+    outgoing.writeHead(200, { 'content-type': 'text/event-stream' });
+    outgoing.end(
+      'data: {"choices":[{"index":0,"delta":{"content":"Ready"},"finish_reason":null}]}\n\n' +
+        'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n' +
+        'data: [DONE]\n\n',
+    );
+  });
+  await new Promise<void>((resolve, reject) => {
+    upstream.once('error', reject);
+    upstream.listen(0, '127.0.0.1', resolve);
+  });
+  const address = upstream.address();
+  if (!address || typeof address === 'string') throw new Error('fake LiteLLM unavailable');
+  try {
+    await writeFile(credentialFile, 'backend-key\n', { mode: 0o600 });
+    await writeFile(
+      config,
+      `controlSocket = "${dir}/control.sock"\nport = ${port}\n\n[upstream]\nbaseUrl = "http://127.0.0.1:${address.port}"\ncredentialFile = "${credentialFile}"\n\n[[routes]]\nid = "legacy-review"\nmodel = "legacy-model"\nprotocol = "chat-completions"\n\n[discovery]\nrefreshIntervalMs = 20\n`,
+    );
+    const server = await startConfiguredService(config);
+    const infer = (token: string, model: string) =>
+      fetch(`http://127.0.0.1:${server.port}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}` },
+        body: JSON.stringify({ model, messages: [] }),
+      });
+    try {
+      const initial = JSON.parse((await controlGet(join(dir, 'control.sock'), '/models')).body) as {
+        ids: string[];
+        lastSuccessAt: string | null;
+        lastRefreshError: string | null;
+      };
+      expect(initial.ids).toEqual(['legacy-review']);
+      expect(initial.lastSuccessAt).toBeNull();
+      expect(initial.lastRefreshError).toBe('refresh failed');
+      const legacyGrant = await controlCall(join(dir, 'control.sock'), '/grants', {
+        jobId: 'job-legacy-discovery-failed',
+        routes: ['legacy-review'],
+      });
+      expect(legacyGrant.status).toBe(201);
+      const legacyToken = (JSON.parse(legacyGrant.body) as { token: string }).token;
+      const legacyResponse = await infer(legacyToken, 'legacy-review');
+      expect(legacyResponse.status).toBe(200);
+      await legacyResponse.text();
+      expect(received).toEqual(['legacy-model']);
+      expect(
+        (
+          await controlCall(join(dir, 'control.sock'), '/grants', {
+            jobId: 'job-unseen-before-retry',
+            routes: ['model-new'],
+          })
+        ).status,
+      ).toBe(400);
+
+      catalogMode = 'ok';
+      await eventually(async () => {
+        const current = JSON.parse(
+          (await controlGet(join(dir, 'control.sock'), '/models')).body,
+        ) as { ids: string[] };
+        return current.ids.includes('model-new');
+      });
+      const newGrant = await controlCall(join(dir, 'control.sock'), '/grants', {
+        jobId: 'job-new-after-retry',
+        routes: ['model-new'],
+      });
+      expect(newGrant.status).toBe(201);
+      const newToken = (JSON.parse(newGrant.body) as { token: string }).token;
+      const newResponse = await infer(newToken, 'model-new');
+      expect(newResponse.status).toBe(200);
+      await newResponse.text();
+      expect(received).toEqual(['legacy-model', 'model-new']);
+    } finally {
+      await server.close();
+    }
+  } finally {
+    await new Promise<void>((resolve) => {
+      upstream.closeAllConnections();
+      upstream.close(() => resolve());
+    });
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+it('uses current explicit aliases on the control catalog and prefers them over discovery', async () => {
+  const { startConfiguredService } = await import('../apps/llm-service/src/bootstrap');
+  const dir = await mkdtemp(join(tmpdir(), 'llm-discovery-explicit-'));
+  const credentialFile = join(dir, 'litellm-key');
+  const config = join(dir, 'service.toml');
+  const port = await probePort(dir);
+  const received: string[] = [];
+  const upstream = createServer(async (incoming, outgoing) => {
+    if (incoming.url === '/v1/models') {
+      outgoing.writeHead(200, { 'content-type': 'application/json' });
+      outgoing.end(JSON.stringify({ data: [{ id: 'model-a' }, { id: 'model-b' }] }));
+      return;
+    }
+    const body = JSON.parse(await readIncoming(incoming)) as { model: string };
+    received.push(body.model);
+    outgoing.writeHead(200, { 'content-type': 'text/event-stream' });
+    outgoing.end(
+      'data: {"choices":[{"index":0,"delta":{"content":"Ready"},"finish_reason":null}]}\n\n' +
+        'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n' +
+        'data: [DONE]\n\n',
+    );
+  });
+  await new Promise<void>((resolve, reject) => {
+    upstream.once('error', reject);
+    upstream.listen(0, '127.0.0.1', resolve);
+  });
+  const address = upstream.address();
+  if (!address || typeof address === 'string') throw new Error('fake LiteLLM unavailable');
+  const writeConfig = (routes: string) =>
+    writeFile(
+      config,
+      `controlSocket = "${dir}/control.sock"\nport = ${port}\n\n${routes}\n[upstream]\nbaseUrl = "http://127.0.0.1:${address.port}"\ncredentialFile = "${credentialFile}"\n\n[discovery]\nrefreshIntervalMs = 60000\n`,
+    );
+  try {
+    await writeFile(credentialFile, 'backend-key\n', { mode: 0o600 });
+    await writeConfig('routes = []\n');
+    const server = await startConfiguredService(config);
+    const infer = (token: string, model: string) =>
+      fetch(`http://127.0.0.1:${server.port}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}` },
+        body: JSON.stringify({ model, messages: [] }),
+      });
+    try {
+      expect(
+        (
+          JSON.parse((await controlGet(join(dir, 'control.sock'), '/models')).body) as {
+            ids: string[];
+          }
+        ).ids,
+      ).toEqual(['model-a', 'model-b']);
+
+      await writeFile(config, 'routes = [\n');
+      const invalid = await controlGet(join(dir, 'control.sock'), '/models');
+      expect(invalid.status).toBe(503);
+      expect(JSON.parse(invalid.body)).toEqual({
+        error: { message: 'service unavailable' },
+      });
+      await writeConfig('routes = []\n');
+
+      await writeConfig(
+        '[[routes]]\nid = "legacy-review"\nmodel = "legacy-model"\nprotocol = "chat-completions"\n',
+      );
+      expect(
+        (
+          JSON.parse((await controlGet(join(dir, 'control.sock'), '/models')).body) as {
+            ids: string[];
+          }
+        ).ids,
+      ).toEqual(['legacy-review', 'model-a', 'model-b']);
+
+      await writeConfig(
+        '[[routes]]\nid = "model-a"\nmodel = "legacy-model"\nprotocol = "chat-completions"\n',
+      );
+      const grant = await controlCall(join(dir, 'control.sock'), '/grants', {
+        jobId: 'job-explicit-wins',
+        routes: ['model-a'],
+      });
+      expect(grant.status).toBe(201);
+      const { token } = JSON.parse(grant.body) as { token: string };
+      const response = await infer(token, 'model-a');
+      expect(response.status).toBe(200);
+      await response.text();
+      expect(received).toEqual(['legacy-model']);
+
+      await writeConfig('routes = []\n');
+      expect(
+        (
+          JSON.parse((await controlGet(join(dir, 'control.sock'), '/models')).body) as {
+            ids: string[];
+          }
+        ).ids,
+      ).toEqual(['model-a', 'model-b']);
+      expect((await infer(token, 'model-a')).status).toBe(200);
+    } finally {
+      await server.close();
+    }
+  } finally {
+    await new Promise<void>((resolve) => {
+      upstream.closeAllConnections();
+      upstream.close(() => resolve());
+    });
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+it('bounds the retained catalog across refreshes', async () => {
+  const { startConfiguredService } = await import('../apps/llm-service/src/bootstrap');
+  const dir = await mkdtemp(join(tmpdir(), 'llm-discovery-cap-'));
+  const credentialFile = join(dir, 'litellm-key');
+  const config = join(dir, 'service.toml');
+  const port = await probePort(dir);
+  const firstBatch = Array.from({ length: 600 }, (_value, index) => `model-a-${index}`);
+  const secondBatch = Array.from({ length: 600 }, (_value, index) => `model-b-${index}`);
+  let models = firstBatch;
+  const upstream = createServer(async (incoming, outgoing) => {
+    if (incoming.url === '/v1/models') {
+      outgoing.writeHead(200, { 'content-type': 'application/json' });
+      outgoing.end(JSON.stringify({ data: models.map((id) => ({ id })) }));
+      return;
+    }
+    outgoing.writeHead(200, { 'content-type': 'text/event-stream' });
+    outgoing.end('data: [DONE]\n\n');
+  });
+  await new Promise<void>((resolve, reject) => {
+    upstream.once('error', reject);
+    upstream.listen(0, '127.0.0.1', resolve);
+  });
+  const address = upstream.address();
+  if (!address || typeof address === 'string') throw new Error('fake LiteLLM unavailable');
+  try {
+    await writeFile(credentialFile, 'backend-key\n', { mode: 0o600 });
+    await writeFile(
+      config,
+      `controlSocket = "${dir}/control.sock"\nport = ${port}\nroutes = []\n\n[upstream]\nbaseUrl = "http://127.0.0.1:${address.port}"\ncredentialFile = "${credentialFile}"\n\n[discovery]\nrefreshIntervalMs = 20\n`,
+    );
+    const server = await startConfiguredService(config);
+    try {
+      models = secondBatch;
+      await eventually(async () => {
+        const current = JSON.parse(
+          (await controlGet(join(dir, 'control.sock'), '/models')).body,
+        ) as { ids: string[]; lastRefreshError: string | null };
+        return current.ids.length === 1000 && current.lastRefreshError === 'refresh failed';
+      });
+      const current = JSON.parse((await controlGet(join(dir, 'control.sock'), '/models')).body) as {
+        ids: string[];
+      };
+      expect(current.ids).toHaveLength(1000);
+      expect(current.ids).toContain('model-a-599');
+      expect(current.ids).toContain('model-b-399');
+      expect(current.ids).not.toContain('model-b-400');
+    } finally {
+      await server.close();
+    }
+  } finally {
+    await new Promise<void>((resolve) => {
+      upstream.closeAllConnections();
+      upstream.close(() => resolve());
+    });
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+it('bounds discovery interval and public prefix configuration', async () => {
+  const { readLlmConfig } = await import('../apps/llm-service/src/bootstrap');
+  const dir = await mkdtemp(join(tmpdir(), 'llm-discovery-bounds-'));
+  const config = join(dir, 'service.toml');
+  const writeConfig = (interval: number, prefix: string) =>
+    writeFile(
+      config,
+      `controlSocket = "${dir}/control.sock"\nport = 8090\nroutes = []\n\n[upstream]\nbaseUrl = "http://127.0.0.1:4000"\ncredentialFile = "${dir}/key"\n\n[discovery]\nrefreshIntervalMs = ${interval}\n\n[[discovery.publicCatalogs]]\nurl = "https://example.com/zen/go/v1/models"\nprefix = "${prefix}"\n`,
+    );
+  try {
+    await writeConfig(2_147_483_648, 'opencode/');
+    await expect(readLlmConfig(config)).rejects.toThrow('invalid LLM service configuration');
+    await writeConfig(2_147_483_647, `${'a'.repeat(127)}/`);
+    await expect(readLlmConfig(config)).rejects.toThrow('invalid LLM service configuration');
+    await writeConfig(2_147_483_647, 'opencode/');
+    await expect(readLlmConfig(config)).resolves.toBeDefined();
+  } finally {
     await rm(dir, { recursive: true, force: true });
   }
 });
