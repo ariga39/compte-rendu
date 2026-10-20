@@ -321,6 +321,96 @@ test('detail shows bare model names and collapses request and token details afte
   });
 });
 
+test('detail shows cache-read percentage only for complete comparable totals', async ({
+  page,
+  harness,
+  base,
+}) => {
+  const model = (route: string, name: string, overrides = {}) => ({
+    route,
+    model: name,
+    requests: 1,
+    incompleteRequests: 0,
+    inputTokens: null,
+    uncachedInputTokens: null,
+    cacheReadTokens: null,
+    cacheWriteTokens: null,
+    outputTokens: null,
+    reasoningTokens: null,
+    ...overrides,
+  });
+  harness.setHandler(() =>
+    ok({
+      ...detailData(publicTask('cache-percent')),
+      usage: {
+        version: 1,
+        models: [
+          model('reviewer', 'openai/cache-75', {
+            requests: 2,
+            inputTokens: { total: 1200, reportedRequests: 2 },
+            cacheReadTokens: { total: 900, reportedRequests: 2 },
+          }),
+          model('zero-cache', 'compte-rendu/zero-cache', {
+            inputTokens: { total: 1000, reportedRequests: 1 },
+            cacheReadTokens: { total: 0, reportedRequests: 1 },
+          }),
+          model('missing-cache', 'missing-cache', {
+            inputTokens: { total: 1000, reportedRequests: 1 },
+          }),
+          model('missing-input', 'missing-input', {
+            cacheReadTokens: { total: 900, reportedRequests: 1 },
+          }),
+          model('zero-input', 'zero-input', {
+            inputTokens: { total: 0, reportedRequests: 1 },
+            cacheReadTokens: { total: 0, reportedRequests: 1 },
+          }),
+          model('partial-cache', 'partial-cache', {
+            requests: 2,
+            inputTokens: { total: 1200, reportedRequests: 1 },
+            cacheReadTokens: { total: 900, reportedRequests: 1 },
+          }),
+        ],
+      },
+    }),
+  );
+  await page.goto(`${base}/jobs/cache-percent`);
+  const usage = page.getByRole('region', { name: 'Models and tokens' });
+  const open = async (name: string) => {
+    const disclosure = usage.getByRole('button', { name, exact: true });
+    await disclosure.click();
+    await expect(disclosure).toHaveAttribute('aria-expanded', 'true');
+    return usage.getByRole('region', { name });
+  };
+
+  await expect(await open('cache-75')).toContainText('900 (75%)');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({
+    path: test.info().outputPath('model-usage-cache-percent-expanded-mobile.png'),
+    fullPage: true,
+  });
+  await expect(await open('zero-cache')).toContainText('0 (0%)');
+
+  const missing = await open('missing-cache');
+  await expect(missing).toContainText('1,000');
+  await expect(missing).toContainText('Not reported');
+  await expect(missing).not.toContainText('%');
+
+  const missingInput = await open('missing-input');
+  await expect(missingInput).toContainText('900');
+  await expect(missingInput).toContainText('Not reported');
+  await expect(missingInput).not.toContainText('%');
+
+  const zeroInput = await open('zero-input');
+  await expect(zeroInput).toContainText('0');
+  await expect(zeroInput).not.toContainText('%');
+
+  const partial = await open('partial-cache');
+  await expect(partial).toContainText('1,200');
+  await expect(partial).toContainText('900');
+  await expect(partial).toContainText('Reported for 1 of 2 requests');
+  await expect(partial).not.toContainText('%');
+});
+
 test('detail keeps distinct route and model pairs when their names contain colons', async ({
   page,
   harness,

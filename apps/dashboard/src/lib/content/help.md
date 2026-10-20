@@ -108,7 +108,9 @@ A route is the configured model alias. The reported model name can differ from
 that alias; if the service did not report a name, it is shown as unknown.
 
 - **Input total** includes cached input. **Uncached input** is input total minus cache reads.
-- **Cache read** is reused input; **Cache write** is input stored in the cache, when reported.
+- **Cache read** is reused input. Its percentage is cache reads divided by input total,
+  shown when both counts cover all requests and input total is greater than zero.
+  **Cache write** is input stored in the cache, when reported.
 - **Output total** includes **Reasoning** tokens when the provider reports that breakdown.
 
 These breakdowns overlap; do not add every row together. A partial count says how

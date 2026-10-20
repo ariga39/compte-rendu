@@ -18,6 +18,24 @@
     ['reasoningTokens', 'Reasoning (included in output)'],
   ] as const;
   const number = new Intl.NumberFormat('en-US');
+  const percentage = new Intl.NumberFormat('en-US', {
+    style: 'percent',
+    maximumFractionDigits: 1,
+  });
+  const cacheReadPercentage = (model: ModelUsageSummary['models'][number]): string | null => {
+    const input = model.inputTokens;
+    const cacheRead = model.cacheReadTokens;
+    if (
+      input === null ||
+      cacheRead === null ||
+      input.total <= 0 ||
+      input.reportedRequests !== model.requests ||
+      cacheRead.reportedRequests !== model.requests
+    ) {
+      return null;
+    }
+    return percentage.format(cacheRead.total / input.total);
+  };
   const displayModel = (model: string | null) => {
     if (model === null) return 'Model not reported';
     const separator = model.lastIndexOf('/');
@@ -38,6 +56,7 @@
     {/if}
     <Accordion>
       {#each usage.models as model (JSON.stringify([model.route, model.model]))}
+        {@const cachePercent = cacheReadPercentage(model)}
         <AccordionItem title={displayModel(model.model)}>
           <div class="model-details">
             <p class="muted">Route: {model.route} · {number.format(model.requests)} {model.requests === 1 ? 'request' : 'requests'}</p>
@@ -53,7 +72,7 @@
                     {#if count === null}
                       <span class="muted">Not reported</span>
                     {:else}
-                      {number.format(count.total)}
+                      {number.format(count.total)}{#if field === 'cacheReadTokens' && cachePercent !== null}{` (${cachePercent})`}{/if}
                       {#if count.reportedRequests < model.requests}
                         <span class="coverage muted">Reported for {count.reportedRequests} of {model.requests} requests</span>
                       {/if}

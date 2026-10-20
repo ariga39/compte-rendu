@@ -196,5 +196,7 @@ and expand on click or keyboard activation. Counts
 come from the grant service through Runner's terminal callback, not from live
 Runner/provider reads. Route and reported model are distinct. Missing fields say
 Not reported; known subtotals identify how many requests reported them. Input/cache
-and output/reasoning are overlapping totals, not additive costs. Anonymous reviews
+and output/reasoning are overlapping totals, not additive costs. Cache read shows
+its share of input total only when both counts cover all requests and input total
+is positive. Anonymous reviews
 retain these aggregate statistics without gaining repository/branch identity.
