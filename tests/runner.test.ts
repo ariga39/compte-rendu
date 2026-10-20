@@ -1096,7 +1096,7 @@ describe('Runner Job HTTP interface', () => {
         callbackToken: 'callback-token',
         callbackFetch: async (input, init) => {
           callbackRequests.push(new Request(input, init));
-          return new Response(null, { status: 202 });
+          return new Response(null, { status: 503 });
         },
         process: async (_command, args, options = {}) => {
           if (args[0] === 'exec' && args.includes('--agent')) {
@@ -1156,7 +1156,7 @@ describe('Runner Job HTTP interface', () => {
       }
 
       expect(terminal.status).toBe('failed');
-      expect(callbackRequests).toHaveLength(1);
+      expect(callbackRequests).toHaveLength(2);
       const callback = (await callbackRequests[0]?.clone().json()) as {
         status: string;
         failure?: { reason: string };
@@ -1187,6 +1187,48 @@ describe('Runner Job HTTP interface', () => {
           'utf8',
         ),
       ).resolves.toBe(sessionExport);
+      await runner.close();
+      const restarted = createRunner({
+        authToken: 'runner-test-token',
+        evidenceRoot,
+        claimUrl: '',
+        callbackUrl: 'https://ingress.test/runner-callback',
+        callbackToken: 'callback-token',
+        callbackFetch: async (input, init) => {
+          callbackRequests.push(new Request(input, init));
+          return new Response(null, { status: 202 });
+        },
+      });
+      const replay = () =>
+        restarted.handle(
+          new Request('http://runner/maintenance/replay-callback', {
+            method: 'POST',
+            headers: {
+              authorization: 'Bearer runner-test-token',
+              'content-type': 'application/json',
+            },
+            body: JSON.stringify({
+              evidenceId: terminal.evidenceId,
+              jobId: id,
+              runId: 'run-114-oversized-callback',
+              attempt: 1,
+              baseSha,
+              headSha,
+            }),
+          }),
+        );
+      try {
+        const recovered = await replay();
+        expect(recovered.status).toBe(202);
+        expect(await recovered.json()).toEqual({ accepted: true });
+        expect(callbackRequests).toHaveLength(3);
+        expect(await callbackRequests[2]!.text()).toBe(await callbackRequests[0]!.text());
+        await writeFile(join(evidenceRoot, terminal.evidenceId as string, 'manifest.json'), '{}');
+        expect((await replay()).status).toBe(409);
+        expect(callbackRequests).toHaveLength(3);
+      } finally {
+        await restarted.close();
+      }
     } finally {
       await rm(evidenceRoot, { recursive: true, force: true });
     }
