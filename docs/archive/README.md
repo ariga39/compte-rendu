@@ -35,3 +35,5 @@ and unimplemented alternatives are retained as evidence, not renewed commitments
 - [Dashboard design-system research](dashboard-design-system-research.md)
 - [Runner concurrency hot reload: library choice (#161)](runner-settings-reload-research.md)
 - [PostHog observability fit](posthog-observability-research.md)
+
+- [Review-oriented skills and native review commands](review-oriented-skills-research.md): source comparison and decision to use one general review skill.

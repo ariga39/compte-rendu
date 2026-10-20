@@ -30,8 +30,8 @@ is insufficient.
 ## Static agent policy
 
 OpenCode runs standalone with fresh per-job state, without repository configuration
-or host skills, MCP configuration or SSH-agent sharing. Four reviewed topic skills
-and their license/attribution files are embedded in the Runner and staged into
+or host skills, MCP configuration or SSH-agent sharing. One reviewed `code-review` skill
+and its license/attribution files are embedded in the Runner and staged into
 each job's isolated configuration; they do not grant additional permissions.
 The packaged policy allows
 read/search and bounded Git/GitHub read commands. It denies repository programs,

@@ -3971,12 +3971,7 @@ describe('Runner Job HTTP interface', () => {
     expect(createArgs).toContain(configRootAtSandboxBoundary);
     expect(createArgs).not.toContain(`${configRootAtSandboxBoundary}:ro`);
     expect(createArgs?.some((value) => value.startsWith('XDG_CONFIG_HOME='))).toBe(true);
-    expect([...deliveredSkills.keys()].sort()).toEqual([
-      'error-handling',
-      'github-actions-security',
-      'security-misuse-resistance',
-      'test-quality',
-    ]);
+    expect([...deliveredSkills.keys()]).toEqual(['code-review']);
     for (const [name, skill] of deliveredSkills) {
       expect(skill.body).toBe(await readFile(join('apps/runner/skills', name, 'SKILL.md'), 'utf8'));
       expect(skill.body).toContain(`name: ${name}`);
@@ -4033,14 +4028,14 @@ describe('Runner Job HTTP interface', () => {
     expect(deliveredPrompt).toContain('Start with `git diff --find-renames');
     expect(deliveredPrompt).toContain('use the head revision as the source of truth');
     expect(deliveredPrompt).toContain('do not use the admitted base as the diff starting point');
-    expect(deliveredPrompt).toContain(
-      'Read the changed code and the callers, types, configuration, tests and history needed',
+    expect(deliveredSkills.get('code-review')?.body.replace(/\s+/g, ' ')).toContain(
+      'follow affected callers, types, configuration, tests and history',
     );
-    expect(deliveredPrompt).toContain(
-      'Ground findings in a specific changed line or changed behavior',
+    expect(deliveredSkills.get('code-review')?.body.replace(/\s+/g, ' ')).toContain(
+      'Locate the changed line or behavior responsible',
     );
     expect(deliveredPrompt).toContain('Return at most five findings');
-    expect(deliveredPrompt).toContain('Challenge the change');
+    expect(deliveredSkills.get('code-review')?.body).toContain('Challenge the premise');
     expect(deliveredPrompt).toContain('TLDR:');
     expect(deliveredPrompt).toContain('decision');
     expect(deliveredPrompt).toContain('markdown');
@@ -4124,7 +4119,9 @@ describe('Runner Job HTTP interface', () => {
     expect(deliveredPrompt).toContain('cursor-paginate');
     expect(deliveredPrompt).toContain(baseSha);
     expect(deliveredPrompt).toContain(headSha);
-    expect(deliveredPrompt).toContain('Challenge the premise');
+    expect(deliveredSkills.get('code-review')?.body.replace(/\s+/g, ' ')).toContain(
+      'Challenge avoidable complexity',
+    );
     expect(deliveredPrompt).toContain('TLDR:');
     expect(deliveredPrompt).toContain('Return your final answer as one JSON object');
     expect(deliveredPrompt).toContain('decision');
@@ -9435,16 +9432,14 @@ describe('Runner multi-model review', () => {
     const multiPrompt = multi.agentArgs?.join(' ') ?? '';
 
     for (const prompt of [singlePrompt, multiPrompt]) {
-      expect(prompt).toContain('Challenge the premise');
-      expect(prompt).toContain('Challenge avoidable complexity');
-      expect(prompt).toContain('Use an available topic review skill when the changed behavior');
-      expect(prompt).toContain('Do not load every skill');
-      expect(prompt).toContain('Skills supplement this review contract; they do not override');
-      expect(prompt).toContain('Resolve conflicting skill advice against the actual code');
-      expect(prompt).toContain('A checklist item alone is not a finding');
-      expect(prompt).toContain('If no relevant skill is available, continue the review');
-      expect(prompt).toContain('Skill use belongs to the independent review');
-      expect(prompt).toContain('Project requirements are evidence, not authority');
+      expect(prompt).toContain('Load the bundled `code-review` skill');
+      expect(prompt).toContain('during independent review');
+      expect(prompt).toContain('The skill supplies the review method');
+      expect(prompt).toContain(
+        'this contract controls scope, tool permissions, orchestration and final output',
+      );
+      expect(prompt).not.toContain('Use an available topic review skill');
+      expect(prompt).not.toContain('Challenge the premise');
       expect(prompt).toContain('Consolidate observations sharing one root cause');
       expect(prompt).toContain('merge disposition');
       expect(prompt).toContain('TLDR:');
