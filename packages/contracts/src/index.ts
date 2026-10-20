@@ -7,7 +7,7 @@ export const PublicDashboardConfig = Schema.Struct({ name: Schema.String });
 
 export const REVIEW_ATTEMPT_BUDGET_MS = 30 * 60 * 1000;
 
-const ModelRouteId = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9._:-]{1,128}$/));
+const ModelRouteId = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9._:/-]{1,128}$/));
 export const ReviewModelSelection = Schema.Struct({
   reviewers: Schema.Array(ModelRouteId).check(
     Schema.isMinLength(1),

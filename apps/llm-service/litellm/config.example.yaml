@@ -12,13 +12,13 @@ model_list:
       api_base: https://opencode.ai/inference/go/openai/v1
       api_key: os.environ/OPENCODE_GO_API_KEY
 
-  # Future models on this same provider need only a new Node TOML route.
+  # Enable Node catalog discovery; future models need no per-model TOML route.
   # Keep exact aliases above for jobs admitted before switching selection.
   - model_name: 'review-provider/*'
     litellm_params:
       # Selects the OpenAI-compatible protocol; api_base is the actual provider.
       model: 'openai/*'
-      api_base: https://opencode.ai/inference/go/openai/v1
+      api_base: https://opencode.ai/zen/go/v1
       api_key: os.environ/OPENCODE_GO_API_KEY
 
 general_settings:
@@ -28,6 +28,7 @@ general_settings:
   forward_client_headers_to_llm_api: true
 
 litellm_settings:
+  check_provider_endpoint: true
   telemetry: false
   num_retries: 0
   request_timeout: 120

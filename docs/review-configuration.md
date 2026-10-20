@@ -84,7 +84,7 @@ and selection are frozen before the job is queued. Runner claim responses carry
 that snapshot as `reviewConfiguration`.
 
 Changing the selection needs no Core or Runner restart. For a new model on an
-already configured provider, add a fresh LLM route using the
+already configured provider, select its discovered native `provider/model` ID using the
 [restart-free model change procedure](llm-service.md#change-a-review-model-without-restarting)
 before saving the selection. Previously queued and
 running jobs retain their snapshots; new jobs use the new revision. Updating a
