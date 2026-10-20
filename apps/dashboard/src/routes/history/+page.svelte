@@ -129,7 +129,7 @@
 </script>
 
 <header class="page-head">
-  <h1>Review history</h1>
+  <h1 tabindex="-1" data-testid="list-heading">Review history</h1>
   {#if dash.data}
     <Toolbar lastGoodAt={dash.lastGoodAt} onRefresh={dash.refresh} />
   {/if}
