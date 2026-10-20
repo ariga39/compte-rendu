@@ -14,6 +14,7 @@ const outputInstruction =
   'Keep the review concise: after that line, include only actionable findings and necessary evidence. ' +
   'Do not repeat the PR description, inventory changes, narrate your process, or pad a clean review. ' +
   'For each finding give the concrete consequence, relevant file/line or changed behavior, and smallest practical correction. ' +
+  'Consolidate observations sharing one root cause and a practical fix or merge disposition into one finding, keeping supporting consequences and evidence together. ' +
   'Use request_changes for a concrete blocking correctness, security, or design problem; approve only after a complete review found no blocker; ' +
   'use comment when the available evidence cannot support a definite recommendation. Do not label an incomplete review as approve.';
 
@@ -27,6 +28,8 @@ export const reviewPrompt = (input: ReviewPromptInput): string => {
     `The admitted base is ${input.baseSha} and head is ${input.headSha}; stop if current GitHub revisions differ. ` +
     'Challenge the premise: is the claimed problem real, does this PR solve it, and is this change necessary? Do not take the PR description as proof. ' +
     'Seek counterexamples and inspect affected callers, tests, configuration and history to verify claims. ' +
+    'Stop once decisive evidence and directly affected behavior are checked; do not perform a repository or history census merely to appear comprehensive. ' +
+    'Keep full PR and review-thread pagination, revision checks and available inspection access; there is no hard tool or time cap, and do not finish before the review is complete. ' +
     'Challenge avoidable complexity: unnecessary abstractions, dependencies, indirection, broadened scope, and maintenance cost. ' +
     'Ask whether a smaller, more direct implementation would meet the actual requirement. ' +
     'Ground criticism in the repository and concrete consequences, and offer a practical simpler alternative when warranted. ' +

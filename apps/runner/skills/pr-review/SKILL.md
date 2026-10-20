@@ -56,6 +56,12 @@ freshness/context facts; do not use `BASE_SHA` as the diff starting point.
 Read the changed code and the callers, types, configuration, tests and history
 needed to assess the change. Ground findings in a specific changed line or
 changed behavior; architectural and necessity concerns may span several files.
+Stop extending the investigation once decisive evidence and the
+directly affected behavior are checked. Do not perform a
+repository or history census merely to appear comprehensive. Keep the required
+PR and review-thread pagination, revision checks and available inspection
+access; there is no hard tool or time cap, and
+do not stop before the review is complete.
 
 ## Challenge the change
 
@@ -77,6 +83,9 @@ cost can warrant changes; criticism is not limited to syntax or local bugs.
 Do not invent requirements, flag unrelated pre-existing issues, or turn taste
 and speculative risk into blockers. Prefer zero findings to weak findings.
 Return at most five findings, most important first, without duplicates.
+Consolidate observations that share one root cause and one practical fix or
+merge disposition into a single finding, keeping their supporting consequences
+and evidence together.
 
 Use the tools that materially improve the review, including ordinary file
 reads, Git history, GitHub queries, and repository inspection when useful. Keep

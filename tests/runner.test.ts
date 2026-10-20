@@ -9437,6 +9437,12 @@ describe('Runner multi-model review', () => {
     for (const prompt of [singlePrompt, multiPrompt]) {
       expect(prompt).toContain('Challenge the premise');
       expect(prompt).toContain('Challenge avoidable complexity');
+      expect(prompt).toContain('Stop once decisive evidence and directly affected behavior');
+      expect(prompt).toContain('repository or history census');
+      expect(prompt).toContain('no hard tool or time cap');
+      expect(prompt).toContain('do not finish before the review is complete');
+      expect(prompt).toContain('Consolidate observations sharing one root cause');
+      expect(prompt).toContain('merge disposition');
       expect(prompt).toContain('TLDR:');
       expect(prompt).toContain('Return your final answer as one JSON object');
       expect(prompt).toContain('decision');
@@ -9450,6 +9456,13 @@ describe('Runner multi-model review', () => {
     expect(multiPrompt).toContain('reviewer-1');
     expect(multiPrompt).toContain('synthesize');
     expect(single.skillText).toBe(multi.skillText);
+    expect(single.skillText).toContain('Stop extending the investigation once decisive evidence');
+    expect(single.skillText).toContain('directly affected behavior');
+    expect(single.skillText).toContain('repository or history census');
+    expect(single.skillText).toContain('no hard tool or time cap');
+    expect(single.skillText).toContain('do not stop before the review is complete');
+    expect(single.skillText).toContain('Consolidate observations that share one root cause');
+    expect(single.skillText).toContain('merge disposition');
     expect(single.skillText).toContain('TLDR:');
     expect(single.skillText).not.toContain('submit_review');
   });
