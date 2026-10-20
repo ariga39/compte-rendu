@@ -422,7 +422,8 @@ export type OperationalLogEvent =
         | 'commenter_permission_uncertain'
         | 'check_lookup_uncertain'
         | 'state_failure'
-        | 'scheduling_failure';
+        | 'scheduling_failure'
+        | 'review_reset_failed';
     }
   | {
       readonly phase: 'publication';
@@ -610,6 +611,7 @@ export const PublicTaskFailure = Schema.Struct({
     'marker_lookup_failed',
     'publication_uncertain',
     'completion_failed',
+    'review_reset_failed',
     'unknown',
   ]),
 });

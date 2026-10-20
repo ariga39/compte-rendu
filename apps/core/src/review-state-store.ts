@@ -496,6 +496,23 @@ const recordLifecycleSnapshot = async (
 };
 
 export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStateStore => ({
+  listPriorReviewRunIds: async (runId) => {
+    const current = await database
+      .prepare('SELECT run_id FROM review_runs WHERE run_id = ?')
+      .bind(runId)
+      .first();
+    if (current === null) throw new Error('Review run unavailable');
+    const rows = await database
+      .prepare(`SELECT previous.run_id FROM review_runs AS previous
+      JOIN review_runs AS current ON current.run_id = ?
+      WHERE previous.installation_id = current.installation_id
+        AND previous.repository_id = current.repository_id
+        AND previous.pull_request_number = current.pull_request_number
+        AND previous.rowid < current.rowid`)
+      .bind(runId)
+      .all<{ run_id: string }>();
+    return rows.results.map((row) => row.run_id);
+  },
   recordDelivery: async ({
     deliveryId,
     installationId,

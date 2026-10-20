@@ -16,6 +16,7 @@ import {
   createGitHubPublicationAdapter,
   createGitHubAppTokenProvider,
   createReviewCoordinator,
+  resetPreviousReviewVerdicts,
   createRunnerJobClient,
   type CoreLifecycleLog,
   type CoreEnv,
@@ -686,7 +687,17 @@ export const createCoreWorker = (
       queueWaitMs,
     });
 
+    let preparationFailure: PublicTaskFailure | undefined;
     try {
+      const reset = await Effect.runPromise(
+        resetPreviousReviewVerdicts(github, stateStore, claim.runId, claim.job).pipe(
+          Effect.match({ onFailure: () => false, onSuccess: () => true }),
+        ),
+      );
+      if (!reset) {
+        preparationFailure = { phase: 'scheduling', reason: 'review_reset_failed' };
+        throw new Error('Previous review reset failed');
+      }
       if (github.getRepositoryUrl === undefined) throw new Error('Repository lookup unavailable');
       const repositoryUrl = await Schema.decodeUnknownPromise(Schema.NonEmptyString)(
         await github.getRepositoryUrl({
@@ -761,12 +772,22 @@ export const createCoreWorker = (
       }
       const failedAt = await Effect.runPromise(DateTime.now.pipe(Effect.map(DateTime.formatIso)));
       if (current === undefined) {
-        await stateStore.markSchedulingFailed({ runId: claim.runId, occurredAt: failedAt });
-      } else {
-        await markRunFailed(current, claim.runId, failedAt, {
-          jobId: claim.jobId,
-          attempt: claim.attempt,
+        await stateStore.markSchedulingFailed({
+          runId: claim.runId,
+          occurredAt: failedAt,
+          failure: preparationFailure,
         });
+      } else {
+        await markRunFailed(
+          current,
+          claim.runId,
+          failedAt,
+          {
+            jobId: claim.jobId,
+            attempt: claim.attempt,
+          },
+          preparationFailure,
+        );
       }
       const failedOutcome = await stateStore.getRunOutcome(claim.runId);
       if (failedOutcome?.status === 'failed') {
@@ -775,7 +796,7 @@ export const createCoreWorker = (
           failedOutcome,
           'failed',
           undefined,
-          {
+          preparationFailure ?? {
             phase: 'unknown',
             reason: 'unknown',
           },

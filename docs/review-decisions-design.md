@@ -105,12 +105,33 @@ their Markdown or backfill them as approvals. Do not label Comment as Approved.
 
 ## Revisions and rollout
 
-A later revision receives a fresh review with its own decision. The service does
-not automatically dismiss earlier reviews, revoke another reviewer's vote, or
-modify repository rules. A new Comment must not be presented as clearing a
-previous Request changes vote. GitHub remains authoritative for current merge
-eligibility and stale-approval rules. Head checks narrow the publication race;
-they cannot make a GitHub read and subsequent review POST atomic.
+A newly scheduled round attempts to dismiss this installation's earlier `APPROVED` and
+`CHANGES_REQUESTED` GitHub reviews on the same PR. Core checks again before handing
+the job to a Runner, including when admission and claim overlap. A replay that
+creates no new run does not reset the current round's conclusion.
+
+Candidates must belong to a database run earlier than this round, match its
+installation/repository/PR, carry the exact run marker, and be authored by the
+configured GitHub App bot. Listing must finish within the existing pagination
+bound and the current head must match. The reset never dismisses a later run,
+another author/App, or an unrecognized review. Comments and dismissed reviews are
+left alone. GitHub review bodies/discussion and the original decisions stored in
+D1 remain historical records; this changes the effective GitHub vote, not history.
+
+A dismissal is confirmed by exact review ID, author, body, commit and `DISMISSED`
+state. If a request response is lost or another reset already succeeded, Core
+reads that exact review to confirm. An eager reset failure is logged and retried on claim; it cannot overwrite a
+Runner that has already confirmed the reset. If claim-time confirmation fails,
+the round records `review_reset_failed` and is not delivered to a Runner; the GitHub Check fails rather than
+claiming the old vote was cleared. A partial failure does not restore votes already
+dismissed. Correct permission/service issues, then request `/ai-review` to retry.
+
+The App needs Pull requests write permission. Protected-branch dismissal policies
+may impose additional restrictions; the service does not change those policies
+or revoke another reviewer's vote. GitHub remains authoritative for merge
+eligibility. Head checks narrow races; they cannot make a GitHub read and subsequent
+mutation atomic. If the new round fails after reset, the old vote stays dismissed;
+failure never restores an earlier approval or Request changes.
 
 Deploy Core/contracts support before restarting upgraded Runners. Existing
 in-flight legacy results retain their COMMENT behavior and do not acquire a
@@ -140,6 +161,8 @@ framework is needed for this feature.
 - [GitHub review decisions](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/reviewing-changes-in-pull-requests/about-pull-request-reviews)
 - [Create a pull request review](https://docs.github.com/en/rest/pulls/reviews#create-a-review-for-a-pull-request): `event`, `commit_id`, and pending/submitted semantics.
 - [Protected branches](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches): required approvals, stale approvals, dismissals, and bypasses.
+
+- [GitHub review dismissal API and permissions](https://docs.github.com/en/rest/pulls/reviews#dismiss-a-review-for-a-pull-request)
 
 Current implementation anchors: `apps/runner/src/review-prompt.ts`,
 `packages/contracts/src/index.ts`, `apps/core/src/review-publication-format.ts`,

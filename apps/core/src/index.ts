@@ -82,6 +82,7 @@ export const CoreLifecycleFailureReason = Schema.Literals([
   'marker_lookup_failed',
   'publication_uncertain',
   'completion_failed',
+  'review_reset_failed',
   'unknown',
 ]);
 export type CoreLifecycleFailureReason = typeof CoreLifecycleFailureReason.Type;
@@ -98,6 +99,7 @@ const CoreLifecycleFinishedCommon = {
   evidenceStatus: Schema.Literals(['complete', 'incomplete', 'unknown']),
 } as const;
 const CoreLifecycleFailurePhase = Schema.Literals([
+  'scheduling',
   'checkout',
   'sandbox',
   'agent',
@@ -318,6 +320,7 @@ export interface ReviewStateStore {
 }
 
 export interface ReviewStateQueries {
+  listPriorReviewRunIds?(runId: string): Promise<readonly string[]>;
   recordEvidence(input: {
     runId: string;
     evidence: ReviewEvidenceMetadata;
@@ -522,6 +525,13 @@ export interface GitHubAdapter {
     marker: string;
     expected?: { headSha: GitHubShaValue; event: ReviewPublicationPayload['event'] };
   }): Promise<unknown>;
+  dismissPreviousReviews?(input: {
+    repositoryId: number;
+    pullRequestNumber: number;
+    installationId: number;
+    headSha: GitHubShaValue;
+    previousRunIds: readonly string[];
+  }): Promise<void>;
   createReview?(input: {
     repositoryId: number;
     pullRequestNumber: number;
@@ -558,6 +568,33 @@ class InvalidReviewEvent extends Schema.TaggedError<InvalidReviewEvent>()('Inval
 class SchedulingFailed extends Schema.TaggedError<SchedulingFailed>()('SchedulingFailed', {
   message: Schema.String,
 }) {}
+
+class ReviewResetFailed extends Schema.TaggedError<ReviewResetFailed>()('ReviewResetFailed', {}) {}
+
+export const resetPreviousReviewVerdicts = Effect.fn('resetPreviousReviewVerdicts')(function* (
+  github: GitHubAdapter,
+  stateStore: ReviewCompletionStateStore,
+  runId: string,
+  job: ReviewJob,
+) {
+  if (github.dismissPreviousReviews === undefined) return;
+  yield* Effect.tryPromise({
+    try: async () => {
+      if (stateStore.listPriorReviewRunIds === undefined)
+        throw new Error('Review history unavailable');
+      const previousRunIds = await stateStore.listPriorReviewRunIds(runId);
+      if (previousRunIds.length === 0) return;
+      await github.dismissPreviousReviews!({
+        repositoryId: job.repositoryId,
+        pullRequestNumber: job.pullRequestNumber,
+        installationId: job.installationId,
+        headSha: job.headSha,
+        previousRunIds,
+      });
+    },
+    catch: () => new ReviewResetFailed(),
+  });
+});
 
 const CommenterPermission = Schema.Literals([
   'none',
@@ -1355,6 +1392,19 @@ const claimAndSchedule = (
 
     yield* startCheckSetup(github, stateStore, claim.runId, job, deferCheckSetup);
 
+    // Eager cleanup is retried by the claim path. A late failure here must not
+    // overwrite a run whose Runner already confirmed the reset and started.
+    yield* resetPreviousReviewVerdicts(github, stateStore, claim.runId, job).pipe(
+      Effect.catch(() =>
+        recordOperationalLog(log, {
+          phase: 'core',
+          outcome: 'retryable',
+          deliveryId,
+          reason: 'review_reset_failed',
+        }),
+      ),
+    );
+
     if (claim.activeRunnerJob !== undefined) {
       if (scheduler.cancel === undefined || stateStore.markRunSuperseded === undefined) {
         return 'scheduled' as const;
@@ -1849,6 +1899,21 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
   };
 
   return {
+    listPriorReviewRunIds: async (runId) => {
+      const current = runs.get(runId);
+      if (current === undefined) throw new Error('Review run unavailable');
+      const previous: string[] = [];
+      for (const run of runs.values()) {
+        if (run.runId === runId) break;
+        if (
+          run.job.installationId === current.job.installationId &&
+          run.job.repositoryId === current.job.repositoryId &&
+          run.job.pullRequestNumber === current.job.pullRequestNumber
+        )
+          previous.push(run.runId);
+      }
+      return previous;
+    },
     recordDelivery: async (input) => {
       if (!deliveries.has(input.deliveryId)) {
         deliveries.set(input.deliveryId, {
