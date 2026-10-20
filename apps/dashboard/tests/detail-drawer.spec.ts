@@ -204,6 +204,113 @@ test('Escape closes the drawer and restores focus to the selected row', async ({
   await page.waitForFunction(() => document.activeElement?.getAttribute('data-run-id') === 'h-1');
 });
 
+test('closing the drawer on the current list focuses the page heading when the row disappears', async ({
+  page,
+  harness,
+  base,
+}) => {
+  const first: PublicTaskState = {
+    ...publicTask('h-1', { headRef: 'feature/one' }),
+    status: 'scheduled',
+    dispatch: 'claimed',
+    claimedAt: NOW,
+    cleanup: 'unknown',
+  };
+  const second: PublicTaskState = {
+    ...publicTask('h-2', { headRef: 'feature/two' }),
+    status: 'scheduled',
+    dispatch: 'claimed',
+    claimedAt: NOW,
+    cleanup: 'unknown',
+  };
+  const overview = (claimed: number): ApiPayload =>
+    ok({
+      generatedAt: NOW,
+      counts: { queued: 0, claimed, publishedLast24h: 0, failedLast24h: 0 },
+      cleanupAttention: 0,
+    });
+  const current =
+    (tasks: PublicTaskState[]): ApiHandler =>
+    (url) => {
+      if (url.pathname === '/api/dashboard') return overview(tasks.length);
+      if (url.pathname === '/api/jobs') return ok(historyPage(tasks));
+      if (url.pathname.startsWith('/api/jobs/')) {
+        const runId = url.pathname.slice('/api/jobs/'.length);
+        const task = [first, second].find((entry) => entry.runId === runId);
+        return task === undefined ? { status: 404 } : ok(detailData(task));
+      }
+      return { status: 404 };
+    };
+  harness.setHandler(current([first, second]));
+  await page.goto(`${base}/`);
+  await page.waitForSelector('[data-testid="task"]');
+  await page.click('[data-testid="task-link"][data-run-id="h-1"]');
+  const drawer = page.locator('[data-testid="detail-drawer"]');
+  await expect(drawer).toContainText('feature/one');
+
+  harness.setHandler(current([second]));
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'visible',
+    });
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
+    window.dispatchEvent(new Event('focus'));
+  });
+  await expect(page.locator('[data-testid="task-link"][data-run-id="h-1"]')).toHaveCount(0);
+  await expect(drawer).toBeVisible();
+
+  await page.click('[data-testid="detail-close"]');
+  await expect(drawer).toHaveCount(0);
+  await page.waitForFunction(
+    () => document.activeElement?.getAttribute('data-testid') === 'list-heading',
+  );
+  expect(await page.evaluate(() => document.activeElement?.textContent?.trim())).toBe('Overview');
+});
+
+test('going back focuses the list heading when the selected row disappears', async ({
+  page,
+  harness,
+  base,
+}) => {
+  const first = publicTask('h-1', { headRef: 'feature/one' });
+  const second = publicTask('h-2', { headRef: 'feature/two' });
+  harness.setHandler(listAndDetails([first, second]));
+  await page.goto(`${base}/history`);
+  await page.waitForSelector('[data-testid="task"]');
+  await page.click('[data-testid="task-link"][data-run-id="h-1"]');
+  const drawer = page.locator('[data-testid="detail-drawer"]');
+  await expect(drawer).toContainText('feature/one');
+
+  harness.setHandler((url) => {
+    if (url.pathname.startsWith('/api/jobs/')) {
+      const runId = url.pathname.slice('/api/jobs/'.length);
+      const task = [first, second].find((entry) => entry.runId === runId);
+      return task === undefined ? { status: 404 } : ok(detailData(task));
+    }
+    return ok(historyPage([second]));
+  });
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'visible',
+    });
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
+    window.dispatchEvent(new Event('focus'));
+  });
+  await expect(page.locator('[data-testid="task-link"][data-run-id="h-1"]')).toHaveCount(0);
+  await expect(drawer).toBeVisible();
+
+  await page.goBack();
+  await expect(drawer).toHaveCount(0);
+  await page.waitForFunction(
+    () => document.activeElement?.getAttribute('data-testid') === 'list-heading',
+  );
+  expect(await page.evaluate(() => document.activeElement?.textContent?.trim())).toBe(
+    'Review history',
+  );
+});
+
 test('narrow viewport shows a full-screen dialog with previous and next', async ({
   page,
   harness,

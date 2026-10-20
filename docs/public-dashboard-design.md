@@ -65,9 +65,9 @@ preserves filters and scroll; Back/Close/Escape closes the drawer, and modified
 clicks/Open full page preserve the permanent job link. Header refresh targets the
 open detail; mobile drawers provide their own refresh control.
 
-Focus normally returns to the selected row. If that row disappears during a
-refresh, stable fallback focus is not yet implemented
-([#170](https://github.com/ariga39/compte-rendu/issues/170)).
+Focus returns to the selected row when the drawer closes. If a refresh removes
+that row, focus returns to the list heading instead. Close, Back and Escape share
+this restoration path and retain the saved list scroll position.
 
 ## Database lifecycle and progress
 

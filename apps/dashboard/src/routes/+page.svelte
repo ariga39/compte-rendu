@@ -53,7 +53,7 @@
 </script>
 
 <header class="page-head">
-  <h1>Overview</h1>
+  <h1 tabindex="-1" data-testid="list-heading">Overview</h1>
 </header>
 
 {#if dash.error && dash.data}

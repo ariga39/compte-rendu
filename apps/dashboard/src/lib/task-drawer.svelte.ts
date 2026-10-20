@@ -27,10 +27,11 @@ export function closeTask(): void {
 
 export function restoreListPosition(runId: string): void {
   requestAnimationFrame(() => {
-    const link = document.querySelector<HTMLElement>(
-      `[data-testid="task-link"][data-run-id="${CSS.escape(runId)}"]`,
-    );
-    link?.focus({ preventScroll: true });
+    const target =
+      document.querySelector<HTMLElement>(
+        `[data-testid="task-link"][data-run-id="${CSS.escape(runId)}"]`,
+      ) ?? document.querySelector<HTMLElement>('[data-testid="list-heading"]');
+    target?.focus({ preventScroll: true });
     if (savedScroll !== null) {
       window.scrollTo(0, savedScroll);
       savedScroll = null;
