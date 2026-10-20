@@ -9740,3 +9740,456 @@ describe('Runner multi-model review', () => {
     );
   });
 });
+
+describe('Runner maintenance drain', () => {
+  const auth = { authorization: 'Bearer runner-test-token' };
+  const maintenance = (
+    runner: ReturnType<typeof createRunner>,
+    method: 'GET' | 'POST',
+    path: string,
+    authorized = true,
+  ) =>
+    runner.handle(
+      new Request(`http://runner${path}`, {
+        method,
+        headers: authorized ? auth : {},
+      }),
+    );
+  const status = async (
+    runner: ReturnType<typeof createRunner>,
+    method: 'GET' | 'POST' = 'GET',
+    path = '/maintenance',
+  ) =>
+    (await (await maintenance(runner, method, path)).json()) as {
+      draining: boolean;
+      drained: boolean;
+      activeJobs: number;
+      claimInFlight: boolean;
+      claimPollingHalted: boolean;
+      cleanupBlockedJobs: number;
+    };
+
+  const jobBody = (id: string, pullRequestNumber: number) =>
+    JSON.stringify({
+      ...runnerJobFields,
+      id,
+      runId: id,
+      attempt: 1,
+      pullRequestNumber,
+      repositoryUrl: 'https://github.com/acme/reviewed.git',
+      baseSha: '1'.repeat(40),
+      headSha: '2'.repeat(40),
+    });
+  const post = (runner: ReturnType<typeof createRunner>, body: string) =>
+    runner.handle(
+      new Request('http://runner/jobs', {
+        method: 'POST',
+        headers: { ...auth, 'content-type': 'application/json' },
+        body,
+      }),
+    );
+
+  const reviewProcess = (options: {
+    readonly onCleanup?: () => void | Promise<void>;
+    readonly cleanupFails?: boolean;
+  }): RunnerProcess => {
+    const baseSha = '1'.repeat(40);
+    const headSha = '2'.repeat(40);
+    const result = finalMarkdownJsonl(undefined, 'maintenance-session');
+    return async (_command, args, processOptions = {}) => {
+      if (args[0] === 'rm' && args[1] === '--force') {
+        await options.onCleanup?.();
+        return {
+          exitCode: options.cleanupFails === true ? 1 : 0,
+          stdout: '',
+          timedOut: false,
+          truncated: false,
+        };
+      }
+      if (args[0] === 'exec' && args.includes('--agent')) {
+        await writeEvidenceFixture(args, processOptions, result);
+        return {
+          exitCode: 0,
+          stdout: `${result}\n`,
+          timedOut: false,
+          truncated: false,
+        };
+      }
+      await writeEvidenceFixture(args, processOptions, result);
+      return {
+        exitCode: 0,
+        stdout: args.includes('rev-parse')
+          ? `${baseSha}\n${headSha}\n`
+          : args.includes('session')
+            ? '[{"id":"maintenance-session"}]\n'
+            : processOptions.captureStdout === true
+              ? `${result}\n`
+              : '',
+        timedOut: false,
+        truncated: false,
+      };
+    };
+  };
+
+  it('protects maintenance endpoints and reports drain/resume status idempotently', async () => {
+    const runner = createRunner({ authToken: 'runner-test-token', claimUrl: '' });
+    try {
+      for (const [method, path] of [
+        ['GET', '/maintenance'],
+        ['POST', '/maintenance/drain'],
+        ['POST', '/maintenance/resume'],
+      ] as const) {
+        expect((await maintenance(runner, method, path, false)).status).toBe(401);
+      }
+      expect(await status(runner)).toEqual({
+        draining: false,
+        drained: false,
+        activeJobs: 0,
+        claimInFlight: false,
+        claimPollingHalted: false,
+        cleanupBlockedJobs: 0,
+      });
+
+      expect(await status(runner, 'POST', '/maintenance/drain')).toEqual({
+        draining: true,
+        drained: true,
+        activeJobs: 0,
+        claimInFlight: false,
+        claimPollingHalted: false,
+        cleanupBlockedJobs: 0,
+      });
+      expect(await status(runner, 'POST', '/maintenance/drain')).toEqual({
+        draining: true,
+        drained: true,
+        activeJobs: 0,
+        claimInFlight: false,
+        claimPollingHalted: false,
+        cleanupBlockedJobs: 0,
+      });
+
+      expect(await status(runner, 'POST', '/maintenance/resume')).toEqual({
+        draining: false,
+        drained: false,
+        activeJobs: 0,
+        claimInFlight: false,
+        claimPollingHalted: false,
+        cleanupBlockedJobs: 0,
+      });
+      expect(await status(runner, 'POST', '/maintenance/resume')).toEqual({
+        draining: false,
+        drained: false,
+        activeJobs: 0,
+        claimInFlight: false,
+        claimPollingHalted: false,
+        cleanupBlockedJobs: 0,
+      });
+    } finally {
+      await runner.close();
+    }
+  });
+
+  it('rejects new direct admission while draining, preserves an existing repost, and resumes', async () => {
+    let releaseJobs: () => void = () => {};
+    const jobsGate = new Promise<void>((resolve) => {
+      releaseJobs = resolve;
+    });
+    const runner = createRunner({
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'fixture-resolver',
+      claimUrl: '',
+      concurrency: 2,
+      process: async () => {
+        await jobsGate;
+        return { exitCode: 1, stdout: '', timedOut: false, truncated: false };
+      },
+    });
+    try {
+      const existing = jobBody('maintenance-direct-existing', 6101);
+      expect((await post(runner, existing)).status).toBe(202);
+
+      expect((await status(runner, 'POST', '/maintenance/drain')).draining).toBe(true);
+      expect((await post(runner, existing)).status).toBe(202);
+      expect((await post(runner, jobBody('maintenance-direct-paused', 6102))).status).toBe(503);
+
+      expect((await status(runner, 'POST', '/maintenance/resume')).draining).toBe(false);
+      expect((await post(runner, jobBody('maintenance-direct-after-resume', 6103))).status).toBe(
+        202,
+      );
+
+      const raced = post(runner, jobBody('maintenance-direct-read-race', 6104));
+      expect((await status(runner, 'POST', '/maintenance/drain')).draining).toBe(true);
+      expect((await raced).status).toBe(503);
+      expect((await status(runner)).activeJobs).toBe(2);
+
+      releaseJobs();
+      await waitForTerminal(runner, 'maintenance-direct-existing');
+      await waitForTerminal(runner, 'maintenance-direct-after-resume');
+    } finally {
+      releaseJobs();
+      await runner.close();
+    }
+  });
+
+  it('does not claim while draining across a settings reload and resumes with one in-flight claim', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'compte-rendu-maintenance-'));
+    const file = join(dir, 'settings.toml');
+    await writeFile(file, 'concurrency = 1\n');
+    const logs: string[] = [];
+    const logSpy = vi
+      .spyOn(console, 'log')
+      .mockImplementation((...args: unknown[]) => void logs.push(args.map(String).join(' ')));
+    let claims = 0;
+    let pending = 0;
+    let peak = 0;
+    const heldClaims: Array<() => void> = [];
+    const runner = createRunner({
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'fixture-resolver',
+      settingsFile: file,
+      claimUrl: 'https://ingress.test/runner-claim',
+      claimIntervalMs: 1_000_000_000,
+      claimFetch: async () => {
+        claims += 1;
+        if (claims === 1) return new Response(null, { status: 204 });
+        pending += 1;
+        peak = Math.max(peak, pending);
+        return new Promise<Response>((resolve) =>
+          heldClaims.push(() => {
+            pending -= 1;
+            resolve(new Response(null, { status: 204 }));
+          }),
+        );
+      },
+    });
+    try {
+      await vi.waitFor(() => expect(claims).toBe(1));
+      await vi.waitFor(() =>
+        expect(logs.some((line) => line.includes('runner settings reloaded concurrency=1'))).toBe(
+          true,
+        ),
+      );
+      expect((await status(runner, 'POST', '/maintenance/drain')).drained).toBe(true);
+
+      const temporary = join(dir, 'settings.next.toml');
+      await writeFile(temporary, 'concurrency = 2\n');
+      await rename(temporary, file);
+      await vi.waitFor(() =>
+        expect(logs.some((line) => line.includes('runner settings reloaded concurrency=2'))).toBe(
+          true,
+        ),
+      );
+      expect(claims).toBe(1);
+
+      const resumed = await Promise.all([
+        status(runner, 'POST', '/maintenance/resume'),
+        status(runner, 'POST', '/maintenance/resume'),
+      ]);
+      expect(resumed.map((value) => value.draining)).toEqual([false, false]);
+      await vi.waitFor(() => expect(claims).toBe(2));
+      expect(peak).toBe(1);
+      for (const release of heldClaims.splice(0)) release();
+      await vi.waitFor(async () => expect((await status(runner)).claimInFlight).toBe(false));
+    } finally {
+      logSpy.mockRestore();
+      for (const release of heldClaims.splice(0)) release();
+      await runner.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('admits and completes an already-reserved claim after drain', async () => {
+    const job = jobBody('maintenance-held-claim', 6111);
+    let claimRequested!: () => void;
+    const requested = new Promise<void>((resolve) => {
+      claimRequested = resolve;
+    });
+    let resolveClaim: ((response: Response) => void) | undefined;
+    const claimResponse = new Promise<Response>((resolve) => {
+      resolveClaim = resolve;
+    });
+    let claims = 0;
+    const runner = createRunner({
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'fixture-resolver',
+      evidenceRoot: sharedEvidenceRoot,
+      claimUrl: 'https://ingress.test/runner-claim',
+      claimIntervalMs: 1_000_000_000,
+      claimFetch: async () => {
+        claims += 1;
+        claimRequested();
+        return claimResponse;
+      },
+      process: async () => ({ exitCode: 1, stdout: '', timedOut: false, truncated: false }),
+    });
+    try {
+      await requested;
+      expect(await status(runner, 'POST', '/maintenance/drain')).toEqual({
+        draining: true,
+        drained: false,
+        activeJobs: 0,
+        claimInFlight: true,
+        claimPollingHalted: false,
+        cleanupBlockedJobs: 0,
+      });
+      resolveClaim?.(Response.json(JSON.parse(job)));
+      await expect(waitForTerminal(runner, 'maintenance-held-claim')).resolves.toMatchObject({
+        status: 'failed',
+        failure: { reason: 'checkout' },
+        sandbox: { cleanup: 'destroyed' },
+      });
+      expect(claims).toBe(1);
+      await vi.waitFor(async () => {
+        expect(await status(runner)).toMatchObject({
+          draining: true,
+          drained: true,
+          activeJobs: 0,
+          claimInFlight: false,
+        });
+      });
+    } finally {
+      resolveClaim?.(new Response(null, { status: 204 }));
+      await runner.close();
+    }
+  });
+
+  it('stays undrained through held cleanup and callback delivery', async () => {
+    let cleanupStarted!: () => void;
+    const cleanupObserved = new Promise<void>((resolve) => {
+      cleanupStarted = resolve;
+    });
+    let releaseCleanup!: () => void;
+    const cleanupGate = new Promise<void>((resolve) => {
+      releaseCleanup = resolve;
+    });
+    let callbackStarted!: () => void;
+    const callbackObserved = new Promise<void>((resolve) => {
+      callbackStarted = resolve;
+    });
+    let releaseCallback!: () => void;
+    const callbackGate = new Promise<void>((resolve) => {
+      releaseCallback = resolve;
+    });
+    const runner = createRunner({
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'fixture-resolver',
+      evidenceRoot: sharedEvidenceRoot,
+      claimUrl: '',
+      process: reviewProcess({
+        onCleanup: async () => {
+          cleanupStarted();
+          await cleanupGate;
+        },
+      }),
+      callbackFetch: async () => {
+        callbackStarted();
+        await callbackGate;
+        return new Response(null, { status: 202 });
+      },
+    });
+    try {
+      expect((await post(runner, jobBody('maintenance-held-cleanup', 6112))).status).toBe(202);
+      expect((await status(runner, 'POST', '/maintenance/drain')).draining).toBe(true);
+
+      await cleanupObserved;
+      expect(await status(runner)).toMatchObject({
+        draining: true,
+        drained: false,
+        activeJobs: 1,
+        claimInFlight: false,
+        cleanupBlockedJobs: 0,
+      });
+
+      releaseCleanup();
+      await callbackObserved;
+      expect(await status(runner)).toMatchObject({
+        draining: true,
+        drained: false,
+        activeJobs: 1,
+        cleanupBlockedJobs: 0,
+      });
+
+      releaseCallback();
+      await waitForTerminal(runner, 'maintenance-held-cleanup');
+      await vi.waitFor(async () => {
+        expect(await status(runner)).toMatchObject({
+          draining: true,
+          drained: true,
+          activeJobs: 0,
+          cleanupBlockedJobs: 0,
+        });
+      });
+    } finally {
+      releaseCleanup();
+      releaseCallback();
+      await runner.close();
+    }
+  });
+
+  it('keeps an ambiguous halted claim blocking drain across resume', async () => {
+    let claims = 0;
+    const runner = createRunner({
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'fixture-resolver',
+      evidenceRoot: sharedEvidenceRoot,
+      claimUrl: 'https://ingress.test/runner-claim',
+      claimIntervalMs: 1_000_000_000,
+      claimFetch: async () => {
+        claims += 1;
+        return new Response('{}', { status: 200 });
+      },
+      process: reviewProcess({}),
+    });
+    try {
+      await vi.waitFor(async () => expect((await status(runner)).claimPollingHalted).toBe(true));
+      expect(await status(runner, 'POST', '/maintenance/drain')).toEqual({
+        draining: true,
+        drained: false,
+        activeJobs: 0,
+        claimInFlight: false,
+        claimPollingHalted: true,
+        cleanupBlockedJobs: 0,
+      });
+      expect(await status(runner, 'POST', '/maintenance/resume')).toMatchObject({
+        draining: false,
+        drained: false,
+        claimPollingHalted: true,
+        cleanupBlockedJobs: 0,
+      });
+      expect(claims).toBe(1);
+    } finally {
+      await runner.close();
+    }
+  });
+
+  it('keeps failed cleanup blocking drain across resume without a halted claim', async () => {
+    const runner = createRunner({
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'fixture-resolver',
+      evidenceRoot: sharedEvidenceRoot,
+      claimUrl: '',
+      process: reviewProcess({ cleanupFails: true }),
+    });
+    try {
+      expect((await post(runner, jobBody('maintenance-blocked-cleanup', 6113))).status).toBe(202);
+      await expect(waitForTerminal(runner, 'maintenance-blocked-cleanup')).resolves.toMatchObject({
+        sandbox: { cleanup: 'failed' },
+      });
+      expect(await status(runner, 'POST', '/maintenance/drain')).toEqual({
+        draining: true,
+        drained: false,
+        activeJobs: 0,
+        claimInFlight: false,
+        claimPollingHalted: false,
+        cleanupBlockedJobs: 1,
+      });
+      expect(await status(runner, 'POST', '/maintenance/resume')).toMatchObject({
+        draining: false,
+        drained: false,
+        claimPollingHalted: false,
+        cleanupBlockedJobs: 1,
+      });
+    } finally {
+      await runner.close();
+    }
+  });
+});

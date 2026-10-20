@@ -161,15 +161,56 @@ Workers deployment controls. Use the matching application build and compatible d
 a release. A schema rollback is a separate, reviewed migration or an operator
 approved D1 recovery action.
 
-## Drain and recovery limitations
+## Drain before maintenance
 
-There is no operator-controlled Runner pause/drain API yet
-([#194](https://github.com/ariga39/compte-rendu/issues/194)). Arrange a quiet
-window, prevent new triggers, and wait for both queued and claimed work to finish
-before restarting Runner or its inference services. Disabling webhooks alone does
-not remove already queued work. Zero concurrency is invalid. If multiple Runners
-share an sbx daemon/cgroup, check all affected instances and Sandbox inventory;
-a single empty dashboard is insufficient.
+Runner exposes authenticated maintenance endpoints on its private loopback HTTP
+service. Use the existing `RUNNER_AUTH_TOKEN`; these routes are not forwarded by
+the public dashboard Worker.
+
+| Request                    | Effect                                         |
+| -------------------------- | ---------------------------------------------- |
+| `POST /maintenance/drain`  | Stop new claims and new direct job admissions. |
+| `GET /maintenance`         | Inspect current drain status.                  |
+| `POST /maintenance/resume` | Reopen admission and wake the claim loop.      |
+
+The response contains `draining`, `drained`, `activeJobs`, `claimInFlight`,
+`claimPollingHalted` and `cleanupBlockedJobs`. A claim already sent when drain
+begins keeps its reservation and can still start its job. Existing jobs finish
+normally, including evidence archival, cleanup and bounded callback delivery.
+Duplicate requests for an active job retain existing idempotency behavior; new jobs receive
+503 while draining. Queued work stays in D1, so webhooks can continue arriving.
+Changing concurrency does not bypass the pause.
+
+On the Runner host, use a mode-0600 curl configuration file containing the
+Authorization header, outside Sandbox mounts. Set `RUNNER_CURL_CONFIG` to that
+file and `RUNNER_ORIGIN` to the instance's loopback address (for example,
+`http://127.0.0.1:8080`). Keep credentials out of command arguments and shell
+traces. Start the drain, then poll its status:
+
+```sh
+curl --fail --silent --show-error --config "$RUNNER_CURL_CONFIG" \
+  --request POST "$RUNNER_ORIGIN/maintenance/drain"
+curl --fail --silent --show-error --config "$RUNNER_CURL_CONFIG" \
+  "$RUNNER_ORIGIN/maintenance"
+```
+
+Wait for `drained: true` before restarting. It requires maintenance mode, no
+active jobs or in-flight claim, no halted claim loop and no terminal job with
+unconfirmed cleanup. Inspect failures rather than forcing a restart to clear
+these conditions. Resume never clears an ownership-related claim halt or failed
+cleanup. If maintenance is cancelled, send `POST /maintenance/resume` with the
+same curl configuration. Drain is in-memory: a restarted Runner begins normal
+claiming automatically.
+
+Drained means local work and callback attempts finished, not that Core accepted
+every callback. Check terminal callback failures and the dashboard before
+replacement; unresolved delivery uses the recovery guidance below. If multiple
+Runners share an sbx daemon/cgroup or inference service, drain each affected
+Runner and check Sandbox inventory before restarting shared services.
+
+For the first upgrade from a Runner without these endpoints, arrange a quiet
+window and wait for queued and claimed work to finish. Disabling webhooks alone
+does not remove queued work; zero concurrency is invalid.
 
 Back up artifacts/configuration before replacement. Deploy additive Core/contracts
 support before a Runner that emits a new result shape. Do not interrupt live jobs
