@@ -30,7 +30,10 @@ is insufficient.
 ## Static agent policy
 
 OpenCode runs standalone with fresh per-job state, without repository configuration
-or host skills, MCP configuration or SSH-agent sharing. The packaged policy allows
+or host skills, MCP configuration or SSH-agent sharing. Four reviewed topic skills
+and their license/attribution files are embedded in the Runner and staged into
+each job's isolated configuration; they do not grant additional permissions.
+The packaged policy allows
 read/search and bounded Git/GitHub read commands. It denies repository programs,
 builds/tests, edits and GitHub writes. Repository contents and PR discussion are
 untrusted evidence, not instructions. Model compliance is not the outer security

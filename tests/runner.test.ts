@@ -3877,6 +3877,7 @@ describe('Runner Job HTTP interface', () => {
     let fetchArgs: readonly string[] | undefined;
     let agentArgs: readonly string[] | undefined;
     let configRootAtSandboxBoundary: string | undefined;
+    const deliveredSkills = new Map<string, { body: string; license: string; notice: string }>();
     let sandboxEnvironment: NodeJS.ProcessEnv | undefined;
     const process = async (
       _command: string,
@@ -3895,6 +3896,14 @@ describe('Runner Job HTTP interface', () => {
         const config = args.find((value) => value.startsWith('XDG_CONFIG_HOME='));
         if (config !== undefined) {
           configRootAtSandboxBoundary = config.slice('XDG_CONFIG_HOME='.length);
+          const skillsRoot = join(configRootAtSandboxBoundary, 'opencode', 'skills');
+          for (const name of await readdir(skillsRoot).catch(() => [])) {
+            deliveredSkills.set(name, {
+              body: await readFile(join(skillsRoot, name, 'SKILL.md'), 'utf8'),
+              license: await readFile(join(skillsRoot, name, 'LICENSE.md'), 'utf8'),
+              notice: await readFile(join(skillsRoot, name, 'NOTICE.md'), 'utf8'),
+            });
+          }
         }
       }
       if (args.includes('fetch')) fetchArgs = args;
@@ -3962,6 +3971,24 @@ describe('Runner Job HTTP interface', () => {
     expect(createArgs).toContain(configRootAtSandboxBoundary);
     expect(createArgs).not.toContain(`${configRootAtSandboxBoundary}:ro`);
     expect(createArgs?.some((value) => value.startsWith('XDG_CONFIG_HOME='))).toBe(true);
+    expect([...deliveredSkills.keys()].sort()).toEqual([
+      'error-handling',
+      'github-actions-security',
+      'security-misuse-resistance',
+      'test-quality',
+    ]);
+    for (const [name, skill] of deliveredSkills) {
+      expect(skill.body).toBe(await readFile(join('apps/runner/skills', name, 'SKILL.md'), 'utf8'));
+      expect(skill.body).toContain(`name: ${name}`);
+      expect(skill.body).toContain('## Credits');
+      expect(skill.license).toBe(
+        await readFile(join('apps/runner/skills', name, 'LICENSE.md'), 'utf8'),
+      );
+      expect(skill.license.length).toBeGreaterThan(1000);
+      expect(skill.notice).toBe(
+        await readFile(join('apps/runner/skills', name, 'NOTICE.md'), 'utf8'),
+      );
+    }
     const deliveredPrompt = (agentArgs?.join(' ') ?? '').replace(/\s+/g, ' ');
     expect(deliveredPrompt).not.toContain('First load the pr-review skill');
     expect(deliveredPrompt).toContain(
