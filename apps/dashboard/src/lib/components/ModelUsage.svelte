@@ -29,6 +29,7 @@
       input === null ||
       cacheRead === null ||
       input.total <= 0 ||
+      cacheRead.total > input.total ||
       input.reportedRequests !== model.requests ||
       cacheRead.reportedRequests !== model.requests
     ) {

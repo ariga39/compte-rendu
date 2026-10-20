@@ -369,6 +369,10 @@ test('detail shows cache-read percentage only for complete comparable totals', a
             inputTokens: { total: 1200, reportedRequests: 1 },
             cacheReadTokens: { total: 900, reportedRequests: 1 },
           }),
+          model('inconsistent-totals', 'inconsistent-totals', {
+            inputTokens: { total: 800, reportedRequests: 1 },
+            cacheReadTokens: { total: 1200, reportedRequests: 1 },
+          }),
         ],
       },
     }),
@@ -409,6 +413,11 @@ test('detail shows cache-read percentage only for complete comparable totals', a
   await expect(partial).toContainText('900');
   await expect(partial).toContainText('Reported for 1 of 2 requests');
   await expect(partial).not.toContainText('%');
+
+  const inconsistent = await open('inconsistent-totals');
+  await expect(inconsistent).toContainText('800');
+  await expect(inconsistent).toContainText('1,200');
+  await expect(inconsistent).not.toContainText('%');
 });
 
 test('detail keeps distinct route and model pairs when their names contain colons', async ({
