@@ -340,7 +340,11 @@ export interface ReviewStateQueries {
   }): Promise<boolean>;
   markCheckSetupFailed?(input: { runId: string; setupClaim?: string }): Promise<boolean>;
   markRunCompleted(input: { runId: string; occurredAt: string }): Promise<boolean>;
-  markRunSuperseded(input: { runId: string; occurredAt: string }): Promise<boolean>;
+  markRunSuperseded(input: {
+    runId: string;
+    occurredAt: string;
+    releaseRunnerClaim?: { jobId: string; attempt: number };
+  }): Promise<boolean>;
   completeRunPublication(input: {
     runId: string;
     occurredAt: string;
@@ -2204,15 +2208,29 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
       }
       return false;
     },
-    markRunSuperseded: async ({ runId, occurredAt }) => {
+    markRunSuperseded: async ({ runId, occurredAt, releaseRunnerClaim }) => {
       const run = runs.get(runId);
-      if (run !== undefined && run.status === 'scheduled') {
-        run.status = 'superseded';
-        run.updatedAt = occurredAt;
-        setDeliveryStatus(run.deliveryId, 'superseded', occurredAt);
-        return true;
+      if (run === undefined) return false;
+      if (
+        releaseRunnerClaim !== undefined &&
+        (run.runnerJobId !== releaseRunnerClaim.jobId ||
+          run.runnerAttempt !== releaseRunnerClaim.attempt)
+      )
+        return false;
+      if (
+        run.status !== 'scheduled' &&
+        !(releaseRunnerClaim !== undefined && run.status === 'superseded')
+      )
+        return false;
+      run.status = 'superseded';
+      run.updatedAt = occurredAt;
+      if (releaseRunnerClaim !== undefined) {
+        run.runnerJobId = undefined;
+        run.runnerAttempt = undefined;
+        run.runnerCleanupStatus = undefined;
       }
-      return false;
+      setDeliveryStatus(run.deliveryId, 'superseded', occurredAt);
+      return true;
     },
     completeRunPublication: async ({ runId, occurredAt, decision }) => {
       const run = runs.get(runId);

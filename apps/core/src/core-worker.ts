@@ -702,10 +702,15 @@ export const createCoreWorker = (
         throw new Error('Previous review reset failed');
       }
       if (reset.kind === 'stale') {
-        await stateStore.markRunSuperseded?.({ runId: claim.runId, occurredAt });
-        await stateStore.clearRunnerJob?.({ runId: claim.runId, jobId: claim.jobId });
+        const released = await stateStore.markRunSuperseded?.({
+          runId: claim.runId,
+          occurredAt,
+          releaseRunnerClaim: { jobId: claim.jobId, attempt: claim.attempt },
+        });
+        if (!released) throw new Error('Supersession failed');
         const superseded = await stateStore.getRunOutcome(claim.runId);
-        if (superseded?.status !== 'superseded') throw new Error('Supersession failed');
+        if (superseded?.status !== 'superseded' || superseded.runnerJobId !== undefined)
+          throw new Error('Supersession failed');
         if (superseded.checkRunId !== undefined && github.updateCheckRun !== undefined) {
           await github
             .updateCheckRun({
