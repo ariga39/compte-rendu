@@ -167,13 +167,14 @@ Runner exposes authenticated maintenance endpoints on its private loopback HTTP
 service. Use the existing `RUNNER_AUTH_TOKEN`; these routes are not forwarded by
 the public dashboard Worker.
 
-| Request                    | Effect                                         |
-| -------------------------- | ---------------------------------------------- |
-| `POST /maintenance/drain`  | Stop new claims and new direct job admissions. |
-| `GET /maintenance`         | Inspect current drain status.                  |
-| `POST /maintenance/resume` | Reopen admission and wake the claim loop.      |
+| Request                             | Effect                                                   |
+| ----------------------------------- | -------------------------------------------------------- |
+| `POST /maintenance/drain`           | Stop new claims and new direct job admissions.           |
+| `GET /maintenance`                  | Inspect current drain status.                            |
+| `POST /maintenance/resume`          | Reopen admission and wake the claim loop.                |
+| `POST /maintenance/replay-callback` | Replay a retained terminal callback; see recovery below. |
 
-The response contains `draining`, `drained`, `activeJobs`, `claimInFlight`,
+The drain, status and resume responses contain `draining`, `drained`, `activeJobs`, `claimInFlight`,
 `claimPollingHalted` and `cleanupBlockedJobs`. A claim already sent when drain
 begins keeps its reservation and can still start its job. Existing jobs finish
 normally, including evidence archival, cleanup and bounded callback delivery.
