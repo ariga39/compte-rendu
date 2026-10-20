@@ -32,7 +32,6 @@ import {
   type OperationalLogEvent,
   type RunnerJobResponse as RunnerJobResponseValue,
 } from '@compte-rendu/contracts';
-import prReviewSkill from '../skills/pr-review/SKILL.md?raw';
 import {
   SandboxCreateError,
   resolveSandboxRuntimeConfig,
@@ -2147,12 +2146,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
       });
       const configRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-opencode-config-'));
       job.configRoot = configRoot;
-      await mkdir(join(configRoot, 'opencode', 'skills', 'pr-review'), { recursive: true });
-      await writeFile(
-        join(configRoot, 'opencode', 'skills', 'pr-review', 'SKILL.md'),
-        prReviewSkill,
-        'utf8',
-      );
       const activeOpenCodeConfig = multi
         ? multiReviewConfig({
             selection: multiSelection,
