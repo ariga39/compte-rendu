@@ -146,8 +146,12 @@ retains its route snapshot. Do not repoint existing IDs to different models.
 
 The discovered catalog is additive for the service's lifetime. LiteLLM can return
 HTTP 200 with missing entries after a provider error, so omission does not delete
-known routes. Refresh errors retain known models and emit a sanitized diagnostic;
-unknown models remain unauthorized. To stop using a model, remove it from the
+known routes. Refresh errors retain known models and emit a sanitized diagnostic. Unsupported
+individual model IDs are skipped with a rejected-entry count; valid siblings remain
+usable. Unknown or skipped IDs remain unauthorized. The retained catalog is capped
+at 1,000 IDs; `lastRefreshError = "catalog limit reached"` distinguishes that
+condition from a source failure. `lastSuccessAt` records the last complete refresh
+and does not advance on truncation. To stop using a model, remove it from the
 review selection. Catalog membership does not guarantee continued upstream
 availability. The in-memory catalog is rebuilt after restart.
 

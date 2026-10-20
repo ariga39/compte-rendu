@@ -1,4 +1,4 @@
-import { Effect, Schema } from 'effect';
+import { Effect, Option, Schema } from 'effect';
 import type { LiteLlmRoute } from './upstream';
 
 const MAX_CATALOG_BYTES = 256 * 1024;
@@ -11,9 +11,10 @@ export const CatalogModelId = Schema.String.check(
   Schema.isPattern(/^[A-Za-z0-9._:/-]+$/),
 );
 
-const CatalogResponse = Schema.Struct({
-  data: Schema.Array(Schema.Struct({ id: CatalogModelId })),
+const CatalogEnvelope = Schema.Struct({
+  data: Schema.Array(Schema.Unknown),
 });
+const CatalogEntry = Schema.Struct({ id: Schema.String });
 
 export type CatalogSource =
   | {
@@ -59,13 +60,23 @@ const readBounded = async (response: Response): Promise<string> => {
   return new TextDecoder().decode(bytes);
 };
 
-const decodeCatalog = (text: string): readonly string[] => {
-  const decoded = Schema.decodeUnknownSync(Schema.fromJsonString(CatalogResponse))(text);
+const decodeCatalog = (
+  text: string,
+): { readonly ids: readonly string[]; readonly rejected: number } => {
+  const decoded = Schema.decodeUnknownSync(Schema.fromJsonString(CatalogEnvelope))(text);
   if (decoded.data.length > MAX_CATALOG_MODELS) throw new Error('catalog too large');
-  return decoded.data.map((model) => model.id);
+  const ids: string[] = [];
+  let rejected = 0;
+  for (const entry of decoded.data) {
+    const model = Option.getOrUndefined(Schema.decodeUnknownOption(CatalogEntry)(entry));
+    if (model === undefined) {
+      rejected += 1;
+      continue;
+    }
+    ids.push(model.id);
+  }
+  return { ids, rejected };
 };
-
-const routeId = (value: string): string => Schema.decodeUnknownSync(CatalogModelId)(value);
 
 export class ModelCatalog {
   readonly #sources: readonly CatalogSource[];
@@ -142,10 +153,12 @@ export class ModelCatalog {
     const results = await Promise.all(this.#sources.map((source) => this.#fetchSource(source)));
     if (this.#closed) return;
     let complete = true;
+    let sourceFailed = false;
     let truncated = false;
     for (const result of results) {
       if (!result.ok) {
         complete = false;
+        sourceFailed = true;
         continue;
       }
       for (const id of result.ids) {
@@ -163,7 +176,7 @@ export class ModelCatalog {
       this.#lastSuccessAt = attemptAt;
       this.#lastRefreshError = null;
     } else {
-      this.#lastRefreshError = 'refresh failed';
+      this.#lastRefreshError = sourceFailed ? 'refresh failed' : 'catalog limit reached';
     }
   }
 
@@ -181,11 +194,26 @@ export class ModelCatalog {
         signal: AbortSignal.any([this.#controller.signal, AbortSignal.timeout(CATALOG_TIMEOUT_MS)]),
       });
       if (!response.ok) throw new Error('catalog unavailable');
-      const ids = decodeCatalog(await readBounded(response));
-      return {
-        ok: true,
-        ids: source.kind === 'public' ? ids.map((id) => routeId(`${source.prefix}${id}`)) : ids,
-      };
+      const decoded = decodeCatalog(await readBounded(response));
+      const ids: string[] = [];
+      let rejected = decoded.rejected;
+      for (const id of decoded.ids) {
+        const candidate = source.kind === 'public' ? `${source.prefix}${id}` : id;
+        const route = Option.getOrUndefined(Schema.decodeUnknownOption(CatalogModelId)(candidate));
+        if (route === undefined) {
+          rejected += 1;
+          continue;
+        }
+        ids.push(route);
+      }
+      if (rejected > 0)
+        Effect.runSync(
+          Effect.logWarning('llm.catalog.entries_rejected', {
+            source: source.label,
+            count: rejected,
+          }),
+        );
+      return { ok: true, ids };
     } catch {
       if (this.#closed) return { ok: false };
       Effect.runSync(Effect.logWarning('llm.catalog.source_failed', { source: source.label }));
