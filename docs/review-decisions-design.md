@@ -120,7 +120,10 @@ D1 remain historical records; this changes the effective GitHub vote, not histor
 
 A dismissal is confirmed by exact review ID, author, body, commit and `DISMISSED`
 state. If a request response is lost or another reset already succeeded, Core
-reads that exact review to confirm. An eager reset failure is logged and retried on claim; it cannot overwrite a
+reads that exact review to confirm. Each reset permits one bounded retry, rescanning
+the reviews and rechecking the head before any further dismissal. A changed head
+at claim time supersedes the queued run, releases its reserved Runner claim and
+cancels its check without a failure comment. An eager reset failure is logged and retried on claim; it cannot overwrite a
 Runner that has already confirmed the reset. If claim-time confirmation fails,
 the round records `review_reset_failed` and is not delivered to a Runner; the GitHub Check fails rather than
 claiming the old vote was cleared. A partial failure does not restore votes already
@@ -130,7 +133,7 @@ The App needs Pull requests write permission. Protected-branch dismissal policie
 may impose additional restrictions; the service does not change those policies
 or revoke another reviewer's vote. GitHub remains authoritative for merge
 eligibility. Head checks narrow races; they cannot make a GitHub read and subsequent
-mutation atomic. If the new round fails after reset, the old vote stays dismissed;
+mutation atomic. If the new round fails or publishes Comment after reset, the old vote stays dismissed;
 failure never restores an earlier approval or Request changes.
 
 Deploy Core/contracts support before restarting upgraded Runners. Existing

@@ -165,6 +165,7 @@ const resetFixture = async () => {
     [];
   const controls = {
     deny: false,
+    repositoryUnavailable: false,
     malformed: false,
     endless: false,
     loseDismissal: false,
@@ -175,6 +176,8 @@ const resetFixture = async () => {
   const remote: typeof fetch = async (input, init) => {
     const request = new Request(input, init);
     const url = new URL(request.url);
+    if (url.pathname === '/repositories/11' && controls.repositoryUnavailable)
+      return new Response(null, { status: 503 });
     if (url.pathname === '/repositories/11')
       return Response.json({
         full_name: 'example/repo',
@@ -405,13 +408,12 @@ it('does not clear this round or repeat the reset when a delivery is replayed', 
   }
 });
 
-it.each(['malformed', 'endless', 'stale'] as const)(
+it.each(['malformed', 'endless'] as const)(
   'does not dismiss anything when the review listing/target is %s',
   async (mode) => {
     const f = await resetFixture();
     try {
-      if (mode === 'stale') f.controls.currentHead = '4'.repeat(40);
-      else f.controls[mode] = true;
+      f.controls[mode] = true;
       expect((await f.send()).status).toBe(202);
       expect(f.reviews[0]!.state).toBe('APPROVED');
       expect((await f.claim()).status).toBe(503);
@@ -477,6 +479,69 @@ it('does not fail an admitted Runner when a slower eager reset loses its listing
   } finally {
     release.resolve();
     await admission;
+    await f.settle();
+    f.database.close();
+  }
+});
+
+it('supersedes a stale queued round without dismissing votes or reporting failure', async () => {
+  const f = await resetFixture();
+  try {
+    expect((await f.send()).status).toBe(202);
+    await f.settle();
+    f.reviews[0]!.state = 'CHANGES_REQUESTED';
+    f.controls.currentHead = '4'.repeat(40);
+    expect((await f.claim()).status).toBe(204);
+    expect(f.reviews[0]!.state).toBe('CHANGES_REQUESTED');
+    expect(await f.store.getDeliveryOutcome(event.deliveryId)).toMatchObject({
+      status: 'superseded',
+    });
+    expect(f.checks[0]).toMatchObject({ status: 'completed', conclusion: 'cancelled' });
+    expect(f.logs).not.toContainEqual(expect.objectContaining({ reason: 'review_reset_failed' }));
+    expect((await f.claim()).status).toBe(204);
+  } finally {
+    await f.settle();
+    f.database.close();
+  }
+});
+
+it('recovers a transient listing failure during the mandatory claim reset', async () => {
+  const f = await resetFixture();
+  try {
+    expect((await f.send()).status).toBe(202);
+    await f.settle();
+    f.reviews[0]!.state = 'CHANGES_REQUESTED';
+    let unavailable = true;
+    f.controls.onList = async () => {
+      if (unavailable) {
+        unavailable = false;
+        throw new Error('temporary network failure');
+      }
+    };
+    expect((await f.claim()).status).toBe(200);
+    expect(f.reviews[0]!.state).toBe('DISMISSED');
+    expect(await f.store.getDeliveryOutcome(event.deliveryId)).toMatchObject({
+      status: 'scheduled',
+    });
+  } finally {
+    await f.settle();
+    f.database.close();
+  }
+});
+
+it('keeps a prior Request changes dismissed when the replacement round fails', async () => {
+  const f = await resetFixture();
+  try {
+    f.reviews[0]!.state = 'CHANGES_REQUESTED';
+    expect((await f.send()).status).toBe(202);
+    await f.settle();
+    expect(f.reviews[0]!.state).toBe('DISMISSED');
+    f.controls.repositoryUnavailable = true;
+    expect((await f.claim()).status).toBe(503);
+    expect(await f.store.getDeliveryOutcome(event.deliveryId)).toMatchObject({ status: 'failed' });
+    expect(f.reviews[0]!.state).toBe('DISMISSED');
+    expect(f.reviews[0]!.body).toContain('Old review body');
+  } finally {
     await f.settle();
     f.database.close();
   }

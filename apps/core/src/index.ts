@@ -531,7 +531,7 @@ export interface GitHubAdapter {
     installationId: number;
     headSha: GitHubShaValue;
     previousRunIds: readonly string[];
-  }): Promise<void>;
+  }): Promise<void | { readonly kind: 'stale'; readonly currentHeadSha: GitHubShaValue }>;
   createReview?(input: {
     repositoryId: number;
     pullRequestNumber: number;
@@ -578,13 +578,13 @@ export const resetPreviousReviewVerdicts = Effect.fn('resetPreviousReviewVerdict
   job: ReviewJob,
 ) {
   if (github.dismissPreviousReviews === undefined) return;
-  yield* Effect.tryPromise({
+  return yield* Effect.tryPromise({
     try: async () => {
       if (stateStore.listPriorReviewRunIds === undefined)
         throw new Error('Review history unavailable');
       const previousRunIds = await stateStore.listPriorReviewRunIds(runId);
       if (previousRunIds.length === 0) return;
-      await github.dismissPreviousReviews!({
+      return await github.dismissPreviousReviews!({
         repositoryId: job.repositoryId,
         pullRequestNumber: job.pullRequestNumber,
         installationId: job.installationId,
@@ -593,7 +593,7 @@ export const resetPreviousReviewVerdicts = Effect.fn('resetPreviousReviewVerdict
       });
     },
     catch: () => new ReviewResetFailed(),
-  });
+  }).pipe(Effect.retry({ times: 1 }));
 });
 
 const CommenterPermission = Schema.Literals([

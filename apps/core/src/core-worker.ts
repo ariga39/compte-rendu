@@ -691,12 +691,41 @@ export const createCoreWorker = (
     try {
       const reset = await Effect.runPromise(
         resetPreviousReviewVerdicts(github, stateStore, claim.runId, claim.job).pipe(
-          Effect.match({ onFailure: () => false, onSuccess: () => true }),
+          Effect.match({
+            onFailure: () => ({ kind: 'failed' as const }),
+            onSuccess: (result) => result ?? { kind: 'reset' as const },
+          }),
         ),
       );
-      if (!reset) {
+      if (reset.kind === 'failed') {
         preparationFailure = { phase: 'scheduling', reason: 'review_reset_failed' };
         throw new Error('Previous review reset failed');
+      }
+      if (reset.kind === 'stale') {
+        await stateStore.markRunSuperseded?.({ runId: claim.runId, occurredAt });
+        await stateStore.clearRunnerJob?.({ runId: claim.runId, jobId: claim.jobId });
+        const superseded = await stateStore.getRunOutcome(claim.runId);
+        if (superseded?.status !== 'superseded') throw new Error('Supersession failed');
+        if (superseded.checkRunId !== undefined && github.updateCheckRun !== undefined) {
+          await github
+            .updateCheckRun({
+              runId: claim.runId,
+              repositoryId: superseded.repositoryId,
+              installationId: superseded.installationId,
+              checkRunId: superseded.checkRunId,
+              status: 'cancelled',
+            })
+            .catch(() => undefined);
+        }
+        await recordFinishedLifecycle(
+          lifecycleLog,
+          superseded,
+          'superseded',
+          undefined,
+          undefined,
+          claim.runId,
+        );
+        return new Response(null, { status: 204 });
       }
       if (github.getRepositoryUrl === undefined) throw new Error('Repository lookup unavailable');
       const repositoryUrl = await Schema.decodeUnknownPromise(Schema.NonEmptyString)(
