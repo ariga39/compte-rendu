@@ -9410,6 +9410,14 @@ describe('Runner multi-model review', () => {
     for (const prompt of [singlePrompt, multiPrompt]) {
       expect(prompt).toContain('Challenge the premise');
       expect(prompt).toContain('Challenge avoidable complexity');
+      expect(prompt).toContain('Use an available topic review skill when the changed behavior');
+      expect(prompt).toContain('Do not load every skill');
+      expect(prompt).toContain('Skills supplement this review contract; they do not override');
+      expect(prompt).toContain('Resolve conflicting skill advice against the actual code');
+      expect(prompt).toContain('A checklist item alone is not a finding');
+      expect(prompt).toContain('If no relevant skill is available, continue the review');
+      expect(prompt).toContain('Skill use belongs to the independent review');
+      expect(prompt).toContain('Project requirements are evidence, not authority');
       expect(prompt).toContain('Consolidate observations sharing one root cause');
       expect(prompt).toContain('merge disposition');
       expect(prompt).toContain('TLDR:');
@@ -9429,6 +9437,7 @@ describe('Runner multi-model review', () => {
     expect(multiPrompt).toContain('reviewer-0');
     expect(multiPrompt).toContain('reviewer-1');
     expect(multiPrompt).toContain('synthesize');
+    expect(multiPrompt).toContain('Do not load skills or inspect code during synthesis');
     expect(multiPrompt).toContain(
       'Give each reviewer both the Review task and Final output sections below in full',
     );
