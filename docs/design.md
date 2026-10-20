@@ -127,6 +127,15 @@ loop prevents a drained report. Resume changes only the maintenance pause and
 preserves capacity and ownership guards. This pause is in-memory and resets on
 process restart. See [maintenance operations](operations.md#drain-before-maintenance).
 
+Runner retains the final callback body privately before bounded delivery. An
+explicit authenticated `POST /maintenance/replay-callback` replays it only after
+matching the operator's job/run/attempt, evidence ID and immutable SHAs and
+validating artifact integrity and confirmed cleanup. This works across Runner
+restarts; it does not reconstruct old callbacks or rerun agent work. Core's
+existing callback ownership, revision freshness and publication reconciliation
+remain authoritative. Acceptance is distinct from publication. There is no
+automatic replay queue; see [callback recovery](operations.md#replay-a-lost-terminal-callback).
+
 Jobs for the same repository/PR remain serialized until the prior Sandbox is
 confirmed destroyed. Unrelated PRs may progress. Each job checks immutable base
 and head commits, derives a merge base, and performs GitHub-read preflight before

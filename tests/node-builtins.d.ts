@@ -105,7 +105,7 @@ declare module 'node:http' {
 
 declare module 'node:crypto' {
   export interface Hash {
-    update(data: string): Hash;
+    update(data: string | Uint8Array): Hash;
     digest(encoding: 'hex'): string;
   }
   export function createHash(algorithm: string): Hash;
@@ -133,7 +133,13 @@ declare module 'node:fs/promises' {
   export function readFile(path: string, encoding: 'utf8'): Promise<string>;
   export function readFile(path: string): Promise<Buffer>;
   export function rename(oldPath: string, newPath: string): Promise<void>;
-  export function stat(path: string): Promise<{ readonly mode: number; readonly size: number }>;
+  export interface Stats {
+    readonly mode: number;
+    readonly size: number;
+    isDirectory(): boolean;
+    isFile(): boolean;
+  }
+  export function stat(path: string): Promise<Stats>;
   export function unlink(path: string): Promise<void>;
   export function rm(
     path: string,
@@ -196,10 +202,12 @@ declare const process: {
 };
 
 declare class Buffer extends Uint8Array {
+  static alloc(size: number, fill?: number | string): Buffer;
   static concat(chunks: readonly Buffer[]): Buffer;
   static isBuffer(value: unknown): value is Buffer;
   static from(value: string | Uint8Array | ArrayBuffer): Buffer;
   static from(value: string, encoding: string): Buffer;
+  equals(other: Uint8Array): boolean;
   toString(encoding?: string): string;
 }
 
