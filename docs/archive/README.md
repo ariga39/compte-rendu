@@ -25,6 +25,7 @@ and unimplemented alternatives are retained as evidence, not renewed commitments
 - [OpenCode final Markdown review submission research](opencode-final-review-submission-research.md)
 - [Review output reliability: structured-output best practice](review-output-reliability-research.md)
 - [PR review skill source synthesis](pr-review-skill-research.md)
+- [Topic-specific review skills research (#211)](topic-review-skills-research.md)
 - [Complete pull-request context from GitHub](pr-context-github-api-research.md)
 - [External LLM service design](llm-service-design.md)
 
