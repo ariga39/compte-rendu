@@ -26,16 +26,16 @@
 
 ## 候选比较
 
-| 候选 | 可用的方法 | 阻塞/缺陷 | 结论 | 许可 |
-| --- | --- | --- | --- | --- |
-| Trail of Bits `differential-review` | 风险分级、baseline 对照、对删除的安全代码做 `git blame`、blast radius、测试覆盖缺口、显式 coverage limits | 要求 `Write`/`Bash`、subagent、固定报告文件、独立 severity；示例偏智能合约；baseline 需 checkout | 只作方法来源，不作技能 | CC-BY-SA-4.0 |
-| wshobson `code-review-excellence` | 测试应验证行为而非内部状态；少量架构/安全问题 | 大量语气、praise、sandwich、固定模板和 emoji；2–3 分钟阶段、超过 400 行建议拆分等流程常数；输出/严重度与共享 prompt 冲突；正确性证据浅 | 拒绝；测试问题由更专门的 test-quality 覆盖 | MIT |
-| Sentry `code-review` | 紧凑通用清单：runtime errors、side effects、backward compatibility、test coverage、design、long-term risk | 非常浅；Sentry/Django/React 语境；tone/approval 文案；没有 finding 证据标准 | 可作唯一综合方法，删掉反馈/决定/输出部分 | Apache-2.0 |
-| Sentry `gha-security-review` | 外部攻击者威胁模型；pwn request、表达式注入、凭证升级、权限/secret、供应链；给 PoC 要素；先排除安全写法 | `Bash`/`Task` 和固定报告/severity；“safe patterns”表是范围化启发式，不是保证，见下文 | 高价值专项，需收窄和纠偏 | Apache-2.0 |
-| Sentry `security-review` | 先追 source→sink、确认 attacker-controlled、查框架缓解；confidence 分层；引用了具体漏洞类别 | 第 46 行排除“需要先认证”的路径，直接漏掉认证后越权；OWASP 参考为 CC-BY-SA；输出/severity 是第二套契约 | 不整体采用 | Apache-2.0 + CC-BY-SA 参考 |
-| `pr-review-toolkit`（test-quality / error-handling） | 行为契约覆盖、具体回归、负例、并发/异步、既有集成覆盖；错误传播、fallback 是否掩盖问题、cleanup、retry 耗尽 | 1–10 评分和固定输出；静默错误一律 critical、空 catch 一律禁止；`logError`/Sentry/Statsig/`errorIds.ts` 是项目专属 | 采用两个 lens，全部去项目化 | Apache-2.0（README 误写 MIT） |
-| Trail of Bits `sharp-edges` | 误用友好性/不安全默认值、类型混淆、配置悬崖、静默安全失败 | 需把“写代码验证”改为静态追踪；启发式规则和自带 severity 不能替代共享门槛 | 条件采用（既有结论） | CC-BY-SA-4.0 |
-| Supabase Postgres + Vercel WIG（既有） | Postgres 约束/索引/RLS/锁/池；Web 可访问性/焦点/表单/语义 | 面向编写代码的触发描述、Supabase 专属规则、WIG 的 WebFetch/输出格式与品牌偏好 | 各收窄为一个专项 | MIT / MIT |
+| 候选                                                 | 可用的方法                                                                                                  | 阻塞/缺陷                                                                                                                              | 结论                                       | 许可                          |
+| ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------ | ----------------------------- |
+| Trail of Bits `differential-review`                  | 风险分级、baseline 对照、对删除的安全代码做 `git blame`、blast radius、测试覆盖缺口、显式 coverage limits   | 要求 `Write`/`Bash`、subagent、固定报告文件、独立 severity；示例偏智能合约；baseline 需 checkout                                       | 只作方法来源，不作技能                     | CC-BY-SA-4.0                  |
+| wshobson `code-review-excellence`                    | 测试应验证行为而非内部状态；少量架构/安全问题                                                               | 大量语气、praise、sandwich、固定模板和 emoji；2–3 分钟阶段、超过 400 行建议拆分等流程常数；输出/严重度与共享 prompt 冲突；正确性证据浅 | 拒绝；测试问题由更专门的 test-quality 覆盖 | MIT                           |
+| Sentry `code-review`                                 | 紧凑通用清单：runtime errors、side effects、backward compatibility、test coverage、design、long-term risk   | 非常浅；Sentry/Django/React 语境；tone/approval 文案；没有 finding 证据标准                                                            | 可作唯一综合方法，删掉反馈/决定/输出部分   | Apache-2.0                    |
+| Sentry `gha-security-review`                         | 外部攻击者威胁模型；pwn request、表达式注入、凭证升级、权限/secret、供应链；给 PoC 要素；先排除安全写法     | `Bash`/`Task` 和固定报告/severity；“safe patterns”表是范围化启发式，不是保证，见下文                                                   | 高价值专项，需收窄和纠偏                   | Apache-2.0                    |
+| Sentry `security-review`                             | 先追 source→sink、确认 attacker-controlled、查框架缓解；confidence 分层；引用了具体漏洞类别                 | 第 46 行排除“需要先认证”的路径，直接漏掉认证后越权；OWASP 参考为 CC-BY-SA；输出/severity 是第二套契约                                  | 不整体采用                                 | Apache-2.0 + CC-BY-SA 参考    |
+| `pr-review-toolkit`（test-quality / error-handling） | 行为契约覆盖、具体回归、负例、并发/异步、既有集成覆盖；错误传播、fallback 是否掩盖问题、cleanup、retry 耗尽 | 1–10 评分和固定输出；静默错误一律 critical、空 catch 一律禁止；`logError`/Sentry/Statsig/`errorIds.ts` 是项目专属                      | 采用两个 lens，全部去项目化                | Apache-2.0（README 误写 MIT） |
+| Trail of Bits `sharp-edges`                          | 误用友好性/不安全默认值、类型混淆、配置悬崖、静默安全失败                                                   | 需把“写代码验证”改为静态追踪；启发式规则和自带 severity 不能替代共享门槛                                                               | 条件采用（既有结论）                       | CC-BY-SA-4.0                  |
+| Supabase Postgres + Vercel WIG（既有）               | Postgres 约束/索引/RLS/锁/池；Web 可访问性/焦点/表单/语义                                                   | 面向编写代码的触发描述、Supabase 专属规则、WIG 的 WebFetch/输出格式与品牌偏好                                                          | 各收窄为一个专项                           | MIT / MIT                     |
 
 ## 关键证据与规则取舍
 
@@ -92,28 +92,28 @@
 
 共享 prompt 已拥有：精确 revision/diff、调用者与历史、challenge premise、correctness/security/performance/tests、具体后果、confidence、decision、最多五条、`TLDR:` 输出。新增技能只能补下表右列。
 
-| 技能 | 共享 prompt 已覆盖 | 唯一增量 |
-| --- | --- | --- |
-| comprehensive-review | 通用检查、设计/安全/性能/测试 | 一张短遗漏清单；风险分级、blast radius、删除代码历史、测试缺口 |
-| test-quality | “看测试” | 行为契约、具体回归、负例、并发/异步、既有集成覆盖、检查 mock 断言是否真正约束行为 |
-| error-handling | reliability/security | 传播 vs 吞掉、fallback 是否掩盖、cleanup、retry 耗尽、fallback 到 mock 的生产风险 |
-| github-actions-security | 一般 security | workflow trigger/checkout/expression/permissions/secrets/action 供应链的具体攻击链 |
-| security-misuse-resistance | 一般 security | 让不安全用法成为最省力路径的 API/配置/默认值/类型设计 |
-| postgres-review | 一般 correctness/performance | 约束、索引选择性、RLS、锁顺序、连接池、迁移的静态判断 |
-| web-accessibility | UI 变更的一般检查 | 语义/焦点/键盘/表单错误/ARIA/动效/触控目标 |
+| 技能                       | 共享 prompt 已覆盖            | 唯一增量                                                                           |
+| -------------------------- | ----------------------------- | ---------------------------------------------------------------------------------- |
+| comprehensive-review       | 通用检查、设计/安全/性能/测试 | 一张短遗漏清单；风险分级、blast radius、删除代码历史、测试缺口                     |
+| test-quality               | “看测试”                      | 行为契约、具体回归、负例、并发/异步、既有集成覆盖、检查 mock 断言是否真正约束行为  |
+| error-handling             | reliability/security          | 传播 vs 吞掉、fallback 是否掩盖、cleanup、retry 耗尽、fallback 到 mock 的生产风险  |
+| github-actions-security    | 一般 security                 | workflow trigger/checkout/expression/permissions/secrets/action 供应链的具体攻击链 |
+| security-misuse-resistance | 一般 security                 | 让不安全用法成为最省力路径的 API/配置/默认值/类型设计                              |
+| postgres-review            | 一般 correctness/performance  | 约束、索引选择性、RLS、锁顺序、连接池、迁移的静态判断                              |
+| web-accessibility          | UI 变更的一般检查             | 语义/焦点/键盘/表单错误/ARIA/动效/触控目标                                         |
 
 ## 推荐首发
 
 **优先试用四个专项，另保留数据库、无障碍和综合类候选**。以下是候选的适配方向，尚未实现；不追求覆盖所有语言，不建立扩展名 dispatcher。
 
-| 技能 | 触发（行为面） | 保留 | 删除/限制 | 许可 |
-| --- | --- | --- | --- | --- |
-| `comprehensive-review`（可选，唯一） | 需要通用遗漏检查且专项都不适用时 | Sentry 的 runtime/side-effect/backward-compat/test/design 清单；differential 的风险、调用者、删除代码历史、测试缺口 | feedback/tone/approval、固定 verdict、报告文件、独立 severity；不执行代码 | Sentry 为 Apache-2.0；若改编 differential 文本还需处理 CC-BY-SA-4.0 |
-| `test-quality` | diff 新增/修改测试，或新增难测分支/并发/错误路径 | 行为契约、具体回归、负例、并发/异步、既有集成覆盖 | 1–10 评分、固定输出、positive observations；不要求覆盖所有行 | Apache-2.0 |
-| `error-handling` | diff 涉及 try/catch、fallback、retry、超时、cleanup、错误映射 | 传播/吞掉、fallback 正当性、cleanup、retry 耗尽、用户可见性是否恰当 | “所有静默错误 critical”、空 catch 绝对禁止、项目专属日志/errorIds、固定 severity | Apache-2.0 |
-| `github-actions-security` | diff 触及 `.github/workflows/`、`action.yml`、本地 composite action、CI 配置 | 外部攻击者链、pwn request、表达式注入、权限/secret、第三方 action 供应链、逐条追踪下游 | `Task`/`Bash`、报告模板、固定 severity；safe-pattern 表只作待验证假设 | Apache-2.0 |
-| `security-misuse-resistance` | authn/authz、session/token、secret、crypto、安全默认值、让调用者选安全策略的 API | 误用友好性、配置悬崖、类型混淆、静默安全失败 | 写代码验证、subagent/report、自带 severity；规则只作 hypothesis | CC-BY-SA-4.0，需接受义务 |
-| `postgres-review` | Postgres schema/migration、约束、索引、查询、RLS/grant、事务/锁、连接池 | 约束/索引/RLS/锁顺序/池化/迁移的静态规则 | 面向编写代码的触发描述、Supabase 专属规则泛化、live `EXPLAIN`/统计视图、固定 severity | MIT |
+| 技能                                 | 触发（行为面）                                                                   | 保留                                                                                                                | 删除/限制                                                                             | 许可                                                                |
+| ------------------------------------ | -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| `comprehensive-review`（可选，唯一） | 需要通用遗漏检查且专项都不适用时                                                 | Sentry 的 runtime/side-effect/backward-compat/test/design 清单；differential 的风险、调用者、删除代码历史、测试缺口 | feedback/tone/approval、固定 verdict、报告文件、独立 severity；不执行代码             | Sentry 为 Apache-2.0；若改编 differential 文本还需处理 CC-BY-SA-4.0 |
+| `test-quality`                       | diff 新增/修改测试，或新增难测分支/并发/错误路径                                 | 行为契约、具体回归、负例、并发/异步、既有集成覆盖                                                                   | 1–10 评分、固定输出、positive observations；不要求覆盖所有行                          | Apache-2.0                                                          |
+| `error-handling`                     | diff 涉及 try/catch、fallback、retry、超时、cleanup、错误映射                    | 传播/吞掉、fallback 正当性、cleanup、retry 耗尽、用户可见性是否恰当                                                 | “所有静默错误 critical”、空 catch 绝对禁止、项目专属日志/errorIds、固定 severity      | Apache-2.0                                                          |
+| `github-actions-security`            | diff 触及 `.github/workflows/`、`action.yml`、本地 composite action、CI 配置     | 外部攻击者链、pwn request、表达式注入、权限/secret、第三方 action 供应链、逐条追踪下游                              | `Task`/`Bash`、报告模板、固定 severity；safe-pattern 表只作待验证假设                 | Apache-2.0                                                          |
+| `security-misuse-resistance`         | authn/authz、session/token、secret、crypto、安全默认值、让调用者选安全策略的 API | 误用友好性、配置悬崖、类型混淆、静默安全失败                                                                        | 写代码验证、subagent/report、自带 severity；规则只作 hypothesis                       | CC-BY-SA-4.0，需接受义务                                            |
+| `postgres-review`                    | Postgres schema/migration、约束、索引、查询、RLS/grant、事务/锁、连接池          | 约束/索引/RLS/锁顺序/池化/迁移的静态规则                                                                            | 面向编写代码的触发描述、Supabase 专属规则泛化、live `EXPLAIN`/统计视图、固定 severity | MIT                                                                 |
 
 其他场景与限制：
 
