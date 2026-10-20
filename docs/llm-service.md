@@ -240,8 +240,8 @@ outbound access to the configured supplier.
 
 ### Switch traffic and verify
 
-1. Stop new admissions and let current jobs finish using your existing operational
-   drain procedure; concurrency zero is invalid. Do not restart a Runner that
+1. Use the [Runner maintenance drain](operations.md#drain-before-maintenance)
+   to stop new admissions and let current jobs finish; concurrency zero is invalid. Do not restart a Runner that
    owns the shared sbx daemon while either instance still has active jobs.
 2. Start the independent LLM service, apply the Runner environment changes, and
    restart that Runner. No Core/Ingress binding or database change is required.

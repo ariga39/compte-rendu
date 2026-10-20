@@ -120,6 +120,13 @@ wake claims and decreases preserve admitted jobs/reserved claims. Other settings
 are not hot-reloaded. Claims are single-flight; ambiguous claim responses halt
 polling rather than risk duplicate ownership.
 
+Authenticated private maintenance endpoints pause new claims and direct admission
+without cancelling jobs or in-flight claim reservations. Drain status includes
+work through cleanup and callback delivery; unconfirmed cleanup or a halted claim
+loop prevents a drained report. Resume changes only the maintenance pause and
+preserves capacity and ownership guards. This pause is in-memory and resets on
+process restart. See [maintenance operations](operations.md#drain-before-maintenance).
+
 Jobs for the same repository/PR remain serialized until the prior Sandbox is
 confirmed destroyed. Unrelated PRs may progress. Each job checks immutable base
 and head commits, derives a merge base, and performs GitHub-read preflight before

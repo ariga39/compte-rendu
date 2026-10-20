@@ -681,7 +681,8 @@ Add its absolute path to the existing Runner environment file:
 RUNNER_SETTINGS_FILE=/home/<RUNNER_USER>/.config/compte-rendu/runner-settings.toml
 ```
 
-After existing reviews finish, restart the Runner once to enable file loading.
+Use the [maintenance drain](operations.md#drain-before-maintenance), then restart
+the Runner once to enable file loading.
 Subsequent edits to this TOML file reload automatically without a restart:
 
 ```toml

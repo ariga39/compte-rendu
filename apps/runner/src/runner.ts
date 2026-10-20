@@ -545,6 +545,15 @@ type RunnerMultiReviewEvidence = {
   readonly synthesis: ReviewSubmission;
 };
 
+type MaintenanceStatus = {
+  readonly draining: boolean;
+  readonly drained: boolean;
+  readonly activeJobs: number;
+  readonly claimInFlight: boolean;
+  readonly claimPollingHalted: boolean;
+  readonly cleanupBlockedJobs: number;
+};
+
 type RunnerJob = {
   usage?: ModelUsageSummary;
   readonly state: RunnerJobState;
@@ -940,6 +949,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
   const jobsByRun = new Map<string, RunnerJob>();
   let claiming = false;
   let claimPollingHalted = false;
+  let draining = false;
   let claimGateFailureLogged = false;
   let requestNextJob: (() => void) | undefined;
   // Admission and claim stay gated until startup recovery has resolved every
@@ -992,6 +1002,31 @@ export const createRunner = (options: RunnerOptions = {}) => {
     [...jobs.values()].filter(
       (candidate) => candidate.state.status === 'queued' || candidate.state.status === 'running',
     ).length;
+  const cleanupBlockedJobCount = () =>
+    [...jobs.values()].filter(
+      (candidate) =>
+        (candidate.state.status === 'succeeded' ||
+          candidate.state.status === 'failed' ||
+          candidate.state.status === 'aborted') &&
+        candidate.state.sandbox.cleanup !== 'destroyed',
+    ).length;
+  const maintenanceStatus = (): MaintenanceStatus => {
+    const activeJobs = activeJobCount();
+    const cleanupBlockedJobs = cleanupBlockedJobCount();
+    return {
+      draining,
+      drained:
+        draining &&
+        activeJobs === 0 &&
+        !claiming &&
+        !claimPollingHalted &&
+        cleanupBlockedJobs === 0,
+      activeJobs,
+      claimInFlight: claiming,
+      claimPollingHalted,
+      cleanupBlockedJobs,
+    };
+  };
   const hasCapacity = () => activeJobCount() + (claiming ? 1 : 0) < effectiveConcurrency;
   const hasUnclearedSamePullRequest = (input: RunnerJobInputState) =>
     [...jobs.values()].some(
@@ -2761,6 +2796,9 @@ export const createRunner = (options: RunnerOptions = {}) => {
     }
     const existing = jobsByRun.get(`${input.runId}:${input.attempt}`);
     if (existing !== undefined) return jsonResponse(409, publicState(existing));
+    if (!claimed && draining) {
+      return jsonResponse(503, { error: 'runner draining' });
+    }
     if (!claimed && !hasCapacity()) {
       return jsonResponse(409, { error: 'runner is busy' });
     }
@@ -2830,6 +2868,20 @@ export const createRunner = (options: RunnerOptions = {}) => {
   const handle = async (request: Request): Promise<Response> => {
     if (!authorized(request, authToken)) return jsonResponse(401, { error: 'unauthorized' });
     const path = new URL(request.url).pathname;
+    if (request.method === 'GET' && path === '/maintenance') {
+      return jsonResponse(200, maintenanceStatus());
+    }
+    if (request.method === 'POST' && path === '/maintenance/drain') {
+      draining = true;
+      return jsonResponse(200, maintenanceStatus());
+    }
+    if (request.method === 'POST' && path === '/maintenance/resume') {
+      if (draining) {
+        draining = false;
+        requestNextJob?.();
+      }
+      return jsonResponse(200, maintenanceStatus());
+    }
     if (request.method === 'POST' && path === '/jobs') {
       if (
         callbackUrl === undefined ||
@@ -2900,6 +2952,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       await recordClaimGateFailure('grant-recovery-failed');
       return;
     }
+    if (draining) return;
     if (
       claiming ||
       claimPollingHalted ||
@@ -2923,7 +2976,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       await recordClaimGateFailure('runtime-preflight-failed');
       return;
     }
-    if (claiming || claimPollingHalted || !hasCapacity()) return;
+    if (claiming || claimPollingHalted || draining || !hasCapacity()) return;
 
     claiming = true;
     let continuePolling = true;
