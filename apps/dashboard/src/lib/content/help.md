@@ -109,7 +109,8 @@ that alias; if the service did not report a name, it is shown as unknown.
 
 - **Input total** includes cached input. **Uncached input** is input total minus cache reads.
 - **Cache read** is reused input. Its percentage is cache reads divided by input total,
-  shown when both counts cover all requests and input total is greater than zero.
+  shown when both counts cover all requests, input total is greater than zero,
+  and cache reads do not exceed input total.
   **Cache write** is input stored in the cache, when reported.
 - **Output total** includes **Reasoning** tokens when the provider reports that breakdown.
 
