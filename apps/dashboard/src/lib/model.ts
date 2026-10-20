@@ -1,4 +1,8 @@
-import { PublicHistoryPage, PublicOverview, PublicTaskDetail } from '@compte-rendu/contracts';
+import {
+  PublicHistoryPage,
+  PublicDashboardSnapshot,
+  PublicTaskDetail,
+} from '@compte-rendu/contracts';
 import { Schema } from 'effect';
 import { PollError, type ApiResult } from './api';
 import type {
@@ -18,7 +22,7 @@ export interface Timing {
 
 function decodeOverview(data: unknown) {
   try {
-    return Schema.decodeUnknownSync(PublicOverview)(data);
+    return Schema.decodeUnknownSync(PublicDashboardSnapshot)(data);
   } catch {
     throw new PollError();
   }
@@ -81,7 +85,7 @@ export function isTaskActive(task: TaskState): boolean {
 
 export function buildOverview(results: ApiResult[], timing: Timing): OverviewModel {
   const overview = decodeOverview(results[0]?.data);
-  const current = decodeHistoryPage(results[1]?.data);
+  const current = overview;
   return {
     kind: 'overview',
     overview,

@@ -30,8 +30,10 @@ first, then queued work oldest first. History lists newest first. A page has 25
 items. Filters use receipt dates and the same status predicates as the table;
 changing filters discards the scoped cursor. Older pages retain their cursor on
 refresh. Cursors contain time/run identity and filter scope, not repository data.
-Counts and lists are separate requests, not an atomic cross-endpoint snapshot
-([#197](https://github.com/ariga39/compte-rendu/issues/197)).
+The overview fetches `/api/dashboard` once for both counts and the first page of
+current reviews. One SQL statement reads both from the same database snapshot;
+SSR and browser refresh use that same response. History pagination continues
+through `/api/jobs`, with its existing scoped cursor and privacy projection.
 
 Public identity shows the repository/PR link, recorded source/target branches and
 base/head commits. Missing historical branch names say Not recorded. Anonymous

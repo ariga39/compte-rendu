@@ -117,10 +117,12 @@ it('counts the received cohort and independently overlapping cleanup attention',
   const { store, identity } = await fixture();
   await store.markRunCompleted({ runId: identity.runId, occurredAt: '2026-01-03T00:00:00.000Z' });
   expect(
-    await store.countPublicOverview!({
-      now: '2026-01-03T12:00:00.000Z',
-      since: '2026-01-02T12:00:00.000Z',
-    }),
+    (
+      await store.getPublicOverview!({
+        limit: 25,
+        since: '2026-01-02T12:00:00.000Z',
+      })
+    ).counts,
   ).toEqual({ queued: 0, claimed: 0, publishedLast24h: 0, failedLast24h: 0, cleanupAttention: 1 });
 });
 

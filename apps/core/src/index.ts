@@ -358,7 +358,10 @@ export interface ReviewStateQueries {
   releaseRunPublicationClaim?(input: { runId: string; occurredAt: string }): Promise<boolean>;
   getDeliveryOutcome(deliveryId: string): Promise<ReviewOutcome | undefined>;
   getRunOutcome(runId: string): Promise<ReviewOutcome | undefined>;
-  countPublicOverview?(input: { now: string; since: string }): Promise<PublicOverviewCounts>;
+  getPublicOverview?(input: {
+    since: string;
+    limit: number;
+  }): Promise<{ counts: PublicOverviewCounts; rows: readonly PublicRunRow[] }>;
   listPublicRuns?(input: {
     limit: number;
     cursor?: PublicRunCursor;

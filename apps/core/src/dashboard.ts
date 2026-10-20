@@ -239,9 +239,10 @@ export const handleDashboardRequest = async (
   const now = await nowIso();
 
   if (url.pathname === '/api/dashboard' || url.pathname === '/dashboard') {
-    if (store.countPublicOverview === undefined) return unavailable();
+    if (store.getPublicOverview === undefined) return unavailable();
     const since = await isoFromMs(Date.parse(now) - DAY_MS);
-    const counts = await store.countPublicOverview({ now, since });
+    const { counts, rows } = await store.getPublicOverview({ since, limit: DEFAULT_LIMIT });
+    const last = rows.at(-1);
     return json({
       generatedAt: now,
       counts: {
@@ -251,6 +252,11 @@ export const handleDashboardRequest = async (
         failedLast24h: counts.failedLast24h,
       },
       cleanupAttention: counts.cleanupAttention,
+      tasks: rows.map((row) => projectPublicTask(row, now)),
+      nextCursor:
+        rows.length === DEFAULT_LIMIT && last !== undefined
+          ? encodeCursor('current', { status: 'all', cleanup: 'all' }, last)
+          : null,
     });
   }
 
