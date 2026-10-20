@@ -189,7 +189,10 @@ requirements. Runtime sources are `apps/core/src/dashboard.ts`,
 
 ### Model usage
 
-Detail pages and drawers show the persisted per-job model/token summary. Counts
+Detail pages and drawers show the persisted per-job model/token summary after
+Timing. Model names omit the provider prefix for display only; persisted and API
+identifiers remain unchanged. Token and request counts are collapsed by default
+and expand on click or keyboard activation. Counts
 come from the grant service through Runner's terminal callback, not from live
 Runner/provider reads. Route and reported model are distinct. Missing fields say
 Not reported; known subtotals identify how many requests reported them. Input/cache

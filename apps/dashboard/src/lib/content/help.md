@@ -101,7 +101,9 @@ A review Check on GitHub can show a Details link to its review page when that li
 
 ## Models and tokens
 
-Review details show models reported by the model service and their token usage.
+The **Models and tokens** section follows **Timing** in review details. Model names
+are shown without the provider prefix. Expand a model to see its token and request
+counts.
 A route is the configured model alias. The reported model name can differ from
 that alias; if the service did not report a name, it is shown as unknown.
 
