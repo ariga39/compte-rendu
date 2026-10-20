@@ -16,6 +16,7 @@ model_list:
   # Keep exact aliases above for jobs admitted before switching selection.
   - model_name: 'review-provider/*'
     litellm_params:
+      # Selects the OpenAI-compatible protocol; api_base is the actual provider.
       model: 'openai/*'
       api_base: https://opencode.ai/inference/go/openai/v1
       api_key: os.environ/OPENCODE_GO_API_KEY
