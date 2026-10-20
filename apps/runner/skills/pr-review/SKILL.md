@@ -60,7 +60,7 @@ Stop extending the investigation once decisive evidence and the
 directly affected behavior are checked. Do not perform a
 repository or history census merely to appear comprehensive. Keep the required
 PR and review-thread pagination, revision checks and available inspection
-access; there is no hard tool or time cap, and
+access; work within the existing execution budget and permitted tools, and
 do not stop before the review is complete.
 
 ## Challenge the change
