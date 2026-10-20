@@ -127,7 +127,8 @@ loop prevents a drained report. Resume changes only the maintenance pause and
 preserves capacity and ownership guards. This pause is in-memory and resets on
 process restart. See [maintenance operations](operations.md#drain-before-maintenance).
 
-Runner retains the final callback body privately before bounded delivery. An
+Runner retains the final callback body privately before bounded delivery when
+the evidence directory is available. An
 explicit authenticated `POST /maintenance/replay-callback` replays it only after
 matching the operator's job/run/attempt, evidence ID and immutable SHAs and
 validating artifact integrity and confirmed cleanup. This works across Runner

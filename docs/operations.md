@@ -224,8 +224,8 @@ or rerun an old Sandbox merely to make the dashboard look settled.
 
 ### Replay a lost terminal callback
 
-Runner retains the exact bounded terminal callback as `callback.json` in the
-job's evidence directory, before attempting delivery. Like the other evidence,
+When the evidence directory is available, Runner retains the exact bounded
+terminal callback as `callback.json` there before attempting delivery. Like the other evidence,
 this file is private (mode 0600); it contains review/session evidence but no
 callback credential. Keep it outside Sandbox mounts and do not upload it to an
 issue. Delivery still proceeds if retaining this extra recovery copy fails.
@@ -260,7 +260,9 @@ callback, artifact sizes/hashes, identities, revisions and confirmed cleanup,
 then sends one bounded request through its configured authenticated callback
 URL. It does not start a Sandbox or rerun the model. Missing, inconsistent or
 unconfirmed evidence is rejected; archives from before callback retention was
-introduced cannot be reconstructed by this operation.
+introduced cannot be reconstructed by this operation. The same limitation applies
+to failures before an evidence directory or valid manifest exists, and to local
+retention failures. Preserve the diagnostics and investigate those cases separately.
 
 Successful delivery returns HTTP 202 with `{"accepted": true}`. Rejections include
 a fixed `reason` without artifact contents: 400 for invalid assertions, 404 for
