@@ -282,6 +282,19 @@ it('snapshots rewritten routes for new grants without restarting or changing old
         model: 'deepseek-flash',
       });
       expect((await infer(oldToken, 'step-review')).status).toBe(403);
+
+      await rm(credentialFile);
+      const duringRotation = await controlCall(join(dir, 'control.sock'), '/grants', {
+        jobId: 'job-during-key-rotation',
+        routes: ['step-review'],
+      });
+      expect(duringRotation.status).toBe(201);
+      const rotationToken = (JSON.parse(duringRotation.body) as { token: string }).token;
+      expect((await infer(rotationToken, 'step-review')).status).toBe(502);
+      await writeFile(credentialFile, 'replacement-backend-key\n', { mode: 0o600 });
+      const afterRotation = await infer(rotationToken, 'step-review');
+      expect(afterRotation.status).toBe(200);
+      await afterRotation.text();
     } finally {
       await server.close();
     }

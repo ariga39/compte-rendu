@@ -80,7 +80,6 @@ const prepareConfiguredGrant = async (
     config.upstream.credentialFile !== startup.upstream.credentialFile
   )
     throw new Error('invalid LLM service configuration');
-  await readBackendCredential(config.upstream.credentialFile);
   return {
     routes: config.routes.map((route): LlmRoute => ({
       id: route.id,
@@ -98,7 +97,16 @@ export const startConfiguredService = async (file: string) => {
   const startup = await readLlmConfig(file);
   await readBackendCredential(startup.upstream.credentialFile);
   const service = createLlmService({
-    prepareGrant: () => prepareConfiguredGrant(file, startup),
+    prepareGrant: () =>
+      Effect.runPromise(
+        Effect.tryPromise(() => prepareConfiguredGrant(file, startup)).pipe(
+          Effect.catch(() =>
+            Effect.logWarning('llm.configuration.reload-failed').pipe(
+              Effect.andThen(Effect.fail(new Error('invalid LLM service configuration'))),
+            ),
+          ),
+        ),
+      ),
   });
   return startLlmServer({
     service,
