@@ -259,8 +259,6 @@
       {dash.data.task.decision ? DECISION_NOTE : DECISION_UNKNOWN}
     </p>
 
-    <ModelUsage usage={dash.data.detail.usage} />
-
     {@render revisionGrid()}
 
     <h2>Timeline</h2>
@@ -292,6 +290,8 @@
         dash.data.task.lastProgressAt ? relativeTime(dash.data.task.lastProgressAt) : 'Not recorded',
       )}
     </StructuredList>
+
+    <ModelUsage usage={dash.data.detail.usage} />
 
     <Accordion>
       <AccordionItem title="Technical details">

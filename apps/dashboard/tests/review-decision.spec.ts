@@ -197,7 +197,14 @@ test('detail shows reported model usage, partial totals and unknown fields for a
   );
   await page.goto(`${base}/jobs/usage`);
   const usage = page.getByRole('region', { name: 'Models and tokens' });
-  await expect(usage).toContainText('deepseek-v4.1-flash');
+  const disclosure = usage.getByRole('button', { name: 'deepseek-v4.1-flash' });
+  await expect(disclosure).toBeVisible();
+  await expect(disclosure).toHaveAttribute('aria-expanded', 'false');
+  await expect(usage.getByText('Route: reviewer')).toBeHidden();
+  await expect(usage.getByText('1,200')).toBeHidden();
+
+  await disclosure.click();
+  await expect(disclosure).toHaveAttribute('aria-expanded', 'true');
   await expect(usage).toContainText('Route: reviewer');
   await expect(usage).toContainText('1,200');
   await expect(usage).toContainText('300');
@@ -207,14 +214,111 @@ test('detail shows reported model usage, partial totals and unknown fields for a
   await expect(usage).toContainText('1 of 2 requests');
   await expect(usage).toContainText('1 interrupted request');
   await expect(page.getByRole('heading', { name: 'Anonymous review' })).toBeVisible();
-  await page.screenshot({
-    path: test.info().outputPath('model-usage-desktop.png'),
-    fullPage: true,
-  });
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(usage).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-  await page.screenshot({ path: test.info().outputPath('model-usage-mobile.png'), fullPage: true });
+
+  await disclosure.click();
+  await expect(disclosure).toHaveAttribute('aria-expanded', 'false');
+  await expect(usage.getByText('Route: reviewer')).toBeHidden();
+  await expect(usage.getByText('1,200')).toBeHidden();
+});
+
+test('detail shows bare model names and collapses request and token details after Timing', async ({
+  page,
+  harness,
+  base,
+}) => {
+  const model = (route: string, name: string, overrides = {}) => ({
+    route,
+    model: name,
+    requests: 1,
+    incompleteRequests: 0,
+    inputTokens: null,
+    uncachedInputTokens: null,
+    cacheReadTokens: null,
+    cacheWriteTokens: null,
+    outputTokens: null,
+    reasoningTokens: null,
+    ...overrides,
+  });
+  harness.setHandler(() =>
+    ok({
+      ...detailData(publicTask('bare-model')),
+      usage: {
+        version: 1,
+        models: [
+          model('reviewer', 'openai/deepseek-v4.1-flash', {
+            requests: 2,
+            incompleteRequests: 1,
+            inputTokens: { total: 1200, reportedRequests: 2 },
+            outputTokens: { total: 80, reportedRequests: 1 },
+          }),
+          model('compte-rendu', 'compte-rendu/qwen3-coder'),
+        ],
+      },
+    }),
+  );
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto(`${base}/jobs/bare-model`);
+  const usage = page.getByRole('region', { name: 'Models and tokens' });
+  const disclosure = usage.getByRole('button', { name: 'deepseek-v4.1-flash' });
+  await expect(disclosure).toBeVisible();
+  await expect(usage.getByRole('button', { name: 'qwen3-coder' })).toBeVisible();
+  await expect(usage).not.toContainText('openai/deepseek-v4.1-flash');
+  await expect(usage).not.toContainText('compte-rendu/qwen3-coder');
+
+  const followsTiming = await page.evaluate(() => {
+    const timing = [...document.querySelectorAll('h2')].find(
+      (heading) => heading.textContent?.trim() === 'Timing',
+    );
+    const models = document.querySelector('section[aria-label="Models and tokens"]');
+    return (
+      timing !== undefined &&
+      models !== null &&
+      (timing.compareDocumentPosition(models) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0
+    );
+  });
+  expect(followsTiming).toBe(true);
+
+  await expect(disclosure).toHaveAttribute('aria-expanded', 'false');
+  await expect(usage.getByText('Route: reviewer')).toBeHidden();
+  await expect(usage.getByText('1,200')).toBeHidden();
+  await page.screenshot({
+    path: test.info().outputPath('model-usage-collapsed-desktop.png'),
+    fullPage: true,
+  });
+
+  await disclosure.focus();
+  await page.keyboard.press('Enter');
+  await expect(disclosure).toHaveAttribute('aria-expanded', 'true');
+  await expect(usage.getByText('Route: reviewer · 2 requests')).toBeVisible();
+  await expect(usage.getByText('1,200')).toBeVisible();
+  await expect(usage.getByText('1 interrupted request')).toBeVisible();
+  await expect(usage.getByText('1 of 2 requests')).toBeVisible();
+  await expect(usage.getByText('Cache write').first()).toBeVisible();
+  await expect(usage.getByText('Not reported').first()).toBeVisible();
+  await page.screenshot({
+    path: test.info().outputPath('model-usage-expanded-desktop.png'),
+    fullPage: true,
+  });
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(usage).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({
+    path: test.info().outputPath('model-usage-expanded-mobile.png'),
+    fullPage: true,
+  });
+
+  await page.keyboard.press('Space');
+  await expect(disclosure).toHaveAttribute('aria-expanded', 'false');
+  await expect(usage.getByText('Route: reviewer')).toBeHidden();
+  await expect(usage.getByText('1,200')).toBeHidden();
+  await page.screenshot({
+    path: test.info().outputPath('model-usage-collapsed-mobile.png'),
+    fullPage: true,
+  });
 });
 
 test('detail keeps distinct route and model pairs when their names contain colons', async ({
@@ -241,8 +345,14 @@ test('detail keeps distinct route and model pairs when their names contain colon
   );
   await page.goto(`${base}/jobs/colon-models`);
   const usage = page.getByRole('region', { name: 'Models and tokens' });
-  await expect(usage.getByRole('heading', { name: 'Model not reported' })).toBeVisible();
-  await expect(usage.getByRole('heading', { name: 'b:null', exact: true })).toBeVisible();
+  const notReported = usage.getByRole('button', { name: 'Model not reported' });
+  const colonModel = usage.getByRole('button', { name: 'b:null', exact: true });
+  await expect(notReported).toBeVisible();
+  await expect(colonModel).toBeVisible();
+  await expect(notReported).toHaveAttribute('aria-expanded', 'false');
+  await expect(colonModel).toHaveAttribute('aria-expanded', 'false');
+  await notReported.click();
+  await colonModel.click();
   await expect(usage).toContainText('Route: a:b');
   await expect(usage).toContainText('Route: a ·');
 });
