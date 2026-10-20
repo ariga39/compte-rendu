@@ -38,6 +38,7 @@ const RunnerManifest = Schema.Struct({
     status: Schema.Literals(['complete', 'incomplete']),
   }),
   complete: Schema.Boolean,
+  evidenceFailure: Schema.optional(Schema.String),
   cleanup: Schema.Struct({
     status: Schema.Literals(['destroyed', 'failed']),
   }),
@@ -130,14 +131,39 @@ export const recoverCallback = Effect.fn('recoverCallback')(function* (
     return yield* fail('integrity-mismatch');
   }
 
-  const manifestBytes = artifactBytes(callback.evidence.manifest);
+  let manifestBytes = artifactBytes(callback.evidence.manifest);
+  const oversizedFallback =
+    callback.status === 'failed' &&
+    callback.failure.reason === 'evidence' &&
+    manifestBytes?.byteLength === 0;
+  if (oversizedFallback) {
+    // The size-limited failure callback intentionally omits all artifacts.
+    // Its rewritten local manifest is the retained ownership/cleanup record.
+    const manifestPath = join(directory, 'manifest.json');
+    const info = yield* readStat(manifestPath, 'invalid-manifest');
+    if (!info.isFile() || info.size > MAX_RUNNER_CALLBACK_BYTES) {
+      return yield* fail('invalid-manifest');
+    }
+    manifestBytes = yield* Effect.tryPromise({
+      try: () => readFile(manifestPath),
+      catch: () => new CallbackRecoveryError({ reason: 'invalid-manifest' }),
+    });
+    if (manifestBytes.byteLength > MAX_RUNNER_CALLBACK_BYTES) {
+      return yield* fail('invalid-manifest');
+    }
+  }
   if (manifestBytes === undefined) return yield* fail('integrity-mismatch');
   const manifest = Option.getOrUndefined(
     Schema.decodeUnknownOption(Schema.fromJsonString(RunnerManifest))(
       new TextDecoder().decode(manifestBytes),
     ),
   );
-  if (manifest === undefined) return yield* fail('invalid-manifest');
+  if (
+    manifest === undefined ||
+    (oversizedFallback && manifest.evidenceFailure !== 'callback-too-large')
+  ) {
+    return yield* fail('invalid-manifest');
+  }
 
   if (
     manifest.jobId !== request.jobId ||

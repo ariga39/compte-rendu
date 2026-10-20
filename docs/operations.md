@@ -249,7 +249,7 @@ request file containing these assertions, rather than the callback payload:
 Using the same private curl configuration and loopback origin as maintenance:
 
 ```sh
-curl --fail --silent --show-error --config "$RUNNER_CURL_CONFIG" \
+curl --fail-with-body --silent --show-error --config "$RUNNER_CURL_CONFIG" \
   --request POST --header 'content-type: application/json' \
   --data-binary @recovery-request.json \
   "$RUNNER_ORIGIN/maintenance/replay-callback"
@@ -258,7 +258,10 @@ curl --fail --silent --show-error --config "$RUNNER_CURL_CONFIG" \
 Runner reads only its configured evidence directory, validates the retained
 callback, artifact sizes/hashes, identities, revisions and confirmed cleanup,
 then sends one bounded request through its configured authenticated callback
-URL. It does not start a Sandbox or rerun the model. Missing, inconsistent or
+URL. For the size-limited failure callback, which omits embedded artifacts,
+recovery requires the rewritten local manifest marked `callback-too-large` and
+applies the same identity, revision and cleanup checks. It does not start a Sandbox
+or rerun the model. Missing, inconsistent or
 unconfirmed evidence is rejected; archives from before callback retention was
 introduced cannot be reconstructed by this operation. The same limitation applies
 to failures before an evidence directory or valid manifest exists, and to local
