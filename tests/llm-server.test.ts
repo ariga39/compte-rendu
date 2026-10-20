@@ -1035,6 +1035,142 @@ it('uses current explicit aliases on the control catalog and prefers them over d
   }
 });
 
+it('skips invalid catalog entries while retaining valid sibling models', async () => {
+  const { startConfiguredService } = await import('../apps/llm-service/src/bootstrap');
+  const dir = await mkdtemp(join(tmpdir(), 'llm-discovery-invalid-entries-'));
+  const credentialFile = join(dir, 'litellm-key');
+  const config = join(dir, 'service.toml');
+  const port = await probePort(dir);
+  const publicUrl = 'https://public.example/zen/go/v1/models';
+  const overlongId = 'a'.repeat(120);
+  let publicBody: unknown = {
+    data: [
+      { id: 'valid-a' },
+      { id: 'valid-b' },
+      { id: 'bad id' },
+      {},
+      { id: 42 },
+      { id: overlongId },
+    ],
+  };
+  const publicCatalog = createServer((_incoming, outgoing) => {
+    outgoing.writeHead(200, { 'content-type': 'application/json' });
+    outgoing.end(JSON.stringify(publicBody));
+  });
+  await new Promise<void>((resolve, reject) => {
+    publicCatalog.once('error', reject);
+    publicCatalog.listen(0, '127.0.0.1', resolve);
+  });
+  const publicAddress = publicCatalog.address();
+  if (!publicAddress || typeof publicAddress === 'string')
+    throw new Error('fake public catalog unavailable');
+  const transport = installCatalogTransport(
+    publicUrl,
+    `http://127.0.0.1:${publicAddress.port}/zen/go/v1/models`,
+  );
+  const received: Array<{ authorization: string | undefined; model: string }> = [];
+  const upstream = createServer(async (incoming, outgoing) => {
+    if (incoming.url === '/v1/models') {
+      outgoing.writeHead(200, { 'content-type': 'application/json' });
+      outgoing.end(JSON.stringify({ data: [{ id: 'backend-ok' }] }));
+      return;
+    }
+    const body = JSON.parse(await readIncoming(incoming)) as { model: string };
+    received.push({
+      authorization:
+        typeof incoming.headers.authorization === 'string'
+          ? incoming.headers.authorization
+          : undefined,
+      model: body.model,
+    });
+    outgoing.writeHead(200, { 'content-type': 'text/event-stream' });
+    outgoing.end(
+      'data: {"choices":[{"index":0,"delta":{"content":"Ready"},"finish_reason":null}]}\n\n' +
+        'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n' +
+        'data: [DONE]\n\n',
+    );
+  });
+  await new Promise<void>((resolve, reject) => {
+    upstream.once('error', reject);
+    upstream.listen(0, '127.0.0.1', resolve);
+  });
+  const address = upstream.address();
+  if (!address || typeof address === 'string') throw new Error('fake LiteLLM unavailable');
+  try {
+    await writeFile(credentialFile, 'backend-key\n', { mode: 0o600 });
+    await writeFile(
+      config,
+      `controlSocket = "${dir}/control.sock"\nport = ${port}\nroutes = []\n\n[upstream]\nbaseUrl = "http://127.0.0.1:${address.port}"\ncredentialFile = "${credentialFile}"\n\n[discovery]\nrefreshIntervalMs = 25\n\n[[discovery.publicCatalogs]]\nurl = "${publicUrl}"\nprefix = "opencode/"\n`,
+    );
+    const server = await startConfiguredService(config);
+    const catalog = async () =>
+      JSON.parse((await controlGet(join(dir, 'control.sock'), '/models')).body) as {
+        ids: string[];
+        lastRefreshError: string | null;
+        lastSuccessAt: string | null;
+      };
+    try {
+      const initial = await catalog();
+      expect(initial.ids).toEqual(['backend-ok', 'opencode/valid-a', 'opencode/valid-b']);
+      expect(initial.lastRefreshError).toBeNull();
+      expect(initial.lastSuccessAt).toEqual(expect.any(String));
+
+      const grant = await controlCall(join(dir, 'control.sock'), '/grants', {
+        jobId: 'job-invalid-entry-valid',
+        routes: ['opencode/valid-a'],
+      });
+      expect(grant.status).toBe(201);
+      const { token } = JSON.parse(grant.body) as { token: string };
+      const infer = (model: string) =>
+        fetch(`http://127.0.0.1:${server.port}/v1/chat/completions`, {
+          method: 'POST',
+          headers: { authorization: `Bearer ${token}` },
+          body: JSON.stringify({ model, messages: [] }),
+        });
+      const response = await infer('opencode/valid-a');
+      expect(response.status).toBe(200);
+      await response.text();
+      expect(received).toEqual([
+        { authorization: 'Bearer backend-key', model: 'opencode/valid-a' },
+      ]);
+
+      for (const skipped of ['opencode/bad id', `opencode/${overlongId}`]) {
+        expect(
+          (
+            await controlCall(join(dir, 'control.sock'), '/grants', {
+              jobId: `job-invalid-entry-${skipped.length}`,
+              routes: [skipped],
+            })
+          ).status,
+        ).toBe(400);
+        expect((await infer(skipped)).status).toBe(403);
+      }
+
+      publicBody = { data: 'not-an-array' };
+      await eventually(async () => (await catalog()).lastRefreshError === 'refresh failed');
+      const retained = await catalog();
+      expect(retained.ids).toEqual(['backend-ok', 'opencode/valid-a', 'opencode/valid-b']);
+      expect(retained.lastSuccessAt).toEqual(initial.lastSuccessAt);
+      const afterMalformed = await infer('opencode/valid-a');
+      expect(afterMalformed.status).toBe(200);
+      await afterMalformed.text();
+    } finally {
+      await server.close();
+    }
+  } finally {
+    transport.restore();
+    await new Promise<void>((resolve) => {
+      publicCatalog.closeAllConnections();
+      publicCatalog.close(() => resolve());
+    });
+    await new Promise<void>((resolve) => {
+      upstream.closeAllConnections();
+      upstream.close(() => resolve());
+    });
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 it('bounds the retained catalog across refreshes', async () => {
   const { startConfiguredService } = await import('../apps/llm-service/src/bootstrap');
   const dir = await mkdtemp(join(tmpdir(), 'llm-discovery-cap-'));
@@ -1072,15 +1208,33 @@ it('bounds the retained catalog across refreshes', async () => {
         const current = JSON.parse(
           (await controlGet(join(dir, 'control.sock'), '/models')).body,
         ) as { ids: string[]; lastRefreshError: string | null };
-        return current.ids.length === 1000 && current.lastRefreshError === 'refresh failed';
+        return current.ids.length === 1000 && current.lastRefreshError === 'catalog limit reached';
       });
       const current = JSON.parse((await controlGet(join(dir, 'control.sock'), '/models')).body) as {
         ids: string[];
+        lastAttemptAt: string | null;
+        lastSuccessAt: string | null;
+        lastRefreshError: string | null;
       };
       expect(current.ids).toHaveLength(1000);
       expect(current.ids).toContain('model-a-599');
       expect(current.ids).toContain('model-b-399');
       expect(current.ids).not.toContain('model-b-400');
+      expect(current.lastSuccessAt).toEqual(expect.any(String));
+      await eventually(async () => {
+        const next = JSON.parse((await controlGet(join(dir, 'control.sock'), '/models')).body) as {
+          lastAttemptAt: string | null;
+        };
+        return next.lastAttemptAt !== current.lastAttemptAt;
+      });
+      const after = JSON.parse((await controlGet(join(dir, 'control.sock'), '/models')).body) as {
+        ids: string[];
+        lastSuccessAt: string | null;
+        lastRefreshError: string | null;
+      };
+      expect(after.lastRefreshError).toBe('catalog limit reached');
+      expect(after.lastSuccessAt).toBe(current.lastSuccessAt);
+      expect(after.ids).toEqual(current.ids);
     } finally {
       await server.close();
     }
