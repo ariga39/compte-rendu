@@ -154,10 +154,25 @@ expiry; already disclosed information cannot be retracted. Browser expiry uses
 server-relative lifetime and elapsed time, including offline/hidden-tab resume,
 so browser clock skew cannot extend it. Normal browsing makes zero GitHub calls.
 
-Fixed refresh bounds are not inventory-aware quota or invocation-budget control.
-Backlog observability and validation of that capacity bound are tracked in
-[#196](https://github.com/ariga39/compte-rendu/issues/196). Deployments must measure
-whether their repository inventory and GitHub quota fit the cadence. Keep private inventory and measurements outside public documentation.
+Each refresh reports `dueAtStart`, `oldestDueAgeMs`, `durationMs` and
+`budgetExhausted` alongside dispatched/failed/skipped counts, without repository
+identifiers. Backlog is measured before dispatch, including during cooldown;
+unknown inventory is reported as null, not zero. Never-due rows use their creation
+update timestamp as the start of waiting.
+
+At most eight lookups run in batches of three. The two-second lookup timeout
+includes installation-token acquisition and the metadata response. Three timeout
+waves take six seconds; the controlled-clock regression adds 500 ms of database
+work and observes 6,500 ms total. A ten-second dispatch budget includes database
+and token time, and is checked before each batch and after each claim. Once
+exhausted, no new GitHub lookup starts. Already-started work finishes under its
+existing timeout; D1 calls are not forcibly cancelled, so this is a dispatch bound,
+not a hard whole-invocation timeout. A claimed but undispatched row becomes
+claimable again after its existing 30-second lease.
+
+This does not make GitHub quota or repository inventory unlimited. Operators use
+the backlog/age trend to detect a cadence deficit before five-minute identity
+expiry. Keep private inventory and measurements outside public documentation.
 
 ## History and Check links
 

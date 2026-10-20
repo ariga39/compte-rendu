@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   createCoreWorker,
   runScheduledMetadataRefresh,
@@ -515,7 +515,7 @@ describe('public dashboard reads are DB-only', () => {
         },
       },
     });
-    expect(result).toEqual({ dispatched: 0, failed: 0, skipped: 'cooldown' });
+    expect(result).toMatchObject({ dispatched: 0, failed: 0, skipped: 'cooldown' });
     expect(called).toBe(0);
   });
 
@@ -764,7 +764,7 @@ describe('public dashboard reads are DB-only', () => {
         },
       },
     });
-    expect(result).toEqual({ dispatched: 0, failed: 1, skipped: '' });
+    expect(result).toMatchObject({ dispatched: 0, failed: 1, skipped: '' });
     expect(aborted).toBe(true);
   });
 
@@ -901,6 +901,153 @@ describe('public dashboard reads are DB-only', () => {
     expect(await identityFor(await runIdFor(333))).toBe('anonymous');
   });
 
+  it('includes database and stalled token exchange time in the bounded refresh summary', async () => {
+    const database = new SqliteD1Database();
+    const store = createD1ReviewStateStore(database);
+    for (let repositoryId = 1; repositoryId <= 8; repositoryId += 1) {
+      await store.claimReview({
+        deliveryId: `slow-token-${repositoryId}`,
+        job: job({ repositoryId }),
+        occurredAt: new Date().toISOString(),
+      });
+    }
+    vi.useFakeTimers();
+    try {
+      let active = 0;
+      let peak = 0;
+      let metadataRequested = false;
+      const github = createGitHubPublicationAdapter({
+        token: async (_installationId, signal) =>
+          new Promise<string>((_resolve, reject) => {
+            active += 1;
+            peak = Math.max(peak, active);
+            signal?.addEventListener(
+              'abort',
+              () => {
+                active -= 1;
+                reject(new Error('token exchange aborted'));
+              },
+              { once: true },
+            );
+          }),
+        fetch: async () => {
+          metadataRequested = true;
+          throw new Error('no token available');
+        },
+      });
+      const pending = runScheduledMetadataRefresh(coreEnv(database), {
+        stateStore: {
+          ...store,
+          getRepositoryRefreshBacklog: async (input) => {
+            vi.setSystemTime(Date.now() + 500);
+            return store.getRepositoryRefreshBacklog!(input);
+          },
+        },
+        github,
+        log: { record: async () => {} },
+      });
+      await vi.advanceTimersByTimeAsync(7000);
+      const summary = await pending;
+      expect(summary).toMatchObject({
+        dueAtStart: 8,
+        dispatched: 0,
+        failed: 8,
+        budgetExhausted: false,
+      });
+      expect(summary.durationMs).toBe(6500);
+      expect(peak).toBe(3);
+      expect(active).toBe(0);
+      expect(metadataRequested).toBe(false);
+    } finally {
+      vi.useRealTimers();
+      database.close();
+    }
+  });
+
+  it('stops dispatching when database work consumes the refresh budget', async () => {
+    const database = new SqliteD1Database();
+    const store = createD1ReviewStateStore(database);
+    await store.claimReview({
+      deliveryId: 'slow-db',
+      job: job(),
+      occurredAt: new Date().toISOString(),
+    });
+    vi.useFakeTimers();
+    try {
+      let contactedGitHub = false;
+      const summary = await runScheduledMetadataRefresh(coreEnv(database), {
+        stateStore: {
+          ...store,
+          listDueRepositoryMetadata: async (input) => {
+            const rows = await store.listDueRepositoryMetadata!(input);
+            vi.setSystemTime(Date.now() + 10001);
+            return rows;
+          },
+        },
+        github: {
+          ...createGitHubPublicationAdapter({ token: 'unused' }),
+          getRepositoryMetadata: async () => {
+            contactedGitHub = true;
+            throw new Error('should not dispatch');
+          },
+        },
+        log: { record: async () => {} },
+      });
+      expect(summary).toMatchObject({
+        dispatched: 0,
+        failed: 0,
+        dueAtStart: 1,
+        budgetExhausted: true,
+      });
+      expect(summary.durationMs).toBeGreaterThanOrEqual(10001);
+      expect(contactedGitHub).toBe(false);
+    } finally {
+      vi.useRealTimers();
+      database.close();
+    }
+  });
+
+  it('reports due metadata backlog and oldest age without repository identifiers', async () => {
+    const database = new SqliteD1Database();
+    const store = createD1ReviewStateStore(database);
+    const createdAt = new Date(Date.now() - 60000).toISOString();
+    for (let repositoryId = 1; repositoryId <= 10; repositoryId += 1) {
+      await store.claimReview({
+        deliveryId: `backlog-${repositoryId}`,
+        job: job({ repositoryId }),
+        occurredAt: createdAt,
+      });
+    }
+    const events: OperationalLogEvent[] = [];
+    const summary = await runScheduledMetadataRefresh(coreEnv(database), {
+      stateStore: store,
+      github: {
+        ...createGitHubPublicationAdapter({ token: 'unused' }),
+        getRepositoryMetadata: async ({ repositoryId }) => ({
+          id: repositoryId,
+          full_name: 'private/secret-canary',
+          visibility: 'private',
+        }),
+      },
+      log: {
+        record: async (event) => {
+          events.push(event);
+        },
+      },
+    });
+    expect(summary).toMatchObject({
+      dueAtStart: 10,
+      dispatched: 8,
+      failed: 0,
+      budgetExhausted: false,
+    });
+    expect(summary.oldestDueAgeMs).toBeGreaterThanOrEqual(60000);
+    expect(summary.durationMs).toBeGreaterThanOrEqual(0);
+    expect(events).toEqual([{ phase: 'core', outcome: 'metadata_refresh', ...summary }]);
+    expect(JSON.stringify(events)).not.toMatch(/secret-canary|repositoryId|installationId/);
+    database.close();
+  });
+
   it('emits aggregate bounded refresh facts and runs through the scheduled boundary', async () => {
     const database = new SqliteD1Database();
     const events: OperationalLogEvent[] = [];
@@ -911,10 +1058,8 @@ describe('public dashboard reads are DB-only', () => {
         },
       },
     });
-    expect(summary).toEqual({ dispatched: 0, failed: 0, skipped: '' });
-    expect(events).toEqual([
-      { phase: 'core', outcome: 'metadata_refresh', dispatched: 0, failed: 0, skipped: '' },
-    ]);
+    expect(summary).toMatchObject({ dispatched: 0, failed: 0, skipped: '' });
+    expect(events).toEqual([{ phase: 'core', outcome: 'metadata_refresh', ...summary }]);
 
     let task: Promise<unknown> | undefined;
     coreWorker.scheduled({}, coreEnv(database), {
@@ -1205,7 +1350,7 @@ describe('public dashboard reads are DB-only', () => {
       github,
       log,
     });
-    expect(second).toEqual({ dispatched: 0, failed: 0, skipped: 'cooldown' });
+    expect(second).toMatchObject({ dispatched: 0, failed: 0, skipped: 'cooldown' });
     expect(tokenExchanges).toBeLessThan(8);
   });
 });

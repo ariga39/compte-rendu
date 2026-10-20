@@ -1164,6 +1164,17 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
   recordProgress: (input) => recordLifecycleSnapshot(database, input, false),
   recordTerminalLifecycle: (input) => recordLifecycleSnapshot(database, input, true),
 
+  getRepositoryRefreshBacklog: async ({ now }) => {
+    const row = await database
+      .prepare(`SELECT COUNT(*) AS due,
+      MIN(COALESCE(next_refresh_at, updated_at)) AS oldestDueAt
+      FROM repository_metadata WHERE next_refresh_at IS NULL OR next_refresh_at <= ?`)
+      .bind(now)
+      .first<{ due: number; oldestDueAt: string | null }>();
+    if (row === null) throw new Error('metadata backlog unavailable');
+    return row;
+  },
+
   listDueRepositoryMetadata: async ({ now, limit }) => {
     const rows = await database
       .prepare(

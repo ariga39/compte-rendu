@@ -405,6 +405,10 @@ export type OperationalLogEvent =
   | {
       readonly phase: 'core';
       readonly outcome: 'metadata_refresh';
+      readonly dueAtStart: number | null;
+      readonly oldestDueAgeMs: number | null;
+      readonly durationMs: number;
+      readonly budgetExhausted: boolean;
       readonly dispatched: number;
       readonly failed: number;
       readonly skipped: 'unavailable' | 'cooldown' | '';
