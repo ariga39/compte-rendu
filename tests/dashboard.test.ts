@@ -1035,6 +1035,57 @@ describe('public dashboard reads are DB-only', () => {
     }
   });
 
+  it('does not contact GitHub after a slow claim and recovers after the lease expires', async () => {
+    const database = new SqliteD1Database();
+    const store = createD1ReviewStateStore(database);
+    await store.claimReview({
+      deliveryId: 'slow-claim',
+      job: job(),
+      occurredAt: new Date().toISOString(),
+    });
+    vi.useFakeTimers();
+    try {
+      let contactedGitHub = false;
+      const github = {
+        ...createGitHubPublicationAdapter({ token: 'unused' }),
+        getRepositoryMetadata: async ({ repositoryId }: { repositoryId: number }) => {
+          contactedGitHub = true;
+          return { id: repositoryId, full_name: 'private/repo', visibility: 'private' as const };
+        },
+      };
+      const first = await runScheduledMetadataRefresh(coreEnv(database), {
+        stateStore: {
+          ...store,
+          claimRepositoryRefresh: async (input) => {
+            const claimed = await store.claimRepositoryRefresh!(input);
+            vi.setSystemTime(Date.now() + 10001);
+            return claimed;
+          },
+        },
+        github,
+        log: { record: async () => {} },
+      });
+      expect(first).toMatchObject({
+        dispatched: 0,
+        failed: 0,
+        dueAtStart: 1,
+        budgetExhausted: true,
+      });
+      expect(contactedGitHub).toBe(false);
+      vi.setSystemTime(Date.now() + 30000);
+      const recovered = await runScheduledMetadataRefresh(coreEnv(database), {
+        stateStore: store,
+        github,
+        log: { record: async () => {} },
+      });
+      expect(recovered).toMatchObject({ dispatched: 1, failed: 0, budgetExhausted: false });
+      expect(contactedGitHub).toBe(true);
+    } finally {
+      vi.useRealTimers();
+      database.close();
+    }
+  });
+
   it('stops dispatching when database work consumes the refresh budget', async () => {
     const database = new SqliteD1Database();
     const store = createD1ReviewStateStore(database);
