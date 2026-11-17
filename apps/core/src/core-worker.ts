@@ -7,6 +7,7 @@ import {
   ReviewEvent,
   RunnerJobInput,
   RunnerProgressReport,
+  RunnerCleanupRecoveryReport,
   RunnerResultCallback,
   StructuredReviewResult,
   sanitizeOperationalLogEvent,
@@ -74,6 +75,7 @@ const metadataEventsPath = '/metadata-events';
 const runnerClaimsPath = '/runner-claims';
 const runnerResultsPath = '/runner-results';
 const runnerProgressPath = '/runner-progress';
+const runnerCleanupRecoveryPath = '/runner-cleanup-recovery';
 const MAX_PROGRESS_BYTES = 16 * 1024;
 const epochMilliseconds = (value: string) => {
   const parsed = DateTime.make(value);
@@ -386,6 +388,76 @@ export const createCoreWorker = (
         throw error;
       }
     }
+  };
+
+  const handleRunnerCleanupRecovery = async (request: Request): Promise<Response> => {
+    if (request.headers.get('x-compte-rendu-runner-cleanup-recovery') !== 'verified') {
+      return new Response(null, { status: 401 });
+    }
+    const body = await request.arrayBuffer();
+    if (body.byteLength > 64 * 1024) return new Response(null, { status: 413 });
+    let report: typeof RunnerCleanupRecoveryReport.Type;
+    try {
+      report = await Schema.decodeUnknownPromise(
+        Schema.fromJsonString(RunnerCleanupRecoveryReport),
+        {
+          onExcessProperty: 'error',
+        },
+      )(new TextDecoder().decode(body));
+    } catch {
+      return new Response(null, { status: 400 });
+    }
+    if (
+      env.EVIDENCE_BUCKET === undefined ||
+      stateStore.validateRunnerCleanupRecovery === undefined ||
+      stateStore.recoverRunnerCleanup === undefined
+    ) {
+      return new Response(null, { status: 503 });
+    }
+    if (
+      Option.isNone(DateTime.make(report.confirmedAt)) ||
+      report.sandboxName !== `compte-rendu-${report.jobId}`
+    ) {
+      return new Response(null, { status: 400 });
+    }
+    const validation = await stateStore.validateRunnerCleanupRecovery({
+      runId: report.runId,
+      jobId: report.jobId,
+      attempt: report.attempt,
+      evidenceId: report.evidenceId,
+      baseSha: report.baseSha,
+      headSha: report.headSha,
+      sandboxName: report.sandboxName,
+      confirmedAt: report.confirmedAt,
+    });
+    if (validation.kind === 'rejected') return new Response(null, { status: 409 });
+    const audit = {
+      version: 1,
+      ...report,
+      confirmedAt:
+        validation.kind === 'already'
+          ? validation.cleanupCompletedAt || report.confirmedAt
+          : report.confirmedAt,
+    };
+    await env.EVIDENCE_BUCKET.put(
+      `cleanup-recoveries/${report.runId}/${report.jobId}/${report.attempt}.json`,
+      JSON.stringify(audit),
+    );
+    const result = await stateStore.recoverRunnerCleanup({
+      runId: report.runId,
+      jobId: report.jobId,
+      attempt: report.attempt,
+      evidenceId: report.evidenceId,
+      baseSha: report.baseSha,
+      headSha: report.headSha,
+      sandboxName: report.sandboxName,
+      confirmedAt: report.confirmedAt,
+    });
+    if (result.kind === 'rejected') return new Response(null, { status: 409 });
+    return Response.json(
+      { accepted: true },
+      { status: 202, headers: { 'cache-control': 'no-store' } },
+    );
   };
 
   const handleRunnerResult = async (
@@ -850,6 +922,16 @@ export const createCoreWorker = (
       if (request.method === 'POST' && new URL(request.url).pathname === runnerClaimsPath) {
         try {
           return await handleRunnerClaim(request, lifecycleLog);
+        } catch {
+          return new Response(null, { status: 503 });
+        }
+      }
+      if (
+        request.method === 'POST' &&
+        new URL(request.url).pathname === runnerCleanupRecoveryPath
+      ) {
+        try {
+          return await handleRunnerCleanupRecovery(request);
         } catch {
           return new Response(null, { status: 503 });
         }

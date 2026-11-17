@@ -128,6 +128,7 @@ export const projectPublicTask = (row: PublicRunRow, now: string): PublicTaskSta
     queueWaitMs: durationMs(row.createdAt, row.claimedAt),
     totalDurationMs: durationMs(row.createdAt, row.terminalAt),
     cleanup: row.runnerCleanupStatus ?? 'unknown',
+    queueBlockReason: row.queueBlockReason,
     failure: Option.getOrNull(
       Schema.decodeUnknownOption(PublicTaskFailure)({
         phase: row.failurePhase,

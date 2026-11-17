@@ -263,6 +263,18 @@ export type RunnerJobInput = typeof RunnerJobInput.Type;
 export type RunnerJobResponse = typeof RunnerJobResponse.Type;
 export type RunnerResultCallback = typeof RunnerResultCallback.Type;
 
+export const RunnerCleanupRecoveryReport = Schema.Struct({
+  runId: Schema.NonEmptyString,
+  jobId: Schema.NonEmptyString,
+  attempt: Schema.Int,
+  evidenceId: Schema.NonEmptyString,
+  baseSha: GitHubSha,
+  headSha: GitHubSha,
+  sandboxName: Schema.NonEmptyString,
+  confirmedAt: Schema.NonEmptyString,
+});
+export type RunnerCleanupRecoveryReport = typeof RunnerCleanupRecoveryReport.Type;
+
 const PullRequestAction = Schema.Literals([
   'opened',
   'reopened',
@@ -641,6 +653,7 @@ export const PublicTaskState = Schema.Struct({
   queueWaitMs: Schema.NullOr(Schema.Int),
   totalDurationMs: Schema.NullOr(Schema.Int),
   cleanup: PublicCleanupStatus,
+  queueBlockReason: Schema.optionalKey(Schema.NullOr(Schema.Literal('cleanup'))),
   failure: Schema.NullOr(PublicTaskFailure),
 });
 export type PublicTaskState = typeof PublicTaskState.Type;

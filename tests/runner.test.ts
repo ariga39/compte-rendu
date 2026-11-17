@@ -10783,3 +10783,213 @@ describe('Runner callback recovery', () => {
     }
   });
 });
+
+describe('Runner confirmed cleanup recovery', () => {
+  it('reconciles a retained failed cleanup after restart without changing its evidence', async () => {
+    const evidenceRoot = await mkdtemp(join(tmpdir(), 'cr-cleanup-recovery-'));
+    const result = await runAgentScenario({
+      runId: 'run-cleanup-recovery',
+      output: finalMarkdownJsonl(),
+      cleanupFailure: true,
+      evidenceRoot,
+    });
+    const evidenceId = result.terminal.evidenceId as string;
+    const original = await readFile(join(evidenceRoot, evidenceId, 'callback.json'), 'utf8');
+    const manifest = JSON.parse(
+      await readFile(join(evidenceRoot, evidenceId, 'manifest.json'), 'utf8'),
+    );
+    const reports: Request[] = [];
+    let releaseInspect!: () => void;
+    let inspectStarted!: () => void;
+    const inspecting = new Promise<void>((resolve) => {
+      inspectStarted = resolve;
+    });
+    const inspectGate = new Promise<void>((resolve) => {
+      releaseInspect = resolve;
+    });
+    const runner = createProductionRunnerWithMergeBase({
+      authToken: 'runner-test-token',
+      evidenceRoot,
+      claimUrl: '',
+      callbackFetch: async (input, init) => {
+        reports.push(new Request(input, init));
+        return new Response(null, { status: 202 });
+      },
+      process: async (_command, args) => {
+        if (args[0] === 'inspect') {
+          inspectStarted();
+          await inspectGate;
+        }
+        if (args[0] === 'inspect')
+          return {
+            exitCode: 1,
+            stdout: '',
+            stderr: `error: sandbox '${manifest.sandboxName}' not found`,
+            timedOut: false,
+            truncated: false,
+          };
+        return {
+          exitCode: 0,
+          stdout: args[0] === 'policy' ? '{"rules":[]}' : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
+    });
+    try {
+      const recoveryRequest = new Request('http://runner/maintenance/recover-cleanup', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer runner-test-token',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          evidenceId,
+          jobId: manifest.jobId,
+          runId: manifest.runId,
+          attempt: manifest.attempt,
+          baseSha: manifest.baseSha,
+          headSha: manifest.headSha,
+        }),
+      });
+      const pending = runner.handle(recoveryRequest.clone());
+      await inspecting;
+      expect((await runner.handle(recoveryRequest.clone())).status).toBe(409);
+      const draining = await runner.handle(
+        new Request('http://runner/maintenance/drain', {
+          method: 'POST',
+          headers: { authorization: 'Bearer runner-test-token' },
+        }),
+      );
+      expect(await draining.json()).toMatchObject({ draining: true, drained: false });
+      releaseInspect();
+      const response = await pending;
+      expect(response.status).toBe(202);
+      expect(reports).toHaveLength(1);
+      expect(new URL(reports[0].url).pathname).toBe('/runner-cleanup-recovery');
+      expect(await reports[0].json()).toMatchObject({
+        runId: manifest.runId,
+        jobId: manifest.jobId,
+        sandboxName: manifest.sandboxName,
+      });
+      expect(await readFile(join(evidenceRoot, evidenceId, 'callback.json'), 'utf8')).toBe(
+        original,
+      );
+      expect(
+        JSON.parse(await readFile(join(evidenceRoot, evidenceId, 'cleanup-recovery.json'), 'utf8')),
+      ).toMatchObject({ jobId: manifest.jobId });
+      expect((await runner.handle(recoveryRequest.clone())).status).toBe(202);
+      expect(reports).toHaveLength(2);
+    } finally {
+      releaseInspect();
+      await runner.close();
+      await rm(evidenceRoot, { recursive: true, force: true });
+    }
+  });
+  it.each([
+    'unauthorized',
+    'wrong-identity',
+    'legacy-host-cleanup',
+    'present-sandbox',
+    'auth-error',
+    'truncated-inspect',
+    'policy-error',
+    'secret-error',
+    'delivery-error',
+  ])('keeps cleanup unresolved for %s', async (failure) => {
+    const evidenceRoot = await mkdtemp(join(tmpdir(), 'cr-recovery-rejected-'));
+    const scenario = await runAgentScenario({
+      runId: 'run-cleanup-rejected',
+      output: finalMarkdownJsonl(),
+      cleanupFailure: true,
+      evidenceRoot,
+    });
+    const evidenceId = scenario.terminal.evidenceId as string;
+    const callbackPath = join(evidenceRoot, evidenceId, 'callback.json');
+    if (failure === 'legacy-host-cleanup') {
+      const callback = JSON.parse(await readFile(callbackPath, 'utf8'));
+      const manifest = JSON.parse(
+        Buffer.from(callback.evidence.manifest.content, 'base64').toString('utf8'),
+      );
+      delete manifest.hostCleanupConfirmed;
+      const bytes = Buffer.from(JSON.stringify(manifest));
+      callback.evidence.manifest = {
+        content: bytes.toString('base64'),
+        size: bytes.length,
+        sha256: createHash('sha256').update(bytes).digest('hex'),
+      };
+      await writeFile(callbackPath, JSON.stringify(callback));
+    }
+    const original = await readFile(callbackPath, 'utf8');
+    const manifest = scenario.manifest;
+    const commands: string[][] = [];
+    const delivered: Request[] = [];
+    const runner = createProductionRunnerWithMergeBase({
+      authToken: 'runner-test-token',
+      evidenceRoot,
+      claimUrl: '',
+      callbackFetch: async (input, init) => {
+        delivered.push(new Request(input, init));
+        return new Response(null, { status: 503 });
+      },
+      process: async (_command, args) => {
+        commands.push([...args]);
+        if (args[0] === 'inspect')
+          return {
+            exitCode: failure === 'present-sandbox' ? 0 : 1,
+            stdout: '',
+            stderr:
+              failure === 'auth-error'
+                ? 'not signed in'
+                : `error: sandbox '${manifest.sandboxName}' not found`,
+            timedOut: false,
+            truncated: failure === 'truncated-inspect',
+          };
+        return {
+          exitCode:
+            (failure === 'policy-error' && args[0] === 'policy') ||
+            (failure === 'secret-error' && args[0] === 'secret')
+              ? 1
+              : 0,
+          stdout: args[0] === 'policy' ? '{"rules":[]}' : '',
+          timedOut: false,
+          truncated: false,
+        };
+      },
+    });
+    try {
+      const response = await runner.handle(
+        new Request('http://runner/maintenance/recover-cleanup', {
+          method: 'POST',
+          headers: {
+            authorization: failure === 'unauthorized' ? 'Bearer bad' : 'Bearer runner-test-token',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            evidenceId,
+            jobId: manifest.jobId,
+            runId: failure === 'wrong-identity' ? 'other-run' : manifest.runId,
+            attempt: manifest.attempt,
+            baseSha: manifest.baseSha,
+            headSha: manifest.headSha,
+          }),
+        }),
+      );
+      expect(response.status).toBe(
+        failure === 'unauthorized'
+          ? 401
+          : ['wrong-identity', 'legacy-host-cleanup'].includes(failure)
+            ? 409
+            : 502,
+      );
+      expect(delivered).toHaveLength(failure === 'delivery-error' ? 1 : 0);
+      expect(commands.some((args) => args[0] === 'rm')).toBe(false);
+      if (['unauthorized', 'wrong-identity', 'legacy-host-cleanup'].includes(failure))
+        expect(commands).toEqual([]);
+      expect(await readFile(callbackPath, 'utf8')).toBe(original);
+    } finally {
+      await runner.close();
+      await rm(evidenceRoot, { recursive: true, force: true });
+    }
+  });
+});

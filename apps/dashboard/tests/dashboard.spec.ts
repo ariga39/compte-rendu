@@ -1472,3 +1472,23 @@ test('dashboard uses the IBM Plex Mono family across text and controls', async (
   const detail = await fontState();
   expect(detail.h1).toBe('IBM Plex Mono');
 });
+
+test('explains a queued review waiting for prior cleanup in table and detail', async ({
+  page,
+  harness,
+  base,
+}) => {
+  const blocked = task({
+    runId: 'blocked-cleanup',
+    status: 'scheduled',
+    dispatch: 'queued',
+    queueBlockReason: 'cleanup',
+  });
+  harness.setHandler((url) =>
+    url.pathname.startsWith('/api/jobs/') ? ok(detailData(blocked)) : ok(historyPage([blocked])),
+  );
+  await page.goto(`${base}/history`);
+  await expect(page.getByText('Waiting for previous review cleanup').first()).toBeVisible();
+  await page.goto(`${base}/jobs/blocked-cleanup`);
+  await expect(page.getByText('Waiting for previous review cleanup.')).toBeVisible();
+});

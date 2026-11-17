@@ -16,7 +16,12 @@ export function createApplication(env: ApplicationEnv, dependencies: CoreWorkerD
       const path = new URL(request.url).pathname;
       const accepted =
         path.startsWith('/api/') ||
-        ['/runner-callback', '/runner-claim', '/runner-progress'].includes(path) ||
+        [
+          '/runner-callback',
+          '/runner-claim',
+          '/runner-progress',
+          '/runner-cleanup-recovery',
+        ].includes(path) ||
         ((path === '/' || path === '/webhooks/github') && request.method === 'POST');
       if (!accepted) return new Response(null, { status: 404 });
       const core = createCoreWorker(env, dependencies);

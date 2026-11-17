@@ -112,7 +112,11 @@ export function progressText(task: TaskState): string {
 export function statusDetail(task: TaskState): string | null {
   if (task.processing === 'publishing') return 'Publishing';
   if (task.processing === 'received') return 'Processing result';
-  if (task.dispatch === 'queued') return 'Waiting to start';
+  if (task.dispatch === 'queued') {
+    return task.queueBlockReason === 'cleanup'
+      ? 'Waiting for previous review cleanup'
+      : 'Waiting to start';
+  }
   if (task.dispatch === 'claimed') {
     const stage = task.stage ? `${STAGE_LABEL[task.stage] ?? task.stage} · ` : '';
     return `${stage}${progressText(task)}`;
@@ -127,7 +131,11 @@ export function outcomeSummary(task: TaskState): string {
       ? `In progress: ${STAGE_LABEL[task.stage] ?? 'Not recorded'}.`
       : 'In progress; awaiting first progress update.';
   }
-  if (task.dispatch === 'queued') return 'Waiting to start.';
+  if (task.dispatch === 'queued') {
+    return task.queueBlockReason === 'cleanup'
+      ? 'Waiting for previous review cleanup.'
+      : 'Waiting to start.';
+  }
   if (task.status === 'completed') return 'Review published to GitHub.';
   if (task.status === 'failed') return 'Did not finish successfully.';
   if (task.status === 'superseded') return 'A newer revision replaced this review.';

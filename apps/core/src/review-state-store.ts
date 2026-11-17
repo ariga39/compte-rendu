@@ -215,6 +215,7 @@ interface PublicRunDbRow {
   runner_job_id: string | null;
   evidence_status: 'complete' | 'incomplete' | null;
   runner_cleanup_status: 'pending' | 'destroyed' | 'failed' | null;
+  queue_block_reason: 'cleanup' | null;
   publication_claimed_at: string | null;
   progress_stage: 'checkout' | 'sandbox' | 'agent' | 'evidence' | 'cleanup' | null;
   progress_received_at: string | null;
@@ -252,6 +253,7 @@ const mapPublicRun = (row: PublicRunDbRow): PublicRunRow => ({
   runnerJobId: row.runner_job_id,
   evidenceStatus: row.evidence_status,
   runnerCleanupStatus: row.runner_cleanup_status,
+  queueBlockReason: row.queue_block_reason,
   publicationClaimedAt: row.publication_claimed_at,
   progressStage: row.progress_stage,
   lastProgressAt: row.progress_received_at,
@@ -287,11 +289,30 @@ const mapMetadataRow = (row: MetadataDbRow): RepositoryMetadataRow => ({
   updatedAt: row.updated_at,
 });
 
+const samePullRequestBlockingClause = (candidate: string, current: string) =>
+  `${candidate}.installation_id = ${current}.installation_id
+    AND ${candidate}.repository_id = ${current}.repository_id
+    AND ${candidate}.pull_request_number = ${current}.pull_request_number
+    AND ${candidate}.runner_job_id IS NOT NULL
+    AND (
+      ${candidate}.status IN ('scheduled', 'superseded')
+      OR ${candidate}.runner_cleanup_status IN ('pending', 'failed')
+    )`;
+
+const queueBlockReasonColumn = `CASE WHEN r.status = 'scheduled' AND r.runner_job_id IS NULL
+  AND EXISTS (
+    SELECT 1 FROM review_runs AS blocker
+    WHERE ${samePullRequestBlockingClause('blocker', 'r')}
+      AND blocker.rowid <> r.rowid
+      AND blocker.status IN ('failed', 'superseded')
+      AND blocker.runner_cleanup_status IN ('pending', 'failed')
+  ) THEN 'cleanup' ELSE NULL END AS queue_block_reason`;
+
 const publicRunColumns = `
   r.run_id, r.status, r.installation_id, r.repository_id, r.pull_request_number,
   r.base_sha, r.head_sha, r.base_ref, r.head_ref, r.review_decision,
   r.created_at, r.claimed_at, r.terminal_at, r.result_received_at, r.publication_started_at, r.runner_job_id, r.failure_phase, r.failure_reason,
-  r.evidence_status, r.runner_cleanup_status, r.publication_claimed_at,
+  r.evidence_status, r.runner_cleanup_status, ${queueBlockReasonColumn}, r.publication_claimed_at,
   r.progress_stage, r.progress_received_at, r.progress_milestones,
   r.execution_started_at, r.submission_completed_at, r.cleanup_completed_at,
   r.repository_visibility_snapshot, r.legacy_public_verified_at,
@@ -843,14 +864,7 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
            WHERE status = 'scheduled' AND runner_job_id IS NULL
              AND NOT EXISTS (
                SELECT 1 FROM review_runs AS active
-               WHERE active.installation_id = review_runs.installation_id
-                 AND active.repository_id = review_runs.repository_id
-                 AND active.pull_request_number = review_runs.pull_request_number
-                 AND active.runner_job_id IS NOT NULL
-                 AND (
-                   active.status IN ('scheduled', 'superseded')
-                   OR active.runner_cleanup_status IN ('pending', 'failed')
-                 )
+               WHERE ${samePullRequestBlockingClause('active', 'review_runs')}
              )
            ORDER BY created_at ASC, rowid ASC
            LIMIT 1
@@ -944,8 +958,14 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
            evidence_key = ?, evidence_status = ?, evidence_size = ?,
            evidence_sha256 = ?, evidence_uploaded_at = ?,
            execution_started_at = ?, submission_completed_at = ?,
-           cleanup_completed_at = ?,
-           runner_cleanup_status = COALESCE(?, runner_cleanup_status)
+           cleanup_completed_at = CASE
+             WHEN runner_cleanup_status = 'destroyed' THEN cleanup_completed_at
+             ELSE ?
+           END,
+           runner_cleanup_status = CASE
+             WHEN runner_cleanup_status = 'destroyed' THEN 'destroyed'
+             ELSE COALESCE(?, runner_cleanup_status)
+           END
          WHERE run_id = ? AND (
            evidence_key IS NULL OR evidence_key = ?
          )`,
@@ -965,6 +985,83 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
       )
       .run();
     return result.meta.changes === 1;
+  },
+
+  validateRunnerCleanupRecovery: async ({ runId, jobId, attempt, baseSha, headSha }) => {
+    const row = await database
+      .prepare(
+        `SELECT runner_cleanup_status, cleanup_completed_at FROM review_runs
+         WHERE run_id = ? AND runner_job_id = ? AND runner_attempt = ?
+           AND base_sha = ? AND head_sha = ? AND status = 'failed'`,
+      )
+      .bind(runId, jobId, attempt, baseSha, headSha)
+      .first<{
+        runner_cleanup_status: RunnerCleanupStatus | null;
+        cleanup_completed_at: string | null;
+      }>();
+    if (row === null) return { kind: 'rejected' as const };
+    if (row.runner_cleanup_status === 'destroyed') {
+      return {
+        kind: 'already' as const,
+        cleanupCompletedAt: row.cleanup_completed_at ?? '',
+      };
+    }
+    return row.runner_cleanup_status === 'failed'
+      ? { kind: 'recoverable' as const }
+      : { kind: 'rejected' as const };
+  },
+
+  recoverRunnerCleanup: async ({ runId, jobId, attempt, baseSha, headSha, confirmedAt }) => {
+    const identify = `run_id = ? AND runner_job_id = ? AND runner_attempt = ? AND base_sha = ? AND head_sha = ?`;
+    const before = await database
+      .prepare(
+        `SELECT runner_cleanup_status, cleanup_completed_at FROM review_runs
+         WHERE ${identify} AND status = 'failed'`,
+      )
+      .bind(runId, jobId, attempt, baseSha, headSha)
+      .first<{
+        runner_cleanup_status: RunnerCleanupStatus | null;
+        cleanup_completed_at: string | null;
+      }>();
+    if (
+      before === null ||
+      (before.runner_cleanup_status !== 'failed' && before.runner_cleanup_status !== 'destroyed')
+    ) {
+      return { kind: 'rejected' as const };
+    }
+    if (before.runner_cleanup_status === 'destroyed') {
+      return {
+        kind: 'already' as const,
+        cleanupCompletedAt: before.cleanup_completed_at ?? confirmedAt,
+      };
+    }
+    await database
+      .prepare(
+        `UPDATE review_runs SET
+           runner_cleanup_status = 'destroyed',
+           cleanup_completed_at = CASE WHEN runner_cleanup_status = 'destroyed'
+             THEN cleanup_completed_at ELSE ? END,
+           updated_at = CASE WHEN runner_cleanup_status = 'destroyed' THEN updated_at ELSE ? END
+         WHERE ${identify} AND status = 'failed'
+           AND runner_cleanup_status IN ('failed', 'destroyed')`,
+      )
+      .bind(confirmedAt, confirmedAt, runId, jobId, attempt, baseSha, headSha)
+      .run();
+    const after = await database
+      .prepare(
+        `SELECT runner_cleanup_status, cleanup_completed_at FROM review_runs
+         WHERE ${identify} AND status = 'failed'`,
+      )
+      .bind(runId, jobId, attempt, baseSha, headSha)
+      .first<{
+        runner_cleanup_status: RunnerCleanupStatus | null;
+        cleanup_completed_at: string | null;
+      }>();
+    if (after?.runner_cleanup_status !== 'destroyed') return { kind: 'rejected' as const };
+    return {
+      kind: 'recovered' as const,
+      cleanupCompletedAt: after.cleanup_completed_at ?? confirmedAt,
+    };
   },
 
   recordRunnerJob: async ({ runId, jobId, attempt }) => {

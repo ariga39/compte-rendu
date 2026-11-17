@@ -43,6 +43,9 @@ const RunnerManifest = Schema.Struct({
     status: Schema.Literals(['destroyed', 'failed']),
   }),
   result: Schema.optional(StructuredReviewResult),
+  runtime: Schema.optional(Schema.String),
+  sandboxName: Schema.optional(Schema.String),
+  hostCleanupConfirmed: Schema.optional(Schema.Boolean),
 });
 
 export const CallbackRecoveryReason = Schema.Literals([
@@ -55,6 +58,7 @@ export const CallbackRecoveryReason = Schema.Literals([
   'integrity-mismatch',
   'cleanup-not-confirmed',
   'result-mismatch',
+  'unsupported-recovery',
 ]);
 export type CallbackRecoveryReason = typeof CallbackRecoveryReason.Type;
 
@@ -93,6 +97,7 @@ const artifactBytes = (artifact: {
 export const recoverCallback = Effect.fn('recoverCallback')(function* (
   evidenceRoot: string,
   request: ReplayCallbackRequest,
+  purpose: 'replay' | 'cleanup' = 'replay',
 ): Effect.fn.Return<RecoveredCallback, CallbackRecoveryError> {
   const directory = join(evidenceRoot, request.evidenceId);
   const directoryInfo = yield* readStat(directory, 'missing-evidence');
@@ -183,7 +188,22 @@ export const recoverCallback = Effect.fn('recoverCallback')(function* (
     return yield* fail('identity-mismatch');
   }
 
-  if (manifest.cleanup.status !== 'destroyed' || callback.sandbox.cleanup !== 'destroyed') {
+  if (
+    purpose === 'cleanup' &&
+    (callback.status !== 'failed' ||
+      manifest.runtime !== 'sbx' ||
+      manifest.sandboxName !== `compte-rendu-${request.jobId}` ||
+      manifest.hostCleanupConfirmed !== true ||
+      manifest.cleanup.status !== 'failed' ||
+      callback.sandbox.cleanup !== 'failed')
+  ) {
+    return yield* fail('unsupported-recovery');
+  }
+
+  if (
+    purpose === 'replay' &&
+    (manifest.cleanup.status !== 'destroyed' || callback.sandbox.cleanup !== 'destroyed')
+  ) {
     return yield* fail('cleanup-not-confirmed');
   }
 
