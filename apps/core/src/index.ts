@@ -2098,7 +2098,7 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
             active.runId !== candidate.runId &&
             active.runnerJobId !== undefined &&
             (active.status === 'scheduled' ||
-              active.status === 'superseded' ||
+              (active.status === 'superseded' && active.runnerCleanupStatus !== 'destroyed') ||
               active.runnerCleanupStatus === 'pending' ||
               active.runnerCleanupStatus === 'failed') &&
             active.job.installationId === candidate.job.installationId &&
@@ -2153,7 +2153,7 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
       const run = runs.get(runId);
       if (
         run === undefined ||
-        run.status !== 'failed' ||
+        (run.status !== 'failed' && run.status !== 'superseded') ||
         run.runnerJobId !== jobId ||
         run.runnerAttempt !== attempt ||
         run.job.baseSha !== baseSha ||
@@ -2175,7 +2175,7 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
       const run = runs.get(runId);
       if (
         run === undefined ||
-        run.status !== 'failed' ||
+        (run.status !== 'failed' && run.status !== 'superseded') ||
         run.runnerJobId !== jobId ||
         run.runnerAttempt !== attempt ||
         run.job.baseSha !== baseSha ||

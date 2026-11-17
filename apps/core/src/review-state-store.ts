@@ -295,7 +295,9 @@ const samePullRequestBlockingClause = (candidate: string, current: string) =>
     AND ${candidate}.pull_request_number = ${current}.pull_request_number
     AND ${candidate}.runner_job_id IS NOT NULL
     AND (
-      ${candidate}.status IN ('scheduled', 'superseded')
+      (${candidate}.status = 'scheduled'
+        OR (${candidate}.status = 'superseded'
+          AND ${candidate}.runner_cleanup_status IS NOT 'destroyed'))
       OR ${candidate}.runner_cleanup_status IN ('pending', 'failed')
     )`;
 
@@ -992,7 +994,7 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
       .prepare(
         `SELECT runner_cleanup_status, cleanup_completed_at FROM review_runs
          WHERE run_id = ? AND runner_job_id = ? AND runner_attempt = ?
-           AND base_sha = ? AND head_sha = ? AND status = 'failed'`,
+           AND base_sha = ? AND head_sha = ? AND status IN ('failed', 'superseded')`,
       )
       .bind(runId, jobId, attempt, baseSha, headSha)
       .first<{
@@ -1016,7 +1018,7 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
     const before = await database
       .prepare(
         `SELECT runner_cleanup_status, cleanup_completed_at FROM review_runs
-         WHERE ${identify} AND status = 'failed'`,
+         WHERE ${identify} AND status IN ('failed', 'superseded')`,
       )
       .bind(runId, jobId, attempt, baseSha, headSha)
       .first<{
@@ -1042,7 +1044,7 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
            cleanup_completed_at = CASE WHEN runner_cleanup_status = 'destroyed'
              THEN cleanup_completed_at ELSE ? END,
            updated_at = CASE WHEN runner_cleanup_status = 'destroyed' THEN updated_at ELSE ? END
-         WHERE ${identify} AND status = 'failed'
+         WHERE ${identify} AND status IN ('failed', 'superseded')
            AND runner_cleanup_status IN ('failed', 'destroyed')`,
       )
       .bind(confirmedAt, confirmedAt, runId, jobId, attempt, baseSha, headSha)
@@ -1050,7 +1052,7 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
     const after = await database
       .prepare(
         `SELECT runner_cleanup_status, cleanup_completed_at FROM review_runs
-         WHERE ${identify} AND status = 'failed'`,
+         WHERE ${identify} AND status IN ('failed', 'superseded')`,
       )
       .bind(runId, jobId, attempt, baseSha, headSha)
       .first<{
