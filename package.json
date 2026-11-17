@@ -12,6 +12,7 @@
     "test:ssr": "vitest run --config tests/runtime/ssr.config.mts && corepack pnpm --filter @compte-rendu/dashboard test:ssr"
   },
   "devDependencies": {
+    "@alibaba-group/opensandbox": "1.2.1",
     "@cloudflare/vitest-pool-workers": "0.22.0",
     "effect": "4.0.0-rc.111",
     "playwright": "1.61.1",

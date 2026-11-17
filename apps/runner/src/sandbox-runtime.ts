@@ -2,7 +2,7 @@ import type { ChildProcess } from 'node:child_process';
 import { Option, Schema } from 'effect';
 import type { RunnerProcessErrorCode } from '@compte-rendu/contracts';
 
-export const SandboxRuntimeKind = Schema.Literals(['sbx', 'openshell']);
+export const SandboxRuntimeKind = Schema.Literals(['sbx', 'openshell', 'opensandbox']);
 export type SandboxRuntimeKind = Schema.Schema.Type<typeof SandboxRuntimeKind>;
 
 export interface OpenShellRuntimeConfig {
@@ -14,15 +14,25 @@ export interface OpenShellRuntimeConfig {
   readonly insecure: boolean;
 }
 
+export interface OpenSandboxRuntimeConfig {
+  readonly endpoint: string;
+  readonly apiKeyFile: string;
+  readonly image: string;
+}
+
 export interface SandboxRuntimeConfig {
   readonly kind: SandboxRuntimeKind;
   readonly cliPath: string;
   readonly openshell?: OpenShellRuntimeConfig;
+  readonly opensandbox?: OpenSandboxRuntimeConfig;
 }
 
 export interface SandboxRuntimeConfigInput {
   readonly kind?: string | undefined;
   readonly cliPath?: string | undefined;
+  readonly opensandboxEndpoint?: string | undefined;
+  readonly opensandboxApiKeyFile?: string | undefined;
+  readonly opensandboxImage?: string | undefined;
   readonly openshellGateway?: string | undefined;
   readonly openshellEndpoint?: string | undefined;
   readonly openshellModelProvider?: string | undefined;
@@ -47,12 +57,35 @@ export const resolveSandboxRuntimeConfig = (
   const decoded = Schema.decodeUnknownOption(SandboxRuntimeKind)(requested);
   if (Option.isNone(decoded)) {
     throw new Error(
-      `RUNNER_SANDBOX_RUNTIME must be one of 'sbx' or 'openshell', received '${requested}'`,
+      `RUNNER_SANDBOX_RUNTIME must be one of 'sbx', 'openshell' or 'opensandbox', received '${requested}'`,
     );
   }
   const kind = decoded.value;
-  const cliPath = nonEmpty(input.cliPath) ?? (kind === 'openshell' ? 'openshell' : 'sbx');
+  const cliPath =
+    nonEmpty(input.cliPath) ??
+    (kind === 'openshell' ? 'openshell' : kind === 'opensandbox' ? 'docker' : 'sbx');
   if (kind === 'sbx') return { kind, cliPath };
+  if (kind === 'opensandbox') {
+    const endpoint = nonEmpty(input.opensandboxEndpoint);
+    const apiKeyFile = nonEmpty(input.opensandboxApiKeyFile);
+    const image = nonEmpty(input.opensandboxImage);
+    if (endpoint === undefined || apiKeyFile === undefined || image === undefined) {
+      throw new Error('OpenSandbox runtime requires endpoint, API key file and image');
+    }
+    const url = new URL(endpoint);
+    if (
+      !['http:', 'https:'].includes(url.protocol) ||
+      !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) ||
+      url.username ||
+      url.password ||
+      url.search ||
+      url.hash ||
+      url.pathname !== '/'
+    ) {
+      throw new Error('OpenSandbox requires a local control-plane endpoint');
+    }
+    return { kind, cliPath, opensandbox: { endpoint, apiKeyFile, image } };
+  }
 
   const gateway = nonEmpty(input.openshellGateway);
   const gatewayEndpoint = nonEmpty(input.openshellEndpoint);
@@ -105,6 +138,7 @@ export type RunnerProcessResult = {
 };
 
 export type RunnerProcessOptions = {
+  readonly signal?: AbortSignal;
   readonly captureStdout?: boolean;
   readonly captureStderr?: boolean;
   readonly stderrRedactions?: readonly string[];
@@ -130,15 +164,24 @@ export type RunnerDiagnostic = {
 };
 
 /**
- * One runtime CLI invocation, owned by the Runner so that deadlines, abort
+ * A runtime invocation, owned by the Runner so that deadlines, abort
  * wiring, environment stripping, redaction and diagnostics stay in one place.
- * Adapters build argv and interpret results; they never manage budgets.
+ * CLI adapters build argv; SDK adapters use execute with the same budget and
+ * cancellation context. SDK availability does not imply a local child process.
  */
-export type SandboxCommand = (
+export type SandboxOperation = (options: RunnerProcessOptions) => Promise<RunnerProcessResult>;
+
+export type SandboxCommand = ((
   args: readonly string[],
   diagnostic?: RunnerDiagnostic,
   options?: RunnerProcessOptions,
-) => Promise<RunnerProcessResult>;
+) => Promise<RunnerProcessResult>) & {
+  readonly execute?: (
+    operation: SandboxOperation,
+    diagnostic?: RunnerDiagnostic,
+    options?: RunnerProcessOptions,
+  ) => Promise<RunnerProcessResult>;
+};
 
 /**
  * The identity and host paths a per-job runtime needs. Provider names, secret
