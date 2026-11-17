@@ -9,6 +9,7 @@ import {
   type SandboxCommand,
   type SandboxJobSpec,
   type SandboxOperation,
+  type RunnerProcessOptions,
 } from '../apps/runner/src/sandbox-runtime.js';
 
 const backend = vi.hoisted(() => ({
@@ -611,4 +612,72 @@ describe('OpenSandbox runtime lifecycle', () => {
       expect(runtime.metadata.hostCleanupConfirmed).toBe(true);
     },
   );
+});
+
+describe('OpenSandbox copyOut diagnostics', () => {
+  const prepare = async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-os-runtime-'));
+    roots.push(root);
+    const spec = jobSpec(root);
+    await writeFile(spec.modelTokenFile!, 'host-only-grant', { mode: 0o600 });
+    const calls: Array<{ diagnostic: unknown; options: unknown }> = [];
+    const command = Object.assign(
+      async () => ({ exitCode: 0, stdout: '', timedOut: false, truncated: false }),
+      {
+        execute: async (
+          operation: SandboxOperation,
+          diagnostic: unknown,
+          options?: RunnerProcessOptions,
+        ) => {
+          calls.push({ diagnostic, options });
+          return operation(options ?? {});
+        },
+      },
+    );
+    const runtime = createOpenSandboxRuntimeFactory({
+      endpoint: 'http://127.0.0.1:8080',
+      apiKey: 'control-key',
+      image: 'review-image',
+      lifetimeSeconds: 3600,
+    })(spec);
+    await runtime.setup(command);
+    calls.length = 0;
+    return { root, runtime, command, calls };
+  };
+
+  it('uses the default copy-evidence diagnostic', async () => {
+    const { root, runtime, command, calls } = await prepare();
+
+    const result = await runtime.copyOut(
+      '/tmp/evidence/export.json',
+      join(root, 'default.json'),
+      command,
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(calls).toEqual([
+      { diagnostic: { stage: 'sandbox', command: 'copy-evidence' }, options: undefined },
+    ]);
+  });
+
+  it('forwards the caller diagnostic and options', async () => {
+    const { root, runtime, command, calls } = await prepare();
+    const diagnostic = {
+      stage: 'sandbox' as const,
+      command: 'archive-opencode-data',
+      includeStderr: true,
+    };
+    const options = { captureStdout: true, maxBytes: 4096 };
+
+    const result = await runtime.copyOut(
+      '/tmp/evidence/export.json',
+      join(root, 'archive.json'),
+      command,
+      diagnostic,
+      options,
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(calls).toEqual([{ diagnostic, options }]);
+  });
 });
