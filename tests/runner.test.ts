@@ -11318,3 +11318,134 @@ describe('Runner confirmed cleanup recovery', () => {
     }
   });
 });
+
+describe('SDK sandbox execution', () => {
+  it.each([
+    ['http://llm.internal.example/v1', true],
+    ['https://llm.internal.example/v1', true],
+    ['http://llm.internal.example:8080/v1', false],
+    ['http://127.0.0.1/v1', false],
+    ['http://llm.internal.example/other', false],
+    ['https://user:password@llm.internal.example/v1', false],
+  ] as const)('validates an OpenSandbox Vault endpoint: %s', async (baseUrl, valid) => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-os-config-'));
+    const apiKeyFile = join(root, 'control-key');
+    await writeFile(apiKeyFile, 'test-control-key');
+    try {
+      const create = () =>
+        createRunner({
+          sandboxRuntime: 'opensandbox',
+          opensandbox: { endpoint: 'http://127.0.0.1:8080', apiKeyFile, image: 'review:test' },
+          llmServiceSocket: join(root, 'control.sock'),
+          modelConfig: JSON.stringify({
+            id: 'opencode-go/review',
+            baseUrl,
+            definition: { name: 'Review' },
+          }),
+        });
+      if (valid) await create().close();
+      else expect(create).toThrow();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects missing OpenSandbox configuration without falling back to another runtime', () => {
+    expect(() => createRunner({ sandboxRuntime: 'opensandbox' })).toThrow(
+      'OpenSandbox runtime requires endpoint, API key file and image',
+    );
+  });
+  it('aborts remote work and still gives cleanup a fresh execution context', async () => {
+    const baseSha = '1'.repeat(40);
+    const headSha = '2'.repeat(40);
+    let started = false;
+    let remoteStopped = false;
+    let destroyed = false;
+    const ok = { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+    const runner = createRunner({
+      evidenceRoot: sharedEvidenceRoot,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'test-model-secret',
+      process: async (_command, args) => ({
+        ...ok,
+        stdout: args.includes('rev-parse') ? `${baseSha}\n${headSha}\n` : '',
+      }),
+      sandboxRuntimeFactory: (spec) => ({
+        metadata: {
+          created: true,
+          get hostCleanupConfirmed() {
+            return destroyed;
+          },
+          id: spec.id,
+          name: spec.name,
+          runtime: 'sbx',
+          imageRef: spec.imageRef,
+          evidenceRoot: '/tmp/evidence',
+        },
+        setup: async (command) => {
+          if (command.execute === undefined) throw new Error('SDK execution unavailable');
+          await command.execute(async (context) => {
+            started = true;
+            await new Promise<void>((resolve) => {
+              const stop = () => {
+                remoteStopped = true;
+                resolve();
+              };
+              if (context.signal?.aborted) stop();
+              else context.signal?.addEventListener('abort', stop, { once: true });
+            });
+            return { ...ok, exitCode: 1 };
+          });
+        },
+        exec: async () => ({ ...ok, exitCode: 1 }),
+        copyOut: async () => ({ ...ok, exitCode: 1 }),
+        destroy: async (command) => {
+          if (command.execute === undefined) throw new Error('SDK cleanup unavailable');
+          const result = await command.execute(async (context) => {
+            if (context.signal?.aborted || !remoteStopped) return { ...ok, exitCode: 1 };
+            destroyed = true;
+            return ok;
+          });
+          if (result.exitCode !== 0) throw new Error('cleanup failed');
+        },
+      }),
+    });
+    try {
+      const admitted = await runner.handle(
+        new Request('http://runner/jobs', {
+          method: 'POST',
+          headers: {
+            authorization: 'Bearer runner-test-token',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            ...runnerJobFields,
+            id: 'sdk-cancel-job',
+            runId: 'sdk-cancel-run',
+            repositoryUrl: 'https://github.com/acme/reviewed.git',
+            baseSha,
+            headSha,
+            attempt: 1,
+          }),
+        }),
+      );
+      expect(admitted.status).toBe(202);
+      const accepted = (await admitted.json()) as { id: string };
+      await vi.waitFor(() => expect(started).toBe(true));
+      const stopped = await runner.handle(
+        new Request(`http://runner/jobs/${accepted.id}`, {
+          method: 'DELETE',
+          headers: { authorization: 'Bearer runner-test-token' },
+        }),
+      );
+      expect(await stopped.json()).toMatchObject({
+        status: 'aborted',
+        sandbox: { cleanup: 'destroyed' },
+      });
+      expect(remoteStopped).toBe(true);
+      expect(destroyed).toBe(true);
+    } finally {
+      await runner.close();
+    }
+  });
+});

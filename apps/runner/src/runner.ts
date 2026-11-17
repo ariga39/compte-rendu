@@ -1,7 +1,7 @@
 import type { ModelUsageSummary } from '@compte-rendu/contracts';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { createWriteStream, type WriteStream } from 'node:fs';
+import { createWriteStream, readFileSync, type WriteStream } from 'node:fs';
 import {
   chmod,
   mkdir,
@@ -41,9 +41,12 @@ import {
   type RunnerProcessOptions,
   type RunnerProcessResult,
   type SandboxCommand,
+  type SandboxOperation,
+  type SandboxRuntimeFactory,
   type SandboxRuntimeKind,
 } from './sandbox-runtime.js';
 import { confirmSbxCleanup } from './cleanup-recovery.js';
+import { createOpenSandboxRuntimeFactory } from './sandbox-runtime-opensandbox.js';
 import { createSbxRuntimeFactory } from './sandbox-runtime-sbx.js';
 import { createLlmServiceClient } from './llm-service-client.js';
 import {
@@ -169,6 +172,23 @@ const SbxLocalServiceBaseUrl = Schema.URLFromString.check(
     { expected: 'http://host.docker.internal:<port>/v1' },
   ),
 );
+const OpenSandboxServiceBaseUrl = Schema.URLFromString.check(
+  Schema.makeFilter(
+    (url) =>
+      ['http:', 'https:'].includes(url.protocol) &&
+      url.port === '' &&
+      /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/i.test(
+        url.hostname,
+      ) &&
+      !/^\d+(?:\.\d+){3}$/.test(url.hostname) &&
+      (url.pathname === '/v1' || url.pathname === '/v1/') &&
+      url.username === '' &&
+      url.password === '' &&
+      url.search === '' &&
+      url.hash === '',
+    { expected: 'HTTP(S) FQDN on its standard port with /v1 path' },
+  ),
+);
 const ReviewModelConfig = Schema.Struct({
   id: Schema.String.check(Schema.isPattern(/^opencode-go\/[A-Za-z0-9._:-]{1,128}$/)),
   baseUrl: Schema.optional(ModelBaseUrl),
@@ -185,12 +205,22 @@ type ReviewModelDefinitionValue = Schema.Schema.Type<typeof ReviewModelDefinitio
 const decodeReviewModelConfig = (
   raw: string | undefined,
   serviceMode: boolean,
+  openSandbox: boolean,
 ): ReviewModelConfigValue | undefined =>
   raw === undefined
     ? undefined
     : Option.getOrUndefined(
         Schema.decodeUnknownOption(
-          Schema.fromJsonString(serviceMode ? ServiceReviewModelConfig : ReviewModelConfig),
+          Schema.fromJsonString(
+            serviceMode
+              ? openSandbox
+                ? Schema.Struct({
+                    ...ServiceReviewModelConfig.fields,
+                    baseUrl: Schema.optional(OpenSandboxServiceBaseUrl),
+                  })
+                : ServiceReviewModelConfig
+              : ReviewModelConfig,
+          ),
           { onExcessProperty: 'error' },
         )(raw),
       );
@@ -576,6 +606,7 @@ type RunnerJob = {
   readonly done: Promise<void>;
   resolveDone: () => void;
   child?: ChildProcess;
+  sdkController?: AbortController;
   abortRequested: boolean;
   sandboxAttempted: boolean;
   sandboxCreated: boolean;
@@ -607,8 +638,14 @@ export interface RunnerOptions {
   readonly sbxPath?: string;
   readonly sandboxRuntime?: SandboxRuntimeKind;
   readonly sandboxCliPath?: string;
+  readonly sandboxRuntimeFactory?: SandboxRuntimeFactory;
   /** Absolute Unix socket for the host LLM service control plane. */
   readonly llmServiceSocket?: string;
+  readonly opensandbox?: {
+    readonly endpoint?: string;
+    readonly apiKeyFile?: string;
+    readonly image?: string;
+  };
   readonly openshell?: {
     readonly gateway?: string;
     readonly gatewayEndpoint?: string;
@@ -864,6 +901,9 @@ export const createRunner = (options: RunnerOptions = {}) => {
   const sandboxRuntime = resolveSandboxRuntimeConfig({
     kind: options.sandboxRuntime ?? process.env.RUNNER_SANDBOX_RUNTIME,
     cliPath: options.sandboxCliPath ?? process.env.RUNNER_SANDBOX_CLI,
+    opensandboxEndpoint: options.opensandbox?.endpoint ?? process.env.OPENSANDBOX_ENDPOINT,
+    opensandboxApiKeyFile: options.opensandbox?.apiKeyFile ?? process.env.OPENSANDBOX_API_KEY_FILE,
+    opensandboxImage: options.opensandbox?.image ?? process.env.OPENSANDBOX_IMAGE,
     openshellGateway: options.openshell?.gateway ?? process.env.OPENSHELL_GATEWAY,
     openshellEndpoint: options.openshell?.gatewayEndpoint ?? process.env.OPENSHELL_GATEWAY_ENDPOINT,
     openshellModelProvider:
@@ -883,16 +923,36 @@ export const createRunner = (options: RunnerOptions = {}) => {
   const sandboxPortPath =
     options.sandboxCliPath ??
     process.env.RUNNER_SANDBOX_CLI ??
-    (sandboxRuntime.kind === 'openshell' ? sandboxRuntime.cliPath : sbxPath);
+    (sandboxRuntime.kind === 'sbx' ? sbxPath : sandboxRuntime.cliPath);
   const authToken = options.authToken ?? process.env.RUNNER_AUTH_TOKEN;
   const modelSecretCommand =
     llmServiceSocket === undefined
       ? (options.modelSecretCommand ?? process.env.MODEL_SECRET_COMMAND)
       : undefined;
+  let opensandboxOptions: Parameters<typeof createOpenSandboxRuntimeFactory>[0] | undefined;
+  if (sandboxRuntime.opensandbox !== undefined) {
+    if (llmServiceSocket === undefined) throw new Error('OpenSandbox requires LLM service mode');
+    let apiKey: string;
+    try {
+      apiKey = readFileSync(sandboxRuntime.opensandbox.apiKeyFile, 'utf8').trim();
+      if (apiKey.length === 0) throw new Error('empty');
+    } catch {
+      throw new Error('invalid OpenSandbox API key file');
+    }
+    opensandboxOptions = {
+      endpoint: sandboxRuntime.opensandbox.endpoint,
+      apiKey,
+      image: sandboxRuntime.opensandbox.image,
+      lifetimeSeconds: Math.ceil((4 * REVIEW_ATTEMPT_BUDGET_MS) / 1000),
+    };
+  }
   const sandboxRuntimeFactory =
-    sandboxRuntime.kind === 'openshell'
-      ? createOpenShellRuntimeFactory(sandboxRuntime.openshell!)
-      : createSbxRuntimeFactory({ modelSecretCommand });
+    options.sandboxRuntimeFactory ??
+    (opensandboxOptions !== undefined
+      ? createOpenSandboxRuntimeFactory(opensandboxOptions)
+      : sandboxRuntime.kind === 'openshell'
+        ? createOpenShellRuntimeFactory(sandboxRuntime.openshell!)
+        : createSbxRuntimeFactory({ modelSecretCommand }));
   const modelResolverMissing =
     sandboxRuntime.kind === 'sbx' &&
     llmServiceSocket === undefined &&
@@ -900,6 +960,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
   const modelConfig = decodeReviewModelConfig(
     options.modelConfig ?? process.env.REVIEW_MODEL_CONFIG,
     llmServiceSocket !== undefined,
+    sandboxRuntime.kind === 'opensandbox',
   );
   if (
     llmServiceSocket !== undefined &&
@@ -925,7 +986,9 @@ export const createRunner = (options: RunnerOptions = {}) => {
   const modelPort =
     serviceBaseUrl !== undefined && serviceBaseUrl.port.length > 0
       ? serviceBaseUrl.port
-      : MODEL_PORT;
+      : serviceBaseUrl?.protocol === 'http:'
+        ? '80'
+        : MODEL_PORT;
   const modelResource = `${modelHost}:${modelPort}`;
   const openCodeConfig = modelConfig === undefined ? undefined : trustedOpenCodeConfig(modelConfig);
   const evidenceRoot =
@@ -1199,6 +1262,72 @@ export const createRunner = (options: RunnerOptions = {}) => {
     await recordLog(event);
   };
 
+  const runSdkOperation = async (
+    job: RunnerJob,
+    operation: SandboxOperation,
+    diagnostic: RunnerDiagnostic | undefined,
+    processOptions: RunnerProcessOptions = {},
+    timeoutMs: number,
+    abortable: boolean,
+  ): Promise<RunnerProcessResult> => {
+    const controller = new AbortController();
+    let timedOut = false;
+    let grace: ReturnType<typeof setTimeout> | undefined;
+    const failed = (): RunnerProcessResult => ({
+      exitCode: 1,
+      stdout: '',
+      timedOut,
+      truncated: false,
+      streamError: true,
+    });
+    if (abortable && job.abortRequested) return failed();
+    if (abortable) job.sdkController = controller;
+    const stopped = new Promise<RunnerProcessResult>((resolve) => {
+      controller.signal.addEventListener(
+        'abort',
+        () => {
+          grace = setTimeout(() => resolve(failed()), 5_000);
+        },
+        { once: true },
+      );
+    });
+    const timer = setTimeout(
+      () => {
+        timedOut = true;
+        controller.abort();
+      },
+      Math.max(1, timeoutMs),
+    );
+    let result: RunnerProcessResult;
+    try {
+      result = await Promise.race([
+        operation({
+          ...processOptions,
+          maxBytes:
+            processOptions.maxBytes ??
+            (diagnostic === undefined ? undefined : MAX_DIAGNOSTIC_STDERR_BYTES),
+          signal: controller.signal,
+          timeoutMs,
+          captureStderr: processOptions.captureStderr ?? diagnostic !== undefined,
+          stderrRedactions: [
+            job.diagnosticCheckoutToken,
+            job.grantToken,
+            job.input.repositoryReadToken,
+            ...(processOptions.stderrRedactions ?? []),
+          ].filter((value): value is string => value !== undefined && value.length > 0),
+        }).catch(failed),
+        stopped,
+      ]);
+      if (timedOut) result = { ...result, exitCode: 1, timedOut: true };
+    } finally {
+      clearTimeout(timer);
+      if (grace !== undefined) clearTimeout(grace);
+      if (job.sdkController === controller) job.sdkController = undefined;
+    }
+    if (diagnostic !== undefined) await recordCommand(job, diagnostic, result);
+    return result;
+  };
+
   const runTracked = async (
     job: RunnerJob,
     command: string,
@@ -1348,8 +1477,31 @@ export const createRunner = (options: RunnerOptions = {}) => {
     if (!(await fileExists(join(evidencePath, 'opencode.stderr')))) complete = false;
 
     const runtime = job.sandboxRuntime;
-    const archiveCommand: SandboxCommand = (args, diagnostic, processOptions) =>
-      runArchive(job, sandboxPortPath, args, deadlineAt, processOptions, diagnostic);
+    const archiveCommand: SandboxCommand = Object.assign(
+      (
+        args: readonly string[],
+        diagnostic?: RunnerDiagnostic,
+        processOptions?: RunnerProcessOptions,
+      ) => runArchive(job, sandboxPortPath, args, deadlineAt, processOptions, diagnostic),
+      {
+        execute: (
+          operation: SandboxOperation,
+          diagnostic?: RunnerDiagnostic,
+          processOptions?: RunnerProcessOptions,
+        ) =>
+          runSdkOperation(
+            job,
+            operation,
+            diagnostic,
+            processOptions,
+            Math.min(
+              processOptions?.timeoutMs ?? ARCHIVE_COMMAND_TIMEOUT_MS,
+              deadlineAt - Date.now(),
+            ),
+            false,
+          ),
+      },
+    );
     if (runtime === undefined) {
       complete = false;
     } else {
@@ -1737,7 +1889,23 @@ export const createRunner = (options: RunnerOptions = {}) => {
     };
     if (job.sandboxRuntime !== undefined) {
       try {
-        await job.sandboxRuntime.destroy(cleanupProcess);
+        await job.sandboxRuntime.destroy(
+          Object.assign(cleanupProcess, {
+            execute: (
+              operation: SandboxOperation,
+              diagnostic?: RunnerDiagnostic,
+              processOptions?: RunnerProcessOptions,
+            ) =>
+              runSdkOperation(
+                job,
+                operation,
+                diagnostic,
+                processOptions,
+                CLEANUP_COMMAND_TIMEOUT_MS,
+                false,
+              ),
+          }),
+        );
       } catch {
         clean = false;
       }
@@ -2110,7 +2278,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       if (job.abortRequested) return;
       if (multi) {
         if (
-          sandboxRuntime.kind !== 'sbx' ||
+          sandboxRuntime.kind === 'openshell' ||
           llmServiceClient === undefined ||
           serviceBaseUrl === undefined
         ) {
@@ -2220,19 +2388,43 @@ export const createRunner = (options: RunnerOptions = {}) => {
       job.sandboxRuntime = runtime;
       job.sandboxAttempted = true;
       reportStage(job, 'sandbox');
-      const setupCommand: SandboxCommand = (args, diagnostic, processOptions) =>
-        runTracked(
-          job,
-          sandboxPortPath,
-          args,
-          sandboxRuntime.kind === 'openshell'
-            ? {
-                ...processOptions,
-                env: { ...strippedSandboxEnvironment, ...processOptions?.env },
-              }
-            : processOptions,
-          diagnostic,
-        );
+      const setupCommand: SandboxCommand = Object.assign(
+        (
+          args: readonly string[],
+          diagnostic?: RunnerDiagnostic,
+          processOptions?: RunnerProcessOptions,
+        ) =>
+          runTracked(
+            job,
+            sandboxPortPath,
+            args,
+            sandboxRuntime.kind === 'openshell'
+              ? {
+                  ...processOptions,
+                  env: { ...strippedSandboxEnvironment, ...processOptions?.env },
+                }
+              : processOptions,
+            diagnostic,
+          ),
+        {
+          execute: (
+            operation: SandboxOperation,
+            diagnostic?: RunnerDiagnostic,
+            processOptions?: RunnerProcessOptions,
+          ) =>
+            runSdkOperation(
+              job,
+              operation,
+              diagnostic,
+              processOptions,
+              Math.min(
+                processOptions?.timeoutMs ?? SETUP_TIMEOUT_MS,
+                job.deadlineAt - Date.now() - CLEANUP_RESERVE_MS,
+              ),
+              true,
+            ),
+        },
+      );
       try {
         await runtime.setup(setupCommand);
       } catch (error) {
@@ -3209,6 +3401,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
     if (request.method === 'DELETE') {
       if (job.state.status === 'queued' || job.state.status === 'running') {
         job.abortRequested = true;
+        job.sdkController?.abort();
         const child = job.child;
         if (child !== undefined) {
           stop(child);

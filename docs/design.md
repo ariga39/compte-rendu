@@ -175,7 +175,7 @@ selection and `multi-review.json`, with one callback and one publication.
 The LLM grant permits the routes actually needed by the job. One-reviewer jobs do
 not grant an unused synthesis route. Cancellation revokes that grant and destroys
 the shared Sandbox: closing an OpenCode client does not stop its server sessions.
-This selection/service path currently supports sbx, not OpenShell.
+This selection/service path supports sbx and OpenSandbox, not OpenShell.
 
 ## Sandbox runtime modules
 
@@ -189,13 +189,19 @@ as resources are created so partial setup can still be archived and cleaned.
   Explicit per-job rules rely on the host's deny-all policy and absence of other
   global/organization allows. Direct-model mode uses host secret resolution;
   service mode injects a short-lived job grant instead of an upstream key.
+- **OpenSandbox:** official SDK execution on local Docker Engine, read-only host
+  checkout/configuration mounts, and sidecar Credential Vault for job grants and
+  GitHub read tokens. Runner provides SDK operations with a bounded execution
+  context and AbortSignal; remote command interruption uses its execution ID.
+  Cleanup rechecks ownership and confirms Docker workload/sidecar/volume absence.
+  See [deployment constraints](opensandbox.md).
 - **OpenShell:** fixed `/workspace/{checkout,config,evidence}`, preconfigured model
   provider and job-owned GitHub provider. Startup preflight checks the configured
   provider. Cleanup verifies ownership nonce and exact recorded identities;
   malformed/uncertain get/list/delete results cannot confirm destruction.
 
 Runtime selection is startup configuration. Unknown kinds and incomplete
-OpenShell configuration fail before claims; no silent fallback to sbx occurs.
+runtime configuration fail before claims; no silent fallback to sbx occurs.
 See [security boundaries](security.md) for backend-specific assumptions.
 
 ## Credentials and evidence
@@ -321,5 +327,5 @@ and R2 recovery records provide the audit trail. Core matches the failed or supe
 job, attempt and immutable SHAs before confirming cleanup. Destroyed cleanup is
 monotonic under delayed callbacks. The queued-task projection exposes an anonymous
 cleanup-block reason only when an unresolved terminal same-PR run blocks claiming.
-Legacy evidence lacking host confirmation and OpenShell recovery remain outside
+Legacy evidence lacking host confirmation, OpenShell and OpenSandbox recovery remain outside
 this operation; see the operations guide.

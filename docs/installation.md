@@ -582,7 +582,9 @@ and every file it reads outside writable sandbox mounts.
 
 The Runner executes reviews through a per-job sandbox runtime adapter.
 `RUNNER_SANDBOX_RUNTIME` selects `sbx` (the default, unchanged production path)
-or `openshell`. An unknown value, or an incomplete OpenShell configuration,
+or `openshell` or `opensandbox`. For the Docker Engine backend, follow
+[OpenSandbox installation](opensandbox.md), including its private standard-port
+inference endpoint. An unknown value, or incomplete runtime configuration,
 fails at startup before any claim or admission.
 
 OpenShell additionally requires:
