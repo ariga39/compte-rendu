@@ -12,6 +12,7 @@ export default defineConfig({
     sourcemap: true,
     rollupOptions: {
       external: [/^node:/],
+      output: { codeSplitting: false },
     },
   },
 });
