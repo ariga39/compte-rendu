@@ -396,10 +396,10 @@ cache hit.
 
 Control bodies are bounded at 16 KiB; inference bodies at 16 MiB. The larger bound
 allows substantial review context/tool transcripts while bounding per-request
-buffering, and is independent of the Runner claim/callback body limits. Each model
-request has a two-minute total timeout, including credential resolution, in
-addition to grant expiry. Native response output is streamed with backpressure and a 16 MiB total bound
-(to bound buffering and network queues).
+buffering, and is independent of the Runner claim/callback body limits. Native
+response output is streamed with backpressure, without a Node request deadline
+or cumulative response-size cap. LiteLLM owns upstream timeout/retry policy.
+Job cancellation, grant revocation/expiry and service shutdown still cancel active inference.
 No extra output-token cap is injected: supported client limits are forwarded.
 
 ## OpenCode recovery and terminal state
@@ -435,7 +435,6 @@ Use the instance's LLM service unit, for example:
 journalctl --user -u <LLM_UNIT> --since '2026-10-19 01:45:00 UTC' --until '2026-10-19 02:00:00 UTC' -o cat
 ```
 
-- `service-timeout`: the service's two-minute deadline expired.
 - `provider-request-aborted`: the outbound LiteLLM request was aborted. Correlate
   with caller and service lifecycle records to establish why.
 - `request-aborted` / `client-cancelled`: the caller, grant lifecycle, or service
@@ -445,7 +444,7 @@ journalctl --user -u <LLM_UNIT> --since '2026-10-19 01:45:00 UTC' --until '2026-
 - `upstream-stream-error`: reading the upstream body failed.
 - `incomplete-stream`: upstream EOF arrived without successful native completion.
   `[DONE]` alone does not establish completion.
-- `upstream-error-event`, `invalid-stream`, or `stream-too-large`: the service
+- `upstream-error-event` or `invalid-stream`: the service
   rejected the stream for the stated reason.
 - `credential-or-request-failure`: credential resolution or request setup failed.
 - `completed`: the upstream stream completed and was consumed by the service's

@@ -3,9 +3,6 @@ import { Effect, Option, Schema } from 'effect';
 import { EventSourceParserStream } from 'eventsource-parser/stream';
 import type { UpstreamUsage } from './usage.js';
 
-const REQUEST_TIMEOUT_MS = 120_000;
-const MAX_STREAM_BYTES = 16 * 1024 * 1024;
-
 const optional = Schema.optionalKey(Schema.Unknown);
 const ChatFunction = Schema.StructWithRest(Schema.Struct({ name: Schema.String }), [
   Schema.Record(Schema.String, Schema.Unknown),
@@ -223,11 +220,9 @@ type StreamOutcome =
   | 'upstream-stream-error'
   | 'upstream-error-event'
   | 'invalid-stream'
-  | 'stream-too-large'
   | 'incomplete-stream'
   | 'client-cancelled'
-  | 'request-aborted'
-  | 'service-timeout';
+  | 'request-aborted';
 
 const requestDiagnostic = (route: LiteLlmRoute, jobId: string | undefined, signal: AbortSignal) => {
   const startedAt = Date.now();
@@ -251,13 +246,7 @@ const requestDiagnostic = (route: LiteLlmRoute, jobId: string | undefined, signa
       if (finished) return;
       finished = true;
       const finalOutcome =
-        outcome === 'completed'
-          ? 'completed'
-          : signal.aborted
-            ? signal.reason instanceof DOMException && signal.reason.name === 'TimeoutError'
-              ? 'service-timeout'
-              : 'request-aborted'
-            : outcome;
+        outcome === 'completed' ? 'completed' : signal.aborted ? 'request-aborted' : outcome;
       Effect.runSync(
         Effect.logInfo('llm.request.finished', {
           ...identity,
@@ -382,10 +371,6 @@ const relay = (
               transform(chunk, output) {
                 received += chunk.byteLength;
                 diagnostic.state.receivedBytes = received;
-                if (received > MAX_STREAM_BYTES) {
-                  streamOutcome = 'stream-too-large';
-                  throw new Error('model stream too large');
-                }
                 output.enqueue(decoder.decode(chunk, { stream: true }));
               },
               flush(output) {
@@ -605,14 +590,5 @@ export const createLiteLlmUpstream = (options: LiteLlmUpstreamOptions) => {
     signal: AbortSignal,
     sessionId?: string,
     observe?: (usage: UpstreamUsage) => void,
-  ) =>
-    Effect.runPromise(
-      run(
-        routeId,
-        body,
-        AbortSignal.any([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
-        sessionId,
-        observe,
-      ),
-    );
+  ) => Effect.runPromise(run(routeId, body, signal, sessionId, observe));
 };

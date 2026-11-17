@@ -1178,55 +1178,96 @@ it.each([
   },
 );
 
-it('records the service deadline when its own timeout signal aborts', async () => {
+it('continues a healthy stream beyond two minutes until the job cancels it', async () => {
   vi.useFakeTimers();
   const timeout = vi.spyOn(AbortSignal, 'timeout').mockImplementation((delay) => {
     const controller = new AbortController();
     setTimeout(() => controller.abort(new DOMException('deadline', 'TimeoutError')), delay);
     return controller.signal;
   });
-  const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined);
-  try {
-    const h = harness({
-      fetch: async (_url, init) =>
-        new Promise<Response>((_resolve, reject) => {
-          init?.signal?.addEventListener('abort', () => reject(new Error('private-error')), {
-            once: true,
-          });
-        }),
-    });
-    const pending = h.request({ model: 'review', messages: [] }, undefined, 'job-service-timeout');
-    await vi.advanceTimersByTimeAsync(120_001);
-    expect((await pending).status).toBe(502);
-    const finished = logs.mock.calls.filter((call) => call.includes('llm.request.finished'));
-    expect(finished).toHaveLength(1);
-    expect(finished[0]?.[2]).toMatchObject({
-      outcome: 'service-timeout',
-      jobId: 'job-service-timeout',
-    });
-  } finally {
-    logs.mockRestore();
-    timeout.mockRestore();
-    vi.useRealTimers();
-  }
-});
-
-it('bounds the upstream stream at sixteen mebibytes', async () => {
-  const chunk = new Uint8Array(16 * 1024 * 1024 + 1);
+  let source!: ReadableStreamDefaultController<Uint8Array>;
   const h = harness({
-    fetch: async () =>
+    fetch: async (_url, init) =>
       new Response(
         new ReadableStream<Uint8Array>({
           start(controller) {
-            controller.enqueue(chunk);
-            controller.close();
+            source = controller;
+            init?.signal?.addEventListener(
+              'abort',
+              () => controller.error(new Error('cancelled')),
+              { once: true },
+            );
           },
         }),
         { headers: { 'content-type': 'text/event-stream' } },
       ),
   });
-  const response = await h.request({ model: 'review', messages: [] }, undefined, 'job-too-large');
-  await expect(response.text()).rejects.toThrow();
+  try {
+    const controller = new AbortController();
+    const response = await h.request({ model: 'review', messages: [] }, controller.signal);
+    const reader = response.body!.getReader();
+    source.enqueue(new TextEncoder().encode('data: {"choices":[]}\n\n'));
+    expect((await reader.read()).done).toBe(false);
+    await vi.advanceTimersByTimeAsync(120_001);
+    source.enqueue(new TextEncoder().encode('data: {"choices":[]}\n\n'));
+    expect((await reader.read()).done).toBe(false);
+    controller.abort();
+    await expect(reader.read()).rejects.toThrow();
+  } finally {
+    h.close();
+    timeout.mockRestore();
+    vi.useRealTimers();
+  }
+});
+
+it('relays a healthy stream larger than sixteen mebibytes with usage intact', async () => {
+  const chunk = new TextEncoder().encode(
+    `data: ${JSON.stringify({ choices: [{ delta: { content: 'x'.repeat(64 * 1024) }, finish_reason: null }] })}\n\n`,
+  );
+  let sent = 0;
+  const h = harness({
+    fetch: async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          pull(controller) {
+            if (sent++ < 257) controller.enqueue(chunk);
+            else {
+              controller.enqueue(new TextEncoder().encode(chatWire()));
+              controller.close();
+            }
+          },
+        }),
+        { headers: { 'content-type': 'text/event-stream' } },
+      ),
+  });
+  try {
+    const response = await h.request(
+      { model: 'review', messages: [] },
+      undefined,
+      'job-large-stream',
+    );
+    const reader = response.body!.getReader();
+    let bytes = 0;
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      bytes += next.value.byteLength;
+    }
+    expect(bytes).toBeGreaterThan(16 * 1024 * 1024);
+    const usage = await (await h.usage('job-large-stream')).json();
+    expect(usage).toMatchObject({
+      models: [
+        {
+          requests: 1,
+          incompleteRequests: 0,
+          inputTokens: { total: 3 },
+          outputTokens: { total: 4 },
+        },
+      ],
+    });
+  } finally {
+    h.close();
+  }
 });
 
 it.each(['cancel', 'abort'] as const)(
