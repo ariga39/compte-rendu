@@ -317,7 +317,7 @@ An authenticated Runner maintenance operation can reconcile a failed sbx run
 whose original host-directory cleanup was confirmed and whose exact Sandbox is
 now absent. It rechecks scoped policies/secrets and revokes the job grant before
 reporting recovery. Original terminal evidence remains immutable; separate local
-and R2 recovery records provide the audit trail. Core matches the failed run,
+and R2 recovery records provide the audit trail. Core matches the failed or superseded run,
 job, attempt and immutable SHAs before confirming cleanup. Destroyed cleanup is
 monotonic under delayed callbacks. The queued-task projection exposes an anonymous
 cleanup-block reason only when an unresolved terminal same-PR run blocks claiming.
