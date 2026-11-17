@@ -381,7 +381,9 @@ allow only `function`; Responses allow `function` and `custom`. Hosted tools
 (such as web search, file search, code interpreter and MCP) and
 `web_search_options` are rejected before contacting LiteLLM. Unsupported top-level fields
 are rejected instead of silently ignored. Nested protocol payloads are handled by LiteLLM. Upstream HTTP
-errors become sanitized failures; interrupted streams are not successful results.
+errors retain their 400–599 status with a fixed sanitized body; upstream error
+text and arbitrary headers are not forwarded. Transport failures use 502.
+Interrupted streams are not successful results.
 
 Messages, tools, reasoning, image parts and provider-native replay data are
 forwarded without conversion to an intermediate agent Context. LiteLLM performs
@@ -413,6 +415,16 @@ correction, recovery eligibility is checked for each invocation: an earlier
 known error cannot excuse a generic failure in the correction round. Unknown
 errors, other nonzero exits, timeout, truncation, identity mismatch and incomplete
 required evidence fail without publication. See [final output](review-decisions-design.md#final-output-and-publication).
+
+Other structured OpenCode provider errors are recorded as model-request
+failures (`upstream`, phase `agent`), with an HTTP status when the event reports
+400–599. Core persists that status and the dashboard displays it separately from
+invalid review output (`invalid_output`, phase `output_validation`). Raw provider
+messages are not included in the public failure record. Existing historical
+classifications are unchanged. Apply migration `0014_failure_http_status.sql`
+before deploying Core/dashboard, then update Runner and the Node service after
+draining active jobs. The nullable column preserves compatibility with older
+callbacks while the rollout completes.
 
 The original CLI exit code and error events remain in the evidence. A sanitized
 `Runner accepted recovered OpenCode session` log records the job/session identity

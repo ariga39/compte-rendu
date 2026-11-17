@@ -194,6 +194,85 @@ const capturePostHogTransport = (status = 200) => {
 };
 
 describe('Core Worker', () => {
+  it.each([
+    {
+      failure: { reason: 'upstream', cause: 'upstream-error', httpStatus: 400 },
+      expected: { phase: 'agent', reason: 'upstream', httpStatus: 400 },
+    },
+    {
+      failure: { reason: 'upstream', cause: 'upstream-error', httpStatus: 429 },
+      expected: { phase: 'agent', reason: 'upstream', httpStatus: 429 },
+    },
+    {
+      failure: { reason: 'upstream', cause: 'upstream-error', httpStatus: 503 },
+      expected: { phase: 'agent', reason: 'upstream', httpStatus: 503 },
+    },
+    {
+      failure: { reason: 'upstream', cause: 'upstream-error' },
+      expected: { phase: 'agent', reason: 'upstream' },
+    },
+    {
+      failure: { reason: 'invalid-output', cause: 'result-schema-failure' },
+      expected: { phase: 'output_validation', reason: 'invalid_output' },
+    },
+  ])(
+    'persists callback failure $failure as a distinct dashboard failure after worker recreation',
+    async ({ failure, expected }) => {
+      const database = new SqliteD1Database();
+      const store = createD1ReviewStateStore(database);
+      const review = await store.claimReview({
+        deliveryId: 'failure-classification-run',
+        job: {
+          repositoryId: 11,
+          pullRequestNumber: 42,
+          installationId: 7,
+          baseSha: '1'.repeat(40),
+          headSha: '2'.repeat(40),
+          trigger: 'automatic',
+          repositoryVisibility: 'private',
+        },
+        occurredAt: '2026-10-19T00:00:00.000Z',
+      });
+      if (review.kind !== 'claimed') throw new Error('not admitted');
+      await store.claimNextJob!({
+        jobId: 'failure-job',
+        attempt: 1,
+        occurredAt: '2026-10-19T00:00:01.000Z',
+      });
+      const env = { ...coreEnv(database), EVIDENCE_BUCKET: { put: async () => undefined } };
+      const worker = createCoreWorker(env, { stateStore: store, github: {} });
+      const callback = {
+        ...JSON.parse(await failedCallback(review.runId, 'failure-job')),
+        failure,
+      };
+      const post = (body: unknown) =>
+        worker.fetch(
+          new Request('https://core.internal/runner-results', {
+            method: 'POST',
+            headers: { 'x-compte-rendu-runner-callback': 'verified' },
+            body: JSON.stringify(body),
+          }),
+        );
+      expect((await post({ ...callback, id: 'foreign-job' })).status).toBe(409);
+      expect((await post({ ...callback, failure: { ...failure, httpStatus: 999 } })).status).toBe(
+        400,
+      );
+      expect((await post(callback)).status).toBe(202);
+      const reader = createCoreWorker(env);
+      const detail = await (
+        await reader.fetch(new Request(`https://core.internal/api/jobs/${review.runId}`))
+      ).json();
+      expect(detail).toMatchObject({
+        task: { status: 'failed', identity: { kind: 'anonymous' }, failure: expected },
+      });
+      const history = await (
+        await reader.fetch(new Request('https://core.internal/api/jobs'))
+      ).json();
+      expect(history.tasks[0].failure).toEqual(expected);
+      database.close();
+    },
+  );
+
   it('persists job model usage from an owned failed callback without exposing private repository identity', async () => {
     const database = new SqliteD1Database();
     const store = createD1ReviewStateStore(database);
@@ -1121,6 +1200,7 @@ describe('Core Worker', () => {
         '0010_review_branch_refs.sql',
         '0012_review_configuration.sql',
         '0013_model_usage.sql',
+        '0014_failure_http_status.sql',
       ]);
       const migratedStore = createD1ReviewStateStore(database);
       if (migratedStore.claimNextJob === undefined) throw new Error('claim route is unavailable');

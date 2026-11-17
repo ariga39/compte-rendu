@@ -71,6 +71,7 @@ export class SqliteD1Database implements D1DatabaseLike {
       '0011_review_decision.sql',
       '0012_review_configuration.sql',
       '0013_model_usage.sql',
+      '0014_failure_http_status.sql',
     ],
   ) {
     this.applyMigrations(migrationNames);

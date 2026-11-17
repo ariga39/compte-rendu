@@ -913,6 +913,39 @@ test('detail renders milestones, failure category and the public PR link', async
   );
 });
 
+for (const httpStatus of [400, 429, 503, undefined]) {
+  test(`detail distinguishes model request failure with HTTP status ${httpStatus}`, async ({
+    page,
+    harness,
+    base,
+  }) => {
+    harness.setHandler(() =>
+      ok(
+        detailData(
+          task({
+            runId: 'upstream-failure',
+            status: 'failed',
+            dispatch: null,
+            failure: {
+              phase: 'agent',
+              reason: 'upstream',
+              ...(httpStatus === undefined ? {} : { httpStatus }),
+            },
+          }),
+        ),
+      ),
+    );
+    await page.goto(`${base}/jobs/upstream-failure`);
+    const notice = page.locator('.notice.error');
+    await expect(notice).toContainText('The model request failed');
+    if (httpStatus === undefined) await expect(notice).not.toContainText('HTTP');
+    else await expect(notice).toContainText(`The model request failed (HTTP ${httpStatus})`);
+    await expect(notice).not.toContainText('submitted output');
+    if (httpStatus === 400)
+      await page.screenshot({ path: '/tmp/cr226-upstream-failure.png', fullPage: true });
+  });
+}
+
 test('detail renders uncertain publication neutrally', async ({ page, harness, base }) => {
   harness.setHandler(() =>
     ok(

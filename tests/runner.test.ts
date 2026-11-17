@@ -2041,6 +2041,151 @@ describe('Runner Job HTTP interface', () => {
     ).resolves.toBe(markdown);
   });
 
+  it('reports an unrecovered provider request failure as upstream with its HTTP status', async () => {
+    const callbacks: Request[] = [];
+    const output = JSON.stringify({
+      type: 'error',
+      sessionID: 'scenario-session',
+      error: {
+        type: 'provider.invalid-request',
+        message: 'model request failed',
+        status: 400,
+      },
+    });
+    const { terminal, manifest } = await runAgentScenario({
+      runId: 'run-226-upstream-400',
+      output,
+      exitCode: 1,
+      callbackRequests: callbacks,
+    });
+
+    expect(terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'upstream', cause: 'upstream-error', httpStatus: 400 },
+      evidence: { status: 'complete' },
+      sandbox: { cleanup: 'destroyed' },
+    });
+    expect(terminal).not.toHaveProperty('result');
+    expect(manifest).toMatchObject({
+      execution: {
+        status: 'failed',
+        reason: 'upstream',
+        cause: 'upstream-error',
+        httpStatus: 400,
+      },
+      terminal: {
+        status: 'failed',
+        reason: 'upstream',
+        cause: 'upstream-error',
+        httpStatus: 400,
+      },
+    });
+    expect(await callbacks[0]!.json()).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'upstream', cause: 'upstream-error', httpStatus: 400 },
+    });
+  });
+
+  it.each([
+    ['without a status', {}],
+    ['with an out-of-range status', { status: 999 }],
+  ])(
+    'reports an unrecovered provider failure %s as upstream without an HTTP status',
+    async (_name, errorFields) => {
+      const output = JSON.stringify({
+        type: 'error',
+        sessionID: 'scenario-session',
+        error: { type: 'provider.server-error', message: 'model request failed', ...errorFields },
+      });
+      const { terminal, manifest } = await runAgentScenario({
+        runId: `run-226-upstream-${String(_name).replace(/\W+/g, '-')}`,
+        output,
+        exitCode: 1,
+      });
+
+      expect(terminal).toMatchObject({
+        status: 'failed',
+        failure: { reason: 'upstream', cause: 'upstream-error' },
+        sandbox: { cleanup: 'destroyed' },
+      });
+      expect(terminal).not.toHaveProperty('failure.httpStatus');
+      expect(manifest).toMatchObject({
+        execution: { status: 'failed', reason: 'upstream', cause: 'upstream-error' },
+        terminal: { status: 'failed', reason: 'upstream', cause: 'upstream-error' },
+      });
+      expect(manifest.execution).not.toHaveProperty('httpStatus');
+      expect(manifest.terminal).not.toHaveProperty('httpStatus');
+    },
+  );
+
+  it('reports a provider invalid-output error from another session as upstream', async () => {
+    const output = JSON.stringify({
+      type: 'error',
+      sessionID: 'another-session',
+      error: { type: 'provider.invalid-output', status: 200 },
+    });
+    const { terminal } = await runAgentScenario({
+      runId: 'run-226-upstream-foreign-session',
+      output: `${output}\n${finalMarkdownJsonl()}`,
+      exitCode: 1,
+    });
+
+    expect(terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'upstream', cause: 'upstream-error' },
+    });
+    expect(terminal).not.toHaveProperty('failure.httpStatus');
+    expect(terminal).not.toHaveProperty('result');
+  });
+
+  it('keeps an unproven same-session status-200 provider recovery as invalid output', async () => {
+    const error = JSON.stringify({
+      type: 'error',
+      sessionID: 'scenario-session',
+      error: { type: 'provider.invalid-output', status: 200 },
+    });
+    const { terminal } = await runAgentScenario({
+      runId: 'run-226-unproven-status-200-recovery',
+      output: `${error}\n${finalMarkdownJsonl()}`,
+      exitCode: 1,
+      sessionExport: sessionExportJson('scenario-session', { outcome: 'failed' }),
+    });
+
+    expect(terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'invalid-output', cause: 'process-exit' },
+    });
+    expect(terminal).not.toHaveProperty('failure.httpStatus');
+    expect(terminal).not.toHaveProperty('result');
+  });
+
+  it('keeps cleanup as the failure reason without attributing an upstream status to it', async () => {
+    const output = JSON.stringify({
+      type: 'error',
+      sessionID: 'scenario-session',
+      error: { type: 'provider.invalid-request', message: 'model request failed', status: 400 },
+    });
+    const { terminal, manifest } = await runAgentScenario({
+      runId: 'run-226-upstream-cleanup-failure',
+      output,
+      exitCode: 1,
+      cleanupFailure: true,
+    });
+
+    expect(terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'cleanup', cause: 'upstream-error' },
+      sandbox: { cleanup: 'failed' },
+    });
+    expect(terminal).not.toHaveProperty('failure.httpStatus');
+    expect(manifest).toMatchObject({
+      execution: { status: 'failed', reason: 'cleanup', cause: 'upstream-error' },
+      terminal: { status: 'failed', reason: 'cleanup', cause: 'upstream-error' },
+    });
+    expect(manifest.execution).not.toHaveProperty('httpStatus');
+    expect(manifest.terminal).not.toHaveProperty('httpStatus');
+  });
+
   type RecoveryScenario = {
     readonly errorSession?: string;
     readonly exportOutcome?: string;
@@ -9716,6 +9861,85 @@ describe('Runner multi-model review', () => {
       expect(reviews).toHaveLength(1);
       expect(reviews[0]).toMatchObject({ event: 'REQUEST_CHANGES', commit_id: headSha });
       expect((reviews[0] as { body: string }).body).toContain(synthesisMarkdown);
+    } finally {
+      database.close();
+    }
+  });
+
+  it('persists a Runner-produced upstream provider failure through Core', async () => {
+    const database = new SqliteD1Database();
+    const stateStore = createD1ReviewStateStore(database);
+    try {
+      const claim = await stateStore.claimReview({
+        deliveryId: 'delivery-multi-upstream',
+        job: {
+          repositoryId: 11,
+          installationId: 7,
+          pullRequestNumber: 42,
+          baseSha,
+          headSha,
+          trigger: 'automatic',
+        },
+        occurredAt: '2026-09-01T00:00:00.000Z',
+      });
+      if (claim.kind !== 'claimed') throw new Error('upstream review run was not claimed');
+      await stateStore.recordRunnerJob({
+        runId: claim.runId,
+        jobId: runnerJobFields.id,
+        attempt: 1,
+      });
+
+      const error = JSON.stringify({
+        type: 'error',
+        sessionID: rootSession,
+        error: {
+          type: 'provider.invalid-request',
+          message: 'model request failed',
+          status: 400,
+        },
+      });
+      const result = await runScenario({
+        runId: claim.runId,
+        rootJsonl: error,
+        agentExitCode: 1,
+      });
+      expect(result.terminal).toMatchObject({
+        status: 'failed',
+        failure: { reason: 'upstream', cause: 'upstream-error', httpStatus: 400 },
+      });
+      const callback = result.callbacks[0]!;
+
+      const env = {
+        REVIEW_DB: database,
+        GITHUB_APP_ID: '1234567',
+        GITHUB_APP_PRIVATE_KEY: 'test-private-key',
+        EVIDENCE_BUCKET: { put: async () => undefined },
+      };
+      const worker = createCoreWorker(env, { github: {} });
+      const response = await worker.fetch(
+        new Request('https://core.internal/runner-results', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-compte-rendu-runner-callback': 'verified',
+          },
+          body: await callback.clone().text(),
+        }),
+        env,
+        { waitUntil: () => undefined },
+      );
+      expect(response.status).toBe(202);
+
+      const reader = createCoreWorker(env, { github: {} });
+      const detail = await (
+        await reader.fetch(new Request(`https://core.internal/api/jobs/${claim.runId}`))
+      ).json();
+      expect(detail).toMatchObject({
+        task: {
+          status: 'failed',
+          failure: { phase: 'agent', reason: 'upstream', httpStatus: 400 },
+        },
+      });
     } finally {
       database.close();
     }

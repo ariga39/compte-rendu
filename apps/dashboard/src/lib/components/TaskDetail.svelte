@@ -241,7 +241,7 @@
     {#if dash.data.task.failure}
       <div class="notice error" role="alert">
         <strong>{failurePhaseLabel(dash.data.task.failure.phase)}</strong><br />
-        {failureReasonLabel(dash.data.task.failure.reason)}
+        {failureReasonLabel(dash.data.task.failure.reason)}{#if dash.data.task.failure.httpStatus !== undefined}{' '}(HTTP {dash.data.task.failure.httpStatus}){/if}
       </div>
     {/if}
 

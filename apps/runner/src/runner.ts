@@ -330,6 +330,17 @@ const OpenCodeRecoverableError = Schema.Struct({
     status: Schema.Literal(200),
   }),
 });
+const OpenCodeProviderError = Schema.Struct({
+  type: Schema.Literal('error'),
+  error: Schema.Struct({
+    type: Schema.String.check(Schema.isPattern(/^provider\.[A-Za-z0-9._:-]+$/)),
+  }),
+});
+const OpenCodeProviderHttpStatus = Schema.Struct({
+  error: Schema.Struct({
+    status: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 400, maximum: 599 }))),
+  }),
+});
 const OpenCodeSessionId = Schema.NonEmptyString.check(Schema.isPattern(/^[A-Za-z0-9._:-]+$/));
 const OpenCodeSessionEvent = Schema.Struct({ sessionID: OpenCodeSessionId });
 const OpenCodeSession = Schema.Struct({ id: OpenCodeSessionId });
@@ -649,6 +660,7 @@ const readJson = async (request: Request) => {
 type ParsedAgentResult = {
   readonly recoveredErrors?: number;
   readonly cause?: RunnerFailureCauseValue;
+  readonly upstream?: { readonly httpStatus?: number };
 };
 
 const parseResult = (stdout: string, recoverySessionId?: string): ParsedAgentResult => {
@@ -672,6 +684,13 @@ const parseResult = (stdout: string, recoverySessionId?: string): ParsedAgentRes
       ) {
         recoveredErrors += 1;
         continue;
+      }
+      if (Option.isSome(Schema.decodeUnknownOption(OpenCodeProviderError)(event))) {
+        const status = Schema.decodeUnknownOption(OpenCodeProviderHttpStatus)(event);
+        const httpStatus = Option.isSome(status) ? status.value.error.status : undefined;
+        return {
+          upstream: httpStatus === undefined ? {} : { httpStatus },
+        };
       }
       return { cause: 'agent-error' };
     }
@@ -2308,7 +2327,8 @@ export const createRunner = (options: RunnerOptions = {}) => {
         !agent.timedOut &&
         !agent.truncated &&
         agent.streamError !== true &&
-        initialStdout.cause === undefined
+        initialStdout.cause === undefined &&
+        initialStdout.upstream === undefined
       ) {
         // A normal exit with no valid final result is only eligible for the one
         // correction when the exact session reached an authoritative normal
@@ -2381,7 +2401,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
           const recoveredErrors =
             (initialStdout.recoveredErrors ?? 0) + (reminderParsed.recoveredErrors ?? 0);
           agentParsed =
-            reminderParsed.cause !== undefined
+            reminderParsed.cause !== undefined || reminderParsed.upstream !== undefined
               ? reminderParsed
               : reminder.exitCode !== 0 && !reminderRecovered
                 ? { cause: 'process-exit' }
@@ -2479,6 +2499,15 @@ export const createRunner = (options: RunnerOptions = {}) => {
         } else if (parsed.cause !== undefined) {
           executionCause = parsed.cause;
           failure = { reason: 'invalid-output', cause: executionCause };
+        } else if (parsed.upstream !== undefined) {
+          executionCause = 'upstream-error';
+          failure = {
+            reason: 'upstream',
+            cause: executionCause,
+            ...(parsed.upstream.httpStatus === undefined
+              ? {}
+              : { httpStatus: parsed.upstream.httpStatus }),
+          };
         } else if (agent.exitCode !== 0 && !recoveredProvider) {
           executionCause = 'process-exit';
           failure = { reason: 'invalid-output', cause: executionCause };
@@ -2741,12 +2770,18 @@ export const createRunner = (options: RunnerOptions = {}) => {
                       status: 'failed',
                       reason: finalFailure.reason,
                       ...(finalFailure.cause === undefined ? {} : { cause: finalFailure.cause }),
+                      ...(finalFailure.httpStatus === undefined
+                        ? {}
+                        : { httpStatus: finalFailure.httpStatus }),
                     }
                   : { status: 'succeeded', validation: 'valid-review-result' },
             terminal: {
               status: finalStatus,
               ...(finalFailure === undefined ? {} : { reason: finalFailure.reason }),
               ...(finalFailure?.cause === undefined ? {} : { cause: finalFailure.cause }),
+              ...(finalFailure?.httpStatus === undefined
+                ? {}
+                : { httpStatus: finalFailure.httpStatus }),
             },
             evidence: { id: evidenceId, status: evidenceStatus },
             complete: evidenceComplete && evidenceFailure === undefined,

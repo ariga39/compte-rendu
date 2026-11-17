@@ -539,12 +539,17 @@ export const createCoreWorker = (
             : 'unknown';
       const failure: PublicTaskFailure = {
         reason,
+        ...(callback.status === 'failed' && callback.failure.httpStatus !== undefined
+          ? { httpStatus: callback.failure.httpStatus }
+          : {}),
         phase:
-          reason === 'invalid_output'
-            ? 'output_validation'
-            : reason === 'timeout' || reason === 'unknown'
-              ? 'unknown'
-              : reason,
+          reason === 'upstream'
+            ? 'agent'
+            : reason === 'invalid_output'
+              ? 'output_validation'
+              : reason === 'timeout' || reason === 'unknown'
+                ? 'unknown'
+                : reason,
       };
       await markRunFailed(outcome, callback.runId, occurredAt, undefined, failure);
     };

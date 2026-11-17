@@ -159,6 +159,7 @@ export const FAILURE_REASON_LABEL: Record<string, string> = {
   checkout: 'Could not fetch the code',
   sandbox: 'Could not prepare the review environment',
   agent: 'The review agent did not complete',
+  upstream: 'The model request failed',
   timeout: 'The review timed out',
   invalid_output: 'The submitted output was not valid',
   evidence: 'Could not save the run records',

@@ -75,7 +75,10 @@ export const RunnerFailureCause = Schema.Literals([
   'result-schema-failure',
   'missing-terminal-message',
   'empty-final-text',
+  'upstream-error',
 ]);
+
+const RunnerHttpStatus = Schema.Int.check(Schema.isBetween({ minimum: 400, maximum: 599 }));
 
 export const RunnerJobInput = Schema.Struct({
   reviewConfiguration: Schema.optional(ReviewConfiguration),
@@ -110,12 +113,14 @@ export const RunnerJobResponse = Schema.Struct({
       reason: Schema.Literals([
         'checkout',
         'agent',
+        'upstream',
         'timeout',
         'invalid-output',
         'evidence',
         'cleanup',
       ]),
       cause: Schema.optional(RunnerFailureCause),
+      httpStatus: Schema.optional(RunnerHttpStatus),
     }),
   ),
 });
@@ -172,12 +177,14 @@ const CallbackFailure = Schema.Struct({
   reason: Schema.Literals([
     'checkout',
     'agent',
+    'upstream',
     'timeout',
     'invalid-output',
     'evidence',
     'cleanup',
   ]),
   cause: Schema.optional(RunnerFailureCause),
+  httpStatus: Schema.optional(RunnerHttpStatus),
 });
 const CallbackIdentity = {
   usage: Schema.optionalKey(ModelUsageSummary),
@@ -615,6 +622,7 @@ export const PublicTaskFailure = Schema.Struct({
     'checkout',
     'sandbox',
     'agent',
+    'upstream',
     'timeout',
     'invalid_output',
     'evidence',
@@ -626,6 +634,7 @@ export const PublicTaskFailure = Schema.Struct({
     'review_reset_failed',
     'unknown',
   ]),
+  httpStatus: Schema.optional(RunnerHttpStatus),
 });
 export type PublicTaskFailure = typeof PublicTaskFailure.Type;
 
