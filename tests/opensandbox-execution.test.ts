@@ -121,6 +121,41 @@ const cancellationFixture = (
 };
 
 describe('executeOpenSandboxCommand', () => {
+  it.each(['error', 'early-eof'])('interrupts initialized remote work after %s', async (ending) => {
+    let stopped = false;
+    const fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const method = init?.method ?? (input instanceof Request ? input.method : 'GET');
+      if (method === 'DELETE') {
+        stopped = true;
+        return new Response(null, { status: 204 });
+      }
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(
+              new TextEncoder().encode(
+                streamOf([{ type: 'init', text: 'remote-running', timestamp: 1 }]),
+              ),
+            );
+            setTimeout(
+              () =>
+                ending === 'error'
+                  ? controller.error(new Error('transport disconnected'))
+                  : controller.close(),
+              0,
+            );
+          },
+        }),
+        { headers: { 'content-type': 'text/event-stream' } },
+      );
+    };
+    const commands = new CommandsAdapter(createExecdClient({ baseUrl, fetch }), { baseUrl, fetch });
+    const result = await executeOpenSandboxCommand({ commands }, ['long-running-work'], {});
+    expect(stopped).toBe(true);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.streamError).toBe(true);
+  });
+
   it('returns the remote exit code, stdout and stderr while preserving argv', async () => {
     const argv = ['sh', '-c', 'printf stdout-ok; printf stderr-ok >&2; exit 7'];
     const fixture = commandFixture(

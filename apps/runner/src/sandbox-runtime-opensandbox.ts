@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { basename, join, posix } from 'node:path';
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import {
   ConnectionConfig,
   Sandbox,
@@ -39,6 +40,10 @@ const failure = (): RunnerProcessResult => ({
 const EVIDENCE_ROOT = '/tmp/compte-rendu-evidence';
 const isMissingSandbox = (error: unknown): boolean =>
   error instanceof SandboxApiException && error.statusCode === 404;
+const EvidenceEntry = Schema.Struct({
+  path: Schema.NonEmptyString,
+  type: Schema.Literals(['file', 'directory']),
+});
 const IdentityPage = Schema.Struct({
   items: Schema.Array(
     Schema.Struct({
@@ -225,15 +230,43 @@ export const createOpenSandboxRuntimeFactory =
             };
             const cancelled = (): boolean => aborted || context.signal?.aborted === true;
             context.signal?.addEventListener('abort', onAbort, { once: true });
+            const active = sandbox;
             try {
-              await writeFile(temporary, '', { mode: 0o600, flag: 'wx' });
-              download = (await sandbox.files.readBytesStreamDetailed!(path)).body;
-              if (cancelled()) {
-                aborted = true;
-                await closeDownload();
-                return failure();
-              }
-              for await (const chunk of download) await writeFile(temporary, chunk, { flag: 'a' });
+              const copy = async (source: string, target: string): Promise<void> => {
+                if (cancelled()) throw new Error('copy cancelled');
+                const info = Schema.decodeUnknownSync(EvidenceEntry)(
+                  (await active.files.getFileInfo([source]))[source],
+                );
+                if (info.path !== source) throw new Error('invalid evidence identity');
+                if (info.type === 'directory') {
+                  await mkdir(target, { mode: 0o700 });
+                  const entries = Schema.decodeUnknownSync(Schema.Array(EvidenceEntry))(
+                    await active.files.listDirectory({ path: source, depth: 1 }),
+                  );
+                  for (const entry of entries) {
+                    if (
+                      posix.normalize(entry.path) !== entry.path ||
+                      posix.dirname(entry.path) !== source
+                    )
+                      throw new Error('invalid evidence path');
+                    await copy(entry.path, join(target, basename(entry.path)));
+                  }
+                  return;
+                }
+                await writeFile(target, '', { mode: 0o600, flag: 'wx' });
+                download = (await active.files.readBytesStreamDetailed!(source)).body;
+                try {
+                  if (cancelled()) throw new Error('copy cancelled');
+                  for await (const chunk of download) {
+                    if (cancelled()) throw new Error('copy cancelled');
+                    await writeFile(target, chunk, { flag: 'a' });
+                  }
+                } finally {
+                  await closeDownload();
+                  download = undefined;
+                }
+              };
+              await copy(path, temporary);
               if (cancelled()) return failure();
               await rename(temporary, destination);
               return success();
@@ -242,19 +275,21 @@ export const createOpenSandboxRuntimeFactory =
             } finally {
               context.signal?.removeEventListener('abort', onAbort);
               await closeDownload();
-              await rm(temporary, { force: true });
+              await rm(temporary, { recursive: true, force: true });
             }
           },
           'copy-evidence',
         );
       },
       async destroy(command) {
+        let manager: SandboxManager | undefined;
         try {
           if (!createAttempted && identity === undefined) {
             hostCleanupConfirmed = true;
             return;
           }
-          const manager = SandboxManager.create({ connectionConfig: connection });
+          const activeManager = SandboxManager.create({ connectionConfig: connection });
+          manager = activeManager;
           const identities = new Set<string>();
           if (identity !== undefined) identities.add(identity);
           const result = await execute(
@@ -262,7 +297,7 @@ export const createOpenSandboxRuntimeFactory =
             async () => {
               let complete = false;
               for (let page = 1; page <= 20; page += 1) {
-                const raw = await manager.listSandboxInfos({
+                const raw = await activeManager.listSandboxInfos({
                   metadata: { 'cr-job-owner': owner },
                   page,
                   pageSize: 100,
@@ -282,14 +317,14 @@ export const createOpenSandboxRuntimeFactory =
               for (const id of identities) {
                 let current;
                 try {
-                  current = await manager.getSandboxInfo(id);
+                  current = await activeManager.getSandboxInfo(id);
                 } catch (error) {
                   if (isMissingSandbox(error)) continue;
                   throw error;
                 }
                 if (current.id !== id || current.metadata?.['cr-job-owner'] !== owner)
                   return failure();
-                await manager.killSandbox(id);
+                await activeManager.killSandbox(id);
               }
               return success();
             },
@@ -321,8 +356,7 @@ export const createOpenSandboxRuntimeFactory =
           }
           hostCleanupConfirmed = true;
         } finally {
-          await sandbox?.close();
-          await connection.closeTransport();
+          await Promise.all([manager?.close(), sandbox?.close(), connection.closeTransport()]);
         }
       },
     };

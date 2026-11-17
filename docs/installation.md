@@ -1044,7 +1044,7 @@ limits.
 ### Multi-model review configuration
 
 Deploy Core migration `0012_review_configuration.sql` and the multi-model-capable
-Runner before enabling a selection. This execution path requires sbx, OpenCode 2,
+Runner before enabling a selection. This execution path requires sbx or OpenSandbox, OpenCode 2,
 and the external LLM service. A selection can contain one reviewer; it runs directly with the same prompt
 and output contract used for multiple reviewers. Jobs retain the selection
 frozen when admitted. OpenShell does not support this multi-model path yet.

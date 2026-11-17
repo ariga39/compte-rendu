@@ -44,7 +44,9 @@ it.skipIf(process.env.CR_OPENSANDBOX_NATIVE_PROBE !== '1')(
       modelResource: 'llm.compte-rendu.test:80',
       modelTokenFile: tokenFile,
       githubResource: 'api.github.com:443',
-      githubReadToken: 'dummy-github-read-token',
+      githubReadToken: process.env.CR_OPENSANDBOX_GITHUB_TOKEN_FILE
+        ? (await readFile(process.env.CR_OPENSANDBOX_GITHUB_TOKEN_FILE, 'utf8')).trim()
+        : 'dummy-github-read-token',
     });
     const command: SandboxCommand = Object.assign(
       (args: readonly string[]) =>
@@ -81,11 +83,17 @@ it.skipIf(process.env.CR_OPENSANDBOX_NATIVE_PROBE !== '1')(
         expect(versions.stdout).toContain('opencode v2.0.32');
         expect(versions.stdout).toContain('gh version 2.98.0');
       }
+      if (process.env.CR_OPENSANDBOX_GITHUB_TOKEN_FILE) {
+        expect(
+          (await runtime.exec(['gh', 'api', '--silent', 'installation/repositories'], command))
+            .exitCode,
+        ).toBe(0);
+      }
       const result = await runtime.exec(
         [
           'sh',
           '-c',
-          'test "$(cat fixture.txt)" = read-only-checkout && test "$OPENCODE_API_KEY" = cr-native-adapter-probe && printf "native evidence" > /tmp/native-evidence.txt && printf native-ok',
+          'test "$(cat fixture.txt)" = read-only-checkout && test "$OPENCODE_API_KEY" = cr-native-adapter-probe && printf "native evidence" > /tmp/native-evidence.txt && mkdir -p /tmp/native-tree/logs && printf database > /tmp/native-tree/opencode.db && printf log > /tmp/native-tree/logs/review.log && printf native-ok',
         ],
         command,
         { captureStdout: true, maxBytes: 4096 },
@@ -95,6 +103,10 @@ it.skipIf(process.env.CR_OPENSANDBOX_NATIVE_PROBE !== '1')(
       const output = join(root, 'native-evidence.txt');
       expect((await runtime.copyOut('/tmp/native-evidence.txt', output, command)).exitCode).toBe(0);
       expect(await readFile(output, 'utf8')).toBe('native evidence');
+      const tree = join(root, 'exported-tree');
+      expect((await runtime.copyOut('/tmp/native-tree', tree, command)).exitCode).toBe(0);
+      expect(await readFile(join(tree, 'opencode.db'), 'utf8')).toBe('database');
+      expect(await readFile(join(tree, 'logs/review.log'), 'utf8')).toBe('log');
     } finally {
       await runtime.destroy(command);
       await rm(root, { recursive: true, force: true });
