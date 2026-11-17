@@ -12,6 +12,12 @@ import {
 const EvidenceId = Schema.String.check(
   Schema.isPattern(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i),
 );
+const SandboxRuntimeId = Schema.String.check(
+  Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/),
+);
+const OwnershipNonce = Schema.String.check(
+  Schema.isPattern(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i),
+);
 
 export const ReplayCallbackRequest = Schema.Struct({
   evidenceId: EvidenceId,
@@ -45,8 +51,12 @@ const RunnerManifest = Schema.Struct({
   result: Schema.optional(StructuredReviewResult),
   runtime: Schema.optional(Schema.String),
   sandboxName: Schema.optional(Schema.String),
+  sandboxId: Schema.optional(Schema.String),
+  sandboxOwnerNonce: Schema.optional(Schema.String),
   hostCleanupConfirmed: Schema.optional(Schema.Boolean),
+  hostFilesCleanupConfirmed: Schema.optional(Schema.Boolean),
 });
+export type RecoveredManifest = typeof RunnerManifest.Type;
 
 export const CallbackRecoveryReason = Schema.Literals([
   'missing-evidence',
@@ -70,6 +80,7 @@ export class CallbackRecoveryError extends Schema.TaggedError<CallbackRecoveryEr
 export type RecoveredCallback = {
   readonly body: string;
   readonly callback: typeof RunnerResultCallback.Type;
+  readonly manifest: RecoveredManifest;
 };
 
 const fail = (reason: CallbackRecoveryReason) => Effect.fail(new CallbackRecoveryError({ reason }));
@@ -188,16 +199,28 @@ export const recoverCallback = Effect.fn('recoverCallback')(function* (
     return yield* fail('identity-mismatch');
   }
 
-  if (
-    purpose === 'cleanup' &&
-    (callback.status !== 'failed' ||
-      manifest.runtime !== 'sbx' ||
-      manifest.sandboxName !== `compte-rendu-${request.jobId}` ||
-      manifest.hostCleanupConfirmed !== true ||
+  if (purpose === 'cleanup') {
+    if (
+      callback.status !== 'failed' ||
       manifest.cleanup.status !== 'failed' ||
-      callback.sandbox.cleanup !== 'failed')
-  ) {
-    return yield* fail('unsupported-recovery');
+      callback.sandbox.cleanup !== 'failed' ||
+      manifest.sandboxName !== `compte-rendu-${request.jobId}`
+    ) {
+      return yield* fail('unsupported-recovery');
+    }
+    if (manifest.runtime === 'sbx') {
+      if (manifest.hostCleanupConfirmed !== true) return yield* fail('unsupported-recovery');
+    } else if (manifest.runtime === 'opensandbox') {
+      if (
+        manifest.hostFilesCleanupConfirmed !== true ||
+        Option.isNone(Schema.decodeUnknownOption(SandboxRuntimeId)(manifest.sandboxId)) ||
+        Option.isNone(Schema.decodeUnknownOption(OwnershipNonce)(manifest.sandboxOwnerNonce))
+      ) {
+        return yield* fail('unsupported-recovery');
+      }
+    } else {
+      return yield* fail('unsupported-recovery');
+    }
   }
 
   if (
@@ -227,5 +250,5 @@ export const recoverCallback = Effect.fn('recoverCallback')(function* (
     return yield* fail('result-mismatch');
   }
 
-  return { body: text, callback };
+  return { body: text, callback, manifest };
 });

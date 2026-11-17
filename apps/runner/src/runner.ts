@@ -611,6 +611,7 @@ type RunnerJob = {
   sandboxAttempted: boolean;
   sandboxCreated: boolean;
   hostCleanupConfirmed?: boolean;
+  hostFilesCleanupConfirmed?: boolean;
   sessionIds: string[];
   multiReview?: RunnerMultiReviewEvidence;
   diagnosticCheckoutToken: string;
@@ -1844,6 +1845,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
           hostClean = false;
         }
       }
+      job.hostFilesCleanupConfirmed = hostClean;
       job.hostCleanupConfirmed =
         hostClean &&
         (!job.sandboxAttempted || job.sandboxRuntime?.metadata.hostCleanupConfirmed === true);
@@ -1942,6 +1944,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         hostClean = false;
       }
     }
+    job.hostFilesCleanupConfirmed = hostClean;
     job.hostCleanupConfirmed =
       hostClean &&
       (!job.sandboxAttempted || job.sandboxRuntime?.metadata.hostCleanupConfirmed === true);
@@ -2879,6 +2882,9 @@ export const createRunner = (options: RunnerOptions = {}) => {
             sandboxName: job.sandboxName,
             sandboxId: job.sandboxRuntime?.metadata.id ?? job.sandboxName,
             sandboxRuntimeName: job.sandboxRuntime?.metadata.name ?? job.sandboxName,
+            ...(job.sandboxRuntime?.metadata.ownershipNonce === undefined
+              ? {}
+              : { sandboxOwnerNonce: job.sandboxRuntime.metadata.ownershipNonce }),
             runtime: job.sandboxRuntime?.metadata.runtime ?? 'sbx',
             evidenceId,
             runId: job.input.runId,
@@ -2980,6 +2986,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
             evidenceFailure,
             cleanup: { status: cleaned ? 'destroyed' : 'failed' },
             hostCleanupConfirmed: job.hostCleanupConfirmed === true,
+            hostFilesCleanupConfirmed: job.hostFilesCleanupConfirmed === true,
             files: await evidenceFiles(evidencePath),
           });
           manifestFinalized = true;
@@ -3170,21 +3177,47 @@ export const createRunner = (options: RunnerOptions = {}) => {
         const recovered = await Effect.runPromise(
           recoverCallback(evidenceRoot, input, 'cleanup').pipe(Effect.option),
         );
-        if (Option.isNone(recovered) || sandboxRuntime.kind !== 'sbx')
+        if (Option.isNone(recovered))
           return jsonResponse(409, { error: 'cleanup recovery rejected' });
-        const sandboxName = `compte-rendu-${input.jobId}`;
-        await Effect.runPromise(
-          confirmSbxCleanup(sandboxName, input.jobId, (args, _diagnostic, processOptions) =>
-            executeProcess(sandboxPortPath, args, {
-              ...processOptions,
-              env: strippedSandboxEnvironment,
-              captureStdout: true,
-              captureStderr: true,
-              maxBytes: 256 * 1024,
-              timeoutMs: CLEANUP_COMMAND_TIMEOUT_MS,
-            }),
-          ),
-        );
+        const manifest = recovered.value.manifest;
+        const sandboxName = manifest.sandboxName ?? `compte-rendu-${input.jobId}`;
+        const recoveryCommand = (
+          args: readonly string[],
+          _diagnostic?: RunnerDiagnostic,
+          processOptions?: RunnerProcessOptions,
+        ) =>
+          executeProcess(sandboxPortPath, args, {
+            ...processOptions,
+            env: strippedSandboxEnvironment,
+            captureStdout: true,
+            captureStderr: true,
+            maxBytes: 256 * 1024,
+            timeoutMs: CLEANUP_COMMAND_TIMEOUT_MS,
+          });
+        if (manifest.runtime === 'sbx') {
+          if (sandboxRuntime.kind !== 'sbx')
+            return jsonResponse(409, { error: 'cleanup recovery rejected' });
+          await Effect.runPromise(confirmSbxCleanup(sandboxName, input.jobId, recoveryCommand));
+        } else if (manifest.runtime === 'opensandbox') {
+          if (
+            sandboxRuntime.kind !== 'opensandbox' ||
+            sandboxRuntimeFactory.confirmCleanupAbsent === undefined ||
+            manifest.sandboxId === undefined ||
+            manifest.sandboxOwnerNonce === undefined
+          ) {
+            return jsonResponse(409, { error: 'cleanup recovery rejected' });
+          }
+          await sandboxRuntimeFactory.confirmCleanupAbsent(
+            {
+              sandboxId: manifest.sandboxId,
+              ownershipNonce: manifest.sandboxOwnerNonce,
+              sandboxName,
+            },
+            recoveryCommand,
+          );
+        } else {
+          return jsonResponse(409, { error: 'cleanup recovery rejected' });
+        }
         if (llmServiceClient !== undefined) {
           await llmServiceClient.revoke(input.jobId);
           await clearGrantMarker(input.jobId);

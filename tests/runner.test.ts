@@ -10,6 +10,11 @@ import {
   type RunnerProcessResult,
 } from '../apps/runner/src/runner';
 import { createCoreWorker } from '../apps/core/src/core-worker';
+import type {
+  JobSandboxRuntime,
+  SandboxJobSpec,
+  SandboxRuntimeFactory,
+} from '../apps/runner/src/sandbox-runtime';
 import { createD1ReviewStateStore } from '../apps/core/src/index';
 import { SqliteD1Database } from './support/d1-database';
 
@@ -11088,6 +11093,167 @@ describe('Runner callback recovery', () => {
 });
 
 describe('Runner confirmed cleanup recovery', () => {
+  it('recovers a recorded OpenSandbox cleanup after restart without deleting workload', async () => {
+    const evidenceRoot = await mkdtemp(join(tmpdir(), 'cr-os-cleanup-recovery-'));
+    const socketRoot = await mkdtemp(join(tmpdir(), 'cr-os-recovery-llm-'));
+    const socket = join(socketRoot, 'control.sock');
+    const server = createServer(async (incoming, outgoing) => {
+      for await (const _chunk of incoming) {
+        /* consume request */
+      }
+      outgoing.writeHead(incoming.url === '/grants/revoke' ? 204 : 200);
+      outgoing.end();
+    });
+    await new Promise<void>((resolve) => server.listen(socket, resolve));
+    try {
+      const result = await runAgentScenario({
+        runId: 'run-os-cleanup-recovery',
+        output: finalMarkdownJsonl(),
+        cleanupFailure: true,
+        evidenceRoot,
+      });
+      const evidenceId = result.terminal.evidenceId as string;
+      const callbackPath = join(evidenceRoot, evidenceId, 'callback.json');
+      const callback = JSON.parse(await readFile(callbackPath, 'utf8'));
+      const manifest = JSON.parse(
+        Buffer.from(callback.evidence.manifest.content, 'base64').toString('utf8'),
+      );
+      manifest.runtime = 'opensandbox';
+      manifest.sandboxId = 'sandbox-identity';
+      manifest.sandboxOwnerNonce = '11111111-1111-1111-1111-111111111111';
+      manifest.hostFilesCleanupConfirmed = true;
+      const manifestBytes = Buffer.from(JSON.stringify(manifest));
+      callback.evidence.manifest = {
+        content: manifestBytes.toString('base64'),
+        size: manifestBytes.length,
+        sha256: createHash('sha256').update(manifestBytes).digest('hex'),
+      };
+      await writeFile(callbackPath, JSON.stringify(callback));
+      const original = await readFile(callbackPath, 'utf8');
+
+      let mode: 'success' | 'remaining' = 'success';
+      const seen: unknown[] = [];
+      const confirmCleanupAbsent = vi.fn(async (identity: unknown) => {
+        seen.push(identity);
+        if (mode === 'remaining') throw new Error('sandbox remains');
+      });
+      const runtimeFactory: SandboxRuntimeFactory = Object.assign(
+        (_spec: SandboxJobSpec): JobSandboxRuntime => {
+          throw new Error('runtime factory is not used during recovery');
+        },
+        { confirmCleanupAbsent },
+      );
+      const apiKeyFile = join(socketRoot, 'control-key');
+      await writeFile(apiKeyFile, 'control-key', { mode: 0o600 });
+      const reports: Request[] = [];
+      const runner = createProductionRunnerWithMergeBase({
+        authToken: 'runner-test-token',
+        evidenceRoot,
+        claimUrl: '',
+        llmServiceSocket: socket,
+        sandboxRuntime: 'opensandbox',
+        opensandbox: {
+          endpoint: 'http://127.0.0.1:8080',
+          apiKeyFile,
+          image: 'review-image',
+        },
+        modelConfig: JSON.stringify({
+          id: 'opencode-go/review',
+          baseUrl: 'http://llm.internal.example/v1',
+          definition: { name: 'Review' },
+        }),
+        callbackFetch: async (input, init) => {
+          reports.push(new Request(input, init));
+          return new Response(null, { status: 202 });
+        },
+        process: async () => ({ exitCode: 0, stdout: '', timedOut: false, truncated: false }),
+        sandboxRuntimeFactory: runtimeFactory,
+      });
+      const recoveryRequest = (runId = manifest.runId) =>
+        new Request('http://runner/maintenance/recover-cleanup', {
+          method: 'POST',
+          headers: {
+            authorization: 'Bearer runner-test-token',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            evidenceId,
+            jobId: manifest.jobId,
+            runId,
+            attempt: manifest.attempt,
+            baseSha: manifest.baseSha,
+            headSha: manifest.headSha,
+          }),
+        });
+      try {
+        const missingIdentity = JSON.parse(original);
+        const missingManifest = JSON.parse(
+          Buffer.from(missingIdentity.evidence.manifest.content, 'base64').toString('utf8'),
+        );
+        missingManifest.sandboxId = missingManifest.sandboxName;
+        delete missingManifest.sandboxOwnerNonce;
+        const missingBytes = Buffer.from(JSON.stringify(missingManifest));
+        missingIdentity.evidence.manifest = {
+          content: missingBytes.toString('base64'),
+          size: missingBytes.length,
+          sha256: createHash('sha256').update(missingBytes).digest('hex'),
+        };
+        await writeFile(callbackPath, JSON.stringify(missingIdentity));
+        expect((await runner.handle(recoveryRequest())).status).toBe(409);
+        expect(confirmCleanupAbsent).not.toHaveBeenCalled();
+        expect(reports).toHaveLength(0);
+        await writeFile(callbackPath, original);
+
+        expect((await runner.handle(recoveryRequest('other-run'))).status).toBe(409);
+        expect(confirmCleanupAbsent).not.toHaveBeenCalled();
+        expect(reports).toHaveLength(0);
+
+        mode = 'remaining';
+        expect((await runner.handle(recoveryRequest())).status).toBe(502);
+        expect(confirmCleanupAbsent).toHaveBeenCalledTimes(1);
+        expect(reports).toHaveLength(0);
+
+        mode = 'success';
+        const accepted = await runner.handle(recoveryRequest());
+        expect(accepted.status).toBe(202);
+        expect(seen[1]).toEqual({
+          sandboxId: 'sandbox-identity',
+          ownershipNonce: '11111111-1111-1111-1111-111111111111',
+          sandboxName: manifest.sandboxName,
+        });
+        expect(reports).toHaveLength(1);
+        expect(new URL(reports[0]!.url).pathname).toBe('/runner-cleanup-recovery');
+        const report = await reports[0]!.json();
+        expect(report).toMatchObject({
+          runId: manifest.runId,
+          jobId: manifest.jobId,
+          attempt: manifest.attempt,
+          evidenceId,
+          baseSha: manifest.baseSha,
+          headSha: manifest.headSha,
+          sandboxName: manifest.sandboxName,
+        });
+        expect(report).not.toHaveProperty('sandboxId');
+        expect(report).not.toHaveProperty('sandboxOwnerNonce');
+        expect(await readFile(callbackPath, 'utf8')).toBe(original);
+        expect(
+          JSON.parse(
+            await readFile(join(evidenceRoot, evidenceId, 'cleanup-recovery.json'), 'utf8'),
+          ),
+        ).toMatchObject({ jobId: manifest.jobId, sandboxName: manifest.sandboxName });
+
+        expect((await runner.handle(recoveryRequest())).status).toBe(202);
+        expect(reports).toHaveLength(2);
+      } finally {
+        await runner.close();
+      }
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(socketRoot, { recursive: true, force: true });
+      await rm(evidenceRoot, { recursive: true, force: true });
+    }
+  });
+
   it.each(['finished', 'cancelled'] as const)(
     'reconciles a retained %s cleanup after restart without changing its evidence',
     async (execution) => {

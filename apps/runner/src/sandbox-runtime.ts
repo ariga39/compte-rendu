@@ -221,6 +221,8 @@ export interface SandboxRuntimeMetadata {
   readonly hostCleanupConfirmed?: boolean;
   /** Backend sandbox identity (sbx uses the requested name; OpenShell the real id). */
   readonly id: string;
+  /** Backend ownership nonce retained for recovery of a recorded runtime. */
+  readonly ownershipNonce?: string;
   readonly name: string;
   readonly runtime: SandboxRuntimeKind;
   readonly imageRef: string;
@@ -254,7 +256,19 @@ export interface JobSandboxRuntime {
   destroy(command: SandboxCommand): Promise<void>;
 }
 
-export type SandboxRuntimeFactory = (spec: SandboxJobSpec) => JobSandboxRuntime;
+export interface SandboxRecoveryIdentity {
+  readonly sandboxId: string;
+  readonly ownershipNonce: string;
+  readonly sandboxName: string;
+}
+
+export type SandboxRuntimeFactory = ((spec: SandboxJobSpec) => JobSandboxRuntime) & {
+  /** Proves a recorded owned sandbox and its host resources are absent without deleting anything. */
+  readonly confirmCleanupAbsent?: (
+    identity: SandboxRecoveryIdentity,
+    command: SandboxCommand,
+  ) => Promise<void>;
+};
 
 /** Carries the create invocation's terminal cause so the Runner can report it. */
 export class SandboxCreateError extends Error {
