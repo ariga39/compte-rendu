@@ -211,9 +211,10 @@ export const createOpenSandboxRuntimeFactory =
           processOptions,
         );
       },
-      async copyOut(path, destination, command) {
-        return execute(
-          command,
+      async copyOut(path, destination, command, diagnostic, options) {
+        const run = command.execute;
+        if (run === undefined) throw new Error('OpenSandbox requires an SDK execution port');
+        return run(
           async (context) => {
             if (sandbox === undefined) return failure();
             const temporary = `${destination}.${randomUUID()}.tmp`;
@@ -278,7 +279,8 @@ export const createOpenSandboxRuntimeFactory =
               await rm(temporary, { recursive: true, force: true });
             }
           },
-          'copy-evidence',
+          diagnostic ?? { stage: 'sandbox', command: 'copy-evidence' },
+          options,
         );
       },
       async destroy(command) {
