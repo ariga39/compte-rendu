@@ -175,6 +175,7 @@ export interface SandboxJobSpec {
 export interface SandboxRuntimeMetadata {
   /** True as soon as the sandbox resource exists, even if later setup steps fail. */
   readonly created: boolean;
+  readonly hostCleanupConfirmed?: boolean;
   /** Backend sandbox identity (sbx uses the requested name; OpenShell the real id). */
   readonly id: string;
   readonly name: string;

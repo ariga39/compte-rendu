@@ -30,6 +30,7 @@ const supportedEvents = [
 const runnerCallbackPath = '/runner-callback';
 const runnerClaimPath = '/runner-claim';
 const runnerProgressPath = '/runner-progress';
+const runnerCleanupRecoveryPath = '/runner-cleanup-recovery';
 const MAX_RUNNER_PROGRESS_BYTES = 16 * 1024;
 const supportedPullRequestActions = [
   'opened',
@@ -769,6 +770,34 @@ const forwardRunnerCallback = async (request: Request, dependencies: IngressDepe
   return new Response(null, { status: forwarded.ok ? 202 : 503 });
 };
 
+const forwardRunnerCleanupRecovery = async (
+  request: Request,
+  dependencies: IngressDependencies,
+) => {
+  if (
+    dependencies.runnerCallbackToken === undefined ||
+    request.headers.get('authorization') !== `Bearer ${dependencies.runnerCallbackToken}`
+  ) {
+    return new Response(null, { status: 401 });
+  }
+  const body = await request.arrayBuffer();
+  if (body.byteLength > 64 * 1024) return new Response(null, { status: 413 });
+  const forwarded = await dependencies.core.fetch(
+    new Request('https://core.internal/runner-cleanup-recovery', {
+      method: 'POST',
+      headers: {
+        'content-type': request.headers.get('content-type') ?? 'application/json',
+        'x-compte-rendu-runner-cleanup-recovery': 'verified',
+      },
+      body,
+    }),
+  );
+  return new Response(await forwarded.arrayBuffer(), {
+    status: forwarded.status,
+    headers: forwarded.headers,
+  });
+};
+
 const forwardRunnerClaim = async (request: Request, dependencies: IngressDependencies) => {
   if (
     dependencies.runnerCallbackToken === undefined ||
@@ -903,6 +932,14 @@ export function createIngressWorker(dependencies: IngressDependencies): WorkerEn
       if (new URL(request.url).pathname === runnerProgressPath) {
         try {
           return await forwardRunnerProgress(request, dependencies);
+        } catch {
+          return new Response(null, { status: 503 });
+        }
+      }
+
+      if (new URL(request.url).pathname === runnerCleanupRecoveryPath) {
+        try {
+          return await forwardRunnerCleanupRecovery(request, dependencies);
         } catch {
           return new Response(null, { status: 503 });
         }

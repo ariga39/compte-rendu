@@ -32,6 +32,14 @@ it('serves public data in-process without exposing trusted Core endpoints', asyn
       }),
     );
     expect(callback.status).toBe(401);
+    const recovery = await application.fetch(
+      new Request('https://reviews.test/runner-cleanup-recovery', {
+        method: 'POST',
+        headers: { 'x-compte-rendu-runner-cleanup-recovery': 'verified' },
+        body: '{}',
+      }),
+    );
+    expect(recovery.status).toBe(401);
     const configuration = await application.fetch(
       new Request('https://reviews.test/api/review-configuration'),
     );

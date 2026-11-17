@@ -233,6 +233,54 @@ An exhausted terminal callback can leave Core showing a claimed run even after
 local cleanup. Use the explicit recovery operation below; never clear D1 ownership
 or rerun an old Sandbox merely to make the dashboard look settled.
 
+### Recover cleanup after an authentication failure
+
+A failed run whose cleanup remains unresolved blocks later reviews of the same
+pull request. Restarting Runner does not clear that database ownership. The
+queued task displays “Waiting for previous review cleanup” until the blocker is
+resolved; an ordinary running review does not produce this warning.
+
+After restoring Docker authentication, use the correct instance's authenticated
+Runner maintenance endpoint. Prepare `recovery-request.json` with the same six
+identity fields shown in the callback replay section below, taken from the
+retained manifest. Then run:
+
+```sh
+curl --fail-with-body --silent --show-error --config "$RUNNER_CURL_CONFIG" \
+  --request POST --header 'content-type: application/json' \
+  --data-binary @recovery-request.json \
+  "$RUNNER_ORIGIN/maintenance/recover-cleanup"
+```
+
+This operation is for failed sbx runs with retained, valid callback evidence and
+`hostCleanupConfirmed: true` in the manifest. It verifies the immutable identity
+and artifact hashes, requires the exact Sandbox to be absent, removes only its
+scoped network policies and secrets, and revokes its LLM grant when configured.
+An existing Sandbox is never deleted by this recovery operation. Authentication
+errors, truncated inventory or failed removal leave cleanup unresolved.
+
+The original callback, manifest and terminal failure stay unchanged. Runner writes
+`cleanup-recovery.json` separately and sends an authenticated recovery report.
+Core retains a separate `cleanup-recoveries/` audit object and updates only the
+matching failed run's cleanup state and completion time. The run remains failed;
+new same-PR work can then be claimed. A delayed original callback cannot reverse
+this confirmation. HTTP 202 means Core accepted the report. Retrying the operation
+is safe; concurrent recovery of the same local job is rejected. Drain cannot
+finish while a recovery operation is in progress.
+
+HTTP 400 rejects invalid identity input; 401 rejects authentication; 409 rejects
+active jobs, mismatched or unsupported evidence; 502 means cleanup or report
+delivery was not confirmed; 503 means callback configuration is unavailable.
+Check the database-backed dashboard after recovery. A local audit file alone is
+not proof that Core accepted the report.
+
+Older archives without host-cleanup confirmation, missing retained callbacks,
+failed host-directory removal and OpenShell ownership recovery are unsupported.
+Do not add confirmation fields to historical evidence or fabricate callbacks.
+Those cases require separately verified operator recovery; this endpoint is not
+a general orphan-Sandbox sweep. Local host paths are deliberately not loaded from
+an archive and recursively deleted.
+
 ### Replay a lost terminal callback
 
 When the evidence directory is available, Runner retains the exact bounded

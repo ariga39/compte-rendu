@@ -174,6 +174,21 @@ export interface ReviewEvidenceMetadata {
 }
 
 export type RepositoryVisibility = 'public' | 'private' | 'unknown';
+export interface ReviewCleanupRecovery {
+  readonly runId: string;
+  readonly jobId: string;
+  readonly attempt: number;
+  readonly evidenceId: string;
+  readonly baseSha: GitHubShaValue;
+  readonly headSha: GitHubShaValue;
+  readonly sandboxName: string;
+  readonly confirmedAt: string;
+}
+
+export type ReviewCleanupRecoveryResult =
+  | { readonly kind: 'recovered'; readonly cleanupCompletedAt: string }
+  | { readonly kind: 'already'; readonly cleanupCompletedAt: string }
+  | { readonly kind: 'rejected' };
 
 export interface RepositoryMetadataRow {
   installationId: number;
@@ -215,6 +230,7 @@ export interface PublicRunRow {
   runnerJobId: string | null;
   evidenceStatus: 'complete' | 'incomplete' | null;
   runnerCleanupStatus: 'pending' | 'destroyed' | 'failed' | null;
+  queueBlockReason: 'cleanup' | null;
   publicationClaimedAt: string | null;
   progressStage: 'checkout' | 'sandbox' | 'agent' | 'evidence' | 'cleanup' | null;
   lastProgressAt: string | null;
@@ -326,6 +342,14 @@ export interface ReviewStateQueries {
     evidence: ReviewEvidenceMetadata;
     sandboxCleanup?: RunnerCleanupStatus;
   }): Promise<boolean>;
+  validateRunnerCleanupRecovery?(
+    input: ReviewCleanupRecovery,
+  ): Promise<
+    | { readonly kind: 'recoverable' }
+    | { readonly kind: 'already'; readonly cleanupCompletedAt: string }
+    | { readonly kind: 'rejected' }
+  >;
+  recoverRunnerCleanup?(input: ReviewCleanupRecovery): Promise<ReviewCleanupRecoveryResult>;
   recordRunnerJob(input: { runId: string; jobId: string; attempt: number }): Promise<boolean>;
   clearRunnerJob?(input: { runId: string; jobId: string }): Promise<boolean>;
   claimCheckSetup?(input: {
@@ -2116,9 +2140,62 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
       const run = runs.get(runId);
       if (run === undefined) return false;
       if (run.evidence !== undefined && run.evidence.key !== evidence.key) return false;
-      run.evidence = evidence;
-      if (sandboxCleanup !== undefined) run.runnerCleanupStatus = sandboxCleanup;
+      run.evidence =
+        run.runnerCleanupStatus === 'destroyed' && run.evidence?.cleanupCompletedAt !== undefined
+          ? { ...evidence, cleanupCompletedAt: run.evidence.cleanupCompletedAt }
+          : evidence;
+      if (sandboxCleanup !== undefined && run.runnerCleanupStatus !== 'destroyed') {
+        run.runnerCleanupStatus = sandboxCleanup;
+      }
       return true;
+    },
+    validateRunnerCleanupRecovery: async ({ runId, jobId, attempt, baseSha, headSha }) => {
+      const run = runs.get(runId);
+      if (
+        run === undefined ||
+        run.status !== 'failed' ||
+        run.runnerJobId !== jobId ||
+        run.runnerAttempt !== attempt ||
+        run.job.baseSha !== baseSha ||
+        run.job.headSha !== headSha
+      ) {
+        return { kind: 'rejected' as const };
+      }
+      if (run.runnerCleanupStatus === 'destroyed') {
+        return {
+          kind: 'already' as const,
+          cleanupCompletedAt: run.evidence?.cleanupCompletedAt ?? '',
+        };
+      }
+      return run.runnerCleanupStatus === 'failed'
+        ? { kind: 'recoverable' as const }
+        : { kind: 'rejected' as const };
+    },
+    recoverRunnerCleanup: async ({ runId, jobId, attempt, baseSha, headSha, confirmedAt }) => {
+      const run = runs.get(runId);
+      if (
+        run === undefined ||
+        run.status !== 'failed' ||
+        run.runnerJobId !== jobId ||
+        run.runnerAttempt !== attempt ||
+        run.job.baseSha !== baseSha ||
+        run.job.headSha !== headSha
+      ) {
+        return { kind: 'rejected' as const };
+      }
+      if (run.runnerCleanupStatus === 'destroyed') {
+        return {
+          kind: 'already' as const,
+          cleanupCompletedAt: run.evidence?.cleanupCompletedAt ?? confirmedAt,
+        };
+      }
+      if (run.runnerCleanupStatus !== 'failed') return { kind: 'rejected' as const };
+      run.runnerCleanupStatus = 'destroyed';
+      run.updatedAt = confirmedAt;
+      if (run.evidence !== undefined) {
+        run.evidence = { ...run.evidence, cleanupCompletedAt: confirmedAt };
+      }
+      return { kind: 'recovered' as const, cleanupCompletedAt: confirmedAt };
     },
     recordRunnerJob: async ({ runId, jobId, attempt }) => {
       const run = runs.get(runId);

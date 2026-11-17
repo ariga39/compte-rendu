@@ -43,6 +43,7 @@ import {
   type SandboxCommand,
   type SandboxRuntimeKind,
 } from './sandbox-runtime.js';
+import { confirmSbxCleanup } from './cleanup-recovery.js';
 import { createSbxRuntimeFactory } from './sandbox-runtime-sbx.js';
 import { createLlmServiceClient } from './llm-service-client.js';
 import {
@@ -567,6 +568,7 @@ type RunnerJob = {
   abortRequested: boolean;
   sandboxAttempted: boolean;
   sandboxCreated: boolean;
+  hostCleanupConfirmed?: boolean;
   sessionIds: string[];
   multiReview?: RunnerMultiReviewEvidence;
   diagnosticCheckoutToken: string;
@@ -960,6 +962,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
     GH_TOKEN: undefined,
     GITHUB_TOKEN: undefined,
   };
+  const recoveringCleanup = new Set<string>();
   const jobs = new Map<string, RunnerJob>();
   const jobsByRun = new Map<string, RunnerJob>();
   let claiming = false;
@@ -1035,7 +1038,8 @@ export const createRunner = (options: RunnerOptions = {}) => {
         activeJobs === 0 &&
         !claiming &&
         !claimPollingHalted &&
-        cleanupBlockedJobs === 0,
+        cleanupBlockedJobs === 0 &&
+        recoveringCleanup.size === 0,
       activeJobs,
       claimInFlight: claiming,
       claimPollingHalted,
@@ -1635,12 +1639,14 @@ export const createRunner = (options: RunnerOptions = {}) => {
   const cleanup = async (job: RunnerJob) => {
     reportStage(job, 'cleanup');
     let clean = true;
+    let hostClean = true;
     if (!job.sandboxAttempted) {
       if (job.checkoutRoot !== undefined) {
         try {
           await rm(job.checkoutRoot, { recursive: true, force: true });
         } catch {
           clean = false;
+          hostClean = false;
         }
       }
       if (job.configRoot !== undefined) {
@@ -1648,6 +1654,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
           await rm(job.configRoot, { recursive: true, force: true });
         } catch {
           clean = false;
+          hostClean = false;
         }
       }
       if (job.githubTokenRoot !== undefined) {
@@ -1655,6 +1662,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
           await rm(job.githubTokenRoot, { recursive: true, force: true });
         } catch {
           clean = false;
+          hostClean = false;
         }
       }
       if (job.grantRoot !== undefined) {
@@ -1662,8 +1670,12 @@ export const createRunner = (options: RunnerOptions = {}) => {
           await rm(job.grantRoot, { recursive: true, force: true });
         } catch {
           clean = false;
+          hostClean = false;
         }
       }
+      job.hostCleanupConfirmed =
+        hostClean &&
+        (!job.sandboxAttempted || job.sandboxRuntime?.metadata.hostCleanupConfirmed === true);
       update(job, { sandbox: { cleanup: clean ? 'destroyed' : 'failed' } });
       return clean;
     }
@@ -1716,6 +1728,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         await rm(job.checkoutRoot, { recursive: true, force: true });
       } catch {
         clean = false;
+        hostClean = false;
       }
     }
     if (job.configRoot !== undefined) {
@@ -1723,6 +1736,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         await rm(job.configRoot, { recursive: true, force: true });
       } catch {
         clean = false;
+        hostClean = false;
       }
     }
     if (job.githubTokenRoot !== undefined) {
@@ -1730,6 +1744,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         await rm(job.githubTokenRoot, { recursive: true, force: true });
       } catch {
         clean = false;
+        hostClean = false;
       }
     }
     if (job.grantRoot !== undefined) {
@@ -1737,8 +1752,12 @@ export const createRunner = (options: RunnerOptions = {}) => {
         await rm(job.grantRoot, { recursive: true, force: true });
       } catch {
         clean = false;
+        hostClean = false;
       }
     }
+    job.hostCleanupConfirmed =
+      hostClean &&
+      (!job.sandboxAttempted || job.sandboxRuntime?.metadata.hostCleanupConfirmed === true);
     update(job, { sandbox: { cleanup: clean ? 'destroyed' : 'failed' } });
     return clean;
   };
@@ -2733,6 +2752,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
             complete: evidenceComplete && evidenceFailure === undefined,
             evidenceFailure,
             cleanup: { status: cleaned ? 'destroyed' : 'failed' },
+            hostCleanupConfirmed: job.hostCleanupConfirmed === true,
             files: await evidenceFiles(evidencePath),
           });
           manifestFinalized = true;
@@ -2898,6 +2918,87 @@ export const createRunner = (options: RunnerOptions = {}) => {
         requestNextJob?.();
       }
       return jsonResponse(200, maintenanceStatus());
+    }
+    if (request.method === 'POST' && path === '/maintenance/recover-cleanup') {
+      if (!callbackUrl || !callbackToken)
+        return jsonResponse(503, { error: 'callback unavailable' });
+      const input = await Schema.decodeUnknownPromise(ReplayCallbackRequest)(
+        await readJson(request),
+      ).catch(() => undefined);
+      if (input === undefined) return jsonResponse(400, { error: 'invalid recovery request' });
+      if (
+        recoveringCleanup.has(input.jobId) ||
+        [...jobs.values()].some(
+          (job) =>
+            (job.state.status === 'queued' || job.state.status === 'running') &&
+            (job.id === input.jobId ||
+              job.input.runId === input.runId ||
+              job.state.evidenceId === input.evidenceId),
+        )
+      ) {
+        return jsonResponse(409, { error: 'job is active' });
+      }
+      recoveringCleanup.add(input.jobId);
+      try {
+        const recovered = await Effect.runPromise(
+          recoverCallback(evidenceRoot, input, 'cleanup').pipe(Effect.option),
+        );
+        if (Option.isNone(recovered) || sandboxRuntime.kind !== 'sbx')
+          return jsonResponse(409, { error: 'cleanup recovery rejected' });
+        const sandboxName = `compte-rendu-${input.jobId}`;
+        await Effect.runPromise(
+          confirmSbxCleanup(sandboxName, input.jobId, (args, _diagnostic, processOptions) =>
+            executeProcess(sandboxPortPath, args, {
+              ...processOptions,
+              env: strippedSandboxEnvironment,
+              captureStdout: true,
+              captureStderr: true,
+              maxBytes: 256 * 1024,
+              timeoutMs: CLEANUP_COMMAND_TIMEOUT_MS,
+            }),
+          ),
+        );
+        if (llmServiceClient !== undefined) await llmServiceClient.revoke(input.jobId);
+        const report = { ...input, sandboxName, confirmedAt: await currentIso() };
+        await writeManifestAtomically(
+          join(evidenceRoot, input.evidenceId, 'cleanup-recovery.json'),
+          report,
+        );
+        const controller = new AbortController();
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        try {
+          const response = await Promise.race([
+            callbackFetch(new URL('/runner-cleanup-recovery', callbackUrl).href, {
+              method: 'POST',
+              headers: {
+                authorization: `Bearer ${callbackToken}`,
+                'content-type': 'application/json',
+              },
+              body: JSON.stringify(report),
+              signal: controller.signal,
+            }),
+            new Promise<Response>((_, reject) => {
+              timeout = setTimeout(() => {
+                controller.abort();
+                reject(new Error('delivery timeout'));
+              }, callbackTimeoutMs);
+            }),
+          ]);
+          await response.body?.cancel().catch(() => undefined);
+          if (response.status !== 202)
+            return jsonResponse(502, { error: 'cleanup recovery delivery rejected' });
+          const job = jobs.get(input.jobId);
+          if (job !== undefined) update(job, { sandbox: { cleanup: 'destroyed' } });
+          requestNextJob?.();
+          return jsonResponse(202, { accepted: true });
+        } finally {
+          if (timeout !== undefined) clearTimeout(timeout);
+        }
+      } catch {
+        return jsonResponse(502, { error: 'cleanup recovery not confirmed' });
+      } finally {
+        recoveringCleanup.delete(input.jobId);
+      }
     }
     if (request.method === 'POST' && path === '/maintenance/replay-callback') {
       if (

@@ -51,7 +51,11 @@ export const createSbxRuntimeFactory = (options: SbxRuntimeOptions): SandboxRunt
     let githubServiceCleanupRequired = false;
     let tokenRoot: string | undefined;
     let created = false;
+    let hostCleanupConfirmed = false;
     const metadata = {
+      get hostCleanupConfirmed() {
+        return hostCleanupConfirmed;
+      },
       get created() {
         return created;
       },
@@ -306,9 +310,11 @@ export const createSbxRuntimeFactory = (options: SbxRuntimeOptions): SandboxRunt
         );
         if (github.exitCode !== 0 || github.timedOut) clean = false;
       }
+      hostCleanupConfirmed = tokenRoot === undefined;
       if (tokenRoot !== undefined) {
         try {
           await rm(tokenRoot, { recursive: true, force: true });
+          hostCleanupConfirmed = true;
         } catch {
           clean = false;
         }

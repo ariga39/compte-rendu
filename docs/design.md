@@ -310,3 +310,16 @@ A terminal state and eventual Sandbox destruction are the product objective,
 not proof of crash recovery. Keep missing behavior in issues rather than describing
 it as delivered. Merge bounded changes when their main behavior is correct and
 reviewed; non-critical findings become follow-up issues.
+
+### Failed-cleanup reconciliation
+
+An authenticated Runner maintenance operation can reconcile a failed sbx run
+whose original host-directory cleanup was confirmed and whose exact Sandbox is
+now absent. It rechecks scoped policies/secrets and revokes the job grant before
+reporting recovery. Original terminal evidence remains immutable; separate local
+and R2 recovery records provide the audit trail. Core matches the failed run,
+job, attempt and immutable SHAs before confirming cleanup. Destroyed cleanup is
+monotonic under delayed callbacks. The queued-task projection exposes an anonymous
+cleanup-block reason only when an unresolved terminal same-PR run blocks claiming.
+Legacy evidence lacking host confirmation and OpenShell recovery remain outside
+this operation; see the operations guide.
