@@ -1014,7 +1014,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
     }
     return !unresolved;
   };
-  const grantRecovery =
+  let grantRecovery =
     llmServiceClient === undefined ? undefined : recoverPendingGrants().catch(() => false);
   const activeJobCount = () =>
     [...jobs.values()].filter(
@@ -2958,7 +2958,18 @@ export const createRunner = (options: RunnerOptions = {}) => {
             }),
           ),
         );
-        if (llmServiceClient !== undefined) await llmServiceClient.revoke(input.jobId);
+        if (llmServiceClient !== undefined) {
+          await llmServiceClient.revoke(input.jobId);
+          await clearGrantMarker(input.jobId);
+          const previousRecovery = grantRecovery;
+          if (
+            previousRecovery !== undefined &&
+            !(await previousRecovery) &&
+            grantRecovery === previousRecovery
+          ) {
+            grantRecovery = recoverPendingGrants().catch(() => false);
+          }
+        }
         const report = { ...input, sandboxName, confirmedAt: await currentIso() };
         await writeManifestAtomically(
           join(evidenceRoot, input.evidenceId, 'cleanup-recovery.json'),
