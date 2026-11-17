@@ -319,13 +319,16 @@ reviewed; non-critical findings become follow-up issues.
 
 ### Failed-cleanup reconciliation
 
-An authenticated Runner maintenance operation can reconcile a failed sbx run
-whose original host-directory cleanup was confirmed and whose exact Sandbox is
-now absent. It rechecks scoped policies/secrets and revokes the job grant before
-reporting recovery. Original terminal evidence remains immutable; separate local
+An authenticated Runner maintenance operation can reconcile a failed sbx or
+OpenSandbox run whose original host-directory cleanup was confirmed and whose
+exact Sandbox is now absent. For sbx it rechecks scoped policies/secrets. For
+OpenSandbox it requires retained authoritative identity and ownership nonce, an
+empty complete ownership listing, a specific identity lookup returning 404, and
+absence of the Docker workload, sidecar and runtime volumes. The configured
+runtime must match. It revokes the job grant before reporting recovery. Original terminal evidence remains immutable; separate local
 and R2 recovery records provide the audit trail. Core matches the failed or superseded run,
 job, attempt and immutable SHAs before confirming cleanup. Destroyed cleanup is
 monotonic under delayed callbacks. The queued-task projection exposes an anonymous
 cleanup-block reason only when an unresolved terminal same-PR run blocks claiming.
-Legacy evidence lacking host confirmation, OpenShell and OpenSandbox recovery remain outside
-this operation; see the operations guide.
+Legacy evidence lacking host confirmation, unknown OpenSandbox create identity
+and OpenShell recovery remain outside this operation; see the operations guide.
