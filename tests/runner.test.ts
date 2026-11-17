@@ -11093,7 +11093,7 @@ describe('Runner callback recovery', () => {
 });
 
 describe('Runner confirmed cleanup recovery', () => {
-  it('recovers a recorded OpenSandbox cleanup after restart without deleting workload', async () => {
+  it('bounds a hanging OpenSandbox verifier and releases recovery', async () => {
     const evidenceRoot = await mkdtemp(join(tmpdir(), 'cr-os-cleanup-recovery-'));
     const socketRoot = await mkdtemp(join(tmpdir(), 'cr-os-recovery-llm-'));
     const socket = join(socketRoot, 'control.sock');
@@ -11131,11 +11131,19 @@ describe('Runner confirmed cleanup recovery', () => {
       await writeFile(callbackPath, JSON.stringify(callback));
       const original = await readFile(callbackPath, 'utf8');
 
-      let mode: 'success' | 'remaining' = 'success';
+      let mode: 'success' | 'remaining' | 'hang' = 'success';
       let verifiedIdentity: unknown;
+      let verifierStarted: (() => void) | undefined;
+      const started = new Promise<void>((resolve) => {
+        verifierStarted = resolve;
+      });
       const confirmCleanupAbsent = async (identity: unknown) => {
         verifiedIdentity = identity;
         if (mode === 'remaining') throw new Error('sandbox remains');
+        if (mode === 'hang') {
+          verifierStarted?.();
+          return new Promise<void>(() => undefined);
+        }
       };
       const runtimeFactory: SandboxRuntimeFactory = Object.assign(
         (_spec: SandboxJobSpec): JobSandboxRuntime => {
@@ -11209,6 +11217,32 @@ describe('Runner confirmed cleanup recovery', () => {
         mode = 'remaining';
         expect((await runner.handle(recoveryRequest())).status).toBe(502);
         expect(reports).toHaveLength(0);
+
+        mode = 'hang';
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+        try {
+          let timedOut: Response | undefined;
+          const hanging = runner.handle(recoveryRequest()).then((response) => {
+            timedOut = response;
+          });
+          await started;
+          for (let elapsed = 0; elapsed < 31_000 && timedOut === undefined; elapsed += 1000) {
+            await vi.advanceTimersByTimeAsync(1000);
+          }
+          expect(timedOut?.status).toBe(502);
+          await hanging;
+          expect(reports).toHaveLength(0);
+          const drained = await runner.handle(
+            new Request('http://runner/maintenance/drain', {
+              method: 'POST',
+              headers: { authorization: 'Bearer runner-test-token' },
+            }),
+          );
+          expect(drained.status).toBe(200);
+          expect(await drained.json()).toMatchObject({ draining: true, drained: true });
+        } finally {
+          vi.useRealTimers();
+        }
 
         mode = 'success';
         const accepted = await runner.handle(recoveryRequest());

@@ -279,7 +279,9 @@ must match the retained runtime. Runner verifies an empty complete owner listing
 a lookup of the exact sandbox ID returning 404, and absence of its Docker
 workload, sidecar and runtime volumes, then revokes the job grant. Neither an API
 404 alone nor an unknown create identity proves cleanup. The endpoint only
-verifies absence; it does not delete OpenSandbox workloads.
+verifies absence; it does not delete OpenSandbox workloads. Verification has a
+30-second deadline; a timeout returns 502, keeps cleanup unresolved and releases
+the local recovery lock so the operator can retry.
 
 The original callback, manifest and terminal failure stay unchanged. Runner writes
 `cleanup-recovery.json` separately and sends an authenticated recovery report.

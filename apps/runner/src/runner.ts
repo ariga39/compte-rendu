@@ -3199,21 +3199,23 @@ export const createRunner = (options: RunnerOptions = {}) => {
             return jsonResponse(409, { error: 'cleanup recovery rejected' });
           await Effect.runPromise(confirmSbxCleanup(sandboxName, input.jobId, recoveryCommand));
         } else if (manifest.runtime === 'opensandbox') {
+          const confirmCleanupAbsent = sandboxRuntimeFactory.confirmCleanupAbsent;
+          const sandboxId = manifest.sandboxId;
+          const ownershipNonce = manifest.sandboxOwnerNonce;
           if (
             sandboxRuntime.kind !== 'opensandbox' ||
-            sandboxRuntimeFactory.confirmCleanupAbsent === undefined ||
-            manifest.sandboxId === undefined ||
-            manifest.sandboxOwnerNonce === undefined
+            confirmCleanupAbsent === undefined ||
+            sandboxId === undefined ||
+            ownershipNonce === undefined
           ) {
             return jsonResponse(409, { error: 'cleanup recovery rejected' });
           }
-          await sandboxRuntimeFactory.confirmCleanupAbsent(
-            {
-              sandboxId: manifest.sandboxId,
-              ownershipNonce: manifest.sandboxOwnerNonce,
-              sandboxName,
-            },
-            recoveryCommand,
+          await Effect.runPromise(
+            Effect.tryPromise({
+              try: () =>
+                confirmCleanupAbsent({ sandboxId, ownershipNonce, sandboxName }, recoveryCommand),
+              catch: () => new Error('cleanup recovery not confirmed'),
+            }).pipe(Effect.timeout(CLEANUP_COMMAND_TIMEOUT_MS)),
           );
         } else {
           return jsonResponse(409, { error: 'cleanup recovery rejected' });
