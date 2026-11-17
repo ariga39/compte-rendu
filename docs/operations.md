@@ -241,8 +241,8 @@ pull request. Restarting Runner does not clear that database ownership. The
 queued task displays “Waiting for previous review cleanup” until the blocker is
 resolved; an ordinary running review does not produce this warning.
 
-After restoring Docker authentication, confirm the original job has stopped and
-identify its exact Sandbox from the retained manifest (`compte-rendu-<jobId>`).
+For sbx, after restoring Docker authentication, confirm the original job has stopped
+and identify its exact Sandbox from the retained manifest (`compte-rendu-<jobId>`).
 Inspect it with `sbx inspect <sandboxName>` and, if it still exists, remove only
 that Sandbox with `sbx rm --force <sandboxName>`. Verify its absence with another
 inspect; authentication or transport failures are not proof of absence. Do not
