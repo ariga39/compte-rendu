@@ -2273,3 +2273,72 @@ describe('Review coordinator', () => {
     }
   });
 });
+
+it.each(['memory', 'd1'] as const)(
+  'retains superseded recovery identity while unblocking the next claim (%s)',
+  async (backend) => {
+    const database = backend === 'd1' ? new SqliteD1Database() : undefined;
+    const store = database ? createD1ReviewStateStore(database) : createInMemoryReviewStateStore();
+    const at = '2026-11-17T00:00:00.000Z';
+    const job: ReviewJob = {
+      repositoryId: 11,
+      installationId: 7,
+      pullRequestNumber: 42,
+      baseSha: eligiblePrivatePullRequest.baseSha,
+      headSha: eligiblePrivatePullRequest.headSha,
+      trigger: 'automatic',
+    };
+    try {
+      const first = await store.claimReview({ deliveryId: 'recovery-old', job, occurredAt: at });
+      if (first.kind !== 'claimed') throw new Error('not scheduled');
+      await store.claimNextJob!({ jobId: 'old-job', attempt: 1, occurredAt: at });
+      await store.recordEvidence({
+        runId: first.runId,
+        evidence: {
+          key: 'old-evidence',
+          status: 'incomplete',
+          size: 1,
+          sha256: 'a'.repeat(64),
+          uploadedAt: at,
+        },
+        sandboxCleanup: 'failed',
+      });
+      const next = await store.claimReview({
+        deliveryId: 'recovery-next',
+        job: { ...job, headSha: currentFacts.headSha },
+        occurredAt: at,
+      });
+      if (next.kind !== 'claimed') throw new Error('replacement not scheduled');
+      await store.markRunSuperseded!({ runId: first.runId, occurredAt: at });
+      expect(await store.claimNextJob!({ jobId: 'next-job', attempt: 1, occurredAt: at })).toEqual({
+        kind: 'empty',
+      });
+      const report = {
+        runId: first.runId,
+        jobId: 'old-job',
+        attempt: 1,
+        evidenceId: 'old-evidence',
+        baseSha: job.baseSha,
+        headSha: job.headSha,
+        sandboxName: 'compte-rendu-old-job',
+        confirmedAt: at,
+      };
+      expect(await store.validateRunnerCleanupRecovery!(report)).toEqual({ kind: 'recoverable' });
+      expect(await store.recoverRunnerCleanup!(report)).toMatchObject({ kind: 'recovered' });
+      expect(await store.recoverRunnerCleanup!(report)).toMatchObject({
+        kind: 'already',
+        cleanupCompletedAt: at,
+      });
+      expect(await store.getRunOutcome!(first.runId)).toMatchObject({
+        status: 'superseded',
+        runnerJobId: 'old-job',
+        runnerAttempt: 1,
+      });
+      expect(
+        await store.claimNextJob!({ jobId: 'next-job', attempt: 1, occurredAt: at }),
+      ).toMatchObject({ kind: 'claimed', runId: next.runId });
+    } finally {
+      database?.close();
+    }
+  },
+);

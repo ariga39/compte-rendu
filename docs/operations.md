@@ -183,6 +183,7 @@ the public dashboard Worker.
 | `GET /maintenance`                  | Inspect current drain status.                            |
 | `POST /maintenance/resume`          | Reopen admission and wake the claim loop.                |
 | `POST /maintenance/replay-callback` | Replay a retained terminal callback; see recovery below. |
+| `POST /maintenance/recover-cleanup` | Confirm cleanup after exact Sandbox removal; see below.  |
 
 The drain, status and resume responses contain `draining`, `drained`, `activeJobs`, `claimInFlight`,
 `claimPollingHalted` and `cleanupBlockedJobs`. A claim already sent when drain
@@ -235,13 +236,20 @@ or rerun an old Sandbox merely to make the dashboard look settled.
 
 ### Recover cleanup after an authentication failure
 
-A failed run whose cleanup remains unresolved blocks later reviews of the same
+A failed or superseded run whose cleanup remains unresolved blocks later reviews of the same
 pull request. Restarting Runner does not clear that database ownership. The
 queued task displays “Waiting for previous review cleanup” until the blocker is
 resolved; an ordinary running review does not produce this warning.
 
-After restoring Docker authentication, use the correct instance's authenticated
-Runner maintenance endpoint. Prepare `recovery-request.json` with the same six
+After restoring Docker authentication, confirm the original job has stopped and
+identify its exact Sandbox from the retained manifest (`compte-rendu-<jobId>`).
+Inspect it with `sbx inspect <sandboxName>` and, if it still exists, remove only
+that Sandbox with `sbx rm --force <sandboxName>`. Verify its absence with another
+inspect; authentication or transport failures are not proof of absence. Do not
+remove other jobs' Sandboxes or use a bulk prune. The recovery endpoint does not
+perform this removal for you.
+
+Then use the correct instance's authenticated Runner maintenance endpoint. Prepare `recovery-request.json` with the same six
 identity fields shown in the callback replay section below, taken from the
 retained manifest. Then run:
 
@@ -252,7 +260,8 @@ curl --fail-with-body --silent --show-error --config "$RUNNER_CURL_CONFIG" \
   "$RUNNER_ORIGIN/maintenance/recover-cleanup"
 ```
 
-This operation is for failed sbx runs with retained, valid callback evidence and
+This operation accepts retained failed sbx callbacks, including jobs cancelled
+after their Core run was superseded, with valid callback evidence and
 `hostCleanupConfirmed: true` in the manifest. It verifies the immutable identity
 and artifact hashes, requires the exact Sandbox to be absent, removes only its
 scoped network policies and secrets, and revokes its LLM grant when configured.
@@ -262,8 +271,10 @@ errors, truncated inventory or failed removal leave cleanup unresolved.
 The original callback, manifest and terminal failure stay unchanged. Runner writes
 `cleanup-recovery.json` separately and sends an authenticated recovery report.
 Core retains a separate `cleanup-recoveries/` audit object and updates only the
-matching failed run's cleanup state and completion time. The run remains failed;
-new same-PR work can then be claimed. A delayed original callback cannot reverse
+matching failed or superseded run's cleanup state and completion time. The original
+terminal status and job identity remain unchanged; confirmed destruction releases
+the same-PR queue block without discarding recovery identity. New same-PR work can
+then be claimed. A delayed original callback cannot reverse
 this confirmation. HTTP 202 means Core accepted the report. Retrying the operation
 is safe; concurrent recovery of the same local job is rejected. Drain cannot
 finish while a recovery operation is in progress.
