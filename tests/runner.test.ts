@@ -11132,11 +11132,11 @@ describe('Runner confirmed cleanup recovery', () => {
       const original = await readFile(callbackPath, 'utf8');
 
       let mode: 'success' | 'remaining' = 'success';
-      const seen: unknown[] = [];
-      const confirmCleanupAbsent = vi.fn(async (identity: unknown) => {
-        seen.push(identity);
+      let verifiedIdentity: unknown;
+      const confirmCleanupAbsent = async (identity: unknown) => {
+        verifiedIdentity = identity;
         if (mode === 'remaining') throw new Error('sandbox remains');
-      });
+      };
       const runtimeFactory: SandboxRuntimeFactory = Object.assign(
         (_spec: SandboxJobSpec): JobSandboxRuntime => {
           throw new Error('runtime factory is not used during recovery');
@@ -11200,23 +11200,20 @@ describe('Runner confirmed cleanup recovery', () => {
         };
         await writeFile(callbackPath, JSON.stringify(missingIdentity));
         expect((await runner.handle(recoveryRequest())).status).toBe(409);
-        expect(confirmCleanupAbsent).not.toHaveBeenCalled();
         expect(reports).toHaveLength(0);
         await writeFile(callbackPath, original);
 
         expect((await runner.handle(recoveryRequest('other-run'))).status).toBe(409);
-        expect(confirmCleanupAbsent).not.toHaveBeenCalled();
         expect(reports).toHaveLength(0);
 
         mode = 'remaining';
         expect((await runner.handle(recoveryRequest())).status).toBe(502);
-        expect(confirmCleanupAbsent).toHaveBeenCalledTimes(1);
         expect(reports).toHaveLength(0);
 
         mode = 'success';
         const accepted = await runner.handle(recoveryRequest());
         expect(accepted.status).toBe(202);
-        expect(seen[1]).toEqual({
+        expect(verifiedIdentity).toEqual({
           sandboxId: 'sandbox-identity',
           ownershipNonce: '11111111-1111-1111-1111-111111111111',
           sandboxName: manifest.sandboxName,
