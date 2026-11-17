@@ -8087,6 +8087,85 @@ describe('Runner LLM lifecycle failures', () => {
       await f.close();
     }
   });
+  it('resumes claiming after explicit cleanup recovery resolves a failed startup grant gate', async () => {
+    const f = await fixture();
+    f.rejectRevoke(true);
+    const evidenceRoot = join(f.root, 'evidence');
+    let restarted: ReturnType<typeof createRunner> | undefined;
+    try {
+      const failed = await runAgentScenario({
+        runId: 'recovery-grant-gate',
+        output: finalMarkdownJsonl(),
+        llmServiceSocket: f.socket,
+        modelConfig,
+        evidenceRoot,
+        cleanupFailure: true,
+      });
+      let blocked = false;
+      let claims = 0;
+      restarted = createProductionRunnerWithMergeBase({
+        authToken: 'runner-test-token',
+        evidenceRoot,
+        modelConfig,
+        llmServiceSocket: f.socket,
+        claimUrl: 'https://ingress.test/runner-claim',
+        claimIntervalMs: 60000,
+        log: {
+          record: (event) => {
+            if (event.outcome === 'claim' && event.reason === 'grant-recovery-failed')
+              blocked = true;
+          },
+        },
+        claimFetch: async () => {
+          claims += 1;
+          return new Response(null, { status: 204 });
+        },
+        process: async (_command, args) =>
+          args[0] === 'inspect'
+            ? {
+                exitCode: 1,
+                stdout: '',
+                stderr: `error: sandbox '${failed.manifest.sandboxName}' not found`,
+                timedOut: false,
+                truncated: false,
+              }
+            : {
+                exitCode: 0,
+                stdout: args[0] === 'policy' ? '{"rules":[]}' : '',
+                timedOut: false,
+                truncated: false,
+              },
+      });
+      await vi.waitFor(() => expect(blocked).toBe(true));
+      expect(claims).toBe(0);
+      expect(await f.inferenceStatus()).toBe(200);
+      f.rejectRevoke(false);
+      const manifest = failed.manifest;
+      const recovery = await restarted.handle(
+        new Request('http://runner/maintenance/recover-cleanup', {
+          method: 'POST',
+          headers: {
+            authorization: 'Bearer runner-test-token',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            evidenceId: failed.terminal.evidenceId,
+            jobId: manifest.jobId,
+            runId: manifest.runId,
+            attempt: manifest.attempt,
+            baseSha: manifest.baseSha,
+            headSha: manifest.headSha,
+          }),
+        }),
+      );
+      expect(recovery.status).toBe(202);
+      expect(await f.inferenceStatus()).toBe(401);
+      await vi.waitFor(() => expect(claims).toBeGreaterThan(0));
+    } finally {
+      await restarted?.close();
+      await f.close();
+    }
+  });
   it('revokes immediately on DELETE while the agent process has not exited', async () => {
     const f = await fixture();
     let release!: () => void;
