@@ -11219,7 +11219,7 @@ describe('Runner confirmed cleanup recovery', () => {
         expect(reports).toHaveLength(0);
 
         mode = 'hang';
-        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date', 'performance'] });
         try {
           let timedOut: Response | undefined;
           const hanging = runner.handle(recoveryRequest()).then((response) => {
@@ -11227,7 +11227,8 @@ describe('Runner confirmed cleanup recovery', () => {
           });
           await started;
           for (let elapsed = 0; elapsed < 31_000 && timedOut === undefined; elapsed += 1000) {
-            await vi.advanceTimersByTimeAsync(1000);
+            vi.advanceTimersByTime(1000);
+            await vi.advanceTimersByTimeAsync(0);
           }
           expect(timedOut?.status).toBe(502);
           await hanging;
