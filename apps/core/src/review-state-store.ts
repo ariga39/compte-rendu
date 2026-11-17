@@ -212,6 +212,7 @@ interface PublicRunDbRow {
   publication_started_at: string | null;
   failure_phase: string | null;
   failure_reason: string | null;
+  failure_http_status: number | null;
   runner_job_id: string | null;
   evidence_status: 'complete' | 'incomplete' | null;
   runner_cleanup_status: 'pending' | 'destroyed' | 'failed' | null;
@@ -250,6 +251,7 @@ const mapPublicRun = (row: PublicRunDbRow): PublicRunRow => ({
   publicationStartedAt: row.publication_started_at,
   failurePhase: row.failure_phase,
   failureReason: row.failure_reason,
+  failureHttpStatus: row.failure_http_status,
   runnerJobId: row.runner_job_id,
   evidenceStatus: row.evidence_status,
   runnerCleanupStatus: row.runner_cleanup_status,
@@ -313,7 +315,7 @@ const queueBlockReasonColumn = `CASE WHEN r.status = 'scheduled' AND r.runner_jo
 const publicRunColumns = `
   r.run_id, r.status, r.installation_id, r.repository_id, r.pull_request_number,
   r.base_sha, r.head_sha, r.base_ref, r.head_ref, r.review_decision,
-  r.created_at, r.claimed_at, r.terminal_at, r.result_received_at, r.publication_started_at, r.runner_job_id, r.failure_phase, r.failure_reason,
+  r.created_at, r.claimed_at, r.terminal_at, r.result_received_at, r.publication_started_at, r.runner_job_id, r.failure_phase, r.failure_reason, r.failure_http_status,
   r.evidence_status, r.runner_cleanup_status, ${queueBlockReasonColumn}, r.publication_claimed_at,
   r.progress_stage, r.progress_received_at, r.progress_milestones,
   r.execution_started_at, r.submission_completed_at, r.cleanup_completed_at,
@@ -912,7 +914,7 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
     const statements: D1PreparedStatementLike[] = [
       database
         .prepare(
-          `UPDATE review_runs SET status = 'failed', updated_at = ?, terminal_at = COALESCE(terminal_at, ?), failure_phase = ?, failure_reason = ?
+          `UPDATE review_runs SET status = 'failed', updated_at = ?, terminal_at = COALESCE(terminal_at, ?), failure_phase = ?, failure_reason = ?, failure_http_status = ?
            WHERE run_id = ? AND status = 'scheduled'`,
         )
         .bind(
@@ -920,6 +922,7 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
           occurredAt,
           failure?.phase ?? 'scheduling',
           failure?.reason ?? 'unknown',
+          failure?.httpStatus ?? null,
           runId,
         ),
       ...(releaseRunnerClaim === undefined

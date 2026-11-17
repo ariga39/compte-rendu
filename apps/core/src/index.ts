@@ -71,6 +71,7 @@ const CoreLifecycleIdentifier = Schema.String.pipe(
 );
 const CoreLifecycleMilliseconds = Schema.Natural;
 export const CoreLifecycleFailureReason = Schema.Literals([
+  'upstream',
   'checkout',
   'sandbox',
   'agent',
@@ -227,6 +228,7 @@ export interface PublicRunRow {
   publicationStartedAt: string | null;
   failurePhase: string | null;
   failureReason: string | null;
+  failureHttpStatus: number | null;
   runnerJobId: string | null;
   evidenceStatus: 'complete' | 'incomplete' | null;
   runnerCleanupStatus: 'pending' | 'destroyed' | 'failed' | null;

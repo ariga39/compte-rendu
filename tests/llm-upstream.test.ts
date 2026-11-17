@@ -1036,7 +1036,7 @@ it.each([
     );
     if (outcome === 'completed') await expect(response.text()).resolves.toContain('[DONE]');
     else if (status !== 200) {
-      expect(response.status).toBe(502);
+      expect(response.status).toBe(status);
       expect(await response.text()).not.toContain('private-error-canary');
     } else await expect(response.text()).rejects.toThrow();
     const finished = logs.mock.calls.filter((call) => call.includes('llm.request.finished'));
@@ -1051,6 +1051,27 @@ it.each([
     logs.mockRestore();
   }
 });
+
+it.each([400, 401, 403, 404, 408, 409, 422, 429, 500, 502, 503, 504])(
+  'preserves upstream HTTP %i without exposing provider diagnostics or headers',
+  async (status) => {
+    const h = harness({
+      fetch: async () =>
+        new Response('private-upstream-key-and-body', {
+          status,
+          headers: { 'x-provider-key': 'private-header-key', 'content-type': 'application/json' },
+        }),
+    });
+    try {
+      const response = await h.request({ model: 'review', messages: [] });
+      expect(response.status).toBe(status);
+      expect(await response.json()).toEqual({ error: { message: 'model request failed' } });
+      expect(response.headers.get('x-provider-key')).toBeNull();
+    } finally {
+      h.close();
+    }
+  },
+);
 
 it('returns a sanitized failure when the upstream transport fails', async () => {
   const h = harness({

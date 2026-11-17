@@ -133,6 +133,7 @@ export const projectPublicTask = (row: PublicRunRow, now: string): PublicTaskSta
       Schema.decodeUnknownOption(PublicTaskFailure)({
         phase: row.failurePhase,
         reason: row.failureReason,
+        ...(row.failureHttpStatus === null ? {} : { httpStatus: row.failureHttpStatus }),
       }),
     ),
   };

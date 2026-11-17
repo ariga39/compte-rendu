@@ -200,8 +200,8 @@ export interface LiteLlmUpstreamOptions {
   readonly fetch?: typeof globalThis.fetch;
 }
 
-const failure = () =>
-  Response.json({ error: { message: 'model request failed' } }, { status: 502 });
+const failure = (status = 502) =>
+  Response.json({ error: { message: 'model request failed' } }, { status });
 
 const unsupported = () =>
   Response.json({ error: { message: 'unsupported model request' } }, { status: 400 });
@@ -358,7 +358,7 @@ const relay = (
           observeOnce(false);
           stop();
           await upstream.body?.cancel().catch(() => undefined);
-          settle(failure());
+          settle(failure(upstream.status >= 400 && upstream.status <= 599 ? upstream.status : 502));
           return;
         }
 
