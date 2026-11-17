@@ -82,3 +82,20 @@ operator floor with 80/443. Repeating the same probe blocked 8081 while the
 real OpenCode/Vault SSE review fixture still completed and cleanup succeeded.
 This was a real failing assertion before the image change and a passing one
 afterward. The fixture DNS override is only part of the isolated test image.
+
+## Complete local Runner/Core acceptance
+
+The full local run used a real checkout of the public project, a short-lived
+repository-scoped read-only GitHub token through Vault, real OpenCode, the local
+deterministic model fixture, and the real Core/D1 callback handler. GitHub
+publication was intercepted at the public adapter seam; no fixture review was
+posted to a live PR.
+
+This exposed a missing directory-copy implementation: the model result and
+session export were valid, but copying the data/state trees failed, leaving an
+`evidence` failure. After implementing regular-file/directory export, the same
+run reached persisted `completed`, published one `COMMENT` payload for the
+expected SHA with the expected TLDR Markdown, and confirmed sandbox destruction.
+The checked-in opt-in native test now exercises nested DB/log-shaped evidence,
+and optionally authenticated GitHub access when supplied a read-only token file.
+A real model review published to GitHub remains a production cutover check.

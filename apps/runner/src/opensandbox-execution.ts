@@ -177,10 +177,11 @@ export const executeOpenSandboxCommand = async (
       },
       runAbort.signal,
     );
-    if (interrupt !== undefined) await interrupt;
+    const incomplete = execution.exitCode === null || execution.exitCode === undefined;
+    if (incomplete && executionId !== undefined) await stop(executionId);
+    else if (interrupt !== undefined) await interrupt;
     flushStderr('', true);
     await closeFiles();
-    const incomplete = execution.exitCode === null || execution.exitCode === undefined;
     const exitCode = execution.exitCode ?? 1;
     return {
       exitCode: interruptFailed && exitCode === 0 ? 1 : exitCode,
@@ -196,7 +197,8 @@ export const executeOpenSandboxCommand = async (
       truncated,
     };
   } catch {
-    if (interrupt !== undefined) await interrupt;
+    if (executionId !== undefined) await stop(executionId);
+    else if (interrupt !== undefined) await interrupt;
     flushStderr('', true);
     await closeFiles();
     return {

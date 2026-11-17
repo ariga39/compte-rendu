@@ -12,6 +12,10 @@ import {
 } from '../apps/runner/src/sandbox-runtime.js';
 
 const backend = vi.hoisted(() => ({
+  managerClosed: false,
+  directory: false,
+  unsafeEntry: null as string | null,
+  unsafeType: 'file',
   created: false,
   owner: '',
   vault: false,
@@ -72,6 +76,28 @@ vi.mock('@alibaba-group/opensandbox', () => {
             },
           },
           files: {
+            getFileInfo: async (paths: string[]) =>
+              Object.fromEntries(
+                paths.map((path) => [
+                  path,
+                  {
+                    path,
+                    type:
+                      backend.directory && (path.endsWith('/data') || path.endsWith('/logs'))
+                        ? 'directory'
+                        : 'file',
+                  },
+                ]),
+              ),
+            listDirectory: async ({ path }: { path: string }) =>
+              backend.unsafeEntry
+                ? [{ path: backend.unsafeEntry, type: backend.unsafeType }]
+                : path.endsWith('/data')
+                  ? [
+                      { path: `${path}/opencode.db`, type: 'file' },
+                      { path: `${path}/logs`, type: 'directory' },
+                    ]
+                  : [{ path: `${path}/review.log`, type: 'file' }],
             readBytesStreamDetailed: async () =>
               backend.downloadHeaders !== null
                 ? backend.downloadHeaders()
@@ -117,7 +143,9 @@ vi.mock('@alibaba-group/opensandbox', () => {
           backend.kill();
           backend.created = false;
         },
-        close: async () => {},
+        close: async () => {
+          backend.managerClosed = true;
+        },
       }),
     },
   };
@@ -128,6 +156,10 @@ afterEach(async () => {
   for (const path of roots.splice(0)) await rm(path, { recursive: true, force: true });
   vi.clearAllMocks();
   backend.created = false;
+  backend.directory = false;
+  backend.managerClosed = false;
+  backend.unsafeEntry = null;
+  backend.unsafeType = 'file';
   backend.vault = false;
   backend.failCreate = null;
   backend.provisionOnFailedCreate = false;
@@ -161,6 +193,55 @@ const sandboxCommand = (): SandboxCommand =>
   });
 
 describe('OpenSandbox runtime lifecycle', () => {
+  it('exports nested evidence directories with database and logs', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-os-directory-'));
+    roots.push(root);
+    const spec = jobSpec(root);
+    await writeFile(spec.modelTokenFile!, 'host-only-grant');
+    const runtime = createOpenSandboxRuntimeFactory({
+      endpoint: 'http://127.0.0.1:8080',
+      apiKey: 'test',
+      image: 'test',
+      lifetimeSeconds: 3600,
+    })(spec);
+    const command = sandboxCommand();
+    await runtime.setup(command);
+    backend.directory = true;
+    const destination = join(root, 'archive');
+    expect((await runtime.copyOut('/tmp/evidence/data', destination, command)).exitCode).toBe(0);
+    expect(await readFile(join(destination, 'opencode.db'), 'utf8')).toBe('evidence');
+    expect(await readFile(join(destination, 'logs/review.log'), 'utf8')).toBe('evidence');
+    await runtime.destroy(command);
+  });
+
+  it.each([
+    ['/tmp/evidence/data/../outside', 'file'],
+    ['/tmp/evidence/data/link', 'symlink'],
+    ['/tmp/evidence/data/device', 'other'],
+  ])('refuses unsafe evidence entries: %s', async (path, type) => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-os-directory-'));
+    roots.push(root);
+    const spec = jobSpec(root);
+    await writeFile(spec.modelTokenFile!, 'host-only-grant');
+    const runtime = createOpenSandboxRuntimeFactory({
+      endpoint: 'http://127.0.0.1:8080',
+      apiKey: 'test',
+      image: 'test',
+      lifetimeSeconds: 3600,
+    })(spec);
+    const command = sandboxCommand();
+    await runtime.setup(command);
+    backend.directory = true;
+    backend.unsafeEntry = path;
+    backend.unsafeType = type;
+    const destination = join(root, 'archive');
+    expect((await runtime.copyOut('/tmp/evidence/data', destination, command)).exitCode).not.toBe(
+      0,
+    );
+    await expect(readFile(join(root, 'outside'))).rejects.toThrow();
+    await expect(readFile(destination)).rejects.toThrow();
+    await runtime.destroy(command);
+  });
   it('destroys successfully when setup failed before creating a sandbox', async () => {
     const root = await mkdtemp(join(tmpdir(), 'cr-os-runtime-'));
     roots.push(root);
@@ -525,6 +606,7 @@ describe('OpenSandbox runtime lifecycle', () => {
         return;
       }
       await runtime.destroy(command);
+      expect(backend.managerClosed).toBe(true);
       expect(backend.created).toBe(false);
       expect(runtime.metadata.hostCleanupConfirmed).toBe(true);
     },

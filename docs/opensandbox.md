@@ -86,6 +86,9 @@ cleanup. Set `CR_OPENSANDBOX_NATIVE_PROBE=1`, `CR_OPENSANDBOX_PROBE_STAGE` to th
 server-allowed staging directory, `CR_OPENSANDBOX_PROBE_IMAGE` to the image above,
 and `OPENSANDBOX_ENDPOINT` / `OPENSANDBOX_API_KEY_FILE`, then run
 `pnpm exec vp test tests/opensandbox-live.test.ts`. Run it as the image UID.
+Set `CR_OPENSANDBOX_GITHUB_TOKEN_FILE` to a short-lived repository-scoped
+read-only token file to include `gh api installation/repositories` through Vault.
+The token is read only by the host and is never put in the workload environment.
 This is a lifecycle smoke test, not proof of a complete model review.
 
 ## Private inference endpoint
