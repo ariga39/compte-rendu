@@ -23,3 +23,11 @@ corepack pnpm diagnose <PR_URL|DELIVERY_ID|RUN_ID>
 
 The command reads GitHub, D1, and private R2 and never prints credentials,
 repository contents, review bodies, or raw session/tool output.
+
+### Dashboard component previews
+
+Run `pnpm --filter @compte-rendu/dashboard storybook` and open
+<http://localhost:6006>. Under **Reviews / Task detail**, choose a task state,
+use the **variant** control for page or drawer, and use the viewport toolbar
+to inspect a narrow screen. Stories use synthetic API responses. To build a
+static preview, run `pnpm --filter @compte-rendu/dashboard build-storybook`.
