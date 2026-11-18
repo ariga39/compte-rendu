@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { createServer, request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it, vi } from 'vitest';
@@ -280,6 +279,108 @@ afterAll(async () => {
   await rm(sharedEvidenceRoot, { recursive: true, force: true });
 });
 
+const relayInferenceModelConfig = (route = 'deepseek-review') =>
+  JSON.stringify({
+    id: `opencode-go/${route}`,
+    baseUrl: 'https://inference.example/v1',
+    definition: { name: 'Review' },
+  });
+
+const createRelayControl = (
+  options: {
+    readonly issuance?: 'normal' | 'malformed' | 'short';
+    readonly token?: string;
+    readonly usage?: unknown;
+    readonly rejectRevoke?: boolean;
+  } = {},
+) => {
+  const issued: Array<{ jobId: string; routes: string[]; token: string }> = [];
+  const revoked: string[] = [];
+  const requests: Array<{
+    path: string;
+    authorization?: string;
+    body: Record<string, unknown>;
+  }> = [];
+  const active = new Map<string, string>();
+  let counter = 0;
+  let rejectRevoke = options.rejectRevoke ?? false;
+  const controlFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const inputUrl =
+      input instanceof Request ? input.url : input instanceof URL ? input.href : String(input);
+    const path = new URL(inputUrl).pathname;
+    const authorization = new Headers(init?.headers).get('authorization') ?? undefined;
+    const body =
+      typeof init?.body === 'string'
+        ? (JSON.parse(init.body) as Record<string, unknown>)
+        : ({} as Record<string, unknown>);
+    requests.push({
+      path,
+      ...(authorization === undefined ? {} : { authorization }),
+      body,
+    });
+    if (path === '/runner-llm/issue') {
+      if (options.issuance === 'malformed')
+        return new Response('{', {
+          status: 201,
+          headers: { 'content-type': 'application/json' },
+        });
+      const jobId = String(body.jobId);
+      const token = options.token ?? `relay-grant-token-${(counter += 1)}`;
+      active.set(token, jobId);
+      issued.push({ jobId, routes: body.routes as string[], token });
+      return Response.json(
+        {
+          token,
+          expiresAt: new Date(
+            Date.now() + (options.issuance === 'short' ? 1000 : 2 * 60 * 60 * 1000),
+          ).toISOString(),
+        },
+        { status: 201 },
+      );
+    }
+    if (path === '/runner-llm/revoke') {
+      const jobId = String(body.jobId);
+      if (rejectRevoke) return new Response(null, { status: 503 });
+      revoked.push(jobId);
+      for (const [token, owner] of active) if (owner === jobId) active.delete(token);
+      return new Response(null, { status: 204 });
+    }
+    if (path === '/runner-llm/usage') {
+      const available = revoked.includes(String(body.jobId));
+      if (options.usage === undefined) return new Response(null, { status: 200 });
+      return available
+        ? Response.json(options.usage)
+        : Response.json({ error: 'grant still active' }, { status: 409 });
+    }
+    return new Response(null, { status: 404 });
+  }) as typeof fetch;
+  return {
+    fetch: controlFetch,
+    issued,
+    revoked,
+    requests,
+    activeTokens: active,
+    setRejectRevoke: (value: boolean) => {
+      rejectRevoke = value;
+    },
+  };
+};
+
+type RelayControl = ReturnType<typeof createRelayControl>;
+
+const routeRelayControl = (
+  control: RelayControl,
+  callback: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>,
+) => {
+  const routed = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const inputUrl =
+      input instanceof Request ? input.url : input instanceof URL ? input.href : String(input);
+    if (new URL(inputUrl).pathname.startsWith('/runner-llm/')) return control.fetch(input, init);
+    return callback(input, init);
+  }) as typeof fetch;
+  return routed;
+};
+
 const waitForTerminal = async (
   runner: ReturnType<typeof createRunner>,
   jobId: string,
@@ -324,7 +425,7 @@ const runAgentScenario = async (scenario: {
   callbackThrows?: string;
   callbackTimeoutMs?: number;
   modelConfig?: string;
-  llmServiceSocket?: string;
+  relayControl?: RelayControl;
   sessionExport?: string;
   evidenceRoot?: string;
   logEvents?: unknown[];
@@ -343,26 +444,46 @@ const runAgentScenario = async (scenario: {
     evidenceRoot: scenario.evidenceRoot ?? sharedEvidenceRoot,
     authToken: 'runner-test-token',
     modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-    llmServiceSocket: scenario.llmServiceSocket,
     modelConfig: scenario.modelConfig,
     progressFetch: scenario.progressFetch,
+    llmRelay: scenario.relayControl === undefined ? undefined : true,
+    llmRelayGeneration: scenario.relayControl === undefined ? undefined : 'generation-a',
     callbackUrl:
-      scenario.callbackRequests === undefined ? undefined : 'https://ingress.test/runner-callback',
-    callbackToken: scenario.callbackRequests === undefined ? undefined : 'callback-token',
+      scenario.callbackRequests === undefined && scenario.relayControl === undefined
+        ? undefined
+        : 'https://ingress.test/runner-callback',
+    callbackToken:
+      scenario.callbackRequests === undefined && scenario.relayControl === undefined
+        ? undefined
+        : 'callback-token',
     callbackTimeoutMs: scenario.callbackTimeoutMs,
     callbackFetch:
-      scenario.callbackRequests === undefined
+      scenario.callbackRequests === undefined && scenario.relayControl === undefined
         ? undefined
         : async (input: RequestInfo | URL, init?: RequestInit) => {
-            scenario.callbackRequests!.push(new Request(input, init));
+            const inputUrl =
+              input instanceof Request
+                ? input.url
+                : input instanceof URL
+                  ? input.href
+                  : String(input);
+            if (
+              scenario.relayControl !== undefined &&
+              new URL(inputUrl).pathname.startsWith('/runner-llm/')
+            ) {
+              return scenario.relayControl.fetch(input, init);
+            }
+            if (scenario.callbackRequests === undefined) {
+              return new Response(null, { status: 202 });
+            }
+            scenario.callbackRequests.push(new Request(input, init));
             if (scenario.callbackThrows !== undefined) {
               throw new Error(scenario.callbackThrows);
             }
             if (scenario.callbackHangs === true) {
               return new Promise<Response>(() => undefined);
             }
-            const status =
-              scenario.callbackStatuses?.[scenario.callbackRequests!.length - 1] ?? 202;
+            const status = scenario.callbackStatuses?.[scenario.callbackRequests.length - 1] ?? 202;
             return new Response(null, { status });
           },
     log:
@@ -375,12 +496,15 @@ const runAgentScenario = async (scenario: {
           },
     process: async (_command, args, options = {}) => {
       await writeEvidenceFixture(args, options, scenario.output);
-      if (
-        scenario.sessionExport !== undefined &&
-        args[0] === 'cp' &&
-        /opencode-export-[A-Za-z0-9._:-]+\.json$/.test(args[1])
-      ) {
-        await writeFile(args[2], scenario.sessionExport, { mode: 0o600 });
+      if (args[0] === 'cp' && /opencode-export-[A-Za-z0-9._:-]+\.json$/.test(args[1])) {
+        const sessionExport =
+          scenario.sessionExport ??
+          (scenario.relayControl === undefined
+            ? undefined
+            : sessionExportJson('scenario-session', {
+                model: { providerID: 'compte-rendu', id: 'deepseek-review' },
+              }));
+        if (sessionExport !== undefined) await writeFile(args[2], sessionExport, { mode: 0o600 });
       }
       if (args[0] === 'create') {
         createArgs = args;
@@ -433,6 +557,14 @@ const runAgentScenario = async (scenario: {
     },
   });
   scenario.onRunner?.(runner);
+  const reviewConfiguration =
+    scenario.reviewConfiguration ??
+    (scenario.relayControl === undefined
+      ? undefined
+      : {
+          revision: 1,
+          selection: { reviewers: ['deepseek-review'], synthesis: 'deepseek-review' },
+        });
   const submitted = await runner.handle(
     new Request('http://runner/jobs', {
       method: 'POST',
@@ -442,9 +574,7 @@ const runAgentScenario = async (scenario: {
       },
       body: JSON.stringify({
         ...runnerJobFields,
-        ...(scenario.reviewConfiguration === undefined
-          ? {}
-          : { reviewConfiguration: scenario.reviewConfiguration }),
+        ...(reviewConfiguration === undefined ? {} : { reviewConfiguration }),
         runId: scenario.runId,
         attempt: 1,
         repositoryUrl: 'https://github.com/acme/reviewed.git',
@@ -7738,13 +7868,17 @@ describe('Runner LLM service mode', () => {
     expect(result.terminal).not.toHaveProperty('result');
   });
   it.each([
-    'https://models.example/v1',
-    'http://localhost:8090/v1',
-    'http://host.docker.internal:8090/other',
-  ])('rejects a service endpoint outside the supported local transport: %s', (baseUrl) => {
+    'https://models.example/v1?token=private',
+    'https://models.example:8443/v1',
+    'https://127.0.0.1/v1',
+    'http://inference.example/v1',
+    'https://models.example/v2',
+    'https://models.example/v1/chat/completions',
+  ])('rejects a relay endpoint outside the dedicated HTTPS inference origin: %s', (baseUrl) => {
     expect(() =>
       createRunner({
-        llmServiceSocket: '/tmp/control.sock',
+        llmRelay: true,
+        llmRelayGeneration: 'generation-a',
         modelConfig: JSON.stringify({
           id: 'opencode-go/review',
           baseUrl,
@@ -7753,26 +7887,20 @@ describe('Runner LLM service mode', () => {
       }),
     ).toThrow();
   });
-  it('rejects a relative control socket and OpenShell service mode before admission', () => {
-    expect(() => createRunner({ llmServiceSocket: 'control.sock' })).toThrow(
-      'absolute Unix socket',
-    );
+
+  it('rejects OpenShell relay service mode before admission', () => {
     expect(() =>
       createRunner({
-        llmServiceSocket: '/tmp/control.sock',
+        llmRelay: true,
+        llmRelayGeneration: 'generation-a',
+        modelConfig: relayInferenceModelConfig('review'),
         sandboxRuntime: 'openshell',
         openshell: { gateway: 'review', modelProvider: 'review', image: 'review:test' },
       }),
-    ).toThrow('does not support');
+    ).toThrow(/sbx|OpenShell|relay/i);
   });
 
   it('issues a job grant, injects it through the sbx token file, revokes it, and leaves no usable token behind', async () => {
-    const controlRoot = await mkdtemp(join(tmpdir(), 'cr-llm-control-'));
-    const socketPath = join(controlRoot, 'control.sock');
-    const issued: Array<{ jobId: string; routes: string[]; token: string }> = [];
-    const revoked: string[] = [];
-    const active = new Map<string, string>();
-    let counter = 0;
     const callbacks: Request[] = [];
     const usage = {
       version: 1,
@@ -7791,300 +7919,134 @@ describe('Runner LLM service mode', () => {
         },
       ],
     };
-
-    const unixPost = (path: string, payload: unknown, headers: Record<string, string> = {}) =>
-      new Promise<{ status: number; body: string }>((resolve, reject) => {
-        const body = JSON.stringify(payload);
-        const call = request(
-          {
-            socketPath,
-            path,
-            method: 'POST',
-            headers: {
-              'content-type': 'application/json',
-              'content-length': String(new TextEncoder().encode(body).byteLength),
-              ...headers,
-            },
-          },
-          async (response) => {
-            const chunks: Buffer[] = [];
-            for await (const chunk of response) {
-              chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-            }
-            resolve({
-              status: response.statusCode ?? 0,
-              body: Buffer.concat(chunks).toString('utf8'),
-            });
-          },
-        );
-        call.on('error', reject);
-        call.end(body);
-      });
-
-    const server = createServer(async (incoming, outgoing) => {
-      const chunks: Buffer[] = [];
-      for await (const chunk of incoming) {
-        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-      }
-      const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>;
-      if (incoming.method === 'POST' && incoming.url === '/grants') {
-        const jobId = String(body.jobId);
-        const routes = body.routes as string[];
-        const token = `grant-token-${(counter += 1)}`;
-        active.set(token, jobId);
-        issued.push({ jobId, routes, token });
-        outgoing.writeHead(201, { 'content-type': 'application/json' });
-        outgoing.end(
-          JSON.stringify({
-            token,
-            expiresAt: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
-          }),
-        );
-        return;
-      }
-      if (incoming.method === 'POST' && incoming.url === '/grants/revoke') {
-        const jobId = String(body.jobId);
-        revoked.push(jobId);
-        for (const [token, owner] of active) if (owner === jobId) active.delete(token);
-        outgoing.writeHead(204);
-        outgoing.end();
-        return;
-      }
-      if (incoming.url === '/grants/usage') {
-        const available = revoked.includes(String(body.jobId));
-        outgoing.writeHead(available ? 200 : 409, { 'content-type': 'application/json' });
-        outgoing.end(JSON.stringify(available ? usage : { error: 'grant still active' }));
-        return;
-      }
-      if (incoming.method === 'POST' && incoming.url === '/v1/chat/completions') {
-        const authorization = incoming.headers.authorization;
-        const token =
-          typeof authorization === 'string' ? authorization.replace(/^Bearer /, '') : '';
-        outgoing.writeHead(active.has(token) ? 200 : 401, { 'content-type': 'application/json' });
-        outgoing.end(JSON.stringify({ usable: active.has(token) }));
-        return;
-      }
-      outgoing.writeHead(404);
-      outgoing.end();
+    const relay = createRelayControl({ usage });
+    const serviceModelConfig = JSON.stringify({
+      id: 'opencode-go/deepseek-review',
+      baseUrl: 'https://inference.example/v1',
+      definition: {
+        name: 'DeepSeek Review',
+        reasoning: true,
+        limit: { context: 1000000, output: 384000 },
+      },
     });
-    await new Promise<void>((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(socketPath, resolve);
+    let injectedToken = '';
+    let usableDuringReview = false;
+    const scenario = await runAgentScenario({
+      runId: 'run-llm-service-success',
+      output: finalMarkdownJsonl(),
+      callbackRequests: callbacks,
+      modelConfig: serviceModelConfig,
+      relayControl: relay,
+      sessionExport: sessionExportJson('scenario-session', {
+        model: { providerID: 'compte-rendu', id: 'deepseek-review' },
+      }),
+      onModelSecret: async (args) => {
+        const command = args[args.indexOf('--command') + 1];
+        const path = command.slice("/usr/bin/cat '".length, -1);
+        injectedToken = await readFile(path, 'utf8');
+      },
+      onAgentStart: async () => {
+        usableDuringReview = [...relay.activeTokens.values()].includes(runnerJobFields.id);
+        expect(injectedToken).toBe('relay-grant-token-1');
+      },
     });
 
-    try {
-      const serviceModelConfig = JSON.stringify({
-        id: 'opencode-go/deepseek-review',
-        baseUrl: 'http://host.docker.internal:32773/v1',
-        definition: {
-          name: 'DeepSeek Review',
-          reasoning: true,
-          limit: { context: 1000000, output: 384000 },
-        },
-      });
-      let injectedToken = '';
-      let usableDuringReview = false;
-      const scenario = await runAgentScenario({
-        runId: 'run-llm-service-success',
-        output: finalMarkdownJsonl(),
-        callbackRequests: callbacks,
-        modelConfig: serviceModelConfig,
-        llmServiceSocket: socketPath,
-        sessionExport: sessionExportJson('scenario-session', {
-          model: { providerID: 'opencode-go', id: 'deepseek-review' },
-        }),
-        onModelSecret: async (args) => {
-          const command = args[args.indexOf('--command') + 1];
-          const path = command.slice("/usr/bin/cat '".length, -1);
-          injectedToken = await readFile(path, 'utf8');
-        },
-        onAgentStart: async () => {
-          usableDuringReview =
-            (
-              await unixPost(
-                '/v1/chat/completions',
-                {},
-                { authorization: `Bearer ${injectedToken}` },
-              )
-            ).status === 200;
-        },
-      });
+    expect(scenario.terminal).toMatchObject({
+      status: 'succeeded',
+      sandbox: { cleanup: 'destroyed' },
+    });
+    expect(await callbacks[0].clone().json()).toMatchObject({ usage });
+    const manifest = JSON.parse(
+      await readFile(
+        join(sharedEvidenceRoot, scenario.terminal.evidenceId as string, 'manifest.json'),
+        'utf8',
+      ),
+    );
+    expect(manifest.usage).toEqual(usage);
+    const jobId = runnerJobFields.id;
+    expect(usableDuringReview).toBe(true);
+    expect(relay.issued).toHaveLength(1);
+    expect(relay.issued[0]).toMatchObject({ jobId, routes: ['deepseek-review'] });
+    expect(relay.revoked).toEqual([jobId]);
+    expect(relay.activeTokens.size).toBe(0);
 
-      expect(scenario.terminal).toMatchObject({
-        status: 'succeeded',
-        sandbox: { cleanup: 'destroyed' },
-      });
-      expect(await callbacks[0].clone().json()).toMatchObject({ usage });
-      const manifest = JSON.parse(
-        await readFile(
-          join(sharedEvidenceRoot, scenario.terminal.evidenceId as string, 'manifest.json'),
-          'utf8',
-        ),
-      );
-      expect(manifest.usage).toEqual(usage);
-      const jobId = runnerJobFields.id;
-      expect(usableDuringReview).toBe(true);
-      expect(issued).toHaveLength(1);
-      expect(issued[0]).toMatchObject({ jobId, routes: ['deepseek-review'] });
-      expect(revoked).toEqual([jobId]);
+    const token = relay.issued[0].token;
+    const secretArgs = scenario.secretArgs ?? [];
+    const command = secretArgs[secretArgs.indexOf('--command') + 1];
+    expect(command).toMatch(/^\/usr\/bin\/cat '/);
+    expect(secretArgs[secretArgs.indexOf('--host') + 1]).toBe('inference.example');
+    const tokenPath = command.slice("/usr/bin/cat '".length, -1);
+    expect(command).not.toContain(token);
+    expect((scenario.createArgs ?? []).join(' ')).not.toContain(token);
+    expect((scenario.agentArgs ?? []).join(' ')).not.toContain(token);
 
-      const token = issued[0].token;
-      const secretArgs = scenario.secretArgs ?? [];
-      const command = secretArgs[secretArgs.indexOf('--command') + 1];
-      expect(command).toMatch(/^\/usr\/bin\/cat '/);
-      expect(secretArgs[secretArgs.indexOf('--host') + 1]).toBe('localhost');
-      const tokenPath = command.slice("/usr/bin/cat '".length, -1);
-      expect(command).not.toContain(token);
-      expect((scenario.createArgs ?? []).join(' ')).not.toContain(token);
-      expect((scenario.agentArgs ?? []).join(' ')).not.toContain(token);
-
-      const evidence = join(sharedEvidenceRoot, scenario.terminal.evidenceId as string);
-      expect(await readTextTree(evidence)).not.toContain(token);
-      const tokenFileExists = await stat(tokenPath).then(
-        () => true,
-        () => false,
-      );
-      expect(tokenFileExists).toBe(false);
-
-      const inference = await unixPost(
-        '/v1/chat/completions',
-        {},
-        {
-          authorization: `Bearer ${token}`,
-        },
-      );
-      expect(inference.status).toBe(401);
-    } finally {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-      await rm(controlRoot, { recursive: true, force: true });
-    }
+    const evidence = join(sharedEvidenceRoot, scenario.terminal.evidenceId as string);
+    expect(await readTextTree(evidence)).not.toContain(token);
+    const tokenFileExists = await stat(tokenPath).then(
+      () => true,
+      () => false,
+    );
+    expect(tokenFileExists).toBe(false);
   });
 });
 
 describe('Runner LLM token output', () => {
   it('does not publish or retain a review that unexpectedly contains its host grant', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'cr-llm-leak-'));
-    const socketPath = join(root, 'control.sock');
     const token = 'unexpected-host-grant-value';
-    const server = createServer((incoming, outgoing) => {
-      outgoing.writeHead(incoming.url === '/grants' ? 201 : 204, {
-        'content-type': 'application/json',
-      });
-      outgoing.end(
-        incoming.url === '/grants'
-          ? JSON.stringify({ token, expiresAt: new Date(Date.now() + 7200000).toISOString() })
-          : undefined,
-      );
-    });
-    await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+    const relay = createRelayControl({ token });
     const callbacks: Request[] = [];
-    try {
-      const scenario = await runAgentScenario({
-        runId: 'run-llm-leaked-review',
-        output: finalMarkdownJsonl(`## Review:\n${token}`),
-        sessionExport: JSON.stringify({
-          ...JSON.parse(sessionExportJson('scenario-session')),
-          diagnostic: token,
-        }),
-        callbackRequests: callbacks,
-        modelConfig: JSON.stringify({
-          id: 'opencode-go/deepseek-review',
-          baseUrl: 'http://host.docker.internal:18089/v1',
-          definition: { name: 'Review' },
-        }),
-        llmServiceSocket: socketPath,
-      });
-      expect(scenario.terminal).toMatchObject({
-        status: 'failed',
-        sandbox: { cleanup: 'destroyed' },
-      });
-      expect(scenario.terminal).not.toHaveProperty('result');
-      expect(callbacks).toHaveLength(1);
-      const callback = await callbacks[0].json();
-      expect(callback).toMatchObject({ status: 'failed' });
-      expect(callback.result).toBeUndefined();
-      expect(JSON.stringify(callback)).not.toContain(token);
-      expect(
-        Buffer.from(callback.evidence.opencodeExport.content.content, 'base64').toString('utf8'),
-      ).not.toContain(token);
-      expect(
-        await readTextTree(join(sharedEvidenceRoot, scenario.terminal.evidenceId as string)),
-      ).not.toContain(token);
-    } finally {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-      await rm(root, { recursive: true, force: true });
-    }
+    const scenario = await runAgentScenario({
+      runId: 'run-llm-leaked-review',
+      output: finalMarkdownJsonl(`## Review:\n${token}`),
+      sessionExport: JSON.stringify({
+        ...JSON.parse(sessionExportJson('scenario-session')),
+        diagnostic: token,
+      }),
+      callbackRequests: callbacks,
+      modelConfig: relayInferenceModelConfig(),
+      relayControl: relay,
+    });
+    expect(scenario.terminal).toMatchObject({
+      status: 'failed',
+      sandbox: { cleanup: 'destroyed' },
+    });
+    expect(scenario.terminal).not.toHaveProperty('result');
+    expect(callbacks).toHaveLength(1);
+    const callback = await callbacks[0].json();
+    expect(callback).toMatchObject({ status: 'failed' });
+    expect(callback.result).toBeUndefined();
+    expect(JSON.stringify(callback)).not.toContain(token);
+    expect(
+      Buffer.from(callback.evidence.opencodeExport.content.content, 'base64').toString('utf8'),
+    ).not.toContain(token);
+    expect(
+      await readTextTree(join(sharedEvidenceRoot, scenario.terminal.evidenceId as string)),
+    ).not.toContain(token);
+    expect(relay.revoked).toEqual([runnerJobFields.id]);
   });
 });
 
 describe('Runner LLM lifecycle failures', () => {
-  const modelConfig = JSON.stringify({
-    id: 'opencode-go/deepseek-review',
-    baseUrl: 'http://host.docker.internal:18089/v1',
-    definition: { name: 'Review' },
-  });
+  const modelConfig = relayInferenceModelConfig();
   const fixture = async (issue: 'normal' | 'malformed' | 'short' = 'normal') => {
     const root = await mkdtemp(join(tmpdir(), 'cr-llm-life-'));
-    const socket = join(root, 'control.sock');
     const token = 'lifecycle-test-grant';
-    let usable = false;
-    let rejectRevoke = false;
-    const server = createServer(async (incoming, outgoing) => {
-      for await (const _chunk of incoming) {
-        /* consume request */
-      }
-      if (incoming.url === '/grants') {
-        usable = true;
-        outgoing.writeHead(201, { 'content-type': 'application/json' });
-        outgoing.end(
-          issue === 'malformed'
-            ? '{'
-            : JSON.stringify({
-                token,
-                expiresAt: new Date(
-                  Date.now() + (issue === 'short' ? 1000 : 7200000),
-                ).toISOString(),
-              }),
-        );
-      } else if (incoming.url === '/grants/revoke') {
-        if (!rejectRevoke) usable = false;
-        outgoing.writeHead(rejectRevoke ? 503 : 204);
-        outgoing.end();
-      } else {
-        outgoing.writeHead(usable ? 200 : 401);
-        outgoing.end();
-      }
-    });
-    await new Promise<void>((resolve) => server.listen(socket, resolve));
+    const relay = createRelayControl({ issuance: issue, token });
     return {
       root,
-      socket,
+      relay,
       token,
-      rejectRevoke: (value: boolean) => {
-        rejectRevoke = value;
-      },
-      inferenceStatus: () =>
-        new Promise<number>((resolve, reject) => {
-          const req = request(
-            {
-              socketPath: socket,
-              path: '/v1/chat/completions',
-              method: 'POST',
-              headers: { authorization: `Bearer ${token}` },
-            },
-            (res) => {
-              resolve(res.statusCode ?? 0);
-            },
-          );
-          req.on('error', reject);
-          req.end();
-        }),
       close: async () => {
-        await new Promise<void>((resolve) => server.close(() => resolve()));
         await rm(root, { recursive: true, force: true });
       },
     };
   };
+  const relayOptions = (relay: RelayControl) => ({
+    modelConfig,
+    llmRelay: true,
+    llmRelayGeneration: 'generation-a',
+    callbackFetch: routeRelayControl(relay, async () => new Response(null, { status: 202 })),
+  });
   it.each(['malformed', 'short'] as const)(
     'revokes an unusable %s issuance without starting the agent',
     async (issue) => {
@@ -8093,7 +8055,7 @@ describe('Runner LLM lifecycle failures', () => {
         const result = await runAgentScenario({
           runId: `llm-${issue}`,
           output: finalMarkdownJsonl(),
-          llmServiceSocket: f.socket,
+          relayControl: f.relay,
           modelConfig,
           evidenceRoot: join(f.root, 'evidence'),
           callbackRequests: [],
@@ -8103,7 +8065,8 @@ describe('Runner LLM lifecycle failures', () => {
           sandbox: { cleanup: 'destroyed' },
         });
         expect(result.agentInvoked).toBe(false);
-        expect(await f.inferenceStatus()).toBe(401);
+        expect(f.relay.revoked).toEqual([runnerJobFields.id]);
+        expect(f.relay.activeTokens.size).toBe(0);
       } finally {
         await f.close();
       }
@@ -8117,11 +8080,11 @@ describe('Runner LLM lifecycle failures', () => {
         runId: 'usage-unavailable',
         output: finalMarkdownJsonl(),
         modelConfig,
-        llmServiceSocket: f.socket,
+        relayControl: f.relay,
         evidenceRoot: join(f.root, 'evidence'),
         callbackRequests: callbacks,
         sessionExport: sessionExportJson('scenario-session', {
-          model: { providerID: 'opencode-go', id: 'deepseek-review' },
+          model: { providerID: 'compte-rendu', id: 'deepseek-review' },
         }),
       });
       expect(result.terminal).toMatchObject({
@@ -8129,14 +8092,14 @@ describe('Runner LLM lifecycle failures', () => {
         sandbox: { cleanup: 'destroyed' },
       });
       expect(await callbacks[0].clone().json()).not.toHaveProperty('usage');
-      expect(await f.inferenceStatus()).toBe(401);
+      expect(f.relay.revoked).toEqual([runnerJobFields.id]);
     } finally {
       await f.close();
     }
   });
   it('fails without a vote when revocation is unavailable, then recovers before a fresh Runner can claim', async () => {
     const f = await fixture();
-    f.rejectRevoke(true);
+    f.relay.setRejectRevoke(true);
     const evidenceRoot = join(f.root, 'evidence');
     const callbacks: Request[] = [];
     let restarted: ReturnType<typeof createRunner> | undefined;
@@ -8144,8 +8107,8 @@ describe('Runner LLM lifecycle failures', () => {
       const result = await runAgentScenario({
         runId: 'llm-revoke-failed',
         output: finalMarkdownJsonl(),
-        llmServiceSocket: f.socket,
         modelConfig,
+        relayControl: f.relay,
         evidenceRoot,
         callbackRequests: callbacks,
       });
@@ -8155,13 +8118,13 @@ describe('Runner LLM lifecycle failures', () => {
       });
       expect(result.terminal).not.toHaveProperty('result');
       expect((await callbacks[0].json()).result).toBeUndefined();
-      expect(await f.inferenceStatus()).toBe(200);
+      expect(f.relay.revoked).toEqual([]);
+      expect(f.relay.activeTokens.size).toBe(1);
       let unexpectedClaim = false;
       const blocked = createRunner({
+        ...relayOptions(f.relay),
         authToken: 'runner-test-token',
         evidenceRoot,
-        modelConfig,
-        llmServiceSocket: f.socket,
         claimFetch: async () => {
           unexpectedClaim = true;
           return new Response(null, { status: 204 });
@@ -8187,20 +8150,19 @@ describe('Runner LLM lifecycle failures', () => {
         );
         expect(admission.status).toBe(503);
         expect(unexpectedClaim).toBe(false);
-        expect(await f.inferenceStatus()).toBe(200);
+        expect(f.relay.activeTokens.size).toBe(1);
       } finally {
         await blocked.close();
       }
-      f.rejectRevoke(false);
+      f.relay.setRejectRevoke(false);
       let claimedWithRevokedGrant = false;
       restarted = createRunner({
+        ...relayOptions(f.relay),
         authToken: 'runner-test-token',
         evidenceRoot,
-        modelConfig,
-        llmServiceSocket: f.socket,
         claimIntervalMs: 60000,
         claimFetch: async () => {
-          claimedWithRevokedGrant = (await f.inferenceStatus()) === 401;
+          claimedWithRevokedGrant = f.relay.activeTokens.size === 0;
           return new Response(null, { status: 204 });
         },
       });
@@ -8212,13 +8174,13 @@ describe('Runner LLM lifecycle failures', () => {
   });
   it('preserves cleanup failure when grant revocation also fails', async () => {
     const f = await fixture();
-    f.rejectRevoke(true);
+    f.relay.setRejectRevoke(true);
     try {
       const result = await runAgentScenario({
         runId: 'llm-revoke-cleanup-failed',
         output: finalMarkdownJsonl(),
-        llmServiceSocket: f.socket,
         modelConfig,
+        relayControl: f.relay,
         evidenceRoot: join(f.root, 'evidence'),
         cleanupFailure: true,
       });
@@ -8228,31 +8190,31 @@ describe('Runner LLM lifecycle failures', () => {
         sandbox: { cleanup: 'failed' },
       });
       expect(result.manifest.terminal).toMatchObject({ status: 'failed', reason: 'cleanup' });
+      expect(f.relay.revoked).toEqual([]);
     } finally {
       await f.close();
     }
   });
   it('resumes claiming after explicit cleanup recovery resolves a failed startup grant gate', async () => {
     const f = await fixture();
-    f.rejectRevoke(true);
+    f.relay.setRejectRevoke(true);
     const evidenceRoot = join(f.root, 'evidence');
     let restarted: ReturnType<typeof createRunner> | undefined;
     try {
       const failed = await runAgentScenario({
         runId: 'recovery-grant-gate',
         output: finalMarkdownJsonl(),
-        llmServiceSocket: f.socket,
         modelConfig,
+        relayControl: f.relay,
         evidenceRoot,
         cleanupFailure: true,
       });
       let blocked = false;
       let claims = 0;
       restarted = createProductionRunnerWithMergeBase({
+        ...relayOptions(f.relay),
         authToken: 'runner-test-token',
         evidenceRoot,
-        modelConfig,
-        llmServiceSocket: f.socket,
         claimUrl: 'https://ingress.test/runner-claim',
         claimIntervalMs: 60000,
         log: {
@@ -8283,8 +8245,8 @@ describe('Runner LLM lifecycle failures', () => {
       });
       await vi.waitFor(() => expect(blocked).toBe(true));
       expect(claims).toBe(0);
-      expect(await f.inferenceStatus()).toBe(200);
-      f.rejectRevoke(false);
+      expect(f.relay.activeTokens.size).toBe(1);
+      f.relay.setRejectRevoke(false);
       const manifest = failed.manifest;
       const recovery = await restarted.handle(
         new Request('http://runner/maintenance/recover-cleanup', {
@@ -8304,7 +8266,7 @@ describe('Runner LLM lifecycle failures', () => {
         }),
       );
       expect(recovery.status).toBe(202);
-      expect(await f.inferenceStatus()).toBe(401);
+      expect(f.relay.activeTokens.size).toBe(0);
       await vi.waitFor(() => expect(claims).toBeGreaterThan(0));
     } finally {
       await restarted?.close();
@@ -8323,7 +8285,7 @@ describe('Runner LLM lifecycle failures', () => {
       runId: 'llm-cancel',
       terminalAttempts: 400,
       output: finalMarkdownJsonl(),
-      llmServiceSocket: f.socket,
+      relayControl: f.relay,
       modelConfig,
       evidenceRoot: join(f.root, 'evidence'),
       callbackRequests: [],
@@ -8338,14 +8300,14 @@ describe('Runner LLM lifecycle failures', () => {
     let cancelled: Promise<Response> | undefined;
     try {
       await vi.waitFor(() => expect(started).toBe(true));
-      expect(await f.inferenceStatus()).toBe(200);
+      expect(f.relay.activeTokens.size).toBe(1);
       cancelled = runner!.handle(
         new Request(`http://runner/jobs/${runnerJobFields.id}`, {
           method: 'DELETE',
           headers: { authorization: 'Bearer runner-test-token' },
         }),
       );
-      await vi.waitFor(async () => expect(await f.inferenceStatus()).toBe(401));
+      await vi.waitFor(() => expect(f.relay.activeTokens.size).toBe(0));
     } finally {
       release();
       await cancelled;
@@ -8904,27 +8866,35 @@ describe('Runner transport diagnostics', () => {
 
   it('records a one-time grant recovery failure and preserves the claim gate', async () => {
     const evidenceRoot = await mkdtemp(join(tmpdir(), 'cr-claim-grant-'));
+    const jobId = 'job-grant-gate';
     await mkdir(join(evidenceRoot, 'llm-grant-pending'), { recursive: true, mode: 0o700 });
     await writeFile(
       join(
         evidenceRoot,
         'llm-grant-pending',
-        `${createHash('sha256').update('job-grant-gate').digest('hex')}.marker`,
+        `${createHash('sha256').update(jobId).digest('hex')}.marker`,
       ),
-      'job-grant-gate',
+      JSON.stringify({
+        version: 1,
+        jobId,
+        issuer: {
+          transport: 'relay',
+          origin: 'https://ingress.test',
+          generation: 'generation-a',
+        },
+      }),
       { mode: 0o600 },
     );
+    const relay = createRelayControl({ rejectRevoke: true });
     const events: LogEvent[] = [];
     let claims = 0;
     const runner = createRunner({
       evidenceRoot,
       authToken: 'runner-test-token',
-      modelConfig: JSON.stringify({
-        id: 'opencode-go/review',
-        baseUrl: 'http://host.docker.internal:32773/v1',
-        definition: { name: 'Review' },
-      }),
-      llmServiceSocket: join(evidenceRoot, 'missing-control.sock'),
+      modelConfig: relayInferenceModelConfig('review'),
+      llmRelay: true,
+      llmRelayGeneration: 'generation-a',
+      callbackFetch: relay.fetch,
       claimUrl: 'https://ingress.test/runner-claim',
       claimIntervalMs: 1,
       claimFetch: async () => {
@@ -8944,6 +8914,9 @@ describe('Runner transport diagnostics', () => {
         expect.objectContaining({ reason: 'grant-recovery-failed', pollingHalted: true }),
       ]);
       expect(claims).toBe(0);
+      expect(relay.requests).toContainEqual(
+        expect.objectContaining({ path: '/runner-llm/revoke' }),
+      );
     } finally {
       await runner.close();
       await rm(evidenceRoot, { recursive: true, force: true });
@@ -9111,7 +9084,7 @@ describe('Runner multi-model review', () => {
 
   const multiModelConfig = JSON.stringify({
     id: 'opencode-go/legacy-single',
-    baseUrl: 'http://host.docker.internal:32773/v1',
+    baseUrl: 'https://inference.example/v1',
     definition: { name: 'Legacy single' },
   });
 
@@ -9226,44 +9199,7 @@ describe('Runner multi-model review', () => {
           : (overrides.rootExport ?? rootExport)
         : defaultExport(sessionId));
     const controlRoot = await mkdtemp(join(tmpdir(), 'cr-multi-control-'));
-    const socketPath = join(controlRoot, 'control.sock');
-    const issued: Array<{ jobId: string; routes: string[]; token: string }> = [];
-    const revoked: string[] = [];
-    let counter = 0;
-    const server = createServer(async (incoming, outgoing) => {
-      const chunks: Buffer[] = [];
-      for await (const chunk of incoming)
-        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-      const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as Record<
-        string,
-        unknown
-      >;
-      if (incoming.url === '/grants') {
-        const routes = body.routes as string[];
-        const token = `multi-grant-token-${(counter += 1)}`;
-        issued.push({ jobId: String(body.jobId), routes, token });
-        outgoing.writeHead(201, { 'content-type': 'application/json' });
-        outgoing.end(
-          JSON.stringify({
-            token,
-            expiresAt: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
-          }),
-        );
-        return;
-      }
-      if (incoming.url === '/grants/revoke') {
-        revoked.push(String(body.jobId));
-        outgoing.writeHead(204);
-        outgoing.end();
-        return;
-      }
-      outgoing.writeHead(404);
-      outgoing.end();
-    });
-    await new Promise<void>((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(socketPath, resolve);
-    });
+    const relay = createRelayControl();
 
     let createArgs: readonly string[] | undefined;
     let agentArgs: readonly string[] | undefined;
@@ -9273,13 +9209,14 @@ describe('Runner multi-model review', () => {
       evidenceRoot: join(controlRoot, 'evidence'),
       authToken: 'runner-test-token',
       modelConfig: multiModelConfig,
-      llmServiceSocket: socketPath,
+      llmRelay: true,
+      llmRelayGeneration: 'generation-a',
       callbackUrl: 'https://ingress.test/runner-callback',
       callbackToken: 'callback-token',
-      callbackFetch: async (input, init) => {
+      callbackFetch: routeRelayControl(relay, async (input, init) => {
         callbacks.push(new Request(input, init));
         return new Response(null, { status: 202 });
-      },
+      }),
       process: async (_command, args, options = {}) => {
         if (args[0] === 'create') {
           createArgs = args;
@@ -9415,8 +9352,8 @@ describe('Runner multi-model review', () => {
         terminal,
         manifest,
         callbacks,
-        issued,
-        revoked,
+        issued: relay.issued,
+        revoked: relay.revoked,
         createArgs,
         agentArgs,
         agentCommands,
@@ -9428,7 +9365,6 @@ describe('Runner multi-model review', () => {
       };
     } finally {
       await runner.close();
-      await new Promise<void>((resolve) => server.close(() => resolve()));
       await rm(controlRoot, { recursive: true, force: true });
     }
   };
@@ -11327,13 +11263,14 @@ describe('Runner confirmed cleanup recovery', () => {
 
 describe('SDK sandbox execution', () => {
   it.each([
-    ['http://llm.internal.example/v1', true],
     ['https://llm.internal.example/v1', true],
-    ['http://llm.internal.example:8080/v1', false],
+    ['https://llm.internal.example:8443/v1', false],
+    ['https://llm.internal.example/v2', false],
+    ['http://llm.internal.example/v1', false],
     ['http://127.0.0.1/v1', false],
-    ['http://llm.internal.example/other', false],
     ['https://user:password@llm.internal.example/v1', false],
-  ] as const)('validates an OpenSandbox Vault endpoint: %s', async (baseUrl, valid) => {
+    ['https://*.llm.internal.example/v1', false],
+  ] as const)('validates an OpenSandbox HTTPS relay endpoint: %s', async (baseUrl, valid) => {
     const root = await mkdtemp(join(tmpdir(), 'cr-os-config-'));
     const apiKeyFile = join(root, 'control-key');
     await writeFile(apiKeyFile, 'test-control-key');
@@ -11342,7 +11279,9 @@ describe('SDK sandbox execution', () => {
         createRunner({
           sandboxRuntime: 'opensandbox',
           opensandbox: { endpoint: 'http://127.0.0.1:8080', apiKeyFile, image: 'review:test' },
-          llmServiceSocket: join(root, 'control.sock'),
+          llmRelay: true,
+          llmRelayGeneration: 'generation-a',
+          callbackFetch: async () => new Response(null, { status: 204 }),
           modelConfig: JSON.stringify({
             id: 'opencode-go/review',
             baseUrl,

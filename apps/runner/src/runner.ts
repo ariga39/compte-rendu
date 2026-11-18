@@ -14,7 +14,7 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
-import { basename, isAbsolute, join } from 'node:path';
+import { basename, join } from 'node:path';
 import { DateTime, Effect, Option, Schema } from 'effect';
 import {
   MAX_REVIEW_RESULT_BYTES,
@@ -48,12 +48,7 @@ import {
 import { confirmSbxCleanup } from './cleanup-recovery.js';
 import { createOpenSandboxRuntimeFactory } from './sandbox-runtime-opensandbox.js';
 import { createSbxRuntimeFactory } from './sandbox-runtime-sbx.js';
-import {
-  createLlmServiceClient,
-  createRelayLlmServiceClient,
-  type LlmGrantIdentity,
-  type LlmServiceClient,
-} from './llm-service-client.js';
+import { createRelayLlmServiceClient, type LlmGrantIdentity } from './llm-service-client.js';
 import {
   MULTI_PROVIDER_ID,
   SUPERVISOR_AGENT_ID,
@@ -171,41 +166,7 @@ const ModelBaseUrl = Schema.URLFromString.check(
     { expected: 'absolute HTTPS URL without credentials, query, fragment, or wildcard host' },
   ),
 );
-// Service mode talks to the sandbox through the sbx local proxy, whose URL is
-// rewritten to localhost before policy matching. Only this exact host, explicit
-// port and /v1 path are accepted; ordinary direct-provider HTTPS is unchanged.
-const SbxLocalServiceBaseUrl = Schema.URLFromString.check(
-  Schema.makeFilter(
-    (url) =>
-      url.protocol === 'http:' &&
-      url.hostname === 'host.docker.internal' &&
-      url.port.length > 0 &&
-      (url.pathname === '/v1' || url.pathname === '/v1/') &&
-      url.username === '' &&
-      url.password === '' &&
-      url.search === '' &&
-      url.hash === '',
-    { expected: 'http://host.docker.internal:<port>/v1' },
-  ),
-);
-const OpenSandboxServiceBaseUrl = Schema.URLFromString.check(
-  Schema.makeFilter(
-    (url) =>
-      ['http:', 'https:'].includes(url.protocol) &&
-      url.port === '' &&
-      /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/i.test(
-        url.hostname,
-      ) &&
-      !/^\d+(?:\.\d+){3}$/.test(url.hostname) &&
-      (url.pathname === '/v1' || url.pathname === '/v1/') &&
-      url.username === '' &&
-      url.password === '' &&
-      url.search === '' &&
-      url.hash === '',
-    { expected: 'HTTP(S) FQDN on its standard port with /v1 path' },
-  ),
-);
-// Remote relay inference uses the sandbox's credential proxy over HTTPS. Only
+// Managed relay inference uses the sandbox's credential proxy over HTTPS. Only
 // the configured FQDN on port 443 with an exact /v1 base path is accepted.
 const RelayServiceBaseUrl = Schema.URLFromString.check(
   Schema.makeFilter(
@@ -227,24 +188,16 @@ const ReviewModelConfig = Schema.Struct({
   baseUrl: Schema.optional(ModelBaseUrl),
   definition: Schema.optional(ReviewModelDefinition),
 });
-const ServiceReviewModelConfig = Schema.Struct({
-  id: Schema.String.check(Schema.isPattern(/^opencode-go\/[A-Za-z0-9._:-]{1,128}$/)),
-  baseUrl: Schema.optional(SbxLocalServiceBaseUrl),
-  definition: Schema.optional(ReviewModelDefinition),
-});
 const RelayServiceReviewModelConfig = Schema.Struct({
   id: Schema.String.check(Schema.isPattern(/^opencode-go\/[A-Za-z0-9._:-]{1,128}$/)),
   baseUrl: RelayServiceBaseUrl,
   definition: Schema.optional(ReviewModelDefinition),
 });
-const GrantMarkerIssuer = Schema.Union([
-  Schema.Struct({ transport: Schema.Literal('local') }),
-  Schema.Struct({
-    transport: Schema.Literal('relay'),
-    origin: Schema.NonEmptyString,
-    generation: Schema.NonEmptyString,
-  }),
-]);
+const GrantMarkerIssuer = Schema.Struct({
+  transport: Schema.Literal('relay'),
+  origin: Schema.NonEmptyString,
+  generation: Schema.NonEmptyString,
+});
 const GrantMarker = Schema.Struct({
   version: Schema.Literal(1),
   jobId: Schema.NonEmptyString,
@@ -254,7 +207,7 @@ type GrantIssuer = typeof GrantMarkerIssuer.Type;
 type ReviewModelConfigValue = Schema.Schema.Type<typeof ReviewModelConfig>;
 type ReviewModelDefinitionValue = Schema.Schema.Type<typeof ReviewModelDefinition>;
 
-type ModelTransport = 'direct' | 'local' | 'opensandbox' | 'relay';
+type ModelTransport = 'direct' | 'relay';
 
 const decodeReviewModelConfig = (
   raw: string | undefined,
@@ -265,16 +218,7 @@ const decodeReviewModelConfig = (
     : Option.getOrUndefined(
         Schema.decodeUnknownOption(
           Schema.fromJsonString(
-            transport === 'relay'
-              ? RelayServiceReviewModelConfig
-              : transport === 'opensandbox'
-                ? Schema.Struct({
-                    ...ServiceReviewModelConfig.fields,
-                    baseUrl: Schema.optional(OpenSandboxServiceBaseUrl),
-                  })
-                : transport === 'local'
-                  ? ServiceReviewModelConfig
-                  : ReviewModelConfig,
+            transport === 'relay' ? RelayServiceReviewModelConfig : ReviewModelConfig,
           ),
           { onExcessProperty: 'error' },
         )(raw),
@@ -693,8 +637,6 @@ export interface RunnerOptions {
   readonly sandboxRuntime?: SandboxRuntimeKind;
   readonly sandboxCliPath?: string;
   readonly sandboxRuntimeFactory?: SandboxRuntimeFactory;
-  /** Absolute Unix socket for the host LLM service control plane. */
-  readonly llmServiceSocket?: string;
   /** Opt in to the remote relay control plane over the callback origin. */
   readonly llmRelay?: boolean;
   readonly llmRelayGeneration?: string;
@@ -879,6 +821,9 @@ const redactEvidenceTextFiles = async (
     'validated-review.md',
     'opencode-session-list.json',
     'multi-review.json',
+    ...(await readdir(evidencePath)).filter((name) =>
+      /^opencode-child-sessions-[1-9]\d*\.json$/.test(name),
+    ),
     ...sessionIds.map((id) => `opencode-export-${id}.json`),
   ]) {
     const path = join(evidencePath, name);
@@ -947,13 +892,11 @@ export const createRunner = (options: RunnerOptions = {}) => {
     settingsFile === undefined
       ? resolveConcurrency(options.concurrency, process.env.RUNNER_CONCURRENCY)
       : readRunnerSettingsSync(settingsFile).concurrency;
-  const llmServiceSocketRaw = options.llmServiceSocket ?? process.env.RUNNER_LLM_SERVICE_SOCKET;
-  const llmServiceSocket =
-    llmServiceSocketRaw === undefined || llmServiceSocketRaw.trim().length === 0
-      ? undefined
-      : llmServiceSocketRaw.trim();
-  if (llmServiceSocket !== undefined && !isAbsolute(llmServiceSocket)) {
-    throw new Error('RUNNER_LLM_SERVICE_SOCKET must be an absolute Unix socket path');
+  const llmServiceSocketRaw = process.env.RUNNER_LLM_SERVICE_SOCKET;
+  if (llmServiceSocketRaw !== undefined && llmServiceSocketRaw.trim().length > 0) {
+    throw new Error(
+      'RUNNER_LLM_SERVICE_SOCKET is no longer supported; use RUNNER_LLM_RELAY with an HTTPS inference origin',
+    );
   }
   const sandboxRuntime = resolveSandboxRuntimeConfig({
     kind: options.sandboxRuntime ?? process.env.RUNNER_SANDBOX_RUNTIME,
@@ -973,16 +916,10 @@ export const createRunner = (options: RunnerOptions = {}) => {
   if (sandboxRuntime.kind === 'openshell' && sandboxRuntime.openshell === undefined) {
     throw new Error('OpenShell sandbox runtime configuration is incomplete');
   }
-  if (llmServiceSocket !== undefined && sandboxRuntime.kind === 'openshell') {
-    throw new Error('LLM service mode does not support the OpenShell sandbox runtime yet');
-  }
   const relayFlag = options.llmRelay ?? process.env.RUNNER_LLM_RELAY;
   const relayEnabled = isEnabled(relayFlag);
-  if (relayEnabled && llmServiceSocket !== undefined) {
-    throw new Error('RUNNER_LLM_RELAY cannot be combined with RUNNER_LLM_SERVICE_SOCKET');
-  }
-  if (relayEnabled && sandboxRuntime.kind !== 'sbx') {
-    throw new Error('Remote LLM relay requires the sbx sandbox runtime');
+  if (relayEnabled && sandboxRuntime.kind === 'openshell') {
+    throw new Error('LLM service mode does not support the OpenShell sandbox runtime yet');
   }
   const relayCallbackUrl = nonEmpty(options.callbackUrl ?? process.env.RUNNER_CALLBACK_URL);
   const relayCallbackToken = nonEmpty(options.callbackToken ?? process.env.RUNNER_CALLBACK_TOKEN);
@@ -1018,13 +955,12 @@ export const createRunner = (options: RunnerOptions = {}) => {
     process.env.RUNNER_SANDBOX_CLI ??
     (sandboxRuntime.kind === 'sbx' ? sbxPath : sandboxRuntime.cliPath);
   const authToken = options.authToken ?? process.env.RUNNER_AUTH_TOKEN;
-  const modelSecretCommand =
-    llmServiceSocket === undefined && !relayEnabled
-      ? (options.modelSecretCommand ?? process.env.MODEL_SECRET_COMMAND)
-      : undefined;
+  const modelSecretCommand = relayEnabled
+    ? undefined
+    : (options.modelSecretCommand ?? process.env.MODEL_SECRET_COMMAND);
   let opensandboxOptions: Parameters<typeof createOpenSandboxRuntimeFactory>[0] | undefined;
   if (sandboxRuntime.opensandbox !== undefined) {
-    if (llmServiceSocket === undefined) throw new Error('OpenSandbox requires LLM service mode');
+    if (!relayEnabled) throw new Error('OpenSandbox requires the managed HTTPS LLM relay');
     let apiKey: string;
     try {
       apiKey = readFileSync(sandboxRuntime.opensandbox.apiKeyFile, 'utf8').trim();
@@ -1048,22 +984,14 @@ export const createRunner = (options: RunnerOptions = {}) => {
         : createSbxRuntimeFactory({ modelSecretCommand }));
   const modelResolverMissing =
     sandboxRuntime.kind === 'sbx' &&
-    llmServiceSocket === undefined &&
     !relayEnabled &&
     (modelSecretCommand === undefined || modelSecretCommand.length === 0);
-  const serviceMode = llmServiceSocket !== undefined || relayEnabled;
   const modelConfig = decodeReviewModelConfig(
     options.modelConfig ?? process.env.REVIEW_MODEL_CONFIG,
-    relayEnabled
-      ? 'relay'
-      : llmServiceSocket !== undefined
-        ? sandboxRuntime.kind === 'opensandbox'
-          ? 'opensandbox'
-          : 'local'
-        : 'direct',
+    relayEnabled ? 'relay' : 'direct',
   );
   if (
-    serviceMode &&
+    relayEnabled &&
     (modelConfig === undefined ||
       modelConfig.baseUrl === undefined ||
       modelConfig.definition === undefined)
@@ -1080,9 +1008,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
   ) {
     throw new Error('Remote LLM relay requires a dedicated inference hostname');
   }
-  const localLlmServiceClient =
-    llmServiceSocket === undefined ? undefined : createLlmServiceClient(llmServiceSocket);
-  const relayLlmServiceClient =
+  const llmServiceClient =
     relayEnabled && relayOrigin !== undefined && relayToken !== undefined
       ? createRelayLlmServiceClient({
           origin: relayOrigin,
@@ -1090,27 +1016,13 @@ export const createRunner = (options: RunnerOptions = {}) => {
           fetch: relayFetch,
         })
       : undefined;
-  const llmServiceClient = localLlmServiceClient ?? relayLlmServiceClient;
-  const activeGrantIssuer: GrantIssuer =
+  const activeGrantIssuer: GrantIssuer | undefined =
     relayEnabled && relayOrigin !== undefined && relayGeneration !== undefined
       ? { transport: 'relay', origin: relayOrigin, generation: relayGeneration }
-      : { transport: 'local' };
+      : undefined;
   const modelId = modelConfig?.id;
-  const modelRouteId = modelId?.slice('opencode-go/'.length);
   const serviceBaseUrl = modelConfig?.baseUrl;
-  const modelHost =
-    serviceBaseUrl !== undefined &&
-    serviceBaseUrl.protocol === 'http:' &&
-    serviceBaseUrl.hostname === 'host.docker.internal'
-      ? 'localhost'
-      : (serviceBaseUrl?.hostname ?? MODEL_HOST);
-  const modelPort =
-    serviceBaseUrl !== undefined && serviceBaseUrl.port.length > 0
-      ? serviceBaseUrl.port
-      : serviceBaseUrl?.protocol === 'http:'
-        ? '80'
-        : MODEL_PORT;
-  const modelResource = `${modelHost}:${modelPort}`;
+  const modelResource = `${serviceBaseUrl?.hostname ?? MODEL_HOST}:${serviceBaseUrl?.port || MODEL_PORT}`;
   const openCodeConfig = modelConfig === undefined ? undefined : trustedOpenCodeConfig(modelConfig);
   const evidenceRoot =
     options.evidenceRoot ??
@@ -1141,31 +1053,18 @@ export const createRunner = (options: RunnerOptions = {}) => {
         ? { kind: 'missing' }
         : { kind: 'invalid' };
     }
-    const markerName = basename(path);
-    if (value.trimStart().startsWith('{')) {
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(value);
-      } catch {
-        parsed = undefined;
-      }
-      if (parsed !== undefined) {
-        const decoded = Option.getOrUndefined(
-          Schema.decodeUnknownOption(GrantMarker, { onExcessProperty: 'error' })(parsed),
-        );
-        if (decoded === undefined || markerNameFor(decoded.jobId) !== markerName)
-          return { kind: 'invalid' };
-        return { kind: 'present', jobId: decoded.jobId, issuer: decoded.issuer };
-      }
-    }
-    // Legacy plaintext markers belong to the original local issuer and preserve
-    // the exact job identity, including surrounding whitespace or a leading
-    // brace. The hashed filename is the integrity check that distinguishes a
-    // legacy ID from malformed JSON.
-    if (value.length === 0 || markerNameFor(value) !== markerName) return { kind: 'invalid' };
-    return { kind: 'present', jobId: value, issuer: { transport: 'local' } };
+    const decoded = Option.getOrUndefined(
+      Schema.decodeUnknownOption(Schema.fromJsonString(GrantMarker), { onExcessProperty: 'error' })(
+        value,
+      ),
+    );
+    if (decoded === undefined || markerNameFor(decoded.jobId) !== basename(path))
+      return { kind: 'invalid' };
+    return { kind: 'present', jobId: decoded.jobId, issuer: decoded.issuer };
   };
-  const writeGrantMarker = async (jobId: string, issuer = activeGrantIssuer) => {
+  const writeGrantMarker = async (jobId: string) => {
+    const issuer = activeGrantIssuer;
+    if (!issuer) throw new Error('missing relay grant issuer');
     await mkdir(pendingGrantRoot, { recursive: true, mode: 0o700 });
     await writeFile(grantMarkerPath(jobId), `${JSON.stringify({ version: 1, jobId, issuer })}\n`, {
       mode: 0o600,
@@ -1178,18 +1077,19 @@ export const createRunner = (options: RunnerOptions = {}) => {
       // A stale marker only causes a redundant identity revocation next start.
     }
   };
-  const sameIssuer = (expected: GrantIssuer, candidate: GrantIssuer): boolean => {
-    if (expected.transport === 'local' || candidate.transport === 'local')
-      return expected.transport === 'local' && candidate.transport === 'local';
-    return expected.origin === candidate.origin && expected.generation === candidate.generation;
-  };
-  const clientForIssuer = (issuer: GrantIssuer): LlmServiceClient | undefined => {
-    if (!sameIssuer(activeGrantIssuer, issuer)) return undefined;
-    return issuer.transport === 'local' ? localLlmServiceClient : relayLlmServiceClient;
-  };
-  const revokeRecordedGrant = async (jobId: string, issuer: GrantIssuer): Promise<boolean> => {
-    const client = clientForIssuer(issuer);
-    if (client === undefined) return false;
+  const revokeRecordedGrant = async (
+    jobId: string,
+    issuer: GrantIssuer | undefined,
+  ): Promise<boolean> => {
+    const client = llmServiceClient;
+    if (
+      !client ||
+      !issuer ||
+      !activeGrantIssuer ||
+      activeGrantIssuer.origin !== issuer.origin ||
+      activeGrantIssuer.generation !== issuer.generation
+    )
+      return false;
     const deadline = Date.now() + GRANT_REVOKE_BUDGET_MS;
     for (let attempt = 0; attempt < GRANT_REVOKE_ATTEMPTS; attempt += 1) {
       try {
@@ -2470,14 +2370,10 @@ export const createRunner = (options: RunnerOptions = {}) => {
       }
       if (job.abortRequested) return;
 
-      const grantRoutes = multi
-        ? directExecution
+      if (llmServiceClient !== undefined && multiSelection !== undefined) {
+        const grantRoutes = directExecution
           ? [multiSelection.reviewers[0]!]
-          : dedupedRoutes(multiSelection)
-        : modelRouteId === undefined
-          ? undefined
-          : [modelRouteId];
-      if (llmServiceClient !== undefined && grantRoutes !== undefined) {
+          : dedupedRoutes(multiSelection);
         // Persist the issuer-bound marker before the call: an ambiguous response
         // must revoke by job identity and never retry issuance for this job.
         try {

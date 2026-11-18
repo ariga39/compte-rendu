@@ -20,6 +20,7 @@ const backend = vi.hoisted(() => ({
   created: false,
   owner: '',
   vault: false,
+  vaultRequest: null as unknown,
   failCreate: null as Error | null,
   provisionOnFailedCreate: false,
   listError: null as Error | null,
@@ -72,8 +73,9 @@ vi.mock('@alibaba-group/opensandbox', () => {
           },
           waitUntilReady: async () => {},
           credentialVault: {
-            create: async () => {
+            create: async (request: unknown) => {
               backend.vault = true;
+              backend.vaultRequest = request;
             },
           },
           files: {
@@ -162,6 +164,7 @@ afterEach(async () => {
   backend.unsafeEntry = null;
   backend.unsafeType = 'file';
   backend.vault = false;
+  backend.vaultRequest = null;
   backend.failCreate = null;
   backend.provisionOnFailedCreate = false;
   backend.listError = null;
@@ -181,7 +184,7 @@ const jobSpec = (root: string): SandboxJobSpec => ({
   env: [],
   checkoutRoot: join(root, 'checkout'),
   configRoot: join(root, 'config'),
-  modelResource: 'llm.example.test:80',
+  modelResource: 'llm.example.test:443',
   modelTokenFile: join(root, 'grant'),
   githubResource: 'api.github.com:443',
   githubReadToken: 'host-only-github',
@@ -192,6 +195,49 @@ const sandboxCommand = (): SandboxCommand =>
     execute: async (operation: SandboxOperation, _diagnostic: unknown, options: {} = {}) =>
       operation(options),
   });
+
+describe('OpenSandbox runtime inference endpoint', () => {
+  it.each([
+    ['llm.example.test:443', true],
+    ['llm.example.test:80', false],
+    ['llm.example.test:8443', false],
+    ['127.0.0.1:443', false],
+    ['localhost:443', false],
+    ['llm.example.test', false],
+  ] as const)('requires the exact HTTPS relay host on port 443: %s', async (resource, valid) => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-os-endpoint-'));
+    roots.push(root);
+    const spec = { ...jobSpec(root), modelResource: resource };
+    await writeFile(spec.modelTokenFile!, 'host-only-grant', { mode: 0o600 });
+    const runtime = createOpenSandboxRuntimeFactory({
+      endpoint: 'http://127.0.0.1:8080',
+      apiKey: 'test',
+      image: 'test',
+      lifetimeSeconds: 3600,
+    })(spec);
+    if (valid) {
+      await runtime.setup(sandboxCommand());
+      await runtime.destroy(sandboxCommand());
+      expect(backend.vaultRequest).toMatchObject({
+        bindings: expect.arrayContaining([
+          expect.objectContaining({
+            name: 'model',
+            match: {
+              schemes: ['https'],
+              hosts: ['llm.example.test'],
+              methods: ['GET', 'POST'],
+              paths: ['/v1/*'],
+            },
+            auth: { type: 'bearer', credential: 'model' },
+          }),
+        ]),
+      });
+    } else {
+      await expect(runtime.setup(sandboxCommand())).rejects.toThrow(/HTTPS FQDN on port 443/);
+      expect(backend.create).not.toHaveBeenCalled();
+    }
+  });
+});
 
 describe('OpenSandbox runtime lifecycle', () => {
   it('exports nested evidence directories with database and logs', async () => {
@@ -539,7 +585,7 @@ describe('OpenSandbox runtime lifecycle', () => {
         env: [],
         checkoutRoot: join(root, 'checkout'),
         configRoot: join(root, 'config'),
-        modelResource: 'llm.example.test:80',
+        modelResource: 'llm.example.test:443',
         modelTokenFile: tokenPath,
         githubResource: 'api.github.com:443',
         githubReadToken: 'host-only-github',
