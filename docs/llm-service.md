@@ -331,6 +331,11 @@ RUNNER_CALLBACK_TOKEN=<static-runner-callback-token>
 REVIEW_MODEL_CONFIG={"id":"opencode-go/deepseek-review","baseUrl":"https://<INFERENCE_FQDN>/v1","definition":{"name":"DeepSeek review"}}
 ```
 
+Before enabling this transport, provision the relay catalog and confirm that
+its operator endpoint lists every configured reviewer and synthesis route.
+An empty relay database denies grant issuance. Keep the Runner on its local
+socket until catalog discovery and its first successful refresh are deployed.
+
 Deploy and validate Core's `/runner-llm/` control routes plus the relay D1 and
 inference Worker before enabling `RUNNER_LLM_RELAY` on a Runner. Finish any
 already queued legacy null-snapshot jobs on the old backend first; remote
