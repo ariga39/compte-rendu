@@ -5,7 +5,7 @@ import {
   CATALOG_TIMEOUT_MS,
   PUBLIC_USER_AGENT,
   readModelCatalog,
-} from '../../llm-service/src/model-catalog-wire';
+} from './model-catalog-wire';
 import type { D1DatabaseLike } from './grants';
 
 import { gatewayHeaders, gatewayUrl, type GatewayConfig } from './gateway';

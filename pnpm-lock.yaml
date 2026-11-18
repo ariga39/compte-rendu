@@ -129,21 +129,6 @@ importers:
         specifier: 4.0.0-rc.111
         version: 4.0.0-rc.111
 
-  apps/llm-service:
-    dependencies:
-      '@compte-rendu/contracts':
-        specifier: workspace:*
-        version: link:../../packages/contracts
-      effect:
-        specifier: 4.0.0-rc.111
-        version: 4.0.0-rc.111
-      eventsource-parser:
-        specifier: 3.0.6
-        version: 3.0.6
-      smol-toml:
-        specifier: 1.9.1
-        version: 1.9.1
-
   apps/runner:
     dependencies:
       '@alibaba-group/opensandbox':

@@ -63,12 +63,10 @@ work around that sanitization by logging request bodies, git URLs with
 credentials, Sandbox files, OpenCode stdout/stderr, model prompts, or session
 artifacts.
 
-For a self-hosted Runner, read its systemd journal alongside the matching LLM
-service journal. Use an explicit UTC time window and retain the job/run IDs:
+For a self-hosted Runner, read its systemd journal and the installation’s relay D1 request records. Use an explicit UTC time window and retain the job/run IDs:
 
 ```sh
 journalctl --user -u <RUNNER_UNIT> --utc --since '<START UTC>' --until '<END UTC>'
-journalctl --user -u <INSTANCE_NAME>-llm.service --utc --since '<START UTC>' --until '<END UTC>'
 ```
 
 Interpret the boundaries separately:
@@ -77,10 +75,7 @@ Interpret the boundaries separately:
   output on failure. An exit code such as 128 alone does not identify a GitHub,
   authentication, DNS, TLS, disk, or network fault. Check cancellation, timeout,
   process errors, and output truncation before drawing a conclusion.
-- LLM request records correlate `jobId` and `requestId`, route/protocol, HTTP
-  status, received bytes, duration, terminal markers, and outcome. See
-  [LLM diagnostics](llm-service.md). A stream failure received from a gateway
-  does not establish whether the gateway or its upstream caused it.
+- Look up `inference_requests` by the Runner's job ID in the installation's relay D1 database. Compare route, model, status and reported tokens with the job's persisted usage. Gateway Analytics can confirm upstream model traffic; a failed stream alone cannot identify which hop interrupted it. See [usage and Gateway analytics](llm-service.md#reading-ai-gateway-analytics).
 - Claim failures report whether polling continues or is halted. An ambiguous
   owned claim must remain halted; do not resume it by discarding the response
   or clearing database ownership without reconciling that exact job.
@@ -226,8 +221,7 @@ does not remove queued work; zero concurrency is invalid.
 
 Back up artifacts/configuration before replacement. Deploy additive Core/contracts
 support before a Runner that emits a new result shape. Do not interrupt live jobs
-just to update documentation or the dashboard. A service restart invalidates
-in-memory LLM grants; it cannot resume an old agent job.
+just to update documentation or the dashboard. Relay grants survive Worker restarts in D1. On startup the Runner resolves pending revocations before accepting work. Interrupted agent jobs cannot resume.
 
 A hard crash can leave owned Sandboxes ([#66](https://github.com/ariga39/compte-rendu/issues/66)).
 An exhausted terminal callback can leave Core showing a claimed run even after

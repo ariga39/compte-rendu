@@ -8,7 +8,7 @@ from experiments and proposals; a research recommendation is not a shipped featu
 | Understand admission, jobs, publication and component boundaries | [Architecture](design.md)                       |
 | Install an instance or change deployment settings                | [Installation](installation.md)                 |
 | Diagnose failures, upgrade, roll back or uninstall               | [Operations](operations.md)                     |
-| Configure model routes, credentials and job grants               | [LLM service](llm-service.md)                   |
+| Configure model routes, credentials and job grants               | [Inference relay](llm-service.md)               |
 | Select one or several reviewers without restarting               | [Review configuration](review-configuration.md) |
 | Understand the final result, decisions and publication checks    | [Review decisions](review-decisions-design.md)  |
 | Understand dashboard state, privacy and refresh                  | [Dashboard](public-dashboard-design.md)         |
@@ -21,7 +21,7 @@ For end users, the dashboard's `/help` page is rendered from
 
 ## Proposed changes
 
-[Worker relay and AI Gateway migration](gateway-relay-design.md) describes the proposed replacement for host-side review inference and its staged rollout.
+[Worker relay and AI Gateway migration](gateway-relay-design.md) records the design and staged rollout of managed inference.
 
 ## Maintenance
 

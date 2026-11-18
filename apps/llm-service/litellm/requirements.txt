@@ -1,3 +1,0 @@
-# Tested provider gateway. Prisma is required by v1.106.0 error handling even without a DB.
-litellm[proxy]==1.106.0
-prisma==0.15.0

@@ -9,20 +9,9 @@ credentials by itself.
 Values in angle brackets are operator choices. Do not replace them with values
 from another installation.
 
-## External LLM service status
+## Managed inference
 
-The [LLM service deployment guide](llm-service.md) covers the standalone
-host service and LiteLLM backend: routes, credentials, optional subscription setup, systemd
-startup, automatic model catalog discovery, and listener checks. Deploy it independently of the Runner.
-After enabling discovery for a provider, new models become routable automatically;
-change the [review selection](review-configuration.md) without restarting services.
-The guide covers the full-path catalog setting required for official OpenCode Go.
-
-For an sbx Runner, follow [Connecting an sbx Runner](llm-service.md#connecting-an-sbx-runner)
-to configure the private control socket, route alias and local inference URL.
-Changing `REVIEW_MODEL_CONFIG.baseUrl` alone is insufficient: service mode must
-also manage per-job grant issuance and revocation. OpenShell continues to use
-its gateway model provider; this service integration does not yet support it.
+Provision the [inference Worker and Gateway](#configure-the-managed-inference-relay), then configure the [Runner relay environment](llm-service.md#remote-relay-transport). Model selection is stored in D1 and applies to newly admitted jobs.
 
 ## What is deployed
 
@@ -516,14 +505,7 @@ correction before cleanup; no submission plugin is installed. See
 [review decisions](review-decisions-design.md).
 
 The environment example below is **direct-provider mode**. For the recommended
-host LLM service and configurable multi-model selection, use
-[the service-mode environment](llm-service.md#connecting-an-sbx-runner) instead;
-that mode uses job grants and does not require `MODEL_SECRET_COMMAND`. For the
-Worker relay, set `RUNNER_LLM_RELAY=1` and
-`RUNNER_LLM_RELAY_GENERATION=<RELAY_BACKEND_GENERATION>`, keep the HTTPS
-`RUNNER_CALLBACK_URL` and `RUNNER_CALLBACK_TOKEN`, and set
-`REVIEW_MODEL_CONFIG.baseUrl` to the configured `https://<INFERENCE_FQDN>/v1`;
-see [remote relay transport](llm-service.md#remote-relay-transport).
+managed relay and configurable multi-model selection, use the [relay environment](llm-service.md#remote-relay-transport).
 
 The runner listens only on IPv4 loopback port `8080`. It runs as the persistent
 service below on the host that also runs the remotely managed Tunnel connector.
@@ -1050,22 +1032,11 @@ limits.
 
 Deploy Core migration `0012_review_configuration.sql` and the multi-model-capable
 Runner before enabling a selection. This execution path requires sbx or OpenSandbox, OpenCode 2,
-and the external LLM service. A selection can contain one reviewer; it runs directly with the same prompt
+and the managed relay. A selection can contain one reviewer; it runs directly with the same prompt
 and output contract used for multiple reviewers. Jobs retain the selection
 frozen when admitted. OpenShell does not support this multi-model path yet.
 
-Configure each selected route in the host LLM service first (see
-[LLM service configuration](llm-service.md)). Use distinct, stable route IDs such
-as `deepseek-v4.1-flash` and `step-5-preview`, both using `chat-completions` for
-this OpenCode adapter. Configure the upstream model and full base URL in LiteLLM YAML; keep the
-job-derived OpenCode Go session header through the trusted Node service.
-Node route definitions are re-read when issuing each new job grant, without a
-service restart; existing grants keep their mappings. With LiteLLM provider
-wildcards configured, adding another model on that provider also needs no backend
-restart. Follow the [model change procedure](llm-service.md#change-a-review-model-without-restarting).
-Preserve old route IDs and their mappings until queued and running jobs that
-reference them finish. Initial backend setup or binary upgrades still require
-draining active requests before restarting services.
+Configure the [relay model catalog](llm-service.md#managed-relay-model-catalog) and verify it lists every selected route. Preserve old route IDs and their mappings while queued and running jobs reference them.
 
 Set a dedicated `REVIEW_CONFIGURATION_TOKEN` secret on the public SvelteKit Worker. The protected
 `GET /api/review-configuration` and `PUT /api/review-configuration` endpoints on
@@ -1312,23 +1283,18 @@ The file contains deployment identifiers and catalog sources. The example below 
 The command writes instance-specific files to `apps/dashboard` and
 `apps/inference-worker`. For an installation with custom application routes or
 bindings, compare the generated file to the live configuration and carry those
-settings forward. Keep the local LLM units available during commissioning.
+settings forward.
 
 1. Apply the inference Worker's migrations against its relay D1 database.
    Deploy the inference Worker on the dedicated hostname with its Run secret.
 2. Deploy the application Worker with the private `INFERENCE_RELAY` binding
    and `RELAY_DEFAULT_MODEL_ROUTE`. Confirm that the operator catalog endpoint
    lists every selected reviewer and synthesis route after the scheduled refresh.
-3. Drain the Runner on the local transport. Verify old grants have been
+3. Drain the Runner before changing its inference settings. Verify old grants have been
    revoked, legacy null-snapshot jobs have finished, and recovery markers are
    clear. Configure the existing callback URL and bearer, the HTTPS inference
    model base on port 443 ending in `/v1`, and the relay issuer generation.
 4. Resume one installation and run a fresh PR review. Verify the published
    review is for the claimed revision, the check terminates, D1 records usage
    per model, grant reuse is denied after cleanup, and the sandbox is gone.
-5. Exercise rollback under drain. Resolve markers on the issuing backend,
-   restore the local control socket and original model base together, and verify
-   the reviewer and synthesis routes resolve through the original catalog and
-   aliases. Restore the previous selection if it changed. Resume and verify a
-   fresh review. Switch back under the same drain procedure.
-   Retire the replaced local units after acceptance for that installation.
+5. To roll back, drain the Runner and resolve outstanding grants on their issuing backend before restoring the previous binary and its matching configuration. See the [upgrade procedure](llm-service.md#upgrading-an-installation-with-the-former-local-service).
