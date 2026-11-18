@@ -9,7 +9,6 @@ const Grant = Schema.fromJsonString(
   }),
 );
 
-const RUNNER_LLM_CONTROL_TIMEOUT_MS = 5000;
 const CONTROL_MAX_BYTES = 16 * 1024;
 const USAGE_MAX_BYTES = 64 * 1024;
 
