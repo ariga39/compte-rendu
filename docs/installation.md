@@ -24,6 +24,8 @@ The repository deploys these resources:
 | R2 evidence bucket | `<INSTANCE_NAME>-review-evidence`, binding `EVIDENCE_BUCKET`                 | Private bucket storing one bounded JSON evidence bundle per Job; lifecycle expiration is configured at deployment.                                                                    |
 | Runner Job service | Self-hosted runner reached through the Worker’s `RUNNER` VPC Service binding | Owns one authenticated asynchronous review attempt and fresh Docker Sandbox cleanup.                                                                                                  |
 
+Managed inference adds a dedicated inference Worker, its relay D1 database and the installation’s AI Gateway with BYOK credentials. The application Worker calls the inference Worker through the private `INFERENCE_RELAY` binding. Sandbox requests use the dedicated inference hostname. See [managed relay provisioning](#configure-the-managed-inference-relay).
+
 The request path is:
 
 ```text
