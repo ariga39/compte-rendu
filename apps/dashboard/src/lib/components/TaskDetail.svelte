@@ -241,23 +241,24 @@
       </div>
     {/if}
 
-    {#if dash.data.task.decision || dash.data.task.status === 'completed'}
-      <h2>Decision</h2>
-      <p class="decision-block">
-        <span
-          class="decision-value"
-          class:unknown={dash.data.task.decision === null}
-          data-testid="detail-decision"
-        >
-          {decisionLabel(dash.data.task.decision)}
-        </span>
-      </p>
-      <p class="muted">
-        {dash.data.task.decision ? DECISION_NOTE : DECISION_UNKNOWN}
-      </p>
-    {/if}
+    <h2>Decision</h2>
+    <p class="decision-block">
+      <span
+        class="decision-value"
+        class:unknown={dash.data.task.decision === null}
+        data-testid="detail-decision"
+      >
+        {decisionLabel(dash.data.task.decision)}
+      </span>
+    </p>
+    <p class="muted">
+      {#if dash.data.task.decision}{DECISION_NOTE}
+      {:else if dash.data.task.status === 'scheduled'}No decision yet.
+      {:else if dash.data.task.status === 'completed'}{DECISION_UNKNOWN}
+      {:else}No review decision was published.{/if}
+    </p>
 
-    <div class="detail-columns">
+    <div class="detail-columns" class:page-columns={variant === 'page'}>
       <section>
 
         <h2>Timeline</h2>

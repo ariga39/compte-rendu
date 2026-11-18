@@ -455,3 +455,24 @@ test('detail keeps distinct route and model pairs when their names contain colon
   await expect(usage).toContainText('Route: a:b');
   await expect(usage).toContainText('Route: a ·');
 });
+
+for (const status of ['failed', 'scheduled'] as const) {
+  test(`a ${status} review has no decision in the tablet drawer`, async ({
+    page,
+    harness,
+    base,
+  }) => {
+    await page.setViewportSize({ width: 900, height: 900 });
+    harness.setHandler(
+      listAndDetails([
+        publicTask('no-vote', { status, dispatch: status === 'scheduled' ? 'queued' : null }),
+      ]),
+    );
+    await page.goto(base + '/history');
+    await page.getByTestId('task-link').first().click();
+    await expect(page.getByTestId('detail-decision')).toHaveText('—');
+    const timeline = await page.getByRole('heading', { name: 'Timeline' }).boundingBox();
+    const timing = await page.getByRole('heading', { name: 'Timing' }).boundingBox();
+    expect(timing!.y).toBeGreaterThan(timeline!.y);
+  });
+}
