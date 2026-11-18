@@ -19,6 +19,10 @@ from experiments and proposals; a research recommendation is not a shipped featu
 For end users, the dashboard's `/help` page is rendered from
 [Help Markdown](../apps/dashboard/src/lib/content/help.md).
 
+## Proposed changes
+
+[Worker relay and AI Gateway migration](gateway-relay-design.md) describes the proposed replacement for host-side review inference and its staged rollout.
+
 ## Maintenance
 
 Update the guide that owns a behavior when its code changes. Keep operational
