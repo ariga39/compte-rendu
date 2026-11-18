@@ -1,0 +1,17 @@
+{
+  "name": "@compte-rendu/inference-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vp build",
+    "check": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@compte-rendu/contracts": "workspace:*",
+    "effect": "4.0.0-rc.111"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261018.1",
+    "typescript": "6.0.3"
+  }
+}
