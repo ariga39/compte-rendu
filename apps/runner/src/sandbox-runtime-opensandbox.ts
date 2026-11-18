@@ -102,9 +102,21 @@ export const createOpenSandboxRuntimeFactory =
             if (spec.modelTokenFile === undefined)
               throw new Error('OpenSandbox requires LLM service grants');
             const model = new URL(`http://${spec.modelResource}`);
-            const port = model.port || '80';
-            if (!['80', '443'].includes(port))
-              throw new Error('OpenSandbox credential endpoint requires port 80 or 443');
+            const hostname = model.hostname.toLowerCase();
+            if (
+              model.port !== '443' ||
+              model.pathname !== '/' ||
+              model.username !== '' ||
+              model.password !== '' ||
+              model.search !== '' ||
+              model.hash !== '' ||
+              !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/i.test(
+                hostname,
+              ) ||
+              /^\d+(?:\.\d+){3}$/.test(hostname)
+            ) {
+              throw new Error('OpenSandbox credential endpoint must be an HTTPS FQDN on port 443');
+            }
             const modelToken = await readFile(spec.modelTokenFile, 'utf8');
             const environment = Object.fromEntries(
               spec.env.map((pair) => {
@@ -148,7 +160,7 @@ export const createOpenSandboxRuntimeFactory =
                 networkPolicy: {
                   defaultAction: 'deny',
                   egress: [
-                    { action: 'allow', target: model.hostname },
+                    { action: 'allow', target: hostname },
                     { action: 'allow', target: 'api.github.com' },
                   ],
                 },
@@ -173,8 +185,8 @@ export const createOpenSandboxRuntimeFactory =
                 {
                   name: 'model',
                   match: {
-                    schemes: [port === '443' ? 'https' : 'http'],
-                    hosts: [model.hostname],
+                    schemes: ['https'],
+                    hosts: [hostname],
                     methods: ['GET', 'POST'],
                     paths: ['/v1/*'],
                   },

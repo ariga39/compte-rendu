@@ -41,7 +41,7 @@ it.skipIf(process.env.CR_OPENSANDBOX_NATIVE_PROBE !== '1')(
       env: [],
       checkoutRoot,
       configRoot,
-      modelResource: 'llm.compte-rendu.test:80',
+      modelResource: 'llm.compte-rendu.test:443',
       modelTokenFile: tokenFile,
       githubResource: 'api.github.com:443',
       githubReadToken: process.env.CR_OPENSANDBOX_GITHUB_TOKEN_FILE

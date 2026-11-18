@@ -3,7 +3,6 @@ import {
   ModelUsageSummary,
   RUNNER_LLM_CONTROL_TIMEOUT_MS,
 } from '@compte-rendu/contracts';
-import { request } from 'node:http';
 import { Effect, Schema } from 'effect';
 
 const Grant = Schema.fromJsonString(
@@ -30,8 +29,8 @@ export interface RelayLlmServiceClientOptions {
 
 export interface LlmServiceClient {
   readonly issue: (
-    job: string | LlmGrantIdentity,
-    routes: string | readonly string[],
+    job: LlmGrantIdentity,
+    routes: readonly string[],
   ) => Promise<{ token: string; expiresAt: number }>;
   readonly revoke: (jobId: string) => Promise<void>;
   readonly usage: (jobId: string) => Promise<ModelUsageSummary>;
@@ -75,18 +74,17 @@ const relayPost = (options: RelayLlmServiceClientOptions) =>
     });
   });
 
-const createRelayClient = (options: RelayLlmServiceClientOptions): LlmServiceClient => {
+export const createRelayLlmServiceClient = (
+  options: RelayLlmServiceClientOptions,
+): LlmServiceClient => {
   const post = relayPost(options);
   const issue = Effect.fn('RunnerLlmRelayControl.issue')(
-    function* (job: string | LlmGrantIdentity, routes: string | readonly string[]) {
-      if (typeof job === 'string')
-        return yield* Effect.fail(new Error('relay grant requires run and attempt identity'));
-      const requested = [...new Set(typeof routes === 'string' ? [routes] : routes)];
+    function* (job: LlmGrantIdentity, routes: readonly string[]) {
       const payload = {
         runId: job.runId,
         jobId: job.jobId,
         attempt: job.attempt,
-        routes: requested,
+        routes,
       };
       const body = yield* post('/runner-llm/issue', payload, 201);
       const grant = yield* Schema.decodeUnknownEffect(Grant, { onExcessProperty: 'error' })(body);
@@ -105,105 +103,10 @@ const createRelayClient = (options: RelayLlmServiceClientOptions): LlmServiceCli
   );
   return {
     usage: (jobId: string) => Effect.runPromise(usage(jobId)),
-    issue: (job: string | LlmGrantIdentity, routes: string | readonly string[]) =>
+    issue: (job: LlmGrantIdentity, routes: readonly string[]) =>
       Effect.runPromise(issue(job, routes)),
     revoke: async (jobId: string): Promise<void> => {
       await Effect.runPromise(post('/runner-llm/revoke', { jobId }, 204));
     },
   };
 };
-
-export const createRelayLlmServiceClient = (
-  options: RelayLlmServiceClientOptions,
-): LlmServiceClient => createRelayClient(options);
-
-const createLocalClient = (socketPath: string): LlmServiceClient => {
-  const post = Effect.fn('RunnerLlmControl.post')(function* (
-    path: string,
-    payload: unknown,
-    expectedStatus: number,
-    maxBytes = CONTROL_MAX_BYTES,
-  ) {
-    return yield* Effect.tryPromise({
-      try: () =>
-        new Promise<string>((resolve, reject) => {
-          const body = JSON.stringify(payload);
-          let settled = false;
-          const finish = (error?: Error, value = '') => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(timeout);
-            if (error) reject(error);
-            else resolve(value);
-          };
-          const req = request(
-            {
-              socketPath,
-              path,
-              method: 'POST',
-              headers: {
-                'content-type': 'application/json',
-                'content-length': new TextEncoder().encode(body).byteLength,
-              },
-            },
-            (res) => {
-              let size = 0;
-              const chunks: Buffer[] = [];
-              res.on('error', () => finish(new Error('control response interrupted')));
-              res.on('data', (chunk: Buffer) => {
-                size += chunk.byteLength;
-                if (size > maxBytes) {
-                  finish(new Error('control response too large'));
-                  req.destroy();
-                  return;
-                }
-                chunks.push(chunk);
-              });
-              res.on('end', () => {
-                if (res.statusCode !== expectedStatus)
-                  finish(new Error('control request rejected'));
-                else finish(undefined, Buffer.concat(chunks).toString('utf8'));
-              });
-            },
-          );
-          const timeout = setTimeout(() => {
-            finish(new Error('control request timed out'));
-            req.destroy();
-          }, RUNNER_LLM_CONTROL_TIMEOUT_MS);
-          req.on('error', () => finish(new Error('control request failed')));
-          req.end(body);
-        }),
-      catch: () => new Error('LLM service control request failed'),
-    });
-  });
-  const issue = Effect.fn('RunnerLlmControl.issue')(
-    function* (job: string | LlmGrantIdentity, routes: string | readonly string[]) {
-      const jobId = typeof job === 'string' ? job : job.jobId;
-      const requested = [...new Set(typeof routes === 'string' ? [routes] : routes)];
-      const body = yield* post('/grants', { jobId, routes: requested }, 201);
-      const grant = yield* Schema.decodeUnknownEffect(Grant, { onExcessProperty: 'error' })(body);
-      return { token: grant.token, expiresAt: grant.expiresAt.getTime() };
-    },
-    Effect.catch(() => Effect.fail(new Error('LLM service grant unavailable'))),
-  );
-  const usage = Effect.fn('RunnerLlmControl.usage')(
-    function* (jobId: string) {
-      const body = yield* post('/grants/usage', { jobId }, 200, USAGE_MAX_BYTES);
-      return yield* Schema.decodeUnknownEffect(Schema.fromJsonString(ModelUsageSummary), {
-        onExcessProperty: 'error',
-      })(body);
-    },
-    Effect.catch(() => Effect.fail(new Error('LLM usage unavailable'))),
-  );
-  return {
-    usage: (jobId: string) => Effect.runPromise(usage(jobId)),
-    issue: (job: string | LlmGrantIdentity, routes: string | readonly string[]) =>
-      Effect.runPromise(issue(job, routes)),
-    revoke: async (jobId: string): Promise<void> => {
-      await Effect.runPromise(post('/grants/revoke', { jobId }, 204));
-    },
-  };
-};
-
-export const createLlmServiceClient = (socketPath: string): LlmServiceClient =>
-  createLocalClient(socketPath);

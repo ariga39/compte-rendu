@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 import { createRunner } from '../apps/runner/src/runner';
 import { createRelayLlmServiceClient } from '../apps/runner/src/llm-service-client';
+import type { SandboxJobSpec } from '../apps/runner/src/sandbox-runtime';
 
 const evidenceRoots: string[] = [];
 
@@ -195,6 +196,30 @@ describe('Runner relay configuration', () => {
     ).toThrow(/HTTPS/);
     expect(transmitted).toBe(0);
   });
+
+  it.each(['/run/user/1000/compte-rendu-llm/control.sock', 'relative/control.sock'])(
+    'fails closed when the retired local service socket is configured: %s',
+    async (socketPath) => {
+      const previous = process.env.RUNNER_LLM_SERVICE_SOCKET;
+      process.env.RUNNER_LLM_SERVICE_SOCKET = socketPath;
+      try {
+        expect(() =>
+          createRunner({
+            authToken: 'runner-test-token',
+            modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+            modelConfig: JSON.stringify({
+              id: 'opencode-go/deepseek-review',
+              definition: { name: 'DeepSeek review' },
+            }),
+            claimUrl: '',
+          }),
+        ).toThrow(/RUNNER_LLM_SERVICE_SOCKET|Unix socket|retired|relay/i);
+      } finally {
+        if (previous === undefined) delete process.env.RUNNER_LLM_SERVICE_SOCKET;
+        else process.env.RUNNER_LLM_SERVICE_SOCKET = previous;
+      }
+    },
+  );
 });
 
 describe('Runner relay admission and recovery', () => {
@@ -233,6 +258,131 @@ describe('Runner relay admission and recovery', () => {
       const terminal = await waitForTerminal(runner, 'relay-no-selection');
       expect(terminal).toMatchObject({ status: 'failed', failure: { reason: 'configuration' } });
       expect(commands).toEqual([]);
+    } finally {
+      await runner.close();
+    }
+  });
+
+  it('runs an OpenSandbox job over the authenticated HTTPS relay with a frozen selection', async () => {
+    const root = await evidenceRoot();
+    const apiKeyFile = join(root, 'opensandbox-key');
+    await writeFile(apiKeyFile, 'opensandbox-control-key');
+    const specs: SandboxJobSpec[] = [];
+    const issued: Array<Record<string, unknown>> = [];
+    const revoked: string[] = [];
+    let injectedToken = '';
+    const baseSha = '1111111111111111111111111111111111111111';
+    const headSha = '2222222222222222222222222222222222222222';
+    const runner = createRunner({
+      ...relayBaseOptions('https://inference.example/v1'),
+      evidenceRoot: root,
+      sandboxRuntime: 'opensandbox',
+      opensandbox: {
+        endpoint: 'http://127.0.0.1:8080',
+        apiKeyFile,
+        image: 'review:test',
+      },
+      sandboxRuntimeFactory: (spec) => {
+        specs.push(spec);
+        let hostCleanupConfirmed = false;
+        const ok = { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+        return {
+          metadata: {
+            created: true,
+            get hostCleanupConfirmed() {
+              return hostCleanupConfirmed;
+            },
+            id: spec.name,
+            name: spec.name,
+            runtime: 'opensandbox',
+            imageRef: spec.imageRef,
+            evidenceRoot: '/tmp/compte-rendu-evidence',
+          },
+          setup: async () => {
+            injectedToken = await readFile(spec.modelTokenFile!, 'utf8');
+          },
+          exec: async () => ok,
+          copyOut: async () => ok,
+          destroy: async () => {
+            hostCleanupConfirmed = true;
+          },
+        };
+      },
+      callbackFetch: async (input, init) => {
+        const inputUrl =
+          input instanceof Request ? input.url : input instanceof URL ? input.href : input;
+        const path = new URL(inputUrl).pathname;
+        const body = typeof init?.body === 'string' ? JSON.parse(init.body) : {};
+        if (path === '/runner-llm/issue') {
+          issued.push(body as Record<string, unknown>);
+          return Response.json(
+            {
+              token: 'opensandbox-relay-token',
+              expiresAt: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
+            },
+            { status: 201 },
+          );
+        }
+        if (path === '/runner-llm/revoke') {
+          revoked.push(String((body as Record<string, unknown>).jobId));
+          return new Response(null, { status: 204 });
+        }
+        if (path === '/runner-llm/usage') return Response.json({ version: 1, models: [] });
+        return new Response(null, { status: 202 });
+      },
+      process: async (_command, args, options = {}) => ({
+        exitCode: 0,
+        stdout: args.includes('merge-base')
+          ? `${baseSha}\n`
+          : args.includes('rev-parse')
+            ? `${baseSha}\n${headSha}\n`
+            : options.captureStdout === true
+              ? '[]\n'
+              : '',
+        timedOut: false,
+        truncated: false,
+      }),
+    });
+    try {
+      const submitted = await runner.handle(
+        new Request('http://runner/jobs', {
+          method: 'POST',
+          headers: {
+            authorization: 'Bearer runner-test-token',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            id: 'relay-opensandbox-job',
+            runId: 'run-relay-opensandbox',
+            attempt: 1,
+            repositoryName: 'acme/reviewed',
+            pullRequestNumber: 42,
+            repositoryUrl: 'https://github.com/acme/reviewed.git',
+            baseSha,
+            headSha,
+            repositoryReadToken: 'github-read-token',
+            reviewConfiguration: {
+              revision: 4,
+              selection: { reviewers: ['reviewer-a'], synthesis: 'reviewer-a' },
+            },
+          }),
+        }),
+      );
+      expect(submitted.status).toBe(202);
+      await waitForTerminal(runner, 'relay-opensandbox-job');
+      expect(specs).toHaveLength(1);
+      expect(specs[0]).toMatchObject({
+        modelResource: 'inference.example:443',
+        modelTokenFile: expect.any(String),
+      });
+      expect(injectedToken).toBe('opensandbox-relay-token');
+      expect(issued).toContainEqual({
+        runId: 'run-relay-opensandbox',
+        jobId: 'relay-opensandbox-job',
+        attempt: 1,
+        routes: ['reviewer-a'],
+      });
+      expect(revoked).toEqual(['relay-opensandbox-job']);
     } finally {
       await runner.close();
     }
@@ -460,9 +610,8 @@ describe('Runner relay admission and recovery', () => {
     }
   });
 
-  it('recovers a legacy plaintext id starting with a brace when its filename matches', async () => {
+  it('fails closed for a legacy plaintext id starting with a brace when its filename matches', async () => {
     const root = await evidenceRoot();
-    const socketPath = join(root, 'control.sock');
     const markerRoot = join(root, 'llm-grant-pending');
     const jobId = '{"legacy-but-not-json":';
     const markerPath = join(
@@ -471,38 +620,21 @@ describe('Runner relay admission and recovery', () => {
     );
     await mkdir(markerRoot, { recursive: true, mode: 0o700 });
     await writeFile(markerPath, jobId, { mode: 0o600 });
-    const revoked: string[] = [];
-    const server = createServer(async (incoming, outgoing) => {
-      const chunks: Buffer[] = [];
-      for await (const chunk of incoming) {
-        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-      }
-      const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { jobId?: string };
-      if (incoming.url === '/grants/revoke' && body.jobId !== undefined) revoked.push(body.jobId);
-      outgoing.writeHead(204);
-      outgoing.end();
-    });
-    await new Promise<void>((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(socketPath, resolve);
-    });
+    let controlCalls = 0;
     const runner = createRunner({
+      ...relayBaseOptions(),
       evidenceRoot: root,
-      authToken: 'runner-test-token',
-      modelConfig: JSON.stringify({
-        id: 'opencode-go/review',
-        baseUrl: 'http://host.docker.internal:32773/v1',
-        definition: { name: 'Review' },
-      }),
-      llmServiceSocket: socketPath,
-      claimUrl: '',
+      callbackFetch: async () => {
+        controlCalls += 1;
+        return new Response(null, { status: 204 });
+      },
     });
     try {
-      await vi.waitFor(() => expect(revoked).toEqual([jobId]));
-      await expect(readFile(markerPath, 'utf8')).rejects.toThrow();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(controlCalls).toBe(0);
+      expect(await readFile(markerPath, 'utf8')).toBe(jobId);
     } finally {
       await runner.close();
-      await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
 
