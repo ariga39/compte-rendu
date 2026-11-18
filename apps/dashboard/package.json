@@ -14,7 +14,8 @@
     "check": "svelte-check --tsconfig ./tsconfig.json && tsc --noEmit -p tests/tsconfig.json",
     "check:tests": "tsc --noEmit -p tests/tsconfig.json",
     "test:dashboard": "playwright test",
-    "test:ssr": "playwright test --config playwright.ssr.config.ts"
+    "test:ssr": "playwright test --config playwright.ssr.config.ts",
+    "preview:fixtures": "vp build && node tests/fixture-preview.ts"
   },
   "dependencies": {
     "@compte-rendu/contracts": "workspace:*",

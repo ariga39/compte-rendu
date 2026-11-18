@@ -1525,3 +1525,31 @@ test('explains a queued review waiting for prior cleanup in table and detail', a
   await page.goto(`${base}/jobs/blocked-cleanup`);
   await expect(page.getByText('Waiting for previous review cleanup.')).toBeVisible();
 });
+
+test('active detail identifies the current recorded stage and elapsed time', async ({
+  page,
+  harness,
+  base,
+}) => {
+  harness.setHandler(() =>
+    ok(
+      detailData(
+        task({
+          dispatch: 'claimed',
+          stage: 'agent',
+          identity: { ...publicIdentity, expiresAt: '2999-01-01T00:00:00Z' },
+          claimedAt: NOW,
+        }),
+        [
+          { stage: 'checkout', startedAt: NOW },
+          { stage: 'agent', startedAt: '2026-10-16T12:00:16.000Z' },
+        ],
+      ),
+    ),
+  );
+  await page.goto(`${base}/jobs/run-1`);
+  const current = page.getByRole('list', { name: 'Timeline' }).locator('[aria-current="step"]');
+  await expect(current).toContainText('Reviewing');
+  await expect(current).toContainText('+16s');
+  await expect(page.getByRole('heading', { name: 'Revision' })).toBeVisible();
+});

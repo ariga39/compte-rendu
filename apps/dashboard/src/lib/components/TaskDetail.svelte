@@ -4,8 +4,6 @@
     Accordion,
     AccordionItem,
     Button,
-    ContainedList,
-    ContainedListItem,
     StructuredList,
     StructuredListCell,
     StructuredListRow,
@@ -93,6 +91,10 @@
       : 'Anonymous review',
   );
   const timeline = $derived(dash.data ? mergeMilestones(dash.data.detail) : []);
+  const currentStage = $derived(dash.data?.task.processing ?? dash.data?.task.stage);
+  const currentIndex = $derived(dash.data?.task.status === 'scheduled'
+    ? timeline.findLastIndex((entry) => entry.stage === currentStage)
+    : -1);
   const lastGoodLabel = $derived(
     dash.lastGoodAt ? absoluteTime(new Date(dash.lastGoodAt).toISOString()) : 'not yet',
   );
@@ -223,20 +225,14 @@
         ← Back to history
       </a>
     {/if}
-    <h1>{title}</h1>
-    <p>
+    <header class="review-heading">
       <Badge tone={statusTone(dash.data.task)}>{statusLabel(dash.data.task)}</Badge>
-    </p>
-    {#if identity}
-      <p>
-        <a href={identity.pullRequestUrl} target="_blank" rel="noopener noreferrer">
-          Open pull request on GitHub
-        </a>
-      </p>
-    {/if}
-
-    <h2>Status</h2>
-    <p>{outcomeSummary(dash.data.task)}</p>
+      <h1>{title}</h1>
+      {#if identity}
+        <a href={identity.pullRequestUrl} target="_blank" rel="noopener noreferrer">Open pull request on GitHub</a>
+      {/if}
+      <p>{outcomeSummary(dash.data.task)}</p>
+    </header>
 
     {#if dash.data.task.failure}
       <div class="notice error" role="alert">
@@ -245,54 +241,64 @@
       </div>
     {/if}
 
-    <h2>Decision</h2>
-    <p class="decision-block">
-      <span
-        class="decision-value"
-        class:unknown={dash.data.task.decision === null}
-        data-testid="detail-decision"
-      >
-        {decisionLabel(dash.data.task.decision)}
-      </span>
-    </p>
-    <p class="muted">
-      {dash.data.task.decision ? DECISION_NOTE : DECISION_UNKNOWN}
-    </p>
-
-    {@render revisionGrid()}
-
-    <h2>Timeline</h2>
-    {#if timeline.length}
-      <div class="timeline">
-        <ContainedList labelText="Timeline" hideLabel>
-          {#each timeline as milestone (milestone.stage + milestone.startedAt)}
-            <ContainedListItem>
-              <strong>{milestoneLabel(milestone.stage as ExecutionStage | ProcessingStage)}</strong><br />
-              <time datetime={milestone.startedAt}>{absoluteTime(milestone.startedAt)}</time>
-              <span class="muted">({relativeTime(milestone.startedAt)})</span>
-            </ContainedListItem>
-          {/each}
-        </ContainedList>
-      </div>
-    {:else}
-      <p class="muted">Not recorded</p>
+    {#if dash.data.task.decision || dash.data.task.status === 'completed'}
+      <h2>Decision</h2>
+      <p class="decision-block">
+        <span
+          class="decision-value"
+          class:unknown={dash.data.task.decision === null}
+          data-testid="detail-decision"
+        >
+          {decisionLabel(dash.data.task.decision)}
+        </span>
+      </p>
+      <p class="muted">
+        {dash.data.task.decision ? DECISION_NOTE : DECISION_UNKNOWN}
+      </p>
     {/if}
 
-    <h2>Timing</h2>
-    <StructuredList>
-      {@render timeFact('Received', dash.data.task.receivedAt)}
-      {@render timeFact('Assigned', dash.data.task.claimedAt)}
-      {@render timeFact('Finished', dash.data.task.terminalAt)}
-      {@render textFact('Time in queue', formatDuration(dash.data.task.queueWaitMs))}
-      {@render textFact('Total time', formatDuration(dash.data.task.totalDurationMs))}
-      {@render textFact(
-        'Last progress update',
-        dash.data.task.lastProgressAt ? relativeTime(dash.data.task.lastProgressAt) : 'Not recorded',
-      )}
-    </StructuredList>
+    <div class="detail-columns">
+      <section>
 
-    <ModelUsage usage={dash.data.detail.usage} />
+        <h2>Timeline</h2>
+        {#if timeline.length}
+          <ol class="timeline" aria-label="Timeline">
+            {#each timeline as milestone, index (milestone.stage + milestone.startedAt)}
+              {@const current = index === currentIndex}
+              {@const elapsed = Date.parse(milestone.startedAt) - Date.parse(dash.data.task.receivedAt)}
+              <li data-stage={milestone.stage} aria-current={current ? 'step' : undefined}>
+                <strong>{milestoneLabel(milestone.stage as ExecutionStage | ProcessingStage)}</strong>
+                {#if current}<span class="current-stage">Current</span>{/if}
+                <time datetime={milestone.startedAt}>{absoluteTime(milestone.startedAt)}</time>
+                {#if elapsed >= 0}<small title="Elapsed since received">+{formatDuration(elapsed)}</small>{/if}
+              </li>
+            {/each}
+          </ol>
+        {:else}
+          <p class="muted">Not recorded</p>
+        {/if}
 
+      </section>
+      <section>
+        <h2>Timing</h2>
+        <StructuredList>
+          {@render timeFact('Received', dash.data.task.receivedAt)}
+          {@render timeFact('Assigned', dash.data.task.claimedAt)}
+          {@render timeFact('Finished', dash.data.task.terminalAt)}
+          {@render textFact('Time in queue', formatDuration(dash.data.task.queueWaitMs))}
+          {@render textFact('Total time', formatDuration(dash.data.task.totalDurationMs))}
+          {@render textFact(
+            'Last progress update',
+            dash.data.task.lastProgressAt ? relativeTime(dash.data.task.lastProgressAt) : 'Not recorded',
+          )}
+        </StructuredList>
+
+        <ModelUsage usage={dash.data.detail.usage} />
+
+      </section>
+    </div>
+
+    {@render revisionGrid()}
     <Accordion>
       <AccordionItem title="Technical details">
         <h3>Execution details</h3>
