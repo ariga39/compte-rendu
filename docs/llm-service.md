@@ -318,6 +318,42 @@ only the local service route and their existing GitHub API allowance; they no
 longer need direct access to the model supplier. The service host itself needs
 outbound access to the configured supplier.
 
+### Remote relay transport
+
+To use the Worker relay instead of the local Unix socket, opt in on the `sbx`
+Runner and remove `RUNNER_LLM_SERVICE_SOCKET`:
+
+```dotenv
+RUNNER_LLM_RELAY=1
+RUNNER_LLM_RELAY_GENERATION=<RELAY_BACKEND_GENERATION>
+RUNNER_CALLBACK_URL=https://<INGRESS_HOST>/runner-callback
+RUNNER_CALLBACK_TOKEN=<static-runner-callback-token>
+REVIEW_MODEL_CONFIG={"id":"opencode-go/deepseek-review","baseUrl":"https://<INFERENCE_FQDN>/v1","definition":{"name":"DeepSeek review"}}
+```
+
+`RUNNER_LLM_RELAY` is the only relay opt-in. The control client reuses the
+HTTPS callback origin and callback bearer; there is no separate relay control
+URL, origin or credential, and an HTTP callback URL is rejected at startup
+before any credential is sent. `RUNNER_LLM_RELAY_GENERATION` identifies the
+relay backend/D1 generation and is part of every pending marker's issuer, so a
+different generation on the same hostname never clears it. Keep it stable for a
+relay database and change it only with a drained cutover. It sends
+`POST /runner-llm/issue` with `{ runId, jobId, attempt, routes }`,
+`POST /runner-llm/revoke` with `{ jobId }`, and `POST /runner-llm/usage` with
+`{ jobId }` directly to that origin. Issue expects the existing 201 grant
+response, revoke expects 204 and usage expects the existing 200 usage summary.
+The same bearer is never installed in the Sandbox; only the per-job grant is.
+
+The inference `baseUrl` must be one HTTPS FQDN on port 443 with an exact `/v1`
+path. Credentials, a query, a fragment, a wildcard host, a non-standard port, a
+different path, redirects, or another scheme fail startup before any claim.
+Runner uses that exact host for sbx secret substitution and adds only the
+`<host>:443` egress rule. Remote mode requires the frozen claim selection before
+checkout; a legacy claim without an effective selection fails without running
+Git, a model call, or a Sandbox. `RUNNER_LLM_RELAY` cannot be combined with the
+local socket and is not available for OpenShell or OpenSandbox. Local service
+mode and direct OpenShell provider mode are unchanged.
+
 ### Switch traffic and verify
 
 1. Use the [Runner maintenance drain](operations.md#drain-before-maintenance)
@@ -337,20 +373,25 @@ Runner revokes the grant when agent work ends, before evidence export and Sandbo
 cleanup, and on cancellation. Revocation failure does not skip Sandbox cleanup.
 The grant expiry (currently two hours) remains the upper bound if the control
 service is unreachable.
-Runner records only the job identity in a pending-revocation marker before
-requesting a grant. After a crash, a new Runner revokes those identities before
-claiming or admitting more jobs; unreadable or unresolved records keep admission
-closed. After repairing service or storage availability, restart the Runner to
-retry this startup recovery. Keep the instance's evidence directory across Runner restarts, and do not
-share it between concurrently running Runners. This recovery does not recreate
-jobs or replace the existing operational cleanup of orphan Sandboxes.
-Keep the service in its own systemd unit/cgroup; do not make its lifetime depend
-on the Runner unit.
+Runner records the job identity and issuing transport/backend in a durable
+pending-revocation marker before requesting a grant. Legacy plaintext markers
+belong to the local issuer. After a crash, a new Runner revokes each identity
+only against its recorded issuer before claiming or admitting more jobs; an
+unknown, unreadable, or mismatched issuer keeps admission closed and is never
+cleared by a successful response from a different backend. After repairing the
+original service or storage, restart the Runner to retry this startup recovery.
+Keep the instance's evidence directory across Runner restarts, and do not share
+it between concurrently running Runners. This recovery does not recreate jobs
+or replace the existing operational cleanup of orphan Sandboxes. Keep the
+service in its own systemd unit/cgroup; do not make its lifetime depend on the
+Runner unit.
 
-To roll back, drain jobs, remove `RUNNER_LLM_SERVICE_SOCKET`, restore the previous
-`REVIEW_MODEL_CONFIG` and host `MODEL_SECRET_COMMAND`, then restart the Runner.
-Only new jobs use the restored route; interrupted jobs require an explicit new
-review trigger. Stop the LLM service only after its callers are drained.
+To roll back, drain jobs, remove `RUNNER_LLM_SERVICE_SOCKET` or
+`RUNNER_LLM_RELAY`, restore the previous `REVIEW_MODEL_CONFIG` and host
+`MODEL_SECRET_COMMAND`, then restart the Runner. Do not point an unresolved
+marker at a different backend. Only new jobs use the restored route;
+interrupted jobs require an explicit new review trigger. Stop the LLM service
+only after its callers are drained.
 
 ## Public boundaries
 

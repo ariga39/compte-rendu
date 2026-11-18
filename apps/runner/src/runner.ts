@@ -14,7 +14,7 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
-import { isAbsolute, join } from 'node:path';
+import { basename, isAbsolute, join } from 'node:path';
 import { DateTime, Effect, Option, Schema } from 'effect';
 import {
   MAX_REVIEW_RESULT_BYTES,
@@ -48,7 +48,12 @@ import {
 import { confirmSbxCleanup } from './cleanup-recovery.js';
 import { createOpenSandboxRuntimeFactory } from './sandbox-runtime-opensandbox.js';
 import { createSbxRuntimeFactory } from './sandbox-runtime-sbx.js';
-import { createLlmServiceClient } from './llm-service-client.js';
+import {
+  createLlmServiceClient,
+  createRelayLlmServiceClient,
+  type LlmGrantIdentity,
+  type LlmServiceClient,
+} from './llm-service-client.js';
 import {
   MULTI_PROVIDER_ID,
   SUPERVISOR_AGENT_ID,
@@ -107,6 +112,17 @@ const CALLBACK_REQUEST_TIMEOUT_MS = 30 * 1000;
 const CLAIM_REQUEST_TIMEOUT_MS = 30 * 1000;
 const DEFAULT_CONCURRENCY = 1;
 const EMPTY_EVIDENCE_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+const HTTPS_FQDN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/i;
+const IPV4 = /^\d+(?:\.\d+){3}$/;
+
+const nonEmpty = (value: string | undefined): string | undefined => {
+  const trimmed = value?.trim();
+  return trimmed === undefined || trimmed.length === 0 ? undefined : trimmed;
+};
+
+const isEnabled = (value: string | boolean | undefined): boolean =>
+  value === true ||
+  (typeof value === 'string' && ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase()));
 
 const RunnerConcurrency = Schema.Union([
   Schema.Int.check(Schema.isGreaterThan(0)),
@@ -189,6 +205,23 @@ const OpenSandboxServiceBaseUrl = Schema.URLFromString.check(
     { expected: 'HTTP(S) FQDN on its standard port with /v1 path' },
   ),
 );
+// Remote relay inference uses the sandbox's credential proxy over HTTPS. Only
+// the configured FQDN on port 443 with an exact /v1 base path is accepted.
+const RelayServiceBaseUrl = Schema.URLFromString.check(
+  Schema.makeFilter(
+    (url) =>
+      url.protocol === 'https:' &&
+      url.port === '' &&
+      HTTPS_FQDN.test(url.hostname) &&
+      !IPV4.test(url.hostname) &&
+      (url.pathname === '/v1' || url.pathname === '/v1/') &&
+      url.username === '' &&
+      url.password === '' &&
+      url.search === '' &&
+      url.hash === '',
+    { expected: 'HTTPS FQDN on port 443 with /v1 path' },
+  ),
+);
 const ReviewModelConfig = Schema.Struct({
   id: Schema.String.check(Schema.isPattern(/^opencode-go\/[A-Za-z0-9._:-]{1,128}$/)),
   baseUrl: Schema.optional(ModelBaseUrl),
@@ -199,27 +232,49 @@ const ServiceReviewModelConfig = Schema.Struct({
   baseUrl: Schema.optional(SbxLocalServiceBaseUrl),
   definition: Schema.optional(ReviewModelDefinition),
 });
+const RelayServiceReviewModelConfig = Schema.Struct({
+  id: Schema.String.check(Schema.isPattern(/^opencode-go\/[A-Za-z0-9._:-]{1,128}$/)),
+  baseUrl: RelayServiceBaseUrl,
+  definition: Schema.optional(ReviewModelDefinition),
+});
+const GrantMarkerIssuer = Schema.Union([
+  Schema.Struct({ transport: Schema.Literal('local') }),
+  Schema.Struct({
+    transport: Schema.Literal('relay'),
+    origin: Schema.NonEmptyString,
+    generation: Schema.NonEmptyString,
+  }),
+]);
+const GrantMarker = Schema.Struct({
+  version: Schema.Literal(1),
+  jobId: Schema.NonEmptyString,
+  issuer: GrantMarkerIssuer,
+});
+type GrantIssuer = typeof GrantMarkerIssuer.Type;
 type ReviewModelConfigValue = Schema.Schema.Type<typeof ReviewModelConfig>;
 type ReviewModelDefinitionValue = Schema.Schema.Type<typeof ReviewModelDefinition>;
 
+type ModelTransport = 'direct' | 'local' | 'opensandbox' | 'relay';
+
 const decodeReviewModelConfig = (
   raw: string | undefined,
-  serviceMode: boolean,
-  openSandbox: boolean,
+  transport: ModelTransport,
 ): ReviewModelConfigValue | undefined =>
   raw === undefined
     ? undefined
     : Option.getOrUndefined(
         Schema.decodeUnknownOption(
           Schema.fromJsonString(
-            serviceMode
-              ? openSandbox
+            transport === 'relay'
+              ? RelayServiceReviewModelConfig
+              : transport === 'opensandbox'
                 ? Schema.Struct({
                     ...ServiceReviewModelConfig.fields,
                     baseUrl: Schema.optional(OpenSandboxServiceBaseUrl),
                   })
-                : ServiceReviewModelConfig
-              : ReviewModelConfig,
+                : transport === 'local'
+                  ? ServiceReviewModelConfig
+                  : ReviewModelConfig,
           ),
           { onExcessProperty: 'error' },
         )(raw),
@@ -641,6 +696,9 @@ export interface RunnerOptions {
   readonly sandboxRuntimeFactory?: SandboxRuntimeFactory;
   /** Absolute Unix socket for the host LLM service control plane. */
   readonly llmServiceSocket?: string;
+  /** Opt in to the remote relay control plane over the callback origin. */
+  readonly llmRelay?: boolean;
+  readonly llmRelayGeneration?: string;
   readonly opensandbox?: {
     readonly endpoint?: string;
     readonly apiKeyFile?: string;
@@ -919,6 +977,42 @@ export const createRunner = (options: RunnerOptions = {}) => {
   if (llmServiceSocket !== undefined && sandboxRuntime.kind === 'openshell') {
     throw new Error('LLM service mode does not support the OpenShell sandbox runtime yet');
   }
+  const relayFlag = options.llmRelay ?? process.env.RUNNER_LLM_RELAY;
+  const relayEnabled = isEnabled(relayFlag);
+  if (relayEnabled && llmServiceSocket !== undefined) {
+    throw new Error('RUNNER_LLM_RELAY cannot be combined with RUNNER_LLM_SERVICE_SOCKET');
+  }
+  if (relayEnabled && sandboxRuntime.kind !== 'sbx') {
+    throw new Error('Remote LLM relay requires the sbx sandbox runtime');
+  }
+  const relayCallbackUrl = nonEmpty(options.callbackUrl ?? process.env.RUNNER_CALLBACK_URL);
+  const relayCallbackToken = nonEmpty(options.callbackToken ?? process.env.RUNNER_CALLBACK_TOKEN);
+  const relayGeneration = nonEmpty(
+    options.llmRelayGeneration ?? process.env.RUNNER_LLM_RELAY_GENERATION,
+  );
+  let relayOrigin: string | undefined;
+  let relayToken: string | undefined;
+  if (relayEnabled) {
+    if (relayCallbackUrl === undefined || relayCallbackToken === undefined) {
+      throw new Error('RUNNER_LLM_RELAY requires RUNNER_CALLBACK_URL and RUNNER_CALLBACK_TOKEN');
+    }
+    if (relayGeneration === undefined) {
+      throw new Error('RUNNER_LLM_RELAY requires RUNNER_LLM_RELAY_GENERATION');
+    }
+    const controlUrl = new URL(relayCallbackUrl);
+    if (
+      controlUrl.protocol !== 'https:' ||
+      controlUrl.username !== '' ||
+      controlUrl.password !== '' ||
+      controlUrl.search !== '' ||
+      controlUrl.hash !== ''
+    ) {
+      throw new Error('RUNNER_LLM_RELAY requires an HTTPS callback origin');
+    }
+    relayOrigin = controlUrl.origin;
+    relayToken = relayCallbackToken;
+  }
+  const relayFetch = options.callbackFetch ?? globalThis.fetch;
   const sbxPath = options.sbxPath ?? process.env.SBX_BIN ?? 'sbx';
   const sandboxPortPath =
     options.sandboxCliPath ??
@@ -926,7 +1020,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
     (sandboxRuntime.kind === 'sbx' ? sbxPath : sandboxRuntime.cliPath);
   const authToken = options.authToken ?? process.env.RUNNER_AUTH_TOKEN;
   const modelSecretCommand =
-    llmServiceSocket === undefined
+    llmServiceSocket === undefined && !relayEnabled
       ? (options.modelSecretCommand ?? process.env.MODEL_SECRET_COMMAND)
       : undefined;
   let opensandboxOptions: Parameters<typeof createOpenSandboxRuntimeFactory>[0] | undefined;
@@ -956,14 +1050,21 @@ export const createRunner = (options: RunnerOptions = {}) => {
   const modelResolverMissing =
     sandboxRuntime.kind === 'sbx' &&
     llmServiceSocket === undefined &&
+    !relayEnabled &&
     (modelSecretCommand === undefined || modelSecretCommand.length === 0);
+  const serviceMode = llmServiceSocket !== undefined || relayEnabled;
   const modelConfig = decodeReviewModelConfig(
     options.modelConfig ?? process.env.REVIEW_MODEL_CONFIG,
-    llmServiceSocket !== undefined,
-    sandboxRuntime.kind === 'opensandbox',
+    relayEnabled
+      ? 'relay'
+      : llmServiceSocket !== undefined
+        ? sandboxRuntime.kind === 'opensandbox'
+          ? 'opensandbox'
+          : 'local'
+        : 'direct',
   );
   if (
-    llmServiceSocket !== undefined &&
+    serviceMode &&
     (modelConfig === undefined ||
       modelConfig.baseUrl === undefined ||
       modelConfig.definition === undefined)
@@ -972,8 +1073,21 @@ export const createRunner = (options: RunnerOptions = {}) => {
       'LLM service mode requires REVIEW_MODEL_CONFIG with an explicit baseUrl and model definition',
     );
   }
-  const llmServiceClient =
+  const localLlmServiceClient =
     llmServiceSocket === undefined ? undefined : createLlmServiceClient(llmServiceSocket);
+  const relayLlmServiceClient =
+    relayEnabled && relayOrigin !== undefined && relayToken !== undefined
+      ? createRelayLlmServiceClient({
+          origin: relayOrigin,
+          token: relayToken,
+          fetch: relayFetch,
+        })
+      : undefined;
+  const llmServiceClient = localLlmServiceClient ?? relayLlmServiceClient;
+  const activeGrantIssuer: GrantIssuer =
+    relayEnabled && relayOrigin !== undefined && relayGeneration !== undefined
+      ? { transport: 'relay', origin: relayOrigin, generation: relayGeneration }
+      : { transport: 'local' };
   const modelId = modelConfig?.id;
   const modelRouteId = modelId?.slice('opencode-go/'.length);
   const serviceBaseUrl = modelConfig?.baseUrl;
@@ -999,15 +1113,52 @@ export const createRunner = (options: RunnerOptions = {}) => {
       'compte-rendu',
       'reviews',
     );
-  // Job-id-only durable markers. A marker is written before issuance and
-  // removed only after confirmed revocation, so a crash leaves the identity to
-  // revoke on the next startup. The raw token is never persisted.
+  // Issuer-bound durable markers. A marker is written before issuance and
+  // removed only after confirmed revocation, so a crash leaves both the job
+  // identity and the trusted transport/backend generation to revoke on the next
+  // startup or maintenance call. The raw token is never persisted.
   const pendingGrantRoot = join(evidenceRoot, 'llm-grant-pending');
-  const grantMarkerPath = (jobId: string) =>
-    join(pendingGrantRoot, `${createHash('sha256').update(jobId).digest('hex')}.marker`);
-  const writeGrantMarker = async (jobId: string) => {
+  const markerNameFor = (jobId: string) =>
+    `${createHash('sha256').update(jobId).digest('hex')}.marker`;
+  const grantMarkerPath = (jobId: string) => join(pendingGrantRoot, markerNameFor(jobId));
+  type GrantMarkerRead =
+    | { readonly kind: 'missing' }
+    | { readonly kind: 'invalid' }
+    | { readonly kind: 'present'; readonly jobId: string; readonly issuer: GrantIssuer };
+  const readGrantMarker = async (path: string): Promise<GrantMarkerRead> => {
+    let value: string;
+    try {
+      value = await readFile(path, 'utf8');
+    } catch (error) {
+      return Schema.is(Schema.Struct({ code: Schema.Literal('ENOENT') }))(error)
+        ? { kind: 'missing' }
+        : { kind: 'invalid' };
+    }
+    const markerName = basename(path);
+    if (value.trimStart().startsWith('{')) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(value);
+      } catch {
+        return { kind: 'invalid' };
+      }
+      const decoded = Option.getOrUndefined(
+        Schema.decodeUnknownOption(GrantMarker, { onExcessProperty: 'error' })(parsed),
+      );
+      if (decoded === undefined || markerNameFor(decoded.jobId) !== markerName)
+        return { kind: 'invalid' };
+      return { kind: 'present', jobId: decoded.jobId, issuer: decoded.issuer };
+    }
+    // Legacy plaintext markers belong to the original local issuer and preserve
+    // the exact job identity, including surrounding whitespace.
+    if (value.length === 0 || markerNameFor(value) !== markerName) return { kind: 'invalid' };
+    return { kind: 'present', jobId: value, issuer: { transport: 'local' } };
+  };
+  const writeGrantMarker = async (jobId: string, issuer = activeGrantIssuer) => {
     await mkdir(pendingGrantRoot, { recursive: true, mode: 0o700 });
-    await writeFile(grantMarkerPath(jobId), jobId, { mode: 0o600 });
+    await writeFile(grantMarkerPath(jobId), `${JSON.stringify({ version: 1, jobId, issuer })}\n`, {
+      mode: 0o600,
+    });
   };
   const clearGrantMarker = async (jobId: string) => {
     try {
@@ -1015,6 +1166,31 @@ export const createRunner = (options: RunnerOptions = {}) => {
     } catch {
       // A stale marker only causes a redundant identity revocation next start.
     }
+  };
+  const sameIssuer = (expected: GrantIssuer, candidate: GrantIssuer): boolean => {
+    if (expected.transport === 'local' || candidate.transport === 'local')
+      return expected.transport === 'local' && candidate.transport === 'local';
+    return expected.origin === candidate.origin && expected.generation === candidate.generation;
+  };
+  const clientForIssuer = (issuer: GrantIssuer): LlmServiceClient | undefined => {
+    if (!sameIssuer(activeGrantIssuer, issuer)) return undefined;
+    return issuer.transport === 'local' ? localLlmServiceClient : relayLlmServiceClient;
+  };
+  const revokeRecordedGrant = async (jobId: string, issuer: GrantIssuer): Promise<boolean> => {
+    const client = clientForIssuer(issuer);
+    if (client === undefined) return false;
+    const deadline = Date.now() + GRANT_REVOKE_BUDGET_MS;
+    for (let attempt = 0; attempt < GRANT_REVOKE_ATTEMPTS; attempt += 1) {
+      try {
+        await client.revoke(jobId);
+        await clearGrantMarker(jobId);
+        return true;
+      } catch {
+        // A bounded retry keeps a transient control failure from losing revocation.
+      }
+      if (Date.now() >= deadline) break;
+    }
+    return false;
   };
   const executeProcess = options.process ?? runProcess;
   const log = options.log;
@@ -1053,9 +1229,10 @@ export const createRunner = (options: RunnerOptions = {}) => {
   let claimGateFailureLogged = false;
   let requestNextJob: (() => void) | undefined;
   // Admission and claim stay gated until startup recovery has resolved every
-  // own pending grant marker; an unresolved identity keeps the gate closed.
+  // own pending grant marker; an unresolved or foreign issuer keeps the gate
+  // closed and is never cleared through another backend's success.
   const recoverPendingGrants = async () => {
-    if (llmServiceClient === undefined) return true;
+    if (localLlmServiceClient === undefined && relayLlmServiceClient === undefined) return true;
     let names: string[] = [];
     try {
       names = await readdir(pendingGrantRoot);
@@ -1068,31 +1245,12 @@ export const createRunner = (options: RunnerOptions = {}) => {
     let unresolved = false;
     for (const name of names) {
       if (!name.endsWith('.marker')) continue;
-      const markerPath = join(pendingGrantRoot, name);
-      let jobId: string | undefined;
-      try {
-        // Preserve the identity exactly; input ids may contain surrounding whitespace.
-        const value = await readFile(markerPath, 'utf8');
-        if (value.length > 0) jobId = value;
-      } catch {
-        jobId = undefined;
-      }
-      if (jobId === undefined) {
+      const marker = await readGrantMarker(join(pendingGrantRoot, name));
+      if (marker.kind !== 'present') {
         unresolved = true;
         continue;
       }
-      let confirmed = false;
-      for (let attempt = 0; attempt < GRANT_REVOKE_ATTEMPTS; attempt += 1) {
-        try {
-          await llmServiceClient.revoke(jobId);
-          confirmed = true;
-          break;
-        } catch {
-          // Retry within the bounded attempt count before declaring it unresolved.
-        }
-      }
-      if (confirmed) await clearGrantMarker(jobId);
-      else unresolved = true;
+      if (!(await revokeRecordedGrant(marker.jobId, marker.issuer))) unresolved = true;
     }
     return !unresolved;
   };
@@ -2276,6 +2434,12 @@ export const createRunner = (options: RunnerOptions = {}) => {
         cleanup: { status: 'pending' },
       });
       if (job.abortRequested) return;
+      // Remote relay execution never infers a default route: Core must have
+      // materialized the frozen selection at admission. Fail before checkout.
+      if (relayEnabled && multiSelection === undefined) {
+        failure = { reason: 'checkout' };
+        return;
+      }
       if (multi) {
         if (
           sandboxRuntime.kind === 'openshell' ||
@@ -2305,7 +2469,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
           ? undefined
           : [modelRouteId];
       if (llmServiceClient !== undefined && grantRoutes !== undefined) {
-        // Persist the job-id-only marker before the call: an ambiguous response
+        // Persist the issuer-bound marker before the call: an ambiguous response
         // must revoke by job identity and never retry issuance for this job.
         try {
           await writeGrantMarker(job.id);
@@ -2314,9 +2478,14 @@ export const createRunner = (options: RunnerOptions = {}) => {
           return;
         }
         job.grantIssuanceAttempted = true;
+        const grantIdentity: LlmGrantIdentity = {
+          runId: job.input.runId,
+          jobId: job.id,
+          attempt: job.input.attempt,
+        };
         let grant: { token: string; expiresAt: number };
         try {
-          grant = await llmServiceClient.issue(job.id, grantRoutes);
+          grant = await llmServiceClient.issue(grantIdentity, grantRoutes);
         } catch {
           failure = { reason: 'agent' };
           return;
@@ -3185,9 +3354,13 @@ export const createRunner = (options: RunnerOptions = {}) => {
             }),
           ),
         );
-        if (llmServiceClient !== undefined) {
-          await llmServiceClient.revoke(input.jobId);
-          await clearGrantMarker(input.jobId);
+        const marker = await readGrantMarker(grantMarkerPath(input.jobId));
+        if (marker.kind === 'invalid') throw new Error('grant recovery marker invalid');
+        if (marker.kind === 'present' || llmServiceClient !== undefined) {
+          const recordedJobId = marker.kind === 'present' ? marker.jobId : input.jobId;
+          const issuer = marker.kind === 'present' ? marker.issuer : activeGrantIssuer;
+          if (!(await revokeRecordedGrant(recordedJobId, issuer)))
+            throw new Error('grant revocation not confirmed');
           const previousRecovery = grantRecovery;
           if (
             previousRecovery !== undefined &&
