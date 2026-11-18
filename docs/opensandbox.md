@@ -91,42 +91,13 @@ read-only token file to include `gh api installation/repositories` through Vault
 The token is read only by the host and is never put in the workload environment.
 This is a lifecycle smoke test, not proof of a complete model review.
 
-## Private inference endpoint
+## Inference endpoint
 
-Credential Vault injects secrets only on ports 80 and 443 and requires FQDN
-bindings. The existing loopback high-port Node LLM service therefore needs a
-private standard-port reverse proxy. Give each instance its own private DNS
-name resolving to an address reachable from the Docker bridge. Keep the Node
-service's control Unix socket and inference listener unchanged.
-
-For example, an existing nginx can serve this scoped private listener:
-
-```nginx
-server {
-    listen <DOCKER_BRIDGE_GATEWAY>:80;
-    server_name <PRIVATE_LLM_FQDN>;
-    client_max_body_size 0;
-    location /v1/ {
-        proxy_pass http://127.0.0.1:<INSTANCE_LLM_PORT>;
-        proxy_http_version 1.1;
-        proxy_buffering off;
-        proxy_request_buffering off;
-        proxy_read_timeout 2h;
-        proxy_send_timeout 2h;
-    }
-}
-```
-
-The authenticated Node service retains its request-size and route limits. The
-proxy does not contain provider keys or job grants. Bind it only to the private
-interface; do not replace an existing public listener. Use ordinary working DNS
-for the private name, not an agent-visible hosts-file workaround. Vault handles
-HTTPS certificate interception and supplies its CA trust to sandbox processes;
-do not disable certificate verification.
+Use the installation’s dedicated HTTPS inference hostname on port 443. The sidecar Vault supplies the job grant on the scoped inference requests and provides the CA trust used by the workload. Keep certificate verification enabled.
 
 ## Runner configuration
 
-Configure the [host LLM service](llm-service.md) first, then set:
+Configure the [managed relay environment](llm-service.md#remote-relay-transport) and set:
 
 ```dotenv
 RUNNER_SANDBOX_RUNTIME=opensandbox
@@ -134,15 +105,9 @@ OPENSANDBOX_ENDPOINT=http://127.0.0.1:8080
 OPENSANDBOX_API_KEY_FILE=<PRIVATE_CONTROL_KEY_FILE>
 OPENSANDBOX_IMAGE=<LOCAL_REVIEW_IMAGE>
 RUNNER_SANDBOX_CLI=/usr/bin/docker
-RUNNER_LLM_SERVICE_SOCKET=<INSTANCE_CONTROL_SOCKET>
 ```
 
-Keep the existing `REVIEW_MODEL_CONFIG` model definition and change its
-`baseUrl` to `http://<PRIVATE_LLM_FQDN>/v1` (or HTTPS on 443). Direct-provider
-secret resolver mode is not supported by this backend. Both single-model and
-multi-model jobs use the same host service and per-job grants. Agents see only
-placeholders; the host writes the real model grant and read-only repository
-token to the sidecar Vault.
+The host writes the job grant and read-only repository token to the sidecar Vault. The workload uses placeholders.
 
 Runner's systemd `ExecStart` must start only the Runner Node executable. Remove
 an sbx-daemon launcher prefix when switching this instance. Preserve its other

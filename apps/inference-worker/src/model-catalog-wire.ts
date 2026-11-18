@@ -1,8 +1,9 @@
+import { readBoundedBody } from '@compte-rendu/contracts';
 import { Option, Schema } from 'effect';
 const MAX_CATALOG_BYTES = 256 * 1024;
 export const MAX_CATALOG_MODELS = 1000;
 export const CATALOG_TIMEOUT_MS = 5000;
-export const PUBLIC_USER_AGENT = 'litellm/1.106.0';
+export const PUBLIC_USER_AGENT = 'compte-rendu/1.0';
 
 export const CatalogModelId = Schema.String.check(
   Schema.isMaxLength(128),
@@ -13,34 +14,6 @@ const CatalogEnvelope = Schema.Struct({
   data: Schema.Array(Schema.Unknown),
 });
 const CatalogEntry = Schema.Struct({ id: Schema.String });
-
-const readBounded = async (response: Response): Promise<string> => {
-  if (response.body === null) return '';
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  try {
-    for (;;) {
-      const next = await reader.read();
-      if (next.done) break;
-      total += next.value.byteLength;
-      if (total > MAX_CATALOG_BYTES) {
-        await reader.cancel().catch(() => undefined);
-        throw new Error('catalog too large');
-      }
-      chunks.push(next.value);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  const bytes = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return new TextDecoder().decode(bytes);
-};
 
 const decodeCatalog = (
   text: string,
@@ -61,5 +34,7 @@ const decodeCatalog = (
 
 export const readModelCatalog = async (response: Response) => {
   if (!response.ok) throw new Error('catalog unavailable');
-  return decodeCatalog(await readBounded(response));
+  const body = await readBoundedBody(response.body, MAX_CATALOG_BYTES);
+  if (body.kind !== 'ok') throw new Error('catalog too large');
+  return decodeCatalog(body.text);
 };

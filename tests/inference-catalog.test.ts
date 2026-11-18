@@ -35,7 +35,10 @@ it('keeps formerly listed models available across refreshes and fresh relay inst
     });
     expect(
       observedHeaders.every(
-        (headers) => !headers.has('authorization') && !headers.has('cf-aig-authorization'),
+        (headers) =>
+          headers.get('user-agent') === 'compte-rendu/1.0' &&
+          !headers.has('authorization') &&
+          !headers.has('cf-aig-authorization'),
       ),
     ).toBe(true);
   } finally {

@@ -13,8 +13,8 @@ record historical assumptions and observations, not current deployment policy.
 | Maintainer → review admission  | Current GitHub permission and immutable head checks                                        |
 | Runner → public Worker         | Authenticated claim/progress/callback, persisted job/attempt ownership                     |
 | Agent → GitHub                 | Repository-scoped read token injected through the runtime proxy; no publication credential |
-| Agent → model                  | Direct-provider proxy, or restricted expiring job grant to the private LLM service         |
-| Node LLM service → LiteLLM     | Private backend credential and loopback endpoint; trusted route/job headers                |
+| Agent → model                  | Direct-provider proxy, or restricted expiring job grant to the managed inference Worker    |
+| Inference Worker → AI Gateway  | Account-scoped Gateway Run token and BYOK alias from the frozen grant mapping              |
 | Runner → host resources        | Per-job runtime ownership, bounded commands, deadlines, redaction and confirmed teardown   |
 | Core module → public dashboard | DB-only projection; unknown/private/expired repository identity removed server-side        |
 
@@ -69,11 +69,7 @@ resource ownership labels and recorded identities before deletion and requires
 positive deletion confirmation. It does not interpret transport errors as absence.
 OpenShell does not currently support this project's LLM-service/multi-model path.
 
-LLM service mode deliberately permits one private host inference endpoint; it is
-not accurate to claim that all host network access is impossible. The control Unix
-socket and upstream keys are outside Sandbox access. Only the configured inference
-port and GitHub read destination are intended allowances. Verify those boundaries
-on the selected runtime; isolation strength alone is not a product acceptance test.
+Managed inference permits the configured HTTPS inference hostname. Grant control uses the application origin and a Runner credential kept outside the Sandbox. The inference Worker constructs its upstream URL and headers from its own configuration and the frozen grant.
 
 ## Credentials and lifecycle
 
@@ -81,14 +77,10 @@ on the selected runtime; isolation strength alone is not a product acceptance te
   Runner removes local token sources, secret registration and scoped rules during
   cleanup. It does not currently revoke the GitHub installation token upstream.
 - Service-mode grants expire after four review budgets and cannot be renewed.
-  Revocation aborts active requests. Unconfirmed revocation fails the review and
+  Revocation rejects later admissions and seals usage for open requests. Unconfirmed revocation fails the review and
   leaves a recovery marker; Sandbox cleanup is still attempted independently.
-- Grant-service restart invalidates in-memory grants. Runner startup retries
-  pending grant revocations, but does not reconstruct interrupted agent jobs.
-- Supplier keys and optional subscription state belong to LiteLLM, not the agent.
-  ChatGPT subscription refresh/activation has separate limitations in
-  [the service guide](llm-service.md#optional-chatgpt-subscription); API-key operation
-  does not establish subscription refresh safety.
+- Relay D1 persists grants and revocations across Worker restarts. Runner startup retries pending revocations against the issuer recorded on disk.
+- The upstream credential belongs to the account’s AI Gateway BYOK configuration.
 - A stopped OpenCode client is not proof its server sessions stopped. Confirmed
   Sandbox destruction and grant revocation end job capabilities.
 
@@ -118,7 +110,7 @@ configured; they are not the product state or an authorization dependency.
 - Ownership, publication and projection: `apps/core/src/core-worker.ts`,
   `review-state-store.ts`, `github-review-adapter.ts`, `dashboard.ts`
 - Runner and runtimes: `apps/runner/src/runner.ts`, `sandbox-runtime-*.ts`
-- Grant and upstream boundaries: `apps/llm-service/src/service.ts`, `upstream.ts`
+- Grant and upstream boundaries: `apps/inference-worker/src/grants.ts`, `relay.ts`
 - Agent permissions and prompt: `apps/runner/src/opencode-multi-review.ts`,
   `review-prompt.ts`
 - Bundled review method and provenance: `apps/runner/skills/code-review/SKILL.md`,

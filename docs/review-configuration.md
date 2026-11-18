@@ -1,7 +1,7 @@
 # Review model configuration
 
-Multi-model execution is available through the sbx or OpenSandbox runtime with OpenCode and the external
-LLM service. Deploy migration `0012_review_configuration.sql` and the compatible
+Multi-model execution is available through the sbx or OpenSandbox runtime with OpenCode and the managed
+inference relay. Deploy migration `0012_review_configuration.sql` and the compatible
 Core and Runner before enabling a non-null selection. Missing grant routes or an
 invalid final result fail without a vote; no fallback reviewer is substituted.
 Child-session evidence is best effort, not an extra publication gate.
@@ -9,8 +9,7 @@ See [installation](installation.md#multi-model-review-configuration) for rollout
 
 ## Ownership
 
-Each Core instance stores its active selection and revision in D1. The LLM service
-owns the configured routes, upstream endpoints, protocols and credentials. A
+Each Core instance stores its active selection and revision in D1. The inference Worker owns the route catalog. AI Gateway owns upstream endpoints and BYOK credentials. A
 selection contains only route IDs: it cannot install a provider, supply a URL,
 change agent permissions or contain a key. The same route ID must continue to mean
 the same upstream model while queued or executing jobs reference it.
@@ -18,7 +17,7 @@ the same upstream model while queued or executing jobs reference it.
 The initial intended reviewers are DeepSeek V4.1 Flash and Step 5 Preview, with
 DeepSeek V4.1 Flash for synthesis. They are configuration choices, not program
 constants. The examples below assume the operator has configured the corresponding
-`deepseek-review` and `step-review` routes on that instance's LLM service.
+`deepseek-review` and `step-review` routes on that instance's relay.
 
 ## Operator API
 
@@ -70,7 +69,6 @@ payload budget rather than an inference or review-output limit. Responses are
 `Cache-Control: no-store`.
 
 Use `selection: null` with the current revision to select the installation default.
-On installations using the local LLM service, the Runner supplies this model.
 For the managed relay, set the application Worker's `RELAY_DEFAULT_MODEL_ROUTE`
 to a catalog route. Core freezes that route as a single-reviewer selection when
 it inserts each new run. The operator API continues to show the configured
@@ -94,8 +92,7 @@ before saving the selection. Previously queued and
 running jobs retain their snapshots; new jobs use the new revision. Updating a
 selection does not create a job, restart a review or bypass the existing same-PR
 guard. A new explicit retry uses the configuration active at its own admission.
-Historical runs are not backfilled or relabeled. Runs admitted with legacy
-single-review behavior continue without a multi-model snapshot.
+Historical runs are not backfilled or relabeled. Finish legacy jobs without a frozen selection before enabling the managed relay.
 
 Deploy the migration before upgraded Core code, and upgrade Runner to understand
 the snapshot before enabling any selection. A one-reviewer selection runs directly. A larger selection uses independent

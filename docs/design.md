@@ -86,23 +86,22 @@ flowchart LR
   R[Runner] -->|Claim, progress, callback| I
   C -->|VPC: targeted cancellation| R
   R --> S[Fresh Sandbox / OpenCode]
-  S --> L[Host LLM grant service]
-  L --> P[Loopback LiteLLM]
+  S --> L[Inference Worker]
+  L --> P[Cloudflare AI Gateway BYOK]
 ```
 
-| Component            | Owns                                                                                                                       |
-| -------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `apps/ingress`       | Webhook verification, installation filtering, request authentication and normalization, called inside the SvelteKit Worker |
-| `apps/core`          | Authorization, durable queue, GitHub App access/publication, lifecycle, public projection and metadata refresh             |
-| `apps/runner`        | Checkout, sandbox lifecycle, agent execution, evidence, grant revocation and terminal callback                             |
-| `apps/llm-service`   | Per-job grants, route authorization, cancellation and sanitized transport diagnostics                                      |
-| LiteLLM Proxy        | Upstream models, URLs, credentials and protocol adaptation                                                                 |
-| `apps/dashboard`     | Single Worker entry point, SSR SvelteKit/Carbon UI and self-hosted IBM Plex Mono                                           |
-| `packages/contracts` | Shared Effect schemas and transport types                                                                                  |
+| Component               | Owns                                                                                                                       |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `apps/ingress`          | Webhook verification, installation filtering, request authentication and normalization, called inside the SvelteKit Worker |
+| `apps/core`             | Authorization, durable queue, GitHub App access/publication, lifecycle, public projection and metadata refresh             |
+| `apps/runner`           | Checkout, sandbox lifecycle, agent execution, evidence, grant revocation and terminal callback                             |
+| `apps/inference-worker` | Per-job grants, route authorization, cancellation and sanitized transport diagnostics                                      |
+| AI Gateway BYOK         | Upstream models, URLs, credentials and protocol adaptation                                                                 |
+| `apps/dashboard`        | Single Worker entry point, SSR SvelteKit/Carbon UI and self-hosted IBM Plex Mono                                           |
+| `packages/contracts`    | Shared Effect schemas and transport types                                                                                  |
 
 Core and ingress are internal modules of one public SvelteKit Worker; only the
-allowlisted HTTP endpoints are exposed. Runner and inference/control services
-are private. New work is pulled from D1, not submitted through the VPC binding.
+allowlisted HTTP endpoints are exposed. Runner is private. The inference hostname accepts job grants; relay control uses a private Worker binding. New work is pulled from D1, not submitted through the VPC binding.
 There is no Cloudflare Workflow or message queue. See [installation](installation.md)
 and [LLM service](llm-service.md) for configuration, grants and deployment order.
 
@@ -211,7 +210,7 @@ limited to the target repository and read permissions, used for checkout and the
 runtime's GitHub proxy. Sandbox agents see a proxy placeholder, not the real
 GitHub credential. Cleanup removes the job's credential sources and scoped rules.
 
-In LLM service mode, supplier credentials stay in LiteLLM; Sandbox inference uses
+In LLM service mode, supplier credentials stay in the installation’s Cloudflare account; Sandbox inference uses
 a job grant valid for four review budgets, with no renewal. Grant revocation and
 Sandbox cleanup are independent. An unconfirmed revocation fails the job even
 when Sandbox destruction succeeds. Direct-model and OpenShell provider modes have

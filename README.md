@@ -9,8 +9,7 @@ Start with the [documentation index](docs/README.md) and
 Operators can install and run the deployed Workers from
 [docs/installation.md](docs/installation.md). Evidence is retained in a
 private R2 bucket with a deployment-configured lifecycle expiration.
-The standalone [LLM service deployment guide](docs/llm-service.md) covers the
-host-side inference service and its sbx Runner integration.
+The [managed inference guide](docs/llm-service.md) covers Gateway BYOK, model selection and job grants.
 
 To print one sanitized correlated diagnosis, pass an explicit deployed
 database, bucket, and generated config:

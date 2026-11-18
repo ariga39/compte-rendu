@@ -2,7 +2,6 @@ import { Effect, Option, Schema } from 'effect';
 import {
   ChatRequest,
   decodeStreamFrame,
-  modelIdentity,
   streamEventIsError,
   streamFrameIsError,
   streamFrameModel,
@@ -168,8 +167,6 @@ export const relayInference = (options: InferenceRelayOptions): Effect.Effect<Re
       yield* Effect.promise(() => finishOnce(false));
       return failure();
     }
-    const deploymentModel = modelIdentity(upstream.headers.get('x-litellm-model-name'));
-    if (deploymentModel !== null) usage.model = deploymentModel;
     if (!upstream.ok || upstream.body === null) {
       cleanup();
       yield* Effect.promise(
@@ -260,10 +257,10 @@ export const relayInference = (options: InferenceRelayOptions): Effect.Effect<Re
               return;
             }
             const frame = decoded.value;
-            const model = streamFrameModel(frame, 'chat-completions');
-            if (deploymentModel === null && model !== null) usage.model = model;
-            Object.assign(usage, streamFrameUsage(frame, 'chat-completions'));
-            if (streamFrameTerminal(frame, 'chat-completions')) finishMarker = true;
+            const model = streamFrameModel(frame);
+            if (model !== null) usage.model = model;
+            Object.assign(usage, streamFrameUsage(frame));
+            if (streamFrameTerminal(frame)) finishMarker = true;
             if (errorEvent || streamFrameIsError(frame)) {
               await failStream();
               return;

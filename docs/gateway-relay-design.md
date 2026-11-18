@@ -1,6 +1,8 @@
 # Move review inference to Cloudflare AI Gateway
 
-**Proposal for [issue 236](https://github.com/ariga39/compte-rendu/issues/236).** Replace the Runner host’s Node LLM service and LiteLLM for the OpenCode Go review workload. Keep one review job, its existing sandbox and one GitHub verdict. An operator must still be able to select a newly discovered model without redeploying or restarting a Runner. Each installation migrates independently.
+**Original migration design for [issue 236](https://github.com/ariga39/compte-rendu/issues/236).** The managed relay now ships. Use the [current deployment guide](installation.md#configure-the-managed-inference-relay) for new installations.
+
+Original scope: replace the Runner host’s Node LLM service and LiteLLM for the OpenCode Go review workload. Keep one review job, its existing sandbox and one GitHub verdict. An operator must still be able to select a newly discovered model without redeploying or restarting a Runner. Each installation migrates independently.
 
 ## What the pilot established
 
