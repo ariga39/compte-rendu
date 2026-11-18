@@ -1,3 +1,4 @@
+export { readBoundedRequestBody } from './read-request-body.ts';
 import { Schema } from 'effect';
 import { ModelUsageSummary } from './model-usage.ts';
 export { ModelUsageSummary } from './model-usage.ts';
@@ -5,6 +6,7 @@ export { ModelUsageSummary } from './model-usage.ts';
 export const DEFAULT_REVIEW_NAME = 'Compte-rendu review';
 export const PublicDashboardConfig = Schema.Struct({ name: Schema.String });
 
+export const RUNNER_LLM_CONTROL_TIMEOUT_MS = 5000;
 export const REVIEW_ATTEMPT_BUDGET_MS = 30 * 60 * 1000;
 
 const ModelRouteId = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9._:/-]{1,128}$/));

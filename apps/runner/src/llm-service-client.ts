@@ -1,4 +1,4 @@
-import { ModelUsageSummary } from '@compte-rendu/contracts';
+import { ModelUsageSummary, RUNNER_LLM_CONTROL_TIMEOUT_MS } from '@compte-rendu/contracts';
 import { request } from 'node:http';
 import { Effect, Schema } from 'effect';
 
@@ -61,7 +61,7 @@ export const createLlmServiceClient = (socketPath: string) => {
           const timeout = setTimeout(() => {
             finish(new Error('control request timed out'));
             req.destroy();
-          }, 5000);
+          }, RUNNER_LLM_CONTROL_TIMEOUT_MS);
           req.on('error', () => finish(new Error('control request failed')));
           req.end(body);
         }),

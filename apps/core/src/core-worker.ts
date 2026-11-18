@@ -41,12 +41,14 @@ import {
 } from './dashboard';
 
 export interface CoreWorkerEnv extends Partial<CoreEnv> {
+  readonly INFERENCE_RELAY?: import('./runner-llm-control').RelayControl;
   readonly REVIEW_DB: D1DatabaseLike;
   readonly GITHUB_APP_ID: string;
   readonly GITHUB_APP_PRIVATE_KEY: string;
   readonly DASHBOARD_ORIGIN?: string;
   readonly GITHUB_CHECK_NAME?: string;
   readonly REVIEW_CONFIGURATION_TOKEN?: string;
+  readonly RELAY_DEFAULT_MODEL_ROUTE?: string;
   readonly EVIDENCE_BUCKET?: R2BucketLike;
   readonly POSTHOG_ENABLED?: string;
   readonly POSTHOG_PROJECT_API_KEY?: string;
@@ -224,7 +226,9 @@ export const createCoreWorker = (
       dashboardOrigin: env.DASHBOARD_ORIGIN,
       checkName: env.GITHUB_CHECK_NAME,
     });
-  const stateStore = dependencies.stateStore ?? createD1ReviewStateStore(env.REVIEW_DB);
+  const stateStore =
+    dependencies.stateStore ??
+    createD1ReviewStateStore(env.REVIEW_DB, env.RELAY_DEFAULT_MODEL_ROUTE);
   const runner =
     env.RUNNER === undefined || env.RUNNER_AUTH_TOKEN === undefined
       ? undefined
@@ -1046,7 +1050,9 @@ export const runScheduledMetadataRefresh = async (
   const github =
     dependencies.github ??
     createGitHubPublicationAdapter({ token: tokenProvider.getInstallationToken });
-  const stateStore = dependencies.stateStore ?? createD1ReviewStateStore(env.REVIEW_DB);
+  const stateStore =
+    dependencies.stateStore ??
+    createD1ReviewStateStore(env.REVIEW_DB, env.RELAY_DEFAULT_MODEL_ROUTE);
   const log = dependencies.log ?? createCloudflareOperationalLog();
   const summary = await refreshRepositoryMetadata({ stateStore, github });
   try {

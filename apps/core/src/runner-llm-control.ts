@@ -1,0 +1,97 @@
+import { DateTime, Effect, Option, Schema } from 'effect';
+import {
+  type ModelUsageSummary,
+  RUNNER_LLM_CONTROL_TIMEOUT_MS,
+  readBoundedRequestBody,
+  ReviewConfiguration,
+  ReviewModelSelection,
+} from '@compte-rendu/contracts';
+import type { CoreWorkerEnv } from './core-worker';
+
+const JobId = Schema.NonEmptyString.check(Schema.isMaxLength(128));
+const RequestGrant = Schema.Struct({
+  runId: JobId,
+  jobId: JobId,
+  attempt: Schema.Int.check(Schema.isGreaterThan(0)),
+  routes: ReviewModelSelection.fields.reviewers,
+});
+
+export interface RelayControl {
+  revoke(input: { jobId: string }): Promise<{ kind: 'revoked' | 'invalid' }>;
+  usage(input: { jobId: string }): Promise<ModelUsageSummary | null>;
+  issue(input: {
+    jobId: string;
+    snapshot: { routes: readonly string[] };
+    latestIssueDeadline: number;
+  }): Promise<
+    | { kind: 'issued'; token: string; expiresAt: string }
+    | { kind: 'duplicate' | 'deadline-exceeded' | 'invalid' }
+  >;
+}
+
+export async function handleRunnerLlmControl(
+  request: Request,
+  env: CoreWorkerEnv,
+  callbackToken?: string,
+) {
+  const path = new URL(request.url).pathname;
+  if (!['/runner-llm/issue', '/runner-llm/usage', '/runner-llm/revoke'].includes(path))
+    return new Response(null, { status: 404 });
+  if (request.method !== 'POST') return new Response(null, { status: 405 });
+  if (!callbackToken || request.headers.get('authorization') !== 'Bearer ' + callbackToken)
+    return new Response(null, { status: 401 });
+  if (!env.INFERENCE_RELAY) return new Response(null, { status: 503 });
+  try {
+    const payload = await readBoundedRequestBody(request, 16 * 1024);
+    if (payload.kind !== 'ok') return new Response(null, { status: 413 });
+    const body = payload.text;
+    if (path !== '/runner-llm/issue') {
+      const job = Schema.decodeUnknownOption(
+        Schema.fromJsonString(Schema.Struct({ jobId: JobId })),
+        { onExcessProperty: 'error' },
+      )(body);
+      if (Option.isNone(job)) return new Response(null, { status: 400 });
+      if (path === '/runner-llm/revoke') {
+        const result = await env.INFERENCE_RELAY.revoke(job.value);
+        return new Response(null, { status: result.kind === 'revoked' ? 204 : 503 });
+      }
+      const summary = await env.INFERENCE_RELAY.usage(job.value);
+      return summary === null
+        ? new Response(null, { status: 404 })
+        : Response.json(summary, { headers: { 'cache-control': 'no-store' } });
+    }
+    const input = Schema.decodeUnknownOption(Schema.fromJsonString(RequestGrant), {
+      onExcessProperty: 'error',
+    })(body);
+    if (Option.isNone(input)) return new Response(null, { status: 400 });
+    const { runId, jobId, attempt, routes } = input.value;
+    const now = await Effect.runPromise(DateTime.now.pipe(Effect.map(DateTime.toEpochMillis)));
+    const row = await env.REVIEW_DB.prepare(
+      "SELECT review_configuration FROM review_runs WHERE run_id = ? AND runner_job_id = ? AND runner_attempt = ? AND status = 'scheduled'",
+    )
+      .bind(runId, jobId, attempt)
+      .first<{ review_configuration: string | null }>();
+    if (!row?.review_configuration) return new Response(null, { status: 409 });
+    const { selection } = Schema.decodeUnknownSync(Schema.fromJsonString(ReviewConfiguration))(
+      row.review_configuration,
+    );
+    if (!selection) return new Response(null, { status: 409 });
+    const allowed = new Set(selection.reviewers);
+    if (selection.reviewers.length > 1) allowed.add(selection.synthesis);
+    if (routes.length !== allowed.size || routes.some((route) => !allowed.has(route)))
+      return new Response(null, { status: 409 });
+    const reply = await env.INFERENCE_RELAY.issue({
+      jobId,
+      snapshot: { routes: [...allowed] },
+      latestIssueDeadline: now + RUNNER_LLM_CONTROL_TIMEOUT_MS,
+    });
+    if (reply.kind !== 'issued')
+      return new Response(null, { status: reply.kind === 'duplicate' ? 409 : 503 });
+    return Response.json(
+      { token: reply.token, expiresAt: reply.expiresAt },
+      { status: 201, headers: { 'cache-control': 'no-store' } },
+    );
+  } catch {
+    return new Response(null, { status: 503 });
+  }
+}
