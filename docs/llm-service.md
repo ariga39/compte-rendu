@@ -577,6 +577,20 @@ and deploy Core first. In an idle maintenance window, update the Node LLM servic
 and Runner, then publish the dashboard build. LiteLLM configuration and credentials
 need no change. See [operations](operations.md) for shared-host drain requirements.
 
+### Reading AI Gateway analytics
+
+For a catalog using Gateway discovery, the application’s minute cron sends a
+`GET /models` through the Gateway. These requests can appear with an empty model
+and zero tokens. Filter Analytics by the reviewer’s upstream model ID to see its
+inference traffic. A streaming response that includes usage can populate the
+input and output token counts. The review dashboard shows usage attributed to
+the individual job.
+
+The relay sends `cf-aig-skip-cache: true`, so a Gateway response-cache miss is
+expected. Provider input-cache reads are accounted for separately in the
+reported token usage. A zero Gateway cost can coexist with subscription
+allowance consumption. Consult the provider’s billing data for that amount.
+
 ### Managed relay model catalog
 
 Set the inference Worker's `RELAY_CATALOG_SOURCES` variable to a JSON array.
