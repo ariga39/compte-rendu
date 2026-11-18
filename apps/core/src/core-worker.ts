@@ -323,7 +323,8 @@ export const createCoreWorker = (
         published: false,
         failurePhase:
           failure?.phase ??
-          (failedCallback?.stage === 'checkout' ||
+          (failedCallback?.stage === 'admission' ||
+          failedCallback?.stage === 'checkout' ||
           failedCallback?.stage === 'sandbox' ||
           failedCallback?.stage === 'agent' ||
           failedCallback?.stage === 'cleanup'
@@ -550,13 +551,15 @@ export const createCoreWorker = (
           ? { httpStatus: callback.failure.httpStatus }
           : {}),
         phase:
-          reason === 'upstream'
-            ? 'agent'
-            : reason === 'invalid_output'
-              ? 'output_validation'
-              : reason === 'timeout' || reason === 'unknown'
-                ? 'unknown'
-                : reason,
+          reason === 'configuration'
+            ? 'admission'
+            : reason === 'upstream'
+              ? 'agent'
+              : reason === 'invalid_output'
+                ? 'output_validation'
+                : reason === 'timeout' || reason === 'unknown'
+                  ? 'unknown'
+                  : reason,
       };
       await markRunFailed(outcome, callback.runId, occurredAt, undefined, failure);
     };

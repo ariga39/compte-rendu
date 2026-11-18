@@ -1073,6 +1073,14 @@ export const createRunner = (options: RunnerOptions = {}) => {
       'LLM service mode requires REVIEW_MODEL_CONFIG with an explicit baseUrl and model definition',
     );
   }
+  if (
+    relayEnabled &&
+    relayOrigin !== undefined &&
+    modelConfig?.baseUrl !== undefined &&
+    new URL(relayOrigin).hostname.toLowerCase() === modelConfig.baseUrl.hostname.toLowerCase()
+  ) {
+    throw new Error('Remote LLM relay requires a dedicated inference hostname');
+  }
   const localLlmServiceClient =
     llmServiceSocket === undefined ? undefined : createLlmServiceClient(llmServiceSocket);
   const relayLlmServiceClient =
@@ -1140,17 +1148,21 @@ export const createRunner = (options: RunnerOptions = {}) => {
       try {
         parsed = JSON.parse(value);
       } catch {
-        return { kind: 'invalid' };
+        parsed = undefined;
       }
-      const decoded = Option.getOrUndefined(
-        Schema.decodeUnknownOption(GrantMarker, { onExcessProperty: 'error' })(parsed),
-      );
-      if (decoded === undefined || markerNameFor(decoded.jobId) !== markerName)
-        return { kind: 'invalid' };
-      return { kind: 'present', jobId: decoded.jobId, issuer: decoded.issuer };
+      if (parsed !== undefined) {
+        const decoded = Option.getOrUndefined(
+          Schema.decodeUnknownOption(GrantMarker, { onExcessProperty: 'error' })(parsed),
+        );
+        if (decoded === undefined || markerNameFor(decoded.jobId) !== markerName)
+          return { kind: 'invalid' };
+        return { kind: 'present', jobId: decoded.jobId, issuer: decoded.issuer };
+      }
     }
     // Legacy plaintext markers belong to the original local issuer and preserve
-    // the exact job identity, including surrounding whitespace.
+    // the exact job identity, including surrounding whitespace or a leading
+    // brace. The hashed filename is the integrity check that distinguishes a
+    // legacy ID from malformed JSON.
     if (value.length === 0 || markerNameFor(value) !== markerName) return { kind: 'invalid' };
     return { kind: 'present', jobId: value, issuer: { transport: 'local' } };
   };
@@ -1232,7 +1244,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
   // own pending grant marker; an unresolved or foreign issuer keeps the gate
   // closed and is never cleared through another backend's success.
   const recoverPendingGrants = async () => {
-    if (localLlmServiceClient === undefined && relayLlmServiceClient === undefined) return true;
     let names: string[] = [];
     try {
       names = await readdir(pendingGrantRoot);
@@ -1254,8 +1265,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
     }
     return !unresolved;
   };
-  let grantRecovery =
-    llmServiceClient === undefined ? undefined : recoverPendingGrants().catch(() => false);
+  let grantRecovery = recoverPendingGrants().catch(() => false);
   const activeJobCount = () =>
     [...jobs.values()].filter(
       (candidate) => candidate.state.status === 'queued' || candidate.state.status === 'running',
@@ -2437,7 +2447,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       // Remote relay execution never infers a default route: Core must have
       // materialized the frozen selection at admission. Fail before checkout.
       if (relayEnabled && multiSelection === undefined) {
-        failure = { reason: 'checkout' };
+        failure = { reason: 'configuration' };
         return;
       }
       if (multi) {

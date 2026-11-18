@@ -8905,9 +8905,15 @@ describe('Runner transport diagnostics', () => {
   it('records a one-time grant recovery failure and preserves the claim gate', async () => {
     const evidenceRoot = await mkdtemp(join(tmpdir(), 'cr-claim-grant-'));
     await mkdir(join(evidenceRoot, 'llm-grant-pending'), { recursive: true, mode: 0o700 });
-    await writeFile(join(evidenceRoot, 'llm-grant-pending', 'marker.marker'), 'job-grant-gate', {
-      mode: 0o600,
-    });
+    await writeFile(
+      join(
+        evidenceRoot,
+        'llm-grant-pending',
+        `${createHash('sha256').update('job-grant-gate').digest('hex')}.marker`,
+      ),
+      'job-grant-gate',
+      { mode: 0o600 },
+    );
     const events: LogEvent[] = [];
     let claims = 0;
     const runner = createRunner({

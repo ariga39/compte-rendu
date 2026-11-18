@@ -120,6 +120,7 @@ export const RunnerJobResponse = Schema.Struct({
         'invalid-output',
         'evidence',
         'cleanup',
+        'configuration',
       ]),
       cause: Schema.optional(RunnerFailureCause),
       httpStatus: Schema.optional(RunnerHttpStatus),
@@ -184,6 +185,7 @@ const CallbackFailure = Schema.Struct({
     'invalid-output',
     'evidence',
     'cleanup',
+    'configuration',
   ]),
   cause: Schema.optional(RunnerFailureCause),
   httpStatus: Schema.optional(RunnerHttpStatus),
@@ -609,6 +611,7 @@ export type PublicTaskIdentity = typeof PublicTaskIdentity.Type;
 
 export const PublicTaskFailure = Schema.Struct({
   phase: Schema.Literals([
+    'admission',
     'scheduling',
     'checkout',
     'sandbox',
@@ -634,6 +637,7 @@ export const PublicTaskFailure = Schema.Struct({
     'publication_uncertain',
     'completion_failed',
     'review_reset_failed',
+    'configuration',
     'unknown',
   ]),
   httpStatus: Schema.optional(RunnerHttpStatus),
