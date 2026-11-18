@@ -16,5 +16,5 @@
     "tests/**/*.ts",
     "vite.config.ts"
   ],
-  "exclude": ["node_modules", "apps/dashboard"]
+  "exclude": ["node_modules", "apps/dashboard", "apps/inference-worker"]
 }

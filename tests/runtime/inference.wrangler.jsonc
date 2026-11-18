@@ -1,0 +1,20 @@
+{
+  "name": "compte-rendu-inference-rpc-test",
+  "main": "inference-caller-entry.mjs",
+  "compatibility_date": "2026-08-22",
+  "d1_databases": [
+    {
+      "binding": "RELAY_DB",
+      "database_name": "compte-rendu-inference-test",
+      "database_id": "compte-rendu-inference-test",
+      "migrations_dir": "../../apps/inference-worker/migrations",
+    },
+  ],
+  "services": [
+    {
+      "binding": "INFERENCE",
+      "service": "compte-rendu-inference-worker",
+      "entrypoint": "InferenceWorker",
+    },
+  ],
+}

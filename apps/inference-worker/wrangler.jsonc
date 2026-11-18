@@ -1,0 +1,15 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "compte-rendu-inference-worker",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-08-25",
+  "workers_dev": false,
+  "d1_databases": [
+    {
+      "binding": "RELAY_DB",
+      "database_name": "compte-rendu-relay-grants",
+      "database_id": "REPLACE_WITH_RELAY_D1_DATABASE_ID",
+      "migrations_dir": "migrations",
+    },
+  ],
+}

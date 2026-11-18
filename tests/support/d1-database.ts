@@ -73,6 +73,7 @@ export class SqliteD1Database implements D1DatabaseLike {
       '0013_model_usage.sql',
       '0014_failure_http_status.sql',
     ],
+    private readonly migrationsDirectory = '../../apps/core/migrations',
   ) {
     this.applyMigrations(migrationNames);
   }
@@ -81,7 +82,7 @@ export class SqliteD1Database implements D1DatabaseLike {
     for (const migrationName of migrationNames) {
       this.database.exec(
         readFileSync(
-          fileURLToPath(new URL(`../../apps/core/migrations/${migrationName}`, import.meta.url)),
+          fileURLToPath(new URL(`${this.migrationsDirectory}/${migrationName}`, import.meta.url)),
           'utf8',
         ),
       );
