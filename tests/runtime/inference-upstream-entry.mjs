@@ -176,6 +176,8 @@ const silentResponse = () =>
 export default {
   async fetch(request) {
     const url = new URL(request.url);
+    if (url.href === 'https://catalog.test/models')
+      return Response.json({ data: [{ id: 'tool-model' }] });
     if (url.pathname === '/__control') {
       reset(await request.json());
       return Response.json({ ok: true });

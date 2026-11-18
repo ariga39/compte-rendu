@@ -451,6 +451,10 @@ export type OperationalLogEvent =
         | 'review_reset_failed';
     }
   | {
+      readonly phase: 'relay';
+      readonly outcome: 'refresh_failed';
+    }
+  | {
       readonly phase: 'publication';
       readonly outcome: 'published';
       readonly runId: string;
@@ -554,6 +558,8 @@ export const sanitizeOperationalLogEvent = (event: OperationalLogEvent): Operati
           deliveryId: sanitizeOperationalLogIdentifier(event.deliveryId) ?? 'redacted',
         };
   }
+
+  if (event.phase === 'relay') return event;
 
   if (event.phase === 'publication') {
     return { ...event, runId: sanitizeOperationalLogIdentifier(event.runId) ?? 'redacted' };

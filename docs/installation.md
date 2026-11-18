@@ -1276,3 +1276,59 @@ argument. Include the Bot allowlist and PostHog arguments when supplying it; use
 ```sh
 corepack pnpm render:wrangler ariga39-ai-reviewers <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '[]' '{"enabled":false}' 'Ariga39 AI Review'
 ```
+
+### Configure the managed inference relay
+
+Use one relay D1 database, inference hostname, Gateway, BYOK credential and scoped
+Gateway Run token per installation. Provision them in the same account as the
+application Worker. Give the relay only its own D1 binding. In AI Gateway, set
+the custom provider's full upstream API base including its `/v1` path. Store the
+upstream credential in that account's Secrets Store and select its BYOK alias.
+The Run token belongs in the inference Worker's `AI_GATEWAY_RUN_TOKEN` secret.
+The Runner receives job grants through the existing authenticated callback origin.
+
+Append a relay configuration file path after the check name in the existing
+`render:wrangler` command. Use an empty quoted argument for a blank check name.
+The file contains deployment identifiers and catalog sources. The example below uses a public model list. Protected lists and fixed aliases are described in the [relay catalog configuration](llm-service.md#managed-relay-model-catalog).
+
+```json
+{
+  "accountId": "<CLOUDFLARE_ACCOUNT_ID>",
+  "databaseId": "<RELAY_D1_DATABASE_ID>",
+  "hostname": "inference.example.net",
+  "gatewayId": "review",
+  "defaultRoute": "review-provider/deepseek-v4.1-flash",
+  "catalogSources": [
+    {
+      "url": "https://models.example.net/v1/models",
+      "prefix": "review-provider/",
+      "providerSlug": "custom-review",
+      "credentialAlias": "default"
+    }
+  ]
+}
+```
+
+The command writes instance-specific files to `apps/dashboard` and
+`apps/inference-worker`. For an installation with custom application routes or
+bindings, compare the generated file to the live configuration and carry those
+settings forward. Keep the local LLM units available during commissioning.
+
+1. Apply the inference Worker's migrations against its relay D1 database.
+   Deploy the inference Worker on the dedicated hostname with its Run secret.
+2. Deploy the application Worker with the private `INFERENCE_RELAY` binding
+   and `RELAY_DEFAULT_MODEL_ROUTE`. Confirm that the operator catalog endpoint
+   lists every selected reviewer and synthesis route after the scheduled refresh.
+3. Drain the Runner on the local transport. Verify old grants have been
+   revoked, legacy null-snapshot jobs have finished, and recovery markers are
+   clear. Configure the existing callback URL and bearer, the HTTPS inference
+   model base on port 443 ending in `/v1`, and the relay issuer generation.
+4. Resume one installation and run a fresh PR review. Verify the published
+   review is for the claimed revision, the check terminates, D1 records usage
+   per model, grant reuse is denied after cleanup, and the sandbox is gone.
+5. Exercise rollback under drain. Resolve markers on the issuing backend,
+   restore the local control socket and original model base together, and verify
+   the reviewer and synthesis routes resolve through the original catalog and
+   aliases. Restore the previous selection if it changed. Resume and verify a
+   fresh review. Switch back under the same drain procedure.
+   Retire the replaced local units after acceptance for that installation.

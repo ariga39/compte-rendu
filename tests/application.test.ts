@@ -61,6 +61,14 @@ it('issues a relay grant only to the Runner owning the frozen review routes', as
     ALLOWED_INSTALLATION_IDS: '[7]',
     RUNNER_CALLBACK_TOKEN: 'test-callback-token',
     INFERENCE_RELAY: {
+      catalog: async () => ({
+        routes: [],
+        lastAttemptAt: null,
+        lastSuccessAt: null,
+        rejected: 0,
+        lastRefreshError: null,
+      }),
+      refreshCatalog: async () => {},
       issue: async () => ({
         kind: 'issued' as const,
         token: 'test-grant',
@@ -126,6 +134,14 @@ it('allows authenticated recovery and usage reads after a claim has cleared', as
     ALLOWED_INSTALLATION_IDS: '[7]',
     RUNNER_CALLBACK_TOKEN: 'runner',
     INFERENCE_RELAY: {
+      catalog: async () => ({
+        routes: [],
+        lastAttemptAt: null,
+        lastSuccessAt: null,
+        rejected: 0,
+        lastRefreshError: null,
+      }),
+      refreshCatalog: async () => {},
       issue: async () => ({ kind: 'invalid' as const }),
       revoke: async () => ({ kind: 'revoked' as const }),
       usage: async ({ jobId }) => (jobId === 'retired' ? null : { version: 1, models: [] }),
@@ -163,6 +179,14 @@ it.each(['', 'broken route'])(
         ALLOWED_INSTALLATION_IDS: '[7]',
         RELAY_DEFAULT_MODEL_ROUTE: defaultRoute,
         INFERENCE_RELAY: {
+          catalog: async () => ({
+            routes: [],
+            lastAttemptAt: null,
+            lastSuccessAt: null,
+            rejected: 0,
+            lastRefreshError: null,
+          }),
+          refreshCatalog: async () => {},
           issue: async () => ({ kind: 'invalid' as const }),
           revoke: async () => ({ kind: 'revoked' as const }),
           usage: async () => null,

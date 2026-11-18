@@ -576,3 +576,45 @@ For rollout, apply migration `0013_model_usage.sql` with the other tracked migra
 and deploy Core first. In an idle maintenance window, update the Node LLM service
 and Runner, then publish the dashboard build. LiteLLM configuration and credentials
 need no change. See [operations](operations.md) for shared-host drain requirements.
+
+### Managed relay model catalog
+
+Set the inference Worker's `RELAY_CATALOG_SOURCES` variable to a JSON array.
+Every source names a Gateway custom provider and its BYOK credential alias.
+Choose discovery according to how that provider exposes its model list.
+
+- For a public list, set `url` to its credential-free HTTPS endpoint and
+  `prefix` to the prefix for discovered review routes.
+- For a protected list, set `"discovery": "gateway"` and `prefix`. The relay
+  calls the provider's `/models` endpoint through Gateway using its BYOK alias.
+  Confirm this endpoint lists the selected models before cutover.
+- For fixed routes, provide a nonempty `aliases` map from review route ID to
+  upstream model ID. A source with only aliases makes no discovery request.
+  A discovery source can also declare aliases for the same upstream.
+
+For example, this configuration discovers models on one authenticated upstream
+and preserves a historical route served by another upstream.
+
+```json
+[
+  {
+    "discovery": "gateway",
+    "prefix": "review-provider/",
+    "providerSlug": "custom-review",
+    "credentialAlias": "default"
+  },
+  {
+    "aliases": { "deepseek-review": "deepseek-v4.1-flash" },
+    "providerSlug": "custom-legacy",
+    "credentialAlias": "default"
+  }
+]
+```
+
+The application Worker's minute cron refreshes the private relay catalog.
+Read `GET /api/review-configuration/catalog` on the application origin with
+the review configuration operator bearer to see route IDs and refresh status.
+The catalog endpoint reads D1. A failed provider refresh preserves known
+routes. Existing route IDs keep their original upstream mapping. A conflicting
+configuration appears as a refresh error. See the [migration design](gateway-relay-design.md)
+for the drain and retirement procedure.

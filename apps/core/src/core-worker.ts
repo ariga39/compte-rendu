@@ -41,8 +41,11 @@ import {
 } from './dashboard';
 
 export interface CoreWorkerEnv extends Partial<CoreEnv> {
-  readonly INFERENCE_RELAY?: import('./runner-llm-control').RelayControl;
   readonly REVIEW_DB: D1DatabaseLike;
+  readonly INFERENCE_RELAY?: import('./runner-llm-control').RelayControl & {
+    catalog(): Promise<import('../../inference-worker/src/catalog').RelayCatalogSnapshot>;
+    refreshCatalog(scheduledTime: number): Promise<void>;
+  };
   readonly GITHUB_APP_ID: string;
   readonly GITHUB_APP_PRIVATE_KEY: string;
   readonly DASHBOARD_ORIGIN?: string;

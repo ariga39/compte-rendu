@@ -13,19 +13,14 @@ import {
 import { EventSourceParserStream } from 'eventsource-parser/stream';
 import { finalizeComplete, savePartial, type AuthenticatedGrant } from './ledger.ts';
 import type { D1DatabaseLike } from './grants.ts';
-import { gatewayProviderPath, type FrozenRoute } from './routes.ts';
+import type { FrozenRoute } from './routes.ts';
+import { gatewayHeaders, gatewayUrl, type GatewayConfig } from './gateway';
+export type { GatewayConfig } from './gateway';
 
 const CHAT_PATH = '/v1/chat/completions';
 const GATEWAY_PATH = '/chat/completions';
-const GATEWAY_ORIGIN = 'https://gateway.ai.cloudflare.com';
 const MAX_HELD_FRAMES = 32;
 const MAX_HELD_BYTES = 64 * 1024;
-
-export interface GatewayConfig {
-  readonly accountId: string;
-  readonly gatewayId: string;
-  readonly runToken: string;
-}
 
 export interface InferenceRelayOptions {
   readonly database: D1DatabaseLike;
@@ -59,19 +54,10 @@ const frameBytes = (event: { readonly event?: string; readonly data: string }): 
 const headersFor = (gateway: GatewayConfig, grant: AuthenticatedGrant, route: FrozenRoute) => ({
   'content-type': 'application/json',
   accept: 'text/event-stream',
-  'cf-aig-authorization': `Bearer ${gateway.runToken}`,
-  'cf-aig-collect-log': 'false',
-  'cf-aig-collect-log-payload': 'false',
-  'cf-aig-skip-cache': 'true',
-  'cf-aig-byok-alias': route.credentialAlias,
+  ...gatewayHeaders(gateway, route.credentialAlias),
   'x-opencode-session': grant.jobId,
   session_id: grant.jobId,
 });
-
-const gatewayUrl = (gateway: GatewayConfig, route: FrozenRoute, path = GATEWAY_PATH): string =>
-  `${GATEWAY_ORIGIN}/v1/${gateway.accountId}/${gateway.gatewayId}/${gatewayProviderPath(
-    route.providerSlug,
-  )}${path}`;
 
 export const isChatCompletionPath = (pathname: string): boolean => pathname === CHAT_PATH;
 
@@ -148,7 +134,7 @@ export const relayInference = (options: InferenceRelayOptions): Effect.Effect<Re
 
     const upstream = yield* Effect.tryPromise({
       try: () =>
-        fetchUpstream(gatewayUrl(gateway, route), {
+        fetchUpstream(gatewayUrl(gateway, route.providerSlug, GATEWAY_PATH), {
           method: 'POST',
           headers: headersFor(gateway, grant, route),
           body: JSON.stringify({ ...body, model: route.upstreamModel, store: false, stream: true }),
