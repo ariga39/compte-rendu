@@ -213,6 +213,6 @@
     {/if}
   </div>
   {#if selected}
-    <TaskDrawer runId={selected} {taskIds} onClose={closeDrawer} />
+    <TaskDrawer runId={selected} {taskIds} onSelect={openTask} onClose={closeDrawer} />
   {/if}
 </div>

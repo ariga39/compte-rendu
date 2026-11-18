@@ -1,12 +1,12 @@
 <script lang="ts">
   import TaskDetail from './TaskDetail.svelte';
-  import { openTask } from '#lib/task-drawer.svelte.ts';
 
   let {
     runId,
     taskIds,
+    onSelect,
     onClose,
-  }: { runId: string; taskIds: string[]; onClose: () => void } = $props();
+  }: { runId: string; taskIds: string[]; onClose: () => void; onSelect: (runId: string) => void } = $props();
 
   let narrow = $state(false);
   let root = $state<HTMLElement | null>(null);
@@ -26,10 +26,10 @@
     hasPrev: index > 0,
     hasNext: index >= 0 && index < taskIds.length - 1,
     prev: () => {
-      if (index > 0) openTask(taskIds[index - 1]!);
+      if (index > 0) onSelect(taskIds[index - 1]!);
     },
     next: () => {
-      if (index >= 0 && index < taskIds.length - 1) openTask(taskIds[index + 1]!);
+      if (index >= 0 && index < taskIds.length - 1) onSelect(taskIds[index + 1]!);
     },
   });
 
