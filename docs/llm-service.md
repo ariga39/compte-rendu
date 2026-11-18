@@ -331,36 +331,44 @@ RUNNER_CALLBACK_TOKEN=<static-runner-callback-token>
 REVIEW_MODEL_CONFIG={"id":"opencode-go/deepseek-review","baseUrl":"https://<INFERENCE_FQDN>/v1","definition":{"name":"DeepSeek review"}}
 ```
 
+Deploy and validate Core's `/runner-llm/` control routes plus the relay D1 and
+inference Worker before enabling `RUNNER_LLM_RELAY` on a Runner. Finish any
+already queued legacy null-snapshot jobs on the old backend first; remote
+claims must carry an effective frozen selection.
+
 `RUNNER_LLM_RELAY` is the only relay opt-in. The control client reuses the
 HTTPS callback origin and callback bearer; there is no separate relay control
 URL, origin or credential, and an HTTP callback URL is rejected at startup
 before any credential is sent. `RUNNER_LLM_RELAY_GENERATION` identifies the
 relay backend/D1 generation and is part of every pending marker's issuer, so a
-different generation on the same hostname never clears it. Keep it stable for a
-relay database and change it only with a drained cutover. It sends
+different generation or D1 on the same hostname never clears it. Keep it stable
+for a relay database and change it only with a drained cutover. It sends
 `POST /runner-llm/issue` with `{ runId, jobId, attempt, routes }`,
 `POST /runner-llm/revoke` with `{ jobId }`, and `POST /runner-llm/usage` with
 `{ jobId }` directly to that origin. Issue expects the existing 201 grant
 response, revoke expects 204 and usage expects the existing 200 usage summary.
 The same bearer is never installed in the Sandbox; only the per-job grant is.
 
-The inference `baseUrl` must be one HTTPS FQDN on port 443 with an exact `/v1`
-path. Credentials, a query, a fragment, a wildcard host, a non-standard port, a
-different path, redirects, or another scheme fail startup before any claim.
-Runner uses that exact host for sbx secret substitution and adds only the
-`<host>:443` egress rule. Remote mode requires the frozen claim selection before
-checkout; a legacy claim without an effective selection fails without running
-Git, a model call, or a Sandbox. `RUNNER_LLM_RELAY` cannot be combined with the
-local socket and is not available for OpenShell or OpenSandbox. Local service
-mode and direct OpenShell provider mode are unchanged.
+The inference `baseUrl` must be one HTTPS FQDN on port 443 with `/v1` or `/v1/`
+as the base path. Credentials, a query, a fragment, a wildcard host, a
+non-standard port, a different path, another scheme, or the callback hostname
+fail startup before any claim. Redirects are refused at request time. Runner
+uses that exact host for sbx secret substitution and adds only the `<host>:443`
+egress rule; the required `api.github.com:443` GitHub host remains present.
+Remote mode requires the frozen claim selection before checkout; a legacy claim
+without an effective selection fails without running Git, a model call, or a
+Sandbox. `RUNNER_LLM_RELAY` cannot be combined with the local socket and is not
+available for OpenShell or OpenSandbox. Local service mode and direct OpenShell
+provider mode are unchanged.
 
 ### Switch traffic and verify
 
 1. Use the [Runner maintenance drain](operations.md#drain-before-maintenance)
    to stop new admissions and let current jobs finish; concurrency zero is invalid. Do not restart a Runner that
    owns the shared sbx daemon while either instance still has active jobs.
-2. Start the independent LLM service, apply the Runner environment changes, and
-   restart that Runner. No Core/Ingress binding or database change is required.
+2. For local service mode, start the independent LLM service. For relay mode,
+   keep the already deployed Core/relay control in place. Apply the Runner
+   environment changes and restart that Runner.
 3. Trigger one review of a known PR. Verify the final review addresses the pinned
    diff, the callback and published review agree, and Sandbox cleanup is
    `destroyed`. Inspect the private evidence for credential leakage without
@@ -386,12 +394,17 @@ or replace the existing operational cleanup of orphan Sandboxes. Keep the
 service in its own systemd unit/cgroup; do not make its lifetime depend on the
 Runner unit.
 
-To roll back, drain jobs, remove `RUNNER_LLM_SERVICE_SOCKET` or
-`RUNNER_LLM_RELAY`, restore the previous `REVIEW_MODEL_CONFIG` and host
-`MODEL_SECRET_COMMAND`, then restart the Runner. Do not point an unresolved
-marker at a different backend. Only new jobs use the restored route;
-interrupted jobs require an explicit new review trigger. Stop the LLM service
-only after its callers are drained.
+To roll back, drain jobs and confirm every remote revocation. The
+`llm-grant-pending` directory must be empty before downgrading to a Runner
+binary that cannot read issuer-bound markers. Restore the previous
+`REVIEW_MODEL_CONFIG` and host `MODEL_SECRET_COMMAND`, remove
+`RUNNER_LLM_SERVICE_SOCKET` or `RUNNER_LLM_RELAY`, then restart the Runner and
+resume admissions. Do not repoint an unresolved marker at a different backend.
+If any marker is unresolved or mismatched, repair its recorded issuer; never
+delete or rewrite markers by hand. Only new jobs use the restored route;
+interrupted jobs require an explicit new review trigger. Keep Core and the
+relay deployed until all remote grants and markers have retired. Stop the LLM
+service only after its callers are drained.
 
 ## Public boundaries
 

@@ -84,6 +84,7 @@ export const CoreLifecycleFailureReason = Schema.Literals([
   'publication_uncertain',
   'completion_failed',
   'review_reset_failed',
+  'configuration',
   'unknown',
 ]);
 export type CoreLifecycleFailureReason = typeof CoreLifecycleFailureReason.Type;
@@ -100,6 +101,7 @@ const CoreLifecycleFinishedCommon = {
   evidenceStatus: Schema.Literals(['complete', 'incomplete', 'unknown']),
 } as const;
 const CoreLifecycleFailurePhase = Schema.Literals([
+  'admission',
   'scheduling',
   'checkout',
   'sandbox',

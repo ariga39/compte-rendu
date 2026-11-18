@@ -143,6 +143,7 @@ export function outcomeSummary(task: TaskState): string {
 }
 
 export const FAILURE_PHASE_LABEL: Record<string, string> = {
+  admission: 'Checking admission',
   scheduling: 'Scheduling review',
   checkout: 'Fetching code',
   sandbox: 'Preparing environment',
@@ -170,6 +171,7 @@ export const FAILURE_REASON_LABEL: Record<string, string> = {
     'Publication could not be confirmed; the review may still have been posted.',
   completion_failed: 'Completion could not be confirmed',
   review_reset_failed: 'Could not dismiss the previous GitHub review',
+  configuration: 'The review configuration was unavailable',
   unknown: 'Reason not recorded',
 };
 

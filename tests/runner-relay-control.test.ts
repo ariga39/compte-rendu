@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import { createRunner } from '../apps/runner/src/runner';
 import { createRelayLlmServiceClient } from '../apps/runner/src/llm-service-client';
 
@@ -44,7 +44,10 @@ const waitForTerminal = async (runner: ReturnType<typeof createRunner>, jobId: s
         headers: { authorization: 'Bearer runner-test-token' },
       }),
     );
-    const state = (await response.json()) as { status: string };
+    const state = (await response.json()) as {
+      status: string;
+      failure?: { reason?: string };
+    };
     if (state.status === 'succeeded' || state.status === 'failed' || state.status === 'aborted')
       return state;
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -158,6 +161,12 @@ describe('Runner relay configuration', () => {
     },
   );
 
+  it('rejects the callback hostname as the inference hostname', () => {
+    expect(() => createRunner(relayBaseOptions('https://ingress.test/v1'))).toThrow(
+      /dedicated inference hostname/,
+    );
+  });
+
   it('does not admit relay work without the callback transport settings', () => {
     expect(() =>
       createRunner({
@@ -222,7 +231,7 @@ describe('Runner relay admission and recovery', () => {
       );
       expect(submitted.status).toBe(202);
       const terminal = await waitForTerminal(runner, 'relay-no-selection');
-      expect(terminal).toMatchObject({ status: 'failed' });
+      expect(terminal).toMatchObject({ status: 'failed', failure: { reason: 'configuration' } });
       expect(commands).toEqual([]);
     } finally {
       await runner.close();
@@ -377,6 +386,148 @@ describe('Runner relay admission and recovery', () => {
       await new Promise((resolve) => setTimeout(resolve, 50));
       expect(controlCalls).toBe(0);
       expect(await readFile(markerPath, 'utf8')).toBe('legacy-local-job');
+    } finally {
+      await runner.close();
+    }
+  });
+
+  it('scans stale markers in direct mode and gates admission, claims and diagnostics', async () => {
+    const root = await evidenceRoot();
+    const markerRoot = join(root, 'llm-grant-pending');
+    const jobId = 'direct-stale-job';
+    const markerPath = join(
+      markerRoot,
+      `${createHash('sha256').update(jobId).digest('hex')}.marker`,
+    );
+    await mkdir(markerRoot, { recursive: true, mode: 0o700 });
+    await writeFile(markerPath, jobId, { mode: 0o600 });
+    const events: Array<Record<string, unknown>> = [];
+    let claims = 0;
+    const runner = createRunner({
+      evidenceRoot: root,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      modelConfig: JSON.stringify({
+        id: 'opencode-go/deepseek-flash',
+        definition: { name: 'DeepSeek V4.1 Flash' },
+      }),
+      callbackUrl: 'https://ingress.test/runner-callback',
+      callbackToken: 'callback-token',
+      callbackFetch: async () => new Response(null, { status: 202 }),
+      claimUrl: 'https://ingress.test/runner-claim',
+      claimIntervalMs: 10,
+      claimFetch: async () => {
+        claims += 1;
+        return new Response(null, { status: 204 });
+      },
+      log: {
+        record: async (event) => {
+          events.push(event as Record<string, unknown>);
+        },
+      },
+    });
+    try {
+      await vi.waitFor(() =>
+        expect(events).toContainEqual(
+          expect.objectContaining({ outcome: 'claim', reason: 'grant-recovery-failed' }),
+        ),
+      );
+      const admission = await runner.handle(
+        new Request('http://runner/jobs', {
+          method: 'POST',
+          headers: {
+            authorization: 'Bearer runner-test-token',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            id: 'direct-job',
+            runId: 'run-direct-job',
+            attempt: 1,
+            repositoryName: 'acme/reviewed',
+            pullRequestNumber: 42,
+            repositoryUrl: 'https://github.com/acme/reviewed.git',
+            baseSha: '1111111111111111111111111111111111111111',
+            headSha: '2222222222222222222222222222222222222222',
+            repositoryReadToken: 'github-read-token',
+          }),
+        }),
+      );
+      expect(admission.status).toBe(503);
+      expect(claims).toBe(0);
+      expect(await readFile(markerPath, 'utf8')).toBe(jobId);
+    } finally {
+      await runner.close();
+    }
+  });
+
+  it('recovers a legacy plaintext id starting with a brace when its filename matches', async () => {
+    const root = await evidenceRoot();
+    const socketPath = join(root, 'control.sock');
+    const markerRoot = join(root, 'llm-grant-pending');
+    const jobId = '{"legacy-but-not-json":';
+    const markerPath = join(
+      markerRoot,
+      `${createHash('sha256').update(jobId).digest('hex')}.marker`,
+    );
+    await mkdir(markerRoot, { recursive: true, mode: 0o700 });
+    await writeFile(markerPath, jobId, { mode: 0o600 });
+    const revoked: string[] = [];
+    const server = createServer(async (incoming, outgoing) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of incoming) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      }
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { jobId?: string };
+      if (incoming.url === '/grants/revoke' && body.jobId !== undefined) revoked.push(body.jobId);
+      outgoing.writeHead(204);
+      outgoing.end();
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(socketPath, resolve);
+    });
+    const runner = createRunner({
+      evidenceRoot: root,
+      authToken: 'runner-test-token',
+      modelConfig: JSON.stringify({
+        id: 'opencode-go/review',
+        baseUrl: 'http://host.docker.internal:32773/v1',
+        definition: { name: 'Review' },
+      }),
+      llmServiceSocket: socketPath,
+      claimUrl: '',
+    });
+    try {
+      await vi.waitFor(() => expect(revoked).toEqual([jobId]));
+      await expect(readFile(markerPath, 'utf8')).rejects.toThrow();
+    } finally {
+      await runner.close();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('fails closed for malformed JSON that is not a matching legacy plaintext id', async () => {
+    const root = await evidenceRoot();
+    const markerRoot = join(root, 'llm-grant-pending');
+    const markerPath = join(
+      markerRoot,
+      `${createHash('sha256').update('intended-job').digest('hex')}.marker`,
+    );
+    await mkdir(markerRoot, { recursive: true, mode: 0o700 });
+    await writeFile(markerPath, '{"legacy":', { mode: 0o600 });
+    let controlCalls = 0;
+    const runner = createRunner({
+      ...relayBaseOptions(),
+      evidenceRoot: root,
+      callbackFetch: async () => {
+        controlCalls += 1;
+        return new Response(null, { status: 204 });
+      },
+    });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(controlCalls).toBe(0);
+      expect(await readFile(markerPath, 'utf8')).toBe('{"legacy":');
     } finally {
       await runner.close();
     }
