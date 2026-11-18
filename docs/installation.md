@@ -518,7 +518,12 @@ correction before cleanup; no submission plugin is installed. See
 The environment example below is **direct-provider mode**. For the recommended
 host LLM service and configurable multi-model selection, use
 [the service-mode environment](llm-service.md#connecting-an-sbx-runner) instead;
-that mode uses job grants and does not require `MODEL_SECRET_COMMAND`.
+that mode uses job grants and does not require `MODEL_SECRET_COMMAND`. For the
+Worker relay, set `RUNNER_LLM_RELAY=1` and
+`RUNNER_LLM_RELAY_GENERATION=<RELAY_BACKEND_GENERATION>`, keep the HTTPS
+`RUNNER_CALLBACK_URL` and `RUNNER_CALLBACK_TOKEN`, and set
+`REVIEW_MODEL_CONFIG.baseUrl` to the configured `https://<INFERENCE_FQDN>/v1`;
+see [remote relay transport](llm-service.md#remote-relay-transport).
 
 The runner listens only on IPv4 loopback port `8080`. It runs as the persistent
 service below on the host that also runs the remotely managed Tunnel connector.
