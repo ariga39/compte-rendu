@@ -33,8 +33,8 @@
   const dash = createDashboard<HistoryModel>({
     dehydrated: () => data.dehydrated,
     key: () => `/history${search}`,
-    urls: () => [historyRequestUrl(search)],
-    build: (results, timing) => buildHistory(results, timing),
+    url: () => historyRequestUrl(search),
+    build: buildHistory,
     isActive: (model) => historyActive(model),
   });
 

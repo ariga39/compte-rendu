@@ -20,8 +20,8 @@
   const dash = createDashboard<OverviewModel>({
     dehydrated: () => data.dehydrated,
     key: () => '/',
-    urls: () => ['/api/dashboard'],
-    build: (results, timing) => buildOverview(results, timing),
+    url: () => '/api/dashboard',
+    build: buildOverview,
     isActive: (model) => overviewActive(model),
   });
 
