@@ -1,11 +1,16 @@
 import { Effect, Option, Schema } from 'effect';
 import { REVIEW_ATTEMPT_BUDGET_MS } from '@compte-rendu/contracts';
+import {
+  CatalogRoute,
+  FrozenRouteMapping,
+  RouteId,
+  freezeRoute,
+  type FrozenRoute,
+} from './routes.ts';
 
 export const GRANT_TTL_MS = 4 * REVIEW_ATTEMPT_BUDGET_MS;
 
 const PRIMARY_CLOCK_MS = "CAST(ROUND((julianday('now') - 2440587.5) * 86400000) AS INTEGER)";
-
-const RouteId = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9._:/-]{1,128}$/));
 
 export const ResolvedGrantSnapshot = Schema.Struct({
   routes: Schema.Array(RouteId).check(
@@ -70,7 +75,7 @@ const randomToken = (): string => {
   return base64url(bytes);
 };
 
-const sha256Hex = async (value: string): Promise<string> => {
+export const sha256Hex = async (value: string): Promise<string> => {
   const digest = await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
 };
@@ -82,6 +87,25 @@ export const createGrantControl = (database: D1DatabaseLike): InferenceGrantCont
     })(input);
     if (Option.isNone(decoded)) return { kind: 'invalid' as const };
 
+    const rows = yield* Effect.promise(() =>
+      database
+        .prepare(
+          `SELECT route_id, upstream_model, provider_slug, credential_alias
+          FROM catalog_routes
+          WHERE route_id IN (${decoded.value.snapshot.routes.map(() => '?').join(', ')})`,
+        )
+        .bind(...decoded.value.snapshot.routes)
+        .all<CatalogRoute>(),
+    );
+    const catalog = new Map<string, FrozenRoute>();
+    for (const row of rows.results) {
+      const frozen = freezeRoute(row);
+      if (frozen !== null) catalog.set(frozen.routeId, frozen);
+    }
+    const requested = decoded.value.snapshot.routes.map((id) => catalog.get(id));
+    if (requested.some((route) => route === undefined)) return { kind: 'invalid' as const };
+    const frozen = Schema.decodeUnknownSync(FrozenRouteMapping)(requested);
+
     const token = randomToken();
     const tokenHash = yield* Effect.promise(() => sha256Hex(token));
     const inserted = yield* Effect.promise(() =>
@@ -89,9 +113,10 @@ export const createGrantControl = (database: D1DatabaseLike): InferenceGrantCont
         .prepare(
           `WITH clock(now) AS (SELECT ${PRIMARY_CLOCK_MS})
           INSERT INTO grants (
-            job_id, token_hash, snapshot, issued_at, expires_at, latest_issue_deadline, revoked_at
+            job_id, token_hash, snapshot, route_mapping, issued_at, expires_at,
+            latest_issue_deadline, revoked_at
           )
-          SELECT ?, ?, ?, now, now + ?, ?, NULL
+          SELECT ?, ?, ?, ?, now, now + ?, ?, NULL
           FROM clock
           WHERE now < ?
           ON CONFLICT(job_id) DO NOTHING`,
@@ -100,6 +125,7 @@ export const createGrantControl = (database: D1DatabaseLike): InferenceGrantCont
           decoded.value.jobId,
           tokenHash,
           JSON.stringify(decoded.value.snapshot),
+          JSON.stringify(frozen),
           GRANT_TTL_MS,
           decoded.value.latestIssueDeadline,
           decoded.value.latestIssueDeadline,
@@ -140,20 +166,29 @@ export const createGrantControl = (database: D1DatabaseLike): InferenceGrantCont
     if (Option.isNone(decoded)) return { kind: 'invalid' as const };
 
     yield* Effect.promise(() =>
-      database
-        .prepare(
-          `WITH clock(now) AS (SELECT ${PRIMARY_CLOCK_MS})
-          INSERT INTO grants (
-            job_id, token_hash, snapshot, issued_at, expires_at, latest_issue_deadline, revoked_at
+      database.batch([
+        database
+          .prepare(
+            `WITH clock(now) AS (SELECT ${PRIMARY_CLOCK_MS})
+            INSERT INTO grants (
+              job_id, token_hash, snapshot, route_mapping, issued_at, expires_at,
+              latest_issue_deadline, revoked_at
+            )
+            SELECT ?, NULL, NULL, NULL, now, now + ?, now, now
+            FROM clock
+            WHERE true
+            ON CONFLICT(job_id) DO UPDATE SET
+              revoked_at = COALESCE(grants.revoked_at, excluded.revoked_at)`,
           )
-          SELECT ?, NULL, NULL, now, now + ?, now, now
-          FROM clock
-          WHERE true
-          ON CONFLICT(job_id) DO UPDATE SET
-            revoked_at = COALESCE(grants.revoked_at, excluded.revoked_at)`,
-        )
-        .bind(decoded.value.jobId, GRANT_TTL_MS)
-        .run(),
+          .bind(decoded.value.jobId, GRANT_TTL_MS),
+        database
+          .prepare(
+            `UPDATE inference_requests
+            SET status = 'incomplete', finalized_at = ${PRIMARY_CLOCK_MS}
+            WHERE job_id = ? AND status = 'pending'`,
+          )
+          .bind(decoded.value.jobId),
+      ]),
     );
     return { kind: 'revoked' as const };
   });

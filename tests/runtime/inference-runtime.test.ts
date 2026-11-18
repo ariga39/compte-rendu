@@ -14,6 +14,7 @@ import type {
 const GRANT_TTL_MS = 4 * REVIEW_ATTEMPT_BUDGET_MS;
 
 interface InferenceBinding {
+  usage(input: { jobId: string }): Promise<unknown>;
   fetch(request: Request): Promise<Response>;
   issue(input: IssueGrantInput): Promise<IssueGrantResult>;
   revoke(input: RevokeGrantInput): Promise<RevokeGrantResult>;
@@ -97,5 +98,13 @@ describe('Inference Worker runtime boundaries', () => {
         latestIssueDeadline: now,
       }),
     ).resolves.toEqual({ kind: 'deadline-exceeded' });
+  });
+});
+
+describe('Inference Worker usage retention', () => {
+  it('returns null for an unknown job and for a tombstone', async () => {
+    await expect(runtime.INFERENCE.usage({ jobId: 'runtime-absent' })).resolves.toBeNull();
+    await runtime.INFERENCE.revoke({ jobId: 'runtime-tombstone' });
+    await expect(runtime.INFERENCE.usage({ jobId: 'runtime-tombstone' })).resolves.toBeNull();
   });
 });

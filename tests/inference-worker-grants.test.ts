@@ -10,11 +10,31 @@ const sha256 = (value: string) => createHash('sha256').update(value).digest('hex
 
 const setup = () => {
   const database = new SqliteD1Database(
-    ['0001_grants.sql'],
+    ['0001_grants.sql', '0002_requests.sql'],
     '../../apps/inference-worker/migrations',
   );
+  const insertCatalog = database.database.prepare(
+    `INSERT INTO catalog_routes (route_id, upstream_model, provider_slug, credential_alias)
+    VALUES (?, ?, ?, ?)`,
+  );
+  for (const route of [...snapshot.routes, 'other-review']) {
+    insertCatalog.run(route, `${route}-native`, 'review-provider', 'default');
+  }
   return { database, control: createGrantControl(database) };
 };
+
+const mutationCounts = (database: SqliteD1Database) => ({
+  grants: (
+    database.database.prepare('SELECT COUNT(*) AS count FROM grants').get() as {
+      readonly count: number;
+    }
+  ).count,
+  requests: (
+    database.database.prepare('SELECT COUNT(*) AS count FROM inference_requests').get() as {
+      readonly count: number;
+    }
+  ).count,
+});
 
 const d1Now = async (database: SqliteD1Database) => {
   const row = database.database
@@ -116,6 +136,55 @@ describe('Inference Worker grant issue', () => {
       database.close();
     }
   });
+
+  it('rejects a snapshot route absent from the trusted catalog', async () => {
+    const { database, control } = setup();
+    try {
+      await expect(
+        control.issue({
+          jobId: 'job-unknown-route',
+          snapshot: { routes: ['deepseek-review', 'unknown-review'] },
+          latestIssueDeadline: (await d1Now(database)) + 60_000,
+        }),
+      ).resolves.toEqual({ kind: 'invalid' });
+      expect(
+        database.database
+          .prepare('SELECT COUNT(*) AS count FROM grants WHERE job_id = ?')
+          .get('job-unknown-route'),
+      ).toEqual({ count: 0 });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('rejects empty, unknown and excess issue properties without mutation', async () => {
+    const { database, control } = setup();
+    try {
+      const before = mutationCounts(database);
+      const deadline = (await d1Now(database)) + 60_000;
+      await expect(
+        control.issue({ jobId: '', snapshot, latestIssueDeadline: deadline } as never),
+      ).resolves.toEqual({ kind: 'invalid' });
+      await expect(
+        control.issue({
+          jobId: 'job-empty-routes',
+          snapshot: { routes: [] },
+          latestIssueDeadline: deadline,
+        } as never),
+      ).resolves.toEqual({ kind: 'invalid' });
+      await expect(
+        control.issue({
+          jobId: 'job-excess',
+          snapshot,
+          latestIssueDeadline: deadline,
+          extra: true,
+        } as never),
+      ).resolves.toEqual({ kind: 'invalid' });
+      expect(mutationCounts(database)).toEqual(before);
+    } finally {
+      database.close();
+    }
+  });
 });
 
 describe('Inference Worker grant revoke', () => {
@@ -164,6 +233,20 @@ describe('Inference Worker grant revoke', () => {
           latestIssueDeadline: (await d1Now(database)) + 60_000,
         }),
       ).resolves.toEqual({ kind: 'duplicate' });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('rejects empty and excess revoke properties without mutation', async () => {
+    const { database, control } = setup();
+    try {
+      const before = mutationCounts(database);
+      await expect(control.revoke({ jobId: '' } as never)).resolves.toEqual({ kind: 'invalid' });
+      await expect(
+        control.revoke({ jobId: 'job-excess-revoke', extra: true } as never),
+      ).resolves.toEqual({ kind: 'invalid' });
+      expect(mutationCounts(database)).toEqual(before);
     } finally {
       database.close();
     }
