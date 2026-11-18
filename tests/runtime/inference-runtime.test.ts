@@ -2,6 +2,12 @@
 
 import { describe, expect, it } from 'vitest';
 import { env } from 'cloudflare:test';
+import { createApplication } from '../../apps/dashboard/src/lib/server/application';
+import {
+  createD1ReviewStateStore,
+  type D1DatabaseLike as ReviewDb,
+} from '../../apps/core/src/review-state-store';
+import type { RelayCatalogSnapshot } from '../../apps/inference-worker/src/catalog';
 import { REVIEW_ATTEMPT_BUDGET_MS } from '../../packages/contracts/src';
 import type {
   D1DatabaseLike,
@@ -15,6 +21,8 @@ import type { ModelUsageSummary } from '../../packages/contracts/src';
 const GRANT_TTL_MS = 4 * REVIEW_ATTEMPT_BUDGET_MS;
 
 interface InferenceBinding {
+  catalog(): Promise<RelayCatalogSnapshot>;
+  refreshCatalog(at: number): Promise<void>;
   fetch(request: Request): Promise<Response>;
   issue(input: IssueGrantInput): Promise<IssueGrantResult>;
   revoke(input: RevokeGrantInput): Promise<RevokeGrantResult>;
@@ -34,6 +42,7 @@ interface UpstreamState {
 }
 
 interface RuntimeEnv {
+  readonly REVIEW_DB: ReviewDb;
   readonly RELAY_DB: D1DatabaseLike;
   readonly INFERENCE: InferenceBinding;
   readonly UPSTREAM: {
@@ -605,5 +614,91 @@ describe('Inference Worker usage retention', () => {
       .run();
     await expect(runtime.INFERENCE.scheduled()).resolves.toBeUndefined();
     await expect(runtime.INFERENCE.usage({ jobId: 'runtime-scheduled' })).resolves.toBeNull();
+  });
+});
+
+it('discovers provider models through the private relay binding on a scheduled refresh', async () => {
+  await runtime.INFERENCE.refreshCatalog(Date.parse('2026-11-18T00:00:00Z'));
+  expect(await runtime.INFERENCE.catalog()).toMatchObject({
+    routes: expect.arrayContaining(['sample/tool-model']),
+    rejected: 0,
+    lastRefreshError: null,
+  });
+});
+
+it('serves a claimed model through application control, managed inference, and durable usage across workers', async () => {
+  const environment = {
+    REVIEW_DB: runtime.REVIEW_DB,
+    INFERENCE_RELAY: runtime.INFERENCE,
+    RELAY_DEFAULT_MODEL_ROUTE: 'sample/tool-model',
+    GITHUB_APP_ID: '1',
+    GITHUB_APP_PRIVATE_KEY: 'unused',
+    ALLOWED_INSTALLATION_IDS: '[7]',
+    WEBHOOK_SECRET: 'unused',
+    RUNNER_CALLBACK_TOKEN: 'test-runner',
+  };
+  const app = () =>
+    createApplication(environment, {
+      github: { getRepositoryUrl: async () => 'https://github.com/example/reviewed.git' },
+      getReadInstallationToken: async () => ({
+        token: 'read-only-test',
+        expiresAt: '2099-01-01T00:00:00Z',
+      }),
+    });
+  const post = (path: string, payload: unknown) =>
+    app().fetch(
+      new Request('https://app.example' + path, {
+        method: 'POST',
+        headers: { authorization: 'Bearer test-runner', 'content-type': 'application/json' },
+        body: JSON.stringify(payload),
+      }),
+    );
+  await control('success');
+  await runtime.INFERENCE.refreshCatalog(Date.now());
+  await createD1ReviewStateStore(runtime.REVIEW_DB, 'sample/tool-model').claimReview({
+    deliveryId: 'integrated-grant',
+    occurredAt: '2026-11-18T00:00:00Z',
+    job: {
+      repositoryId: 1,
+      installationId: 7,
+      pullRequestNumber: 1,
+      baseSha: 'a'.repeat(40),
+      headSha: 'b'.repeat(40),
+      trigger: 'automatic',
+    },
+  });
+  const claimed = await post('/runner-claim', {});
+  expect(claimed.status).toBe(200);
+  const claim = (await claimed.json()) as {
+    id: string;
+    runId: string;
+    attempt: number;
+    reviewConfiguration: { selection: { reviewers: string[] } };
+  };
+  const routes = claim.reviewConfiguration.selection.reviewers;
+  const issued = await post('/runner-llm/issue', {
+    jobId: claim.id,
+    runId: claim.runId,
+    attempt: claim.attempt,
+    routes,
+  });
+  expect(issued.status).toBe(201);
+  const { token } = (await issued.json()) as { token: string };
+  const inference = () =>
+    runtime.INFERENCE.fetch(
+      new Request('https://inference.example/v1/chat/completions', {
+        method: 'POST',
+        headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' },
+        body: JSON.stringify({ model: routes[0], messages: [{ role: 'user', content: 'test' }] }),
+      }),
+    );
+  const result = await inference();
+  expect(result.status).toBe(200);
+  expect(await result.text()).toContain('[DONE]');
+  expect((await post('/runner-llm/revoke', { jobId: claim.id })).status).toBe(204);
+  expect((await inference()).status).toBe(401);
+  const usage = await post('/runner-llm/usage', { jobId: claim.id });
+  expect(await usage.json()).toMatchObject({
+    models: [{ route: 'sample/tool-model', requests: 1, incompleteRequests: 0 }],
   });
 });

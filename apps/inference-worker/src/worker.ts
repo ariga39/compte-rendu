@@ -1,3 +1,5 @@
+import { createRelayCatalog } from './catalog';
+import { RelayCatalogSources } from './catalog-config';
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import { Effect, Option, Schema } from 'effect';
 import { readBoundedRequestBody, type ModelUsageSummary } from '@compte-rendu/contracts';
@@ -29,6 +31,7 @@ const GatewayIdentity = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const UsageInput = Schema.Struct({ jobId: Schema.NonEmptyString });
 
 export interface InferenceWorkerEnv {
+  readonly RELAY_CATALOG_SOURCES: string;
   readonly RELAY_DB: D1DatabaseLike;
   readonly AI_GATEWAY_ACCOUNT_ID?: string;
   readonly AI_GATEWAY_ID?: string;
@@ -119,6 +122,21 @@ export class InferenceWorker extends WorkerEntrypoint<InferenceWorkerEnv> {
       return new Response(null, { status: 405, headers: { 'cache-control': 'no-store' } });
     }
     return this.inference(request);
+  }
+
+  #modelCatalog() {
+    const sources = Schema.decodeUnknownSync(Schema.fromJsonString(RelayCatalogSources), {
+      onExcessProperty: 'error',
+    })(this.env.RELAY_CATALOG_SOURCES);
+    return createRelayCatalog(this.env.RELAY_DB, sources, gatewayConfig(this.env));
+  }
+
+  catalog() {
+    return this.#modelCatalog().get();
+  }
+
+  refreshCatalog(scheduledTime: number) {
+    return this.#modelCatalog().refresh(scheduledTime);
   }
 
   issue(input: IssueGrantInput): Promise<IssueGrantResult> {

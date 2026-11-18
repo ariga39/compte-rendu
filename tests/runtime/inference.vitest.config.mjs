@@ -33,6 +33,10 @@ await writeFile(
   `export default ${JSON.stringify(migrations)};\n`,
 );
 
+await writeFile(
+  resolve(outputDirectory, 'core-migrations.mjs'),
+  `export default ${JSON.stringify(await readD1Migrations(resolve('apps/core/migrations')))};\n`,
+);
 const workerPoolOptions = {
   wrangler: {
     configPath: 'tests/runtime/inference.wrangler.jsonc',
@@ -44,12 +48,20 @@ const workerPoolOptions = {
         scriptPath: resolve(outputDirectory, 'inference-worker.mjs'),
         modules: true,
         compatibilityDate: '2026-08-22',
-        d1Databases: { RELAY_DB: 'compte-rendu-inference-test' },
         bindings: {
+          RELAY_CATALOG_SOURCES: JSON.stringify([
+            {
+              url: 'https://catalog.test/models',
+              prefix: 'sample/',
+              providerSlug: 'custom-test',
+              credentialAlias: 'default',
+            },
+          ]),
           AI_GATEWAY_ACCOUNT_ID: 'test-account',
           AI_GATEWAY_ID: 'test-gateway',
           AI_GATEWAY_RUN_TOKEN: 'test-run-token',
         },
+        d1Databases: { RELAY_DB: 'compte-rendu-inference-test' },
         outboundService: 'compte-rendu-controlled-upstream',
       },
       {

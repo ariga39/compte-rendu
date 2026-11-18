@@ -1,13 +1,8 @@
 import { Option, Schema } from 'effect';
 import { SafeModel } from '@compte-rendu/contracts';
+import { CredentialAlias, ProviderSlug, RouteId } from './route-schema.ts';
 
-export const RouteId = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9._:/-]{1,128}$/));
-export type RouteId = typeof RouteId.Type;
-
-const ProviderSlug = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/));
-const CredentialAlias = Schema.String.check(
-  Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/),
-);
+export { RouteId } from './route-schema.ts';
 
 export const CatalogRoute = Schema.Struct({
   route_id: RouteId,

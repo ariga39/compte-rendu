@@ -3,6 +3,8 @@
 import { applyD1Migrations, env } from 'cloudflare:test';
 import migrations from './.generated/inference/migrations.mjs';
 
+import coreMigrations from './.generated/inference/core-migrations.mjs';
+await applyD1Migrations(env.REVIEW_DB, coreMigrations);
 await applyD1Migrations(env.RELAY_DB, migrations);
 
 const route = env.RELAY_DB.prepare(

@@ -1,6 +1,8 @@
+import { createCloudflareOperationalLog } from '../../../../core/src/operational-log';
 import { handleRunnerLlmControl } from '../../../../core/src/runner-llm-control';
 import {
   createCoreWorker,
+  runScheduledMetadataRefresh,
   type CoreWorkerDependencies,
   type CoreWorkerEnv,
 } from '../../../../core/src/core-worker';
@@ -17,6 +19,22 @@ export function createApplication(env: ApplicationEnv, dependencies: CoreWorkerD
       const path = new URL(request.url).pathname;
       if (path.startsWith('/runner-llm/'))
         return handleRunnerLlmControl(request, env, env.RUNNER_CALLBACK_TOKEN);
+      if (path === '/api/review-configuration/catalog') {
+        if (request.method !== 'GET') return new Response(null, { status: 405 });
+        if (
+          !env.REVIEW_CONFIGURATION_TOKEN?.trim() ||
+          request.headers.get('authorization') !== 'Bearer ' + env.REVIEW_CONFIGURATION_TOKEN
+        )
+          return new Response(null, { status: 401 });
+        if (!env.INFERENCE_RELAY) return new Response(null, { status: 503 });
+        try {
+          return Response.json(await env.INFERENCE_RELAY.catalog(), {
+            headers: { 'cache-control': 'no-store' },
+          });
+        } catch {
+          return new Response(null, { status: 503 });
+        }
+      }
       const accepted =
         path.startsWith('/api/') ||
         [
@@ -39,4 +57,22 @@ export function createApplication(env: ApplicationEnv, dependencies: CoreWorkerD
       }).fetch(request);
     },
   };
+}
+
+export async function runApplicationScheduled(
+  controller: { scheduledTime: number },
+  env: CoreWorkerEnv,
+): Promise<void> {
+  const [metadata, relay] = await Promise.allSettled([
+    runScheduledMetadataRefresh(env),
+    env.INFERENCE_RELAY?.refreshCatalog(controller.scheduledTime),
+  ]);
+  if (relay.status === 'rejected') {
+    try {
+      await createCloudflareOperationalLog().record({ phase: 'relay', outcome: 'refresh_failed' });
+    } catch {
+      // Operational logging is best-effort.
+    }
+  }
+  if (metadata.status === 'rejected') throw metadata.reason;
 }

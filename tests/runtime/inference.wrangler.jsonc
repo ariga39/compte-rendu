@@ -2,7 +2,13 @@
   "name": "compte-rendu-inference-rpc-test",
   "main": "inference-caller-entry.mjs",
   "compatibility_date": "2026-08-22",
+  "compatibility_flags": ["nodejs_compat"],
   "d1_databases": [
+    {
+      "binding": "REVIEW_DB",
+      "database_name": "relay-core-test",
+      "database_id": "relay-core-test",
+    },
     {
       "binding": "RELAY_DB",
       "database_name": "compte-rendu-inference-test",
