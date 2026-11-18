@@ -45,6 +45,18 @@ const workerPoolOptions = {
         modules: true,
         compatibilityDate: '2026-08-22',
         d1Databases: { RELAY_DB: 'compte-rendu-inference-test' },
+        bindings: {
+          AI_GATEWAY_ACCOUNT_ID: 'test-account',
+          AI_GATEWAY_ID: 'test-gateway',
+          AI_GATEWAY_RUN_TOKEN: 'test-run-token',
+        },
+        outboundService: 'compte-rendu-controlled-upstream',
+      },
+      {
+        name: 'compte-rendu-controlled-upstream',
+        scriptPath: resolve('tests/runtime/inference-upstream-entry.mjs'),
+        modules: true,
+        compatibilityDate: '2026-08-22',
       },
     ],
   },
