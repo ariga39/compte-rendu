@@ -1,4 +1,3 @@
-import { publicTask } from './sample-task.ts';
 import type { PublicHistoryPage, PublicTaskDetail, PublicTaskState } from '@compte-rendu/contracts';
 import { expect, test, type ApiHandler, type ApiPayload } from './fixtures';
 
@@ -15,6 +14,40 @@ const detailData = (single: PublicTaskState): PublicTaskDetail => ({
   task: single,
   milestones: [],
   processingMilestones: [],
+});
+
+const publicTask = (runId: string, overrides: Partial<PublicTaskState> = {}): PublicTaskState => ({
+  runId,
+  status: 'completed',
+  dispatch: null,
+  stage: null,
+  processing: null,
+  decision: null,
+  identity: {
+    kind: 'public',
+    repositoryFullName: 'acme/widgets',
+    pullRequestNumber: 7,
+    pullRequestUrl: 'https://github.com/acme/widgets/pull/7',
+    expiresAt: '2999-01-01T00:00:00.000Z',
+    baseRef: 'main',
+    headRef: 'feature/decision',
+    baseSha: '1'.repeat(40),
+    headSha: '2'.repeat(40),
+  },
+  receivedAt: NOW,
+  claimedAt: null,
+  terminalAt: null,
+  executionStartedAt: null,
+  submissionCompletedAt: null,
+  cleanupCompletedAt: null,
+  resultReceivedAt: null,
+  publicationStartedAt: null,
+  lastProgressAt: null,
+  queueWaitMs: null,
+  totalDurationMs: null,
+  cleanup: 'destroyed',
+  failure: null,
+  ...overrides,
 });
 
 const listAndDetails =
