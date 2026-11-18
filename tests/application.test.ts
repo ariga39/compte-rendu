@@ -149,3 +149,28 @@ it('allows authenticated recovery and usage reads after a claim has cleared', as
     database.close();
   }
 });
+
+it.each(['', 'broken route'])(
+  'keeps the public dashboard available with an unusable relay default (%j)',
+  async (defaultRoute) => {
+    const database = new SqliteD1Database();
+    try {
+      const app = createApplication({
+        REVIEW_DB: database,
+        GITHUB_APP_ID: '1',
+        GITHUB_APP_PRIVATE_KEY: 'unused',
+        WEBHOOK_SECRET: 'unused',
+        ALLOWED_INSTALLATION_IDS: '[7]',
+        RELAY_DEFAULT_MODEL_ROUTE: defaultRoute,
+        INFERENCE_RELAY: {
+          issue: async () => ({ kind: 'invalid' as const }),
+          revoke: async () => ({ kind: 'revoked' as const }),
+          usage: async () => null,
+        },
+      });
+      expect((await app.fetch(new Request('https://reviews.test/api/dashboard'))).status).toBe(200);
+    } finally {
+      database.close();
+    }
+  },
+);

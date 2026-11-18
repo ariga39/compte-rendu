@@ -228,7 +228,10 @@ export const createCoreWorker = (
     });
   const stateStore =
     dependencies.stateStore ??
-    createD1ReviewStateStore(env.REVIEW_DB, env.RELAY_DEFAULT_MODEL_ROUTE);
+    createD1ReviewStateStore(
+      env.REVIEW_DB,
+      env.INFERENCE_RELAY ? env.RELAY_DEFAULT_MODEL_ROUTE : undefined,
+    );
   const runner =
     env.RUNNER === undefined || env.RUNNER_AUTH_TOKEN === undefined
       ? undefined
@@ -1052,7 +1055,10 @@ export const runScheduledMetadataRefresh = async (
     createGitHubPublicationAdapter({ token: tokenProvider.getInstallationToken });
   const stateStore =
     dependencies.stateStore ??
-    createD1ReviewStateStore(env.REVIEW_DB, env.RELAY_DEFAULT_MODEL_ROUTE);
+    createD1ReviewStateStore(
+      env.REVIEW_DB,
+      env.INFERENCE_RELAY ? env.RELAY_DEFAULT_MODEL_ROUTE : undefined,
+    );
   const log = dependencies.log ?? createCloudflareOperationalLog();
   const summary = await refreshRepositoryMetadata({ stateStore, github });
   try {
