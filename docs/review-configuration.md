@@ -69,8 +69,12 @@ fields are rejected. Requests are limited to 16 KiB, matching the LLM grant-cont
 payload budget rather than an inference or review-output limit. Responses are
 `Cache-Control: no-store`.
 
-Use `selection: null` with the current revision to use the Runner-configured
-default model for newly admitted jobs. It uses the same review prompt and final
+Use `selection: null` with the current revision to select the installation default.
+On installations using the local LLM service, the Runner supplies this model.
+For the managed relay, set the application Worker's `RELAY_DEFAULT_MODEL_ROUTE`
+to a catalog route. Core freezes that route as a single-reviewer selection when
+it inserts each new run. The operator API continues to show the configured
+selection as null. It uses the same review prompt and final
 output contract as an explicit one-model or multi-model selection. This does not modify already admitted jobs.
 Saving a syntactically valid route ID does not prove upstream availability; the
 execution adapter must validate support when preparing the job's grant.

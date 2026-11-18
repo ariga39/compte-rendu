@@ -161,3 +161,39 @@ it('persists native provider/model catalog IDs without renaming the selected mod
     database.close();
   }
 });
+
+it('claims the relay default frozen at admission after the configured default changes', async () => {
+  const database = new SqliteD1Database();
+  try {
+    const store = createD1ReviewStateStore(database, 'provider/original');
+    await store.claimReview({
+      deliveryId: 'default-at-admission',
+      occurredAt: '2026-11-18T00:00:00Z',
+      job: {
+        repositoryId: 11,
+        installationId: 7,
+        pullRequestNumber: 42,
+        baseSha: '1'.repeat(40),
+        headSha: '2'.repeat(40),
+        trigger: 'automatic',
+      },
+    });
+    const restarted = createD1ReviewStateStore(database, 'provider/replacement');
+    const claimed = await restarted.claimNextJob?.({
+      jobId: 'relay-job',
+      attempt: 1,
+      occurredAt: '2026-11-18T00:01:00Z',
+    });
+    expect(claimed).toMatchObject({
+      kind: 'claimed',
+      job: {
+        reviewConfiguration: {
+          revision: 0,
+          selection: { reviewers: ['provider/original'], synthesis: 'provider/original' },
+        },
+      },
+    });
+  } finally {
+    database.close();
+  }
+});

@@ -1,5 +1,5 @@
 import type { ReviewDecision } from '@compte-rendu/contracts';
-import { ReviewConfiguration } from '@compte-rendu/contracts';
+import { ReviewConfiguration, ReviewModelSelection } from '@compte-rendu/contracts';
 import { Schema } from 'effect';
 import type {
   ReviewDeliveryRecord,
@@ -520,7 +520,26 @@ const recordLifecycleSnapshot = async (
   return false;
 };
 
-export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStateStore => ({
+export const createD1ReviewStateStore = (
+  database: D1DatabaseLike,
+  defaultRoute?: string,
+): D1ReviewStateStore => {
+  const defaultSelection =
+    defaultRoute === undefined
+      ? null
+      : JSON.stringify(
+          Schema.decodeUnknownSync(ReviewModelSelection)({
+            reviewers: [defaultRoute],
+            synthesis: defaultRoute,
+          }),
+        );
+  return createStore(database, defaultSelection);
+};
+
+const createStore = (
+  database: D1DatabaseLike,
+  defaultSelection: string | null,
+): D1ReviewStateStore => ({
   listPriorReviewRunIds: async (runId) => {
     const current = await database
       .prepare('SELECT run_id FROM review_runs WHERE run_id = ?')
@@ -626,8 +645,8 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
              status, created_at, updated_at, comment_id, check_setup_status,
              repository_visibility_snapshot, base_ref, head_ref, review_configuration)
            SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, 'pending', ?, ?, ?,
-             (SELECT json_object('revision', revision, 'selection', json(selection))
-              FROM review_configuration WHERE id = 1 AND selection IS NOT NULL)
+             (SELECT json_object('revision', revision, 'selection', json(COALESCE(selection, ?)))
+              FROM review_configuration WHERE id = 1 AND (selection IS NOT NULL OR ? IS NOT NULL))
            WHERE EXISTS (
              SELECT 1 FROM deliveries
              WHERE delivery_id = ? AND status = 'claiming'
@@ -669,6 +688,8 @@ export const createD1ReviewStateStore = (database: D1DatabaseLike): D1ReviewStat
           job.repositoryVisibility ?? null,
           job.baseRef ?? null,
           job.headRef ?? null,
+          defaultSelection,
+          defaultSelection,
           deliveryId,
           job.repositoryId,
           job.pullRequestNumber,

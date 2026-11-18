@@ -1,3 +1,4 @@
+import { handleRunnerLlmControl } from '../../../../core/src/runner-llm-control';
 import {
   createCoreWorker,
   type CoreWorkerDependencies,
@@ -14,6 +15,8 @@ export function createApplication(env: ApplicationEnv, dependencies: CoreWorkerD
       context?: { waitUntil(task: Promise<unknown>): void },
     ): Promise<Response> {
       const path = new URL(request.url).pathname;
+      if (path.startsWith('/runner-llm/'))
+        return handleRunnerLlmControl(request, env, env.RUNNER_CALLBACK_TOKEN);
       const accepted =
         path.startsWith('/api/') ||
         [
