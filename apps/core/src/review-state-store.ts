@@ -1,6 +1,6 @@
 import type { ReviewDecision } from '@compte-rendu/contracts';
 import { ReviewConfiguration, ReviewModelSelection } from '@compte-rendu/contracts';
-import { Schema } from 'effect';
+import { Option, Schema } from 'effect';
 import type {
   ReviewDeliveryRecord,
   ReviewJob,
@@ -524,16 +524,13 @@ export const createD1ReviewStateStore = (
   database: D1DatabaseLike,
   defaultRoute?: string,
 ): D1ReviewStateStore => {
-  const defaultSelection =
-    defaultRoute === undefined
-      ? null
-      : JSON.stringify(
-          Schema.decodeUnknownSync(ReviewModelSelection)({
-            reviewers: [defaultRoute],
-            synthesis: defaultRoute,
-          }),
-        );
-  return createStore(database, defaultSelection);
+  const route = defaultRoute?.trim();
+  if (!route) return createStore(database, null);
+  const selection = Schema.decodeUnknownOption(ReviewModelSelection)({
+    reviewers: [route],
+    synthesis: route,
+  });
+  return createStore(database, Option.isSome(selection) ? JSON.stringify(selection.value) : null);
 };
 
 const createStore = (
