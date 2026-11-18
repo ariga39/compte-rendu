@@ -16,5 +16,9 @@
       "service": "compte-rendu-inference-worker",
       "entrypoint": "InferenceWorker",
     },
+    {
+      "binding": "UPSTREAM",
+      "service": "compte-rendu-controlled-upstream",
+    },
   ],
 }

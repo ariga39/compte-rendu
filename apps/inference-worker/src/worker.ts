@@ -1,7 +1,6 @@
-import { Option, Schema } from 'effect';
-import type { ModelUsageSummary } from '@compte-rendu/contracts';
-import { readUsage, sweep } from './ledger.ts';
 import { WorkerEntrypoint } from 'cloudflare:workers';
+import { Effect, Option, Schema } from 'effect';
+import { readBoundedRequestBody, type ModelUsageSummary } from '@compte-rendu/contracts';
 import {
   createGrantControl,
   type D1DatabaseLike,
@@ -9,17 +8,117 @@ import {
   type IssueGrantResult,
   type RevokeGrantInput,
   type RevokeGrantResult,
-} from './grants';
+} from './grants.ts';
+import {
+  admitRequest,
+  authenticateGrant,
+  readUsage,
+  sweep,
+  type AuthenticatedGrant,
+} from './ledger.ts';
+import {
+  isChatCompletionPath,
+  relayInference,
+  validateChatBody,
+  type GatewayConfig,
+} from './relay.ts';
+import type { FrozenRoute } from './routes.ts';
 
+const INFERENCE_MAX_BYTES = 16 * 1024 * 1024;
+const GatewayIdentity = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const UsageInput = Schema.Struct({ jobId: Schema.NonEmptyString });
 
 export interface InferenceWorkerEnv {
   readonly RELAY_DB: D1DatabaseLike;
+  readonly AI_GATEWAY_ACCOUNT_ID?: string;
+  readonly AI_GATEWAY_ID?: string;
+  readonly AI_GATEWAY_RUN_TOKEN?: string;
 }
 
+const json = (body: unknown, status: number): Response =>
+  Response.json(body, {
+    status,
+    headers: { 'content-type': 'application/json', 'cache-control': 'no-store' },
+  });
+
+const error = (status: number, message: string): Response => json({ error: { message } }, status);
+
+const gatewayConfig = (env: InferenceWorkerEnv): GatewayConfig | null => {
+  const accountId = env.AI_GATEWAY_ACCOUNT_ID;
+  const gatewayId = env.AI_GATEWAY_ID;
+  const runToken = env.AI_GATEWAY_RUN_TOKEN;
+  if (
+    accountId === undefined ||
+    gatewayId === undefined ||
+    runToken === undefined ||
+    !GatewayIdentity.test(accountId) ||
+    !GatewayIdentity.test(gatewayId) ||
+    runToken.trim().length === 0
+  )
+    return null;
+  return { accountId, gatewayId, runToken: runToken.trim() };
+};
+
+const selectedRoute = (
+  grant: AuthenticatedGrant,
+  body: Record<string, unknown>,
+): FrozenRoute | null => {
+  const model = body.model;
+  if (typeof model !== 'string') return null;
+  return grant.routes.find((route) => route.routeId === model) ?? null;
+};
+
 export class InferenceWorker extends WorkerEntrypoint<InferenceWorkerEnv> {
-  fetch(): Response {
-    return new Response(null, { status: 404, headers: { 'cache-control': 'no-store' } });
+  private inference(request: Request): Promise<Response> {
+    return this.handleInference(request);
+  }
+
+  private async handleInference(request: Request): Promise<Response> {
+    const grant = await authenticateGrant(this.env.RELAY_DB, request.headers.get('authorization'));
+    if (grant === null) return error(401, 'unauthorized');
+    const gateway = gatewayConfig(this.env);
+    if (gateway === null) return error(503, 'service unavailable');
+
+    const bounded = await readBoundedRequestBody(request, INFERENCE_MAX_BYTES);
+    if (bounded.kind === 'too-large') return error(413, 'request too large');
+    let raw: unknown;
+    try {
+      raw = JSON.parse(bounded.text) as unknown;
+    } catch {
+      return error(400, 'invalid request');
+    }
+    const body = validateChatBody(raw);
+    if (body === null) return error(400, 'invalid request');
+    const route = selectedRoute(grant, body);
+    if (route === null) return error(403, 'route forbidden');
+
+    const requestId = crypto.randomUUID();
+    const admitted = await admitRequest(this.env.RELAY_DB, requestId, grant, route);
+    if (!admitted) return error(401, 'unauthorized');
+
+    return Effect.runPromise(
+      relayInference({
+        database: this.env.RELAY_DB,
+        requestId,
+        gateway,
+        grant,
+        route,
+        body,
+        request,
+        waitUntil: (task) => this.ctx.waitUntil(task),
+      }),
+    );
+  }
+
+  fetch(request: Request): Response | Promise<Response> {
+    const url = new URL(request.url);
+    if (!isChatCompletionPath(url.pathname)) {
+      return new Response(null, { status: 404, headers: { 'cache-control': 'no-store' } });
+    }
+    if (request.method !== 'POST') {
+      return new Response(null, { status: 405, headers: { 'cache-control': 'no-store' } });
+    }
+    return this.inference(request);
   }
 
   issue(input: IssueGrantInput): Promise<IssueGrantResult> {
