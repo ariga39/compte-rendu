@@ -1,12 +1,6 @@
 import { Effect, Option, Schema } from 'effect';
 import { REVIEW_ATTEMPT_BUDGET_MS } from '@compte-rendu/contracts';
-import {
-  CatalogRoute,
-  FrozenRouteMapping,
-  RouteId,
-  freezeRoute,
-  type FrozenRoute,
-} from './routes.ts';
+import { FrozenRouteMapping, RouteId, type FrozenRoute } from './routes.ts';
 
 export const GRANT_TTL_MS = 4 * REVIEW_ATTEMPT_BUDGET_MS;
 
@@ -90,21 +84,19 @@ export const createGrantControl = (database: D1DatabaseLike): InferenceGrantCont
     const rows = yield* Effect.promise(() =>
       database
         .prepare(
-          `SELECT route_id, upstream_model, provider_slug, credential_alias
+          `SELECT route_id AS routeId, upstream_model AS upstreamModel,
+                 provider_slug AS providerSlug, credential_alias AS credentialAlias
           FROM catalog_routes
           WHERE route_id IN (${decoded.value.snapshot.routes.map(() => '?').join(', ')})`,
         )
         .bind(...decoded.value.snapshot.routes)
-        .all<CatalogRoute>(),
+        .all<FrozenRoute>(),
     );
-    const catalog = new Map<string, FrozenRoute>();
-    for (const row of rows.results) {
-      const frozen = freezeRoute(row);
-      if (frozen !== null) catalog.set(frozen.routeId, frozen);
-    }
-    const requested = decoded.value.snapshot.routes.map((id) => catalog.get(id));
-    if (requested.some((route) => route === undefined)) return { kind: 'invalid' as const };
-    const frozen = Schema.decodeUnknownSync(FrozenRouteMapping)(requested);
+    const catalog = new Map(rows.results.map((route) => [route.routeId, route]));
+    const frozen = Schema.decodeUnknownOption(FrozenRouteMapping)(
+      decoded.value.snapshot.routes.map((id) => catalog.get(id)),
+    );
+    if (Option.isNone(frozen)) return { kind: 'invalid' as const };
 
     const token = randomToken();
     const tokenHash = yield* Effect.promise(() => sha256Hex(token));
@@ -125,7 +117,7 @@ export const createGrantControl = (database: D1DatabaseLike): InferenceGrantCont
           decoded.value.jobId,
           tokenHash,
           JSON.stringify(decoded.value.snapshot),
-          JSON.stringify(frozen),
+          JSON.stringify(frozen.value),
           GRANT_TTL_MS,
           decoded.value.latestIssueDeadline,
           decoded.value.latestIssueDeadline,

@@ -678,7 +678,6 @@ type RunnerJob = {
   grantToken?: string;
   grantTokenPath?: string;
   grantRoot?: string;
-  grantExpiresAt?: number;
   deadlineAt: number;
   executionStartedAt?: string;
   submissionCompletedAt?: string;
@@ -2505,7 +2504,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
           return;
         }
         job.grantToken = grant.token;
-        job.grantExpiresAt = grant.expiresAt;
         const grantRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-llm-grant-'));
         job.grantRoot = grantRoot;
         const tokenPath = join(grantRoot, 'job-token');

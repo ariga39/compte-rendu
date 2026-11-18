@@ -83,15 +83,14 @@ export function isTaskActive(task: TaskState): boolean {
   );
 }
 
-export function buildOverview(results: ApiResult[], timing: Timing): OverviewModel {
-  const overview = decodeOverview(results[0]?.data);
-  const current = overview;
+export function buildOverview(result: ApiResult, timing: Timing): OverviewModel {
+  const overview = decodeOverview(result.data);
   return {
     kind: 'overview',
     overview,
     current: {
-      tasks: decorateTasks(current.tasks, current.generatedAt, timing),
-      nextCursor: current.nextCursor,
+      tasks: decorateTasks(overview.tasks, overview.generatedAt, timing),
+      nextCursor: overview.nextCursor,
     },
   };
 }
@@ -100,8 +99,8 @@ export function overviewActive(model: OverviewModel): boolean {
   return model.current.tasks.some(isTaskActive);
 }
 
-export function buildHistory(results: ApiResult[], timing: Timing): HistoryModel {
-  const page = decodeHistoryPage(results[0]?.data);
+export function buildHistory(result: ApiResult, timing: Timing): HistoryModel {
+  const page = decodeHistoryPage(result.data);
   return {
     kind: 'history',
     page: {
@@ -116,8 +115,8 @@ export function historyActive(model: HistoryModel): boolean {
   return model.page.tasks.some(isTaskActive);
 }
 
-export function buildDetail(results: ApiResult[], timing: Timing): DetailModel {
-  const detail = decodeTaskDetail(results[0]?.data);
+export function buildDetail(result: ApiResult, timing: Timing): DetailModel {
+  const detail = decodeTaskDetail(result.data);
   return {
     kind: 'detail',
     detail,

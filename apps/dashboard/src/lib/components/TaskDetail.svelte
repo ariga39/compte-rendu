@@ -69,8 +69,8 @@
   const dash = createDashboard<DetailModel>({
     dehydrated: () => dehydrated,
     key: () => `/jobs/${runId}`,
-    urls: () => [`/api/jobs/${encodedRunId}`],
-    build: (results, timing) => buildDetail(results, timing),
+    url: () => `/api/jobs/${encodedRunId}`,
+    build: buildDetail,
     isActive: (model) => detailActive(model),
     detail: true,
   });

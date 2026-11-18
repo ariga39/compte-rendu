@@ -1,4 +1,8 @@
-import { ModelUsageSummary, RUNNER_LLM_CONTROL_TIMEOUT_MS } from '@compte-rendu/contracts';
+import {
+  readBoundedBody,
+  ModelUsageSummary,
+  RUNNER_LLM_CONTROL_TIMEOUT_MS,
+} from '@compte-rendu/contracts';
 import { request } from 'node:http';
 import { Effect, Schema } from 'effect';
 
@@ -33,34 +37,6 @@ export interface LlmServiceClient {
   readonly usage: (jobId: string) => Promise<ModelUsageSummary>;
 }
 
-const readBoundedBody = async (response: Response, maxBytes: number): Promise<string> => {
-  if (response.body === null) return '';
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  try {
-    for (;;) {
-      const next = await reader.read();
-      if (next.done) break;
-      size += next.value.byteLength;
-      if (size > maxBytes) {
-        await reader.cancel().catch(() => undefined);
-        throw new Error('control response too large');
-      }
-      chunks.push(next.value);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  const body = new Uint8Array(size);
-  let offset = 0;
-  for (const chunk of chunks) {
-    body.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return new TextDecoder().decode(body);
-};
-
 const relayPost = (options: RelayLlmServiceClientOptions) =>
   Effect.fn('RunnerLlmRelayControl.post')(function* (
     path: string,
@@ -88,7 +64,9 @@ const relayPost = (options: RelayLlmServiceClientOptions) =>
             await response.body?.cancel().catch(() => undefined);
             throw new Error('control request rejected');
           }
-          return await readBoundedBody(response, maxBytes);
+          const body = await readBoundedBody(response.body, maxBytes);
+          if (body.kind === 'too-large') throw new Error('control response too large');
+          return body.text;
         } finally {
           clearTimeout(timeout);
         }

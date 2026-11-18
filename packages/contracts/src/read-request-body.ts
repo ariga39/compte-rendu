@@ -9,8 +9,15 @@ export const readBoundedRequestBody = async (
     await request.body?.cancel().catch(() => undefined);
     return { kind: 'too-large' };
   }
-  if (!request.body) return { kind: 'ok', text: '' };
-  const reader = request.body.getReader();
+  return readBoundedBody(request.body, limit);
+};
+
+export const readBoundedBody = async (
+  body: ReadableStream<Uint8Array> | null,
+  limit: number,
+): Promise<BodyResult> => {
+  if (!body) return { kind: 'ok', text: '' };
+  const reader = body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
   try {
