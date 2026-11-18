@@ -2,6 +2,8 @@ export { readBoundedRequestBody } from './read-request-body.ts';
 import { Schema } from 'effect';
 import { ModelUsageSummary } from './model-usage.ts';
 export { ModelUsageSummary } from './model-usage.ts';
+export * from './stream.ts';
+export * from './usage.ts';
 
 export const DEFAULT_REVIEW_NAME = 'Compte-rendu review';
 export const PublicDashboardConfig = Schema.Struct({ name: Schema.String });

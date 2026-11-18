@@ -2,190 +2,17 @@ import { randomUUID } from 'node:crypto';
 import { Effect, Option, Schema } from 'effect';
 import { EventSourceParserStream } from 'eventsource-parser/stream';
 import type { UpstreamUsage } from './usage.js';
-
-const optional = Schema.optionalKey(Schema.Unknown);
-const ChatFunction = Schema.StructWithRest(Schema.Struct({ name: Schema.String }), [
-  Schema.Record(Schema.String, Schema.Unknown),
-]);
-const ChatTool = Schema.StructWithRest(
-  Schema.Struct({ type: Schema.Literal('function'), function: ChatFunction }),
-  [Schema.Record(Schema.String, Schema.Unknown)],
-);
-const ResponsesTool = Schema.StructWithRest(
-  Schema.Struct({ type: Schema.Literals(['function', 'custom']), name: Schema.String }),
-  [Schema.Record(Schema.String, Schema.Unknown)],
-);
-const ChatRequest = Schema.Struct({
-  model: Schema.String,
-  messages: Schema.Array(Schema.Unknown),
-  stream: optional,
-  store: optional,
-  tools: Schema.optionalKey(Schema.Array(ChatTool)),
-  tool_choice: optional,
-  parallel_tool_calls: optional,
-  temperature: optional,
-  top_p: optional,
-  n: optional,
-  max_tokens: optional,
-  max_completion_tokens: optional,
-  stop: optional,
-  frequency_penalty: optional,
-  presence_penalty: optional,
-  seed: optional,
-  stream_options: optional,
-  response_format: optional,
-  reasoning_effort: optional,
-  reasoning: optional,
-  verbosity: optional,
-  logprobs: optional,
-  top_logprobs: optional,
-  logit_bias: optional,
-  user: optional,
-  service_tier: optional,
-  prompt_cache_key: optional,
-  modalities: optional,
-  audio: optional,
-  prediction: optional,
-});
-const ResponsesRequest = Schema.Struct({
-  model: Schema.String,
-  input: Schema.Union([Schema.String, Schema.Array(Schema.Unknown)]),
-  instructions: optional,
-  stream: optional,
-  store: optional,
-  tools: Schema.optionalKey(Schema.Array(ResponsesTool)),
-  tool_choice: optional,
-  parallel_tool_calls: optional,
-  temperature: optional,
-  top_p: optional,
-  max_output_tokens: optional,
-  reasoning: optional,
-  text: optional,
-  include: optional,
-  prompt_cache_key: optional,
-  service_tier: optional,
-  client_metadata: optional,
-  previous_response_id: optional,
-  conversation: optional,
-  truncation: optional,
-  user: optional,
-  background: optional,
-  safety_identifier: optional,
-  max_tool_calls: optional,
-});
-
-const ChatChoice = Schema.Struct({
-  finish_reason: Schema.optionalKey(Schema.NullOr(Schema.String)),
-});
-const TokenNumber = Schema.Int.check(
-  Schema.isGreaterThanOrEqualTo(0),
-  Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER),
-);
-const ChatUsageDetails = Schema.StructWithRest(
-  Schema.Struct({
-    cached_tokens: Schema.optionalKey(Schema.NullOr(TokenNumber)),
-    cache_write_tokens: Schema.optionalKey(Schema.NullOr(TokenNumber)),
-    cache_creation_input_tokens: Schema.optionalKey(Schema.NullOr(TokenNumber)),
-  }),
-  [Schema.Record(Schema.String, Schema.Unknown)],
-);
-const ChatCompletionDetails = Schema.StructWithRest(
-  Schema.Struct({ reasoning_tokens: Schema.optionalKey(Schema.NullOr(TokenNumber)) }),
-  [Schema.Record(Schema.String, Schema.Unknown)],
-);
-const ChatUsage = Schema.Struct({
-  prompt_tokens: Schema.optionalKey(Schema.NullOr(TokenNumber)),
-  completion_tokens: Schema.optionalKey(Schema.NullOr(TokenNumber)),
-  total_tokens: Schema.optionalKey(Schema.NullOr(TokenNumber)),
-  prompt_tokens_details: Schema.optionalKey(Schema.NullOr(ChatUsageDetails)),
-  completion_tokens_details: Schema.optionalKey(Schema.NullOr(ChatCompletionDetails)),
-});
-const ResponsesUsageDetails = Schema.StructWithRest(
-  Schema.Struct({
-    cached_tokens: Schema.optionalKey(Schema.NullOr(TokenNumber)),
-    cache_write_tokens: Schema.optionalKey(Schema.NullOr(TokenNumber)),
-    cache_creation_input_tokens: Schema.optionalKey(Schema.NullOr(TokenNumber)),
-  }),
-  [Schema.Record(Schema.String, Schema.Unknown)],
-);
-const ResponsesOutputDetails = Schema.StructWithRest(
-  Schema.Struct({ reasoning_tokens: Schema.optionalKey(Schema.NullOr(TokenNumber)) }),
-  [Schema.Record(Schema.String, Schema.Unknown)],
-);
-const ResponsesUsage = Schema.Struct({
-  input_tokens: Schema.optionalKey(Schema.NullOr(TokenNumber)),
-  output_tokens: Schema.optionalKey(Schema.NullOr(TokenNumber)),
-  total_tokens: Schema.optionalKey(Schema.NullOr(TokenNumber)),
-  input_tokens_details: Schema.optionalKey(Schema.NullOr(ResponsesUsageDetails)),
-  output_tokens_details: Schema.optionalKey(Schema.NullOr(ResponsesOutputDetails)),
-});
-const StreamFrame = Schema.Struct({
-  type: Schema.optionalKey(Schema.String),
-  model: Schema.optionalKey(Schema.Unknown),
-  choices: Schema.optionalKey(Schema.Array(ChatChoice)),
-  usage: Schema.optionalKey(Schema.Unknown),
-  error: Schema.optionalKey(Schema.Unknown),
-  response: Schema.optionalKey(
-    Schema.Struct({
-      status: Schema.optionalKey(Schema.String),
-      model: Schema.optionalKey(Schema.Unknown),
-      usage: Schema.optionalKey(Schema.Unknown),
-    }),
-  ),
-});
-const decodeFrame = Schema.decodeUnknownOption(Schema.fromJsonString(StreamFrame));
-const SafeModel = Schema.String.check(
-  Schema.isMaxLength(128),
-  Schema.isPattern(/^[A-Za-z0-9._:/-]+$/),
-);
-const modelIdentity = (value: unknown): string | null =>
-  Option.getOrUndefined(Schema.decodeUnknownOption(SafeModel)(value)) ?? null;
-
-type ObservedTokens = {
-  -readonly [K in Exclude<keyof UpstreamUsage, 'model' | 'complete'>]?: number;
-};
-
-const put = (
-  target: ObservedTokens,
-  key: Exclude<keyof UpstreamUsage, 'model' | 'complete'>,
-  value: number | null | undefined,
-): void => {
-  if (value !== null && value !== undefined) target[key] = value;
-};
-
-const responsesUsage = (value: unknown): ObservedTokens => {
-  const decoded = Option.getOrUndefined(Schema.decodeUnknownOption(ResponsesUsage)(value));
-  const observed: ObservedTokens = {};
-  if (decoded === undefined) return observed;
-  put(observed, 'inputTokens', decoded.input_tokens);
-  put(observed, 'cacheReadTokens', decoded.input_tokens_details?.cached_tokens);
-  put(
-    observed,
-    'cacheWriteTokens',
-    decoded.input_tokens_details?.cache_write_tokens ??
-      decoded.input_tokens_details?.cache_creation_input_tokens,
-  );
-  put(observed, 'outputTokens', decoded.output_tokens);
-  put(observed, 'reasoningTokens', decoded.output_tokens_details?.reasoning_tokens);
-  return observed;
-};
-
-const chatUsage = (value: unknown): ObservedTokens => {
-  const decoded = Option.getOrUndefined(Schema.decodeUnknownOption(ChatUsage)(value));
-  const observed: ObservedTokens = {};
-  if (decoded === undefined) return observed;
-  put(observed, 'inputTokens', decoded.prompt_tokens);
-  put(observed, 'cacheReadTokens', decoded.prompt_tokens_details?.cached_tokens);
-  put(
-    observed,
-    'cacheWriteTokens',
-    decoded.prompt_tokens_details?.cache_write_tokens ??
-      decoded.prompt_tokens_details?.cache_creation_input_tokens,
-  );
-  put(observed, 'outputTokens', decoded.completion_tokens);
-  put(observed, 'reasoningTokens', decoded.completion_tokens_details?.reasoning_tokens);
-  return observed;
-};
+import {
+  ChatRequest,
+  ResponsesRequest,
+  decodeStreamFrame,
+  modelIdentity,
+  streamEventIsError,
+  streamFrameIsError,
+  streamFrameModel,
+  streamFrameTerminal,
+  streamFrameUsage,
+} from '@compte-rendu/contracts';
 
 export interface LiteLlmRoute {
   readonly id: string;
@@ -415,40 +242,23 @@ const relay = (
               }
               const event = next.value;
               try {
-                const errorEvent = event.event === 'error' || event.event === 'response.failed';
+                const errorEvent = streamEventIsError(event.event);
                 if (event.data === '[DONE]' && !errorEvent) {
                   diagnostic.state.doneMarker = true;
                 } else {
-                  const decoded = decodeFrame(event.data);
+                  const decoded = decodeStreamFrame(event.data);
                   if (Option.isNone(decoded)) {
                     streamOutcome = errorEvent ? 'upstream-error-event' : 'invalid-stream';
                     throw new Error(errorEvent ? 'upstream error' : 'invalid stream');
                   }
                   const frame = decoded.value;
-                  if (route.protocol === 'chat-completions') {
-                    const model = modelIdentity(frame.model);
-                    if (deploymentModel === null && model !== null) usage = { ...usage, model };
-                    usage = { ...usage, ...chatUsage(frame.usage) };
-                    if (frame.choices?.some((choice) => choice.finish_reason != null) === true)
-                      diagnostic.state.finishMarker = true;
-                  } else {
-                    const model = modelIdentity(frame.response?.model);
-                    if (deploymentModel === null && model !== null) usage = { ...usage, model };
-                    usage = { ...usage, ...responsesUsage(frame.response?.usage) };
-                    if (
-                      frame.type === 'response.completed' ||
-                      frame.type === 'response.incomplete'
-                    ) {
-                      diagnostic.state.finishMarker = true;
-                    }
+                  const model = streamFrameModel(frame, route.protocol);
+                  if (deploymentModel === null && model !== null) usage = { ...usage, model };
+                  usage = { ...usage, ...streamFrameUsage(frame, route.protocol) };
+                  if (streamFrameTerminal(frame, route.protocol)) {
+                    diagnostic.state.finishMarker = true;
                   }
-                  if (
-                    errorEvent ||
-                    frame.error != null ||
-                    frame.type === 'error' ||
-                    frame.type === 'response.failed' ||
-                    frame.response?.status === 'failed'
-                  ) {
+                  if (errorEvent || streamFrameIsError(frame)) {
                     streamOutcome = 'upstream-error-event';
                     throw new Error('upstream error');
                   }

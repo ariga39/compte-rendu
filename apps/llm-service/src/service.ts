@@ -1,8 +1,11 @@
-import { readBoundedRequestBody as readBody } from '@compte-rendu/contracts';
 import { createHash, randomUUID } from 'node:crypto';
 import { Effect, Schema } from 'effect';
 import { REVIEW_ATTEMPT_BUDGET_MS } from '@compte-rendu/contracts';
-import { createUsageCollector, type UpstreamUsage } from './usage.js';
+import {
+  createUsageCollector,
+  readBoundedRequestBody,
+  type UpstreamUsage,
+} from '@compte-rendu/contracts';
 
 const GRANT_TTL_MS = 4 * REVIEW_ATTEMPT_BUDGET_MS;
 const CONTROL_MAX_BYTES = 16 * 1024;
@@ -124,7 +127,7 @@ export const createLlmService = (options: LlmServiceOptions): LlmService => {
   };
 
   const issue = Effect.fn('LlmService.issue')(function* (request: Request) {
-    const body = yield* Effect.tryPromise(() => readBody(request, CONTROL_MAX_BYTES));
+    const body = yield* Effect.tryPromise(() => readBoundedRequestBody(request, CONTROL_MAX_BYTES));
     if (body.kind === 'too-large') return error(413, 'request too large');
     const raw = parseJson(body.text);
     if (raw === undefined) return error(400, 'invalid request');
@@ -174,7 +177,7 @@ export const createLlmService = (options: LlmServiceOptions): LlmService => {
   });
 
   const revoke = Effect.fn('LlmService.revoke')(function* (request: Request) {
-    const body = yield* Effect.tryPromise(() => readBody(request, CONTROL_MAX_BYTES));
+    const body = yield* Effect.tryPromise(() => readBoundedRequestBody(request, CONTROL_MAX_BYTES));
     if (body.kind === 'too-large') return error(413, 'request too large');
     const raw = parseJson(body.text);
     if (raw === undefined) return error(400, 'invalid request');
@@ -206,7 +209,7 @@ export const createLlmService = (options: LlmServiceOptions): LlmService => {
   });
 
   const usage = Effect.fn('LlmService.usage')(function* (request: Request) {
-    const body = yield* Effect.tryPromise(() => readBody(request, CONTROL_MAX_BYTES));
+    const body = yield* Effect.tryPromise(() => readBoundedRequestBody(request, CONTROL_MAX_BYTES));
     if (body.kind === 'too-large') return error(413, 'request too large');
     const raw = parseJson(body.text);
     if (raw === undefined) return error(400, 'invalid request');
@@ -308,7 +311,9 @@ export const createLlmService = (options: LlmServiceOptions): LlmService => {
     if (grant === undefined) return error(401, 'unauthorized');
     if (grant.revoked || Date.now() >= grant.expiresAt) return error(401, 'unauthorized');
 
-    const body = yield* Effect.tryPromise(() => readBody(request, INFERENCE_MAX_BYTES));
+    const body = yield* Effect.tryPromise(() =>
+      readBoundedRequestBody(request, INFERENCE_MAX_BYTES),
+    );
     if (body.kind === 'too-large') return error(413, 'request too large');
     const raw = parseJson(body.text);
     if (raw === undefined) return error(400, 'invalid request');
