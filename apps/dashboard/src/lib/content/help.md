@@ -1,6 +1,6 @@
 # Help
 
-How to read this dashboard. It is read-only and reflects the latest recorded review state; nothing here starts, stops, or changes a review.
+How to read this dashboard. Anyone may read it. Authorized operators can also cancel a review that has not started publishing. Nothing here edits a review result or starts a review.
 
 ## On this page
 
@@ -9,8 +9,9 @@ How to read this dashboard. It is read-only and reflects the latest recorded rev
 - [Technical details](#technical-details)
 - [Finding and paging through history](#finding-and-paging-through-history)
 - [Review details](#review-details)
+- [Cancelling a review](#cancelling-a-review)
 - [Review decisions](#review-decisions)
-- [Published, Failed and Superseded](#published-failed-and-superseded)
+- [Published, Failed, Superseded and Cancelled](#published-failed-superseded-and-cancelled)
 - [Timestamps and older records](#timestamps-and-older-records)
 - [Updates and refresh](#updates-and-refresh)
 - [Anonymous reviews](#anonymous-reviews)
@@ -20,7 +21,8 @@ How to read this dashboard. It is read-only and reflects the latest recorded rev
 
 - **Queued**: waiting to start.
 - **In progress**: assigned to a runner and preparing, reviewing, or publishing. This is not a count of model calls and does not prove a process is currently alive.
-- **Published** and **Failed** count reviews received in the past 24 hours that ended that way. When a review from that period was cancelled, the overview shows a separate cancellation count with a link to history.
+- **Published** and **Failed** count reviews received in the past 24 hours that ended that way.
+- **Cancelled** shows a separate count when any review received in the past 24 hours was cancelled. Follow its link to see cancelled reviews in history.
 
 ## Current reviews
 
@@ -59,6 +61,14 @@ Reviews are listed newest first, and filters stay in the page address so a filte
 
 Stages that never ran are skipped. Missing history is shown as not recorded and is not filled in later.
 
+## Cancelling a review
+
+Authorized operators see **Cancel review** on a queued or in-progress review until publication starts. The confirmation names the review and explains that it will publish no review. Choosing **Keep review** leaves it running.
+
+After a cancellation is accepted, the review shows **Cancelling** while execution stops and resource cleanup is confirmed. It changes to **Cancelled** when no cleanup is outstanding. If cleanup fails, the review still shows **Cancelled** and **Cleanup failed** separately because an operator may need to intervene. A queued review that never reached a runner becomes **Cancelled** without a cleanup warning.
+
+Cancellation is durable: refreshing the page, closing the tab, or signing out does not restart the review. If publication has already started, or the review has already reached another final state, cancellation is refused and the latest details are shown instead. An existing GitHub review is never withdrawn.
+
 ## Review decisions
 
 A published review records one decision:
@@ -69,11 +79,12 @@ A published review records one decision:
 
 The decision is the review's original conclusion at the time it ran, not current merge eligibility. Repository rules and the pull request's own review state decide whether merging is allowed, and a decision can be out of date after a newer revision. A failed review publishes no vote, so its decision shows an em dash. Historical reviews that predate decisions also have no recorded decision and show an em dash; they are never labelled as approvals.
 
-## Published, Failed and Superseded
+## Published, Failed, Superseded and Cancelled
 
 - **Published**: the review was published to GitHub.
 - **Failed**: the review did not finish successfully; the phase and reason are shown when they were recorded.
 - **Superseded**: a newer revision replaced this review before publication. A superseded review keeps its own page.
+- **Cancelled**: an operator stopped the review before publication. It published no review and is not a failure. **Cancelling** means the request was accepted and cleanup confirmation is still outstanding. A cancelled review keeps its own page and public identity rules.
 
 ## Timestamps and older records
 
@@ -89,7 +100,7 @@ Times are the latest recorded observations, not live guarantees. Older reviews m
 - **Refresh now** is available on **Overview**, **History**, and review detail pages.
 - **Help** is a static page and does not refresh.
 
-**Last updated** is the time of the last successful data refresh for the page you are viewing. The data comes from stored review state and is read-only.
+**Last updated** is the time of the last successful data refresh for the page you are viewing. The data comes from stored review state. Reading it is read-only; the only change an authorized operator can make is cancelling a review that has not started publishing.
 
 ## Anonymous reviews
 

@@ -356,6 +356,32 @@ main#content {
   border-color: #fa4d56;
   color: #f4f4f4;
 }
+dialog.cancel-confirm {
+  width: min(34rem, calc(100vw - 32px));
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 32px);
+  margin: auto;
+  overflow: auto;
+  padding: 20px;
+  border: 1px solid #fa4d56;
+  background: #262626;
+  color: #f4f4f4;
+}
+dialog.cancel-confirm::backdrop {
+  background: rgba(0, 0, 0, 0.68);
+}
+.cancel-confirm h2 {
+  margin-top: 0;
+}
+.cancel-confirm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+}
+.cancel-confirm code {
+  overflow-wrap: anywhere;
+}
 
 .fact {
   overflow-wrap: anywhere;

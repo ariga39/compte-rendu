@@ -13,6 +13,7 @@
   import { absoluteTime } from '#lib/format.ts';
   import { createDashboardQueryClient, installFocusTracking } from '#lib/query.svelte.ts';
   import { createRefreshState, provideRefresh } from '#lib/refresh.svelte.ts';
+  import { provideOperator } from '#lib/dashboard-operator.ts';
   import { DashboardSession } from '#lib/session.ts';
 
   let { children, data } = $props();
@@ -41,6 +42,8 @@
 
   const anonymous: DashboardSession = { signedIn: false, account: null, operator: false };
   let viewer = $state<DashboardSession | null>(null);
+
+  provideOperator(() => viewer?.operator === true);
 
   onMount(() => {
     let active = true;
