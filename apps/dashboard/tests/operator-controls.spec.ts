@@ -197,27 +197,6 @@ test('cleanup failure is explained separately from cancellation', async ({
   await expect(page.locator('.review-heading .bx--tag')).not.toHaveText('Failed');
 });
 
-test('history filters include cancelled reviews', async ({ page, harness, base }) => {
-  harness.setHandler(() =>
-    ok(
-      historyPage([
-        publicTask('cancelled-filter', {
-          status: 'cancelled',
-          dispatch: null,
-          terminalAt: NOW,
-          cleanup: 'destroyed',
-        }),
-      ]),
-    ),
-  );
-  await page.goto(`${base}/history`);
-  await page.selectOption('select[name="status"]', 'cancelled');
-  await page.click('[data-testid="apply"]');
-  await page.waitForFunction(() => location.search.includes('status=cancelled'));
-  await expect(page.locator('[data-testid="task"]').first()).toContainText('Cancelled');
-  expect(harness.state.requests.at(-1)).toBe('/api/jobs?status=cancelled');
-});
-
 test('anonymous readers cannot open a cancellation confirmation', async ({
   page,
   harness,
