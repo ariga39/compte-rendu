@@ -16,12 +16,12 @@ A cancellable run shows **Cancel review** in its detail page and drawer. Confirm
 
 Expose a same-origin authenticated `POST /api/jobs/:runId/cancel`. The public run ID identifies one immutable attempt. Core resolves its exact Runner job ID and attempt from D1; clients never supply a Runner ID. A session is required (401); a disallowed UID or wrong origin gets 403. Return 404 for an unknown run after authorization. Repeated requests return the current cancellation state without duplicating side effects.
 
-| State when Core receives the request | Outcome |
-| --- | --- |
-| Queued, no Runner claim | Atomically finish as cancelled (200). A racing claim cannot take it. There is no Sandbox to clean up. |
-| Claimed, publication unclaimed | Persist cancellation intent, requester UID and timestamp (202). Prevent new grants and publication for this attempt, and dispatch the stop to Runner. |
-| Cancellation already pending or complete | Return 202 or 200 respectively. The job page can resume polling by run ID. |
-| Publication already claimed, or any other terminal state | Return 409 and refresh the detail. An existing GitHub review is never withdrawn by this action. |
+| State when Core receives the request                     | Outcome                                                                                                                                               |
+| -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Queued, no Runner claim                                  | Atomically finish as cancelled (200). A racing claim cannot take it. There is no Sandbox to clean up.                                                 |
+| Claimed, publication unclaimed                           | Persist cancellation intent, requester UID and timestamp (202). Prevent new grants and publication for this attempt, and dispatch the stop to Runner. |
+| Cancellation already pending or complete                 | Return 202 or 200 respectively. The job page can resume polling by run ID.                                                                            |
+| Publication already claimed, or any other terminal state | Return 409 and refresh the detail. An existing GitHub review is never withdrawn by this action.                                                       |
 
 The D1 conditional write for cancellation and the existing publication claim must exclude one another. A successful agent result alone does not win publication. After cancellation wins, a late success callback may record usage, evidence and cleanup for its exact attempt but cannot publish a review, change the verdict or turn cancellation into failure. Automatic supersession, retries and late callbacks must preserve the winning disposition. A new review of the same PR waits for confirmed cleanup of the previous Runner claim. No cancellation can target the replacement run.
 
