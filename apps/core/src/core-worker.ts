@@ -584,6 +584,8 @@ export const createCoreWorker = (
     };
     if (callback.status === 'succeeded') {
       if (!(await completeCallbackEvidenceIsValid(callback))) {
+        const latest = await stateStore.getRunOutcome(callback.runId).catch(() => undefined);
+        if (latest?.status === 'cancelled') return new Response(null, { status: 202 });
         if (outcome.status !== 'scheduled') return new Response(null, { status: 409 });
         await markCallbackFailed();
         await recordFinishedLifecycle(lifecycleLog, outcome, 'failed', callback, {
@@ -985,16 +987,49 @@ export const createCoreWorker = (
       if (current.runnerJobId !== claim.jobId || current.runnerAttempt !== claim.attempt) {
         return new Response(null, { status: 204 });
       }
-      if (current.checkRunId !== undefined && github.updateCheckRun !== undefined) {
-        await github
-          .updateCheckRun({
+      const wroteInProgress =
+        current.checkRunId !== undefined && github.updateCheckRun !== undefined;
+      if (wroteInProgress) {
+        await github.updateCheckRun!({
+          runId: claim.runId,
+          repositoryId: current.repositoryId,
+          installationId: current.installationId,
+          checkRunId: current.checkRunId!,
+          status: 'in_progress',
+        }).catch(() => undefined);
+      }
+      // A cancellation can win while the in_progress Check write is in flight.
+      // Re-read before handing the job to Runner so the claim is released and
+      // a stale Check write is reconciled durably instead of leaving the Check
+      // in progress forever.
+      const latest = await stateStore.getRunOutcome(claim.runId).catch(() => current);
+      if (latest?.status === 'cancelled') {
+        const checkRunId = latest.checkRunId ?? current.checkRunId;
+        if (wroteInProgress && checkRunId !== undefined) {
+          await stateStore
+            .reopenCheckCancellation?.({ runId: claim.runId, checkRunId })
+            .catch(() => false);
+          const confirmAt = await Effect.runPromise(
+            DateTime.now.pipe(Effect.map(DateTime.formatIso)),
+          );
+          await github.updateCheckRun!({
             runId: claim.runId,
-            repositoryId: current.repositoryId,
-            installationId: current.installationId,
-            checkRunId: current.checkRunId,
-            status: 'in_progress',
+            repositoryId: latest.repositoryId,
+            installationId: latest.installationId,
+            checkRunId,
+            status: 'cancelled',
+            cancellationReason: 'manual',
           })
-          .catch(() => undefined);
+            .then(() =>
+              stateStore.confirmCheckCancelled?.({
+                runId: claim.runId,
+                checkRunId,
+                occurredAt: confirmAt,
+              }),
+            )
+            .catch(() => undefined);
+        }
+        return releaseUndeliveredCancellation();
       }
       return new Response(JSON.stringify(input), {
         status: 200,
