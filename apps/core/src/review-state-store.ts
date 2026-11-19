@@ -53,6 +53,8 @@ interface DeliveryRow {
   status: ReviewStoredStatus;
   created_at: string;
   updated_at: string;
+  claimed_at?: string | null;
+  publication_claimed_at?: string | null;
   runner_job_id?: string | null;
   runner_attempt?: number | null;
   comment_id?: number | null;
@@ -183,6 +185,10 @@ const outcomeFromRow = (row: DeliveryRow): ReviewOutcome => ({
   status: row.status,
   createdAt: row.created_at,
   updatedAt: row.updated_at,
+  ...(row.claimed_at == null ? {} : { claimedAt: row.claimed_at }),
+  ...(row.publication_claimed_at == null
+    ? {}
+    : { publicationClaimedAt: row.publication_claimed_at }),
   ...(row.runner_job_id == null ? {} : { runnerJobId: row.runner_job_id }),
   ...(row.runner_attempt == null ? {} : { runnerAttempt: row.runner_attempt }),
   ...(row.comment_id == null ? {} : { commentId: row.comment_id }),
@@ -222,7 +228,8 @@ const deliverySelect = `
 const runOutcomeSelect = `
   SELECT d.delivery_id, d.installation_id, d.repository_id, d.pull_request_number,
     d.base_sha, d.head_sha, d.trigger, r.status,
-    r.created_at, r.updated_at, r.runner_job_id, r.runner_attempt, r.comment_id,
+    r.created_at, r.updated_at, r.claimed_at, r.publication_claimed_at,
+    r.runner_job_id, r.runner_attempt, r.comment_id,
     r.check_run_id,
     r.check_setup_status, r.review_decision,
     r.evidence_key, r.evidence_status,

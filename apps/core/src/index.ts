@@ -159,6 +159,8 @@ export interface ReviewOutcome {
   status: ReviewStoredStatus;
   createdAt: string;
   updatedAt: string;
+  claimedAt?: string;
+  publicationClaimedAt?: string;
   runnerJobId?: string;
   runnerAttempt?: number;
   commentId?: number;
@@ -2617,6 +2619,10 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
             status: run.status,
             updatedAt: run.updatedAt,
             ...(run.job.commentId === undefined ? {} : { commentId: run.job.commentId }),
+            ...(run.claimedAt === undefined ? {} : { claimedAt: run.claimedAt }),
+            ...(run.publicationClaimedAt === undefined
+              ? {}
+              : { publicationClaimedAt: run.publicationClaimedAt }),
             ...(run.runnerJobId === undefined ? {} : { runnerJobId: run.runnerJobId }),
             ...(run.runnerAttempt === undefined ? {} : { runnerAttempt: run.runnerAttempt }),
             ...(run.checkRunId === undefined ? {} : { checkRunId: run.checkRunId }),

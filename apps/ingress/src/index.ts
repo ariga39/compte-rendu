@@ -29,9 +29,11 @@ const supportedEvents = [
 ] as const;
 const runnerCallbackPath = '/runner-callback';
 const runnerClaimPath = '/runner-claim';
+const runnerReadTokenPath = '/runner-read-token';
 const runnerProgressPath = '/runner-progress';
 const runnerCleanupRecoveryPath = '/runner-cleanup-recovery';
 const MAX_RUNNER_PROGRESS_BYTES = 16 * 1024;
+const MAX_RUNNER_READ_TOKEN_BYTES = 16 * 1024;
 const supportedPullRequestActions = [
   'opened',
   'reopened',
@@ -825,6 +827,33 @@ const forwardRunnerClaim = async (request: Request, dependencies: IngressDepende
   });
 };
 
+const forwardRunnerReadToken = async (request: Request, dependencies: IngressDependencies) => {
+  if (
+    dependencies.runnerCallbackToken === undefined ||
+    request.headers.get('authorization') !== `Bearer ${dependencies.runnerCallbackToken}`
+  ) {
+    return new Response(null, { status: 401 });
+  }
+  const body = await request.arrayBuffer();
+  if (body.byteLength > MAX_RUNNER_READ_TOKEN_BYTES) {
+    return new Response(null, { status: 413 });
+  }
+  const forwarded = await dependencies.core.fetch(
+    new Request('https://core.internal/runner-read-token', {
+      method: 'POST',
+      headers: {
+        'content-type': request.headers.get('content-type') ?? 'application/json',
+        'x-compte-rendu-runner-read-token': 'verified',
+      },
+      body,
+    }),
+  );
+  return new Response(await forwarded.arrayBuffer(), {
+    status: forwarded.status,
+    headers: forwarded.headers,
+  });
+};
+
 const isPublicReadPath = (path: string) =>
   path === '/api/dashboard-config' ||
   path === '/api/dashboard' ||
@@ -924,6 +953,14 @@ export function createIngressWorker(dependencies: IngressDependencies): WorkerEn
       if (new URL(request.url).pathname === runnerClaimPath) {
         try {
           return await forwardRunnerClaim(request, dependencies);
+        } catch {
+          return new Response(null, { status: 503 });
+        }
+      }
+
+      if (new URL(request.url).pathname === runnerReadTokenPath) {
+        try {
+          return await forwardRunnerReadToken(request, dependencies);
         } catch {
           return new Response(null, { status: 503 });
         }
