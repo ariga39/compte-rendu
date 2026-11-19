@@ -1976,6 +1976,20 @@ describe('Runner Job HTTP interface', () => {
     }
   });
 
+  it('does not attribute the shorter correction timeout to the review deadline', async () => {
+    const result = await runReminderScenario({
+      runId: 'short-correction-timeout',
+      rounds: [
+        { output: completedWithoutSubmitJsonl('session-reminder'), finalText: null },
+        { output: '', timedOut: true },
+      ],
+    });
+    expect(result.agentRuns).toBe(2);
+    expect(result.terminal).toMatchObject({ failure: { reason: 'timeout' } });
+    expect(result.terminal).not.toHaveProperty('failure.deadline');
+    expect(result.manifest.execution).not.toHaveProperty('deadline');
+  });
+
   it('caps the reminder at the remaining shared agent budget', async () => {
     const agentBudgetMs = 60 * 60 * 1000;
     vi.useFakeTimers({ toFake: ['Date'] });

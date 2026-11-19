@@ -2257,6 +2257,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
     let executionCause: RunnerFailureCauseValue | undefined;
     let result: StructuredReviewResult | undefined;
     let agent: RunnerProcessResult | undefined;
+    let correctionTimeout = false;
     let agentParsed: ParsedAgentResult | undefined;
     let executionModel: string | undefined;
     let submissionIdentity: SessionIdentity | undefined;
@@ -2706,6 +2707,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
                     ? reminderParsed
                     : { ...reminderParsed, recoveredErrors }
                   : { cause: 'zero-results' };
+          correctionTimeout = reminder.timedOut && remaining > SUBMIT_REMINDER_BUDGET_MS;
           agent = mergedAgentResult(agent, reminder);
         }
       }
@@ -2791,7 +2793,11 @@ export const createRunner = (options: RunnerOptions = {}) => {
           submissionSessionId !== undefined;
         if (agent.timedOut) {
           executionCause = 'timeout';
-          failure = { reason: 'timeout', cause: executionCause, deadline: job.deadlineLimit };
+          failure = {
+            reason: 'timeout',
+            cause: executionCause,
+            ...(correctionTimeout ? {} : { deadline: job.deadlineLimit }),
+          };
         } else if (parsed.cause !== undefined) {
           executionCause = parsed.cause;
           failure = { reason: 'invalid-output', cause: executionCause };
