@@ -146,9 +146,7 @@ OpenCode starts. Checkout disables hooks, submodules and LFS smudge and removes
 the authenticated remote before agent execution.
 
 The shared review attempt budget is 90 minutes from Core's durable claim
-timestamp, including setup. Queue time is free. Runner receives the absolute deadline and caps
-execution at the earlier of it and the validated GitHub read-token expiry minus
-a clock-skew reserve. It reports whether the claim deadline or the credential
+timestamp, including setup. Queue time is free. Runner receives the absolute deadline. The sbx backend refreshes the GitHub read token for the same claimed job and repository before expiry. A failed refresh limits execution to the existing credential expiry minus one minute. OpenSandbox and OpenShell use that credential cap throughout. It reports whether the claim deadline or the credential
 ended a timeout. Setup consumes the same remaining budget; there is no
 agent-start reset. One same-session correction gets at most two minutes of its
 remainder; it is not another attempt. Evidence archival, revocation,

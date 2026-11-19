@@ -152,6 +152,12 @@ deadline. Deploy the managed inference Worker as well when the four-times grant
 policy must become six hours. An older inference Worker still issues two-hour
 grants, which cover a 90-minute attempt.
 
+Deploy the application Worker with `POST /runner-read-token` before the Runner
+that uses it. The sbx Runner authenticates to the same callback origin and
+rotates the active Sandbox's private token file. Rotation requires no additional
+GitHub permissions or configuration. Renewal failure keeps the current token's
+expiry limit. OpenShell and OpenSandbox retain the initial credential cap.
+
 Drain Runner before replacing its binary so every running attempt finishes under
 the version that admitted it. Do not reset a job's deadline during the restart;
 queued work is claimed after resume under the new deployment. To roll back to 30
