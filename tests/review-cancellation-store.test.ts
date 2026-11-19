@@ -229,7 +229,7 @@ describe.each([
     ).resolves.toBe(false);
     await expect(
       store.markSchedulingFailed({ runId, occurredAt: '2026-11-19T00:02:00.000Z' }),
-    ).resolves.toBeUndefined();
+    ).resolves.toBe(false);
     await expect(store.getRunOutcome(runId)).resolves.toMatchObject({
       status: 'cancelled',
     });

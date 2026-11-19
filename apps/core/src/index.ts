@@ -392,7 +392,7 @@ export interface ReviewStateStore {
     runId: string;
     occurredAt: string;
     releaseRunnerClaim?: { jobId: string; attempt: number };
-  }): Promise<void>;
+  }): Promise<boolean>;
   recordDelivery: (input: ReviewDeliveryRecord) => Promise<void>;
 }
 
@@ -1025,7 +1025,7 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
     if (!ownsPublication && stateStore.claimRunPublication !== undefined) {
       ownsPublication = yield* claimFailureNotification();
     }
-    yield* Effect.tryPromise({
+    const statusWriteSucceeded = yield* Effect.tryPromise({
       try: () =>
         stateStore.markSchedulingFailed({
           runId: input.runId,
@@ -1035,13 +1035,16 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
             reason,
           },
         }),
-      catch: () => undefined,
-    });
+      catch: () => false,
+    }).pipe(Effect.catch(() => Effect.succeed(false)));
     // Cancellation can overtake the pre-check and win before the claim and
     // status CAS. The durable outcome is the winner; only a failed winner may
     // emit failure feedback, a failure Check or comment, or failed telemetry.
     const settled = yield* latestOutcome;
-    if (settled?.status !== 'failed') {
+    // A failed post-write read must not hide failure feedback once this attempt
+    // provably owns publication and wrote the failed status.
+    const fallbackFailed = settled === undefined && ownsPublication && statusWriteSucceeded;
+    if (settled?.status !== 'failed' && !fallbackFailed) {
       return {
         result: settled?.status === 'cancelled' ? ('cancelled' as const) : ('failed' as const),
         settled: false,
@@ -2261,11 +2264,13 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
     },
     markSchedulingFailed: async ({ runId, occurredAt, releaseRunnerClaim }) => {
       const run = runs.get(runId);
-      if (run === undefined) return;
+      if (run === undefined) return false;
+      let transitioned = false;
       if (run.status === 'scheduled') {
         run.status = 'failed';
         run.updatedAt = occurredAt;
         setDeliveryStatus(run.deliveryId, 'failed', occurredAt);
+        transitioned = true;
       }
       if (
         run.status === 'failed' &&
@@ -2277,6 +2282,7 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
         run.runnerAttempt = undefined;
         run.runnerCleanupStatus = undefined;
       }
+      return transitioned;
     },
     recordEvidence: async ({ runId, evidence, sandboxCleanup }) => {
       const run = runs.get(runId);

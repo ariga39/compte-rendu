@@ -1169,7 +1169,7 @@ describe('Review coordinator', () => {
           ? { kind: 'claimed', runId: 'run-1' }
           : { kind: 'replay', disposition: 'scheduled' };
       },
-      markSchedulingFailed: async () => {},
+      markSchedulingFailed: async () => false,
     };
     const coordinator = createReviewCoordinator({
       github: {},
@@ -2032,7 +2032,7 @@ describe('Review coordinator', () => {
         approval?.headSha === '4444444444444444444444444444444444444444'
           ? { kind: 'claimed', runId: 'manual-run-1' }
           : { kind: 'existing', disposition: 'awaiting approval' },
-      markSchedulingFailed: async () => {},
+      markSchedulingFailed: async () => false,
     };
     const coordinator = createReviewCoordinator({
       github: {
