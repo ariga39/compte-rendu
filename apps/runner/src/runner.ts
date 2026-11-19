@@ -49,6 +49,7 @@ import { confirmSbxCleanup } from './cleanup-recovery.js';
 import { createOpenSandboxRuntimeFactory } from './sandbox-runtime-opensandbox.js';
 import { createSbxRuntimeFactory } from './sandbox-runtime-sbx.js';
 import { createRelayLlmServiceClient, type LlmGrantIdentity } from './llm-service-client.js';
+import { createReadTokenClient, type ReadTokenClient } from './read-token-client.js';
 import {
   MULTI_PROVIDER_ID,
   SUPERVISOR_AGENT_ID,
@@ -95,6 +96,9 @@ const SUBMIT_REMINDER_BUDGET_MS = 2 * 60 * 1000;
 const FINALIZATION_BUDGET_MS = 60 * 1000;
 // Keep a clock-skew reserve before the upstream GitHub read credential expires.
 const CREDENTIAL_EXPIRY_SAFETY_MARGIN_MS = FINALIZATION_BUDGET_MS;
+// Refresh early enough to replace a long-lived run's credential before it
+// expires, without shortening it to the finalization reserve.
+const READ_TOKEN_REFRESH_LEAD_MS = 5 * 60 * 1000;
 const OPENSANDBOX_RESOURCE_LIFETIME_SECONDS = 2 * 60 * 60;
 const GRANT_REVOKE_ATTEMPTS = 2;
 const GRANT_REVOKE_BUDGET_MS = 15 * 1000;
@@ -626,8 +630,19 @@ type RunnerJob = {
   grantToken?: string;
   grantTokenPath?: string;
   grantRoot?: string;
+  claimDeadlineAt: number;
   deadlineAt: number;
   deadlineLimit: 'claim' | 'credential';
+  readTokenRotationEnabled: boolean;
+  readTokenRefreshAt?: number;
+  readTokenRefreshTimer?: ReturnType<typeof setTimeout>;
+  readTokenDeadlineTimer?: ReturnType<typeof setTimeout>;
+  readTokenRefreshController?: AbortController;
+  readTokenRefreshInFlight?: Promise<void>;
+  readTokenRefreshStopped: boolean;
+  readTokenRefreshFailed: boolean;
+  credentialDeadlineReached: boolean;
+  readTokenSecrets: string[];
   executionStartedAt?: string;
   submissionCompletedAt?: string;
   cleanupCompletedAt?: string;
@@ -668,6 +683,8 @@ export interface RunnerOptions {
   readonly callbackToken?: string;
   readonly callbackFetch?: typeof fetch;
   readonly progressFetch?: typeof fetch;
+  /** Fetch for the authenticated read-token refresh; defaults to callbackFetch. */
+  readonly readTokenFetch?: typeof fetch;
   readonly callbackTimeoutMs?: number;
   readonly claimUrl?: string;
   readonly claimFetch?: typeof fetch;
@@ -1136,6 +1153,220 @@ export const createRunner = (options: RunnerOptions = {}) => {
   const claimFetch = options.claimFetch ?? globalThis.fetch;
   const claimTimeoutMs = options.claimTimeoutMs ?? CLAIM_REQUEST_TIMEOUT_MS;
   const claimIntervalMs = options.claimIntervalMs ?? 1000;
+  const readTokenUrl =
+    callbackUrl === undefined
+      ? undefined
+      : (() => {
+          try {
+            return new URL('/runner-read-token', callbackUrl).toString();
+          } catch {
+            return undefined;
+          }
+        })();
+  const readTokenClient: ReadTokenClient | undefined =
+    readTokenUrl === undefined || callbackToken === undefined
+      ? undefined
+      : createReadTokenClient({
+          url: readTokenUrl,
+          token: callbackToken,
+          fetch: options.readTokenFetch ?? callbackFetch,
+        });
+  // Only sbx exposes an atomic, same-destination credential file that its
+  // `--refresh on-demand` source rereads. Other backends and legacy claims
+  // keep the original credential hard cap.
+  const readTokenRotationSupported = readTokenClient !== undefined && sandboxRuntime.kind === 'sbx';
+  const readTokenSecretValues = (job: RunnerJob): string[] =>
+    [...new Set([job.input.repositoryReadToken, ...job.readTokenSecrets])].filter(
+      (value) => value.length > 0,
+    );
+  const clearReadTokenRefreshTimer = (job: RunnerJob) => {
+    if (job.readTokenRefreshTimer !== undefined) clearTimeout(job.readTokenRefreshTimer);
+    job.readTokenRefreshTimer = undefined;
+  };
+  const clearReadTokenDeadlineTimer = (job: RunnerJob) => {
+    if (job.readTokenDeadlineTimer !== undefined) clearTimeout(job.readTokenDeadlineTimer);
+    job.readTokenDeadlineTimer = undefined;
+  };
+  const stopActiveExecution = (job: RunnerJob) => {
+    job.sdkController?.abort();
+    const child = job.child;
+    if (child !== undefined) {
+      stop(child);
+      setTimeout(() => stop(child, 'SIGKILL'), 5_000);
+    }
+  };
+  const reachCredentialDeadline = (job: RunnerJob) => {
+    if (job.readTokenRefreshStopped) return;
+    job.credentialDeadlineReached = true;
+    clearReadTokenRefreshTimer(job);
+    clearReadTokenDeadlineTimer(job);
+    if (Date.now() >= job.deadlineAt) stopActiveExecution(job);
+  };
+  const scheduleCredentialDeadline = (job: RunnerJob, deadlineAt: number) => {
+    clearReadTokenDeadlineTimer(job);
+    const delay = Math.max(0, deadlineAt - Date.now());
+    if (delay === 0) {
+      reachCredentialDeadline(job);
+      return;
+    }
+    const timer = setTimeout(() => {
+      if (job.readTokenDeadlineTimer !== timer) return;
+      job.readTokenDeadlineTimer = undefined;
+      reachCredentialDeadline(job);
+    }, delay);
+    if (typeof timer === 'object' && timer !== null && 'unref' in timer) {
+      (timer as { unref: () => void }).unref();
+    }
+    job.readTokenDeadlineTimer = timer;
+  };
+  const readTokenRefreshLead = (expiresAt: number) => {
+    const remaining = Math.max(0, expiresAt - Date.now());
+    return Math.min(READ_TOKEN_REFRESH_LEAD_MS, Math.floor(remaining / 2));
+  };
+  const credentialExpiryNeedsRefresh = (job: RunnerJob) => {
+    const expiresAt = job.input.repositoryReadTokenExpiresAt;
+    return (
+      expiresAt !== undefined &&
+      expiresAt <= job.claimDeadlineAt + CREDENTIAL_EXPIRY_SAFETY_MARGIN_MS
+    );
+  };
+  const applyCredentialFallback = (job: RunnerJob, fallbackAt: number) => {
+    if (job.readTokenRefreshStopped || job.readTokenRefreshFailed) return;
+    job.readTokenRefreshFailed = true;
+    clearReadTokenRefreshTimer(job);
+    if (fallbackAt < job.deadlineAt) {
+      job.deadlineAt = fallbackAt;
+      job.deadlineLimit = 'credential';
+    }
+    void Effect.runPromise(
+      Effect.logWarning('runner.read-token.refresh-failed', { jobId: job.id }),
+    ).catch(() => undefined);
+    scheduleCredentialDeadline(job, fallbackAt);
+  };
+  const scheduleReadTokenRefresh = (job: RunnerJob) => {
+    clearReadTokenRefreshTimer(job);
+    if (
+      !job.readTokenRotationEnabled ||
+      job.readTokenRefreshStopped ||
+      job.readTokenRefreshFailed ||
+      !credentialExpiryNeedsRefresh(job)
+    ) {
+      job.readTokenRefreshAt = undefined;
+      return;
+    }
+    const expiresAt = job.input.repositoryReadTokenExpiresAt!;
+    const refreshAt = expiresAt - readTokenRefreshLead(expiresAt);
+    job.readTokenRefreshAt = refreshAt;
+    const delay = Math.max(0, refreshAt - Date.now());
+    const timer = setTimeout(() => {
+      if (job.readTokenRefreshTimer !== timer) return;
+      job.readTokenRefreshTimer = undefined;
+      void refreshReadToken(job)
+        .then(() => scheduleReadTokenRefresh(job))
+        .catch(() => undefined);
+    }, delay);
+    if (typeof timer === 'object' && timer !== null && 'unref' in timer) {
+      (timer as { unref: () => void }).unref();
+    }
+    job.readTokenRefreshTimer = timer;
+  };
+  const refreshReadToken = async (job: RunnerJob): Promise<void> => {
+    if (
+      !job.readTokenRotationEnabled ||
+      readTokenClient === undefined ||
+      job.readTokenRefreshStopped ||
+      job.readTokenRefreshFailed
+    ) {
+      return;
+    }
+    if (job.readTokenRefreshInFlight !== undefined) return job.readTokenRefreshInFlight;
+    const expiresAt = job.input.repositoryReadTokenExpiresAt;
+    if (expiresAt === undefined) return;
+    const previousToken = job.input.repositoryReadToken;
+    const controller = new AbortController();
+    job.readTokenRefreshController = controller;
+    const refresh = (async () => {
+      try {
+        const refreshed = await readTokenClient.refresh(
+          {
+            runId: job.input.runId,
+            jobId: job.id,
+            attempt: job.input.attempt,
+          },
+          controller.signal,
+        );
+        if (job.readTokenRefreshStopped) return;
+        const nextExpiresAt = refreshed.expiresAt;
+        if (
+          !Number.isFinite(nextExpiresAt) ||
+          nextExpiresAt <= Date.now() ||
+          nextExpiresAt <= expiresAt
+        ) {
+          applyCredentialFallback(job, expiresAt - CREDENTIAL_EXPIRY_SAFETY_MARGIN_MS);
+          return;
+        }
+        const runtime = job.sandboxRuntime;
+        if (runtime !== undefined) {
+          if (runtime.rotateGithubReadToken === undefined) {
+            applyCredentialFallback(job, expiresAt - CREDENTIAL_EXPIRY_SAFETY_MARGIN_MS);
+            return;
+          }
+          try {
+            await runtime.rotateGithubReadToken(refreshed.token);
+          } catch {
+            if (!job.readTokenRefreshStopped) {
+              applyCredentialFallback(job, expiresAt - CREDENTIAL_EXPIRY_SAFETY_MARGIN_MS);
+            }
+            return;
+          }
+        }
+        if (job.readTokenRefreshStopped) return;
+        if (!job.readTokenSecrets.includes(previousToken)) {
+          job.readTokenSecrets.push(previousToken);
+        }
+        job.input.repositoryReadToken = refreshed.token;
+        job.input.repositoryReadTokenExpiresAt = nextExpiresAt;
+      } catch {
+        if (!job.readTokenRefreshStopped) {
+          applyCredentialFallback(job, expiresAt - CREDENTIAL_EXPIRY_SAFETY_MARGIN_MS);
+        }
+      } finally {
+        if (job.readTokenRefreshController === controller) {
+          job.readTokenRefreshController = undefined;
+        }
+      }
+    })();
+    job.readTokenRefreshInFlight = refresh;
+    try {
+      await refresh;
+    } finally {
+      if (job.readTokenRefreshInFlight === refresh) job.readTokenRefreshInFlight = undefined;
+    }
+  };
+  const ensureReadTokenFresh = async (job: RunnerJob) => {
+    if (
+      !job.readTokenRotationEnabled ||
+      job.readTokenRefreshStopped ||
+      job.readTokenRefreshFailed ||
+      !credentialExpiryNeedsRefresh(job)
+    ) {
+      return;
+    }
+    const expiresAt = job.input.repositoryReadTokenExpiresAt!;
+    const refreshAt =
+      job.readTokenRefreshAt ??
+      expiresAt - Math.min(READ_TOKEN_REFRESH_LEAD_MS, readTokenRefreshLead(expiresAt));
+    if (Date.now() >= refreshAt) {
+      await refreshReadToken(job);
+      scheduleReadTokenRefresh(job);
+    }
+  };
+  const stopReadTokenRefresh = (job: RunnerJob) => {
+    job.readTokenRefreshStopped = true;
+    clearReadTokenRefreshTimer(job);
+    clearReadTokenDeadlineTimer(job);
+    job.readTokenRefreshController?.abort();
+  };
   const strippedSandboxEnvironment = {
     ...process.env,
     SSH_AUTH_SOCK: undefined,
@@ -1292,7 +1523,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
   const boundedDiagnostic = (job: RunnerJob, value: string | undefined) => {
     if (value === undefined || value.length === 0) return undefined;
     let sanitized = value;
-    for (const secret of [job.diagnosticCheckoutToken, modelSecretCommand, job.grantToken]) {
+    for (const secret of [...readTokenSecretValues(job), modelSecretCommand, job.grantToken]) {
       if (secret !== undefined && secret.length > 0)
         sanitized = sanitized.replaceAll(secret, '[redacted]');
     }
@@ -1397,9 +1628,8 @@ export const createRunner = (options: RunnerOptions = {}) => {
           timeoutMs,
           captureStderr: processOptions.captureStderr ?? diagnostic !== undefined,
           stderrRedactions: [
-            job.diagnosticCheckoutToken,
+            ...readTokenSecretValues(job),
             job.grantToken,
-            job.input.repositoryReadToken,
             ...(processOptions.stderrRedactions ?? []),
           ].filter((value): value is string => value !== undefined && value.length > 0),
         }).catch(failed),
@@ -1438,11 +1668,10 @@ export const createRunner = (options: RunnerOptions = {}) => {
           diagnostic === undefined
             ? processOptions.stderrRedactions
             : [
-                job.diagnosticCheckoutToken,
+                ...readTokenSecretValues(job),
                 modelSecretCommand,
                 job.grantToken,
                 job.input.repositoryUrl,
-                job.input.repositoryReadToken,
               ].filter((value): value is string => value !== undefined && value.length > 0),
         maxBytes:
           diagnostic === undefined
@@ -1949,11 +2178,10 @@ export const createRunner = (options: RunnerOptions = {}) => {
           captureStdout: processOptions.captureStdout ?? false,
           captureStderr: true,
           stderrRedactions: [
-            job.diagnosticCheckoutToken,
+            ...readTokenSecretValues(job),
             modelSecretCommand,
             job.grantToken,
             job.input.repositoryUrl,
-            job.input.repositoryReadToken,
           ].filter((value): value is string => value !== undefined && value.length > 0),
           maxBytes: processOptions.maxBytes ?? MAX_DIAGNOSTIC_STDERR_BYTES,
           timeoutMs: CLEANUP_COMMAND_TIMEOUT_MS,
@@ -2362,6 +2590,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         cleanup: { status: 'pending' },
       });
       if (job.abortRequested) return;
+      await ensureReadTokenFresh(job);
       if (job.deadlineAt <= Date.now()) {
         failure = deadlineFailure(job);
         return;
@@ -2394,6 +2623,11 @@ export const createRunner = (options: RunnerOptions = {}) => {
       }
       if (mergeBaseSha === undefined) {
         failure = { reason: 'checkout' };
+        return;
+      }
+      await ensureReadTokenFresh(job);
+      if (job.deadlineAt <= Date.now()) {
+        failure = deadlineFailure(job);
         return;
       }
 
@@ -2526,6 +2760,16 @@ export const createRunner = (options: RunnerOptions = {}) => {
         await runtime.setup(setupCommand);
       } catch (error) {
         job.sandboxCreated = runtime.metadata.created;
+        if (
+          error instanceof SandboxCreateError &&
+          error.timedOut &&
+          remainingExecutionMs(job) <= 0
+        ) {
+          // The create consumed the job's limiting clock rather than only its
+          // ordinary per-command timeout. Report the actual exhausted deadline.
+          failure = deadlineFailure(job);
+          return;
+        }
         executionCause =
           error instanceof SandboxCreateError
             ? error.timedOut
@@ -2546,6 +2790,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         {},
         { stage: 'sandbox', command: 'github-preflight' },
       );
+      await ensureReadTokenFresh(job);
       if (job.deadlineAt <= Date.now()) {
         failure = deadlineFailure(job);
         return;
@@ -2714,6 +2959,21 @@ export const createRunner = (options: RunnerOptions = {}) => {
     } catch {
       failure = { reason: 'agent' };
     } finally {
+      // Stop the refresh loop before evidence/cleanup removes the active token
+      // destination. An in-flight response is ignored when it settles late.
+      stopReadTokenRefresh(job);
+      if (
+        !job.credentialDeadlineReached &&
+        job.readTokenRefreshFailed &&
+        job.deadlineLimit === 'credential' &&
+        Date.now() >= job.deadlineAt
+      ) {
+        job.credentialDeadlineReached = true;
+      }
+      if (job.credentialDeadlineReached) {
+        executionCause = 'timeout';
+        failure = { reason: 'timeout', cause: 'timeout', deadline: 'credential' };
+      }
       // Revoke as soon as agent work ends, before evidence/archive/cleanup, so a
       // still-running Sandbox cannot keep using a finished job's grant.
       if (job.grantIssuanceAttempted) {
@@ -2755,16 +3015,22 @@ export const createRunner = (options: RunnerOptions = {}) => {
       } else {
         evidenceFailure = 'sandbox-not-created';
       }
-      if (evidenceReady && job.grantToken !== undefined && job.grantToken.length > 0) {
-        try {
-          if (await redactEvidenceTextFiles(evidencePath, [job.grantToken], job.sessionIds)) {
-            failure ??= { reason: 'evidence' };
+      if (evidenceReady) {
+        const evidenceSecrets = [
+          ...readTokenSecretValues(job),
+          ...(job.grantToken === undefined || job.grantToken.length === 0 ? [] : [job.grantToken]),
+        ];
+        if (evidenceSecrets.length > 0) {
+          try {
+            if (await redactEvidenceTextFiles(evidencePath, evidenceSecrets, job.sessionIds)) {
+              failure ??= { reason: 'evidence' };
+              evidenceComplete = false;
+              evidenceFailure = 'credential-in-output';
+            }
+          } catch {
+            evidenceFailure = 'archive-incomplete';
             evidenceComplete = false;
-            evidenceFailure = 'credential-in-output';
           }
-        } catch {
-          evidenceFailure = 'archive-incomplete';
-          evidenceComplete = false;
         }
       }
       // A process that echoed the grant into its output must fail closed: the
@@ -3150,6 +3416,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       }
       job.diagnosticCheckoutToken = '';
       job.grantToken = '';
+      job.readTokenSecrets = [];
       job.resolveDone();
       requestNextJob?.();
     }
@@ -3201,8 +3468,18 @@ export const createRunner = (options: RunnerOptions = {}) => {
       input.repositoryReadTokenExpiresAt === undefined
         ? undefined
         : input.repositoryReadTokenExpiresAt - CREDENTIAL_EXPIRY_SAFETY_MARGIN_MS;
+    // A supported rotation replaces the credential in place, so the initial
+    // expiry does not cap the job. On outage the old expiry-minus-margin becomes
+    // the fallback deadline. Legacy claims and unsupported backends keep the
+    // original hard cap.
+    const rotatingCredential =
+      readTokenRotationSupported &&
+      input.repositoryReadTokenExpiresAt !== undefined &&
+      input.repositoryReadTokenExpiresAt > admittedAt;
     const deadlineLimit =
-      credentialDeadlineAt !== undefined && credentialDeadlineAt < claimDeadlineAt
+      !rotatingCredential &&
+      credentialDeadlineAt !== undefined &&
+      credentialDeadlineAt < claimDeadlineAt
         ? 'credential'
         : 'claim';
     const job: RunnerJob = {
@@ -3230,11 +3507,20 @@ export const createRunner = (options: RunnerOptions = {}) => {
       grantRevoked: false,
       sessionIds: [],
       diagnosticCheckoutToken: input.repositoryReadToken,
-      deadlineAt: Math.min(claimDeadlineAt, credentialDeadlineAt ?? Number.POSITIVE_INFINITY),
+      claimDeadlineAt,
+      deadlineAt: rotatingCredential
+        ? claimDeadlineAt
+        : Math.min(claimDeadlineAt, credentialDeadlineAt ?? Number.POSITIVE_INFINITY),
       deadlineLimit,
+      readTokenRotationEnabled: rotatingCredential,
+      readTokenRefreshStopped: false,
+      readTokenRefreshFailed: false,
+      credentialDeadlineReached: false,
+      readTokenSecrets: [input.repositoryReadToken],
     };
     jobs.set(id, job);
     jobsByRun.set(`${input.runId}:${input.attempt}`, job);
+    scheduleReadTokenRefresh(job);
     void execute(job);
     return jsonResponse(202, publicState(job));
   };

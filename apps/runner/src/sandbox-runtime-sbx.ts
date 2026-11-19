@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Option, Schema } from 'effect';
@@ -50,6 +50,10 @@ export const createSbxRuntimeFactory = (options: SbxRuntimeOptions): SandboxRunt
     const networkRules: Array<{ resource: string; id?: string }> = [];
     let githubServiceCleanupRequired = false;
     let tokenRoot: string | undefined;
+    let tokenPath: string | undefined;
+    let activeGithubReadToken = spec.githubReadToken;
+    let tokenWriteChain: Promise<void> = Promise.resolve();
+    let destroyed = false;
     let created = false;
     let hostCleanupConfirmed = false;
     const metadata = {
@@ -127,6 +131,33 @@ export const createSbxRuntimeFactory = (options: SbxRuntimeOptions): SandboxRunt
       return undefined;
     };
 
+    // The `--refresh on-demand` service source rereads this exact host file for
+    // each credential use. Replacing its contents atomically keeps the same
+    // sandbox-scoped registration and destination; no Sandbox reinstall is
+    // needed. A destroyed runtime rejects queued or late writes.
+    const writeActiveGithubToken = (token: string): Promise<void> => {
+      const write = tokenWriteChain.then(async () => {
+        if (destroyed || tokenPath === undefined) {
+          throw new Error('sandbox github token destination unavailable');
+        }
+        const temporaryPath = `${tokenPath}.tmp`;
+        try {
+          await writeFile(temporaryPath, token, { mode: 0o600 });
+          await chmod(temporaryPath, 0o600);
+          if (destroyed) {
+            await rm(temporaryPath, { force: true });
+            throw new Error('sandbox github token destination unavailable');
+          }
+          await rename(temporaryPath, tokenPath);
+        } catch (error) {
+          await rm(temporaryPath, { force: true }).catch(() => undefined);
+          throw error;
+        }
+      });
+      tokenWriteChain = write.catch(() => undefined);
+      return write;
+    };
+
     const setup = async (command: SandboxCommand) => {
       const modelSecretSource =
         spec.modelTokenFile === undefined
@@ -152,9 +183,9 @@ export const createSbxRuntimeFactory = (options: SbxRuntimeOptions): SandboxRunt
       if (secret.exitCode !== 0 || secret.timedOut) throw new Error('sandbox secret setup failed');
 
       tokenRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-sbx-token-'));
-      const tokenPath = join(tokenRoot, 'github-read-token');
-      await writeFile(tokenPath, spec.githubReadToken, { mode: 0o600 });
+      tokenPath = join(tokenRoot, 'github-read-token');
       githubServiceCleanupRequired = true;
+      await writeActiveGithubToken(activeGithubReadToken);
       const githubSecret = await command(
         [
           'secret',
@@ -256,6 +287,8 @@ export const createSbxRuntimeFactory = (options: SbxRuntimeOptions): SandboxRunt
       command(['cp', `${spec.name}:${sandboxPath}`, localPath], diagnostic, processOptions);
 
     const destroy = async (command: SandboxCommand) => {
+      destroyed = true;
+      await tokenWriteChain.catch(() => undefined);
       let clean = true;
       for (const expected of networkRules) {
         const matching = await findRule(command, expected);
@@ -314,6 +347,8 @@ export const createSbxRuntimeFactory = (options: SbxRuntimeOptions): SandboxRunt
       if (tokenRoot !== undefined) {
         try {
           await rm(tokenRoot, { recursive: true, force: true });
+          tokenRoot = undefined;
+          tokenPath = undefined;
           hostCleanupConfirmed = true;
         } catch {
           clean = false;
@@ -322,6 +357,15 @@ export const createSbxRuntimeFactory = (options: SbxRuntimeOptions): SandboxRunt
       if (!clean) throw new Error('sbx sandbox cleanup was not confirmed');
     };
 
-    return { metadata, setup, exec, copyOut, destroy };
+    const rotateGithubReadToken = async (token: string) => {
+      if (destroyed) throw new Error('sandbox github token destination unavailable');
+      activeGithubReadToken = token;
+      // Setup may not have created the destination yet; its next write uses the
+      // latest token. Once present, replace the same file atomically.
+      if (tokenPath === undefined) return;
+      await writeActiveGithubToken(token);
+    };
+
+    return { metadata, setup, exec, copyOut, rotateGithubReadToken, destroy };
   };
 };
