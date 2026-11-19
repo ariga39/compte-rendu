@@ -1461,6 +1461,17 @@ const createStore = (
     return result.meta.changes === 1;
   },
 
+  reopenCheckCancellation: async ({ runId, checkRunId }) => {
+    const result = await database
+      .prepare(
+        `UPDATE review_runs SET check_cancel_reconciled_at = NULL, check_cancel_attempted_at = NULL
+         WHERE run_id = ? AND status = 'cancelled' AND check_run_id = ?`,
+      )
+      .bind(runId, checkRunId)
+      .run();
+    return result.meta.changes === 1;
+  },
+
   completeRunPublication: async ({ runId, occurredAt, fingerprints, decision }) => {
     const results = await database.batch([
       ...fingerprints.map((fingerprint) =>

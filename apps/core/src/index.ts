@@ -465,6 +465,7 @@ export interface ReviewStateQueries {
     checkRunId: number;
     occurredAt: string;
   }): Promise<boolean>;
+  reopenCheckCancellation?(input: { runId: string; checkRunId: number }): Promise<boolean>;
   completeRunPublication(input: {
     runId: string;
     occurredAt: string;
@@ -1009,9 +1010,17 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
             }),
           catch: () => undefined,
         }).pipe(Effect.catch(() => Effect.succeed(undefined)));
+  const cancellationWon = Effect.gen(function* () {
+    const latest = yield* Effect.tryPromise({
+      try: () => getRunOutcome(input.runId),
+      catch: () => undefined,
+    }).pipe(Effect.catch(() => Effect.succeed(undefined)));
+    return latest?.status === 'cancelled';
+  });
   const markCompletionFailed = Effect.fn('markCompletionFailed')(function* (
     reason: PublicTaskFailure['reason'] = 'completion_failed',
   ) {
+    if (yield* cancellationWon) return 'cancelled' as const;
     const failedAt = yield* currentIso;
     if (!ownsPublication && stateStore.claimRunPublication !== undefined) {
       ownsPublication = yield* claimFailureNotification();
@@ -1030,18 +1039,23 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
     });
     yield* manualReaction('-1');
     yield* publishFailureNotification(ownsPublication);
+    return 'failed' as const;
+  });
+
+  const completionFailed = Effect.fn('completionFailed')(function* (
+    reason: Extract<PublicationTerminal, { outcome: 'failed' }>['reason'],
+  ) {
+    const failed = yield* markCompletionFailed(reason);
+    if (failed === 'cancelled') return 'cancelled' as const;
+    yield* recordPublicationTerminal(log, input.runId, { outcome: 'failed', reason });
+    return 'failed' as const;
   });
 
   const decodedOutput = yield* Schema.decodeUnknownEffect(RunnerReviewResult)(input.output).pipe(
     Effect.catch(() => Effect.succeed(undefined)),
   );
   if (decodedOutput === undefined) {
-    yield* markCompletionFailed('invalid_output');
-    yield* recordPublicationTerminal(log, input.runId, {
-      outcome: 'failed',
-      reason: 'invalid_output',
-    });
-    return 'failed' as const;
+    return yield* completionFailed('invalid_output');
   }
 
   decision = typeof decodedOutput === 'string' ? undefined : decodedOutput.decision;
@@ -1052,12 +1066,7 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
     outcome.baseSha === null ||
     outcome.headSha === null
   ) {
-    yield* markCompletionFailed('publication_uncertain');
-    yield* recordPublicationTerminal(log, input.runId, {
-      outcome: 'failed',
-      reason: 'publication_uncertain',
-    });
-    return 'failed' as const;
+    return yield* completionFailed('publication_uncertain');
   }
 
   const target = yield* Effect.tryPromise({
@@ -1096,6 +1105,7 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
       catch: () => undefined,
     }).pipe(Effect.catch(() => Effect.succeed(false)));
     if (!superseded) {
+      if (yield* cancellationWon) return 'cancelled' as const;
       yield* recordPublicationTerminal(log, input.runId, {
         outcome: 'failed',
         reason: 'completion_failed',
@@ -1109,12 +1119,7 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
   }
 
   if (target === undefined) {
-    yield* markCompletionFailed('publication_uncertain');
-    yield* recordPublicationTerminal(log, input.runId, {
-      outcome: 'failed',
-      reason: 'publication_uncertain',
-    });
-    return 'failed' as const;
+    return yield* completionFailed('publication_uncertain');
   }
 
   const payload: ReviewPublicationPayload = formatReviewPublicationPayload({
@@ -1152,23 +1157,13 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
 
   const markerLookup = yield* lookupMarker();
   if (!markerLookup.ok) {
-    yield* markCompletionFailed('marker_lookup_failed');
-    yield* recordPublicationTerminal(log, input.runId, {
-      outcome: 'failed',
-      reason: 'marker_lookup_failed',
-    });
-    return 'failed' as const;
+    return yield* completionFailed('marker_lookup_failed');
   }
 
   if (markerLookup.review !== undefined) {
     const completed = yield* completeRun([]);
     if (!completed) {
-      yield* markCompletionFailed('completion_failed');
-      yield* recordPublicationTerminal(log, input.runId, {
-        outcome: 'failed',
-        reason: 'completion_failed',
-      });
-      return 'failed' as const;
+      return yield* completionFailed('completion_failed');
     }
     yield* recordPublicationTerminal(log, input.runId, { outcome: 'published' });
     return 'completed' as const;
@@ -1229,6 +1224,7 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
       catch: () => undefined,
     }).pipe(Effect.catch(() => Effect.succeed(false)));
     if (!superseded) {
+      if (yield* cancellationWon) return 'cancelled' as const;
       yield* recordPublicationTerminal(log, input.runId, {
         outcome: 'failed',
         reason: 'completion_failed',
@@ -1245,33 +1241,18 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
     if (recoveredLookup.ok && recoveredLookup.review !== undefined) {
       const completed = yield* completeRun([]);
       if (!completed) {
-        yield* markCompletionFailed('completion_failed');
-        yield* recordPublicationTerminal(log, input.runId, {
-          outcome: 'failed',
-          reason: 'completion_failed',
-        });
-        return 'failed' as const;
+        return yield* completionFailed('completion_failed');
       }
       yield* recordPublicationTerminal(log, input.runId, { outcome: 'published' });
       return 'completed' as const;
     }
-    yield* markCompletionFailed(
+    return yield* completionFailed(
       recoveredLookup.ok ? 'publication_uncertain' : 'marker_lookup_failed',
     );
-    yield* recordPublicationTerminal(log, input.runId, {
-      outcome: 'failed',
-      reason: recoveredLookup.ok ? 'publication_uncertain' : 'marker_lookup_failed',
-    });
-    return 'failed' as const;
   }
   const completed = yield* completeRun([]);
   if (!completed) {
-    yield* markCompletionFailed('completion_failed');
-    yield* recordPublicationTerminal(log, input.runId, {
-      outcome: 'failed',
-      reason: 'completion_failed',
-    });
-    return 'failed' as const;
+    return yield* completionFailed('completion_failed');
   }
   yield* recordPublicationTerminal(log, input.runId, { outcome: 'published' });
   return 'completed' as const;
@@ -2616,6 +2597,15 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
         return false;
       }
       run.checkCancelReconciledAt = occurredAt;
+      return true;
+    },
+    reopenCheckCancellation: async ({ runId, checkRunId }) => {
+      const run = runs.get(runId);
+      if (run === undefined || run.status !== 'cancelled' || run.checkRunId !== checkRunId) {
+        return false;
+      }
+      run.checkCancelReconciledAt = undefined;
+      run.checkCancelAttemptedAt = undefined;
       return true;
     },
     completeRunPublication: async ({ runId, occurredAt, decision }) => {

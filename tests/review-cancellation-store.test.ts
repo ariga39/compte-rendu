@@ -519,6 +519,80 @@ describe.each([
     );
   });
 
+  it('reopens a reconciled Check cancellation after a stale in-progress write', async () => {
+    const store = createStore() as CancellationStore;
+    const runId = await schedule(store, 'cancel-check-reopen');
+    const scheduledRun = await schedule(store, 'cancel-check-reopen-scheduled', {
+      ...job(),
+      pullRequestNumber: 43,
+      headSha: '3'.repeat(40),
+    });
+    await store.recordCheckRun?.({ runId, checkRunId: 501 });
+    await store.cancelRun({
+      runId,
+      requestedByUid: 1001,
+      occurredAt: '2026-11-19T00:01:00.000Z',
+    });
+    await expect(
+      store.recordCheckCancellationAttempt?.({
+        runId,
+        checkRunId: 501,
+        occurredAt: '2026-11-19T00:01:30.000Z',
+        expectedLastAttempt: null,
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      store.confirmCheckCancelled?.({
+        runId,
+        checkRunId: 501,
+        occurredAt: '2026-11-19T00:01:31.000Z',
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      store.listCancellationWork?.({
+        retryBefore: '2026-11-19T00:02:00.000Z',
+        recoveryBefore: '2026-11-19T00:00:00.000Z',
+        limit: 10,
+      }),
+    ).resolves.toEqual([]);
+
+    await expect(store.reopenCheckCancellation?.({ runId, checkRunId: 501 })).resolves.toBe(true);
+    await expect(store.reopenCheckCancellation?.({ runId, checkRunId: 999 })).resolves.toBe(false);
+    await expect(
+      store.reopenCheckCancellation?.({ runId: scheduledRun, checkRunId: 501 }),
+    ).resolves.toBe(false);
+    await expect(
+      store.listCancellationWork?.({
+        retryBefore: '2026-11-19T00:02:00.000Z',
+        recoveryBefore: '2026-11-19T00:00:00.000Z',
+        limit: 10,
+      }),
+    ).resolves.toMatchObject([{ runId, needsCheckReconciliation: true }]);
+
+    await expect(
+      store.recordCheckCancellationAttempt?.({
+        runId,
+        checkRunId: 501,
+        occurredAt: '2026-11-19T00:02:01.000Z',
+        expectedLastAttempt: null,
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      store.confirmCheckCancelled?.({
+        runId,
+        checkRunId: 501,
+        occurredAt: '2026-11-19T00:02:02.000Z',
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      store.listCancellationWork?.({
+        retryBefore: '2026-11-19T00:02:03.000Z',
+        recoveryBefore: '2026-11-19T00:00:00.000Z',
+        limit: 10,
+      }),
+    ).resolves.toEqual([]);
+  });
+
   it('recovers a failed cancelled-run cleanup and keeps destroyed teardown monotonic', async () => {
     const store = createStore() as CancellationStore;
     const runId = await schedule(store, 'cancel-cleanup-recovery');

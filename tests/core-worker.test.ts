@@ -1083,6 +1083,153 @@ describe('Core Worker', () => {
     },
   );
 
+  it('stops failing a manual review cancelled while its late result is being received', async () => {
+    const database = new SqliteD1Database();
+    const { fetcher, requests, waitUntilTasks } = capturePostHogTransport();
+    const state = createD1ReviewStateStore(database);
+    const claimed = await state.claimReview({
+      deliveryId: 'late-invalid-evidence',
+      job: {
+        repositoryId: 11,
+        pullRequestNumber: 42,
+        installationId: 7,
+        baseSha: eligibleEvent.baseSha,
+        headSha: eligibleEvent.headSha,
+        trigger: 'manual',
+        commentId: 987654,
+      },
+      occurredAt: '2026-09-01T00:00:00.000Z',
+    });
+    if (claimed.kind !== 'claimed') throw new Error('manual run was not claimed');
+    const { runId } = claimed;
+    await state.claimNextJob!({
+      jobId: 'runner-job-1',
+      attempt: 1,
+      occurredAt: '2026-09-01T00:01:00.000Z',
+    });
+    const reactions: unknown[] = [];
+    const env = {
+      ...coreEnv(database),
+      ...postHogTestDefaults.environment,
+      EVIDENCE_BUCKET: { put: async () => undefined },
+    };
+    const worker = createCoreWorker(env, {
+      stateStore: {
+        ...state,
+        recordResultReceived: async (input) => {
+          await state.cancelRun({
+            runId,
+            requestedByUid: 1,
+            occurredAt: new Date().toISOString(),
+          });
+          return state.recordResultReceived!(input);
+        },
+      },
+      github: { addReaction: async (input) => void reactions.push(input) },
+    });
+    try {
+      const callback = JSON.parse(await successfulCallback(runId)) as {
+        evidence: { manifest: { sha256: string } };
+      };
+      callback.evidence.manifest.sha256 = '0'.repeat(64);
+      const response = await worker.fetch(
+        new Request('https://core.internal/runner-results', {
+          method: 'POST',
+          headers: {
+            'x-compte-rendu-runner-callback': 'verified',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify(callback),
+        }),
+        env,
+        { waitUntil: (task) => waitUntilTasks.push(task) },
+      );
+      expect(response.status).toBe(202);
+      expect(await state.getRunOutcome(runId)).toMatchObject({ status: 'cancelled' });
+      await Promise.all(waitUntilTasks);
+      expect(reactions).toEqual([]);
+      expect(await postHogEvents(requests)).not.toContainEqual(
+        expect.objectContaining({
+          event: 'review finished',
+          properties: expect.objectContaining({ outcome: 'failed' }),
+        }),
+      );
+    } finally {
+      fetcher.mockRestore();
+      database.close();
+    }
+  });
+
+  it('does not react or report a publication failure when cancellation wins during target lookup', async () => {
+    const database = new SqliteD1Database();
+    const state = createD1ReviewStateStore(database);
+    const claimed = await state.claimReview({
+      deliveryId: 'late-target-lookup',
+      job: {
+        repositoryId: 11,
+        pullRequestNumber: 42,
+        installationId: 7,
+        baseSha: eligibleEvent.baseSha,
+        headSha: eligibleEvent.headSha,
+        trigger: 'manual',
+        commentId: 987654,
+      },
+      occurredAt: '2026-09-01T00:00:00.000Z',
+    });
+    if (claimed.kind !== 'claimed') throw new Error('manual run was not claimed');
+    const { runId } = claimed;
+    await state.claimNextJob!({
+      jobId: 'runner-job-1',
+      attempt: 1,
+      occurredAt: '2026-09-01T00:01:00.000Z',
+    });
+    const reactions: unknown[] = [];
+    const logs: OperationalLogEvent[] = [];
+    const createReview = vi.fn();
+    const env = {
+      ...coreEnv(database),
+      EVIDENCE_BUCKET: { put: async () => undefined },
+    };
+    const worker = createCoreWorker(env, {
+      stateStore: state,
+      log: { record: (event) => void logs.push(event) },
+      github: {
+        addReaction: async (input) => void reactions.push(input),
+        loadReviewTarget: async () => {
+          await state.cancelRun({
+            runId,
+            requestedByUid: 1,
+            occurredAt: new Date().toISOString(),
+          });
+          return undefined;
+        },
+        createReview,
+      },
+    });
+    try {
+      const response = await worker.fetch(
+        new Request('https://core.internal/runner-results', {
+          method: 'POST',
+          headers: {
+            'x-compte-rendu-runner-callback': 'verified',
+            'content-type': 'application/json',
+          },
+          body: await successfulCallback(runId),
+        }),
+        env,
+      );
+      expect(response.status).toBe(202);
+      expect(await state.getRunOutcome(runId)).toMatchObject({ status: 'cancelled' });
+      expect(createReview).not.toHaveBeenCalled();
+      expect(reactions).toEqual([]);
+      expect(
+        logs.filter((event) => event.phase === 'publication' && event.outcome === 'failed'),
+      ).toEqual([]);
+    } finally {
+      database.close();
+    }
+  });
+
   it('captures a superseded lifecycle event for a late successful callback', async () => {
     const database = new SqliteD1Database();
     const stateStore = createD1ReviewStateStore(database);
