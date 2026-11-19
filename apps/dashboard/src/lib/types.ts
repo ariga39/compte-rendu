@@ -30,7 +30,14 @@ export type TaskDetail = PublicTaskDetail;
 
 export type ProcessingStage = 'received' | 'publishing';
 
-export type StatusFilter = 'all' | 'queued' | 'in_progress' | 'published' | 'failed' | 'superseded';
+export type StatusFilter =
+  | 'all'
+  | 'queued'
+  | 'in_progress'
+  | 'published'
+  | 'failed'
+  | 'superseded'
+  | 'cancelled';
 
 export interface Filters {
   status: StatusFilter;

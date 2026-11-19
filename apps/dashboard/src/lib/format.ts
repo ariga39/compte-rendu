@@ -5,6 +5,7 @@ export const STATUS_LABEL: Record<string, string> = {
   completed: 'Published',
   failed: 'Failed',
   superseded: 'Superseded',
+  cancelled: 'Cancelled',
 };
 
 export const DECISION_LABEL: Record<string, string> = {
@@ -47,19 +48,35 @@ export const STATUS_TONE: Record<string, BadgeTone> = {
   failed: 'bad',
   superseded: 'muted',
   scheduled: 'info',
+  cancelled: 'muted',
 };
+
+/**
+ * A claimed cancellation is still stopping execution until teardown is
+ * confirmed. An unrecorded cleanup is unresolved, not proof of destruction.
+ * A queued cancellation has no Runner claim to stop, so it is already final.
+ */
+export function isCancelling(task: TaskState): boolean {
+  return (
+    task.status === 'cancelled' &&
+    task.claimedAt !== null &&
+    (task.cleanup === 'pending' || task.cleanup === 'unknown')
+  );
+}
 
 export function milestoneLabel(stage: ExecutionStage | ProcessingStage): string {
   return STAGE_LABEL[stage] ?? PROCESSING_STAGE_LABEL[stage] ?? 'Not recorded';
 }
 
 export function statusLabel(task: TaskState): string {
+  if (isCancelling(task)) return 'Cancelling';
   if (task.dispatch === 'claimed') return 'In progress';
   if (task.dispatch === 'queued') return 'Queued';
   return STATUS_LABEL[task.status] ?? 'Not recorded';
 }
 
 export function statusTone(task: TaskState): BadgeTone {
+  if (isCancelling(task)) return 'warn';
   if (task.dispatch) return 'info';
   return STATUS_TONE[task.status] ?? 'info';
 }
@@ -85,7 +102,16 @@ export function cleanupTone(task: TaskState): BadgeTone {
 export function cleanupNote(task: TaskState): string {
   if (task.cleanup === 'destroyed') return 'Cleanup was confirmed.';
   if (task.cleanup === 'failed') return 'Cleanup failed and needs an operator.';
-  if (task.cleanup === 'unknown') return 'Cleanup was not recorded for this review.';
+  if (task.cleanup === 'unknown') {
+    return task.status === 'cancelled'
+      ? 'Cleanup was not recorded for this cancelled review.'
+      : 'Cleanup was not recorded for this review.';
+  }
+  if (task.status === 'cancelled') {
+    return task.claimedAt !== null
+      ? 'Cancellation was accepted; resource cleanup has not been confirmed.'
+      : 'Cancellation was accepted; no review environment needs cleanup.';
+  }
   if (task.status === 'scheduled') {
     return task.stage === 'cleanup'
       ? 'Resource cleanup has started; confirmation is pending.'
@@ -100,6 +126,7 @@ export function taskLabel(task: TaskState): string {
     return task.stage ? (STAGE_LABEL[task.stage] ?? 'Not recorded') : 'In progress';
   }
   if (task.dispatch === 'queued') return 'Queued';
+  if (isCancelling(task)) return 'Cancelling';
   return STATUS_LABEL[task.status] ?? 'Not recorded';
 }
 
@@ -110,6 +137,7 @@ export function progressText(task: TaskState): string {
 }
 
 export function statusDetail(task: TaskState): string | null {
+  if (isCancelling(task)) return 'Waiting for cleanup confirmation';
   if (task.processing === 'publishing') return 'Publishing';
   if (task.processing === 'received') return 'Processing result';
   if (task.dispatch === 'queued') {
@@ -135,6 +163,16 @@ export function outcomeSummary(task: TaskState): string {
     return task.queueBlockReason === 'cleanup'
       ? 'Waiting for previous review cleanup.'
       : 'Waiting to start.';
+  }
+  if (task.status === 'cancelled') {
+    if (isCancelling(task)) {
+      return 'Cancellation accepted. Execution is stopping and cleanup is not yet confirmed.';
+    }
+    if (task.cleanup === 'failed') return 'Review cancelled. Cleanup failed and needs an operator.';
+    if (task.cleanup === 'pending') {
+      return 'Review cancelled. Cleanup has not been confirmed.';
+    }
+    return 'Review cancelled; no review was published.';
   }
   if (task.status === 'completed') return 'Review published to GitHub.';
   if (task.status === 'failed') return 'Did not finish successfully.';
