@@ -6,10 +6,11 @@ import ReviewDetail from './ReviewDetail.svelte';
 const meta = {
   title: 'Reviews/Task detail',
   component: ReviewDetail,
-  args: { variant: 'page' },
+  args: { variant: 'page', operator: false },
   argTypes: {
     variant: { control: 'radio', options: ['page', 'drawer'] },
     runId: { control: false },
+    operator: { control: 'boolean' },
   },
 } satisfies Meta<typeof ReviewDetail>;
 export default meta;
@@ -84,6 +85,41 @@ export const Superseded = scenario('superseded', {
   status: 'superseded',
   terminalAt: at(2),
   totalDurationMs: 2000,
+});
+export const Cancellable = {
+  ...scenario('cancellable', {
+    ...claimed,
+    status: 'scheduled',
+    dispatch: 'claimed',
+    stage: 'agent',
+    cleanup: 'pending',
+  }),
+  args: { runId: 'cancellable', variant: 'page', operator: true },
+} satisfies StoryObj<typeof meta>;
+export const Cancelling = scenario('cancelling', {
+  ...claimed,
+  status: 'cancelled',
+  dispatch: null,
+  terminalAt: at(50),
+  totalDurationMs: 50000,
+  cleanup: 'pending',
+});
+export const Cancelled = scenario('cancelled', {
+  ...claimed,
+  status: 'cancelled',
+  dispatch: null,
+  terminalAt: at(50),
+  cleanupCompletedAt: at(52),
+  totalDurationMs: 50000,
+  cleanup: 'destroyed',
+});
+export const CancelledCleanupFailed = scenario('cancelled-cleanup-failed', {
+  ...claimed,
+  status: 'cancelled',
+  dispatch: null,
+  terminalAt: at(50),
+  totalDurationMs: 50000,
+  cleanup: 'failed',
 });
 export const Anonymous = scenario('anonymous', {
   ...claimed,

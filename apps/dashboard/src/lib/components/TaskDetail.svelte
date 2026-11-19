@@ -11,7 +11,9 @@
   import Badge from '#lib/components/Badge.svelte';
   import ModelUsage from '#lib/components/ModelUsage.svelte';
   import Toolbar from '#lib/components/Toolbar.svelte';
+  import { requestCancellation } from '#lib/api.ts';
   import { createDashboard, createExpiryClock } from '#lib/dashboard.svelte.ts';
+  import { useOperator } from '#lib/dashboard-operator.ts';
   import {
     absoluteTime,
     cleanupLabel,
@@ -98,6 +100,116 @@
   const lastGoodLabel = $derived(
     dash.lastGoodAt ? absoluteTime(new Date(dash.lastGoodAt).toISOString()) : 'not yet',
   );
+
+  const operator = useOperator();
+  let confirming = $state(false);
+  let submitting = $state(false);
+  let cancelError = $state<string | null>(null);
+  let accepted = $state<{ runId: string; pendingCleanup: boolean } | null>(null);
+  let heading = $state<HTMLHeadingElement | null>(null);
+  let cancelTrigger = $state<HTMLButtonElement | null>(null);
+  let confirmDialog = $state<HTMLDialogElement | null>(null);
+  let dismissButton = $state<HTMLButtonElement | null>(null);
+  let activeRunId = $state<string | null>(null);
+
+  $effect(() => {
+    if (activeRunId === runId) return;
+    activeRunId = runId;
+    confirming = false;
+    submitting = false;
+    cancelError = null;
+    accepted = null;
+  });
+
+  const task = $derived(dash.data?.task ?? null);
+  const acceptedForCurrent = $derived(
+    accepted !== null && task !== null && accepted.runId === task.runId ? accepted : null,
+  );
+  const cancellationLabel = $derived(
+    acceptedForCurrent === null
+      ? null
+      : acceptedForCurrent.pendingCleanup
+        ? 'Cancelling'
+        : 'Cancelled',
+  );
+  const canCancel = $derived(
+    operator() &&
+      acceptedForCurrent === null &&
+      task !== null &&
+      task.status === 'scheduled' &&
+      task.processing !== 'publishing',
+  );
+
+  $effect(() => {
+    if (!confirming || confirmDialog === null) return;
+    if (!confirmDialog.open) confirmDialog.showModal();
+    (dismissButton ?? confirmDialog).focus({ preventScroll: true });
+  });
+
+  function openConfirmation() {
+    cancelError = null;
+    confirming = true;
+  }
+
+  function closeConfirmation(returnTo: 'trigger' | 'heading' = 'trigger') {
+    const dialog = confirmDialog;
+    confirming = false;
+    if (dialog?.open) dialog.close();
+    requestAnimationFrame(() => {
+      const target = returnTo === 'heading' ? heading : (cancelTrigger ?? heading);
+      target?.focus({ preventScroll: true });
+    });
+  }
+
+  function onDialogKeydown(event: KeyboardEvent) {
+    // Keep Escape and Tab away from the page or drawer beneath the dialog.
+    event.stopPropagation();
+    if (event.key !== 'Tab' || confirmDialog === null) return;
+    const focusable = [
+      ...confirmDialog.querySelectorAll<HTMLElement>('button:not([disabled])'),
+    ];
+    if (focusable.length === 0) return;
+    const first = focusable[0]!;
+    const last = focusable[focusable.length - 1]!;
+    if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    } else if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    }
+  }
+
+  function onDialogCancel(event: Event) {
+    event.preventDefault();
+    if (!submitting) closeConfirmation('trigger');
+  }
+
+  async function submitCancellation() {
+    if (submitting) return;
+    const requestedRunId = runId;
+    submitting = true;
+    cancelError = null;
+    const result = await requestCancellation(requestedRunId);
+    if (requestedRunId !== runId || activeRunId !== requestedRunId) return;
+    submitting = false;
+    if (result.kind === 'accepted') {
+      accepted = { runId: requestedRunId, pendingCleanup: result.pendingCleanup };
+      closeConfirmation('heading');
+      dash.refresh();
+      return;
+    }
+    const messages: Record<Exclude<typeof result.kind, 'accepted'>, string> = {
+      conflict:
+        'This review can no longer be cancelled because publication has started or it has already finished. The details were refreshed.',
+      unauthorized: 'You are not allowed to cancel reviews.',
+      notfound: 'This review no longer exists.',
+      failed: 'Could not cancel the review right now. Try again.',
+    };
+    cancelError = messages[result.kind];
+    closeConfirmation('trigger');
+    if (result.kind === 'conflict' || result.kind === 'notfound') dash.refresh();
+  }
 </script>
 
 {#snippet timeFact(label: string, value: string | null | undefined)}
@@ -203,6 +315,7 @@
     {/if}
   </section>
 {:else if dash.data}
+  {@const view = task ?? dash.data.task}
   {#if dash.error}
     <div role="alert" class="notice error">
       {dash.error === 'offline'
@@ -226,18 +339,90 @@
       </a>
     {/if}
     <header class="review-heading">
-      <Badge tone={statusTone(dash.data.task)}>{statusLabel(dash.data.task)}</Badge>
-      <h1>{title}</h1>
+      <Badge
+        tone={acceptedForCurrent
+          ? acceptedForCurrent.pendingCleanup
+            ? 'warn'
+            : 'muted'
+          : statusTone(view)}
+      >
+        {acceptedForCurrent ? cancellationLabel : statusLabel(view)}
+      </Badge>
+      <h1 bind:this={heading} tabindex="-1">{title}</h1>
       {#if identity}
         <a href={identity.pullRequestUrl} target="_blank" rel="noopener noreferrer">Open pull request on GitHub</a>
       {/if}
-      <p>{outcomeSummary(dash.data.task)}</p>
+      <p>
+        {acceptedForCurrent
+          ? acceptedForCurrent.pendingCleanup
+            ? 'Cancellation accepted. Execution is stopping and cleanup is not yet confirmed.'
+            : 'Review cancelled; no review was published.'
+          : outcomeSummary(view)}
+      </p>
+      {#if canCancel}
+        <Button
+          kind="danger"
+          size="small"
+          data-testid="cancel-review"
+          bind:ref={cancelTrigger}
+          disabled={submitting}
+          on:click={openConfirmation}
+        >
+          Cancel review
+        </Button>
+      {/if}
     </header>
 
-    {#if dash.data.task.failure}
+    {#if cancelError}
+      <div class="notice error" role="alert" data-testid="cancel-error">
+        {cancelError}
+      </div>
+    {/if}
+
+    {#if confirming}
+      <dialog
+        class="cancel-confirm"
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="cancel-confirm-title"
+        aria-describedby="cancel-confirm-description"
+        data-testid="cancel-confirm"
+        bind:this={confirmDialog}
+        onkeydown={onDialogKeydown}
+        oncancel={onDialogCancel}
+      >
+        <h2 id="cancel-confirm-title">Cancel this review?</h2>
+        <p id="cancel-confirm-description">
+          Cancel <strong>{title}</strong>? Run <code>{runId}</code> will stop and it will publish
+          no review.
+        </p>
+        <div class="cancel-confirm-actions">
+          <Button
+            size="small"
+            data-testid="cancel-confirm-dismiss"
+            bind:ref={dismissButton}
+            disabled={submitting}
+            on:click={() => closeConfirmation('trigger')}
+          >
+            Keep review
+          </Button>
+          <Button
+            kind="danger"
+            size="small"
+            data-testid="cancel-confirm-submit"
+            disabled={submitting}
+            on:click={submitCancellation}
+          >
+            {submitting ? 'Cancelling…' : 'Cancel review'}
+          </Button>
+        </div>
+      </dialog>
+    {/if}
+
+    {#if view.failure}
       <div class="notice error" role="alert">
-        <strong>{failurePhaseLabel(dash.data.task.failure.phase)}</strong><br />
-        {failureReasonLabel(dash.data.task.failure.reason)}{#if dash.data.task.failure.httpStatus !== undefined}{' '}(HTTP {dash.data.task.failure.httpStatus}){/if}
+        <strong>{failurePhaseLabel(view.failure.phase)}</strong><br />
+        {failureReasonLabel(view.failure.reason)}{#if view.failure.httpStatus !== undefined}{' '}(HTTP {view.failure.httpStatus}){/if}
       </div>
     {/if}
 
@@ -245,16 +430,17 @@
     <p class="decision-block">
       <span
         class="decision-value"
-        class:unknown={dash.data.task.decision === null}
+        class:unknown={view.decision === null}
         data-testid="detail-decision"
       >
-        {decisionLabel(dash.data.task.decision)}
+        {decisionLabel(view.decision)}
       </span>
     </p>
     <p class="muted">
-      {#if dash.data.task.decision}{DECISION_NOTE}
-      {:else if dash.data.task.status === 'scheduled'}No decision yet.
-      {:else if dash.data.task.status === 'completed'}{DECISION_UNKNOWN}
+      {#if view.decision}{DECISION_NOTE}
+      {:else if acceptedForCurrent}No review decision was published.
+      {:else if view.status === 'scheduled'}No decision yet.
+      {:else if view.status === 'completed'}{DECISION_UNKNOWN}
       {:else}No review decision was published.{/if}
     </p>
 
@@ -266,7 +452,7 @@
           <ol class="timeline" aria-label="Timeline">
             {#each timeline as milestone, index (milestone.stage + milestone.startedAt)}
               {@const current = index === currentIndex}
-              {@const elapsed = Date.parse(milestone.startedAt) - Date.parse(dash.data.task.receivedAt)}
+              {@const elapsed = Date.parse(milestone.startedAt) - Date.parse(view.receivedAt)}
               <li data-stage={milestone.stage} aria-current={current ? 'step' : undefined}>
                 <strong>{milestoneLabel(milestone.stage as ExecutionStage | ProcessingStage)}</strong>
                 {#if current}<span class="current-stage">Current</span>{/if}
@@ -283,14 +469,14 @@
       <section>
         <h2>Timing</h2>
         <StructuredList>
-          {@render timeFact('Received', dash.data.task.receivedAt)}
-          {@render timeFact('Assigned', dash.data.task.claimedAt)}
-          {@render timeFact('Finished', dash.data.task.terminalAt)}
-          {@render textFact('Time in queue', formatDuration(dash.data.task.queueWaitMs))}
-          {@render textFact('Total time', formatDuration(dash.data.task.totalDurationMs))}
+          {@render timeFact('Received', view.receivedAt)}
+          {@render timeFact('Assigned', view.claimedAt)}
+          {@render timeFact('Finished', view.terminalAt)}
+          {@render textFact('Time in queue', formatDuration(view.queueWaitMs))}
+          {@render textFact('Total time', formatDuration(view.totalDurationMs))}
           {@render textFact(
             'Last progress update',
-            dash.data.task.lastProgressAt ? relativeTime(dash.data.task.lastProgressAt) : 'Not recorded',
+            view.lastProgressAt ? relativeTime(view.lastProgressAt) : 'Not recorded',
           )}
         </StructuredList>
 
@@ -304,14 +490,14 @@
       <AccordionItem title="Technical details">
         <h3>Execution details</h3>
         <StructuredList>
-          {@render timeFact('Runner execution started', dash.data.task.executionStartedAt)}
-          {@render timeFact('Result checks started', dash.data.task.submissionCompletedAt)}
-          {@render timeFact('Cleanup attempt finished', dash.data.task.cleanupCompletedAt)}
+          {@render timeFact('Runner execution started', view.executionStartedAt)}
+          {@render timeFact('Result checks started', view.submissionCompletedAt)}
+          {@render timeFact('Cleanup attempt finished', view.cleanupCompletedAt)}
         </StructuredList>
         <h3>Cleanup</h3>
         <div class="cleanup-block">
-          <Badge tone={cleanupTone(dash.data.task)}>{cleanupLabel(dash.data.task)}</Badge>
-          <p class="muted">{cleanupNote(dash.data.task)}</p>
+          <Badge tone={cleanupTone(view)}>{cleanupLabel(view)}</Badge>
+          <p class="muted">{cleanupNote(view)}</p>
         </div>
       </AccordionItem>
     </Accordion>

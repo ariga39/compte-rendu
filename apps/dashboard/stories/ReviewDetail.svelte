@@ -2,9 +2,15 @@
   import { QueryClientProvider } from '@tanstack/svelte-query';
   import TaskDetail from '#lib/components/TaskDetail.svelte';
   import TaskDrawer from '#lib/components/TaskDrawer.svelte';
+  import { provideOperator } from '#lib/dashboard-operator.ts';
   import { createDashboardQueryClient } from '#lib/query.svelte.ts';
 
-  let { runId, variant }: { runId: string; variant: 'page' | 'drawer' } = $props();
+  let {
+    runId,
+    variant,
+    operator = false,
+  }: { runId: string; variant: 'page' | 'drawer'; operator?: boolean } = $props();
+  provideOperator(() => operator);
   const client = createDashboardQueryClient();
   let view = $derived<'page' | 'drawer' | 'closed'>(variant);
 
