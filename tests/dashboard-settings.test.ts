@@ -23,7 +23,7 @@ it('requires an allowlisted GitHub UID on every model change and preserves the p
         lastAttemptAt: null,
         lastSuccessAt: null,
         rejected: 0,
-        lastRefreshError: null,
+        lastRefreshError: 'refresh failed',
       }),
       refreshCatalog: async () => {},
       issue: async () => ({ kind: 'invalid' }),
@@ -91,6 +91,7 @@ it('requires an allowlisted GitHub UID on every model change and preserves the p
     expect(read.status).toBe(200);
     expect(await read.json()).toMatchObject({
       configuration: { revision: 1 },
+      catalogRefreshFailed: true,
       routes: ['model/a'],
     });
     profile = { id: 42, two_factor_authentication: false };

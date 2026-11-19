@@ -18,6 +18,10 @@ export const load: PageLoad = async ({ fetch, depends }) => {
           : null,
     };
   }
-  const settings = (await reply.json()) as { configuration: ReviewConfiguration; routes: string[] };
+  const settings = (await reply.json()) as {
+    configuration: ReviewConfiguration;
+    routes: string[];
+    catalogRefreshFailed: boolean;
+  };
   return { settings, status: reply.status, error: null };
 };

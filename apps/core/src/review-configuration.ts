@@ -14,19 +14,22 @@ interface ConfigurationRow {
 const response = (value: unknown, status = 200) =>
   Response.json(value, { status, headers: { 'cache-control': 'no-store' } });
 
+type CatalogReader = { catalog(): Promise<{ readonly routes: readonly string[] }> };
+
 export const handleReviewConfiguration = (
   request: Request,
   database: D1DatabaseLike,
   operatorToken: string | undefined,
+  relay?: CatalogReader,
 ): Promise<Response> =>
   !operatorToken?.trim() || request.headers.get('authorization') !== `Bearer ${operatorToken}`
     ? Promise.resolve(response({ error: 'unauthorized' }, 401))
-    : applyReviewConfiguration(request, database);
+    : applyReviewConfiguration(request, database, relay);
 
 export const applyReviewConfiguration = (
   request: Request,
   database: D1DatabaseLike,
-  availableRoutes?: readonly string[],
+  relay?: CatalogReader,
 ): Promise<Response> =>
   Effect.runPromise(
     Effect.gen(function* () {
@@ -61,14 +64,12 @@ export const applyReviewConfiguration = (
       )(body.text).pipe(Effect.catch(() => Effect.succeed(undefined)));
       if (candidate === undefined) return response({ error: 'invalid configuration' }, 400);
       const selected = candidate.selection;
-      if (
-        availableRoutes &&
-        selected &&
-        ![...selected.reviewers, selected.synthesis].every((route) =>
-          availableRoutes.includes(route),
-        )
-      )
-        return response({ error: 'model route unavailable' }, 400);
+      if (selected) {
+        if (!relay) return response({ error: 'catalog unavailable' }, 503);
+        const { routes } = yield* Effect.tryPromise(() => relay.catalog());
+        if (![...selected.reviewers, selected.synthesis].every((route) => routes.includes(route)))
+          return response({ error: 'model route unavailable' }, 400);
+      }
       const row = yield* Effect.tryPromise(() =>
         database
           .prepare(

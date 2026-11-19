@@ -934,7 +934,12 @@ export const createCoreWorker = (
   return {
     fetch: async (request, _env, context) => {
       if (new URL(request.url).pathname === '/review-configuration') {
-        return handleReviewConfiguration(request, env.REVIEW_DB, env.REVIEW_CONFIGURATION_TOKEN);
+        return handleReviewConfiguration(
+          request,
+          env.REVIEW_DB,
+          env.REVIEW_CONFIGURATION_TOKEN,
+          env.INFERENCE_RELAY,
+        );
       }
       const lifecycleLog = createPostHogLifecycleLog(env, context);
       if (request.method === 'POST' && new URL(request.url).pathname === runnerClaimsPath) {
