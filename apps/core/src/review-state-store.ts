@@ -2,6 +2,8 @@ import type { ReviewDecision } from '@compte-rendu/contracts';
 import { ReviewConfiguration, ReviewModelSelection } from '@compte-rendu/contracts';
 import { Option, Schema } from 'effect';
 import type {
+  ReviewCancellationState,
+  ReviewCancellationWorkItem,
   ReviewDeliveryRecord,
   ReviewJob,
   ReviewOutcome,
@@ -110,6 +112,44 @@ interface SupersededRunRow {
   run_id: string;
 }
 
+interface CancellationRow {
+  run_id: string;
+  status: ReviewRunStatus;
+  publication_claimed_at: string | null;
+  cancelled_at: string | null;
+  cancelled_by_uid: number | null;
+  runner_job_id: string | null;
+  runner_attempt: number | null;
+  runner_cleanup_status: RunnerCleanupStatus | null;
+  check_run_id: number | null;
+}
+
+interface CancellationWorkRow {
+  run_id: string;
+  cancelled_at: string;
+  claimed_at: string | null;
+  runner_job_id: string | null;
+  runner_attempt: number | null;
+  runner_cleanup_status: RunnerCleanupStatus | null;
+  runner_stop_attempted_at: string | null;
+  check_run_id: number | null;
+  check_cancel_attempted_at: string | null;
+  check_cancel_reconciled_at: string | null;
+}
+
+const cancellationFromRow = (row: CancellationRow): ReviewCancellationState => ({
+  runId: row.run_id,
+  requestedAt: row.cancelled_at as string,
+  requestedByUid: row.cancelled_by_uid as number,
+  runnerJobId: row.runner_job_id,
+  runnerAttempt: row.runner_attempt,
+  cleanup: row.runner_cleanup_status,
+  checkRunId: row.check_run_id,
+});
+
+const cancellationColumns = `run_id, status, publication_claimed_at, cancelled_at,
+  cancelled_by_uid, runner_job_id, runner_attempt, runner_cleanup_status, check_run_id`;
+
 const dispositionForStatus = (status: ReviewStoredStatus) => {
   switch (status) {
     case 'failed':
@@ -120,6 +160,8 @@ const dispositionForStatus = (status: ReviewStoredStatus) => {
       return 'scheduled' as const;
     case 'awaiting approval':
       return 'awaiting approval' as const;
+    case 'cancelled':
+      return 'cancelled' as const;
     case 'superseded':
     case 'claiming':
     case 'ignored':
@@ -299,7 +341,7 @@ const samePullRequestBlockingClause = (candidate: string, current: string) =>
     AND ${candidate}.runner_job_id IS NOT NULL
     AND (
       (${candidate}.status = 'scheduled'
-        OR (${candidate}.status = 'superseded'
+        OR (${candidate}.status IN ('superseded', 'cancelled')
           AND ${candidate}.runner_cleanup_status IS NOT 'destroyed'))
       OR ${candidate}.runner_cleanup_status IN ('pending', 'failed')
     )`;
@@ -309,7 +351,7 @@ const queueBlockReasonColumn = `CASE WHEN r.status = 'scheduled' AND r.runner_jo
     SELECT 1 FROM review_runs AS blocker
     WHERE ${samePullRequestBlockingClause('blocker', 'r')}
       AND blocker.rowid <> r.rowid
-      AND blocker.status IN ('failed', 'superseded')
+      AND blocker.status IN ('failed', 'superseded', 'cancelled')
       AND blocker.runner_cleanup_status IN ('pending', 'failed')
   ) THEN 'cleanup' ELSE NULL END AS queue_block_reason`;
 
@@ -392,12 +434,14 @@ const statusFilterValue = (status: PublicRunFilter['status']): ReviewRunStatus |
       return 'failed';
     case 'superseded':
       return 'superseded';
+    case 'cancelled':
+      return 'cancelled';
     case 'all':
       return undefined;
   }
 };
 
-const cleanupAttentionClause = `((r.runner_cleanup_status = 'failed') OR (r.status IN ('completed', 'failed', 'superseded') AND r.runner_cleanup_status = 'pending'))`;
+const cleanupAttentionClause = `((r.runner_cleanup_status = 'failed') OR (r.status IN ('completed', 'failed', 'superseded', 'cancelled') AND r.runner_cleanup_status = 'pending'))`;
 
 const buildPublicRunWhere = (
   filter: PublicRunFilter,
@@ -664,7 +708,11 @@ const createStore = (
                  AND EXISTS (
                    SELECT 1 FROM review_runs
                    WHERE repository_id = ? AND pull_request_number = ? AND head_sha = ?
-                     AND status = 'failed'
+                     AND (
+                       status = 'failed'
+                       OR (status = 'cancelled'
+                         AND (runner_job_id IS NULL OR runner_cleanup_status = 'destroyed'))
+                     )
                  )
                )
              )
@@ -955,7 +1003,8 @@ const createStore = (
               .prepare(
                 `UPDATE review_runs
                  SET runner_job_id = NULL, runner_attempt = NULL, runner_cleanup_status = NULL
-                 WHERE run_id = ? AND runner_job_id = ? AND runner_attempt = ?`,
+                 WHERE run_id = ? AND runner_job_id = ? AND runner_attempt = ?
+                   AND status = 'failed'`,
               )
               .bind(runId, releaseRunnerClaim.jobId, releaseRunnerClaim.attempt),
           ]),
@@ -1020,7 +1069,7 @@ const createStore = (
       .prepare(
         `SELECT runner_cleanup_status, cleanup_completed_at FROM review_runs
          WHERE run_id = ? AND runner_job_id = ? AND runner_attempt = ?
-           AND base_sha = ? AND head_sha = ? AND status IN ('failed', 'superseded')`,
+           AND base_sha = ? AND head_sha = ? AND status IN ('failed', 'superseded', 'cancelled')`,
       )
       .bind(runId, jobId, attempt, baseSha, headSha)
       .first<{
@@ -1044,7 +1093,7 @@ const createStore = (
     const before = await database
       .prepare(
         `SELECT runner_cleanup_status, cleanup_completed_at FROM review_runs
-         WHERE ${identify} AND status IN ('failed', 'superseded')`,
+         WHERE ${identify} AND status IN ('failed', 'superseded', 'cancelled')`,
       )
       .bind(runId, jobId, attempt, baseSha, headSha)
       .first<{
@@ -1070,7 +1119,7 @@ const createStore = (
            cleanup_completed_at = CASE WHEN runner_cleanup_status = 'destroyed'
              THEN cleanup_completed_at ELSE ? END,
            updated_at = CASE WHEN runner_cleanup_status = 'destroyed' THEN updated_at ELSE ? END
-         WHERE ${identify} AND status IN ('failed', 'superseded')
+         WHERE ${identify} AND status IN ('failed', 'superseded', 'cancelled')
            AND runner_cleanup_status IN ('failed', 'destroyed')`,
       )
       .bind(confirmedAt, confirmedAt, runId, jobId, attempt, baseSha, headSha)
@@ -1078,7 +1127,7 @@ const createStore = (
     const after = await database
       .prepare(
         `SELECT runner_cleanup_status, cleanup_completed_at FROM review_runs
-         WHERE ${identify} AND status IN ('failed', 'superseded')`,
+         WHERE ${identify} AND status IN ('failed', 'superseded', 'cancelled')`,
       )
       .bind(runId, jobId, attempt, baseSha, headSha)
       .first<{
@@ -1120,7 +1169,7 @@ const createStore = (
     const result = await database
       .prepare(
         `UPDATE review_runs SET check_setup_claimed_at = ?
-         WHERE run_id = ? AND check_run_id IS NULL AND check_setup_status = 'pending'
+         WHERE run_id = ? AND status != 'cancelled' AND check_run_id IS NULL AND check_setup_status = 'pending'
            AND (check_setup_claimed_at IS NULL OR check_setup_claimed_at <= ?)`,
       )
       .bind(claimedAt, runId, staleBefore)
@@ -1240,6 +1289,156 @@ const createStore = (
         .bind(occurredAt, runId),
     ]);
     return results[0]?.meta.changes === 1;
+  },
+
+  cancelRun: async ({ runId, requestedByUid, occurredAt }) => {
+    const results = await database.batch([
+      database
+        .prepare(
+          `UPDATE review_runs
+           SET status = 'cancelled', updated_at = ?, terminal_at = COALESCE(terminal_at, ?),
+             cancelled_at = ?, cancelled_by_uid = ?
+           WHERE run_id = ? AND status = 'scheduled' AND publication_claimed_at IS NULL`,
+        )
+        .bind(occurredAt, occurredAt, occurredAt, requestedByUid, runId),
+      database
+        .prepare(
+          `UPDATE deliveries SET status = 'cancelled', updated_at = ?
+           WHERE delivery_id = (
+             SELECT delivery_id FROM review_runs
+             WHERE run_id = ? AND status = 'cancelled'
+           ) AND status = 'scheduled'`,
+        )
+        .bind(occurredAt, runId),
+    ]);
+    const row = await database
+      .prepare(`SELECT ${cancellationColumns} FROM review_runs WHERE run_id = ?`)
+      .bind(runId)
+      .first<CancellationRow>();
+    if (row === null) return { kind: 'not_found' as const, runId };
+    if ((results[0]?.meta.changes ?? 0) === 1) {
+      return { kind: 'cancelled' as const, cancellation: cancellationFromRow(row) };
+    }
+    if (row.status === 'cancelled') {
+      return { kind: 'already_cancelled' as const, cancellation: cancellationFromRow(row) };
+    }
+    return {
+      kind: 'conflict' as const,
+      runId,
+      status: row.status,
+      publicationClaimed: row.publication_claimed_at !== null,
+    };
+  },
+
+  listCancellationWork: async ({ retryBefore, recoveryBefore, limit }) => {
+    const rows = await database
+      .prepare(
+        `SELECT run_id, cancelled_at, claimed_at, runner_job_id, runner_attempt,
+           runner_cleanup_status, runner_stop_attempted_at, check_run_id,
+           check_cancel_attempted_at, check_cancel_reconciled_at
+         FROM review_runs
+         WHERE status = 'cancelled' AND (
+           (runner_job_id IS NOT NULL AND runner_cleanup_status IS NOT 'destroyed'
+             AND cancelled_at >= ?
+             AND (runner_stop_attempted_at IS NULL OR runner_stop_attempted_at <= ?))
+           OR (check_run_id IS NOT NULL AND check_cancel_reconciled_at IS NULL
+             AND (check_cancel_attempted_at IS NULL OR check_cancel_attempted_at <= ?))
+           OR (runner_job_id IS NOT NULL AND runner_cleanup_status IS NOT 'destroyed'
+             AND cancelled_at < ?)
+         )
+         ORDER BY CASE WHEN
+           (runner_job_id IS NOT NULL AND runner_cleanup_status IS NOT 'destroyed'
+             AND cancelled_at >= ?
+             AND (runner_stop_attempted_at IS NULL OR runner_stop_attempted_at <= ?))
+           OR (check_run_id IS NOT NULL AND check_cancel_reconciled_at IS NULL
+             AND (check_cancel_attempted_at IS NULL OR check_cancel_attempted_at <= ?))
+         THEN 0 ELSE 1 END,
+         cancelled_at ASC, rowid ASC
+         LIMIT ?`,
+      )
+      .bind(
+        recoveryBefore,
+        retryBefore,
+        retryBefore,
+        recoveryBefore,
+        recoveryBefore,
+        retryBefore,
+        retryBefore,
+        limit,
+      )
+      .all<CancellationWorkRow>();
+    const due = (attemptedAt: string | null) => attemptedAt === null || attemptedAt <= retryBefore;
+    return rows.results.map((row): ReviewCancellationWorkItem => {
+      const cleanupBlocked =
+        row.runner_job_id !== null && row.runner_cleanup_status !== 'destroyed';
+      const recoveryRequired = cleanupBlocked && row.cancelled_at < recoveryBefore;
+      return {
+        runId: row.run_id,
+        cancelledAt: row.cancelled_at,
+        claimedAt: row.claimed_at,
+        runnerJobId: row.runner_job_id,
+        runnerAttempt: row.runner_attempt,
+        runnerCleanupStatus: row.runner_cleanup_status,
+        runnerStopAttemptedAt: row.runner_stop_attempted_at,
+        checkRunId: row.check_run_id,
+        checkCancelAttemptedAt: row.check_cancel_attempted_at,
+        needsRunnerStop: cleanupBlocked && !recoveryRequired && due(row.runner_stop_attempted_at),
+        needsCheckReconciliation:
+          row.check_run_id !== null &&
+          row.check_cancel_reconciled_at === null &&
+          due(row.check_cancel_attempted_at),
+        cleanupBlocked,
+        recoveryRequired,
+      };
+    });
+  },
+
+  recordRunnerStopAttempt: async ({ runId, jobId, attempt, occurredAt }) => {
+    const result = await database
+      .prepare(
+        `UPDATE review_runs SET runner_stop_attempted_at = ?
+         WHERE run_id = ? AND status = 'cancelled' AND runner_job_id = ? AND runner_attempt = ?
+           AND runner_cleanup_status IS NOT 'destroyed'`,
+      )
+      .bind(occurredAt, runId, jobId, attempt)
+      .run();
+    return result.meta.changes === 1;
+  },
+
+  confirmRunnerDestroyed: async ({ runId, jobId, attempt, occurredAt }) => {
+    const result = await database
+      .prepare(
+        `UPDATE review_runs SET runner_cleanup_status = 'destroyed',
+           cleanup_completed_at = COALESCE(cleanup_completed_at, ?)
+         WHERE run_id = ? AND status = 'cancelled' AND runner_job_id = ? AND runner_attempt = ?`,
+      )
+      .bind(occurredAt, runId, jobId, attempt)
+      .run();
+    return result.meta.changes === 1;
+  },
+
+  recordCheckCancellationAttempt: async ({ runId, checkRunId, occurredAt }) => {
+    const result = await database
+      .prepare(
+        `UPDATE review_runs SET check_cancel_attempted_at = ?
+         WHERE run_id = ? AND status = 'cancelled' AND check_run_id = ?
+           AND check_cancel_reconciled_at IS NULL`,
+      )
+      .bind(occurredAt, runId, checkRunId)
+      .run();
+    return result.meta.changes === 1;
+  },
+
+  confirmCheckCancelled: async ({ runId, checkRunId, occurredAt }) => {
+    const result = await database
+      .prepare(
+        `UPDATE review_runs SET check_cancel_reconciled_at = COALESCE(check_cancel_reconciled_at, ?)
+         WHERE run_id = ? AND status = 'cancelled' AND check_run_id = ?
+           AND check_cancel_reconciled_at IS NULL`,
+      )
+      .bind(occurredAt, runId, checkRunId)
+      .run();
+    return result.meta.changes === 1;
   },
 
   completeRunPublication: async ({ runId, occurredAt, fingerprints, decision }) => {
