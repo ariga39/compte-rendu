@@ -4,7 +4,7 @@ import { SqliteD1Database } from './support/d1-database';
 
 afterEach(() => vi.unstubAllGlobals());
 
-it('requires live GitHub UID and 2FA on every model change and preserves the previous revision on denial', async () => {
+it('requires an allowlisted GitHub UID on every model change and preserves the previous revision on denial', async () => {
   const db = new SqliteD1Database();
   const origin = 'https://reviews.test';
   const app = createApplication({
@@ -31,7 +31,7 @@ it('requires live GitHub UID and 2FA on every model change and preserves the pre
       usage: async () => null,
     },
   });
-  let profile: Record<string, unknown> | Response = { id: 42, two_factor_authentication: true };
+  let profile: Record<string, unknown> | Response = { id: 42 };
   vi.stubGlobal('fetch', async (input: string | URL | Request) => {
     if (
       (input instanceof Request ? input.url : String(input)) ===
@@ -78,26 +78,23 @@ it('requires live GitHub UID and 2FA on every model change and preserves the pre
     expect((await write(0, origin, 'not-in-catalog')).status).toBe(400);
     expect((await write(0)).status).toBe(200);
     expect((await write(0)).status).toBe(409);
-    for (const unauthorized of [
-      { id: 42, two_factor_authentication: false },
-      { id: 42 },
-      { id: 1, two_factor_authentication: true },
-    ]) {
-      profile = unauthorized;
-      expect((await write(1)).status).toBe(403);
-    }
+    profile = { id: 1, two_factor_authentication: true };
+    expect((await write(1)).status).toBe(403);
     profile = Response.redirect('https://example.test/');
     const unavailable = await write(1);
     expect(unavailable.status).toBe(503);
     expect(await unavailable.json()).toEqual({
       error: 'Could not retrieve your GitHub account details.',
     });
-    profile = { id: 42, two_factor_authentication: true };
+    profile = { id: 42 };
     const read = await call('/api/model-settings', { headers: { cookie } });
+    expect(read.status).toBe(200);
     expect(await read.json()).toMatchObject({
       configuration: { revision: 1 },
       routes: ['model/a'],
     });
+    profile = { id: 42, two_factor_authentication: false };
+    expect((await write(1)).status).toBe(200);
   } finally {
     db.close();
   }

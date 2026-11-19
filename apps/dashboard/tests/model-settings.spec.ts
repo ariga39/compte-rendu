@@ -53,18 +53,20 @@ test('saves an explicit selection when switching from the instance default', asy
   await expect(page.getByRole('status')).toContainText('Saved.');
 });
 
-test('explains when GitHub omitted 2FA and shows no editor', async ({ page, harness, base }) => {
+test('explains when the account is not authorized and shows no editor', async ({
+  page,
+  harness,
+  base,
+}) => {
   harness.setHandler(() => ({
     status: 403,
     json: {
-      error: 'GitHub did not report whether two-factor authentication is enabled for this account.',
+      error: 'This GitHub account is not authorized to edit review models.',
     },
   }));
   await page.goto(base + '/settings');
   await expect(
-    page.getByText(
-      'GitHub did not report whether two-factor authentication is enabled for this account.',
-    ),
+    page.getByText('This GitHub account is not authorized to edit review models.'),
   ).toBeVisible();
   await expect(page.getByRole('button', { name: 'Save changes' })).toHaveCount(0);
 });
