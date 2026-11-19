@@ -1282,7 +1282,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
     if (job.readTokenRefreshInFlight !== undefined) return job.readTokenRefreshInFlight;
     const expiresAt = job.input.repositoryReadTokenExpiresAt;
     if (expiresAt === undefined) return;
-    const previousToken = job.input.repositoryReadToken;
     const controller = new AbortController();
     job.readTokenRefreshController = controller;
     const refresh = (async () => {
@@ -1305,6 +1304,11 @@ export const createRunner = (options: RunnerOptions = {}) => {
           applyCredentialFallback(job, expiresAt - CREDENTIAL_EXPIRY_SAFETY_MARGIN_MS);
           return;
         }
+        // Register before installing the token so cleanup racing the rotation
+        // also redacts it. The original claim token is retained at admission.
+        if (!job.readTokenSecrets.includes(refreshed.token)) {
+          job.readTokenSecrets.push(refreshed.token);
+        }
         const runtime = job.sandboxRuntime;
         if (runtime !== undefined) {
           if (runtime.rotateGithubReadToken === undefined) {
@@ -1321,9 +1325,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
           }
         }
         if (job.readTokenRefreshStopped) return;
-        if (!job.readTokenSecrets.includes(previousToken)) {
-          job.readTokenSecrets.push(previousToken);
-        }
         job.input.repositoryReadToken = refreshed.token;
         job.input.repositoryReadTokenExpiresAt = nextExpiresAt;
       } catch {
