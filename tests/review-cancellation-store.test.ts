@@ -494,6 +494,30 @@ describe.each([
     ).resolves.toBe(false);
   });
 
+  it('retains the first confirmed teardown time when a later callback supplies it', async () => {
+    const store = createStore() as CancellationStore;
+    const runId = await schedule(store, 'late-cleanup-time');
+    await store.recordRunnerJob({ runId, jobId: 'job', attempt: 1 });
+    await store.cancelRun({ runId, requestedByUid: 1, occurredAt: '2026-11-19T00:01:00.000Z' });
+    const key = 'reviews/' + runId;
+    await store.recordEvidence({ runId, evidence: evidence(key), sandboxCleanup: 'destroyed' });
+    await store.recordEvidence({
+      runId,
+      evidence: { ...evidence(key), cleanupCompletedAt: '2026-11-19T00:01:59.000Z' },
+      sandboxCleanup: 'failed',
+    });
+    expect((await store.getRunOutcome(runId))?.evidence?.cleanupCompletedAt).toBeUndefined();
+    for (const timestamp of ['2026-11-19T00:02:00.000Z', '2026-11-19T00:03:00.000Z'])
+      await store.recordEvidence({
+        runId,
+        evidence: { ...evidence(key), cleanupCompletedAt: timestamp },
+        sandboxCleanup: 'destroyed',
+      });
+    expect((await store.getRunOutcome(runId))?.evidence?.cleanupCompletedAt).toBe(
+      '2026-11-19T00:02:00.000Z',
+    );
+  });
+
   it('recovers a failed cancelled-run cleanup and keeps destroyed teardown monotonic', async () => {
     const store = createStore() as CancellationStore;
     const runId = await schedule(store, 'cancel-cleanup-recovery');

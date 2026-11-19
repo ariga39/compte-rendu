@@ -1036,7 +1036,7 @@ const createStore = (
            evidence_sha256 = ?, evidence_uploaded_at = ?,
            execution_started_at = ?, submission_completed_at = ?,
            cleanup_completed_at = CASE
-             WHEN runner_cleanup_status = 'destroyed' THEN cleanup_completed_at
+             WHEN runner_cleanup_status = 'destroyed' AND (cleanup_completed_at IS NOT NULL OR ? IS NOT 'destroyed') THEN cleanup_completed_at
              ELSE ?
            END,
            runner_cleanup_status = CASE
@@ -1055,6 +1055,7 @@ const createStore = (
         evidence.uploadedAt,
         evidence.executionStartedAt ?? null,
         evidence.submissionCompletedAt ?? null,
+        sandboxCleanup ?? null,
         evidence.cleanupCompletedAt ?? null,
         sandboxCleanup ?? null,
         runId,
