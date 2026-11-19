@@ -1,14 +1,24 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { createRelayCatalog } from '../apps/inference-worker/src/catalog';
+import { RelayCatalogSources } from '../apps/inference-worker/src/catalog-config';
 import { createGrantControl } from '../apps/inference-worker/src/grants';
+import { Schema } from 'effect';
 import { SqliteD1Database } from './support/d1-database';
 
+const migrations = [
+  '0001_grants.sql',
+  '0002_requests.sql',
+  '0003_catalog.sql',
+  '0004_catalog_sources.sql',
+];
+const migrationsDirectory = '../../apps/inference-worker/migrations';
+const database = () => new SqliteD1Database(migrations, migrationsDirectory);
+const deadline = () => Date.now() + 60_000;
+
 afterEach(() => vi.unstubAllGlobals());
-it('keeps formerly listed models available across refreshes and fresh relay instances', async () => {
-  const db = new SqliteD1Database(
-    ['0001_grants.sql', '0002_requests.sql', '0003_catalog.sql'],
-    '../../apps/inference-worker/migrations',
-  );
+
+it('replaces a source snapshot while retaining historical mappings for queued grants', async () => {
+  const db = database();
   const source = {
     url: 'https://models.example/v1/models',
     prefix: 'review-provider/',
@@ -16,7 +26,7 @@ it('keeps formerly listed models available across refreshes and fresh relay inst
     credentialAlias: 'default',
   };
   try {
-    let entries: unknown[] = [{ id: 'original' }, {}];
+    let entries: unknown[] = [{ id: 'original' }];
     const observedHeaders: Headers[] = [];
     vi.stubGlobal('fetch', async (_url: string, init: RequestInit) => {
       observedHeaders.push(new Headers(init.headers));
@@ -25,14 +35,28 @@ it('keeps formerly listed models available across refreshes and fresh relay inst
     await createRelayCatalog(db, [source]).refresh(60_000);
     expect(await createRelayCatalog(db, [source]).get()).toMatchObject({
       routes: ['review-provider/original'],
-      rejected: 1,
+      rejected: 0,
+    });
+    entries = [{ id: 'partial' }, {}];
+    await createRelayCatalog(db, [source]).refresh(90_000);
+    expect(await createRelayCatalog(db, [source]).get()).toMatchObject({
+      routes: ['review-provider/original'],
+      lastSuccessAt: new Date(60_000).toISOString(),
+      lastRefreshError: 'refresh failed',
     });
     entries = [{ id: 'new' }];
     await createRelayCatalog(db, [source]).refresh(120_000);
     expect(await createRelayCatalog(db, [source]).get()).toMatchObject({
-      routes: ['review-provider/new', 'review-provider/original'],
+      routes: ['review-provider/new'],
       rejected: 0,
     });
+    await expect(
+      createGrantControl(db).issue({
+        jobId: 'job-original',
+        snapshot: { routes: ['review-provider/original'] },
+        latestIssueDeadline: deadline(),
+      }),
+    ).resolves.toMatchObject({ kind: 'issued' });
     expect(
       observedHeaders.every(
         (headers) =>
@@ -85,11 +109,8 @@ it('requires the operator bearer to read the relay catalog from the application'
   }
 });
 
-it('preserves the last complete refresh and bounds newly discovered routes', async () => {
-  const db = new SqliteD1Database(
-    ['0001_grants.sql', '0002_requests.sql', '0003_catalog.sql'],
-    '../../apps/inference-worker/migrations',
-  );
+it('rejects a snapshot over the distinct selectable route limit and keeps the prior snapshot', async () => {
+  const db = database();
   const catalog = createRelayCatalog(db, [
     {
       url: 'https://models.example/catalog',
@@ -102,20 +123,34 @@ it('preserves the last complete refresh and bounds newly discovered routes', asy
     vi.stubGlobal('fetch', async () => Response.json({ data: [{ id: 'old' }] }));
     await catalog.refresh(100);
     vi.stubGlobal('fetch', async () =>
-      Response.json({ data: Array.from({ length: 1001 }, (_, i) => ({ id: 'm' + i })) }),
+      Response.json({ data: Array.from({ length: 1000 }, (_, i) => ({ id: 'm' + i })) }),
     );
     await catalog.refresh(200);
     const capped = await catalog.get();
     expect(capped.routes).toHaveLength(1000);
-    expect(capped.routes).toContain('p/old');
-    expect(capped.lastRefreshError).toBe('catalog limit reached');
+    expect(capped.routes).not.toContain('p/old');
+    expect(capped.lastRefreshError).toBeNull();
+    const historical = db.database
+      .prepare('SELECT COUNT(*) AS total FROM catalog_routes')
+      .get() as { readonly total: number };
+    expect(historical.total).toBe(1001);
+
+    vi.stubGlobal('fetch', async () =>
+      Response.json({ data: Array.from({ length: 1001 }, (_, i) => ({ id: 'n' + i })) }),
+    );
+    await catalog.refresh(300);
+    const rejected = await catalog.get();
+    expect(rejected.routes).toEqual(capped.routes);
+    expect(rejected.lastRefreshError).toBe('catalog limit reached');
+    expect(rejected.lastSuccessAt).toEqual(new Date(200).toISOString());
+
     vi.stubGlobal('fetch', async () => {
       throw new Error('private detail');
     });
-    await catalog.refresh(300);
+    await catalog.refresh(400);
     const failed = await catalog.get();
     expect(failed.routes).toEqual(capped.routes);
-    expect(failed.lastSuccessAt).toEqual(new Date(100).toISOString());
+    expect(failed.lastSuccessAt).toEqual(new Date(200).toISOString());
     expect(failed.lastRefreshError).toBe('refresh failed');
   } finally {
     db.close();
@@ -123,10 +158,7 @@ it('preserves the last complete refresh and bounds newly discovered routes', asy
 });
 
 it('reports an attempted route remap and keeps its former mapping', async () => {
-  const db = new SqliteD1Database(
-    ['0001_grants.sql', '0002_requests.sql', '0003_catalog.sql'],
-    '../../apps/inference-worker/migrations',
-  );
+  const db = database();
   try {
     vi.stubGlobal('fetch', async () => Response.json({ data: [] }));
     const source = {
@@ -140,6 +172,7 @@ it('reports an attempted route remap and keeps its former mapping', async () => 
     const changed = createRelayCatalog(db, [{ ...source, aliases: { review: 'two' } }]);
     await changed.refresh(200);
     expect(await changed.get()).toMatchObject({
+      lastAttemptAt: new Date(200).toISOString(),
       lastRefreshError: 'route mapping conflict',
       lastSuccessAt: new Date(100).toISOString(),
     });
@@ -154,10 +187,7 @@ it('reports an attempted route remap and keeps its former mapping', async () => 
 });
 
 it('an older refresh finishing last cannot overwrite a newer failure', async () => {
-  const db = new SqliteD1Database(
-    ['0001_grants.sql', '0002_requests.sql', '0003_catalog.sql'],
-    '../../apps/inference-worker/migrations',
-  );
+  const db = database();
   const source = {
     url: 'https://models.example/models',
     prefix: 'p/',
@@ -182,21 +212,105 @@ it('an older refresh finishing last cannot overwrite a newer failure', async () 
       lastAttemptAt: new Date(300).toISOString(),
       lastRefreshError: 'refresh failed',
     });
+    expect(await catalog.get()).toMatchObject({ routes: ['p/old'] });
   } finally {
     db.close();
   }
 });
 
-it('retains explicit aliases served by a separate provider without discovering unrelated routes there', async () => {
-  const db = new SqliteD1Database(
-    ['0001_grants.sql', '0002_requests.sql', '0003_catalog.sql'],
-    '../../apps/inference-worker/migrations',
-  );
+it('replaces each source independently and serves the failed source snapshot with a warning', async () => {
+  const db = database();
+  const first = {
+    url: 'https://a.example/models',
+    prefix: 'a/',
+    providerSlug: 'custom-a',
+    credentialAlias: 'default',
+  };
+  const second = {
+    url: 'https://b.example/models',
+    prefix: 'b/',
+    providerSlug: 'custom-b',
+    credentialAlias: 'default',
+  };
+  const entries = new Map<string, unknown[]>([
+    ['https://a.example/models', [{ id: 'one' }]],
+    ['https://b.example/models', [{ id: 'one' }]],
+  ]);
+  vi.stubGlobal('fetch', async (url: string) => Response.json({ data: entries.get(url) ?? [] }));
+  const catalog = createRelayCatalog(db, [first, second]);
+  try {
+    await catalog.refresh(100);
+    expect((await catalog.get()).routes).toEqual(['a/one', 'b/one']);
+
+    entries.set('https://a.example/models', [{ id: 'two' }]);
+    entries.set('https://b.example/models', [{ id: 'two' }]);
+    await catalog.refresh(200);
+    expect((await catalog.get()).routes).toEqual(['a/two', 'b/two']);
+
+    vi.stubGlobal('fetch', async (url: string) => {
+      if (url === 'https://a.example/models') throw new Error('provider down');
+      return Response.json({ data: [{ id: 'three' }] });
+    });
+    await catalog.refresh(300);
+    expect(await catalog.get()).toMatchObject({
+      routes: ['a/two', 'b/three'],
+      lastAttemptAt: new Date(300).toISOString(),
+      lastSuccessAt: new Date(200).toISOString(),
+      lastRefreshError: 'refresh failed',
+    });
+  } finally {
+    db.close();
+  }
+});
+
+it('removes memberships from sources that are no longer configured but keeps old grants resolvable', async () => {
+  const db = database();
+  const retired = {
+    providerSlug: 'custom-legacy',
+    credentialAlias: 'default',
+    aliases: { retired: 'retired-model' },
+  };
+  const active = {
+    url: 'https://b.example/models',
+    prefix: 'b/',
+    providerSlug: 'custom-b',
+    credentialAlias: 'default',
+  };
+  const entries = new Map<string, unknown[]>([['https://b.example/models', [{ id: 'one' }]]]);
+  vi.stubGlobal('fetch', async (url: string) => Response.json({ data: entries.get(url) ?? [] }));
+  try {
+    await createRelayCatalog(db, [retired, active]).refresh(100);
+    expect((await createRelayCatalog(db, [retired, active]).get()).routes).toEqual([
+      'b/one',
+      'retired',
+    ]);
+
+    const remaining = createRelayCatalog(db, [active]);
+    expect((await remaining.get()).routes).toEqual(['b/one']);
+    entries.set('https://b.example/models', [{ id: 'two' }]);
+    await remaining.refresh(200);
+    expect(await remaining.get()).toMatchObject({
+      routes: ['b/two'],
+      lastRefreshError: null,
+    });
+
+    await expect(
+      createGrantControl(db).issue({
+        jobId: 'job-retired',
+        snapshot: { routes: ['retired'] },
+        latestIssueDeadline: deadline(),
+      }),
+    ).resolves.toMatchObject({ kind: 'issued' });
+  } finally {
+    db.close();
+  }
+});
+
+it('keeps explicit aliases served by a separate provider without discovering unrelated routes there', async () => {
+  const db = database();
   const fetch = vi.fn(async () => Response.json({ data: [{ id: 'current' }] }));
   vi.stubGlobal('fetch', fetch);
   try {
-    const { RelayCatalogSources } = await import('../apps/inference-worker/src/catalog-config');
-    const { Schema } = await import('effect');
     const sources = Schema.decodeUnknownSync(RelayCatalogSources)([
       {
         url: 'https://models.example/native/models',
@@ -222,13 +336,34 @@ it('retains explicit aliases served by a separate provider without discovering u
   }
 });
 
+it('presents a discovered route instead of an alias with the same provider, credential and model', async () => {
+  const db = database();
+  const source = {
+    url: 'https://models.example/native/models',
+    prefix: 'provider/',
+    providerSlug: 'custom-review',
+    credentialAlias: 'default',
+    aliases: { 'legacy-review': 'same-model' },
+  };
+  try {
+    vi.stubGlobal('fetch', async () => Response.json({ data: [{ id: 'same-model' }] }));
+    const catalog = createRelayCatalog(db, [source]);
+    await catalog.refresh(50);
+    expect((await catalog.get()).routes).toEqual(['provider/same-model']);
+    await expect(
+      createGrantControl(db).issue({
+        jobId: 'job-legacy-alias',
+        snapshot: { routes: ['legacy-review'] },
+        latestIssueDeadline: deadline(),
+      }),
+    ).resolves.toMatchObject({ kind: 'issued' });
+  } finally {
+    db.close();
+  }
+});
+
 it('discovers a private provider catalog only through its trusted Gateway BYOK route', async () => {
-  const db = new SqliteD1Database(
-    ['0001_grants.sql', '0002_requests.sql', '0003_catalog.sql'],
-    '../../apps/inference-worker/migrations',
-  );
-  const { RelayCatalogSources } = await import('../apps/inference-worker/src/catalog-config');
-  const { Schema } = await import('effect');
+  const db = database();
   try {
     const observed: { url: string; headers: Headers; redirect?: RequestRedirect }[] = [];
     vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
@@ -265,12 +400,7 @@ it('discovers a private provider catalog only through its trusted Gateway BYOK r
 });
 
 it('freezes the alias-only source provider and credential on a legacy grant', async () => {
-  const db = new SqliteD1Database(
-    ['0001_grants.sql', '0002_requests.sql', '0003_catalog.sql'],
-    '../../apps/inference-worker/migrations',
-  );
-  const { RelayCatalogSources } = await import('../apps/inference-worker/src/catalog-config');
-  const { Schema } = await import('effect');
+  const db = database();
   try {
     const sources = Schema.decodeUnknownSync(RelayCatalogSources)([
       {
@@ -284,12 +414,11 @@ it('freezes the alias-only source provider and credential on a legacy grant', as
     await createRelayCatalog(db, sources).refresh(50);
     expect(fetch).not.toHaveBeenCalled();
 
-    const deadline = Date.now() + 60_000;
     await expect(
       createGrantControl(db).issue({
         jobId: 'job-legacy',
         snapshot: { routes: ['legacy-review'] },
-        latestIssueDeadline: deadline,
+        latestIssueDeadline: deadline(),
       }),
     ).resolves.toMatchObject({ kind: 'issued' });
     const grant = db.database
@@ -308,13 +437,181 @@ it('freezes the alias-only source provider and credential on a legacy grant', as
   }
 });
 
-it('validates the combined prefix and model length per discovered route', async () => {
-  const db = new SqliteD1Database(
-    ['0001_grants.sql', '0002_requests.sql', '0003_catalog.sql'],
-    '../../apps/inference-worker/migrations',
-  );
-  const { RelayCatalogSources } = await import('../apps/inference-worker/src/catalog-config');
-  const { Schema } = await import('effect');
+it('reads a paginated source through its final page before replacing the snapshot', async () => {
+  const db = database();
+  const pages = new Map<string, unknown>([
+    [
+      'https://models.example/models',
+      { data: [{ id: 'one' }], next: 'https://models.example/models?page=2' },
+    ],
+    ['https://models.example/models?page=2', { data: [{ id: 'two' }], has_more: false }],
+  ]);
+  vi.stubGlobal('fetch', async (url: string) => Response.json(pages.get(url) ?? { data: [] }));
+  try {
+    const catalog = createRelayCatalog(db, [
+      {
+        url: 'https://models.example/models',
+        prefix: 'p/',
+        providerSlug: 'custom-review',
+        credentialAlias: 'default',
+      },
+    ]);
+    await catalog.refresh(50);
+    expect(await catalog.get()).toMatchObject({
+      routes: ['p/one', 'p/two'],
+      lastRefreshError: null,
+    });
+  } finally {
+    db.close();
+  }
+});
+
+it('never follows a next-page URL that changes the configured Gateway provider path', async () => {
+  const db = database();
+  const configured = 'https://gateway.ai.cloudflare.com/v1/account/gateway/custom-private/models';
+  const other = 'https://gateway.ai.cloudflare.com/v1/account/gateway/custom-other/models';
+  const observed: string[] = [];
+  let next: string | null = null;
+  vi.stubGlobal('fetch', async (url: string) => {
+    observed.push(url);
+    return Response.json({ data: [{ id: 'one' }], ...(next === null ? {} : { next }) });
+  });
+  try {
+    const catalog = createRelayCatalog(
+      db,
+      [
+        {
+          discovery: 'gateway',
+          prefix: 'p/',
+          providerSlug: 'custom-private',
+          credentialAlias: 'default',
+        },
+      ],
+      { accountId: 'account', gatewayId: 'gateway', runToken: 'test-run-token' },
+    );
+    await catalog.refresh(25);
+    expect(observed).toEqual([configured]);
+    next = other;
+    await catalog.refresh(50);
+    expect(observed).toEqual([configured, configured]);
+    expect(await catalog.get()).toMatchObject({
+      routes: ['p/one'],
+      lastRefreshError: 'refresh failed',
+      lastSuccessAt: new Date(25).toISOString(),
+    });
+  } finally {
+    db.close();
+  }
+});
+
+it('rejects a continuation signal that cannot establish a complete list', async () => {
+  const db = database();
+  const source = {
+    url: 'https://models.example/models',
+    prefix: 'p/',
+    providerSlug: 'custom-review',
+    credentialAlias: 'default',
+  };
+  const catalog = createRelayCatalog(db, [source]);
+  try {
+    vi.stubGlobal('fetch', async () => Response.json({ data: [{ id: 'old' }] }));
+    await catalog.refresh(100);
+    vi.stubGlobal('fetch', async () => Response.json({ data: [{ id: 'new' }], has_more: true }));
+    await catalog.refresh(200);
+    expect(await catalog.get()).toMatchObject({
+      routes: ['p/old'],
+      lastSuccessAt: new Date(100).toISOString(),
+      lastRefreshError: 'refresh failed',
+    });
+  } finally {
+    db.close();
+  }
+});
+
+it('withdraws a source on a valid complete empty list and retains it on malformed or oversized responses', async () => {
+  const db = database();
+  const source = {
+    url: 'https://models.example/models',
+    prefix: 'p/',
+    providerSlug: 'custom-review',
+    credentialAlias: 'default',
+  };
+  const catalog = createRelayCatalog(db, [source]);
+  try {
+    vi.stubGlobal('fetch', async () => Response.json({ data: [{ id: 'old' }] }));
+    await catalog.refresh(100);
+
+    vi.stubGlobal('fetch', async () => new Response('{', { status: 200 }));
+    await catalog.refresh(200);
+    expect((await catalog.get()).routes).toEqual(['p/old']);
+
+    vi.stubGlobal('fetch', async () => new Response('x'.repeat(300 * 1024), { status: 200 }));
+    await catalog.refresh(300);
+    expect((await catalog.get()).routes).toEqual(['p/old']);
+
+    vi.stubGlobal('fetch', async () => Response.json({ data: [] }));
+    await catalog.refresh(400);
+    expect(await catalog.get()).toMatchObject({
+      routes: [],
+      lastSuccessAt: new Date(400).toISOString(),
+      lastRefreshError: null,
+    });
+  } finally {
+    db.close();
+  }
+});
+
+it('an initial failed refresh contributes no discovered choices', async () => {
+  const db = database();
+  try {
+    vi.stubGlobal('fetch', async () => {
+      throw new Error('offline');
+    });
+    const catalog = createRelayCatalog(db, [
+      {
+        url: 'https://models.example/models',
+        prefix: 'p/',
+        providerSlug: 'custom-review',
+        credentialAlias: 'default',
+      },
+    ]);
+    await catalog.refresh(50);
+    expect(await catalog.get()).toMatchObject({
+      routes: [],
+      lastAttemptAt: new Date(50).toISOString(),
+      lastSuccessAt: null,
+      lastRefreshError: 'refresh failed',
+    });
+  } finally {
+    db.close();
+  }
+});
+
+it('an initial mixed valid and malformed list publishes no partial snapshot', async () => {
+  const db = database();
+  const source = {
+    url: 'https://models.example/models',
+    prefix: 'p/',
+    providerSlug: 'custom-review',
+    credentialAlias: 'default',
+  };
+  try {
+    vi.stubGlobal('fetch', async () => Response.json({ data: [{ id: 'partial' }, {}] }));
+    const catalog = createRelayCatalog(db, [source]);
+    await catalog.refresh(50);
+    expect(await catalog.get()).toMatchObject({
+      routes: [],
+      lastAttemptAt: new Date(50).toISOString(),
+      lastSuccessAt: null,
+      lastRefreshError: 'refresh failed',
+    });
+  } finally {
+    db.close();
+  }
+});
+
+it('rejects a snapshot with an invalid combined ID length without publishing a partial list', async () => {
+  const db = database();
   try {
     const prefix = 'a'.repeat(127);
     const sources = Schema.decodeUnknownSync(RelayCatalogSources)([
@@ -325,13 +622,54 @@ it('validates the combined prefix and model length per discovered route', async 
         credentialAlias: 'default',
       },
     ]);
-    vi.stubGlobal('fetch', async () => Response.json({ data: [{ id: 'a' }, { id: 'ab' }] }));
+    let entries: unknown[] = [{ id: 'a' }, { id: 'ab' }];
+    vi.stubGlobal('fetch', async () => Response.json({ data: entries }));
     const catalog = createRelayCatalog(db, sources);
     await catalog.refresh(25);
     expect(await catalog.get()).toMatchObject({
+      routes: [],
+      lastSuccessAt: null,
+      lastRefreshError: 'refresh failed',
+    });
+
+    entries = [{ id: 'a' }];
+    await catalog.refresh(50);
+    expect(await catalog.get()).toMatchObject({
       routes: [`${prefix}a`],
-      rejected: 1,
       lastRefreshError: null,
+    });
+
+    entries = [{ id: 'a' }, { id: 'ab' }];
+    await catalog.refresh(75);
+    expect(await catalog.get()).toMatchObject({
+      routes: [`${prefix}a`],
+      lastSuccessAt: new Date(50).toISOString(),
+      lastRefreshError: 'refresh failed',
+    });
+  } finally {
+    db.close();
+  }
+});
+
+it('preserves choices when a provider sends malformed continuation metadata', async () => {
+  const db = database();
+  try {
+    let body: unknown = { data: [{ id: 'saved' }] };
+    vi.stubGlobal('fetch', async () => Response.json(body));
+    const catalog = createRelayCatalog(db, [
+      {
+        url: 'https://models.example/models',
+        prefix: 'p/',
+        providerSlug: 'review',
+        credentialAlias: 'default',
+      },
+    ]);
+    await catalog.refresh(1);
+    body = { data: [], next: { unexpected: 'cursor' } };
+    await catalog.refresh(2);
+    expect(await catalog.get()).toMatchObject({
+      routes: ['p/saved'],
+      lastRefreshError: 'refresh failed',
     });
   } finally {
     db.close();

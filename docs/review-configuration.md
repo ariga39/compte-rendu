@@ -14,10 +14,74 @@ selection contains only route IDs: it cannot install a provider, supply a URL,
 change agent permissions or contain a key. The same route ID must continue to mean
 the same upstream model while queued or executing jobs reference it.
 
-The initial intended reviewers are DeepSeek V4.1 Flash and Step 5 Preview, with
-DeepSeek V4.1 Flash for synthesis. They are configuration choices, not program
-constants. The examples below assume the operator has configured the corresponding
-`deepseek-review` and `step-review` routes on that instance's relay.
+## Selectable model catalog
+
+An editor choosing a reviewer needs to know which models this installation's
+configured providers advertise. Free-text entry would require the editor to know both the
+upstream model ID and the installation's route prefix; it would still leave the
+relay needing a trusted mapping before it can issue a grant.
+
+Both production installations have a discovery source. Use those lists to
+populate Settings. Fetching them in the settings request would put provider
+latency and outages on every edit. The existing scheduled refresh already pays
+the discovery cost and can serve a last-known list when a provider is down.
+A public provider list can differ from the models an individual credential can
+invoke. Describe the list as provider-advertised; a successful authenticated
+inference remains the evidence that a model worked for a particular request.
+
+### Refresh and storage
+
+Keep the existing immutable route mappings for grant issuance. Store each source’s complete selectable membership in one D1 row, including
+a valid empty list. A shared refresh timestamp orders the atomic batch. Derive the source key from normalized provider
+slug, credential alias, discovery mode, prefix and configured URL where applicable.
+Reordering configuration must not change identity. Explicitly configured aliases
+can be resolved from configuration separately from discovered membership, so a
+failed network request cannot keep a deleted alias in the picker.
+
+Use the existing scheduled refresh. Publish new mappings and replace the source's
+members in one guarded D1 transaction. Reject an older completion, a conflicting
+route mapping, or a change that would exceed 1,000 distinct selectable routes.
+Keep the previous snapshot on rejection. Historical mappings do not consume that
+budget. Restrict reads to currently configured sources and remove obsolete
+memberships during refresh. A changed source configuration requires deployment;
+changes to a provider's advertised models take effect on refresh.
+
+Accept a complete list according to the configured endpoint's listing contract.
+For a single-page source, reject a continuation signal (for example a next link,
+a next cursor or a true has-more flag), invalid entries, and malformed or
+oversized responses. A paginated provider must be read through its final page
+before publishing any replacement. A bare first page without continuation
+metadata cannot establish completeness unless the endpoint contract says it can.
+A valid complete empty list withdraws that source's candidates. An interrupted
+or invalid response retains its last successful list. Show a refresh warning
+when serving cached choices after failure. An initial failed refresh has no
+choices to contribute.
+
+### Selection and execution
+
+Read candidates from the active membership in Settings and the catalog API.
+Validate explicit selections against that list at save time in both Settings and
+the operator API. Show a saved reviewer or synthesis model that has disappeared
+as unavailable and let the editor replace it. If an alias duplicates a discovered
+route to the identical provider, credential and model, present the discovered
+route for new choices and retain the old ID on existing configurations and jobs.
+
+Keep the saved selection until an editor changes it. Removing a model from the
+picker does not prove that requests using its ID will fail. An existing selection
+(including the installation default) can therefore still run. No catalog read is
+needed at webhook admission. Core freezes the selected revision when queueing;
+the relay resolves those IDs when issuing a grant. Upstream refusals follow the
+existing job failure path. Configuration revisions order editor writes only;
+the scheduled refresh time orders catalog updates independently.
+
+On migration, keep existing route mappings and start discovery memberships
+empty. Populate from an initial complete refresh before switching picker reads.
+If a source cannot refresh, expose its discovery failure, and never fill its
+list with unverified historical mappings. On a healthy refresh the picker should
+go from A and B to B and C without intervention, while a job queued with A can
+still resolve its original route. Also verify source removal, complete empty
+lists, partial and overlapping refreshes, and a saved synthesis model withdrawn
+between opening and saving the form.
 
 ## Operator API
 
@@ -48,8 +112,8 @@ selection:
 {
   "revision": 0,
   "selection": {
-    "reviewers": ["deepseek-review", "step-review"],
-    "synthesis": "deepseek-review"
+    "reviewers": ["review-provider/deepseek-v4.1-flash", "review-provider/glm-5.3-flash"],
+    "synthesis": "review-provider/deepseek-v4.1-flash"
   }
 }
 ```

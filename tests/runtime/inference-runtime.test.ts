@@ -667,6 +667,12 @@ it('serves a claimed model through application control, managed inference, and d
       trigger: 'automatic',
     },
   });
+  await control('retire-model');
+  await runtime.INFERENCE.refreshCatalog(Date.now() + 1);
+  expect((await runtime.INFERENCE.catalog()).routes).toEqual([
+    'sample/common',
+    'sample/replacement',
+  ]);
   const claimed = await post('/runner-claim', {});
   expect(claimed.status).toBe(200);
   const claim = (await claimed.json()) as {

@@ -113,7 +113,9 @@ and preserves a historical route served by another upstream.
 The application Worker's minute cron refreshes the private relay catalog.
 Read `GET /api/review-configuration/catalog` on the application origin with
 the review configuration operator bearer to see route IDs and refresh status.
-The catalog endpoint reads D1. A failed provider refresh preserves known
-routes. Existing route IDs keep their original upstream mapping. A conflicting
-configuration appears as a refresh error. See the [migration design](gateway-relay-design.md)
-for the drain and retirement procedure.
+The catalog returns the latest complete list per discovery source. A valid
+empty list withdraws that source's candidates; a failed refresh preserves its
+last complete list. Existing reviews can still resolve their frozen route IDs.
+Apply the relay D1 migrations before deploying the inference Worker. Verify a
+successful scheduled refresh and the expected model IDs on this endpoint before
+rolling out the dashboard. See [model selection](review-configuration.md#selectable-model-catalog).
