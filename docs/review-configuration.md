@@ -86,10 +86,8 @@ The user authorization flow uses PKCE. GitHub chooses the permissions of an
 App user token from the App registration and the authorizing user.
 
 The editor calls GitHub's authenticated-user endpoint on each settings read
-and save. It requires an allowlisted numeric ID and an explicit
-`two_factor_authentication: true`. A missing field denies access. Verify that
-the instance's actual GitHub App user authorization returns the private field
-before declaring the editor operational. The public task dashboard needs no
+and save. Only accounts whose numeric ID is in this instance’s allowlist can edit.
+The public task dashboard needs no
 session. The editor lists this instance's inference catalog and uses the same
 revision check and admission snapshots as the operator API.
 

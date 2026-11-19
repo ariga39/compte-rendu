@@ -137,7 +137,7 @@ export async function modelSettings(request: Request, env: ApplicationEnv): Prom
     });
     if (!upstream.ok)
       return upstream.status === 401 ? response(401) : response(503, { error: unavailable });
-    const user = (await upstream.json()) as { id?: unknown; two_factor_authentication?: unknown };
+    const user = (await upstream.json()) as { id?: unknown };
     unavailable = 'Could not read the dashboard editor allowlist.';
     const allowed = Schema.decodeUnknownSync(Schema.Array(Schema.Number))(
       JSON.parse(env.DASHBOARD_MODEL_EDITOR_IDS ?? '[]'),
@@ -145,13 +145,6 @@ export async function modelSettings(request: Request, env: ApplicationEnv): Prom
     if (typeof user.id !== 'number' || !Number.isSafeInteger(user.id) || !allowed.includes(user.id))
       return response(403, {
         error: 'This GitHub account is not authorized to edit review models.',
-      });
-    if (user.two_factor_authentication !== true)
-      return response(403, {
-        error:
-          user.two_factor_authentication === false
-            ? 'Enable two-factor authentication on GitHub to edit review models.'
-            : 'GitHub did not report whether two-factor authentication is enabled for this account.',
       });
     unavailable = 'Could not load the model catalog.';
     if (!env.INFERENCE_RELAY) return response(503, { error: unavailable });

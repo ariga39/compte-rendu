@@ -43,7 +43,7 @@ export default defineConfig({
             request.url === 'https://api.github.com/user' &&
             request.headers.get('authorization') === 'Bearer ghu_test'
           )
-            return Response.json({ id: 42, two_factor_authentication: true });
+            return Response.json({ id: 42 });
           return new Response(null, { status: 404 });
         },
       },
