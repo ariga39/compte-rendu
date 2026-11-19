@@ -1341,14 +1341,14 @@ const createStore = (
     };
   },
 
-  listCancellationWork: async ({ retryBefore, recoveryBefore, limit }) => {
+  listCancellationWork: async ({ runId, retryBefore, recoveryBefore, limit }) => {
     const rows = await database
       .prepare(
         `SELECT run_id, cancelled_at, claimed_at, runner_job_id, runner_attempt,
            runner_cleanup_status, runner_stop_attempted_at, check_run_id,
            check_cancel_attempted_at, check_cancel_reconciled_at
          FROM review_runs
-         WHERE status = 'cancelled' AND (
+         WHERE status = 'cancelled' AND (? IS NULL OR run_id = ?) AND (
            (runner_job_id IS NOT NULL AND runner_cleanup_status IS NOT 'destroyed'
              AND cancelled_at >= ?
              AND (runner_stop_attempted_at IS NULL OR runner_stop_attempted_at <= ?))
@@ -1368,6 +1368,8 @@ const createStore = (
          LIMIT ?`,
       )
       .bind(
+        runId ?? null,
+        runId ?? null,
         recoveryBefore,
         retryBefore,
         retryBefore,
@@ -1404,14 +1406,15 @@ const createStore = (
     });
   },
 
-  recordRunnerStopAttempt: async ({ runId, jobId, attempt, occurredAt }) => {
+  recordRunnerStopAttempt: async ({ runId, jobId, attempt, occurredAt, expectedLastAttempt }) => {
     const result = await database
       .prepare(
         `UPDATE review_runs SET runner_stop_attempted_at = ?
          WHERE run_id = ? AND status = 'cancelled' AND runner_job_id = ? AND runner_attempt = ?
-           AND runner_cleanup_status IS NOT 'destroyed'`,
+           AND runner_cleanup_status IS NOT 'destroyed'
+           AND runner_stop_attempted_at IS ?`,
       )
-      .bind(occurredAt, runId, jobId, attempt)
+      .bind(occurredAt, runId, jobId, attempt, expectedLastAttempt)
       .run();
     return result.meta.changes === 1;
   },
@@ -1428,14 +1431,20 @@ const createStore = (
     return result.meta.changes === 1;
   },
 
-  recordCheckCancellationAttempt: async ({ runId, checkRunId, occurredAt }) => {
+  recordCheckCancellationAttempt: async ({
+    runId,
+    checkRunId,
+    occurredAt,
+    expectedLastAttempt,
+  }) => {
     const result = await database
       .prepare(
         `UPDATE review_runs SET check_cancel_attempted_at = ?
          WHERE run_id = ? AND status = 'cancelled' AND check_run_id = ?
-           AND check_cancel_reconciled_at IS NULL`,
+           AND check_cancel_reconciled_at IS NULL
+           AND check_cancel_attempted_at IS ?`,
       )
-      .bind(occurredAt, runId, checkRunId)
+      .bind(occurredAt, runId, checkRunId, expectedLastAttempt)
       .run();
     return result.meta.changes === 1;
   },

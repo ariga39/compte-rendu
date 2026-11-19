@@ -458,6 +458,7 @@ export const createGitHubPublicationAdapter = (
       runId,
       status,
       decision,
+      cancellationReason,
     }) => {
       const payload =
         status === 'in_progress'
@@ -492,7 +493,10 @@ export const createGitHubPublicationAdapter = (
                   conclusion: status,
                   output: {
                     title: 'Review cancelled',
-                    summary: 'A newer pull request revision replaced this run.',
+                    summary:
+                      cancellationReason === 'manual'
+                        ? 'An operator cancelled this review.'
+                        : 'A newer pull request revision replaced this run.',
                   },
                 };
       await requestJson(

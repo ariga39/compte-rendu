@@ -28,6 +28,7 @@ import {
   type ReviewPublicationStateStore,
 } from './index';
 import type { D1DatabaseLike } from './review-state-store';
+import { createJobControl } from './job-control';
 import type { WorkerEntrypoint } from '@compte-rendu/contracts';
 import { createCloudflareOperationalLog } from './operational-log';
 import { createPostHogLifecycleLog } from './posthog';
@@ -226,7 +227,7 @@ const responseForDisposition = (
 export const createCoreWorker = (
   env: CoreWorkerEnv,
   dependencies: CoreWorkerDependencies = {},
-): WorkerEntrypoint<CoreWorkerEnv> => {
+): WorkerEntrypoint<CoreWorkerEnv> & ReturnType<typeof createJobControl> => {
   const tokenProvider = createGitHubAppTokenProvider({
     appId: env.GITHUB_APP_ID,
     privateKey: env.GITHUB_APP_PRIVATE_KEY,
@@ -620,6 +621,8 @@ export const createCoreWorker = (
       },
     });
     if (!evidenceRecorded) return new Response(null, { status: 409 });
+    if ((await stateStore.getRunOutcome(callback.runId))?.status === 'cancelled')
+      return new Response(null, { status: 202 });
 
     if (callback.status === 'succeeded') {
       if (outcome.status === 'superseded') {
@@ -656,6 +659,7 @@ export const createCoreWorker = (
       if (finalOutcome === undefined || finalOutcome.status === 'scheduled') {
         return new Response(null, { status: 503 });
       }
+      if (finalOutcome.status === 'cancelled') return new Response(null, { status: 202 });
       await recordFinishedLifecycle(
         lifecycleLog,
         finalOutcome,
@@ -868,6 +872,16 @@ export const createCoreWorker = (
       queueWaitMs,
     });
 
+    const releaseUndeliveredCancellation = async () => {
+      const stopped = await stateStore.confirmRunnerDestroyed?.({
+        runId: claim.runId,
+        jobId: claim.jobId,
+        attempt: claim.attempt,
+        occurredAt: new Date().toISOString(),
+      });
+      return new Response(null, { status: stopped ? 204 : 503 });
+    };
+
     let preparationFailure: PublicTaskFailure | undefined;
     try {
       const reset = await Effect.runPromise(
@@ -956,6 +970,7 @@ export const createCoreWorker = (
       };
       await Schema.decodeUnknownPromise(RunnerJobInput)(input);
       const current = await stateStore.getRunOutcome(claim.runId);
+      if (current?.status === 'cancelled') return releaseUndeliveredCancellation();
       if (current?.status !== 'scheduled') {
         if (
           current !== undefined &&
@@ -993,6 +1008,7 @@ export const createCoreWorker = (
       ) {
         return new Response(null, { status: 204 });
       }
+      if (current?.status === 'cancelled') return releaseUndeliveredCancellation();
       const failedAt = await Effect.runPromise(DateTime.now.pipe(Effect.map(DateTime.formatIso)));
       if (current === undefined) {
         await stateStore.markSchedulingFailed({
@@ -1031,6 +1047,7 @@ export const createCoreWorker = (
   };
 
   return {
+    ...createJobControl(stateStore, github, runner),
     fetch: async (request, _env, context) => {
       if (new URL(request.url).pathname === '/review-configuration') {
         return handleReviewConfiguration(

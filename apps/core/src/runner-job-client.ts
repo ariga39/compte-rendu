@@ -11,6 +11,12 @@ export interface RunnerJobClientOptions {
 }
 
 export interface RunnerJobSubmitter {
+  readonly requestStop: (input: {
+    jobId: string;
+    runId: string;
+    attempt: number;
+    claimDeadlineAt: number;
+  }) => Promise<boolean>;
   readonly cancelJob: (jobId: string, claimedAt?: string) => Promise<void | 'pending'>;
 }
 
@@ -27,6 +33,25 @@ export const createRunnerJobClient = ({
   binding,
   authToken,
 }: RunnerJobClientOptions): RunnerJobSubmitter => ({
+  requestStop: async ({ jobId, runId, attempt, claimDeadlineAt }) => {
+    const response = await binding.fetch(
+      authorizedJobRequest(authToken, jobId, {
+        method: 'DELETE',
+        headers: { 'x-compte-rendu-claim-deadline': String(claimDeadlineAt) },
+        signal: AbortSignal.timeout(8000),
+      }),
+    );
+    if (response.status !== 200) return false;
+    const state = await Schema.decodeUnknownPromise(RunnerJobResponse)(await response.json());
+    return (
+      state.id === jobId &&
+      state.runId === runId &&
+      state.attempt === attempt &&
+      state.status !== 'queued' &&
+      state.status !== 'running' &&
+      state.sandbox.cleanup === 'destroyed'
+    );
+  },
   cancelJob: async (jobId, claimedAt) => {
     const deadline =
       claimedAt === undefined ? NaN : Date.parse(claimedAt) + REVIEW_ATTEMPT_BUDGET_MS;

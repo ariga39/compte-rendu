@@ -458,6 +458,7 @@ describe.each([
       runId,
       checkRunId: 321,
       occurredAt: '2026-11-19T00:02:00.000Z',
+      expectedLastAttempt: null,
     });
     await expect(
       store.listCancellationWork?.({
@@ -675,6 +676,159 @@ describe.each([
     ).resolves.toEqual([]);
   });
 
+  it('limits cancellation work to an optional runId for an immediate targeted stop', async () => {
+    const store = createStore() as CancellationStore;
+    const firstRun = await schedule(store, 'targeted-first', job({ pullRequestNumber: 201 }));
+    await store.recordRunnerJob({ runId: firstRun, jobId: 'targeted-job-1', attempt: 1 });
+    await store.cancelRun({
+      runId: firstRun,
+      requestedByUid: 1001,
+      occurredAt: '2026-11-19T00:01:00.000Z',
+    });
+    const secondRun = await schedule(store, 'targeted-second', job({ pullRequestNumber: 202 }));
+    await store.recordRunnerJob({ runId: secondRun, jobId: 'targeted-job-2', attempt: 1 });
+    await store.cancelRun({
+      runId: secondRun,
+      requestedByUid: 1001,
+      occurredAt: '2026-11-19T00:02:00.000Z',
+    });
+
+    await expect(
+      store.listCancellationWork?.({
+        retryBefore: '2026-11-19T01:00:00.000Z',
+        recoveryBefore: '2026-11-18T00:00:00.000Z',
+        limit: 10,
+      }),
+    ).resolves.toMatchObject([{ runId: firstRun }, { runId: secondRun }]);
+    await expect(
+      store.listCancellationWork?.({
+        runId: secondRun,
+        retryBefore: '2026-11-19T01:00:00.000Z',
+        recoveryBefore: '2026-11-18T00:00:00.000Z',
+        limit: 1,
+      }),
+    ).resolves.toMatchObject([{ runId: secondRun, needsRunnerStop: true }]);
+    await expect(
+      store.listCancellationWork?.({
+        runId: 'missing-run',
+        retryBefore: '2026-11-19T01:00:00.000Z',
+        recoveryBefore: '2026-11-18T00:00:00.000Z',
+        limit: 1,
+      }),
+    ).resolves.toEqual([]);
+  });
+
+  it('leases one stop and one Check dispatch per observed attempt snapshot', async () => {
+    const store = createStore() as CancellationStore;
+    const runId = await schedule(store, 'cancellation-cas');
+    await store.recordRunnerJob({ runId, jobId: 'cas-job', attempt: 1 });
+    await store.recordCheckRun?.({ runId, checkRunId: 321 });
+    await store.cancelRun({
+      runId,
+      requestedByUid: 1001,
+      occurredAt: '2026-11-19T00:01:00.000Z',
+    });
+
+    const [snapshot] =
+      (await store.listCancellationWork?.({
+        runId,
+        retryBefore: '2026-11-19T00:02:00.000Z',
+        recoveryBefore: '2026-11-19T00:00:00.000Z',
+        limit: 1,
+      })) ?? [];
+    if (snapshot === undefined) throw new Error('cancellation work was not visible');
+    expect(snapshot).toMatchObject({
+      runnerStopAttemptedAt: null,
+      checkCancelAttemptedAt: null,
+      needsRunnerStop: true,
+      needsCheckReconciliation: true,
+    });
+
+    const stopResults = await Promise.all([
+      store.recordRunnerStopAttempt!({
+        runId,
+        jobId: 'cas-job',
+        attempt: 1,
+        occurredAt: '2026-11-19T00:02:00.000Z',
+        expectedLastAttempt: snapshot.runnerStopAttemptedAt,
+      }),
+      store.recordRunnerStopAttempt!({
+        runId,
+        jobId: 'cas-job',
+        attempt: 1,
+        occurredAt: '2026-11-19T00:02:01.000Z',
+        expectedLastAttempt: snapshot.runnerStopAttemptedAt,
+      }),
+    ]);
+    expect(stopResults.filter(Boolean)).toHaveLength(1);
+
+    const checkResults = await Promise.all([
+      store.recordCheckCancellationAttempt!({
+        runId,
+        checkRunId: 321,
+        occurredAt: '2026-11-19T00:02:00.000Z',
+        expectedLastAttempt: snapshot.checkCancelAttemptedAt,
+      }),
+      store.recordCheckCancellationAttempt!({
+        runId,
+        checkRunId: 321,
+        occurredAt: '2026-11-19T00:02:01.000Z',
+        expectedLastAttempt: snapshot.checkCancelAttemptedAt,
+      }),
+    ]);
+    expect(checkResults.filter(Boolean)).toHaveLength(1);
+
+    const [leased] =
+      (await store.listCancellationWork?.({
+        runId,
+        retryBefore: '2026-11-19T00:02:02.000Z',
+        recoveryBefore: '2026-11-19T00:00:00.000Z',
+        limit: 1,
+      })) ?? [];
+    if (leased === undefined) throw new Error('leased cancellation work was not visible');
+    expect(['2026-11-19T00:02:00.000Z', '2026-11-19T00:02:01.000Z']).toContain(
+      leased.runnerStopAttemptedAt,
+    );
+    expect(['2026-11-19T00:02:00.000Z', '2026-11-19T00:02:01.000Z']).toContain(
+      leased.checkCancelAttemptedAt,
+    );
+
+    await expect(
+      store.recordRunnerStopAttempt!({
+        runId,
+        jobId: 'cas-job',
+        attempt: 1,
+        occurredAt: '2026-11-19T00:03:00.000Z',
+        expectedLastAttempt: leased.runnerStopAttemptedAt,
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      store.recordCheckCancellationAttempt!({
+        runId,
+        checkRunId: 321,
+        occurredAt: '2026-11-19T00:03:00.000Z',
+        expectedLastAttempt: leased.checkCancelAttemptedAt,
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      store.recordRunnerStopAttempt!({
+        runId,
+        jobId: 'cas-job',
+        attempt: 1,
+        occurredAt: '2026-11-19T00:04:00.000Z',
+        expectedLastAttempt: null,
+      }),
+    ).resolves.toBe(false);
+    await expect(
+      store.recordCheckCancellationAttempt!({
+        runId,
+        checkRunId: 321,
+        occurredAt: '2026-11-19T00:04:00.000Z',
+        expectedLastAttempt: null,
+      }),
+    ).resolves.toBe(false);
+  });
+
   it('returns a bounded, retry-aware cancellation work list', async () => {
     const store = createStore() as CancellationStore;
     const runIds: string[] = [];
@@ -708,6 +862,7 @@ describe.each([
       jobId: 'runner-job-0',
       attempt: 1,
       occurredAt: '2026-11-19T00:10:00.000Z',
+      expectedLastAttempt: null,
     });
     await expect(
       store.listCancellationWork?.({
@@ -722,6 +877,7 @@ describe.each([
         jobId: 'foreign-job',
         attempt: 1,
         occurredAt: '2026-11-19T00:11:00.000Z',
+        expectedLastAttempt: '2026-11-19T00:10:00.000Z',
       }),
     ).resolves.toBe(false);
   });

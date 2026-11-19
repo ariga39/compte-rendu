@@ -1,3 +1,4 @@
+import { createD1ReviewStateStore } from '../apps/core/src/review-state-store';
 import { afterEach, expect, it, vi } from 'vitest';
 import { createApplication } from '../apps/dashboard/src/lib/server/application';
 import { SqliteD1Database } from './support/d1-database';
@@ -345,6 +346,51 @@ it('requires an allowlisted GitHub UID on every model change and preserves the p
     });
     profile = { id: 42, two_factor_authentication: false };
     expect((await write(1)).status).toBe(200);
+  } finally {
+    db.close();
+  }
+});
+
+it('requires the current operator and same origin to cancel a queued review by its public ID', async () => {
+  const { app, db } = createApp();
+  let uid = 42;
+  stubGitHub(() => ({ id: uid, login: 'operator' }));
+  try {
+    const state = createD1ReviewStateStore(db);
+    const queued = await state.claimReview({
+      deliveryId: 'dashboard-cancel',
+      occurredAt: new Date().toISOString(),
+      job: {
+        repositoryId: 1,
+        installationId: 2,
+        pullRequestNumber: 3,
+        baseSha: '1'.repeat(40),
+        headSha: '2'.repeat(40),
+        trigger: 'automatic',
+      },
+    });
+    if (queued.kind !== 'claimed') throw new Error('expected queued review');
+    const cancel = (cookie: string, from: string, id = queued.runId) =>
+      app.fetch(
+        new Request(origin + '/api/jobs/' + id + '/cancel', {
+          method: 'POST',
+          headers: { cookie, origin: from },
+        }),
+      );
+    expect((await cancel('', origin)).status).toBe(401);
+    const { cookie } = await signIn(app);
+    expect((await cancel(cookie, 'https://other.test')).status).toBe(403);
+    uid = 99;
+    expect((await cancel(cookie, origin)).status).toBe(403);
+    expect(await state.getRunOutcome(queued.runId)).toMatchObject({ status: 'scheduled' });
+    uid = 42;
+    expect((await cancel(cookie, origin, 'unknown')).status).toBe(404);
+    const response = await cancel(cookie, origin);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(await response.json()).toEqual({ status: 'cancelled', pendingCleanup: false });
+    expect((await cancel(cookie, origin)).status).toBe(200);
+    expect(await state.getRunOutcome(queued.runId)).toMatchObject({ status: 'cancelled' });
   } finally {
     db.close();
   }
