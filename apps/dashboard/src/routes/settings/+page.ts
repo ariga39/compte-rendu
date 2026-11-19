@@ -22,6 +22,7 @@ export const load: PageLoad = async ({ fetch, depends }) => {
     configuration: ReviewConfiguration;
     routes: string[];
     catalogRefreshFailed: boolean;
+    lastAttemptAt: string | null;
   };
   return { settings, status: reply.status, error: null };
 };

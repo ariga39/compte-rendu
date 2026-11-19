@@ -150,7 +150,7 @@ export async function modelSettings(request: Request, env: ApplicationEnv): Prom
     if (!env.INFERENCE_RELAY) return response(503, { error: unavailable });
     if (request.method === 'PUT')
       return applyReviewConfiguration(request, env.REVIEW_DB, env.INFERENCE_RELAY);
-    const { routes, lastRefreshError } = await env.INFERENCE_RELAY.catalog();
+    const { routes, lastAttemptAt, lastRefreshError } = await env.INFERENCE_RELAY.catalog();
     unavailable = 'Could not read the saved model configuration.';
     const config = await applyReviewConfiguration(request, env.REVIEW_DB);
     return config.ok
@@ -158,6 +158,7 @@ export async function modelSettings(request: Request, env: ApplicationEnv): Prom
           configuration: await config.json(),
           routes,
           catalogRefreshFailed: lastRefreshError !== null,
+          lastAttemptAt,
         })
       : config;
   } catch {

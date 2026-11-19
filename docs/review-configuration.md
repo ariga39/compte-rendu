@@ -42,15 +42,15 @@ Use the existing scheduled refresh. Publish new mappings and replace the source'
 members in one guarded D1 transaction. Reject an older completion, a conflicting
 route mapping, or a change that would exceed 1,000 distinct selectable routes.
 Keep the previous snapshot on rejection. Historical mappings do not consume that
-budget. Restrict reads to currently configured sources and remove obsolete
-memberships during refresh. A changed source configuration requires deployment;
+budget. If another source frees capacity later in the same refresh, a rejected source can use it on the following refresh. Restrict reads to currently configured sources and remove obsolete
+memberships during refresh. Changing a source URL or prefix creates a new source with no prior list. A changed source configuration requires deployment;
 changes to a provider's advertised models take effect on refresh.
 
 Accept a complete list according to the configured endpoint's listing contract.
 For a single-page source, reject a continuation signal (for example a next link,
 a next cursor or a true has-more flag), invalid entries, and malformed or
 oversized responses. A paginated provider must be read through its final page
-before publishing any replacement. A bare first page without continuation
+before publishing any replacement. The relay follows explicit next-page URLs on the same HTTPS origin and path. Cursor-only continuations preserve the previous snapshot. A bare first page without continuation
 metadata cannot establish completeness unless the endpoint contract says it can.
 A valid complete empty list withdraws that source's candidates. An interrupted
 or invalid response retains its last successful list. Show a refresh warning

@@ -37,7 +37,7 @@ const linkHeader = (response: Response): string[] => {
   const targets: string[] = [];
   for (const part of response.headers.get('link')?.split(/,(?=\s*<)/) ?? []) {
     const rel = /;\s*rel\s*=\s*(?:"([^"]*)"|([^;\s]+))/i.exec(part);
-    if (!rel) throw new Error('invalid catalog link');
+    if (!rel) continue;
     if (!(rel[1] ?? rel[2])?.toLowerCase().split(/\s+/).includes('next')) continue;
     const match = /^\s*<([^>]+)>/.exec(part);
     if (!match?.[1]) throw new Error('invalid catalog continuation');

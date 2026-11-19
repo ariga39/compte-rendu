@@ -130,10 +130,13 @@ it('rejects a snapshot over the distinct selectable route limit and keeps the pr
     expect(capped.routes).toHaveLength(1000);
     expect(capped.routes).not.toContain('p/old');
     expect(capped.lastRefreshError).toBeNull();
-    const historical = db.database
-      .prepare('SELECT COUNT(*) AS total FROM catalog_routes')
-      .get() as { readonly total: number };
-    expect(historical.total).toBe(1001);
+    await expect(
+      createGrantControl(db).issue({
+        jobId: 'before-the-budget-replacement',
+        snapshot: { routes: ['p/old'] },
+        latestIssueDeadline: deadline(),
+      }),
+    ).resolves.toMatchObject({ kind: 'issued' });
 
     vi.stubGlobal('fetch', async () =>
       Response.json({ data: Array.from({ length: 1001 }, (_, i) => ({ id: 'n' + i })) }),
@@ -166,14 +169,17 @@ it('reports an attempted route remap and keeps its former mapping', async () => 
       prefix: 'p/',
       providerSlug: 'custom-review',
       credentialAlias: 'default',
-      aliases: { review: 'one' },
+      aliases: { unchanged: 'original', review: 'one', removed: 'other' },
     };
     await createRelayCatalog(db, [source]).refresh(100);
-    const changed = createRelayCatalog(db, [{ ...source, aliases: { review: 'two' } }]);
+    const changed = createRelayCatalog(db, [
+      { ...source, aliases: { unchanged: 'original', review: 'two' } },
+    ]);
     await changed.refresh(200);
     expect(await changed.get()).toMatchObject({
       lastAttemptAt: new Date(200).toISOString(),
       lastRefreshError: 'route mapping conflict',
+      routes: ['unchanged'],
       lastSuccessAt: new Date(100).toISOString(),
     });
     await createRelayCatalog(db, [source]).refresh(300);
@@ -655,7 +661,11 @@ it('preserves choices when a provider sends malformed continuation metadata', as
   const db = database();
   try {
     let body: unknown = { data: [{ id: 'saved' }] };
-    vi.stubGlobal('fetch', async () => Response.json(body));
+    vi.stubGlobal('fetch', async () =>
+      Response.json(body, {
+        headers: { Link: '<https://example.test/info>; title="Information"' },
+      }),
+    );
     const catalog = createRelayCatalog(db, [
       {
         url: 'https://models.example/models',
@@ -665,6 +675,7 @@ it('preserves choices when a provider sends malformed continuation metadata', as
       },
     ]);
     await catalog.refresh(1);
+    expect((await catalog.get()).routes).toEqual(['p/saved']);
     body = { data: [], next: { unexpected: 'cursor' } };
     await catalog.refresh(2);
     expect(await catalog.get()).toMatchObject({

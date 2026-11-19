@@ -106,10 +106,29 @@ test('shows an empty provider list after the last model is withdrawn', async ({
     status: 200,
     json: {
       routes: [],
+      lastAttemptAt: new Date(100).toISOString(),
       catalogRefreshFailed: false,
       configuration: { revision: 1, selection: null },
     },
   }));
   await page.goto(base + '/settings');
   await expect(page.getByRole('status')).toHaveText('No models are currently listed.');
+});
+
+test('distinguishes an uninitialized catalog from a complete empty list', async ({
+  page,
+  harness,
+  base,
+}) => {
+  harness.setHandler(() => ({
+    status: 200,
+    json: {
+      routes: [],
+      lastAttemptAt: null,
+      catalogRefreshFailed: false,
+      configuration: { revision: 0, selection: null },
+    },
+  }));
+  await page.goto(base + '/settings');
+  await expect(page.getByRole('status')).toHaveText('Waiting for the first model list refresh.');
 });
