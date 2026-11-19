@@ -20,7 +20,7 @@ How to read this dashboard. It is read-only and reflects the latest recorded rev
 
 - **Queued**: waiting to start.
 - **In progress**: assigned to a runner and preparing, reviewing, or publishing. This is not a count of model calls and does not prove a process is currently alive.
-- **Published** and **Failed** count reviews received in the past 24 hours that ended that way.
+- **Published** and **Failed** count reviews received in the past 24 hours that ended that way. When a review from that period was cancelled, the overview shows a separate cancellation count with a link to history.
 
 ## Current reviews
 
@@ -39,7 +39,7 @@ Cleanup follows the review and is not an error. Cleanup is shown on a review's p
 
 ## Finding and paging through history
 
-- **Status**: all, queued, in progress, published, failed, or superseded.
+- **Status**: all, queued, in progress, published, failed, superseded, or cancelled.
 - **From (UTC)** and **To (UTC)** are dates in UTC and each includes the whole selected day.
 - Choose your filters, then select **Apply filters**. A changed date does not apply until you select it.
 - **Older runs** loads the next page and **Back to latest** returns to the newest page.

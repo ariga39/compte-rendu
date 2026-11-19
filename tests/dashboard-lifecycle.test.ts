@@ -113,6 +113,14 @@ it('shows durable result receipt and publication milestones without inventing ex
   });
 });
 
+it('counts a manual cancellation separately from failures in the received cohort', async () => {
+  const { store, identity } = await fixture(false);
+  await store.cancelRun({ runId: identity.runId, requestedByUid: 17, occurredAt: time(2) });
+  const overview = (since: string) => store.getPublicOverview!({ since, limit: 25 });
+  expect((await overview(time(0))).counts).toMatchObject({ cancelledLast24h: 1, failedLast24h: 0 });
+  expect((await overview(time(1))).counts).toMatchObject({ cancelledLast24h: 0, failedLast24h: 0 });
+});
+
 it('counts the received cohort and independently overlapping cleanup attention', async () => {
   const { store, identity } = await fixture();
   await store.markRunCompleted({ runId: identity.runId, occurredAt: '2026-01-03T00:00:00.000Z' });
@@ -123,7 +131,14 @@ it('counts the received cohort and independently overlapping cleanup attention',
         since: '2026-01-02T12:00:00.000Z',
       })
     ).counts,
-  ).toEqual({ queued: 0, claimed: 0, publishedLast24h: 0, failedLast24h: 0, cleanupAttention: 1 });
+  ).toEqual({
+    queued: 0,
+    claimed: 0,
+    publishedLast24h: 0,
+    failedLast24h: 0,
+    cancelledLast24h: 0,
+    cleanupAttention: 1,
+  });
 });
 
 it('projects an authenticated failed callback through a fresh dashboard worker', async () => {

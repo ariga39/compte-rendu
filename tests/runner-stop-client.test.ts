@@ -39,4 +39,14 @@ describe('operator stop delivery', () => {
     expect(requests[0].headers.get('authorization')).toBe('Bearer test-token');
     expect(requests[0].headers.get('x-compte-rendu-claim-deadline')).toBe('12345678');
   });
+
+  it('rejects an unexpected Runner failure instead of treating it as pending', async () => {
+    const client = createRunnerJobClient({
+      authToken: 'test-token',
+      binding: {
+        fetch: async () => new Response('runner credential ghp_runner_secret', { status: 503 }),
+      },
+    });
+    await expect(client.requestStop(attempt)).rejects.toThrow('Runner stop request failed');
+  });
 });

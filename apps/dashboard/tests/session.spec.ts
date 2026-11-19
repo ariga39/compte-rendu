@@ -42,7 +42,7 @@ const historyPage = (tasks: PublicTaskState[] = []): PublicHistoryPage => ({
 
 const overview = (): PublicOverview & PublicHistoryPage => ({
   ...historyPage(),
-  counts: { queued: 0, claimed: 0, publishedLast24h: 0, failedLast24h: 0 },
+  counts: { queued: 0, claimed: 0, publishedLast24h: 0, failedLast24h: 0, cancelledLast24h: 0 },
   cleanupAttention: 0,
 });
 

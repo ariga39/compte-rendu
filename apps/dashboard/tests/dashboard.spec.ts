@@ -103,7 +103,10 @@ const publicIdentity: Extract<PublicTaskIdentity, { kind: 'public' }> = {
 const defaultOverviewHandler: ApiHandler = (url) => {
   if (url.pathname === '/api/dashboard') {
     return ok({
-      ...overviewData({ queued: 2, claimed: 1, publishedLast24h: 5, failedLast24h: 1 }, 3),
+      ...overviewData(
+        { queued: 2, claimed: 1, publishedLast24h: 5, failedLast24h: 1, cancelledLast24h: 3 },
+        3,
+      ),
       ...historyPage([task({ runId: 'cur-1', dispatch: 'claimed', claimedAt: NOW })]),
     });
   }
@@ -120,7 +123,10 @@ const defaultOverviewHandler: ApiHandler = (url) => {
 const publicIdentityOverviewHandler: ApiHandler = (url) => {
   if (url.pathname === '/api/dashboard') {
     return ok({
-      ...overviewData({ queued: 2, claimed: 1, publishedLast24h: 5, failedLast24h: 1 }, 0),
+      ...overviewData(
+        { queued: 2, claimed: 1, publishedLast24h: 5, failedLast24h: 1, cancelledLast24h: 3 },
+        0,
+      ),
       ...historyPage([
         task({ runId: 'cur-1', dispatch: 'claimed', claimedAt: NOW, identity: publicIdentity }),
       ]),
@@ -150,6 +156,9 @@ test('overview requests its read-only endpoints and renders counts and lists', a
   expect(await page.locator('[data-testid="stat"] strong').first().textContent()).toBe('2');
   const text = await page.locator('#content').textContent();
   expect(text).toContain('Anonymous review');
+  await expect(page.locator('[data-testid="stats"]')).toContainText(
+    'Cancelled reviews received in the past 24 hours: 3',
+  );
   expect(text).not.toContain('Cleanup needs attention');
 });
 
@@ -162,7 +171,10 @@ test('overview links truncated current work to a status-filtered history view', 
   harness.setHandler((url) => {
     if (url.pathname === '/api/dashboard') {
       return ok({
-        ...overviewData({ queued: 25, claimed: 0, publishedLast24h: 0, failedLast24h: 0 }, 2),
+        ...overviewData(
+          { queued: 25, claimed: 0, publishedLast24h: 0, failedLast24h: 0, cancelledLast24h: 0 },
+          2,
+        ),
         ...historyPage(current25, 'CUR-CURSOR'),
       });
     }
@@ -507,7 +519,12 @@ test('repeated manual refresh clicks stay single-flight', async ({ page, harness
   });
   harness.setHandler(() => ({
     promise: gate.then(() =>
-      ok(overviewData({ queued: 0, claimed: 0, publishedLast24h: 0, failedLast24h: 0 }, 0)),
+      ok(
+        overviewData(
+          { queued: 0, claimed: 0, publishedLast24h: 0, failedLast24h: 0, cancelledLast24h: 0 },
+          0,
+        ),
+      ),
     ),
   }));
   await page.click('[data-testid="refresh"]');
@@ -643,7 +660,10 @@ test('identity expires independently of network and navigation', async ({
   harness.setHandler((url) => {
     if (url.pathname === '/api/dashboard') {
       return ok({
-        ...overviewData({ queued: 1, claimed: 0, publishedLast24h: 0, failedLast24h: 0 }, 0),
+        ...overviewData(
+          { queued: 1, claimed: 0, publishedLast24h: 0, failedLast24h: 0, cancelledLast24h: 0 },
+          0,
+        ),
         ...historyPage([task({ runId: 'r', identity: expiring })]),
       });
     }
@@ -669,7 +689,10 @@ test('each identity expires at its own deadline without a refresh', async ({
   harness.setHandler((url) => {
     if (url.pathname === '/api/dashboard') {
       return ok({
-        ...overviewData({ queued: 2, claimed: 0, publishedLast24h: 0, failedLast24h: 0 }, 0),
+        ...overviewData(
+          { queued: 2, claimed: 0, publishedLast24h: 0, failedLast24h: 0, cancelledLast24h: 0 },
+          0,
+        ),
         ...historyPage([
           task({ runId: 'one', identity: first }),
           task({ runId: 'two', identity: second }),
@@ -708,7 +731,10 @@ test('an already-expired public identity is not rendered', async ({ page, harnes
   harness.setHandler((url) => {
     if (url.pathname === '/api/dashboard') {
       return ok({
-        ...overviewData({ queued: 1, claimed: 0, publishedLast24h: 0, failedLast24h: 0 }, 0),
+        ...overviewData(
+          { queued: 1, claimed: 0, publishedLast24h: 0, failedLast24h: 0, cancelledLast24h: 0 },
+          0,
+        ),
         ...historyPage([task({ runId: 'r', identity: { ...publicIdentity, expiresAt: NOW } })]),
       });
     }
@@ -756,7 +782,10 @@ test('a valid identity expires while offline and does not return without a fresh
   harness.setHandler((url) => {
     if (url.pathname === '/api/dashboard') {
       return ok({
-        ...overviewData({ queued: 1, claimed: 0, publishedLast24h: 0, failedLast24h: 0 }, 0),
+        ...overviewData(
+          { queued: 1, claimed: 0, publishedLast24h: 0, failedLast24h: 0, cancelledLast24h: 0 },
+          0,
+        ),
         ...historyPage([task({ runId: 'r', identity: expiring })]),
       });
     }
@@ -795,7 +824,10 @@ test('network delay is subtracted from the identity lifetime conservatively', as
     const delayed = sleep(300).then(() => {
       if (url.pathname === '/api/dashboard') {
         return ok({
-          ...overviewData({ queued: 1, claimed: 0, publishedLast24h: 0, failedLast24h: 0 }, 0),
+          ...overviewData(
+            { queued: 1, claimed: 0, publishedLast24h: 0, failedLast24h: 0, cancelledLast24h: 0 },
+            0,
+          ),
           ...historyPage([task({ runId: 'r', identity: lifetime })]),
         });
       }
@@ -823,7 +855,10 @@ test('hostile route and task fields cannot inject markup or run scripts', async 
   harness.setHandler((url) => {
     if (url.pathname === '/api/dashboard') {
       return ok({
-        ...overviewData({ queued: 1, claimed: 0, publishedLast24h: 0, failedLast24h: 0 }, 0),
+        ...overviewData(
+          { queued: 1, claimed: 0, publishedLast24h: 0, failedLast24h: 0, cancelledLast24h: 0 },
+          0,
+        ),
         ...historyPage([
           task({
             runId: 'r',

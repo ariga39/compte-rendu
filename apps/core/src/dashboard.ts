@@ -254,6 +254,7 @@ export const handleDashboardRequest = async (
         claimed: counts.claimed,
         publishedLast24h: counts.publishedLast24h,
         failedLast24h: counts.failedLast24h,
+        cancelledLast24h: counts.cancelledLast24h,
       },
       cleanupAttention: counts.cleanupAttention,
       tasks: rows.map((row) => projectPublicTask(row, now)),

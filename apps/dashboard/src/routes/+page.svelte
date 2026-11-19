@@ -99,6 +99,9 @@
             </Column>
           </Row>
         </Grid>
+        {#if dash.data.overview.counts.cancelledLast24h > 0}
+          <p><a href="/history?status=cancelled">Cancelled reviews</a> received in the past 24 hours: {dash.data.overview.counts.cancelledLast24h}</p>
+        {/if}
       </section>
       <section>
         <h2 class="section-title">Current reviews</h2>

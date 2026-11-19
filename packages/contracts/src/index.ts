@@ -481,6 +481,12 @@ export type OperationalLogEvent =
         | 'completion_failed';
     }
   | {
+      readonly phase: 'cancellation';
+      readonly outcome: 'delivery_failed';
+      readonly runId: string;
+      readonly kind: 'runner-stop' | 'check-cancel';
+    }
+  | {
       readonly phase: 'runner';
       readonly outcome: 'command';
       readonly runId: string;
@@ -568,6 +574,10 @@ export const sanitizeOperationalLogEvent = (event: OperationalLogEvent): Operati
   if (event.phase === 'relay') return event;
 
   if (event.phase === 'publication') {
+    return { ...event, runId: sanitizeOperationalLogIdentifier(event.runId) ?? 'redacted' };
+  }
+
+  if (event.phase === 'cancellation') {
     return { ...event, runId: sanitizeOperationalLogIdentifier(event.runId) ?? 'redacted' };
   }
 
@@ -700,6 +710,7 @@ export const PublicOverview = Schema.Struct({
     claimed: Schema.Int,
     publishedLast24h: Schema.Int,
     failedLast24h: Schema.Int,
+    cancelledLast24h: Schema.Int,
   }),
   cleanupAttention: Schema.Int,
 });
