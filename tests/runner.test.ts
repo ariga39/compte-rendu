@@ -670,6 +670,7 @@ const runReminderScenario = async (scenario: {
   checkoutTimedOut?: boolean;
   advanceOnCreateMs?: number;
   createTimedOut?: boolean;
+  advanceOnSessionExportMs?: number;
   agentDelayMs?: number;
   expectedRotatedToken?: string;
   readTokenFetch?: typeof fetch;
@@ -749,7 +750,11 @@ const runReminderScenario = async (scenario: {
         if (scenario.checkoutTimedOut)
           return { exitCode: 1, stdout: '', timedOut: true, truncated: false };
       }
-      if (args.includes('export')) exportTimeouts.push(options.timeoutMs);
+      if (args.includes('export')) {
+        exportTimeouts.push(options.timeoutMs);
+        if (scenario.advanceOnSessionExportMs !== undefined)
+          vi.setSystemTime(Date.now() + scenario.advanceOnSessionExportMs);
+      }
       const readGithubToken = async () => {
         if (githubTokenPath === undefined) return '';
         try {
@@ -2559,38 +2564,52 @@ describe('Runner Job HTTP interface', () => {
     }
   });
 
-  it('rejects a successful agent result that crosses the fallback credential margin', async () => {
-    vi.useFakeTimers({ toFake: ['Date'] });
-    const start = Date.parse('2026-09-12T00:00:00.000Z');
-    const markdown = '## Review:\n\nToo late for the old credential.';
-    try {
-      vi.setSystemTime(start);
-      const result = await runReminderScenario({
-        runId: 'run-read-token-fallback-crossed',
-        claimDeadlineAt: start + 90 * 60 * 1000,
-        repositoryReadTokenExpiresAt: start + 20 * 60 * 1000,
-        advanceOnCheckoutMs: 18 * 60 * 1000,
-        readTokenFetch: async () => new Response(null, { status: 503 }),
-        rounds: [
-          {
-            output: finalMarkdownJsonl(markdown, 'session-reminder'),
-            finalText: JSON.stringify({ decision: 'comment', markdown }),
-            advanceMs: 2 * 60 * 1000,
-          },
-        ],
-      });
+  it.each(['agent', 'inspection', 'correction'] as const)(
+    'applies the credential deadline to agent work when %s crosses the margin',
+    async (crossing) => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      const start = Date.parse('2026-09-12T00:00:00.000Z');
+      const markdown = '## Review:\n\nReview result.';
+      try {
+        vi.setSystemTime(start);
+        const result = await runReminderScenario({
+          runId: 'run-read-token-fallback-crossed',
+          advanceOnSessionExportMs: crossing === 'inspection' ? 2 * 60 * 1000 : undefined,
+          claimDeadlineAt: start + 90 * 60 * 1000,
+          repositoryReadTokenExpiresAt: start + 20 * 60 * 1000,
+          advanceOnCheckoutMs: 18 * 60 * 1000,
+          readTokenFetch: async () => new Response(null, { status: 503 }),
+          rounds: [
+            ...(crossing === 'correction'
+              ? [{ output: completedWithoutSubmitJsonl('session-reminder'), finalText: null }]
+              : []),
+            {
+              output: finalMarkdownJsonl(markdown, 'session-reminder'),
+              finalText: JSON.stringify({ decision: 'comment', markdown }),
+              advanceMs: crossing === 'inspection' ? 0 : 2 * 60 * 1000,
+            },
+          ],
+        });
 
-      expect(result.agentRuns).toBe(1);
-      expect(result.terminal).toMatchObject({
-        status: 'failed',
-        failure: { reason: 'timeout', deadline: 'credential' },
-        sandbox: { cleanup: 'destroyed' },
-      });
-      expect(result.terminal).not.toHaveProperty('result');
-    } finally {
-      vi.useRealTimers();
-    }
-  });
+        expect(result.agentRuns).toBe(crossing === 'correction' ? 2 : 1);
+        if (crossing === 'inspection') {
+          expect(result.terminal).toMatchObject({
+            status: 'succeeded',
+            result: structuredResult(markdown),
+          });
+          return;
+        }
+        expect(result.terminal).toMatchObject({
+          status: 'failed',
+          failure: { reason: 'timeout', deadline: 'credential' },
+          sandbox: { cleanup: 'destroyed' },
+        });
+        expect(result.terminal).not.toHaveProperty('result');
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it('ignores a read-token refresh response that arrives after cleanup', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
