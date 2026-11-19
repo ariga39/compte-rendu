@@ -672,6 +672,7 @@ const runReminderScenario = async (scenario: {
   createTimedOut?: boolean;
   agentDelayMs?: number;
   readTokenFetch?: typeof fetch;
+  cleanupStderr?: string;
   logEvents?: unknown[];
   terminalAttempts?: number;
   driveClock?: () => Promise<void>;
@@ -807,6 +808,9 @@ const runReminderScenario = async (scenario: {
             : args.includes('session')
               ? `[{"id":"${sessionId}"}]\n`
               : '',
+        ...(scenario.cleanupStderr === undefined || args[0] !== 'secret' || args[1] !== 'rm'
+          ? {}
+          : { stderr: scenario.cleanupStderr }),
         timedOut: isCreate && scenario.createTimedOut === true,
         truncated: false,
       };
@@ -2451,6 +2455,65 @@ describe('Runner Job HTTP interface', () => {
       });
       expect(JSON.stringify(result.terminal)).not.toContain('rotated-github-read-token');
       expect(JSON.stringify(result.manifest)).not.toContain('rotated-github-read-token');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('retains the rotated read token for cleanup diagnostic redaction', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const start = Date.now();
+    const markdown = '## Review:\n\nRotated canary.';
+    const canary = 'synthetic-rotated-canary';
+    const logEvents: unknown[] = [];
+    let agentStarted = false;
+    let agentDone = false;
+    let refreshStarted = false;
+    try {
+      const result = await runReminderScenario({
+        runId: 'run-read-token-cleanup-redaction',
+        claimDeadlineAt: start + 90 * 60 * 1000,
+        repositoryReadTokenExpiresAt: start + 700,
+        agentDelayMs: 1000,
+        terminalAttempts: 300,
+        cleanupStderr: `cleanup failed: ${canary}`,
+        logEvents,
+        driveClock: createSeamClock({
+          agentStarted: () => agentStarted,
+          refreshStarted: () => refreshStarted,
+          agentDone: () => agentDone,
+        }),
+        onAgentStart: () => {
+          agentStarted = true;
+        },
+        onAgentDone: () => {
+          agentDone = true;
+        },
+        readTokenFetch: async () => {
+          refreshStarted = true;
+          return Response.json({
+            token: canary,
+            expiresAt: new Date(Date.now() + 100 * 60 * 1000).toISOString(),
+          });
+        },
+        rounds: [
+          {
+            output: finalMarkdownJsonl(markdown, 'session-reminder'),
+            finalText: JSON.stringify({ decision: 'comment', markdown }),
+          },
+        ],
+      });
+
+      expect(result.githubTokenSnapshots.at(-1)).toBe(canary);
+      expect(result.terminal).toMatchObject({ status: 'succeeded' });
+      const cleanupDiagnostics = (logEvents as Array<{ stderr?: string }>).filter(
+        (event) => event.stderr !== undefined,
+      );
+      expect(cleanupDiagnostics.length).toBeGreaterThan(0);
+      expect(cleanupDiagnostics.every((event) => event.stderr?.includes('[redacted]'))).toBe(true);
+      expect(JSON.stringify(logEvents)).not.toContain(canary);
+      expect(JSON.stringify(result.terminal)).not.toContain(canary);
+      expect(JSON.stringify(result.manifest)).not.toContain(canary);
     } finally {
       vi.useRealTimers();
     }
