@@ -627,6 +627,7 @@ const runReminderScenario = async (scenario: {
   claimDeadlineAt?: number;
   repositoryReadTokenExpiresAt?: number;
   advanceOnCheckoutMs?: number;
+  checkoutTimedOut?: boolean;
 }) => {
   const baseSha = '1111111111111111111111111111111111111111';
   const headSha = '2222222222222222222222222222222222222222';
@@ -644,6 +645,8 @@ const runReminderScenario = async (scenario: {
       if (args[0] === 'create') createCommands.push([...args]);
       if (args.includes('merge-base') && scenario.advanceOnCheckoutMs !== undefined) {
         vi.setSystemTime(Date.now() + scenario.advanceOnCheckoutMs);
+        if (scenario.checkoutTimedOut)
+          return { exitCode: 1, stdout: '', timedOut: true, truncated: false };
       }
       const isAgent = args[0] === 'exec' && args.includes('--agent');
       if (isAgent) {
@@ -2098,6 +2101,26 @@ describe('Runner Job HTTP interface', () => {
       expect(result.terminal).toMatchObject({
         status: 'succeeded',
         result: structuredResult(markdown),
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('attributes checkout timeout to the exhausted claim deadline', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const result = await runReminderScenario({
+        runId: 'run-checkout-reaches-deadline',
+        claimDeadlineAt: Date.now() + 5000,
+        advanceOnCheckoutMs: 5000,
+        checkoutTimedOut: true,
+        rounds: [],
+      });
+      expect(result.terminal).toMatchObject({
+        status: 'failed',
+        failure: { reason: 'timeout', deadline: 'claim' },
+        sandbox: { cleanup: 'destroyed' },
       });
     } finally {
       vi.useRealTimers();

@@ -2387,13 +2387,13 @@ export const createRunner = (options: RunnerOptions = {}) => {
       const checkoutRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-review-'));
       job.checkoutRoot = checkoutRoot;
       const mergeBaseSha = await prepareCheckout(job, checkoutRoot);
-      if (mergeBaseSha === undefined) {
-        failure = { reason: 'checkout' };
-        return;
-      }
       if (job.abortRequested) return;
       if (job.deadlineAt <= Date.now()) {
         failure = deadlineFailure(job);
+        return;
+      }
+      if (mergeBaseSha === undefined) {
+        failure = { reason: 'checkout' };
         return;
       }
 
