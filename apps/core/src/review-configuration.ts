@@ -1,5 +1,9 @@
 import { Effect, Schema } from 'effect';
-import { ReviewConfiguration, ReviewModelSelection } from '@compte-rendu/contracts';
+import {
+  ReviewConfiguration,
+  ReviewModelSelection,
+  readBoundedRequestBody,
+} from '@compte-rendu/contracts';
 import type { D1DatabaseLike } from './review-state-store';
 
 interface ConfigurationRow {
@@ -15,13 +19,17 @@ export const handleReviewConfiguration = (
   database: D1DatabaseLike,
   operatorToken: string | undefined,
 ): Promise<Response> =>
+  !operatorToken?.trim() || request.headers.get('authorization') !== `Bearer ${operatorToken}`
+    ? Promise.resolve(response({ error: 'unauthorized' }, 401))
+    : applyReviewConfiguration(request, database);
+
+export const applyReviewConfiguration = (
+  request: Request,
+  database: D1DatabaseLike,
+  availableRoutes?: readonly string[],
+): Promise<Response> =>
   Effect.runPromise(
     Effect.gen(function* () {
-      if (
-        !operatorToken?.trim() ||
-        request.headers.get('authorization') !== `Bearer ${operatorToken}`
-      )
-        return response({ error: 'unauthorized' }, 401);
       if (request.method === 'GET') {
         const row = yield* Effect.tryPromise(() =>
           database
@@ -43,16 +51,24 @@ export const handleReviewConfiguration = (
         return response(configuration);
       }
       if (request.method !== 'PUT') return response({ error: 'method not allowed' }, 405);
-      const body = yield* Effect.tryPromise(() => request.text());
-      if (new TextEncoder().encode(body).byteLength > 16 * 1024)
-        return response({ error: 'configuration too large' }, 413);
+      const body = yield* Effect.tryPromise(() => readBoundedRequestBody(request, 16 * 1024));
+      if (body.kind === 'too-large') return response({ error: 'configuration too large' }, 413);
       const candidate = yield* Schema.decodeUnknownEffect(
         Schema.fromJsonString(ReviewConfiguration),
         {
           onExcessProperty: 'error',
         },
-      )(body).pipe(Effect.catch(() => Effect.succeed(undefined)));
+      )(body.text).pipe(Effect.catch(() => Effect.succeed(undefined)));
       if (candidate === undefined) return response({ error: 'invalid configuration' }, 400);
+      const selected = candidate.selection;
+      if (
+        availableRoutes &&
+        selected &&
+        ![...selected.reviewers, selected.synthesis].every((route) =>
+          availableRoutes.includes(route),
+        )
+      )
+        return response({ error: 'model route unavailable' }, 400);
       const row = yield* Effect.tryPromise(() =>
         database
           .prepare(

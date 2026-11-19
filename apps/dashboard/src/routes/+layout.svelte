@@ -28,6 +28,7 @@
     ['/', 'Overview'],
     ['/history', 'History'],
     ['/help', 'Help'],
+    ['/settings', 'Settings'],
   ] as const;
 
   let path = $derived(page.url.pathname);
