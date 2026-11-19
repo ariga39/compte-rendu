@@ -6015,76 +6015,85 @@ describe('Runner concurrency', () => {
     expect(started).toEqual([]);
   });
 
-  it('stops an in-flight claim before admission and keeps polling after its aborted callback', async () => {
-    const job = independentJob(42, 'cancel-during-claim');
-    let deliver!: (response: Response) => void;
-    let started!: () => void;
-    const claimed = new Promise<void>((resolve) => {
-      started = resolve;
-    });
-    const response = new Promise<Response>((resolve) => {
-      deliver = resolve;
-    });
-    let callback!: (value: unknown) => void;
-    const result = new Promise<unknown>((resolve) => {
-      callback = resolve;
-    });
-    let polledAgain!: () => void;
-    const resumed = new Promise<void>((resolve) => {
-      polledAgain = resolve;
-    });
-    let first = true;
-    const deadline = Date.now() + 60_000;
-    const runner = createRunner({
-      authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-      evidenceRoot: sharedEvidenceRoot,
-      claimUrl: 'https://ingress.test/runner-claim',
-      claimIntervalMs: 10,
-      callbackUrl: 'https://ingress.test/runner-callback',
-      callbackToken: 'callback-token',
-      claimFetch: async () => {
-        if (first) {
-          first = false;
-          started();
-          return response;
-        }
-        polledAgain();
-        return new Response(null, { status: 204 });
-      },
-      callbackFetch: async (_, init) => {
-        if (typeof init?.body !== 'string') throw new Error('expected callback body');
-        callback(JSON.parse(init.body));
-        return new Response(null, { status: 202 });
-      },
-      process: async (_command, args) => {
-        if (args.includes('clone') || args[0] === 'create')
-          throw new Error('cancelled job executed');
-        return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
-      },
-    });
-    await claimed;
-    try {
-      const reply = await runner.handle(
-        new Request('http://runner/jobs/' + job.id, {
-          method: 'DELETE',
-          headers: {
-            authorization: 'Bearer runner-test-token',
-            'x-compte-rendu-claim-deadline': String(deadline),
-          },
-        }),
-      );
-      expect(reply.status).toBe(202);
-    } finally {
-      deliver(Response.json({ ...job, claimDeadlineAt: deadline }));
-    }
-    expect(await result).toMatchObject({
-      runId: job.runId,
-      status: 'aborted',
-      sandbox: { cleanup: 'destroyed' },
-    });
-    await resumed;
-  });
+  it.each([false, true])(
+    'stops an in-flight claim before admission with lost response=%s and resumes after callback',
+    async (lost) => {
+      const job = independentJob(42, 'cancel-during-claim');
+      let deliver!: (response: Response) => void;
+      let started!: () => void;
+      const claimed = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      const response = new Promise<Response>((resolve) => {
+        deliver = resolve;
+      });
+      let callback!: (value: unknown) => void;
+      const result = new Promise<unknown>((resolve) => {
+        callback = resolve;
+      });
+      let polledAgain!: () => void;
+      const resumed = new Promise<void>((resolve) => {
+        polledAgain = resolve;
+      });
+      let first = true;
+      let retry = true;
+      const deadline = Date.now() + 60_000;
+      const runner = createRunner({
+        authToken: 'runner-test-token',
+        modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+        evidenceRoot: sharedEvidenceRoot,
+        claimUrl: 'https://ingress.test/runner-claim',
+        claimIntervalMs: 10,
+        callbackUrl: 'https://ingress.test/runner-callback',
+        callbackToken: 'callback-token',
+        claimFetch: async () => {
+          if (first) {
+            first = false;
+            started();
+            return response;
+          }
+          if (lost && retry) {
+            retry = false;
+            return Response.json({ ...job, claimDeadlineAt: deadline });
+          }
+          polledAgain();
+          return new Response(null, { status: 204 });
+        },
+        callbackFetch: async (_, init) => {
+          if (typeof init?.body !== 'string') throw new Error('expected callback body');
+          callback(JSON.parse(init.body));
+          return new Response(null, { status: 202 });
+        },
+        process: async (_command, args) => {
+          if (args.includes('clone') || args[0] === 'create')
+            throw new Error('cancelled job executed');
+          return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+        },
+      });
+      await claimed;
+      try {
+        const reply = await runner.handle(
+          new Request('http://runner/jobs/' + job.id, {
+            method: 'DELETE',
+            headers: {
+              authorization: 'Bearer runner-test-token',
+              'x-compte-rendu-claim-deadline': String(deadline),
+            },
+          }),
+        );
+        expect(reply.status).toBe(202);
+      } finally {
+        if (lost) deliver(new Response(null, { status: 503 }));
+        else deliver(Response.json({ ...job, claimDeadlineAt: deadline }));
+      }
+      expect(await result).toMatchObject({
+        runId: job.runId,
+        status: 'aborted',
+        sandbox: { cleanup: 'destroyed' },
+      });
+      await resumed;
+    },
+  );
 
   it('reserves the only slot for an in-flight claim without rejecting its admitted job', async () => {
     const evidenceRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-runner-reserve-'));

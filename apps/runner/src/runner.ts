@@ -1136,7 +1136,10 @@ export const createRunner = (options: RunnerOptions = {}) => {
   const jobs = new Map<string, RunnerJob>();
   const jobsByRun = new Map<string, RunnerJob>();
   let claiming = false;
-  const stopsDuringClaim = new Map<string, ReturnType<typeof setTimeout>>();
+  const stopsDuringClaim = new Map<
+    string,
+    { deadline: number; timer: ReturnType<typeof setTimeout> }
+  >();
   let claimPollingHalted = false;
   let draining = false;
   let claimGateFailureLogged = false;
@@ -3154,6 +3157,11 @@ export const createRunner = (options: RunnerOptions = {}) => {
       resolveDone = resolve;
     });
     const id = input.id;
+    const stop = claimed ? stopsDuringClaim.get(id) : undefined;
+    if (stop) {
+      clearTimeout(stop.timer);
+      stopsDuringClaim.delete(id);
+    }
     const evidenceId = randomUUID();
     const job: RunnerJob = {
       state: {
@@ -3171,7 +3179,8 @@ export const createRunner = (options: RunnerOptions = {}) => {
       sandboxName: `compte-rendu-${id}`,
       done,
       resolveDone,
-      abortRequested: contradictsSamePullRequest || (claimed && stopsDuringClaim.has(id)),
+      abortRequested:
+        contradictsSamePullRequest || (stop !== undefined && stop.deadline > Date.now()),
       progressStopped: false,
       sandboxAttempted: false,
       sandboxCreated: false,
@@ -3493,7 +3502,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
             () => stopsDuringClaim.delete(id),
             Math.min(deadline - Date.now(), REVIEW_ATTEMPT_BUDGET_MS),
           );
-          stopsDuringClaim.set(id, timer);
+          stopsDuringClaim.set(id, { deadline, timer });
         }
         return jsonResponse(202, { status: 'stop requested' });
       }
@@ -3641,8 +3650,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
     } finally {
       if (timeout !== undefined) clearTimeout(timeout);
       claiming = false;
-      for (const timer of stopsDuringClaim.values()) clearTimeout(timer);
-      stopsDuringClaim.clear();
       if (claimFailure !== undefined) {
         await recordLog({
           phase: 'runner',
