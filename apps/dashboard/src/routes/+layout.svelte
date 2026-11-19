@@ -90,7 +90,7 @@
     {#if refresh.state.active}
       <div class="header-refresh">
         <span data-testid="last-refresh" class="muted">
-          Last updated: {refresh.state.lastGoodAt
+          <span class="refresh-prefix">Last updated:&nbsp;</span>{refresh.state.lastGoodAt
             ? absoluteTime(new Date(refresh.state.lastGoodAt).toISOString())
             : 'not yet'}
         </span>
@@ -100,7 +100,7 @@
           data-testid="refresh"
           on:click={() => refresh.state.refresh()}
         >
-          Refresh now
+          Refresh<span class="refresh-now">&nbsp;now</span>
         </Button>
       </div>
     {/if}

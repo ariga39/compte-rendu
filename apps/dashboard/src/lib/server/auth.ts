@@ -150,7 +150,9 @@ export function safeReturnTarget(value: string | null | undefined, fallback = '/
   } catch {
     return fallback;
   }
-  if (url.origin !== RETURN_TARGET_BASE) return fallback;
+  // URL normalizes dot segments. Only accept the route the caller supplied.
+  if (url.origin !== RETURN_TARGET_BASE || url.pathname !== value.split(/[?#]/, 1)[0])
+    return fallback;
 
   if (url.pathname === '/') return '/';
   if (url.pathname === '/help' || url.pathname === '/settings') return url.pathname;
