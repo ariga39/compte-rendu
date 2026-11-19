@@ -6016,7 +6016,7 @@ describe('Runner concurrency', () => {
   });
 
   it.each([false, true])(
-    'stops an in-flight claim before admission with lost response=%s and resumes after callback',
+    'acknowledges a stop during claim delivery without inventing cleanup if delivery fails (%s)',
     async (lost) => {
       const job = independentJob(42, 'cancel-during-claim');
       let deliver!: (response: Response) => void;
@@ -6036,7 +6036,6 @@ describe('Runner concurrency', () => {
         polledAgain = resolve;
       });
       let first = true;
-      let retry = true;
       const deadline = Date.now() + 60_000;
       const runner = createRunner({
         authToken: 'runner-test-token',
@@ -6051,10 +6050,6 @@ describe('Runner concurrency', () => {
             first = false;
             started();
             return response;
-          }
-          if (lost && retry) {
-            retry = false;
-            return Response.json({ ...job, claimDeadlineAt: deadline });
           }
           polledAgain();
           return new Response(null, { status: 204 });
@@ -6085,6 +6080,17 @@ describe('Runner concurrency', () => {
       } finally {
         if (lost) deliver(new Response(null, { status: 503 }));
         else deliver(Response.json({ ...job, claimDeadlineAt: deadline }));
+      }
+      await resumed;
+      if (lost) {
+        const unknown = await runner.handle(
+          new Request('http://runner/jobs/' + job.id, {
+            headers: { authorization: 'Bearer runner-test-token' },
+          }),
+        );
+        expect(unknown.status).toBe(404);
+        await runner.close();
+        return;
       }
       expect(await result).toMatchObject({
         runId: job.runId,
