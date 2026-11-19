@@ -641,7 +641,6 @@ type RunnerJob = {
   readTokenRefreshInFlight?: Promise<void>;
   readTokenRefreshStopped: boolean;
   readTokenRefreshFailed: boolean;
-  credentialDeadlineReached: boolean;
   readTokenSecrets: string[];
   executionStartedAt?: string;
   submissionCompletedAt?: string;
@@ -1197,7 +1196,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
   };
   const reachCredentialDeadline = (job: RunnerJob) => {
     if (job.readTokenRefreshStopped) return;
-    job.credentialDeadlineReached = true;
     clearReadTokenRefreshTimer(job);
     clearReadTokenDeadlineTimer(job);
     if (Date.now() >= job.deadlineAt) stopActiveExecution(job);
@@ -1237,11 +1235,11 @@ export const createRunner = (options: RunnerOptions = {}) => {
     if (fallbackAt < job.deadlineAt) {
       job.deadlineAt = fallbackAt;
       job.deadlineLimit = 'credential';
+      scheduleCredentialDeadline(job, fallbackAt);
     }
     void Effect.runPromise(
       Effect.logWarning('runner.read-token.refresh-failed', { jobId: job.id }),
     ).catch(() => undefined);
-    scheduleCredentialDeadline(job, fallbackAt);
   };
   const scheduleReadTokenRefresh = (job: RunnerJob) => {
     clearReadTokenRefreshTimer(job);
@@ -2486,6 +2484,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
     let executionCause: RunnerFailureCauseValue | undefined;
     let result: StructuredReviewResult | undefined;
     let agent: RunnerProcessResult | undefined;
+    let agentEndedAt: number | undefined;
     let correctionTimeout = false;
     let agentParsed: ParsedAgentResult | undefined;
     let executionModel: string | undefined;
@@ -2861,6 +2860,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
           stderrFilePath: join(evidencePath, 'opencode.stderr'),
         },
       );
+      agentEndedAt = Date.now();
       const sessionId = uniqueSessionIdFrom(agent.stdout);
       const initialStdout = parseResult(agent.stdout, sessionId);
       const recoveredProvider = agent.exitCode === 1 && (initialStdout.recoveredErrors ?? 0) > 0;
@@ -2913,6 +2913,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
           normalCompletion &&
           needsCorrection
         ) {
+          agentEndedAt = undefined;
           const reminder = await runtime.exec(
             [
               'opencode',
@@ -2939,6 +2940,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
               fileAppend: true,
             },
           );
+          agentEndedAt = Date.now();
           const reminderParsed = parseResult(reminder.stdout, sessionId);
           const reminderRecovered = (reminderParsed.recoveredErrors ?? 0) > 0;
           const recoveredErrors =
@@ -2964,14 +2966,10 @@ export const createRunner = (options: RunnerOptions = {}) => {
       // destination. An in-flight response is ignored when it settles late.
       stopReadTokenRefresh(job);
       if (
-        !job.credentialDeadlineReached &&
         job.readTokenRefreshFailed &&
         job.deadlineLimit === 'credential' &&
-        Date.now() >= job.deadlineAt
+        (agentEndedAt ?? Date.now()) >= job.deadlineAt
       ) {
-        job.credentialDeadlineReached = true;
-      }
-      if (job.credentialDeadlineReached) {
         executionCause = 'timeout';
         failure = { reason: 'timeout', cause: 'timeout', deadline: 'credential' };
       }
@@ -3516,7 +3514,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
       readTokenRotationEnabled: rotatingCredential,
       readTokenRefreshStopped: false,
       readTokenRefreshFailed: false,
-      credentialDeadlineReached: false,
       readTokenSecrets: [input.repositoryReadToken],
     };
     jobs.set(id, job);
