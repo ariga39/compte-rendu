@@ -35,10 +35,6 @@ wrangler secret put REVIEW_CONFIGURATION_TOKEN --config apps/dashboard/wrangler.
 
 Enter the secret at the prompt. For command-line HTTP clients, load the header from
 a private client configuration file rather than putting the secret in arguments.
-No dashboard editor or browser login is implemented. The public
-dashboard remains read-only; a future editor must authenticate the operator and
-use this same validation/update operation behind its authenticated server boundary.
-
 `GET /api/review-configuration` returns:
 
 ```json
@@ -76,6 +72,26 @@ selection as null. It uses the same review prompt and final
 output contract as an explicit one-model or multi-model selection. This does not modify already admitted jobs.
 Saving a syntactically valid route ID does not prove upstream availability; the
 execution adapter must validate support when preparing the job's grant.
+
+## GitHub dashboard editor
+
+The Settings link opens `/settings`. Configure each application Worker with its own
+GitHub App client ID in `DASHBOARD_GITHUB_CLIENT_ID`, its canonical HTTPS origin
+in `DASHBOARD_ORIGIN`, and a JSON array of numeric GitHub user IDs in
+`DASHBOARD_MODEL_EDITOR_IDS` (default `[]`). Register
+`https://<dashboard-host>/auth/github/callback` as a callback on the existing
+GitHub App. Store that App's client secret as the Worker secret
+`DASHBOARD_GITHUB_CLIENT_SECRET`. Rotating it also invalidates browser sessions.
+The user authorization flow uses PKCE. GitHub chooses the permissions of an
+App user token from the App registration and the authorizing user.
+
+The editor calls GitHub's authenticated-user endpoint on each settings read
+and save. It requires an allowlisted numeric ID and an explicit
+`two_factor_authentication: true`. A missing field denies access. Verify that
+the instance's actual GitHub App user authorization returns the private field
+before declaring the editor operational. The public task dashboard needs no
+session. The editor lists this instance's inference catalog and uses the same
+revision check and admission snapshots as the operator API.
 
 ## Admission snapshots
 

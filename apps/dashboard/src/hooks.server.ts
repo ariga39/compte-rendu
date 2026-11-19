@@ -6,6 +6,7 @@ export const handle: Handle = async ({ event, resolve }) => {
   const path = event.url.pathname;
   if (
     path.startsWith('/api/') ||
+    path.startsWith('/auth/') ||
     path.startsWith('/runner-') ||
     ((path === '/' || path === '/webhooks/github') && event.request.method === 'POST')
   ) {
