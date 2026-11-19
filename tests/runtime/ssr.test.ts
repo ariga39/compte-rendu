@@ -235,7 +235,5 @@ it('exchanges a GitHub callback for a dashboard session in the built Worker', as
   const callback = await callbackFor('https://github.com/login/oauth');
   expect(callback.status).toBe(303);
   expect(callback.headers.get('location')).toBe('/settings');
-  expect(callback.headers.getSetCookie().some((c) => c.startsWith('__Host-cr-session='))).toBe(
-    true,
-  );
+  expect(callback.headers.get('set-cookie')).toContain('__Host-cr-session=');
 });
