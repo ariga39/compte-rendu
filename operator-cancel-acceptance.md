@@ -1,0 +1,1 @@
+This disposable change triggers a review for the operator cancellation acceptance check. The operator will cancel the review from its dashboard and verify the GitHub Check and sandbox cleanup. Close this PR after verification.
