@@ -31,7 +31,7 @@ it('requires live GitHub UID and 2FA on every model change and preserves the pre
       usage: async () => null,
     },
   });
-  let profile: Record<string, unknown> = { id: 42, two_factor_authentication: true };
+  let profile: Record<string, unknown> | Response = { id: 42, two_factor_authentication: true };
   vi.stubGlobal('fetch', async (input: string | URL | Request) => {
     if (
       (input instanceof Request ? input.url : String(input)) ===
@@ -39,7 +39,7 @@ it('requires live GitHub UID and 2FA on every model change and preserves the pre
     )
       return Response.json({ token_type: 'bearer', access_token: 'github-user-token' });
     if ((input instanceof Request ? input.url : String(input)) === 'https://api.github.com/user')
-      return Response.json(profile);
+      return profile instanceof Response ? profile : Response.json(profile);
     throw Error('unexpected upstream');
   });
   const call = (path: string, init?: RequestInit) => app.fetch(new Request(origin + path, init));
@@ -86,6 +86,12 @@ it('requires live GitHub UID and 2FA on every model change and preserves the pre
       profile = unauthorized;
       expect((await write(1)).status).toBe(403);
     }
+    profile = Response.redirect('https://example.test/');
+    const unavailable = await write(1);
+    expect(unavailable.status).toBe(503);
+    expect(await unavailable.json()).toEqual({
+      error: 'Could not retrieve your GitHub account details.',
+    });
     profile = { id: 42, two_factor_authentication: true };
     const read = await call('/api/model-settings', { headers: { cookie } });
     expect(await read.json()).toMatchObject({

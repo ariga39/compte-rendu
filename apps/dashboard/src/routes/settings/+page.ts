@@ -4,8 +4,20 @@ import type { PageLoad } from './$types';
 export const load: PageLoad = async ({ fetch, depends }) => {
   depends('dashboard:model-settings');
   const reply = await fetch('/api/model-settings');
-  const settings = reply.ok
-    ? ((await reply.json()) as { configuration: ReviewConfiguration; routes: string[] })
-    : null;
-  return { settings, status: reply.status };
+  if (!reply.ok) {
+    const failure: unknown = await reply.json().catch(() => null);
+    return {
+      settings: null,
+      status: reply.status,
+      error:
+        failure &&
+        typeof failure === 'object' &&
+        'error' in failure &&
+        typeof failure.error === 'string'
+          ? failure.error
+          : null,
+    };
+  }
+  const settings = (await reply.json()) as { configuration: ReviewConfiguration; routes: string[] };
+  return { settings, status: reply.status, error: null };
 };
