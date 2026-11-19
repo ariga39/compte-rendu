@@ -7,6 +7,7 @@ export const STATUSES: StatusFilter[] = [
   'published',
   'failed',
   'superseded',
+  'cancelled',
 ];
 
 export function dateBound(value: string | null, edge: 'start' | 'end'): string | null {

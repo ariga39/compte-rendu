@@ -155,6 +155,7 @@
         <SelectItem value="published" text="Published" />
         <SelectItem value="failed" text="Failed" />
         <SelectItem value="superseded" text="Superseded" />
+        <SelectItem value="cancelled" text="Cancelled" />
       </Select>
       <div class="bx--form-item">
         <label class="bx--label" for="filter-from">From (UTC)</label>

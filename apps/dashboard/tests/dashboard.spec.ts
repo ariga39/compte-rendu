@@ -1553,3 +1553,25 @@ test('active detail identifies the current recorded stage and elapsed time', asy
   await expect(current).toContainText('+16s');
   await expect(page.getByRole('heading', { name: 'Revision' })).toBeVisible();
 });
+
+test('history filters include cancelled reviews', async ({ page, harness, base }) => {
+  harness.setHandler(() =>
+    ok(
+      historyPage([
+        task({
+          runId: 'cancelled-filter',
+          status: 'cancelled',
+          dispatch: null,
+          terminalAt: NOW,
+          cleanup: 'destroyed',
+        }),
+      ]),
+    ),
+  );
+  await page.goto(`${base}/history`);
+  await page.selectOption('select[name="status"]', 'cancelled');
+  await page.click('[data-testid="apply"]');
+  await page.waitForFunction(() => location.search.includes('status=cancelled'));
+  await expect(page.locator('[data-testid="task"]').first()).toContainText('Cancelled');
+  expect(harness.state.requests.at(-1)).toBe('/api/jobs?status=cancelled');
+});

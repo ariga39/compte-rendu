@@ -5,6 +5,7 @@ import {
 } from '@compte-rendu/contracts';
 import { Schema } from 'effect';
 import { PollError, type ApiResult } from './api';
+import { isCancelling } from './format.ts';
 import type {
   DatedTask,
   DetailModel,
@@ -79,7 +80,8 @@ export function isTaskActive(task: TaskState): boolean {
     task.status === 'scheduled' ||
     task.dispatch === 'claimed' ||
     task.processing != null ||
-    task.cleanup === 'pending'
+    task.cleanup === 'pending' ||
+    isCancelling(task)
   );
 }
 
