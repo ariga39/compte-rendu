@@ -36,13 +36,26 @@ export interface HarnessState {
   active: number;
   maxActive: number;
   aborted: number;
+  sessionRequests: number;
 }
 
 export interface Harness {
   readonly base: string;
   readonly state: HarnessState;
   setHandler(handler: ApiHandler): void;
+  setSession(payload: ApiPayload): void;
   waitFor(predicate: () => boolean, timeoutMs?: number): Promise<void>;
+}
+
+const anonymousSession: ApiPayload = {
+  status: 200,
+  json: { signedIn: false, account: null, operator: false },
+};
+
+function safeMockReturn(value: string | null): string {
+  return value && value.startsWith('/') && !value.startsWith('//') && !value.includes('\\')
+    ? value
+    : '/';
 }
 
 async function staticFile(pathname: string) {
@@ -101,11 +114,45 @@ function trackApi(res: ServerResponse, state: HarnessState) {
 }
 
 async function startHarness(): Promise<{ harness: Harness; server: Server }> {
-  const state: HarnessState = { requests: [], settled: 0, active: 0, maxActive: 0, aborted: 0 };
+  const state: HarnessState = {
+    requests: [],
+    settled: 0,
+    active: 0,
+    maxActive: 0,
+    aborted: 0,
+    sessionRequests: 0,
+  };
   let handler: ApiHandler = () => ({ status: 404 });
+  let session: ApiPayload = anonymousSession;
   const server = createServer((req, res) => {
     void (async () => {
       const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+      if (url.pathname === '/api/session') {
+        state.sessionRequests += 1;
+        respond(res, session);
+        return;
+      }
+      if (url.pathname === '/auth/github' && req.method === 'GET') {
+        session = {
+          status: 200,
+          json: { signedIn: true, account: { login: 'octocat' }, operator: true },
+        };
+        res.writeHead(303, {
+          location: safeMockReturn(url.searchParams.get('returnTo')),
+          'cache-control': 'no-store',
+        });
+        res.end();
+        return;
+      }
+      if (url.pathname === '/auth/logout' && req.method === 'POST') {
+        session = anonymousSession;
+        res.writeHead(303, {
+          location: safeMockReturn(url.searchParams.get('returnTo')),
+          'cache-control': 'no-store',
+        });
+        res.end();
+        return;
+      }
       // Client-only fixture: page data is supplied by the mocked public API.
       if (url.pathname.endsWith('/__data.json')) {
         respond(res, { status: 200, json: { type: 'data', nodes: [null, null, null] } });
@@ -177,6 +224,9 @@ async function startHarness(): Promise<{ harness: Harness; server: Server }> {
     state,
     setHandler(next) {
       handler = next;
+    },
+    setSession(payload) {
+      session = payload;
     },
     async waitFor(predicate, timeoutMs = 6000) {
       await expect.poll(predicate, { timeout: timeoutMs, intervals: [20, 50, 100] }).toBe(true);

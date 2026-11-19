@@ -137,9 +137,13 @@ output contract as an explicit one-model or multi-model selection. This does not
 Saving a syntactically valid route ID does not prove upstream availability; the
 execution adapter must validate support when preparing the job's grant.
 
-## GitHub dashboard editor
+## Dashboard sign-in and model settings
 
-The Settings link opens `/settings`. Configure each application Worker with its own
+Use **Sign in with GitHub** in the dashboard header. Signing in from a job
+returns you to that job. The header shows the account and offers **Sign out**.
+Anyone can browse public pages, and signing in does not grant editing rights.
+
+Configure each application Worker with its own
 GitHub App client ID in `DASHBOARD_GITHUB_CLIENT_ID`, its canonical HTTPS origin
 in `DASHBOARD_ORIGIN`, and a JSON array of numeric GitHub user IDs in
 `DASHBOARD_MODEL_EDITOR_IDS` (default `[]`). Register
@@ -153,8 +157,9 @@ The editor calls GitHub's authenticated-user endpoint on each settings read
 and save. The numeric UID allowlist is the sole editor authorization rule.
 These GitHub App user tokens can omit private profile fields, so editing does
 not require a GitHub account 2FA status.
-The public task dashboard needs no
-session. The editor lists this instance's inference catalog and uses the same
+Public pages render independently of GitHub. After the page loads, the header
+reads the viewer and permissions from the private, uncached `/api/session` endpoint.
+The editor at `/settings` lists this instance's inference catalog and uses the same
 revision check and admission snapshots as the operator API.
 
 ## Admission snapshots

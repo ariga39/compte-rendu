@@ -49,7 +49,7 @@
 <section class="model-settings">
   <h1>Review models</h1>
   {#if data.status === 401}
-    <a class="bx--btn bx--btn--primary" href="/auth/github" data-sveltekit-reload>Sign in with GitHub</a>
+    <a class="bx--btn bx--btn--primary" href="/auth/github?returnTo=%2Fsettings" data-sveltekit-reload>Sign in with GitHub</a>
   {:else if data.status === 403}
     <p>{data.error ?? 'Editing requires an authorized GitHub account.'}</p>
   {:else if !data.settings}
@@ -88,9 +88,6 @@
     </form>
     {#if message}<p role={success ? 'status' : 'alert'}>{message}</p>{/if}
     {#if message && !success}<button class="bx--btn bx--btn--tertiary" onclick={reload} disabled={busy}>Reload saved selection</button>{/if}
-  {/if}
-  {#if data.settings || data.status === 403}
-    <form method="POST" action="/auth/logout"><button class="bx--btn bx--btn--ghost">Sign out</button></form>
   {/if}
 </section>
 
