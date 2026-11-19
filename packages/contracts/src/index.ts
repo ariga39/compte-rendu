@@ -596,7 +596,13 @@ export type PublicExecutionStage = typeof PublicExecutionStage.Type;
 export const PublicCleanupStatus = Schema.Literals(['pending', 'destroyed', 'failed', 'unknown']);
 export type PublicCleanupStatus = typeof PublicCleanupStatus.Type;
 
-export const PublicTaskStatus = Schema.Literals(['scheduled', 'completed', 'failed', 'superseded']);
+export const PublicTaskStatus = Schema.Literals([
+  'scheduled',
+  'completed',
+  'failed',
+  'superseded',
+  'cancelled',
+]);
 export type PublicTaskStatus = typeof PublicTaskStatus.Type;
 
 export const PublicTaskDispatch = Schema.NullOr(Schema.Literals(['queued', 'claimed']));

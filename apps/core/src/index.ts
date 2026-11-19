@@ -60,9 +60,10 @@ export type ReviewDisposition =
   | 'awaiting approval'
   | 'scheduled'
   | 'completed'
-  | 'failed';
+  | 'failed'
+  | 'cancelled';
 
-export type ReviewRunStatus = 'scheduled' | 'failed' | 'completed' | 'superseded';
+export type ReviewRunStatus = 'scheduled' | 'failed' | 'completed' | 'superseded' | 'cancelled';
 export type ReviewStoredStatus = ReviewDisposition | ReviewRunStatus | 'claiming';
 export type ReviewCheckSetupStatus = 'pending' | 'ready' | 'failed';
 export type RunnerCleanupStatus = 'pending' | 'destroyed' | 'failed';
@@ -205,7 +206,12 @@ export interface RepositoryMetadataRow {
   updatedAt: string;
 }
 
-export type PublicRunStatusValue = 'scheduled' | 'completed' | 'failed' | 'superseded';
+export type PublicRunStatusValue =
+  | 'scheduled'
+  | 'completed'
+  | 'failed'
+  | 'superseded'
+  | 'cancelled';
 
 export interface PublicRunRow {
   modelUsage?: string | null;
@@ -261,7 +267,15 @@ export interface PublicRunCursor {
 }
 
 export interface PublicRunFilter {
-  status: 'all' | 'active' | 'queued' | 'in_progress' | 'published' | 'failed' | 'superseded';
+  status:
+    | 'all'
+    | 'active'
+    | 'queued'
+    | 'in_progress'
+    | 'published'
+    | 'failed'
+    | 'superseded'
+    | 'cancelled';
   cleanup: 'all' | 'pending' | 'destroyed' | 'failed' | 'unknown';
   from?: string;
   to?: string;
@@ -293,6 +307,43 @@ export interface ActiveRunnerJob {
   readonly claimedAt?: string;
   readonly runId: string;
   readonly jobId: string;
+}
+
+export interface ReviewCancellationState {
+  readonly runId: string;
+  readonly requestedAt: string;
+  readonly requestedByUid: number;
+  readonly runnerJobId: string | null;
+  readonly runnerAttempt: number | null;
+  readonly cleanup: RunnerCleanupStatus | null;
+  readonly checkRunId: number | null;
+}
+
+export type ReviewCancellationResult =
+  | { readonly kind: 'cancelled'; readonly cancellation: ReviewCancellationState }
+  | { readonly kind: 'already_cancelled'; readonly cancellation: ReviewCancellationState }
+  | {
+      readonly kind: 'conflict';
+      readonly runId: string;
+      readonly status: ReviewRunStatus;
+      readonly publicationClaimed: boolean;
+    }
+  | { readonly kind: 'not_found'; readonly runId: string };
+
+export interface ReviewCancellationWorkItem {
+  readonly runId: string;
+  readonly cancelledAt: string;
+  readonly claimedAt: string | null;
+  readonly runnerJobId: string | null;
+  readonly runnerAttempt: number | null;
+  readonly runnerCleanupStatus: RunnerCleanupStatus | null;
+  readonly runnerStopAttemptedAt: string | null;
+  readonly checkRunId: number | null;
+  readonly checkCancelAttemptedAt: string | null;
+  readonly needsRunnerStop: boolean;
+  readonly needsCheckReconciliation: boolean;
+  readonly cleanupBlocked: boolean;
+  readonly recoveryRequired: boolean;
 }
 
 export interface ReviewStateStore {
@@ -373,6 +424,38 @@ export interface ReviewStateQueries {
     runId: string;
     occurredAt: string;
     releaseRunnerClaim?: { jobId: string; attempt: number };
+  }): Promise<boolean>;
+  cancelRun(input: {
+    runId: string;
+    requestedByUid: number;
+    occurredAt: string;
+  }): Promise<ReviewCancellationResult>;
+  listCancellationWork?(input: {
+    retryBefore: string;
+    recoveryBefore: string;
+    limit: number;
+  }): Promise<readonly ReviewCancellationWorkItem[]>;
+  recordRunnerStopAttempt?(input: {
+    runId: string;
+    jobId: string;
+    attempt: number;
+    occurredAt: string;
+  }): Promise<boolean>;
+  confirmRunnerDestroyed?(input: {
+    runId: string;
+    jobId: string;
+    attempt: number;
+    occurredAt: string;
+  }): Promise<boolean>;
+  recordCheckCancellationAttempt?(input: {
+    runId: string;
+    checkRunId: number;
+    occurredAt: string;
+  }): Promise<boolean>;
+  confirmCheckCancelled?(input: {
+    runId: string;
+    checkRunId: number;
+    occurredAt: string;
   }): Promise<boolean>;
   completeRunPublication(input: {
     runId: string;
@@ -534,6 +617,7 @@ export interface GitHubAdapter {
     checkRunId: number;
     status: 'in_progress' | 'success' | 'failure' | 'cancelled';
     decision?: ReviewDecision;
+    cancellationReason?: 'manual';
   }): Promise<void>;
   findCheckRunForSuite?(input: {
     repositoryId: number;
@@ -1900,12 +1984,18 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
       runnerJobId?: string;
       runnerAttempt?: number;
       runnerCleanupStatus?: RunnerCleanupStatus;
+      cleanupCompletedAt?: string;
       evidence?: ReviewEvidenceMetadata;
       decision?: ReviewDecision;
       checkRunId?: number;
       checkSetupStatus: 'pending' | 'ready' | 'failed';
       checkSetupClaimedAt?: string;
       publicationClaimedAt?: string;
+      cancelledAt?: string;
+      cancelledByUid?: number;
+      runnerStopAttemptedAt?: string;
+      checkCancelAttemptedAt?: string;
+      checkCancelReconciledAt?: string;
     }
   >();
   let nextRunId = 1;
@@ -1925,6 +2015,8 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
       case 'ignored':
       case 'rejected':
         return 'ignored';
+      case 'cancelled':
+        return 'cancelled';
     }
   };
 
@@ -1932,6 +2024,24 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
     const delivery = deliveries.get(deliveryId);
     if (delivery !== undefined) deliveries.set(deliveryId, { ...delivery, status, updatedAt });
   };
+
+  const cancellationFor = (run: {
+    runId: string;
+    cancelledAt?: string;
+    cancelledByUid?: number;
+    runnerJobId?: string;
+    runnerAttempt?: number;
+    runnerCleanupStatus?: RunnerCleanupStatus;
+    checkRunId?: number;
+  }): ReviewCancellationState => ({
+    runId: run.runId,
+    requestedAt: run.cancelledAt as string,
+    requestedByUid: run.cancelledByUid as number,
+    runnerJobId: run.runnerJobId ?? null,
+    runnerAttempt: run.runnerAttempt ?? null,
+    cleanup: run.runnerCleanupStatus ?? null,
+    checkRunId: run.checkRunId ?? null,
+  });
 
   return {
     listPriorReviewRunIds: async (runId) => {
@@ -2017,10 +2127,13 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
           run.job.pullRequestNumber === job.pullRequestNumber &&
           run.job.headSha === job.headSha,
       );
-      if (
-        historical.length > 0 &&
-        (job.trigger !== 'manual' || !historical.some((run) => run.status === 'failed'))
-      ) {
+      const retryable = historical.some(
+        (run) =>
+          run.status === 'failed' ||
+          (run.status === 'cancelled' &&
+            (run.runnerJobId === undefined || run.runnerCleanupStatus === 'destroyed')),
+      );
+      if (historical.length > 0 && (job.trigger !== 'manual' || !retryable)) {
         const prior = historical[historical.length - 1];
         const disposition = dispositionForStatus(prior.status);
         deliveries.set(deliveryId, {
@@ -2106,7 +2219,8 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
             active.runId !== candidate.runId &&
             active.runnerJobId !== undefined &&
             (active.status === 'scheduled' ||
-              (active.status === 'superseded' && active.runnerCleanupStatus !== 'destroyed') ||
+              ((active.status === 'superseded' || active.status === 'cancelled') &&
+                active.runnerCleanupStatus !== 'destroyed') ||
               active.runnerCleanupStatus === 'pending' ||
               active.runnerCleanupStatus === 'failed') &&
             active.job.installationId === candidate.job.installationId &&
@@ -2136,6 +2250,7 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
         setDeliveryStatus(run.deliveryId, 'failed', occurredAt);
       }
       if (
+        run.status === 'failed' &&
         releaseRunnerClaim !== undefined &&
         run.runnerJobId === releaseRunnerClaim.jobId &&
         run.runnerAttempt === releaseRunnerClaim.attempt
@@ -2149,10 +2264,14 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
       const run = runs.get(runId);
       if (run === undefined) return false;
       if (run.evidence !== undefined && run.evidence.key !== evidence.key) return false;
+      const cleanupCompletedAt = run.cleanupCompletedAt ?? run.evidence?.cleanupCompletedAt;
       run.evidence =
-        run.runnerCleanupStatus === 'destroyed' && run.evidence?.cleanupCompletedAt !== undefined
-          ? { ...evidence, cleanupCompletedAt: run.evidence.cleanupCompletedAt }
+        run.runnerCleanupStatus === 'destroyed' && cleanupCompletedAt !== undefined
+          ? { ...evidence, cleanupCompletedAt }
           : evidence;
+      if (run.cleanupCompletedAt === undefined && evidence.cleanupCompletedAt !== undefined) {
+        run.cleanupCompletedAt = evidence.cleanupCompletedAt;
+      }
       if (sandboxCleanup !== undefined && run.runnerCleanupStatus !== 'destroyed') {
         run.runnerCleanupStatus = sandboxCleanup;
       }
@@ -2162,7 +2281,7 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
       const run = runs.get(runId);
       if (
         run === undefined ||
-        (run.status !== 'failed' && run.status !== 'superseded') ||
+        (run.status !== 'failed' && run.status !== 'superseded' && run.status !== 'cancelled') ||
         run.runnerJobId !== jobId ||
         run.runnerAttempt !== attempt ||
         run.job.baseSha !== baseSha ||
@@ -2173,7 +2292,7 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
       if (run.runnerCleanupStatus === 'destroyed') {
         return {
           kind: 'already' as const,
-          cleanupCompletedAt: run.evidence?.cleanupCompletedAt ?? '',
+          cleanupCompletedAt: run.cleanupCompletedAt ?? run.evidence?.cleanupCompletedAt ?? '',
         };
       }
       return run.runnerCleanupStatus === 'failed'
@@ -2184,7 +2303,7 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
       const run = runs.get(runId);
       if (
         run === undefined ||
-        (run.status !== 'failed' && run.status !== 'superseded') ||
+        (run.status !== 'failed' && run.status !== 'superseded' && run.status !== 'cancelled') ||
         run.runnerJobId !== jobId ||
         run.runnerAttempt !== attempt ||
         run.job.baseSha !== baseSha ||
@@ -2195,14 +2314,19 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
       if (run.runnerCleanupStatus === 'destroyed') {
         return {
           kind: 'already' as const,
-          cleanupCompletedAt: run.evidence?.cleanupCompletedAt ?? confirmedAt,
+          cleanupCompletedAt:
+            run.cleanupCompletedAt ?? run.evidence?.cleanupCompletedAt ?? confirmedAt,
         };
       }
       if (run.runnerCleanupStatus !== 'failed') return { kind: 'rejected' as const };
       run.runnerCleanupStatus = 'destroyed';
+      run.cleanupCompletedAt ??= confirmedAt;
       run.updatedAt = confirmedAt;
       if (run.evidence !== undefined) {
-        run.evidence = { ...run.evidence, cleanupCompletedAt: confirmedAt };
+        run.evidence = {
+          ...run.evidence,
+          cleanupCompletedAt: run.evidence.cleanupCompletedAt ?? (run.cleanupCompletedAt as string),
+        };
       }
       return { kind: 'recovered' as const, cleanupCompletedAt: confirmedAt };
     },
@@ -2229,6 +2353,7 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
       const run = runs.get(runId);
       if (
         run === undefined ||
+        run.status === 'cancelled' ||
         run.checkSetupStatus !== 'pending' ||
         (run.checkSetupClaimedAt !== undefined && run.checkSetupClaimedAt > staleBefore)
       ) {
@@ -2316,6 +2441,148 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
         run.runnerCleanupStatus = undefined;
       }
       setDeliveryStatus(run.deliveryId, 'superseded', occurredAt);
+      return true;
+    },
+    cancelRun: async ({ runId, requestedByUid, occurredAt }) => {
+      const run = runs.get(runId);
+      if (run === undefined) return { kind: 'not_found' as const, runId };
+      if (run.status === 'cancelled') {
+        return { kind: 'already_cancelled' as const, cancellation: cancellationFor(run) };
+      }
+      if (run.status !== 'scheduled' || run.publicationClaimedAt !== undefined) {
+        return {
+          kind: 'conflict' as const,
+          runId,
+          status: run.status,
+          publicationClaimed: run.publicationClaimedAt !== undefined,
+        };
+      }
+      run.status = 'cancelled';
+      run.cancelledAt = occurredAt;
+      run.cancelledByUid = requestedByUid;
+      run.updatedAt = occurredAt;
+      setDeliveryStatus(run.deliveryId, 'cancelled', occurredAt);
+      return { kind: 'cancelled' as const, cancellation: cancellationFor(run) };
+    },
+    listCancellationWork: async ({ retryBefore, recoveryBefore, limit }) => {
+      const due = (attemptedAt: string | undefined) =>
+        attemptedAt === undefined || attemptedAt <= retryBefore;
+      return [...runs.values()]
+        .filter((run) => run.status === 'cancelled')
+        .map((run) => {
+          const cleanupBlocked =
+            run.runnerJobId !== undefined && run.runnerCleanupStatus !== 'destroyed';
+          const recoveryRequired = cleanupBlocked && (run.cancelledAt ?? '') < recoveryBefore;
+          return {
+            run,
+            cleanupBlocked,
+            recoveryRequired,
+            needsRunnerStop: cleanupBlocked && !recoveryRequired && due(run.runnerStopAttemptedAt),
+            needsCheckReconciliation:
+              run.checkRunId !== undefined &&
+              run.checkCancelReconciledAt === undefined &&
+              due(run.checkCancelAttemptedAt),
+          };
+        })
+        .filter(
+          (entry) =>
+            entry.needsRunnerStop || entry.needsCheckReconciliation || entry.recoveryRequired,
+        )
+        .sort((left, right) => {
+          const priority = (entry: {
+            needsRunnerStop: boolean;
+            needsCheckReconciliation: boolean;
+          }) => (entry.needsRunnerStop || entry.needsCheckReconciliation ? 0 : 1);
+          return (
+            priority(left) - priority(right) ||
+            (left.run.cancelledAt ?? '').localeCompare(right.run.cancelledAt ?? '')
+          );
+        })
+        .slice(0, limit)
+        .map(
+          ({
+            run,
+            needsRunnerStop,
+            needsCheckReconciliation,
+            cleanupBlocked,
+            recoveryRequired,
+          }) => ({
+            runId: run.runId,
+            cancelledAt: run.cancelledAt as string,
+            claimedAt: run.claimedAt ?? null,
+            runnerJobId: run.runnerJobId ?? null,
+            runnerAttempt: run.runnerAttempt ?? null,
+            runnerCleanupStatus: run.runnerCleanupStatus ?? null,
+            runnerStopAttemptedAt: run.runnerStopAttemptedAt ?? null,
+            checkRunId: run.checkRunId ?? null,
+            checkCancelAttemptedAt: run.checkCancelAttemptedAt ?? null,
+            needsRunnerStop,
+            needsCheckReconciliation,
+            cleanupBlocked,
+            recoveryRequired,
+          }),
+        );
+    },
+    recordRunnerStopAttempt: async ({ runId, jobId, attempt, occurredAt }) => {
+      const run = runs.get(runId);
+      if (
+        run === undefined ||
+        run.status !== 'cancelled' ||
+        run.runnerJobId !== jobId ||
+        run.runnerAttempt !== attempt ||
+        run.runnerCleanupStatus === 'destroyed'
+      ) {
+        return false;
+      }
+      run.runnerStopAttemptedAt = occurredAt;
+      return true;
+    },
+    confirmRunnerDestroyed: async ({ runId, jobId, attempt, occurredAt }) => {
+      const run = runs.get(runId);
+      if (
+        run === undefined ||
+        run.status !== 'cancelled' ||
+        run.runnerJobId !== jobId ||
+        run.runnerAttempt !== attempt
+      ) {
+        return false;
+      }
+      if (run.runnerCleanupStatus !== 'destroyed') {
+        run.runnerCleanupStatus = 'destroyed';
+      }
+      run.cleanupCompletedAt ??= occurredAt;
+      if (run.evidence !== undefined) {
+        run.evidence = {
+          ...run.evidence,
+          cleanupCompletedAt: run.evidence.cleanupCompletedAt ?? (run.cleanupCompletedAt as string),
+        };
+      }
+      return true;
+    },
+    recordCheckCancellationAttempt: async ({ runId, checkRunId, occurredAt }) => {
+      const run = runs.get(runId);
+      if (
+        run === undefined ||
+        run.status !== 'cancelled' ||
+        run.checkRunId !== checkRunId ||
+        run.checkCancelReconciledAt !== undefined
+      ) {
+        return false;
+      }
+      run.checkCancelAttemptedAt = occurredAt;
+      return true;
+    },
+    confirmCheckCancelled: async ({ runId, checkRunId, occurredAt }) => {
+      const run = runs.get(runId);
+      if (
+        run === undefined ||
+        run.status !== 'cancelled' ||
+        run.checkRunId !== checkRunId ||
+        run.checkCancelReconciledAt !== undefined
+      ) {
+        return false;
+      }
+      run.checkCancelReconciledAt = occurredAt;
       return true;
     },
     completeRunPublication: async ({ runId, occurredAt, decision }) => {
