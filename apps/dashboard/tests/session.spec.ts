@@ -4,6 +4,7 @@ import type {
   PublicTaskDetail,
   PublicTaskState,
 } from '@compte-rendu/contracts';
+import type { Page } from '@playwright/test';
 import { expect, test, type ApiPayload } from './fixtures';
 
 const NOW = '2026-10-16T12:00:00.000Z';
@@ -172,29 +173,118 @@ test('signing out POSTs to the same origin and clears the viewer', async ({
   );
 });
 
-test('signed-in mobile header keeps the account, sign-out and refresh usable', async ({
+const headerGeometry = (page: Page) =>
+  page.evaluate(() => {
+    const rect = (selector: string) => {
+      const element = document.querySelector(selector);
+      if (!element) throw new Error('Missing ' + selector);
+      const bounds = element.getBoundingClientRect();
+      return {
+        top: bounds.top,
+        right: bounds.right,
+        bottom: bounds.bottom,
+        left: bounds.left,
+        width: bounds.width,
+        height: bounds.height,
+      };
+    };
+    const navItems = [...document.querySelectorAll('.bx--header__menu-item')].map((element) => {
+      const bounds = element.getBoundingClientRect();
+      return { text: element.textContent?.trim() ?? '', top: bounds.top, bottom: bounds.bottom };
+    });
+    const timestamp = document.querySelector<HTMLElement>('[data-testid="last-refresh"]');
+    return {
+      header: rect('.bx--header'),
+      name: rect('.bx--header__name'),
+      nav: rect('.bx--header__nav'),
+      navItems,
+      account: rect('.header-account'),
+      viewer: rect('[data-testid="viewer-login"]'),
+      signOut: rect('[data-testid="sign-out"]'),
+      refresh: rect('.header-refresh [data-testid="refresh"]'),
+      timestamp: rect('[data-testid="last-refresh"]'),
+      timestampFits: timestamp ? timestamp.scrollWidth <= timestamp.clientWidth + 1 : false,
+      overflow: document.documentElement.scrollWidth - window.innerWidth,
+    };
+  });
+
+const expectInside = (
+  child: { top: number; right: number; bottom: number; left: number },
+  parent: { top: number; right: number; bottom: number; left: number },
+) => {
+  expect(child.top).toBeGreaterThanOrEqual(parent.top - 0.5);
+  expect(child.left).toBeGreaterThanOrEqual(parent.left - 0.5);
+  expect(child.bottom).toBeLessThanOrEqual(parent.bottom + 0.5);
+  expect(child.right).toBeLessThanOrEqual(parent.right + 0.5);
+};
+
+test('desktop header keeps the account and refresh timestamp inside the 48px bar', async ({
   page,
   harness,
   base,
 }) => {
-  harness.setSession(signedIn('octocat', true));
+  harness.setSession(signedIn('KagamiChan', true));
+  harness.setHandler((url) =>
+    url.pathname === '/api/dashboard' ? ok(overview()) : ok(historyPage()),
+  );
+  await page.setViewportSize({ width: 1280, height: 640 });
+  await page.goto(base + '/');
+  await page.addStyleTag({ content: 'html { overflow-y: scroll; }' });
+  await expect(page.getByTestId('stats')).toBeVisible();
+  await expect(page.getByTestId('viewer-login')).toHaveText('KagamiChan');
+  const geometry = await headerGeometry(page);
+  expect(geometry.header.height).toBe(48);
+  expect(geometry.nav.right).toBeLessThanOrEqual(geometry.account.left);
+  for (const element of [
+    geometry.account,
+    geometry.viewer,
+    geometry.signOut,
+    geometry.timestamp,
+    geometry.refresh,
+  ])
+    expectInside(element, geometry.header);
+  expect(geometry.timestampFits).toBe(true);
+  expect(geometry.overflow).toBeLessThanOrEqual(1);
+});
+
+test('mobile header groups title with account, nav on one row and refresh below', async ({
+  page,
+  harness,
+  base,
+}) => {
+  harness.setSession(signedIn('KagamiChan', true));
   harness.setHandler((url) =>
     url.pathname === '/api/dashboard' ? ok(overview()) : ok(historyPage()),
   );
   await page.setViewportSize({ width: 360, height: 640 });
   await page.goto(base + '/');
   await expect(page.getByTestId('stats')).toBeVisible();
-  await expect(page.getByTestId('viewer-login')).toHaveText('octocat');
-  const refresh = page.locator('.header-refresh [data-testid="refresh"]');
-  await expect(page.getByTestId('sign-out')).toBeVisible();
-  await expect(refresh).toBeVisible();
-  const overflow = await page.evaluate(
-    () => document.documentElement.scrollWidth - window.innerWidth,
-  );
-  expect(overflow).toBeLessThanOrEqual(1);
-  await expect(page.getByTestId('viewer-login')).toBeInViewport({ ratio: 1 });
-  await expect(page.getByTestId('sign-out')).toBeInViewport({ ratio: 1 });
-  await expect(refresh).toBeInViewport({ ratio: 1 });
+  await expect(page.getByTestId('viewer-login')).toHaveText('KagamiChan');
+  const geometry = await headerGeometry(page);
+  expect(geometry.header.height).toBeLessThanOrEqual(150);
+  expect(geometry.overflow).toBeLessThanOrEqual(1);
+  expect(geometry.navItems).toHaveLength(4);
+  expect(new Set(geometry.navItems.map((item) => Math.round(item.top))).size).toBe(1);
+  expect(geometry.navItems.map((item) => item.text)).toEqual([
+    'Overview',
+    'History',
+    'Help',
+    'Settings',
+  ]);
+  expect(geometry.timestampFits).toBe(true);
+  expect(geometry.name.bottom).toBeLessThanOrEqual(geometry.nav.top + 0.5);
+  expect(geometry.account.bottom).toBeLessThanOrEqual(geometry.nav.top + 0.5);
+  expect(geometry.refresh.top).toBeGreaterThanOrEqual(geometry.nav.bottom - 0.5);
+  for (const element of [
+    geometry.name,
+    geometry.account,
+    geometry.viewer,
+    geometry.signOut,
+    geometry.nav,
+    geometry.timestamp,
+    geometry.refresh,
+  ])
+    expectInside(element, geometry.header);
 });
 
 test('a GitHub outage or expired session leaves public browsing usable', async ({

@@ -208,6 +208,13 @@ it('signs out only from a same-origin POST and returns to a safe page', async ()
     );
     expect(unsafe.status).toBe(303);
     expect(unsafe.headers.get('location')).toBe('/');
+    const traversal = await app.fetch(
+      new Request(origin + '/auth/logout?returnTo=/history/%2E%2E/settings', {
+        method: 'POST',
+        headers: { origin, cookie },
+      }),
+    );
+    expect(traversal.headers.get('location')).toBe('/');
   } finally {
     db.close();
   }
