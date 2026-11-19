@@ -92,8 +92,10 @@ const OPENCODE_VERSION = '2.0.32';
 const SANDBOX_TEMPLATE = `ghcr.io/ariga39/petit-chiba-opencode:${OPENCODE_VERSION}-gh2.98.0`;
 const SETUP_TIMEOUT_MS = 2 * 60 * 1000;
 const SUBMIT_REMINDER_BUDGET_MS = 2 * 60 * 1000;
-const CLEANUP_RESERVE_MS = 60 * 1000;
-const FINALIZATION_BUDGET_MS = CLEANUP_RESERVE_MS;
+const FINALIZATION_BUDGET_MS = 60 * 1000;
+// Keep a clock-skew reserve before the upstream GitHub read credential expires.
+const CREDENTIAL_EXPIRY_SAFETY_MARGIN_MS = FINALIZATION_BUDGET_MS;
+const OPENSANDBOX_RESOURCE_LIFETIME_SECONDS = 2 * 60 * 60;
 const GRANT_REVOKE_ATTEMPTS = 2;
 const GRANT_REVOKE_BUDGET_MS = 15 * 1000;
 const CLEANUP_COMMAND_TIMEOUT_MS = 30 * 1000;
@@ -563,6 +565,7 @@ type RunnerFailureCauseValue = typeof RunnerFailureCause.Type;
 
 type RunnerJobInputState = {
   claimDeadlineAt?: number;
+  repositoryReadTokenExpiresAt?: number;
   reviewConfiguration?: RunnerJobInput['reviewConfiguration'];
   id: string;
   runId: string;
@@ -624,6 +627,7 @@ type RunnerJob = {
   grantTokenPath?: string;
   grantRoot?: string;
   deadlineAt: number;
+  deadlineLimit: 'claim' | 'credential';
   executionStartedAt?: string;
   submissionCompletedAt?: string;
   cleanupCompletedAt?: string;
@@ -882,6 +886,11 @@ const askpassScript =
 const currentIso = () => Effect.runPromise(DateTime.now.pipe(Effect.map(DateTime.formatIso)));
 const currentEpochMillis = () =>
   Effect.runPromise(DateTime.now.pipe(Effect.map(DateTime.toEpochMillis)));
+const remainingExecutionMs = (job: RunnerJob) => Math.max(0, job.deadlineAt - Date.now());
+const deadlineFailure = (job: RunnerJob): NonNullable<RunnerJobState['failure']> => ({
+  reason: 'timeout',
+  deadline: job.deadlineLimit,
+});
 
 export const createRunner = (options: RunnerOptions = {}) => {
   const settingsFileRaw = options.settingsFile ?? process.env.RUNNER_SETTINGS_FILE;
@@ -973,7 +982,9 @@ export const createRunner = (options: RunnerOptions = {}) => {
       endpoint: sandboxRuntime.opensandbox.endpoint,
       apiKey,
       image: sandboxRuntime.opensandbox.image,
-      lifetimeSeconds: Math.ceil((4 * REVIEW_ATTEMPT_BUDGET_MS) / 1000),
+      // A review and teardown fit in two hours. Relay grants retain their
+      // separate four-times-budget lifetime.
+      lifetimeSeconds: OPENSANDBOX_RESOURCE_LIFETIME_SECONDS,
     };
   }
   const sandboxRuntimeFactory =
@@ -1412,7 +1423,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
     diagnostic?: RunnerDiagnostic,
   ) => {
     const requestedTimeout = processOptions.timeoutMs ?? SETUP_TIMEOUT_MS;
-    const remaining = job.deadlineAt - Date.now() - CLEANUP_RESERVE_MS;
+    const remaining = remainingExecutionMs(job);
     let result: RunnerProcessResult;
     try {
       const sandboxEnvironment =
@@ -1437,9 +1448,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
           diagnostic === undefined
             ? processOptions.maxBytes
             : (processOptions.maxBytes ?? MAX_DIAGNOSTIC_STDERR_BYTES),
-        timeoutMs: args.includes('--agent')
-          ? requestedTimeout
-          : Math.max(1, Math.min(requestedTimeout, remaining)),
+        timeoutMs: Math.max(1, Math.min(requestedTimeout, remaining)),
         onChild: (child) => {
           job.child = child;
           processOptions.onChild?.(child);
@@ -2352,8 +2361,8 @@ export const createRunner = (options: RunnerOptions = {}) => {
         cleanup: { status: 'pending' },
       });
       if (job.abortRequested) return;
-      if (job.input.claimDeadlineAt !== undefined && job.input.claimDeadlineAt <= Date.now()) {
-        failure = { reason: 'timeout' };
+      if (job.deadlineAt <= Date.now()) {
+        failure = deadlineFailure(job);
         return;
       }
       // Remote relay execution never infers a default route: Core must have
@@ -2382,6 +2391,10 @@ export const createRunner = (options: RunnerOptions = {}) => {
         return;
       }
       if (job.abortRequested) return;
+      if (job.deadlineAt <= Date.now()) {
+        failure = deadlineFailure(job);
+        return;
+      }
 
       if (llmServiceClient !== undefined && multiSelection !== undefined) {
         const grantRoutes = directExecution
@@ -2503,10 +2516,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
               operation,
               diagnostic,
               processOptions,
-              Math.min(
-                processOptions?.timeoutMs ?? SETUP_TIMEOUT_MS,
-                job.deadlineAt - Date.now() - CLEANUP_RESERVE_MS,
-              ),
+              Math.min(processOptions?.timeoutMs ?? SETUP_TIMEOUT_MS, remainingExecutionMs(job)),
               true,
             ),
         },
@@ -2535,13 +2545,21 @@ export const createRunner = (options: RunnerOptions = {}) => {
         {},
         { stage: 'sandbox', command: 'github-preflight' },
       );
+      if (job.deadlineAt <= Date.now()) {
+        failure = deadlineFailure(job);
+        return;
+      }
       if (githubPreflight.exitCode !== 0 || githubPreflight.timedOut) {
         failure = { reason: 'agent' };
         return;
       }
+      const agentRemaining = remainingExecutionMs(job);
+      if (agentRemaining <= 0) {
+        failure = deadlineFailure(job);
+        return;
+      }
       update(job, { stage: 'agent' });
       reportStage(job, 'agent');
-      const agentBudgetDeadline = (await currentEpochMillis()) + REVIEW_ATTEMPT_BUDGET_MS;
       const agentModel = multi
         ? modelReference(directExecution ? multiSelection.reviewers[0]! : multiSelection.synthesis)
         : modelId;
@@ -2591,7 +2609,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
           captureStdout: true,
           captureStderr: true,
           maxBytes: MAX_AGENT_OUTPUT_BYTES,
-          timeoutMs: REVIEW_ATTEMPT_BUDGET_MS,
+          timeoutMs: agentRemaining,
           stdoutFilePath: join(evidencePath, 'opencode.jsonl'),
           stderrFilePath: join(evidencePath, 'opencode.stderr'),
         },
@@ -2615,7 +2633,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         // session.
         let normalCompletion = false;
         let needsCorrection = false;
-        const precheckRemaining = agentBudgetDeadline - (await currentEpochMillis());
+        const precheckRemaining = job.deadlineAt - (await currentEpochMillis());
         if (sessionId !== undefined && precheckRemaining > 0) {
           const exported = await runtime.exec(
             ['opencode', 'session', 'export', '--standalone', sessionId],
@@ -2640,7 +2658,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
           }
         }
         // Recompute after the export: it consumes shared deadline time.
-        const remaining = agentBudgetDeadline - (await currentEpochMillis());
+        const remaining = job.deadlineAt - (await currentEpochMillis());
         if (
           !job.abortRequested &&
           sessionId !== undefined &&
@@ -2773,7 +2791,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
           submissionSessionId !== undefined;
         if (agent.timedOut) {
           executionCause = 'timeout';
-          failure = { reason: 'timeout', cause: executionCause };
+          failure = { reason: 'timeout', cause: executionCause, deadline: job.deadlineLimit };
         } else if (parsed.cause !== undefined) {
           executionCause = parsed.cause;
           failure = { reason: 'invalid-output', cause: executionCause };
@@ -3048,6 +3066,9 @@ export const createRunner = (options: RunnerOptions = {}) => {
                       status: 'failed',
                       reason: finalFailure.reason,
                       ...(finalFailure.cause === undefined ? {} : { cause: finalFailure.cause }),
+                      ...(finalFailure.deadline === undefined
+                        ? {}
+                        : { deadline: finalFailure.deadline }),
                       ...(finalFailure.httpStatus === undefined
                         ? {}
                         : { httpStatus: finalFailure.httpStatus }),
@@ -3057,6 +3078,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
               status: finalStatus,
               ...(finalFailure === undefined ? {} : { reason: finalFailure.reason }),
               ...(finalFailure?.cause === undefined ? {} : { cause: finalFailure.cause }),
+              ...(finalFailure?.deadline === undefined ? {} : { deadline: finalFailure.deadline }),
               ...(finalFailure?.httpStatus === undefined
                 ? {}
                 : { httpStatus: finalFailure.httpStatus }),
@@ -3167,6 +3189,16 @@ export const createRunner = (options: RunnerOptions = {}) => {
       stopsDuringClaim.delete(id);
     }
     const evidenceId = randomUUID();
+    const admittedAt = Date.now();
+    const claimDeadlineAt = input.claimDeadlineAt ?? admittedAt + REVIEW_ATTEMPT_BUDGET_MS;
+    const credentialDeadlineAt =
+      input.repositoryReadTokenExpiresAt === undefined
+        ? undefined
+        : input.repositoryReadTokenExpiresAt - CREDENTIAL_EXPIRY_SAFETY_MARGIN_MS;
+    const deadlineLimit =
+      credentialDeadlineAt !== undefined && credentialDeadlineAt < claimDeadlineAt
+        ? 'credential'
+        : 'claim';
     const job: RunnerJob = {
       state: {
         id,
@@ -3192,7 +3224,8 @@ export const createRunner = (options: RunnerOptions = {}) => {
       grantRevoked: false,
       sessionIds: [],
       diagnosticCheckoutToken: input.repositoryReadToken,
-      deadlineAt: Date.now() + REVIEW_ATTEMPT_BUDGET_MS,
+      deadlineAt: Math.min(claimDeadlineAt, credentialDeadlineAt ?? Number.POSITIVE_INFINITY),
+      deadlineLimit,
     };
     jobs.set(id, job);
     jobsByRun.set(`${input.runId}:${input.attempt}`, job);

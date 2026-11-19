@@ -2606,6 +2606,93 @@ describe('Core Worker', () => {
     }
   });
 
+  it('derives the deadline from the durable claim time and passes the read-token expiry', async () => {
+    const database = new SqliteD1Database();
+    const worker = createCoreWorker(coreEnv(database), {
+      github: { getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git' },
+      getReadInstallationToken: async () => ({
+        token: 'repository-read-token',
+        expiresAt: '2026-09-01T01:20:00.000Z',
+      }),
+    });
+    vi.useFakeTimers({ toFake: ['Date'] });
+
+    try {
+      vi.setSystemTime(new Date('2026-09-01T00:00:00.000Z'));
+      expect(
+        (
+          await worker.fetch(
+            new Request('https://core.internal/review-events', {
+              method: 'POST',
+              body: JSON.stringify({
+                ...eligibleEvent,
+                deliveryId: 'delivery-claim-deadline',
+              }),
+            }),
+          )
+        ).status,
+      ).toBe(202);
+
+      vi.setSystemTime(new Date('2026-09-01T00:05:00.000Z'));
+      const claim = await worker.fetch(
+        new Request('https://core.internal/runner-claims', {
+          method: 'POST',
+          headers: { 'x-compte-rendu-runner-claim': 'verified' },
+        }),
+      );
+
+      expect(claim.status).toBe(200);
+      expect(await claim.json()).toMatchObject({
+        claimDeadlineAt: Date.parse('2026-09-01T01:05:00.000Z'),
+        repositoryReadTokenExpiresAt: Date.parse('2026-09-01T01:20:00.000Z'),
+        repositoryReadToken: 'repository-read-token',
+      });
+    } finally {
+      vi.useRealTimers();
+      database.close();
+    }
+  });
+
+  it('fails a claim closed when the read-token expiry is invalid', async () => {
+    const database = new SqliteD1Database();
+    const worker = createCoreWorker(coreEnv(database), {
+      github: { getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git' },
+      getReadInstallationToken: async () => ({
+        token: 'repository-read-token',
+        expiresAt: 'not-a-date',
+      }),
+    });
+
+    try {
+      await worker.fetch(
+        new Request('https://core.internal/review-events', {
+          method: 'POST',
+          body: JSON.stringify({
+            ...eligibleEvent,
+            deliveryId: 'delivery-invalid-read-token-expiry',
+          }),
+        }),
+      );
+
+      const claim = await worker.fetch(
+        new Request('https://core.internal/runner-claims', {
+          method: 'POST',
+          headers: { 'x-compte-rendu-runner-claim': 'verified' },
+        }),
+      );
+
+      expect(claim.status).toBe(503);
+      await expect(
+        database
+          .prepare(`SELECT status FROM review_runs WHERE delivery_id = ?`)
+          .bind('delivery-invalid-read-token-expiry')
+          .first<{ status: string }>(),
+      ).resolves.toEqual({ status: 'failed' });
+    } finally {
+      database.close();
+    }
+  });
+
   it('does not retry or admit a Runner while accepting a webhook', async () => {
     const database = new SqliteD1Database();
     const runnerRequests: Request[] = [];

@@ -624,6 +624,9 @@ const runReminderScenario = async (scenario: {
   runId: string;
   rounds: readonly ReminderRound[];
   sessionId?: string;
+  claimDeadlineAt?: number;
+  repositoryReadTokenExpiresAt?: number;
+  advanceOnCheckoutMs?: number;
 }) => {
   const baseSha = '1111111111111111111111111111111111111111';
   const headSha = '2222222222222222222222222222222222222222';
@@ -639,6 +642,9 @@ const runReminderScenario = async (scenario: {
     modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
     process: async (_command, args, options = {}) => {
       if (args[0] === 'create') createCommands.push([...args]);
+      if (args.includes('merge-base') && scenario.advanceOnCheckoutMs !== undefined) {
+        vi.setSystemTime(Date.now() + scenario.advanceOnCheckoutMs);
+      }
       const isAgent = args[0] === 'exec' && args.includes('--agent');
       if (isAgent) {
         const round = scenario.rounds[Math.min(agentRuns, scenario.rounds.length - 1)]!;
@@ -697,6 +703,12 @@ const runReminderScenario = async (scenario: {
       },
       body: JSON.stringify({
         ...runnerJobFields,
+        ...(scenario.claimDeadlineAt === undefined
+          ? {}
+          : { claimDeadlineAt: scenario.claimDeadlineAt }),
+        ...(scenario.repositoryReadTokenExpiresAt === undefined
+          ? {}
+          : { repositoryReadTokenExpiresAt: scenario.repositoryReadTokenExpiresAt }),
         runId: scenario.runId,
         attempt: 1,
         repositoryUrl: 'https://github.com/acme/reviewed.git',
@@ -1939,7 +1951,7 @@ describe('Runner Job HTTP interface', () => {
   });
 
   it('does not remind when the shared agent budget is exhausted', async () => {
-    const agentBudgetMs = 30 * 60 * 1000;
+    const agentBudgetMs = 60 * 60 * 1000;
     vi.useFakeTimers({ toFake: ['Date'] });
     try {
       vi.setSystemTime(new Date('2026-09-12T00:00:00.000Z'));
@@ -1965,7 +1977,7 @@ describe('Runner Job HTTP interface', () => {
   });
 
   it('caps the reminder at the remaining shared agent budget', async () => {
-    const agentBudgetMs = 30 * 60 * 1000;
+    const agentBudgetMs = 60 * 60 * 1000;
     vi.useFakeTimers({ toFake: ['Date'] });
     try {
       vi.setSystemTime(new Date('2026-09-12T00:00:00.000Z'));
@@ -1992,6 +2004,190 @@ describe('Runner Job HTTP interface', () => {
         status: 'succeeded',
         result: structuredResult(reminderMarkdown),
       });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps reviewing past 30 minutes and times out at the 60-minute claim deadline', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const start = Date.parse('2026-09-12T00:00:00.000Z');
+    const claimDeadlineAt = start + 60 * 60 * 1000;
+    const markdown = '## Review:\n\nLong review.';
+    try {
+      vi.setSystemTime(start);
+      const continued = await runReminderScenario({
+        runId: 'run-review-past-thirty-minutes',
+        claimDeadlineAt,
+        rounds: [
+          {
+            output: finalMarkdownJsonl(markdown, 'session-reminder'),
+            finalText: JSON.stringify({ decision: 'comment', markdown }),
+            advanceMs: 31 * 60 * 1000,
+          },
+        ],
+      });
+      expect(continued.agentTimeouts[0]).toBe(60 * 60 * 1000);
+      expect(continued.terminal).toMatchObject({
+        status: 'succeeded',
+        result: structuredResult(markdown),
+      });
+
+      vi.setSystemTime(start);
+      const timedOut = await runReminderScenario({
+        runId: 'run-review-sixty-minute-timeout',
+        claimDeadlineAt,
+        rounds: [
+          {
+            output: finalMarkdownJsonl(markdown, 'session-reminder'),
+            finalText: JSON.stringify({ decision: 'comment', markdown }),
+            timedOut: true,
+            advanceMs: 60 * 60 * 1000 + 1,
+          },
+        ],
+      });
+      expect(timedOut.agentTimeouts[0]).toBe(60 * 60 * 1000);
+      expect(timedOut.terminal).toMatchObject({
+        status: 'failed',
+        failure: { reason: 'timeout', deadline: 'claim' },
+        sandbox: { cleanup: 'destroyed' },
+      });
+      expect(timedOut.manifest.execution).toMatchObject({
+        status: 'failed',
+        reason: 'timeout',
+        deadline: 'claim',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('counts setup against the claim deadline instead of resetting the agent clock', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const start = Date.parse('2026-09-12T00:00:00.000Z');
+    const markdown = '## Review:\n\nSetup counted.';
+    try {
+      vi.setSystemTime(start);
+      const result = await runReminderScenario({
+        runId: 'run-setup-consumes-claim-budget',
+        claimDeadlineAt: start + 60 * 60 * 1000,
+        advanceOnCheckoutMs: 31 * 60 * 1000,
+        rounds: [
+          {
+            output: finalMarkdownJsonl(markdown, 'session-reminder'),
+            finalText: JSON.stringify({ decision: 'comment', markdown }),
+          },
+        ],
+      });
+
+      expect(result.agentTimeouts[0]).toBe(29 * 60 * 1000);
+      expect(result.terminal).toMatchObject({
+        status: 'succeeded',
+        result: structuredResult(markdown),
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('caps execution at the GitHub read-token expiry minus the safety margin', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const start = Date.parse('2026-09-12T00:00:00.000Z');
+    const markdown = '## Review:\n\nCredential bounded.';
+    try {
+      vi.setSystemTime(start);
+      const result = await runReminderScenario({
+        runId: 'run-read-token-deadline',
+        claimDeadlineAt: start + 60 * 60 * 1000,
+        repositoryReadTokenExpiresAt: start + 20 * 60 * 1000,
+        advanceOnCheckoutMs: 18 * 60 * 1000,
+        rounds: [
+          {
+            output: finalMarkdownJsonl(markdown, 'session-reminder'),
+            finalText: JSON.stringify({ decision: 'comment', markdown }),
+          },
+        ],
+      });
+
+      expect(result.agentTimeouts[0]).toBe(60 * 1000);
+      expect(result.terminal).toMatchObject({
+        status: 'succeeded',
+        result: structuredResult(markdown),
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reports an expired GitHub read credential and still confirms cleanup', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const start = Date.parse('2026-09-12T00:00:00.000Z');
+    try {
+      vi.setSystemTime(start);
+      const result = await runReminderScenario({
+        runId: 'run-read-token-expired-before-agent',
+        claimDeadlineAt: start + 60 * 60 * 1000,
+        repositoryReadTokenExpiresAt: start + 20 * 60 * 1000,
+        advanceOnCheckoutMs: 20 * 60 * 1000,
+        rounds: [
+          {
+            output: finalMarkdownJsonl('## Review:\n\nMust not run.', 'session-reminder'),
+            finalText: JSON.stringify({
+              decision: 'comment',
+              markdown: '## Review:\n\nMust not run.',
+            }),
+          },
+        ],
+      });
+
+      expect(result.createCommands).toHaveLength(0);
+      expect(result.agentRuns).toBe(0);
+      expect(result.terminal).toMatchObject({
+        status: 'failed',
+        failure: { reason: 'timeout', deadline: 'credential' },
+        sandbox: { cleanup: 'destroyed' },
+      });
+      expect(result.manifest.terminal).toMatchObject({
+        reason: 'timeout',
+        deadline: 'credential',
+      });
+      expect(JSON.stringify(result.terminal)).not.toContain('github-read-token');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('accepts a legacy claim without a read-token expiry', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const start = Date.parse('2026-09-12T00:00:00.000Z');
+    const markdown = '## Review:\n\nLegacy claim.';
+    try {
+      vi.setSystemTime(start);
+      const withDeadline = await runReminderScenario({
+        runId: 'run-legacy-claim-deadline',
+        claimDeadlineAt: start + 45 * 60 * 1000,
+        rounds: [
+          {
+            output: finalMarkdownJsonl(markdown, 'session-reminder'),
+            finalText: JSON.stringify({ decision: 'comment', markdown }),
+          },
+        ],
+      });
+      expect(withDeadline.agentTimeouts[0]).toBe(45 * 60 * 1000);
+      expect(withDeadline.terminal).toMatchObject({ status: 'succeeded' });
+
+      vi.setSystemTime(start);
+      const withoutDeadline = await runReminderScenario({
+        runId: 'run-legacy-claim-without-deadline',
+        rounds: [
+          {
+            output: finalMarkdownJsonl(markdown, 'session-reminder'),
+            finalText: JSON.stringify({ decision: 'comment', markdown }),
+          },
+        ],
+      });
+      expect(withoutDeadline.agentTimeouts[0]).toBe(60 * 60 * 1000);
+      expect(withoutDeadline.terminal).toMatchObject({ status: 'succeeded' });
     } finally {
       vi.useRealTimers();
     }

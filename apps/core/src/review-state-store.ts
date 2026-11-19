@@ -80,6 +80,7 @@ interface ReplayRunRow {
 }
 
 interface ClaimRow {
+  claimed_at: string | null;
   review_configuration: string | null;
   run_id: string;
   installation_id: number;
@@ -946,7 +947,8 @@ const createStore = (
          )
          RETURNING run_id, installation_id, repository_id, pull_request_number,
            base_sha, head_sha, trigger, comment_id, runner_job_id, runner_attempt,
-           repository_visibility_snapshot, base_ref, head_ref, review_configuration`,
+           repository_visibility_snapshot, base_ref, head_ref, review_configuration,
+           claimed_at`,
       )
       .bind(jobId, attempt, occurredAt, occurredAt)
       .first<ClaimRow>();
@@ -957,6 +959,7 @@ const createStore = (
       runId: row.run_id,
       jobId: row.runner_job_id,
       attempt: row.runner_attempt,
+      claimedAt: row.claimed_at ?? occurredAt,
       job: {
         ...(row.review_configuration === null
           ? {}

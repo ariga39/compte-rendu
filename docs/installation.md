@@ -659,7 +659,7 @@ through evidence archival, Sandbox cleanup, and the terminal callback. An
 empty, zero, negative, fractional, or non-numeric value is rejected before
 the Runner claims or admits any work. Size the host for the chosen value: each
 concurrent review runs its own Sandbox with `--cpus 4` and `--memory 8g` plus
-one 30-minute agent budget, so `RUNNER_CONCURRENCY=2` needs roughly twice the
+one 60-minute review deadline, so `RUNNER_CONCURRENCY=2` needs roughly twice the
 CPU, memory, disk, and model throughput of the default. Prefer the smallest
 value that removes head-of-line blocking. This setting reuses the existing D1
 durable queue and adds no new queue, scheduler, or retry system. The Runner
