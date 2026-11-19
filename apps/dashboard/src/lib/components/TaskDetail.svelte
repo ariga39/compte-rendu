@@ -464,7 +464,7 @@
       </div>
     {/if}
 
-    {#if cancelNotice}
+    {#if cancelNotice && task?.status === 'scheduled'}
       <div class="notice" role="status" data-testid="cancel-notice">
         {cancelNotice}
       </div>
