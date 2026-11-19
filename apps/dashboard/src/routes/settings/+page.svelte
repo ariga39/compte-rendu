@@ -51,9 +51,9 @@
   {#if data.status === 401}
     <a class="bx--btn bx--btn--primary" href="/auth/github" data-sveltekit-reload>Sign in with GitHub</a>
   {:else if data.status === 403}
-    <p>Editing requires an authorized GitHub account with two-factor authentication enabled.</p>
+    <p>{data.error ?? 'Editing requires an authorized GitHub account with two-factor authentication enabled.'}</p>
   {:else if !data.settings}
-    <p>Model settings are temporarily unavailable.</p>
+    <p>{data.error ?? 'Model settings are temporarily unavailable.'}</p>
   {:else}
     <p>Changes apply to newly admitted reviews.</p>
     <form onsubmit={save}>

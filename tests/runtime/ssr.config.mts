@@ -14,9 +14,20 @@ export default defineConfig({
       miniflare: {
         bindings: {
           DASHBOARD_ORIGIN: 'https://reviews.test',
+          DASHBOARD_MODEL_EDITOR_IDS: '[42]',
           DASHBOARD_GITHUB_CLIENT_ID: 'test-client',
           DASHBOARD_GITHUB_CLIENT_SECRET: 'test-secret',
         },
+        serviceBindings: { INFERENCE_RELAY: { name: 'settings-test-relay' } },
+        workers: [
+          {
+            name: 'settings-test-relay',
+            modules: true,
+            compatibilityDate: '2026-08-22',
+            script: `import { WorkerEntrypoint } from 'cloudflare:workers';
+            export default class extends WorkerEntrypoint { catalog() { return { routes: ['review/a'] }; } }`,
+          },
+        ],
         outboundService(request) {
           if (
             request.url === 'https://github.com/login/oauth/access_token' &&
@@ -28,6 +39,11 @@ export default defineConfig({
               scope: '',
               expires_in: 28800,
             });
+          if (
+            request.url === 'https://api.github.com/user' &&
+            request.headers.get('authorization') === 'Bearer ghu_test'
+          )
+            return Response.json({ id: 42, two_factor_authentication: true });
           return new Response(null, { status: 404 });
         },
       },

@@ -47,6 +47,7 @@ export async function modelSettings(request: Request, env: ApplicationEnv): Prom
   const secret = env.DASHBOARD_GITHUB_CLIENT_SECRET;
   if (!origin || url.origin !== origin || url.protocol !== 'https:' || !id || !secret)
     return response(503, { error: 'Login is unavailable.' });
+  let unavailable = 'Model settings are temporarily unavailable.';
   const sameOrigin = request.headers.get('origin') === origin;
   try {
     const client = { client_id: id };
@@ -124,35 +125,44 @@ export async function modelSettings(request: Request, env: ApplicationEnv): Prom
       return response(401);
     }
     if (typeof token !== 'string') return response(401);
+    unavailable = 'Could not retrieve your GitHub account details.';
     const upstream = await fetch('https://api.github.com/user', {
       headers: {
         authorization: 'Bearer ' + token,
         accept: 'application/vnd.github+json',
         'user-agent': 'compte-rendu',
       },
-      redirect: 'error',
+      redirect: 'manual',
       signal: AbortSignal.timeout(8000),
     });
-    if (!upstream.ok) return response(upstream.status === 401 ? 401 : 503);
+    if (!upstream.ok)
+      return upstream.status === 401 ? response(401) : response(503, { error: unavailable });
     const user = (await upstream.json()) as { id?: unknown; two_factor_authentication?: unknown };
+    unavailable = 'Could not read the dashboard editor allowlist.';
     const allowed = Schema.decodeUnknownSync(Schema.Array(Schema.Number))(
       JSON.parse(env.DASHBOARD_MODEL_EDITOR_IDS ?? '[]'),
     );
-    if (
-      typeof user.id !== 'number' ||
-      !Number.isSafeInteger(user.id) ||
-      !allowed.includes(user.id) ||
-      user.two_factor_authentication !== true
-    )
-      return response(403);
-    if (!env.INFERENCE_RELAY) return response(503);
+    if (typeof user.id !== 'number' || !Number.isSafeInteger(user.id) || !allowed.includes(user.id))
+      return response(403, {
+        error: 'This GitHub account is not authorized to edit review models.',
+      });
+    if (user.two_factor_authentication !== true)
+      return response(403, {
+        error:
+          user.two_factor_authentication === false
+            ? 'Enable two-factor authentication on GitHub to edit review models.'
+            : 'GitHub did not report whether two-factor authentication is enabled for this account.',
+      });
+    unavailable = 'Could not load the model catalog.';
+    if (!env.INFERENCE_RELAY) return response(503, { error: unavailable });
     const { routes } = await env.INFERENCE_RELAY.catalog();
+    unavailable = 'Could not read the saved model configuration.';
     if (request.method === 'GET') {
       const config = await applyReviewConfiguration(request, env.REVIEW_DB);
       return config.ok ? response(200, { configuration: await config.json(), routes }) : config;
     }
     return applyReviewConfiguration(request, env.REVIEW_DB, routes);
   } catch {
-    return response(503, { error: 'Model settings are temporarily unavailable.' });
+    return response(503, { error: unavailable });
   }
 }

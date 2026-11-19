@@ -217,7 +217,7 @@ it('renders persisted public review details and tokens while keeping private rev
   expect(html).not.toContain('secret-repo-canary');
 });
 
-it('exchanges a GitHub callback for a dashboard session in the built Worker', async () => {
+it('reads model settings after a GitHub callback in the built Worker', async () => {
   const login = await SELF.fetch('https://reviews.test/auth/github', { redirect: 'manual' });
   expect(login.status).toBe(303);
   const state = new URL(login.headers.get('location')!).searchParams.get('state');
@@ -235,5 +235,14 @@ it('exchanges a GitHub callback for a dashboard session in the built Worker', as
   const callback = await callbackFor('https://github.com/login/oauth');
   expect(callback.status).toBe(303);
   expect(callback.headers.get('location')).toBe('/settings');
-  expect(callback.headers.get('set-cookie')).toContain('__Host-cr-session=');
+  const sessionCookie = callback.headers.get('set-cookie')?.match(/__Host-cr-session=[^;,]+/)?.[0];
+  expect(sessionCookie).toBeTruthy();
+  const settings = await SELF.fetch('https://reviews.test/api/model-settings', {
+    headers: { cookie: sessionCookie! },
+  });
+  expect(settings.status).toBe(200);
+  expect(await settings.json()).toMatchObject({
+    routes: ['review/a'],
+    configuration: { revision: 0, selection: null },
+  });
 });
