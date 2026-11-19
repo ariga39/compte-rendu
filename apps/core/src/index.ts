@@ -2247,7 +2247,7 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
         runId: run.runId,
         jobId,
         attempt,
-        claimedAt: occurredAt,
+        claimedAt: run.claimedAt,
         job: run.job,
       };
     },

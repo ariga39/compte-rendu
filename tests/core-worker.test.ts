@@ -2684,10 +2684,16 @@ describe('Core Worker', () => {
       expect(claim.status).toBe(503);
       await expect(
         database
-          .prepare(`SELECT status FROM review_runs WHERE delivery_id = ?`)
+          .prepare(
+            `SELECT status, failure_phase, failure_reason FROM review_runs WHERE delivery_id = ?`,
+          )
           .bind('delivery-invalid-read-token-expiry')
-          .first<{ status: string }>(),
-      ).resolves.toEqual({ status: 'failed' });
+          .first(),
+      ).resolves.toEqual({
+        status: 'failed',
+        failure_phase: 'scheduling',
+        failure_reason: 'configuration',
+      });
     } finally {
       database.close();
     }

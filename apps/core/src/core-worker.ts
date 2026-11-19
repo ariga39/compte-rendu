@@ -846,7 +846,8 @@ export const createCoreWorker = (
       const claimedAtMillis = epochMilliseconds(claimedAt);
       const readTokenExpiresAt = epochMilliseconds(readGrant.expiresAt);
       if (claimedAtMillis === undefined || readTokenExpiresAt === undefined) {
-        throw new Error('GitHub read token expiry is invalid');
+        preparationFailure = { phase: 'scheduling', reason: 'configuration' };
+        throw new Error('Claim or GitHub read token timestamp is invalid');
       }
       const input = {
         ...(claim.job.reviewConfiguration === undefined
