@@ -65,16 +65,17 @@ it('requires live GitHub UID and 2FA on every model change and preserves the pre
       .find((c) => c.startsWith('__Host-cr-session='))!
       .split(';')[0]!;
     expect(cookie).not.toContain('github-user-token');
-    const write = (revision: number, site = origin) =>
+    const write = (revision: number, site = origin, route = 'model/a') =>
       call('/api/model-settings', {
         method: 'PUT',
         headers: { cookie, origin: site, 'content-type': 'application/json' },
         body: JSON.stringify({
           revision,
-          selection: { reviewers: ['model/a'], synthesis: 'model/a' },
+          selection: { reviewers: [route], synthesis: route },
         }),
       });
     expect((await write(0, 'https://elsewhere.test')).status).toBe(403);
+    expect((await write(0, origin, 'not-in-catalog')).status).toBe(400);
     expect((await write(0)).status).toBe(200);
     expect((await write(0)).status).toBe(409);
     for (const unauthorized of [

@@ -1,4 +1,4 @@
-import { CodeChallengeMethod, generateCodeVerifier, generateState, OAuth2Client } from 'arctic';
+import * as oauth from 'oauth4webapi';
 import { EncryptJWT, jwtDecrypt } from 'jose';
 import { Schema } from 'effect';
 import { applyReviewConfiguration } from '../../../../core/src/review-configuration';
@@ -9,6 +9,10 @@ export interface LoginEnv {
   readonly DASHBOARD_GITHUB_CLIENT_SECRET?: string;
   readonly DASHBOARD_MODEL_EDITOR_IDS?: string;
 }
+const github = {
+  issuer: 'https://github.com',
+  token_endpoint: 'https://github.com/login/oauth/access_token',
+};
 const flowCookie = '__Host-cr-flow';
 const sessionCookie = '__Host-cr-session';
 const cookie = (name: string, value: string, seconds: number) =>
@@ -45,17 +49,20 @@ export async function modelSettings(request: Request, env: ApplicationEnv): Prom
     return response(503, { error: 'Login is unavailable.' });
   const sameOrigin = request.headers.get('origin') === origin;
   try {
-    const client = new OAuth2Client(id, secret, origin + '/auth/github/callback');
+    const client = { client_id: id };
+    const redirectUri = origin + '/auth/github/callback';
     if (url.pathname === '/auth/github' && request.method === 'GET') {
-      const state = generateState();
-      const verifier = generateCodeVerifier();
-      const authorize = client.createAuthorizationURLWithPKCE(
-        'https://github.com/login/oauth/authorize',
+      const state = oauth.generateRandomState();
+      const verifier = oauth.generateRandomCodeVerifier();
+      const authorize = new URL('https://github.com/login/oauth/authorize');
+      authorize.search = new URLSearchParams({
+        client_id: id,
+        redirect_uri: redirectUri,
+        response_type: 'code',
         state,
-        CodeChallengeMethod.S256,
-        verifier,
-        [],
-      );
+        code_challenge_method: 'S256',
+        code_challenge: await oauth.calculatePKCECodeChallenge(verifier),
+      }).toString();
       return redirect(authorize.href, [cookie(flowCookie, state + '.' + verifier, 600)]);
     }
     if (url.pathname === '/auth/logout' && request.method === 'POST') {
@@ -70,12 +77,18 @@ export async function modelSettings(request: Request, env: ApplicationEnv): Prom
       const code = url.searchParams.get('code');
       if (!state || !verifier || state !== url.searchParams.get('state') || !code)
         return response(400, { error: 'Invalid or expired sign-in. Start again from Settings.' });
-      const tokens = await client.validateAuthorizationCode(
-        'https://github.com/login/oauth/access_token',
-        code,
+      const params = oauth.validateAuthResponse(github, client, url, state);
+      const exchange = await oauth.authorizationCodeGrantRequest(
+        github,
+        client,
+        oauth.ClientSecretBasic(secret),
+        params,
+        redirectUri,
         verifier,
+        { signal: AbortSignal.timeout(8000) },
       );
-      const sealed = await new EncryptJWT({ token: tokens.accessToken() })
+      const tokens = await oauth.processAuthorizationCodeResponse(github, client, exchange);
+      const sealed = await new EncryptJWT({ token: tokens.access_token })
         .setProtectedHeader({ alg: 'dir', enc: 'A256GCM' })
         .setIssuer(origin)
         .setAudience(id)
