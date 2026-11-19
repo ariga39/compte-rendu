@@ -13,7 +13,7 @@
   import Toolbar from '#lib/components/Toolbar.svelte';
   import { requestCancellation } from '#lib/api.ts';
   import { createDashboard, createExpiryClock } from '#lib/dashboard.svelte.ts';
-  import { useOperator } from '#lib/dashboard-operator.ts';
+  import { useOperator, useViewerRefresh } from '#lib/dashboard-operator.ts';
   import {
     absoluteTime,
     cleanupLabel,
@@ -25,6 +25,7 @@
     failurePhaseLabel,
     failureReasonLabel,
     formatDuration,
+    isCancelling,
     milestoneLabel,
     outcomeSummary,
     relativeTime,
@@ -102,15 +103,19 @@
   );
 
   const operator = useOperator();
+  const refreshViewer = useViewerRefresh();
   let confirming = $state(false);
   let submitting = $state(false);
   let cancelError = $state<string | null>(null);
+  let cancelNotice = $state<string | null>(null);
+  let announcement = $state('');
   let accepted = $state<{ runId: string; pendingCleanup: boolean } | null>(null);
   let heading = $state<HTMLHeadingElement | null>(null);
   let cancelTrigger = $state<HTMLButtonElement | null>(null);
   let confirmDialog = $state<HTMLDialogElement | null>(null);
   let dismissButton = $state<HTMLButtonElement | null>(null);
   let activeRunId = $state<string | null>(null);
+  let announcedCancellation = $state<string | null>(null);
 
   $effect(() => {
     if (activeRunId === runId) return;
@@ -118,12 +123,45 @@
     confirming = false;
     submitting = false;
     cancelError = null;
+    cancelNotice = null;
+    announcement = '';
+    announcedCancellation = null;
     accepted = null;
   });
 
+  $effect(() => {
+    if (accepted === null || task === null) {
+      announcedCancellation = null;
+      return;
+    }
+    if (task.status !== 'cancelled') return;
+    const next = isCancelling(task)
+      ? 'cancelling'
+      : task.cleanup === 'failed'
+        ? 'failed'
+        : 'cancelled';
+    if (next === announcedCancellation) return;
+    announcedCancellation = next;
+    announcement =
+      next === 'cancelling'
+        ? 'Cancellation accepted. Waiting for cleanup confirmation.'
+        : next === 'failed'
+          ? 'Review cancelled. Cleanup failed and needs an operator.'
+          : task.cleanup === 'destroyed'
+            ? 'Review cancelled. Cleanup confirmed.'
+            : 'Review cancelled. No review was published.';
+  });
+
   const task = $derived(dash.data?.task ?? null);
+  // The local POST reply is provisional. Once the refreshed task records the
+  // disposition, its cleanup state is authoritative.
   const acceptedForCurrent = $derived(
-    accepted !== null && task !== null && accepted.runId === task.runId ? accepted : null,
+    accepted !== null &&
+      task !== null &&
+      accepted.runId === task.runId &&
+      task.status === 'scheduled'
+      ? accepted
+      : null,
   );
   const cancellationLabel = $derived(
     acceptedForCurrent === null
@@ -146,8 +184,13 @@
     (dismissButton ?? confirmDialog).focus({ preventScroll: true });
   });
 
+  function announce(message: string) {
+    announcement = message;
+  }
+
   function openConfirmation() {
     cancelError = null;
+    cancelNotice = null;
     confirming = true;
   }
 
@@ -156,7 +199,12 @@
     confirming = false;
     if (dialog?.open) dialog.close();
     requestAnimationFrame(() => {
-      const target = returnTo === 'heading' ? heading : (cancelTrigger ?? heading);
+      const target =
+        returnTo === 'heading'
+          ? heading
+          : cancelTrigger !== null && !cancelTrigger.disabled
+            ? cancelTrigger
+            : heading;
       target?.focus({ preventScroll: true });
     });
   }
@@ -182,7 +230,7 @@
 
   function onDialogCancel(event: Event) {
     event.preventDefault();
-    if (!submitting) closeConfirmation('trigger');
+    closeConfirmation('trigger');
   }
 
   async function submitCancellation() {
@@ -190,24 +238,52 @@
     const requestedRunId = runId;
     submitting = true;
     cancelError = null;
+    cancelNotice = null;
+    announce('Cancelling review.');
     const result = await requestCancellation(requestedRunId);
     if (requestedRunId !== runId || activeRunId !== requestedRunId) return;
     submitting = false;
     if (result.kind === 'accepted') {
       accepted = { runId: requestedRunId, pendingCleanup: result.pendingCleanup };
-      closeConfirmation('heading');
+      announce(
+        result.pendingCleanup
+          ? 'Cancellation accepted. Waiting for cleanup confirmation.'
+          : 'Review cancelled.',
+      );
+      if (confirming) closeConfirmation('heading');
       dash.refresh();
       return;
     }
-    const messages: Record<Exclude<typeof result.kind, 'accepted'>, string> = {
+    if (result.kind === 'ambiguous') {
+      cancelNotice = 'Cancellation could not be confirmed yet. The review details are refreshing.';
+      announce(cancelNotice);
+      if (confirming) closeConfirmation('trigger');
+      dash.refresh();
+      return;
+    }
+    if (result.kind === 'expired') {
+      cancelError = 'Your session expired. Sign in again to cancel reviews.';
+      announce(cancelError);
+      if (confirming) closeConfirmation('heading');
+      void refreshViewer();
+      return;
+    }
+    if (result.kind === 'forbidden') {
+      cancelError = 'You are not allowed to cancel reviews.';
+      announce(cancelError);
+      if (confirming) closeConfirmation('heading');
+      void refreshViewer();
+      return;
+    }
+    const messages: Record<'conflict' | 'notfound' | 'failed', string> = {
       conflict:
         'This review can no longer be cancelled because publication has started or it has already finished. The details were refreshed.',
-      unauthorized: 'You are not allowed to cancel reviews.',
       notfound: 'This review no longer exists.',
       failed: 'Could not cancel the review right now. Try again.',
     };
     cancelError = messages[result.kind];
-    closeConfirmation('trigger');
+    announce(cancelError);
+    if (confirming) closeConfirmation('trigger');
     if (result.kind === 'conflict' || result.kind === 'notfound') dash.refresh();
   }
 </script>
@@ -326,6 +402,15 @@
     </div>
   {/if}
   <Toolbar lastGoodAt={dash.lastGoodAt} onRefresh={dash.refresh} priority={1} />
+  <div
+    class="sr-only"
+    role="status"
+    aria-live="polite"
+    aria-atomic="true"
+    data-testid="cancel-announcement"
+  >
+    {announcement}
+  </div>
   <section class="detail">
     {#if variant === 'page'}
       <a
@@ -379,11 +464,18 @@
       </div>
     {/if}
 
+    {#if cancelNotice}
+      <div class="notice" role="status" data-testid="cancel-notice">
+        {cancelNotice}
+      </div>
+    {/if}
+
     {#if confirming}
       <dialog
         class="cancel-confirm"
         role="alertdialog"
         aria-modal="true"
+        aria-busy={submitting ? 'true' : undefined}
         aria-labelledby="cancel-confirm-title"
         aria-describedby="cancel-confirm-description"
         data-testid="cancel-confirm"
@@ -401,7 +493,6 @@
             size="small"
             data-testid="cancel-confirm-dismiss"
             bind:ref={dismissButton}
-            disabled={submitting}
             on:click={() => closeConfirmation('trigger')}
           >
             Keep review
@@ -409,8 +500,8 @@
           <Button
             kind="danger"
             size="small"
+            loading={submitting}
             data-testid="cancel-confirm-submit"
-            disabled={submitting}
             on:click={submitCancellation}
           >
             {submitting ? 'Cancelling…' : 'Cancel review'}
