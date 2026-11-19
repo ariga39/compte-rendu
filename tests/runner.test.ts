@@ -671,6 +671,7 @@ const runReminderScenario = async (scenario: {
   advanceOnCreateMs?: number;
   createTimedOut?: boolean;
   agentDelayMs?: number;
+  expectedRotatedToken?: string;
   readTokenFetch?: typeof fetch;
   cleanupStderr?: string;
   logEvents?: unknown[];
@@ -768,6 +769,11 @@ const runReminderScenario = async (scenario: {
         await writeEvidenceFixture(args, options, round.output);
         if (scenario.agentDelayMs !== undefined) {
           await new Promise((resolve) => setTimeout(resolve, scenario.agentDelayMs));
+        }
+        if (scenario.expectedRotatedToken !== undefined) {
+          // The on-demand secret command reads a real file. A response from
+          // Core can precede the atomic rename that makes it visible here.
+          await expect.poll(readGithubToken).toBe(scenario.expectedRotatedToken);
         }
         githubTokenSnapshots.push(await readGithubToken());
         if (round.advanceMs !== undefined) {
@@ -2398,7 +2404,7 @@ describe('Runner Job HTTP interface', () => {
         runId: 'run-read-token-rotated',
         claimDeadlineAt: start + 90 * 60 * 1000,
         repositoryReadTokenExpiresAt: start + 700,
-        agentDelayMs: 1000,
+        expectedRotatedToken: 'rotated-github-read-token',
         terminalAttempts: 300,
         driveClock: createSeamClock({
           agentStarted: () => agentStarted,
@@ -2474,7 +2480,7 @@ describe('Runner Job HTTP interface', () => {
         runId: 'run-read-token-cleanup-redaction',
         claimDeadlineAt: start + 90 * 60 * 1000,
         repositoryReadTokenExpiresAt: start + 700,
-        agentDelayMs: 1000,
+        expectedRotatedToken: canary,
         terminalAttempts: 300,
         cleanupStderr: `cleanup failed: ${canary}`,
         logEvents,
