@@ -10,7 +10,7 @@ export interface LoginEnv {
   readonly DASHBOARD_MODEL_EDITOR_IDS?: string;
 }
 const github = {
-  issuer: 'https://github.com',
+  issuer: 'https://github.com/login/oauth',
   token_endpoint: 'https://github.com/login/oauth/access_token',
 };
 const flowCookie = '__Host-cr-flow';
@@ -77,7 +77,14 @@ export async function modelSettings(request: Request, env: ApplicationEnv): Prom
       const code = url.searchParams.get('code');
       if (!state || !verifier || state !== url.searchParams.get('state') || !code)
         return response(400, { error: 'Invalid or expired sign-in. Start again from Settings.' });
-      const params = oauth.validateAuthResponse(github, client, url, state);
+      let params: URLSearchParams;
+      try {
+        params = oauth.validateAuthResponse(github, client, url, state);
+      } catch {
+        return response(400, {
+          error: 'Invalid GitHub sign-in response. Start again from Settings.',
+        });
+      }
       const exchange = await oauth.authorizationCodeGrantRequest(
         github,
         client,
