@@ -13,6 +13,24 @@ const environment = (database: SqliteD1Database) => ({
   GITHUB_APP_ID: '1',
   GITHUB_APP_PRIVATE_KEY: 'test-private-key',
   REVIEW_CONFIGURATION_TOKEN: 'operator-token',
+  INFERENCE_RELAY: {
+    catalog: async () => ({
+      routes: [
+        ...selection.reviewers,
+        'another-review',
+        'review-provider/deepseek-v4.1-flash',
+        'review-provider/mimo-v2.6-flash',
+      ],
+      lastAttemptAt: null,
+      lastSuccessAt: null,
+      rejected: 0,
+      lastRefreshError: null,
+    }),
+    refreshCatalog: async () => {},
+    issue: async () => ({ kind: 'invalid' as const }),
+    revoke: async () => ({ kind: 'revoked' as const }),
+    usage: async () => null,
+  },
 });
 
 it('freezes model selection at admission even when a queued job is claimed after an update', async () => {
@@ -115,6 +133,7 @@ it('protects settings through ingress and preserves valid settings on invalid or
     expect((await request('GET', undefined, 'runner-token')).status).toBe(401);
     expect((await request('PUT', { revision: 0, selection })).status).toBe(200);
     for (const invalid of [
+      { ...selection, synthesis: 'removed-model' },
       { reviewers: [], synthesis: 'deepseek-review' },
       { reviewers: ['deepseek-review', 'deepseek-review'], synthesis: 'deepseek-review' },
       { reviewers: ['deepseek-review', 'step-review'] },

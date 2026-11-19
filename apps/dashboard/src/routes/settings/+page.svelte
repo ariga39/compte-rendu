@@ -56,6 +56,11 @@
     <p>{data.error ?? 'Model settings are temporarily unavailable.'}</p>
   {:else}
     <p>Changes apply to newly admitted reviews.</p>
+    {#if data.settings.catalogRefreshFailed}
+      <p role="status">The model list could not fully refresh. Some choices may be out of date.</p>
+    {:else if !data.settings.routes.length}
+      <p role="status">No models are currently listed.</p>
+    {/if}
     <form onsubmit={save}>
       <fieldset disabled={busy}>
         <label><input type="checkbox" bind:checked={defaults} /> Use the instance default</label>
@@ -69,6 +74,9 @@
           <label>Synthesis model
             <select bind:value={synthesis}>
               <option value="">Select a model</option>
+              {#if synthesis && !data.settings.routes.includes(synthesis)}
+                <option value={synthesis} disabled>{synthesis} (unavailable)</option>
+              {/if}
               {#each data.settings.routes as route (route)}<option value={route}>{route}</option>{/each}
             </select>
           </label>

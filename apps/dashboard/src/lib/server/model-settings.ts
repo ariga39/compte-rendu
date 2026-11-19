@@ -148,13 +148,18 @@ export async function modelSettings(request: Request, env: ApplicationEnv): Prom
       });
     unavailable = 'Could not load the model catalog.';
     if (!env.INFERENCE_RELAY) return response(503, { error: unavailable });
-    const { routes } = await env.INFERENCE_RELAY.catalog();
+    if (request.method === 'PUT')
+      return applyReviewConfiguration(request, env.REVIEW_DB, env.INFERENCE_RELAY);
+    const { routes, lastRefreshError } = await env.INFERENCE_RELAY.catalog();
     unavailable = 'Could not read the saved model configuration.';
-    if (request.method === 'GET') {
-      const config = await applyReviewConfiguration(request, env.REVIEW_DB);
-      return config.ok ? response(200, { configuration: await config.json(), routes }) : config;
-    }
-    return applyReviewConfiguration(request, env.REVIEW_DB, routes);
+    const config = await applyReviewConfiguration(request, env.REVIEW_DB);
+    return config.ok
+      ? response(200, {
+          configuration: await config.json(),
+          routes,
+          catalogRefreshFailed: lastRefreshError !== null,
+        })
+      : config;
   } catch {
     return response(503, { error: unavailable });
   }

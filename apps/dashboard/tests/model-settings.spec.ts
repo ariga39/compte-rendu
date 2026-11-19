@@ -70,3 +70,46 @@ test('explains when the account is not authorized and shows no editor', async ({
   ).toBeVisible();
   await expect(page.getByRole('button', { name: 'Save changes' })).toHaveCount(0);
 });
+
+test('explains stale choices and lets the editor replace a retired synthesis model', async ({
+  page,
+  harness,
+  base,
+}) => {
+  harness.setHandler(() => ({
+    status: 200,
+    json: {
+      catalogRefreshFailed: true,
+      routes: ['review/a'],
+      configuration: {
+        revision: 3,
+        selection: { reviewers: ['review/a'], synthesis: 'review/retired' },
+      },
+    },
+  }));
+  await page.goto(base + '/settings');
+  await expect(page.getByRole('status')).toContainText('refresh');
+  const synthesis = page.getByLabel('Synthesis model');
+  await expect(synthesis).toHaveValue('review/retired');
+  await expect(synthesis.locator('option:checked')).toHaveText('review/retired (unavailable)');
+  await expect(page.getByRole('button', { name: 'Save changes' })).toBeDisabled();
+  await synthesis.selectOption('review/a');
+  await expect(page.getByRole('button', { name: 'Save changes' })).toBeEnabled();
+});
+
+test('shows an empty provider list after the last model is withdrawn', async ({
+  page,
+  harness,
+  base,
+}) => {
+  harness.setHandler(() => ({
+    status: 200,
+    json: {
+      routes: [],
+      catalogRefreshFailed: false,
+      configuration: { revision: 1, selection: null },
+    },
+  }));
+  await page.goto(base + '/settings');
+  await expect(page.getByRole('status')).toHaveText('No models are currently listed.');
+});
