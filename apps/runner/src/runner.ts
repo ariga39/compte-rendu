@@ -1140,6 +1140,10 @@ export const createRunner = (options: RunnerOptions = {}) => {
     string,
     { deadline: number; timer: ReturnType<typeof setTimeout> }
   >();
+  const forgetStops = () => {
+    for (const stop of stopsDuringClaim.values()) clearTimeout(stop.timer);
+    stopsDuringClaim.clear();
+  };
   let claimPollingHalted = false;
   let draining = false;
   let claimGateFailureLogged = false;
@@ -3502,6 +3506,9 @@ export const createRunner = (options: RunnerOptions = {}) => {
             () => stopsDuringClaim.delete(id),
             Math.min(deadline - Date.now(), REVIEW_ATTEMPT_BUDGET_MS),
           );
+          if (typeof timer === 'object' && timer !== null && 'unref' in timer) {
+            (timer as { unref: () => void }).unref();
+          }
           stopsDuringClaim.set(id, { deadline, timer });
         }
         return jsonResponse(202, { status: 'stop requested' });
@@ -3650,6 +3657,9 @@ export const createRunner = (options: RunnerOptions = {}) => {
     } finally {
       if (timeout !== undefined) clearTimeout(timeout);
       claiming = false;
+      // Core allocates a fresh job ID on every poll. An undelivered claim
+      // cannot be admitted by a later poll, and has no local teardown proof.
+      forgetStops();
       if (claimFailure !== undefined) {
         await recordLog({
           phase: 'runner',
@@ -3689,6 +3699,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
   return {
     handle,
     close: async () => {
+      forgetStops();
       await settingsWatcher?.close();
     },
   };
