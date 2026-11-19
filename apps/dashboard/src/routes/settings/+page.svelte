@@ -58,6 +58,8 @@
     <p>Changes apply to newly admitted reviews.</p>
     {#if data.settings.catalogRefreshFailed}
       <p role="status">The model list could not fully refresh. Some choices may be out of date.</p>
+    {:else if data.settings.lastAttemptAt === null}
+      <p role="status">Waiting for the first model list refresh.</p>
     {:else if !data.settings.routes.length}
       <p role="status">No models are currently listed.</p>
     {/if}

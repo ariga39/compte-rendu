@@ -70,7 +70,7 @@ interface CandidateSource {
   key: string;
   provider: string;
   credential: string;
-  aliases: boolean;
+  aliases?: Record<string, string>;
   load(): Promise<{ models: Record<string, string>; rejected: number }>;
 }
 
@@ -80,15 +80,18 @@ function candidateSources(sources: readonly Source[], gateway: GatewayConfig | n
     const provider = source.providerSlug;
     const credential = source.credentialAlias;
     if (source.aliases && Object.keys(source.aliases).length) {
-      const models = Object.fromEntries(
-        Object.entries(source.aliases).sort(([a], [b]) => a.localeCompare(b)),
-      );
-      const key = JSON.stringify([provider, credential, 'aliases', models]);
+      const key = JSON.stringify(['aliases', provider, credential]);
+      const existing = groups.get(key)?.aliases;
+      const models = { ...existing, ...source.aliases };
+      // An ambiguous alias cannot match a stored model. Reject this group
+      // during refresh while other providers continue to publish.
+      for (const [id, model] of Object.entries(source.aliases))
+        if (existing && Object.hasOwn(existing, id) && existing[id] !== model) models[id] = '';
       groups.set(key, {
         key,
         provider,
         credential,
-        aliases: true,
+        aliases: models,
         load: async () => ({ models, rejected: 0 }),
       });
     }
@@ -103,7 +106,6 @@ function candidateSources(sources: readonly Source[], gateway: GatewayConfig | n
       key,
       provider,
       credential,
-      aliases: false,
       async load() {
         const { ids, rejected } = await readSource(source, gateway);
         return {
@@ -119,8 +121,8 @@ function candidateSources(sources: readonly Source[], gateway: GatewayConfig | n
 // Both the picker and the budget count the same set, preferring discovered IDs
 // when an alias refers to exactly the same upstream model and credential.
 const active = `SELECT m.key AS id, m.value AS model, s.provider, s.credential, s.is_alias
-  FROM catalog_sources s, json_each(s.models) m
-  WHERE s.source_key IN (SELECT value FROM json_each(?))`;
+  FROM catalog_sources s JOIN json_each(?) cfg ON cfg.key=s.source_key, json_each(s.models) m
+  WHERE (s.is_alias=0 OR EXISTS (SELECT 1 FROM json_each(cfg.value) a WHERE a.key=m.key AND a.value=m.value))`;
 const visible = `SELECT DISTINCT id FROM (
   SELECT id, is_alias, MIN(is_alias) OVER (PARTITION BY provider, credential, model) AS preferred
   FROM candidates
@@ -136,14 +138,16 @@ export function createRelayCatalog(
   gateway?: GatewayConfig | null,
 ) {
   const groups = candidateSources(sources, gateway ?? null);
-  const keys = JSON.stringify(groups.map((group) => group.key));
+  const configured = JSON.stringify(
+    Object.fromEntries(groups.map((group) => [group.key, group.aliases ?? null])),
+  );
   return {
     async refresh(at: number) {
       const statements = [
         db
           .prepare(`DELETE FROM catalog_sources WHERE source_key NOT IN
-        (SELECT value FROM json_each(?)) AND ${fresh}`)
-          .bind(keys, at),
+        (SELECT key FROM json_each(?)) AND ${fresh}`)
+          .bind(configured, at),
       ];
       for (const group of groups) {
         let models: Record<string, string> = {};
@@ -162,7 +166,7 @@ export function createRelayCatalog(
         }
         const proposed = JSON.stringify(error ? {} : models);
         const { key, provider, credential } = group;
-        const alias = Number(group.aliases);
+        const alias = Number(group.aliases !== undefined);
         statements.push(
           db
             .prepare(`WITH candidates AS (
@@ -179,7 +183,7 @@ export function createRelayCatalog(
             END WHERE ${fresh}
             ON CONFLICT(source_key) DO UPDATE SET rejected=excluded.rejected,error=excluded.error`)
             .bind(
-              keys,
+              configured,
               key,
               provider,
               credential,
@@ -223,25 +227,33 @@ export function createRelayCatalog(
       await db.batch(statements);
     },
     async get(): Promise<RelayCatalogSnapshot> {
-      const [routes, meta] = await Promise.all([
-        db
-          .prepare(`WITH candidates AS (${active}) ${visible} ORDER BY id`)
-          .bind(keys)
-          .all<{ id: string }>(),
-        db
-          .prepare(
-            'SELECT last_attempt,last_complete,rejected,error FROM catalog_refresh WHERE id=1',
-          )
-          .first<{
-            last_attempt: number | null;
-            last_complete: number | null;
-            rejected: number;
-            error: string | null;
-          }>(),
-      ]);
+      const meta = await db
+        .prepare(`WITH candidates AS (${active})
+        SELECT (SELECT json_group_array(id) FROM (${visible} ORDER BY id)) AS routes,
+          EXISTS (SELECT 1 FROM catalog_sources JOIN json_each(?) cfg ON cfg.key=source_key) AS initialized,
+          last_attempt,last_complete,rejected,error FROM catalog_refresh WHERE id=1`)
+        .bind(configured, configured)
+        .first<{
+          routes: string;
+          initialized: number;
+          last_attempt: number | null;
+          last_complete: number | null;
+          rejected: number;
+          error: string | null;
+        }>();
       if (!meta) throw new Error('catalog unavailable');
+      if (!meta.initialized)
+        return {
+          routes: [],
+          lastAttemptAt: null,
+          lastSuccessAt: null,
+          rejected: 0,
+          lastRefreshError: null,
+        };
       return {
-        routes: routes.results.map((r) => r.id),
+        routes: Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Array(Schema.String)))(
+          meta.routes,
+        ),
         lastAttemptAt:
           meta.last_attempt === null ? null : new Date(meta.last_attempt).toISOString(),
         lastSuccessAt:
