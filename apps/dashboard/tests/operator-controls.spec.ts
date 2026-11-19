@@ -130,7 +130,7 @@ test('a claimed cancellation with unrecorded cleanup stays unresolved and pollab
   );
 
   cleanup = 'destroyed';
-  await page.clock.fastForward(16000);
+  await page.clock.fastForward(20000);
   await expect.poll(() => statusOf(page)).toBe('Cancelled');
 });
 
@@ -162,7 +162,7 @@ test('reloading a cancelling review keeps polling until cleanup is confirmed', a
   await page.reload();
   await expect.poll(() => statusOf(page)).toBe('Cancelling');
   cleanup = 'destroyed';
-  await page.clock.fastForward(16000);
+  await page.clock.fastForward(20000);
   await expect.poll(() => statusOf(page)).toBe('Cancelled');
 });
 

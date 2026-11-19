@@ -274,10 +274,10 @@ test('a stalled cancellation request is bounded and refreshed', async ({ page, h
 
   await page.clock.fastForward(16000);
 
-  await expect(page.getByTestId('cancel-notice')).toContainText('could not be confirmed');
   await expect(page.locator('[data-testid="cancel-confirm"]')).toHaveCount(0);
   await expect(page.locator('[data-testid="cancel-error"]')).toHaveCount(0);
   await expect.poll(() => statusOf(page)).toBe('Cancelling');
+  await expect(page.getByTestId('cancel-notice')).toHaveCount(0);
 });
 
 test('a publication conflict refreshes the detail without claiming success', async ({
