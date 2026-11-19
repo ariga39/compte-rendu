@@ -292,19 +292,41 @@ main#content {
   padding-block: 1rem;
 }
 
-.header-refresh {
+.header-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
   margin-left: auto;
+  min-width: 0;
+}
+.header-refresh {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
   padding: 8px 16px;
 }
-.header-refresh .muted {
+.header-refresh .muted,
+.header-account .muted {
   font-size: 12px;
   line-height: 1.4;
 }
-.header-refresh .bx--btn {
+.header-refresh .bx--btn,
+.header-account .bx--btn {
   color: #f4f4f4;
+}
+.header-account {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 16px;
+}
+.header-account .muted {
+  overflow-wrap: anywhere;
+}
+.header-account form {
+  margin: 0;
 }
 
 .empty {
@@ -506,9 +528,18 @@ main#content {
   .bx--header__menu-bar {
     flex-wrap: wrap;
   }
+  .header-actions {
+    width: 100%;
+    margin-left: 0;
+    flex-wrap: wrap;
+  }
   .header-refresh {
     width: 100%;
     margin-left: 0;
+  }
+  .header-account {
+    width: 100%;
+    justify-content: flex-end;
   }
   #content {
     margin-top: 0;

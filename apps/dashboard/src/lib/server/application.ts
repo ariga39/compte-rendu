@@ -1,3 +1,4 @@
+import { authRoute, sessionViewer } from './auth';
 import { modelSettings, type LoginEnv } from './model-settings';
 import { createCloudflareOperationalLog } from '../../../../core/src/operational-log';
 import { handleRunnerLlmControl } from '../../../../core/src/runner-llm-control';
@@ -18,8 +19,9 @@ export function createApplication(env: ApplicationEnv, dependencies: CoreWorkerD
       context?: { waitUntil(task: Promise<unknown>): void },
     ): Promise<Response> {
       const path = new URL(request.url).pathname;
-      if (path.startsWith('/auth/') || path === '/api/model-settings')
-        return modelSettings(request, env);
+      if (path === '/api/session') return sessionViewer(request, env);
+      if (path.startsWith('/auth/')) return authRoute(request, env);
+      if (path === '/api/model-settings') return modelSettings(request, env);
       if (path.startsWith('/runner-llm/'))
         return handleRunnerLlmControl(request, env, env.RUNNER_CALLBACK_TOKEN);
       if (path === '/api/review-configuration/catalog') {
