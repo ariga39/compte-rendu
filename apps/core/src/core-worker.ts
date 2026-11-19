@@ -356,7 +356,7 @@ export const createCoreWorker = (
     occurredAt: string,
     releaseRunnerClaim?: { jobId: string; attempt: number },
     failure?: PublicTaskFailure,
-  ) => {
+  ): Promise<ReviewOutcome | undefined> => {
     const notificationClaimed =
       (outcome.status === 'scheduled' || outcome.status === 'failed') &&
       stateStore.claimRunPublication !== undefined
@@ -368,42 +368,52 @@ export const createCoreWorker = (
       ...(releaseRunnerClaim === undefined ? {} : { releaseRunnerClaim }),
       ...(failure === undefined ? {} : { failure }),
     });
+    // Cancellation can win after the caller read the run but before the claim
+    // and status write above. The durable outcome is the winner; only the
+    // failed (or superseded) winner gets external failure feedback.
+    const settled = await stateStore.getRunOutcome(runId).catch(() => undefined);
+    if (settled === undefined) return undefined;
+    const failed = settled.status === 'failed';
+    const superseded = settled.status === 'superseded';
+    const failureTransitioned = failed && outcome.status === 'scheduled';
+    const supersessionRetained = superseded && outcome.status === 'superseded';
     if (
-      (outcome.status === 'scheduled' || outcome.status === 'superseded') &&
-      outcome.trigger === 'manual' &&
-      outcome.commentId !== undefined &&
+      (failureTransitioned || supersessionRetained) &&
+      settled.trigger === 'manual' &&
+      settled.commentId !== undefined &&
       github.addReaction !== undefined
     ) {
       await github
         .addReaction({
-          repositoryId: outcome.repositoryId,
-          installationId: outcome.installationId,
-          commentId: outcome.commentId,
-          content: outcome.status === 'superseded' ? 'confused' : '-1',
+          repositoryId: settled.repositoryId,
+          installationId: settled.installationId,
+          commentId: settled.commentId,
+          content: supersessionRetained ? 'confused' : '-1',
         })
         .catch(() => undefined);
     }
     if (
       notificationClaimed &&
-      outcome.checkRunId !== undefined &&
+      failed &&
+      settled.checkRunId !== undefined &&
       github.updateCheckRun !== undefined
     ) {
       await github
         .updateCheckRun({
           runId,
-          repositoryId: outcome.repositoryId,
-          installationId: outcome.installationId,
-          checkRunId: outcome.checkRunId,
+          repositoryId: settled.repositoryId,
+          installationId: settled.installationId,
+          checkRunId: settled.checkRunId,
           status: 'failure',
         })
         .catch(() => undefined);
     }
-    if (notificationClaimed && github.createIssueComment !== undefined) {
+    if (notificationClaimed && failed && github.createIssueComment !== undefined) {
       try {
         await github.createIssueComment({
-          repositoryId: outcome.repositoryId,
-          pullRequestNumber: outcome.pullRequestNumber,
-          installationId: outcome.installationId,
+          repositoryId: settled.repositoryId,
+          pullRequestNumber: settled.pullRequestNumber,
+          installationId: settled.installationId,
           body: formatReviewFailureComment(runId),
         });
       } catch (error) {
@@ -411,6 +421,7 @@ export const createCoreWorker = (
         throw error;
       }
     }
+    return settled;
   };
 
   const handleRunnerCleanupRecovery = async (request: Request): Promise<Response> => {
@@ -576,7 +587,7 @@ export const createCoreWorker = (
                   ? 'unknown'
                   : reason,
       };
-      await markRunFailed(outcome, callback.runId, occurredAt, undefined, failure);
+      return markRunFailed(outcome, callback.runId, occurredAt, undefined, failure);
     };
     const clearRunnerJob = async () => {
       if (callback.sandbox.cleanup !== 'destroyed') return;
@@ -587,8 +598,9 @@ export const createCoreWorker = (
         const latest = await stateStore.getRunOutcome(callback.runId).catch(() => undefined);
         if (latest?.status === 'cancelled') return new Response(null, { status: 202 });
         if (outcome.status !== 'scheduled') return new Response(null, { status: 409 });
-        await markCallbackFailed();
-        await recordFinishedLifecycle(lifecycleLog, outcome, 'failed', callback, {
+        const settled = await markCallbackFailed();
+        if (settled?.status !== 'failed') return new Response(null, { status: 202 });
+        await recordFinishedLifecycle(lifecycleLog, settled, 'failed', callback, {
           phase: 'evidence',
           reason: 'evidence',
         });
@@ -693,9 +705,15 @@ export const createCoreWorker = (
       return new Response(null, { status: finalOutcome.status === 'failed' ? 503 : 202 });
     }
 
-    const terminal = outcome.status === 'superseded' ? 'superseded' : 'failed';
-    await markCallbackFailed();
-    await recordFinishedLifecycle(lifecycleLog, outcome, terminal, callback);
+    const settled = await markCallbackFailed();
+    if (settled?.status === 'failed' || settled?.status === 'superseded') {
+      await recordFinishedLifecycle(
+        lifecycleLog,
+        settled,
+        settled.status === 'superseded' ? 'superseded' : 'failed',
+        callback,
+      );
+    }
     await clearRunnerJob();
     return new Response(null, { status: 202 });
   };
