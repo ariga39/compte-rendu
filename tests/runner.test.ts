@@ -1939,7 +1939,7 @@ describe('Runner Job HTTP interface', () => {
   });
 
   it('does not remind when the shared agent budget is exhausted', async () => {
-    const agentBudgetMs = 30 * 60 * 1000;
+    const agentBudgetMs = 90 * 60 * 1000;
     vi.useFakeTimers({ toFake: ['Date'] });
     try {
       vi.setSystemTime(new Date('2026-09-12T00:00:00.000Z'));
@@ -1965,7 +1965,7 @@ describe('Runner Job HTTP interface', () => {
   });
 
   it('caps the reminder at the remaining shared agent budget', async () => {
-    const agentBudgetMs = 30 * 60 * 1000;
+    const agentBudgetMs = 90 * 60 * 1000;
     vi.useFakeTimers({ toFake: ['Date'] });
     try {
       vi.setSystemTime(new Date('2026-09-12T00:00:00.000Z'));

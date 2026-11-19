@@ -973,7 +973,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       endpoint: sandboxRuntime.opensandbox.endpoint,
       apiKey,
       image: sandboxRuntime.opensandbox.image,
-      lifetimeSeconds: Math.ceil((4 * REVIEW_ATTEMPT_BUDGET_MS) / 1000),
+      lifetimeSeconds: 2 * 60 * 60,
     };
   }
   const sandboxRuntimeFactory =

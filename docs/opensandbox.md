@@ -61,8 +61,7 @@ checkout authentication helpers are not mounted. Retain the official default
 capability restrictions. Do not enable gVisor for this configuration: the
 built-in nft egress and credential proxy require compatible network operations.
 
-The maximum sandbox lifetime must accommodate four `REVIEW_ATTEMPT_BUDGET_MS`
-intervals (currently two hours). The Runner still enforces its review deadline
+Configure the server to allow the two-hour Sandbox lifetime requested by Runner. The Runner still enforces its review deadline
 and explicit destruction; the server TTL is not a substitute for cleanup.
 
 ## Review image
