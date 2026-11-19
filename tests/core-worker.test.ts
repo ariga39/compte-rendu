@@ -1083,7 +1083,7 @@ describe('Core Worker', () => {
     },
   );
 
-  it('stops failing a manual review cancelled while its late result is being received', async () => {
+  it('does not fail or react to invalid evidence when cancellation wins at the failure-notification claim', async () => {
     const database = new SqliteD1Database();
     const { fetcher, requests, waitUntilTasks } = capturePostHogTransport();
     const state = createD1ReviewStateStore(database);
@@ -1116,13 +1116,13 @@ describe('Core Worker', () => {
     const worker = createCoreWorker(env, {
       stateStore: {
         ...state,
-        recordResultReceived: async (input) => {
+        claimRunPublication: async (input) => {
           await state.cancelRun({
             runId,
             requestedByUid: 1,
             occurredAt: new Date().toISOString(),
           });
-          return state.recordResultReceived!(input);
+          return state.claimRunPublication!(input);
         },
       },
       github: { addReaction: async (input) => void reactions.push(input) },
@@ -1160,7 +1160,80 @@ describe('Core Worker', () => {
     }
   });
 
-  it('does not react or report a publication failure when cancellation wins during target lookup', async () => {
+  it('does not fail or react to a failed callback when cancellation wins at the failure claim', async () => {
+    const database = new SqliteD1Database();
+    const { fetcher, requests, waitUntilTasks } = capturePostHogTransport();
+    const state = createD1ReviewStateStore(database);
+    const claimed = await state.claimReview({
+      deliveryId: 'late-failed-callback',
+      job: {
+        repositoryId: 11,
+        pullRequestNumber: 42,
+        installationId: 7,
+        baseSha: eligibleEvent.baseSha,
+        headSha: eligibleEvent.headSha,
+        trigger: 'manual',
+        commentId: 987654,
+      },
+      occurredAt: '2026-09-01T00:00:00.000Z',
+    });
+    if (claimed.kind !== 'claimed') throw new Error('manual run was not claimed');
+    const { runId } = claimed;
+    await state.claimNextJob!({
+      jobId: 'runner-job-1',
+      attempt: 1,
+      occurredAt: '2026-09-01T00:01:00.000Z',
+    });
+    const reactions: unknown[] = [];
+    const env = {
+      ...coreEnv(database),
+      ...postHogTestDefaults.environment,
+      EVIDENCE_BUCKET: { put: async () => undefined },
+    };
+    const worker = createCoreWorker(env, {
+      stateStore: {
+        ...state,
+        claimRunPublication: async (input) => {
+          await state.cancelRun({
+            runId,
+            requestedByUid: 1,
+            occurredAt: new Date().toISOString(),
+          });
+          return state.claimRunPublication!(input);
+        },
+      },
+      github: { addReaction: async (input) => void reactions.push(input) },
+    });
+    try {
+      const response = await worker.fetch(
+        new Request('https://core.internal/runner-results', {
+          method: 'POST',
+          headers: {
+            'x-compte-rendu-runner-callback': 'verified',
+            'content-type': 'application/json',
+          },
+          body: await failedCallback(runId),
+        }),
+        env,
+        { waitUntil: (task) => waitUntilTasks.push(task) },
+      );
+      expect(response.status).toBe(202);
+      expect(await state.getRunOutcome(runId)).toMatchObject({ status: 'cancelled' });
+      await Promise.all(waitUntilTasks);
+      expect(reactions).toEqual([]);
+      expect(await postHogEvents(requests)).not.toContainEqual(
+        expect.objectContaining({
+          event: 'review finished',
+          properties: expect.objectContaining({ outcome: 'failed' }),
+        }),
+      );
+    } finally {
+      fetcher.mockRestore();
+      database.close();
+    }
+  });
+
+  it('does not react or report a publication failure when cancellation wins at the failure claim', async () => {
     const database = new SqliteD1Database();
     const state = createD1ReviewStateStore(database);
     const claimed = await state.claimReview({
@@ -1191,18 +1264,21 @@ describe('Core Worker', () => {
       EVIDENCE_BUCKET: { put: async () => undefined },
     };
     const worker = createCoreWorker(env, {
-      stateStore: state,
-      log: { record: (event) => void logs.push(event) },
-      github: {
-        addReaction: async (input) => void reactions.push(input),
-        loadReviewTarget: async () => {
+      stateStore: {
+        ...state,
+        claimRunPublication: async (input) => {
           await state.cancelRun({
             runId,
             requestedByUid: 1,
             occurredAt: new Date().toISOString(),
           });
-          return undefined;
+          return state.claimRunPublication!(input);
         },
+      },
+      log: { record: (event) => void logs.push(event) },
+      github: {
+        addReaction: async (input) => void reactions.push(input),
+        loadReviewTarget: async () => undefined,
         createReview,
       },
     });

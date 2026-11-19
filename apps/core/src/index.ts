@@ -1010,17 +1010,17 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
             }),
           catch: () => undefined,
         }).pipe(Effect.catch(() => Effect.succeed(undefined)));
-  const cancellationWon = Effect.gen(function* () {
-    const latest = yield* Effect.tryPromise({
-      try: () => getRunOutcome(input.runId),
-      catch: () => undefined,
-    }).pipe(Effect.catch(() => Effect.succeed(undefined)));
-    return latest?.status === 'cancelled';
-  });
+  const latestOutcome = Effect.tryPromise({
+    try: () => getRunOutcome(input.runId),
+    catch: () => undefined,
+  }).pipe(Effect.catch(() => Effect.succeed(undefined)));
+  const cancellationWon = latestOutcome.pipe(
+    Effect.map((latest) => latest?.status === 'cancelled'),
+  );
   const markCompletionFailed = Effect.fn('markCompletionFailed')(function* (
     reason: PublicTaskFailure['reason'] = 'completion_failed',
   ) {
-    if (yield* cancellationWon) return 'cancelled' as const;
+    if (yield* cancellationWon) return { result: 'cancelled' as const, settled: false };
     const failedAt = yield* currentIso;
     if (!ownsPublication && stateStore.claimRunPublication !== undefined) {
       ownsPublication = yield* claimFailureNotification();
@@ -1037,17 +1037,27 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
         }),
       catch: () => undefined,
     });
+    // Cancellation can overtake the pre-check and win before the claim and
+    // status CAS. The durable outcome is the winner; only a failed winner may
+    // emit failure feedback, a failure Check or comment, or failed telemetry.
+    const settled = yield* latestOutcome;
+    if (settled?.status !== 'failed') {
+      return {
+        result: settled?.status === 'cancelled' ? ('cancelled' as const) : ('failed' as const),
+        settled: false,
+      };
+    }
     yield* manualReaction('-1');
     yield* publishFailureNotification(ownsPublication);
-    return 'failed' as const;
+    return { result: 'failed' as const, settled: true };
   });
 
   const completionFailed = Effect.fn('completionFailed')(function* (
     reason: Extract<PublicationTerminal, { outcome: 'failed' }>['reason'],
   ) {
-    const failed = yield* markCompletionFailed(reason);
-    if (failed === 'cancelled') return 'cancelled' as const;
-    yield* recordPublicationTerminal(log, input.runId, { outcome: 'failed', reason });
+    const { result, settled } = yield* markCompletionFailed(reason);
+    if (result === 'cancelled') return 'cancelled' as const;
+    if (settled) yield* recordPublicationTerminal(log, input.runId, { outcome: 'failed', reason });
     return 'failed' as const;
   });
 
