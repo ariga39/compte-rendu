@@ -142,6 +142,23 @@ For a normal compatible release:
    a controlled review's exact revision, output and visible GitHub publication;
    do not create reviews solely for screenshots.
 
+### Review deadline rollout
+
+The 90-minute review deadline is carried on the Runner claim, so Core and Runner
+may roll forward in either order. An older Runner keeps its own 30-minute limit
+even when a newer Core sends a 90-minute deadline; an older Core omits the
+GitHub read-token expiry, and a newer Runner then falls back to the claim
+deadline. Deploy the managed inference Worker as well when the four-times grant
+policy must become six hours. An older inference Worker still issues two-hour
+grants, which cover a 90-minute attempt.
+
+Drain Runner before replacing its binary so every running attempt finishes under
+the version that admitted it. Do not reset a job's deadline during the restart;
+queued work is claimed after resume under the new deployment. To roll back to 30
+minutes, restore the previous Core and Runner deployments and drain the newer
+Runner before replacement. There is no schema migration for this rollback, and
+the older components ignore fields they do not know.
+
 ### Migrating an existing two-Worker installation
 
 Keep the public Worker name/domain, D1 and R2 IDs, VPC service, allowlists,

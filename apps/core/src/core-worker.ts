@@ -763,10 +763,11 @@ export const createCoreWorker = (
     const claim = await stateStore.claimNextJob({ jobId, attempt: 1, occurredAt });
     if (claim.kind === 'empty') return new Response(null, { status: 204 });
 
+    const claimedAt = claim.claimedAt;
     const claimedOutcome = await stateStore.getRunOutcome(claim.runId).catch(() => undefined);
     const createdAt = claimedOutcome?.createdAt;
     const parsedCreatedAt = createdAt === undefined ? undefined : epochMilliseconds(createdAt);
-    const parsedClaimedAt = epochMilliseconds(occurredAt);
+    const parsedClaimedAt = epochMilliseconds(claimedAt);
     const queueWaitMs =
       parsedCreatedAt !== undefined && parsedClaimedAt !== undefined
         ? Math.max(0, parsedClaimedAt - parsedCreatedAt)
@@ -842,11 +843,18 @@ export const createCoreWorker = (
         installationId: claim.job.installationId,
         repositoryId: claim.job.repositoryId,
       });
+      const claimedAtMillis = epochMilliseconds(claimedAt);
+      const readTokenExpiresAt = epochMilliseconds(readGrant.expiresAt);
+      if (claimedAtMillis === undefined || readTokenExpiresAt === undefined) {
+        preparationFailure = { phase: 'scheduling', reason: 'configuration' };
+        throw new Error('Claim or GitHub read token timestamp is invalid');
+      }
       const input = {
         ...(claim.job.reviewConfiguration === undefined
           ? {}
           : { reviewConfiguration: claim.job.reviewConfiguration }),
-        claimDeadlineAt: Date.parse(occurredAt) + REVIEW_ATTEMPT_BUDGET_MS,
+        claimDeadlineAt: claimedAtMillis + REVIEW_ATTEMPT_BUDGET_MS,
+        repositoryReadTokenExpiresAt: readTokenExpiresAt,
         id: claim.jobId,
         runId: claim.runId,
         attempt: claim.attempt,

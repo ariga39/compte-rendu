@@ -76,7 +76,8 @@ Managed inference permits the configured HTTPS inference hostname. Grant control
 - GitHub read tokens are limited to the target repository and expire upstream.
   Runner removes local token sources, secret registration and scoped rules during
   cleanup. It does not currently revoke the GitHub installation token upstream.
-- Service-mode grants expire after four review budgets and cannot be renewed.
+- Service-mode grants expire after four review budgets (currently six hours)
+  and cannot be renewed.
   Revocation rejects later admissions and seals usage for open requests. Unconfirmed revocation fails the review and
   leaves a recovery marker; Sandbox cleanup is still attempted independently.
 - Relay D1 persists grants and revocations across Worker restarts. Runner startup retries pending revocations against the issuer recorded on disk.
