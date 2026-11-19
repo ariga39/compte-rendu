@@ -10,6 +10,8 @@ export const PublicDashboardConfig = Schema.Struct({ name: Schema.String });
 
 export const RUNNER_LLM_CONTROL_TIMEOUT_MS = 5000;
 export const REVIEW_ATTEMPT_BUDGET_MS = 90 * 60 * 1000;
+export const RunnerDeadline = Schema.Literals(['claim', 'credential']);
+export type RunnerDeadline = typeof RunnerDeadline.Type;
 
 const ModelRouteId = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9._:/-]{1,128}$/));
 export const ReviewModelSelection = Schema.Struct({
@@ -86,6 +88,7 @@ const RunnerHttpStatus = Schema.Int.check(Schema.isBetween({ minimum: 400, maxim
 
 export const RunnerJobInput = Schema.Struct({
   claimDeadlineAt: Schema.optionalKey(Schema.Natural),
+  repositoryReadTokenExpiresAt: Schema.optionalKey(Schema.Natural),
   reviewConfiguration: Schema.optional(ReviewConfiguration),
   id: Schema.NonEmptyString,
   runId: Schema.NonEmptyString,
@@ -126,6 +129,7 @@ export const RunnerJobResponse = Schema.Struct({
         'configuration',
       ]),
       cause: Schema.optional(RunnerFailureCause),
+      deadline: Schema.optional(RunnerDeadline),
       httpStatus: Schema.optional(RunnerHttpStatus),
     }),
   ),
@@ -191,6 +195,7 @@ const CallbackFailure = Schema.Struct({
     'configuration',
   ]),
   cause: Schema.optional(RunnerFailureCause),
+  deadline: Schema.optional(RunnerDeadline),
   httpStatus: Schema.optional(RunnerHttpStatus),
 });
 const CallbackIdentity = {

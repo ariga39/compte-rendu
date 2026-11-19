@@ -21,7 +21,7 @@ For end users, the dashboard's `/help` page is rendered from
 
 ## Proposed changes
 
-[Dashboard sign-in and review cancellation](dashboard-job-control-design.md) proposes global sign-in, operator cancellation and a 60-minute review budget.
+[Dashboard sign-in and review cancellation](dashboard-job-control-design.md) proposes global sign-in, operator cancellation and a 90-minute review budget.
 
 [Worker relay and AI Gateway migration](gateway-relay-design.md) records the design and staged rollout of managed inference.
 

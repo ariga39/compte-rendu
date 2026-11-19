@@ -374,12 +374,15 @@ export interface ReviewStateStore {
         activeRunnerJob?: ActiveRunnerJob;
       }
   >;
-  claimNextJob?(input: {
-    jobId: string;
-    attempt: number;
-    occurredAt: string;
-  }): Promise<
-    | { kind: 'claimed'; runId: string; jobId: string; attempt: number; job: ReviewJob }
+  claimNextJob?(input: { jobId: string; attempt: number; occurredAt: string }): Promise<
+    | {
+        kind: 'claimed';
+        runId: string;
+        jobId: string;
+        attempt: number;
+        claimedAt: string;
+        job: ReviewJob;
+      }
     | { kind: 'empty' }
   >;
   markSchedulingFailed(input: {
@@ -2239,7 +2242,14 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
       run.runnerCleanupStatus = 'pending';
       run.claimedAt ??= occurredAt;
       run.updatedAt = occurredAt;
-      return { kind: 'claimed' as const, runId: run.runId, jobId, attempt, job: run.job };
+      return {
+        kind: 'claimed' as const,
+        runId: run.runId,
+        jobId,
+        attempt,
+        claimedAt: run.claimedAt,
+        job: run.job,
+      };
     },
     markSchedulingFailed: async ({ runId, occurredAt, releaseRunnerClaim }) => {
       const run = runs.get(runId);

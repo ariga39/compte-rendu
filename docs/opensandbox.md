@@ -61,8 +61,13 @@ checkout authentication helpers are not mounted. Retain the official default
 capability restrictions. Do not enable gVisor for this configuration: the
 built-in nft egress and credential proxy require compatible network operations.
 
-Configure the server to allow the two-hour Sandbox lifetime requested by Runner. The Runner still enforces its review deadline
-and explicit destruction; the server TTL is not a substitute for cleanup.
+The Sandbox resource lifetime is pinned explicitly to two hours. That covers the
+90-minute review deadline plus teardown and does not scale with
+`REVIEW_ATTEMPT_BUDGET_MS`. Relay grants retain their separate four-times
+lifetime (currently six hours) and are revoked sooner on normal completion or
+cancellation. The Runner still enforces its review and credential deadlines and
+explicit destruction; the server TTL is not a substitute for cleanup. Keep
+`max_sandbox_timeout_seconds = 7200` on the server.
 
 ## Review image
 
