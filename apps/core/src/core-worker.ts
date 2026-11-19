@@ -362,7 +362,7 @@ export const createCoreWorker = (
       stateStore.claimRunPublication !== undefined
         ? await stateStore.claimRunPublication({ runId, occurredAt })
         : false;
-    await stateStore.markSchedulingFailed({
+    const statusWriteSucceeded = await stateStore.markSchedulingFailed({
       runId,
       occurredAt,
       ...(releaseRunnerClaim === undefined ? {} : { releaseRunnerClaim }),
@@ -372,22 +372,32 @@ export const createCoreWorker = (
     // and status write above. The durable outcome is the winner; only the
     // failed (or superseded) winner gets external failure feedback.
     const settled = await stateStore.getRunOutcome(runId).catch(() => undefined);
-    if (settled === undefined) return undefined;
-    const failed = settled.status === 'failed';
-    const superseded = settled.status === 'superseded';
+    // A failed post-write read must not hide feedback when this attempt
+    // provably owns publication and wrote the failed status. Known
+    // cancelled/superseded outcomes still take precedence.
+    const failed =
+      settled?.status === 'failed' ||
+      (settled === undefined &&
+        notificationClaimed &&
+        (statusWriteSucceeded || outcome.status === 'failed'));
+    const superseded = settled?.status === 'superseded';
+    const winner =
+      settled ??
+      (failed ? { ...outcome, status: 'failed' as const, updatedAt: occurredAt } : undefined);
+    if (winner === undefined) return undefined;
     const failureTransitioned = failed && outcome.status === 'scheduled';
     const supersessionRetained = superseded && outcome.status === 'superseded';
     if (
       (failureTransitioned || supersessionRetained) &&
-      settled.trigger === 'manual' &&
-      settled.commentId !== undefined &&
+      winner.trigger === 'manual' &&
+      winner.commentId !== undefined &&
       github.addReaction !== undefined
     ) {
       await github
         .addReaction({
-          repositoryId: settled.repositoryId,
-          installationId: settled.installationId,
-          commentId: settled.commentId,
+          repositoryId: winner.repositoryId,
+          installationId: winner.installationId,
+          commentId: winner.commentId,
           content: supersessionRetained ? 'confused' : '-1',
         })
         .catch(() => undefined);
@@ -395,15 +405,15 @@ export const createCoreWorker = (
     if (
       notificationClaimed &&
       failed &&
-      settled.checkRunId !== undefined &&
+      winner.checkRunId !== undefined &&
       github.updateCheckRun !== undefined
     ) {
       await github
         .updateCheckRun({
           runId,
-          repositoryId: settled.repositoryId,
-          installationId: settled.installationId,
-          checkRunId: settled.checkRunId,
+          repositoryId: winner.repositoryId,
+          installationId: winner.installationId,
+          checkRunId: winner.checkRunId,
           status: 'failure',
         })
         .catch(() => undefined);
@@ -411,9 +421,9 @@ export const createCoreWorker = (
     if (notificationClaimed && failed && github.createIssueComment !== undefined) {
       try {
         await github.createIssueComment({
-          repositoryId: settled.repositoryId,
-          pullRequestNumber: settled.pullRequestNumber,
-          installationId: settled.installationId,
+          repositoryId: winner.repositoryId,
+          pullRequestNumber: winner.pullRequestNumber,
+          installationId: winner.installationId,
           body: formatReviewFailureComment(runId),
         });
       } catch (error) {
@@ -421,7 +431,7 @@ export const createCoreWorker = (
         throw error;
       }
     }
-    return settled;
+    return winner;
   };
 
   const handleRunnerCleanupRecovery = async (request: Request): Promise<Response> => {

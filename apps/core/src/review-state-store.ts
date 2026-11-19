@@ -1027,7 +1027,8 @@ const createStore = (
         )
         .bind(occurredAt, runId),
     ];
-    await database.batch(statements);
+    const results = await database.batch(statements);
+    return results[0]?.meta.changes === 1;
   },
 
   recordEvidence: async ({
