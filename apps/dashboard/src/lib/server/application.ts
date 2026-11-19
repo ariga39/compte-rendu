@@ -45,6 +45,7 @@ export function createApplication(env: ApplicationEnv, dependencies: CoreWorkerD
         [
           '/runner-callback',
           '/runner-claim',
+          '/runner-read-token',
           '/runner-progress',
           '/runner-cleanup-recovery',
         ].includes(path) ||

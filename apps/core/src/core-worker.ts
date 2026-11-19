@@ -79,10 +79,20 @@ export interface CoreWorkerDependencies {
 const reviewEventsPath = '/review-events';
 const metadataEventsPath = '/metadata-events';
 const runnerClaimsPath = '/runner-claims';
+const runnerReadTokenPath = '/runner-read-token';
 const runnerResultsPath = '/runner-results';
 const runnerProgressPath = '/runner-progress';
 const runnerCleanupRecoveryPath = '/runner-cleanup-recovery';
 const MAX_PROGRESS_BYTES = 16 * 1024;
+const MAX_READ_TOKEN_REQUEST_BYTES = 16 * 1024;
+// Runner reserves one minute before credential expiry; a grant inside that
+// window cannot be used for another read and must be replaced before returning.
+const READ_TOKEN_RENEWAL_MARGIN_MS = 60 * 1000;
+const RunnerReadTokenRequest = Schema.Struct({
+  runId: Schema.NonEmptyString,
+  jobId: Schema.NonEmptyString,
+  attempt: Schema.Int,
+});
 const epochMilliseconds = (value: string) => {
   const parsed = DateTime.make(value);
   return Option.isSome(parsed) ? parsed.value.epochMilliseconds : undefined;
@@ -749,6 +759,85 @@ export const createCoreWorker = (
     return new Response(null, { status: 204 });
   };
 
+  const liveReadTokenClaim = async (input: { runId: string; jobId: string; attempt: number }) => {
+    const outcome = await stateStore.getRunOutcome(input.runId).catch(() => undefined);
+    if (
+      outcome === undefined ||
+      outcome.status !== 'scheduled' ||
+      outcome.runnerJobId !== input.jobId ||
+      outcome.runnerAttempt !== input.attempt ||
+      outcome.publicationClaimedAt !== undefined ||
+      outcome.claimedAt === undefined
+    ) {
+      return undefined;
+    }
+    const claimedAtMillis = epochMilliseconds(outcome.claimedAt);
+    return claimedAtMillis === undefined ? undefined : { outcome, claimedAtMillis };
+  };
+
+  const handleRunnerReadToken = async (request: Request): Promise<Response> => {
+    if (request.headers.get('x-compte-rendu-runner-read-token') !== 'verified') {
+      return new Response(null, { status: 401 });
+    }
+    const body = await request.arrayBuffer();
+    if (body.byteLength > MAX_READ_TOKEN_REQUEST_BYTES) {
+      return new Response(null, { status: 413 });
+    }
+    let renewal: typeof RunnerReadTokenRequest.Type;
+    try {
+      renewal = await Schema.decodeUnknownPromise(Schema.fromJsonString(RunnerReadTokenRequest), {
+        onExcessProperty: 'error',
+      })(new TextDecoder().decode(body));
+    } catch {
+      return new Response(null, { status: 400 });
+    }
+    if (renewal.attempt < 1) return new Response(null, { status: 400 });
+
+    const initial = await liveReadTokenClaim(renewal);
+    const nowMillis = await Effect.runPromise(
+      DateTime.now.pipe(Effect.map(DateTime.toEpochMillis)),
+    );
+    if (initial === undefined || nowMillis >= initial.claimedAtMillis + REVIEW_ATTEMPT_BUDGET_MS) {
+      return new Response(null, { status: 409 });
+    }
+
+    const mint =
+      dependencies.getReadInstallationToken ??
+      ((input: { installationId: number; repositoryId: number }) =>
+        tokenProvider.getReadInstallationToken(input.installationId, input.repositoryId));
+    const grant = await mint({
+      installationId: initial.outcome.installationId,
+      repositoryId: initial.outcome.repositoryId,
+    });
+    const expiresAtMillis = epochMilliseconds(grant.expiresAt);
+    if (expiresAtMillis === undefined) {
+      throw new Error('GitHub read token expiry is invalid');
+    }
+
+    const current = await liveReadTokenClaim(renewal);
+    const currentMillis = await Effect.runPromise(
+      DateTime.now.pipe(Effect.map(DateTime.toEpochMillis)),
+    );
+    if (
+      current === undefined ||
+      current.claimedAtMillis !== initial.claimedAtMillis ||
+      currentMillis >= current.claimedAtMillis + REVIEW_ATTEMPT_BUDGET_MS
+    ) {
+      return new Response(null, { status: 409 });
+    }
+    if (expiresAtMillis <= currentMillis + READ_TOKEN_RENEWAL_MARGIN_MS) {
+      return new Response(null, { status: 503 });
+    }
+
+    return Response.json(
+      {
+        token: grant.token,
+        expiresAt: new Date(expiresAtMillis).toISOString(),
+      },
+      { status: 200, headers: { 'cache-control': 'no-store' } },
+    );
+  };
+
   const handleRunnerClaim = async (
     request: Request,
     lifecycleLog: ReturnType<typeof createPostHogLifecycleLog>,
@@ -955,6 +1044,13 @@ export const createCoreWorker = (
       if (request.method === 'POST' && new URL(request.url).pathname === runnerClaimsPath) {
         try {
           return await handleRunnerClaim(request, lifecycleLog);
+        } catch {
+          return new Response(null, { status: 503 });
+        }
+      }
+      if (request.method === 'POST' && new URL(request.url).pathname === runnerReadTokenPath) {
+        try {
+          return await handleRunnerReadToken(request);
         } catch {
           return new Response(null, { status: 503 });
         }

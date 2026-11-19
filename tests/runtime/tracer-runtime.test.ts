@@ -189,4 +189,42 @@ describe('local Worker runtime tracer', () => {
     });
     expect((await runtimeHarness.claim()).status).toBe(204);
   });
+
+  it('renews a claimed read token through the unified application ingress', async () => {
+    const renewalDelivery = 'runtime-tracer-read-renewal';
+    const renewalPayload = { ...payload, number: 45 };
+    const scheduled = await runtimeHarness.send(
+      await signedWebhook(renewalDelivery, 'pull_request', renewalPayload),
+    );
+    expect(scheduled.status).toBe(202);
+
+    const claim = await runtimeHarness.claim();
+    expect(claim.status).toBe(200);
+    const claimed = (await claim.json()) as CapturedRunnerJob & {
+      readonly id: string;
+      readonly attempt: number;
+    };
+
+    const renewal = await SELF.fetch(
+      new Request('https://tracer.internal/runner-read-token', {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${runnerCallbackToken}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          runId: claimed.runId,
+          jobId: claimed.id,
+          attempt: claimed.attempt,
+        }),
+      }),
+    );
+
+    expect(renewal.status).toBe(200);
+    expect(renewal.headers.get('cache-control')).toBe('no-store');
+    expect(await renewal.json()).toMatchObject({
+      token: 'test-read-token',
+      expiresAt: expect.any(String),
+    });
+  });
 });

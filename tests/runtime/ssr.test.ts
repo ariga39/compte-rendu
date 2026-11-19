@@ -59,7 +59,12 @@ it('returns usable overview and help HTML without executing JavaScript', async (
 });
 
 it('enforces webhook and Runner authentication at the built SvelteKit entry', async () => {
-  for (const path of ['/runner-claim', '/runner-callback', '/runner-progress']) {
+  for (const path of [
+    '/runner-claim',
+    '/runner-callback',
+    '/runner-progress',
+    '/runner-read-token',
+  ]) {
     const response = await SELF.fetch(`https://reviews.test${path}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -67,6 +72,15 @@ it('enforces webhook and Runner authentication at the built SvelteKit entry', as
     });
     expect(response.status).toBe(401);
   }
+  const readToken = await SELF.fetch('https://reviews.test/runner-read-token', {
+    method: 'POST',
+    headers: {
+      authorization: 'Bearer test-callback-token',
+      'content-type': 'application/json',
+    },
+    body: '{}',
+  });
+  expect(readToken.status).toBe(400);
   for (const path of ['/review-configuration', '/review', '/jobs']) {
     const response = await SELF.fetch(`https://reviews.test${path}`, {
       method: 'POST',

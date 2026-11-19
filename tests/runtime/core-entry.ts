@@ -73,7 +73,7 @@ export default {
         },
         getReadInstallationToken: async () => ({
           token: 'test-read-token',
-          expiresAt: '2026-09-01T01:00:00.000Z',
+          expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
         }),
       },
     );
