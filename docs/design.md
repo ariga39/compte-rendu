@@ -145,7 +145,7 @@ and head commits, derives a merge base, and performs GitHub-read preflight befor
 OpenCode starts. Checkout disables hooks, submodules and LFS smudge and removes
 the authenticated remote before agent execution.
 
-The agent budget is 30 minutes. One same-session correction gets at most two
+The agent budget is 90 minutes. The initial GitHub installation token typically expires after one hour. A later GitHub read requires a valid credential even while the agent has time remaining. One same-session correction gets at most two
 minutes of its remainder; it is not another attempt. Callback delivery has a
 bounded timeout and one immediate retry. An oversized evidence bundle becomes a
 small terminal incomplete-evidence failure, not truncated successful evidence.
