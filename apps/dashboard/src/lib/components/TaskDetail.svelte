@@ -130,7 +130,7 @@
   });
 
   $effect(() => {
-    if (accepted === null || task === null) {
+    if ((accepted === null && cancelNotice === null) || task === null) {
       announcedCancellation = null;
       return;
     }
