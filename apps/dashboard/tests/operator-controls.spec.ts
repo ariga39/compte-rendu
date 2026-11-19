@@ -100,6 +100,40 @@ test('a claimed cancellation stays Cancelling until cleanup is confirmed', async
   expect(done).toContain('Cleanup was confirmed.');
 });
 
+test('a claimed cancellation with unrecorded cleanup stays unresolved and pollable', async ({
+  page,
+  harness,
+  base,
+}) => {
+  let cleanup: PublicTaskState['cleanup'] = 'unknown';
+  harness.setHandler((url) => {
+    if (!url.pathname.startsWith('/api/jobs/')) return ok(historyPage([]));
+    return ok(
+      detailData(
+        publicTask('unknown-cleanup', {
+          status: 'cancelled',
+          dispatch: null,
+          claimedAt: NOW,
+          terminalAt: NOW,
+          cleanup,
+          totalDurationMs: 5000,
+        }),
+      ),
+    );
+  });
+
+  await page.clock.install();
+  await page.goto(`${base}/jobs/unknown-cleanup`);
+  await expect.poll(() => statusOf(page)).toBe('Cancelling');
+  await expect(page.locator('.review-heading p')).toContainText(
+    'Execution is stopping and cleanup is not yet confirmed.',
+  );
+
+  cleanup = 'destroyed';
+  await page.clock.fastForward(16000);
+  await expect.poll(() => statusOf(page)).toBe('Cancelled');
+});
+
 test('reloading a cancelling review keeps polling until cleanup is confirmed', async ({
   page,
   harness,

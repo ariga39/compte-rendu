@@ -43,33 +43,34 @@
   const anonymous: DashboardSession = { signedIn: false, account: null, operator: false };
   let viewer = $state<DashboardSession | null>(null);
 
-  provideOperator(() => viewer?.operator === true);
+  async function loadViewer(signal?: AbortSignal): Promise<void> {
+    try {
+      const response = await fetch('/api/session', {
+        headers: { accept: 'application/json' },
+        cache: 'no-store',
+        ...(signal === undefined ? {} : { signal }),
+      });
+      if (signal?.aborted) return;
+      if (!response.ok) {
+        viewer = anonymous;
+        return;
+      }
+      const decoded = Schema.decodeUnknownOption(DashboardSession)(await response.json());
+      viewer = Option.isSome(decoded) ? decoded.value : anonymous;
+    } catch {
+      if (!signal?.aborted) viewer = anonymous;
+    }
+  }
+
+  provideOperator(
+    () => viewer?.operator === true,
+    () => loadViewer(),
+  );
 
   onMount(() => {
-    let active = true;
     const controller = new AbortController();
-    void (async () => {
-      try {
-        const response = await fetch('/api/session', {
-          headers: { accept: 'application/json' },
-          cache: 'no-store',
-          signal: controller.signal,
-        });
-        if (!active) return;
-        if (!response.ok) {
-          viewer = anonymous;
-          return;
-        }
-        const decoded = Schema.decodeUnknownOption(DashboardSession)(await response.json());
-        viewer = Option.isSome(decoded) ? decoded.value : anonymous;
-      } catch {
-        if (active) viewer = anonymous;
-      }
-    })();
-    return () => {
-      active = false;
-      controller.abort();
-    };
+    void loadViewer(controller.signal);
+    return () => controller.abort();
   });
 
   const refresh = createRefreshState();

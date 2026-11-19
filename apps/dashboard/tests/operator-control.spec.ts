@@ -154,6 +154,132 @@ test('a cancellation without outstanding cleanup becomes Cancelled', async ({
   await expect(page.locator('[data-testid="cancel-review"]')).toHaveCount(0);
 });
 
+test('authoritative server cleanup replaces the local acceptance', async ({
+  page,
+  harness,
+  base,
+}) => {
+  harness.setSession(signedIn(true));
+  let current = cancellable();
+  harness.setHandler((url, request) => {
+    if (url.pathname === '/api/jobs/run-1/cancel') {
+      if (request.method !== 'POST') return { status: 405 };
+      current = publicTask('run-1', {
+        status: 'cancelled',
+        dispatch: null,
+        claimedAt: NOW,
+        terminalAt: NOW,
+        stage: 'agent',
+        cleanup: 'pending',
+        totalDurationMs: 5000,
+      });
+      return { status: 202, json: { status: 'cancelled', pendingCleanup: true } };
+    }
+    if (url.pathname === '/api/jobs/run-1') return ok(detailData(current));
+    return ok(historyPage([current]));
+  });
+
+  await page.goto(`${base}/jobs/run-1`);
+  await expect.poll(() => statusOf(page)).toBe('In progress');
+  await page.locator('[data-testid="cancel-review"]').click();
+  await page.locator('[data-testid="cancel-confirm-submit"]').click();
+  await expect.poll(() => statusOf(page)).toBe('Cancelling');
+  await expect(page.getByTestId('cancel-announcement')).toContainText('Cancellation accepted');
+
+  current = publicTask('run-1', {
+    status: 'cancelled',
+    dispatch: null,
+    claimedAt: NOW,
+    terminalAt: NOW,
+    stage: 'agent',
+    cleanup: 'failed',
+    totalDurationMs: 5000,
+  });
+  await page.click('.header-refresh [data-testid="refresh"]');
+
+  await expect.poll(() => statusOf(page)).toBe('Cancelled');
+  await expect(page.locator('.review-heading p')).toContainText(
+    'Cleanup failed and needs an operator.',
+  );
+  await page.locator('.bx--accordion__heading').click();
+  await expect(page.locator('.cleanup-block')).toContainText('Cleanup failed');
+  await expect(page.getByTestId('cancel-announcement')).toContainText('Cleanup failed');
+});
+
+test('a pending cancellation can be dismissed without losing focus', async ({
+  page,
+  harness,
+  base,
+}) => {
+  harness.setSession(signedIn(true));
+  let release: () => void = () => undefined;
+  const reply = new Promise<ApiPayload>((resolve) => {
+    release = () => resolve({ status: 202, json: { status: 'cancelled', pendingCleanup: true } });
+  });
+  harness.setHandler((url, request) => {
+    if (url.pathname === '/api/jobs/run-1/cancel') {
+      if (request.method !== 'POST') return { status: 405 };
+      return { promise: reply };
+    }
+    if (url.pathname === '/api/jobs/run-1') return ok(detailData(cancellable()));
+    return ok(historyPage([cancellable()]));
+  });
+
+  await page.goto(`${base}/jobs/run-1`);
+  await expect.poll(() => statusOf(page)).toBe('In progress');
+  await page.locator('[data-testid="cancel-review"]').click();
+  await page.locator('[data-testid="cancel-confirm-submit"]').click();
+
+  const dialog = page.locator('[data-testid="cancel-confirm"]');
+  await expect(dialog).toBeVisible();
+  expect(await dialog.evaluate((node) => node.contains(document.activeElement))).toBe(true);
+
+  await page.keyboard.press('Escape');
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator('.detail h1')).toBeFocused();
+
+  release();
+  await expect.poll(() => statusOf(page)).toBe('Cancelling');
+  await expect(page.getByTestId('cancel-announcement')).toContainText('Cancellation accepted');
+  await expect(page.locator('.detail h1')).toBeFocused();
+});
+
+test('a stalled cancellation request is bounded and refreshed', async ({ page, harness, base }) => {
+  await page.clock.install();
+  harness.setSession(signedIn(true));
+  let current = cancellable();
+  harness.setHandler((url, request) => {
+    if (url.pathname === '/api/jobs/run-1/cancel') {
+      if (request.method !== 'POST') return { status: 405 };
+      current = publicTask('run-1', {
+        status: 'cancelled',
+        dispatch: null,
+        claimedAt: NOW,
+        terminalAt: NOW,
+        stage: 'agent',
+        cleanup: 'pending',
+        totalDurationMs: 5000,
+      });
+      return { promise: new Promise<ApiPayload>(() => undefined) };
+    }
+    if (url.pathname === '/api/jobs/run-1') return ok(detailData(current));
+    return ok(historyPage([current]));
+  });
+
+  await page.goto(`${base}/jobs/run-1`);
+  await expect.poll(() => statusOf(page)).toBe('In progress');
+  await page.locator('[data-testid="cancel-review"]').click();
+  await page.locator('[data-testid="cancel-confirm-submit"]').click();
+  await expect(page.locator('[data-testid="cancel-confirm"]')).toBeVisible();
+
+  await page.clock.fastForward(16000);
+
+  await expect(page.getByTestId('cancel-notice')).toContainText('could not be confirmed');
+  await expect(page.locator('[data-testid="cancel-confirm"]')).toHaveCount(0);
+  await expect(page.locator('[data-testid="cancel-error"]')).toHaveCount(0);
+  await expect.poll(() => statusOf(page)).toBe('Cancelling');
+});
+
 test('a publication conflict refreshes the detail without claiming success', async ({
   page,
   harness,
@@ -174,7 +300,7 @@ test('a publication conflict refreshes the detail without claiming success', asy
   await expect(page.locator('[data-testid="cancel-review"]')).toBeFocused();
 });
 
-test('an unauthorized reply is explained without changing the review', async ({
+test('a forbidden reply is explained as permission rather than an expired session', async ({
   page,
   harness,
   base,
@@ -187,8 +313,37 @@ test('an unauthorized reply is explained without changing the review', async ({
   await page.locator('[data-testid="cancel-confirm-submit"]').click();
 
   await expect(page.locator('[data-testid="cancel-error"]')).toContainText('not allowed to cancel');
+  await expect(page.locator('[data-testid="cancel-error"]')).not.toContainText('session expired');
   await expect.poll(() => statusOf(page)).toBe('In progress');
   await expect(page.locator('[data-testid="cancel-review"]')).toBeVisible();
+});
+
+test('an expired session refreshes the viewer and asks for sign-in', async ({
+  page,
+  harness,
+  base,
+}) => {
+  harness.setSession(signedIn(true));
+  harness.setHandler((url, request) => {
+    if (url.pathname === '/api/jobs/run-1/cancel') {
+      if (request.method !== 'POST') return { status: 405 };
+      harness.setSession({ status: 401, json: { error: 'Session expired.' } });
+      return { status: 401 };
+    }
+    if (url.pathname === '/api/jobs/run-1') return ok(detailData(cancellable()));
+    return ok(historyPage([cancellable()]));
+  });
+
+  await page.goto(`${base}/jobs/run-1`);
+  await expect.poll(() => statusOf(page)).toBe('In progress');
+  await expect(page.getByTestId('viewer-login')).toHaveText('octocat');
+  await page.locator('[data-testid="cancel-review"]').click();
+  await page.locator('[data-testid="cancel-confirm-submit"]').click();
+
+  await expect(page.locator('[data-testid="cancel-error"]')).toContainText('session expired');
+  await expect(page.getByTestId('sign-in')).toBeVisible();
+  await expect(page.getByTestId('viewer-login')).toHaveCount(0);
+  await expect(page.locator('[data-testid="cancel-review"]')).toHaveCount(0);
 });
 
 test('a signed-in non-operator does not see operator controls', async ({ page, harness, base }) => {
@@ -271,7 +426,6 @@ test('a delayed cancellation reply cannot update a different review after naviga
   release();
 
   await expect.poll(() => statusOf(page)).toBe('In progress');
-  await expect(page.locator('[data-testid="cancel-status"]')).toHaveCount(0);
   await expect(page.locator('[data-testid="cancel-error"]')).toHaveCount(0);
   await expect(drawer).toContainText('feature/two');
   await expect(drawer.locator('[data-testid="cancel-review"]')).toBeVisible();
