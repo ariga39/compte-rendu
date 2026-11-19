@@ -562,6 +562,7 @@ type RunnerJobState = RunnerJobResponseValue;
 type RunnerFailureCauseValue = typeof RunnerFailureCause.Type;
 
 type RunnerJobInputState = {
+  claimDeadlineAt?: number;
   reviewConfiguration?: RunnerJobInput['reviewConfiguration'];
   id: string;
   runId: string;
@@ -1135,6 +1136,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
   const jobs = new Map<string, RunnerJob>();
   const jobsByRun = new Map<string, RunnerJob>();
   let claiming = false;
+  const stopsDuringClaim = new Map<string, ReturnType<typeof setTimeout>>();
   let claimPollingHalted = false;
   let draining = false;
   let claimGateFailureLogged = false;
@@ -2343,6 +2345,10 @@ export const createRunner = (options: RunnerOptions = {}) => {
         cleanup: { status: 'pending' },
       });
       if (job.abortRequested) return;
+      if (job.input.claimDeadlineAt !== undefined && job.input.claimDeadlineAt <= Date.now()) {
+        failure = { reason: 'timeout' };
+        return;
+      }
       // Remote relay execution never infers a default route: Core must have
       // materialized the frozen selection at admission. Fail before checkout.
       if (relayEnabled && multiSelection === undefined) {
@@ -3165,7 +3171,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       sandboxName: `compte-rendu-${id}`,
       done,
       resolveDone,
-      abortRequested: contradictsSamePullRequest,
+      abortRequested: contradictsSamePullRequest || (claimed && stopsDuringClaim.has(id)),
       progressStopped: false,
       sandboxAttempted: false,
       sandboxCreated: false,
@@ -3473,7 +3479,26 @@ export const createRunner = (options: RunnerOptions = {}) => {
     const match = /^\/jobs\/([^/]+)$/.exec(path);
     if (match === null) return jsonResponse(404, { error: 'not found' });
     const job = jobs.get(match[1]);
-    if (job === undefined) return jsonResponse(404, { error: 'not found' });
+    if (job === undefined) {
+      const deadline = Number(request.headers.get('x-compte-rendu-claim-deadline'));
+      if (
+        request.method === 'DELETE' &&
+        claiming &&
+        Number.isSafeInteger(deadline) &&
+        deadline > Date.now()
+      ) {
+        const id = match[1];
+        if (!stopsDuringClaim.has(id)) {
+          const timer = setTimeout(
+            () => stopsDuringClaim.delete(id),
+            Math.min(deadline - Date.now(), REVIEW_ATTEMPT_BUDGET_MS),
+          );
+          stopsDuringClaim.set(id, timer);
+        }
+        return jsonResponse(202, { status: 'stop requested' });
+      }
+      return jsonResponse(404, { error: 'not found' });
+    }
     if (request.method === 'GET') return jsonResponse(200, publicState(job));
     if (request.method === 'DELETE') {
       if (job.state.status === 'queued' || job.state.status === 'running') {
@@ -3616,6 +3641,8 @@ export const createRunner = (options: RunnerOptions = {}) => {
     } finally {
       if (timeout !== undefined) clearTimeout(timeout);
       claiming = false;
+      for (const timer of stopsDuringClaim.values()) clearTimeout(timer);
+      stopsDuringClaim.clear();
       if (claimFailure !== undefined) {
         await recordLog({
           phase: 'runner',

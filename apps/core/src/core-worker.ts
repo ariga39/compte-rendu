@@ -2,6 +2,7 @@ import { DateTime, Effect, Option, Schema } from 'effect';
 import {
   DEFAULT_REVIEW_NAME,
   MAX_RUNNER_CALLBACK_BYTES,
+  REVIEW_ATTEMPT_BUDGET_MS,
   type PublicTaskFailure,
   MetadataInvalidationEvent,
   ReviewEvent,
@@ -845,6 +846,7 @@ export const createCoreWorker = (
         ...(claim.job.reviewConfiguration === undefined
           ? {}
           : { reviewConfiguration: claim.job.reviewConfiguration }),
+        claimDeadlineAt: Date.parse(occurredAt) + REVIEW_ATTEMPT_BUDGET_MS,
         id: claim.jobId,
         runId: claim.runId,
         attempt: claim.attempt,
