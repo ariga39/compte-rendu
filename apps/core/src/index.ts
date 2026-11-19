@@ -2264,14 +2264,13 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
       const run = runs.get(runId);
       if (run === undefined) return false;
       if (run.evidence !== undefined && run.evidence.key !== evidence.key) return false;
-      const cleanupCompletedAt = run.cleanupCompletedAt ?? run.evidence?.cleanupCompletedAt;
-      run.evidence =
-        run.runnerCleanupStatus === 'destroyed' && cleanupCompletedAt !== undefined
-          ? { ...evidence, cleanupCompletedAt }
-          : evidence;
-      if (run.cleanupCompletedAt === undefined && evidence.cleanupCompletedAt !== undefined) {
-        run.cleanupCompletedAt = evidence.cleanupCompletedAt;
-      }
+      const cleanupCompletedAt =
+        run.runnerCleanupStatus === 'destroyed'
+          ? (run.cleanupCompletedAt ??
+            (sandboxCleanup === 'destroyed' ? evidence.cleanupCompletedAt : undefined))
+          : evidence.cleanupCompletedAt;
+      run.cleanupCompletedAt = cleanupCompletedAt;
+      run.evidence = { ...evidence, cleanupCompletedAt };
       if (sandboxCleanup !== undefined && run.runnerCleanupStatus !== 'destroyed') {
         run.runnerCleanupStatus = sandboxCleanup;
       }
