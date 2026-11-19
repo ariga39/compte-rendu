@@ -1,5 +1,5 @@
 import { Schema } from 'effect';
-import { RunnerJobResponse } from '@compte-rendu/contracts';
+import { REVIEW_ATTEMPT_BUDGET_MS, RunnerJobResponse } from '@compte-rendu/contracts';
 
 export interface RunnerJobBinding {
   readonly fetch: (request: Request) => Response | Promise<Response>;
@@ -11,7 +11,7 @@ export interface RunnerJobClientOptions {
 }
 
 export interface RunnerJobSubmitter {
-  readonly cancelJob: (jobId: string) => Promise<void>;
+  readonly cancelJob: (jobId: string, claimedAt?: string) => Promise<void | 'pending'>;
 }
 
 const authorizedJobRequest = (token: string, jobId: string, init: RequestInit = {}) => {
@@ -27,10 +27,18 @@ export const createRunnerJobClient = ({
   binding,
   authToken,
 }: RunnerJobClientOptions): RunnerJobSubmitter => ({
-  cancelJob: async (jobId) => {
+  cancelJob: async (jobId, claimedAt) => {
+    const deadline =
+      claimedAt === undefined ? NaN : Date.parse(claimedAt) + REVIEW_ATTEMPT_BUDGET_MS;
     const response = await binding.fetch(
-      authorizedJobRequest(authToken, jobId, { method: 'DELETE' }),
+      authorizedJobRequest(authToken, jobId, {
+        method: 'DELETE',
+        headers: Number.isSafeInteger(deadline)
+          ? { 'x-compte-rendu-claim-deadline': String(deadline) }
+          : {},
+      }),
     );
+    if (response.status === 202) return 'pending';
     if (response.status !== 200) throw new Error('Runner Job cleanup was not confirmed');
     const state = await Schema.decodeUnknownPromise(RunnerJobResponse)(await response.json());
     if (state.status !== 'aborted' || state.sandbox.cleanup !== 'destroyed') {
