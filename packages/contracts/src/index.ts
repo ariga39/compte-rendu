@@ -85,6 +85,7 @@ export const RunnerFailureCause = Schema.Literals([
 const RunnerHttpStatus = Schema.Int.check(Schema.isBetween({ minimum: 400, maximum: 599 }));
 
 export const RunnerJobInput = Schema.Struct({
+  claimDeadlineAt: Schema.optionalKey(Schema.Natural),
   reviewConfiguration: Schema.optional(ReviewConfiguration),
   id: Schema.NonEmptyString,
   runId: Schema.NonEmptyString,
