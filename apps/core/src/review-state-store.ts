@@ -95,6 +95,7 @@ interface ClaimRow {
 }
 
 interface ActiveRunnerRow {
+  claimed_at: string | null;
   run_id: string;
   runner_job_id: string;
 }
@@ -786,7 +787,7 @@ const createStore = (
     const results = await database.batch(statements);
     const activeRunner = await database
       .prepare(
-        `SELECT run_id, runner_job_id FROM review_runs
+        `SELECT run_id, runner_job_id, claimed_at FROM review_runs
          WHERE installation_id = ? AND repository_id = ?
            AND pull_request_number = ? AND head_sha <> ?
            AND status = 'scheduled' AND runner_job_id IS NOT NULL
@@ -797,7 +798,11 @@ const createStore = (
     const activeRunnerJob =
       activeRunner === null
         ? undefined
-        : { runId: activeRunner.run_id, jobId: activeRunner.runner_job_id };
+        : {
+            runId: activeRunner.run_id,
+            jobId: activeRunner.runner_job_id,
+            claimedAt: activeRunner.claimed_at ?? undefined,
+          };
     const supersededRun = await database
       .prepare(
         `SELECT run_id FROM review_runs

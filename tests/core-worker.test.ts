@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { gunzipSync } from 'node:zlib';
+import { createRunner } from '../apps/runner/src/runner';
 import { createCoreWorker } from '../apps/core/src/core-worker';
 import { createD1ReviewStateStore, createInMemoryReviewStateStore } from '../apps/core/src/index';
 import type { ReviewJob } from '../apps/core/src/index';
@@ -2384,6 +2385,84 @@ describe('Core Worker', () => {
       expect(await claimAfterCleanup.json()).toMatchObject({ headSha: newEvent.headSha });
     } finally {
       fetcher.mockRestore();
+      database.close();
+    }
+  });
+
+  it('stops a superseded review while the real Core claim response is in transit', async () => {
+    const database = new SqliteD1Database();
+    const stateStore = createD1ReviewStateStore(database);
+    const intercepted = deferred<{ runId: string; id: string }>();
+    const release = deferred<void>();
+    const callback = deferred<{ status: string; sandbox: { cleanup: string } }>();
+    const env = {
+      ...coreEnv(database, (request) => runner.handle(request)),
+      EVIDENCE_BUCKET: { put: async () => undefined },
+    };
+    const core = createCoreWorker(env, { stateStore, ...postHogTestDefaults.dependencies });
+    const schedule = (event: ReviewEvent) =>
+      core.fetch(
+        new Request('https://core.internal/review-events', {
+          method: 'POST',
+          body: JSON.stringify(event),
+        }),
+      );
+    await schedule(eligibleEvent);
+    let polled = false;
+    const runner: ReturnType<typeof createRunner> = createRunner({
+      authToken: 'runner-auth-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      claimUrl: 'https://core.internal/runner-claims',
+      callbackUrl: 'https://core.internal/runner-results',
+      callbackToken: 'callback',
+      claimIntervalMs: 1000,
+      claimFetch: async () => {
+        if (polled) return new Response(null, { status: 204 });
+        polled = true;
+        const response = await core.fetch(
+          new Request('https://core.internal/runner-claims', {
+            method: 'POST',
+            headers: { 'x-compte-rendu-runner-claim': 'verified' },
+          }),
+        );
+        intercepted.resolve(await response.clone().json());
+        await release.promise;
+        return response;
+      },
+      callbackFetch: async (_, init) => {
+        const req = new Request('https://core.internal/runner-results', init);
+        req.headers.set('x-compte-rendu-runner-callback', 'verified');
+        const result = await req.clone().json();
+        const reply = await core.fetch(req);
+        callback.resolve(result);
+        return reply;
+      },
+      evidenceRoot: '/tmp/cr-test-in-flight-supersession',
+      modelConfig: JSON.stringify({ id: 'opencode-go/test-model' }),
+      progressFetch: async () => new Response(null, { status: 202 }),
+      process: async () => ({ exitCode: 0, stdout: '', timedOut: false, truncated: false }),
+    });
+    try {
+      const { runId, id } = await intercepted.promise;
+      await schedule({
+        ...eligibleEvent,
+        deliveryId: 'replace-before-admission',
+        action: 'synchronize',
+        headSha: '3'.repeat(40),
+      });
+      expect(await stateStore.getRunOutcome(runId)).toMatchObject({
+        status: 'superseded',
+        runnerJobId: id,
+      });
+      release.resolve();
+      expect(await callback.promise).toMatchObject({
+        status: 'aborted',
+        sandbox: { cleanup: 'destroyed' },
+      });
+      expect((await stateStore.getRunOutcome(runId))?.runnerJobId).toBeUndefined();
+    } finally {
+      release.resolve();
+      await runner.close();
       database.close();
     }
   });

@@ -290,6 +290,7 @@ export interface ReviewApproval {
 }
 
 export interface ActiveRunnerJob {
+  readonly claimedAt?: string;
   readonly runId: string;
   readonly jobId: string;
 }
@@ -491,7 +492,7 @@ export type ReviewPublicationStateStore = ReviewStateStore & ReviewStateQueries;
 
 export interface ReviewScheduler {
   schedule(job: ReviewJob, runId: string): Promise<void>;
-  cancel?(jobId: string): Promise<void>;
+  cancel?(jobId: string, claimedAt?: string): Promise<void | 'pending'>;
 }
 
 export type ReviewCheckSetupDefer = (task: Promise<void>) => void;
@@ -1469,10 +1470,11 @@ const claimAndSchedule = (
         }).pipe(Effect.catch(() => Effect.succeed(undefined)));
       }
       const canceled = yield* Effect.tryPromise({
-        try: () => scheduler.cancel!(claim.activeRunnerJob!.jobId),
+        try: () =>
+          scheduler.cancel!(claim.activeRunnerJob!.jobId, claim.activeRunnerJob!.claimedAt),
         catch: () => undefined,
       }).pipe(
-        Effect.map(() => true),
+        Effect.map((ack) => ack !== 'pending'),
         Effect.catch(() => Effect.succeed(false)),
       );
       if (!canceled) return 'scheduled' as const;
@@ -1894,6 +1896,7 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
       deliveryId: string;
       createdAt: string;
       updatedAt: string;
+      claimedAt?: string;
       runnerJobId?: string;
       runnerAttempt?: number;
       runnerCleanupStatus?: RunnerCleanupStatus;
@@ -2090,6 +2093,7 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
               activeRunnerJob: {
                 runId: activeRunnerJob.runId,
                 jobId: activeRunnerJob.runnerJobId!,
+                claimedAt: activeRunnerJob.claimedAt,
               },
             }),
         ...(supersededRunIds.length === 0 ? {} : { supersededRunIds }),
@@ -2119,6 +2123,7 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
       run.runnerJobId = jobId;
       run.runnerAttempt = attempt;
       run.runnerCleanupStatus = 'pending';
+      run.claimedAt ??= occurredAt;
       run.updatedAt = occurredAt;
       return { kind: 'claimed' as const, runId: run.runId, jobId, attempt, job: run.job };
     },
