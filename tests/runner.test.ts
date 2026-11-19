@@ -385,6 +385,7 @@ const waitForTerminal = async (
   runner: ReturnType<typeof createRunner>,
   jobId: string,
   attempts = 50,
+  advanceClock?: () => Promise<void>,
 ) => {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     const response = await runner.handle(
@@ -399,7 +400,11 @@ const waitForTerminal = async (
     };
     if (state.status === 'succeeded' || state.status === 'failed' || state.status === 'aborted')
       return state;
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    if (advanceClock === undefined) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    } else {
+      await advanceClock();
+    }
   }
   throw new Error('Runner Job did not reach a terminal state');
 };
@@ -628,6 +633,13 @@ const runReminderScenario = async (scenario: {
   repositoryReadTokenExpiresAt?: number;
   advanceOnCheckoutMs?: number;
   checkoutTimedOut?: boolean;
+  advanceOnCreateMs?: number;
+  createTimedOut?: boolean;
+  agentDelayMs?: number;
+  readTokenFetch?: typeof fetch;
+  logEvents?: unknown[];
+  terminalAttempts?: number;
+  controlledClock?: boolean;
 }) => {
   const baseSha = '1111111111111111111111111111111111111111';
   const headSha = '2222222222222222222222222222222222222222';
@@ -637,26 +649,88 @@ const runReminderScenario = async (scenario: {
   const exportTimeouts: Array<number | undefined> = [];
   const agentTimeouts: Array<number | undefined> = [];
   const createCommands: string[][] = [];
+  const githubTokenSnapshots: string[] = [];
+  const readTokenRequests: Array<{
+    readonly url: string;
+    readonly authorization: string | null;
+    readonly body: Record<string, unknown>;
+  }> = [];
+  let githubTokenPath: string | undefined;
+  let githubSecretArgs: readonly string[] | undefined;
   let agentRuns = 0;
   const runner = createRunner({
     evidenceRoot: sharedEvidenceRoot,
     authToken: 'runner-test-token',
     modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+    ...(scenario.logEvents === undefined
+      ? {}
+      : {
+          log: {
+            record: async (event) => {
+              scenario.logEvents!.push(event);
+            },
+          },
+        }),
+    ...(scenario.readTokenFetch === undefined
+      ? {}
+      : {
+          readTokenFetch: async (input: RequestInfo | URL, init?: RequestInit) => {
+            const inputUrl =
+              input instanceof Request
+                ? input.url
+                : input instanceof URL
+                  ? input.href
+                  : String(input);
+            readTokenRequests.push({
+              url: inputUrl,
+              authorization: new Headers(init?.headers).get('authorization'),
+              body:
+                typeof init?.body === 'string'
+                  ? (JSON.parse(init.body) as Record<string, unknown>)
+                  : {},
+            });
+            return scenario.readTokenFetch!(input, init);
+          },
+        }),
     process: async (_command, args, options = {}) => {
-      if (args[0] === 'create') createCommands.push([...args]);
+      const isCreate = args[0] === 'create';
+      if (isCreate) {
+        createCommands.push([...args]);
+        if (scenario.advanceOnCreateMs !== undefined) {
+          vi.setSystemTime(Date.now() + scenario.advanceOnCreateMs);
+        }
+      }
+      if (args[0] === 'secret' && args[1] === 'set' && args[2] === 'github') {
+        githubSecretArgs = [...args];
+        const command = args[args.indexOf('--command') + 1] ?? '';
+        githubTokenPath = /^cat (.+)$/.exec(command)?.[1];
+      }
       if (args.includes('merge-base') && scenario.advanceOnCheckoutMs !== undefined) {
         vi.setSystemTime(Date.now() + scenario.advanceOnCheckoutMs);
         if (scenario.checkoutTimedOut)
           return { exitCode: 1, stdout: '', timedOut: true, truncated: false };
       }
       if (args.includes('export')) exportTimeouts.push(options.timeoutMs);
+      const readGithubToken = async () => {
+        if (githubTokenPath === undefined) return '';
+        try {
+          return await readFile(githubTokenPath, 'utf8');
+        } catch {
+          return '';
+        }
+      };
       const isAgent = args[0] === 'exec' && args.includes('--agent');
       if (isAgent) {
         const round = scenario.rounds[Math.min(agentRuns, scenario.rounds.length - 1)]!;
         agentRuns += 1;
         agentCommands.push([...args]);
         agentTimeouts.push(options.timeoutMs);
+        githubTokenSnapshots.push(await readGithubToken());
         await writeEvidenceFixture(args, options, round.output);
+        if (scenario.agentDelayMs !== undefined) {
+          await new Promise((resolve) => setTimeout(resolve, scenario.agentDelayMs));
+        }
+        githubTokenSnapshots.push(await readGithubToken());
         if (round.advanceMs !== undefined) {
           vi.setSystemTime(Date.now() + round.advanceMs);
         }
@@ -681,7 +755,7 @@ const runReminderScenario = async (scenario: {
         );
       }
       return {
-        exitCode: 0,
+        exitCode: isCreate && scenario.createTimedOut === true ? 1 : 0,
         stdout: args.includes('rev-parse')
           ? `${baseSha}\n${headSha}\n`
           : args.includes('export')
@@ -694,7 +768,7 @@ const runReminderScenario = async (scenario: {
             : args.includes('session')
               ? `[{"id":"${sessionId}"}]\n`
               : '',
-        timedOut: false,
+        timedOut: isCreate && scenario.createTimedOut === true,
         truncated: false,
       };
     },
@@ -723,7 +797,17 @@ const runReminderScenario = async (scenario: {
     }),
   );
   const { id } = (await submitted.json()) as { id: string };
-  const terminal = await waitForTerminal(runner, id);
+  const terminal = await waitForTerminal(
+    runner,
+    id,
+    scenario.terminalAttempts,
+    scenario.controlledClock === true
+      ? async () => {
+          await vi.advanceTimersByTimeAsync(10);
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        }
+      : undefined,
+  );
   const manifest = JSON.parse(
     await readFile(
       join(sharedEvidenceRoot, terminal.evidenceId as string, 'manifest.json'),
@@ -741,6 +825,10 @@ const runReminderScenario = async (scenario: {
     createCommands,
     sessionId,
     sandboxName,
+    githubSecretArgs,
+    githubTokenPath,
+    githubTokenSnapshots,
+    readTokenRequests,
   };
 };
 
@@ -2131,6 +2219,67 @@ describe('Runner Job HTTP interface', () => {
     }
   });
 
+  it('attributes a create timeout at the exhausted claim clock to the claim deadline', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const start = Date.parse('2026-09-12T00:00:00.000Z');
+    try {
+      vi.setSystemTime(start);
+      const result = await runReminderScenario({
+        runId: 'run-create-reaches-claim-deadline',
+        claimDeadlineAt: start + 5 * 60 * 1000,
+        advanceOnCreateMs: 5 * 60 * 1000,
+        createTimedOut: true,
+        rounds: [],
+      });
+
+      expect(result.createCommands).toHaveLength(1);
+      expect(result.agentRuns).toBe(0);
+      expect(result.terminal).toMatchObject({
+        status: 'failed',
+        failure: { reason: 'timeout', deadline: 'claim' },
+        sandbox: { cleanup: 'destroyed' },
+      });
+      expect(result.manifest.terminal).toMatchObject({
+        reason: 'timeout',
+        deadline: 'claim',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('attributes a create timeout at the fallback credential margin to the credential clock', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const start = Date.parse('2026-09-12T00:00:00.000Z');
+    try {
+      vi.setSystemTime(start);
+      const result = await runReminderScenario({
+        runId: 'run-create-reaches-credential-deadline',
+        claimDeadlineAt: start + 90 * 60 * 1000,
+        repositoryReadTokenExpiresAt: start + 20 * 60 * 1000,
+        advanceOnCheckoutMs: 18 * 60 * 1000,
+        advanceOnCreateMs: 60 * 1000,
+        createTimedOut: true,
+        readTokenFetch: async () => new Response(null, { status: 503 }),
+        rounds: [],
+      });
+
+      expect(result.createCommands).toHaveLength(1);
+      expect(result.agentRuns).toBe(0);
+      expect(result.terminal).toMatchObject({
+        status: 'failed',
+        failure: { reason: 'timeout', deadline: 'credential' },
+        sandbox: { cleanup: 'destroyed' },
+      });
+      expect(result.manifest.terminal).toMatchObject({
+        reason: 'timeout',
+        deadline: 'credential',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('caps execution at the GitHub read-token expiry minus the safety margin', async () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     const start = Date.parse('2026-09-12T00:00:00.000Z');
@@ -2193,6 +2342,181 @@ describe('Runner Job HTTP interface', () => {
         deadline: 'credential',
       });
       expect(JSON.stringify(result.terminal)).not.toContain('github-read-token');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('rotates the same sandbox credential before its first expiry during a long run', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    const start = Date.parse('2026-09-12T00:00:00.000Z');
+    const markdown = '## Review:\n\nRotated credential.';
+    const requestBodies: Array<Record<string, unknown>> = [];
+    try {
+      vi.setSystemTime(start);
+      const result = await runReminderScenario({
+        runId: 'run-read-token-rotated',
+        claimDeadlineAt: start + 90 * 60 * 1000,
+        repositoryReadTokenExpiresAt: start + 700,
+        agentDelayMs: 1000,
+        terminalAttempts: 300,
+        controlledClock: true,
+        readTokenFetch: async (_input, init) => {
+          requestBodies.push(
+            typeof init?.body === 'string'
+              ? (JSON.parse(init.body) as Record<string, unknown>)
+              : {},
+          );
+          return Response.json({
+            token: 'rotated-github-read-token',
+            expiresAt: new Date(Date.now() + 100 * 60 * 1000).toISOString(),
+          });
+        },
+        rounds: [
+          {
+            output: finalMarkdownJsonl(markdown, 'session-reminder'),
+            finalText: JSON.stringify({ decision: 'comment', markdown }),
+          },
+        ],
+      });
+
+      expect(result.readTokenRequests).toHaveLength(1);
+      expect(result.readTokenRequests[0]).toMatchObject({
+        authorization: 'Bearer callback-token',
+        body: {
+          runId: 'run-read-token-rotated',
+          jobId: runnerJobFields.id,
+          attempt: 1,
+        },
+      });
+      expect(new URL(result.readTokenRequests[0]!.url).pathname).toBe('/runner-read-token');
+      expect(requestBodies).toHaveLength(1);
+      expect(result.githubSecretArgs).toContain('--refresh');
+      expect(result.githubSecretArgs).toContain('on-demand');
+      const githubSecretArgs = result.githubSecretArgs!;
+      expect(githubSecretArgs[githubSecretArgs.indexOf('--command') + 1]).toBe(
+        `cat ${result.githubTokenPath}`,
+      );
+      expect(result.githubTokenSnapshots.at(-1)).toBe('rotated-github-read-token');
+      expect(result.terminal).toMatchObject({
+        status: 'succeeded',
+        result: structuredResult(markdown),
+      });
+      expect(JSON.stringify(result.terminal)).not.toContain('rotated-github-read-token');
+      expect(JSON.stringify(result.manifest)).not.toContain('rotated-github-read-token');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('falls back to the old credential expiry margin on refresh outage without leaking secrets', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const start = Date.parse('2026-09-12T00:00:00.000Z');
+    const logEvents: unknown[] = [];
+    try {
+      vi.setSystemTime(start);
+      const result = await runReminderScenario({
+        runId: 'run-read-token-refresh-outage',
+        claimDeadlineAt: start + 90 * 60 * 1000,
+        repositoryReadTokenExpiresAt: start + 20 * 60 * 1000,
+        advanceOnCheckoutMs: 19 * 60 * 1000,
+        readTokenFetch: async () => {
+          throw new Error('refresh transport exposed github-read-token');
+        },
+        logEvents,
+        rounds: [],
+      });
+
+      expect(result.readTokenRequests).toHaveLength(1);
+      expect(result.createCommands).toHaveLength(0);
+      expect(result.agentRuns).toBe(0);
+      expect(result.terminal).toMatchObject({
+        status: 'failed',
+        failure: { reason: 'timeout', deadline: 'credential' },
+        sandbox: { cleanup: 'destroyed' },
+      });
+      expect(JSON.stringify(result.terminal)).not.toContain('github-read-token');
+      expect(JSON.stringify(result.manifest)).not.toContain('github-read-token');
+      expect(JSON.stringify(logEvents)).not.toContain('github-read-token');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('rejects a successful agent result that crosses the fallback credential margin', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const start = Date.parse('2026-09-12T00:00:00.000Z');
+    const markdown = '## Review:\n\nToo late for the old credential.';
+    try {
+      vi.setSystemTime(start);
+      const result = await runReminderScenario({
+        runId: 'run-read-token-fallback-crossed',
+        claimDeadlineAt: start + 90 * 60 * 1000,
+        repositoryReadTokenExpiresAt: start + 20 * 60 * 1000,
+        advanceOnCheckoutMs: 18 * 60 * 1000,
+        readTokenFetch: async () => new Response(null, { status: 503 }),
+        rounds: [
+          {
+            output: finalMarkdownJsonl(markdown, 'session-reminder'),
+            finalText: JSON.stringify({ decision: 'comment', markdown }),
+            advanceMs: 2 * 60 * 1000,
+          },
+        ],
+      });
+
+      expect(result.agentRuns).toBe(1);
+      expect(result.terminal).toMatchObject({
+        status: 'failed',
+        failure: { reason: 'timeout', deadline: 'credential' },
+        sandbox: { cleanup: 'destroyed' },
+      });
+      expect(result.terminal).not.toHaveProperty('result');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('ignores a read-token refresh response that arrives after cleanup', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    const start = Date.parse('2026-09-12T00:00:00.000Z');
+    const markdown = '## Review:\n\nLate refresh ignored.';
+    let releaseRefresh!: (response: Response) => void;
+    const refreshResponse = new Promise<Response>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    let refreshStarted = false;
+    try {
+      vi.setSystemTime(start);
+      const result = await runReminderScenario({
+        runId: 'run-read-token-cleanup-race',
+        claimDeadlineAt: start + 90 * 60 * 1000,
+        repositoryReadTokenExpiresAt: start + 700,
+        agentDelayMs: 1000,
+        terminalAttempts: 300,
+        controlledClock: true,
+        readTokenFetch: async () => {
+          refreshStarted = true;
+          return refreshResponse;
+        },
+        rounds: [
+          {
+            output: finalMarkdownJsonl(markdown, 'session-reminder'),
+            finalText: JSON.stringify({ decision: 'comment', markdown }),
+          },
+        ],
+      });
+
+      expect(refreshStarted).toBe(true);
+      expect(result.githubTokenPath).toBeDefined();
+      expect(result.terminal).toMatchObject({ status: 'succeeded' });
+      releaseRefresh(
+        Response.json({
+          token: 'github-token-that-must-not-be-written',
+          expiresAt: new Date(Date.now() + 100 * 60 * 1000).toISOString(),
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(10);
+      await expect(stat(result.githubTokenPath!)).rejects.toMatchObject({ code: 'ENOENT' });
     } finally {
       vi.useRealTimers();
     }

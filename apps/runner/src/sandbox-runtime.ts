@@ -250,6 +250,12 @@ export interface JobSandboxRuntime {
     diagnostic?: RunnerDiagnostic,
     options?: RunnerProcessOptions,
   ): Promise<RunnerProcessResult>;
+  /**
+   * Replaces the active GitHub read credential at the same sandbox-scoped
+   * destination. Backends without an atomically updateable destination omit
+   * this, and the Runner keeps the initial credential's hard expiry cap.
+   */
+  rotateGithubReadToken?(token: string): Promise<void>;
   /** Removes every owned resource and confirms the sandbox identity is gone; rejects otherwise. */
   destroy(command: SandboxCommand): Promise<void>;
 }
