@@ -135,6 +135,38 @@ describe('Review coordinator', () => {
     },
   );
 
+  it('reports cancellation when it wins before the GitHub publication claim', async () => {
+    const stateStore = createInMemoryReviewStateStore();
+    let runId = '';
+    const reviews: ReviewPublicationPayload[] = [];
+    const coordinator = createReviewCoordinator({
+      stateStore,
+      scheduler: {
+        schedule: async (_job, id) => {
+          runId = id;
+        },
+      },
+      github: {
+        loadReviewTarget: async () => {
+          await stateStore.cancelRun({
+            runId,
+            requestedByUid: 1,
+            occurredAt: new Date().toISOString(),
+          });
+          return { headSha: eligiblePrivatePullRequest.headSha, files: [] };
+        },
+        createReview: async ({ payload }) => {
+          reviews.push(payload);
+          return { kind: 'created', review: payload };
+        },
+      },
+    });
+    await coordinator.handleReviewEvent(eligiblePrivatePullRequest);
+    for (let delivery = 0; delivery < 2; delivery++)
+      expect(await coordinator.completeReview({ runId, output: 'No findings.' })).toBe('cancelled');
+    expect(reviews).toEqual([]);
+  });
+
   it('publishes the Markdown output as a body-only COMMENT for the admitted head', async () => {
     const stateStore = createInMemoryReviewStateStore();
     const reviews: ReviewPublicationPayload[] = [];

@@ -1,6 +1,6 @@
 import { applyReviewConfiguration } from '../../../../core/src/review-configuration';
 import type { ApplicationEnv } from './application';
-import { fetchGitHubAccount, noStore, operatorIds, readSessionToken } from './auth';
+import { noStore, requireOperator } from './auth';
 
 export type { LoginEnv } from './auth';
 
@@ -17,19 +17,12 @@ export async function modelSettings(request: Request, env: ApplicationEnv): Prom
     if (url.pathname !== '/api/model-settings') return noStore(404);
     if (!['GET', 'PUT'].includes(request.method)) return noStore(405);
     if (request.method === 'PUT' && !sameOrigin) return noStore(403);
-    const token = await readSessionToken(request, env);
-    if (!token) return noStore(401);
-    unavailable = 'Could not retrieve your GitHub account details.';
-    const account = await fetchGitHubAccount(token);
-    if (account.kind === 'unauthorized') return noStore(401);
-    if (account.kind === 'unavailable') return noStore(503, { error: unavailable });
-    unavailable = 'Could not read the dashboard editor allowlist.';
-    const allowed = operatorIds(env);
-    if (!allowed) return noStore(503, { error: unavailable });
-    if (!allowed.includes(account.account.id))
-      return noStore(403, {
-        error: 'This GitHub account is not authorized to edit review models.',
-      });
+    const operator = await requireOperator(
+      request,
+      env,
+      'This GitHub account is not authorized to edit review models.',
+    );
+    if (operator instanceof Response) return operator;
     unavailable = 'Could not load the model catalog.';
     if (!env.INFERENCE_RELAY) return noStore(503, { error: unavailable });
     if (request.method === 'PUT')

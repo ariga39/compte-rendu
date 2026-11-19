@@ -274,6 +274,24 @@ const github = {
   token_endpoint: 'https://github.com/login/oauth/access_token',
 };
 
+export async function requireOperator(
+  request: Request,
+  env: LoginEnv,
+  forbiddenMessage: string,
+): Promise<GitHubAccount | Response> {
+  const token = await readSessionToken(request, env);
+  if (!token) return noStore(401);
+  const account = await fetchGitHubAccount(token);
+  if (account.kind === 'unauthorized') return noStore(401);
+  if (account.kind === 'unavailable')
+    return noStore(503, { error: 'Could not retrieve your GitHub account details.' });
+  const allowed = operatorIds(env);
+  if (!allowed) return noStore(503, { error: 'Could not read the dashboard editor allowlist.' });
+  return allowed.includes(account.account.id)
+    ? account.account
+    : noStore(403, { error: forbiddenMessage });
+}
+
 export async function sessionViewer(request: Request, env: LoginEnv): Promise<Response> {
   const url = new URL(request.url);
   const origin = env.DASHBOARD_ORIGIN;

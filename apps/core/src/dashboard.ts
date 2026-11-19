@@ -157,6 +157,7 @@ const StatusValue = Schema.Literals([
   'published',
   'failed',
   'superseded',
+  'cancelled',
 ]);
 const CleanupValue = Schema.Literals(['all', 'pending', 'destroyed', 'failed', 'unknown']);
 const ViewValue = Schema.Literals(['history', 'current', 'cleanup']);

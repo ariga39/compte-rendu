@@ -1,4 +1,4 @@
-import { authRoute, sessionViewer } from './auth';
+import { authRoute, noStore, requireOperator, sessionViewer } from './auth';
 import { modelSettings, type LoginEnv } from './model-settings';
 import { createCloudflareOperationalLog } from '../../../../core/src/operational-log';
 import { handleRunnerLlmControl } from '../../../../core/src/runner-llm-control';
@@ -22,6 +22,33 @@ export function createApplication(env: ApplicationEnv, dependencies: CoreWorkerD
       if (path === '/api/session') return sessionViewer(request, env);
       if (path.startsWith('/auth/')) return authRoute(request, env);
       if (path === '/api/model-settings') return modelSettings(request, env);
+      const cancel = /^\/api\/jobs\/([A-Za-z0-9._~-]{1,128})\/cancel$/.exec(path);
+      if (cancel) {
+        if (request.method !== 'POST') return noStore(405);
+        const origin = new URL(request.url).origin;
+        if (
+          !env.DASHBOARD_ORIGIN ||
+          origin !== env.DASHBOARD_ORIGIN ||
+          !origin.startsWith('https://') ||
+          request.headers.get('origin') !== origin
+        )
+          return noStore(403);
+        const operator = await requireOperator(
+          request,
+          env,
+          'This GitHub account is not authorized to cancel reviews.',
+        );
+        if (operator instanceof Response) return operator;
+        const core = createCoreWorker(env, dependencies);
+        try {
+          const response = await core.cancelReview(cancel[1], operator.id);
+          if (response.ok && context)
+            context.waitUntil(core.reconcileCancellations(Date.now(), cancel[1]));
+          return response;
+        } catch {
+          return noStore(503, { error: 'Review cancellation is temporarily unavailable.' });
+        }
+      }
       if (path.startsWith('/runner-llm/'))
         return handleRunnerLlmControl(request, env, env.RUNNER_CALLBACK_TOKEN);
       if (path === '/api/review-configuration/catalog') {
@@ -69,9 +96,10 @@ export async function runApplicationScheduled(
   controller: { scheduledTime: number },
   env: CoreWorkerEnv,
 ): Promise<void> {
-  const [metadata, relay] = await Promise.allSettled([
+  const [metadata, relay, cancellations] = await Promise.allSettled([
     runScheduledMetadataRefresh(env),
     env.INFERENCE_RELAY?.refreshCatalog(controller.scheduledTime),
+    createCoreWorker(env).reconcileCancellations(controller.scheduledTime),
   ]);
   if (relay.status === 'rejected') {
     try {
@@ -81,4 +109,6 @@ export async function runApplicationScheduled(
     }
   }
   if (metadata.status === 'rejected') throw metadata.reason;
+  if (cancellations.status === 'rejected')
+    throw new Error('Review cancellation reconciliation failed');
 }

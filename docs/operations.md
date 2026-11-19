@@ -31,6 +31,14 @@ timestamps, bounded stderr metadata, and artifact presence/size/hash—not
 credentials, repository contents, review bodies, or raw model/session/tool
 output.
 
+## Operator cancellation
+
+The per-instance numeric GitHub UID list in `DASHBOARD_MODEL_EDITOR_IDS` authorizes both model changes and review cancellation. The dashboard verifies the current account on every cancellation request.
+
+An authorized same-origin `POST /api/jobs/:runId/cancel` accepts a queued review immediately (200). A claimed review returns 202 until Runner confirms cleanup. Repeating the request retrieves its current cancellation state. A 409 means publication or another terminal outcome already won. Cancelling never withdraws a published GitHub review.
+
+The Worker ends the GitHub Check and requests a stop using the recorded Runner job and attempt. The minute cron retries pending deliveries if the Worker or Runner was unavailable. A Runner 404 leaves cleanup unconfirmed. When automatic stop attempts end, inspect the job and use the cleanup recovery procedure below. Keep later runs for the same pull request blocked until teardown is verified.
+
 ## Operations and troubleshooting
 
 The code emits structured operational events without webhook payloads,

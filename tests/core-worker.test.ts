@@ -1016,6 +1016,73 @@ describe('Core Worker', () => {
     }
   });
 
+  it.each([successfulCallback, failedCallback, abortedCallback])(
+    'keeps a cancelled claim and its evidence when a late %s arrives',
+    async (makeCallback) => {
+      const database = new SqliteD1Database();
+      const { fetcher, requests, waitUntilTasks } = capturePostHogTransport();
+      try {
+        const state = createD1ReviewStateStore(database);
+        const queued = await state.claimReview({
+          deliveryId: 'cancelled-before-callback',
+          job: {
+            repositoryId: 11,
+            pullRequestNumber: 42,
+            installationId: 7,
+            baseSha: eligibleEvent.baseSha,
+            headSha: eligibleEvent.headSha,
+            trigger: 'automatic',
+          },
+          occurredAt: '2026-09-01T00:00:00.000Z',
+        });
+        if (queued.kind !== 'claimed') throw new Error('expected scheduled run');
+        const { runId } = queued;
+        const jobId = 'runner-job-1';
+        await state.claimNextJob!({ jobId, attempt: 1, occurredAt: '2026-09-01T00:01:00.000Z' });
+        await state.cancelRun({ runId, requestedByUid: 1, occurredAt: '2026-09-01T00:02:00.000Z' });
+        const env = {
+          ...coreEnv(database),
+          ...postHogTestDefaults.environment,
+          EVIDENCE_BUCKET: { put: async () => undefined },
+        };
+        const createReview = vi.fn();
+        const createIssueComment = vi.fn();
+        const worker = createCoreWorker(env, {
+          stateStore: state,
+          github: { createReview, createIssueComment },
+        });
+        const reply = await worker.fetch(
+          new Request('https://core.internal/runner-results', {
+            method: 'POST',
+            headers: { 'x-compte-rendu-runner-callback': 'verified' },
+            body: await makeCallback(runId, jobId, 1),
+          }),
+          env,
+          { waitUntil: (task) => waitUntilTasks.push(task) },
+        );
+        expect(reply.status).toBe(202);
+        expect(await state.getRunOutcome(runId)).toMatchObject({
+          status: 'cancelled',
+          runnerJobId: jobId,
+          runnerAttempt: 1,
+          evidence: { key: 'reviews/' + runId },
+        });
+        await Promise.all(waitUntilTasks);
+        expect(await postHogEvents(requests)).not.toContainEqual(
+          expect.objectContaining({
+            event: 'review finished',
+            properties: expect.objectContaining({ outcome: 'failed' }),
+          }),
+        );
+        expect(createReview).not.toHaveBeenCalled();
+        expect(createIssueComment).not.toHaveBeenCalled();
+      } finally {
+        fetcher.mockRestore();
+        database.close();
+      }
+    },
+  );
+
   it('captures a superseded lifecycle event for a late successful callback', async () => {
     const database = new SqliteD1Database();
     const stateStore = createD1ReviewStateStore(database);
@@ -1539,6 +1606,45 @@ describe('Core Worker', () => {
           status: 'failure',
         },
       ]);
+    } finally {
+      database.close();
+    }
+  });
+
+  it('finishes a late Check as manually cancelled when the operator wins during creation', async () => {
+    const database = new SqliteD1Database();
+    const background: Promise<unknown>[] = [];
+    const started = deferred<string>();
+    const check = deferred<{ id: number }>();
+    const updateCheckRun = vi.fn(async () => {});
+    const worker = createCoreWorker(coreEnv(database), {
+      github: {
+        createCheckRun: async ({ runId }) => {
+          started.resolve(runId);
+          return check.promise;
+        },
+        updateCheckRun,
+      },
+    });
+    try {
+      await worker.fetch(
+        new Request('https://core.internal/review-events', {
+          method: 'POST',
+          body: JSON.stringify(eligibleEvent),
+        }),
+        undefined,
+        { waitUntil: (task) => background.push(task) },
+      );
+      expect((await worker.cancelReview(await started.promise, 1)).status).toBe(200);
+      check.resolve({ id: 324 });
+      await Promise.all(background);
+      expect(updateCheckRun).toHaveBeenCalledWith(
+        expect.objectContaining({
+          checkRunId: 324,
+          status: 'cancelled',
+          cancellationReason: 'manual',
+        }),
+      );
     } finally {
       database.close();
     }

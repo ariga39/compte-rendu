@@ -77,6 +77,16 @@ describe('per-run dashboard Check links', () => {
         expect(checks[0].output?.summary).toContain('https://dashboard.example/jobs/run-one');
         expect(checks[1].details_url).toBe('https://dashboard.example/jobs/run-two');
       }
+
+      expect(checks[0].output?.summary).toContain('newer pull request revision');
+      await github.updateCheckRun!({
+        ...input,
+        checkRunId: 1,
+        status: 'cancelled',
+        cancellationReason: 'manual',
+      });
+      expect(checks[0]).toMatchObject({ status: 'completed', conclusion: 'cancelled' });
+      expect(checks[0].output?.summary).toContain('An operator cancelled this review.');
     },
   );
 });

@@ -436,6 +436,7 @@ export interface ReviewStateQueries {
     occurredAt: string;
   }): Promise<ReviewCancellationResult>;
   listCancellationWork?(input: {
+    runId?: string;
     retryBefore: string;
     recoveryBefore: string;
     limit: number;
@@ -445,6 +446,7 @@ export interface ReviewStateQueries {
     jobId: string;
     attempt: number;
     occurredAt: string;
+    expectedLastAttempt: string | null;
   }): Promise<boolean>;
   confirmRunnerDestroyed?(input: {
     runId: string;
@@ -456,6 +458,7 @@ export interface ReviewStateQueries {
     runId: string;
     checkRunId: number;
     occurredAt: string;
+    expectedLastAttempt: string | null;
   }): Promise<boolean>;
   confirmCheckCancelled?(input: {
     runId: string;
@@ -884,6 +887,7 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
     });
     return 'failed' as const;
   }
+  if (outcome.status === 'cancelled') return 'cancelled' as const;
   const updateCheck = Effect.fn('updateReviewCheck')(function* (status: 'failure' | 'cancelled') {
     if (outcome.checkRunId === undefined || github.updateCheckRun === undefined) return;
     yield* Effect.tryPromise({
@@ -1181,7 +1185,12 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
         }),
       catch: () => false,
     }).pipe(Effect.catch(() => Effect.succeed(false)));
-    if (!publicationClaimed) return 'completed' as const;
+    if (!publicationClaimed) {
+      const latest = yield* Effect.tryPromise(() => getRunOutcome(input.runId)).pipe(
+        Effect.catch(() => Effect.succeed(undefined)),
+      );
+      return latest?.status === 'cancelled' ? ('cancelled' as const) : ('completed' as const);
+    }
     ownsPublication = true;
   }
 
@@ -1286,7 +1295,7 @@ const checkStatusForOutcome = (
     ? 'success'
     : outcome?.status === 'failed'
       ? 'failure'
-      : outcome?.status === 'superseded'
+      : outcome?.status === 'superseded' || outcome?.status === 'cancelled'
         ? 'cancelled'
         : outcome?.status === 'scheduled' && outcome.runnerJobId !== undefined
           ? 'in_progress'
@@ -1348,6 +1357,9 @@ const setupCheck = Effect.fn('setupCheck')(function* (
                 installationId: current.installationId,
                 checkRunId: checkRun.id,
                 status,
+                ...(current.status === 'cancelled'
+                  ? { cancellationReason: 'manual' as const }
+                  : {}),
                 ...(status === 'success' && current.decision !== undefined
                   ? { decision: current.decision }
                   : {}),
@@ -1373,6 +1385,9 @@ const setupCheck = Effect.fn('setupCheck')(function* (
                     installationId: latest.installationId,
                     checkRunId: checkRun.id,
                     status: latestStatus,
+                    ...(latest.status === 'cancelled'
+                      ? { cancellationReason: 'manual' as const }
+                      : {}),
                     ...(latestStatus === 'success' && latest.decision !== undefined
                       ? { decision: latest.decision }
                       : {}),
@@ -2475,11 +2490,11 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
       setDeliveryStatus(run.deliveryId, 'cancelled', occurredAt);
       return { kind: 'cancelled' as const, cancellation: cancellationFor(run) };
     },
-    listCancellationWork: async ({ retryBefore, recoveryBefore, limit }) => {
+    listCancellationWork: async ({ runId, retryBefore, recoveryBefore, limit }) => {
       const due = (attemptedAt: string | undefined) =>
         attemptedAt === undefined || attemptedAt <= retryBefore;
       return [...runs.values()]
-        .filter((run) => run.status === 'cancelled')
+        .filter((run) => run.status === 'cancelled' && (runId === undefined || run.runId === runId))
         .map((run) => {
           const cleanupBlocked =
             run.runnerJobId !== undefined && run.runnerCleanupStatus !== 'destroyed';
@@ -2534,14 +2549,15 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
           }),
         );
     },
-    recordRunnerStopAttempt: async ({ runId, jobId, attempt, occurredAt }) => {
+    recordRunnerStopAttempt: async ({ runId, jobId, attempt, occurredAt, expectedLastAttempt }) => {
       const run = runs.get(runId);
       if (
         run === undefined ||
         run.status !== 'cancelled' ||
         run.runnerJobId !== jobId ||
         run.runnerAttempt !== attempt ||
-        run.runnerCleanupStatus === 'destroyed'
+        run.runnerCleanupStatus === 'destroyed' ||
+        (run.runnerStopAttemptedAt ?? null) !== expectedLastAttempt
       ) {
         return false;
       }
@@ -2570,13 +2586,19 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
       }
       return true;
     },
-    recordCheckCancellationAttempt: async ({ runId, checkRunId, occurredAt }) => {
+    recordCheckCancellationAttempt: async ({
+      runId,
+      checkRunId,
+      occurredAt,
+      expectedLastAttempt,
+    }) => {
       const run = runs.get(runId);
       if (
         run === undefined ||
         run.status !== 'cancelled' ||
         run.checkRunId !== checkRunId ||
-        run.checkCancelReconciledAt !== undefined
+        run.checkCancelReconciledAt !== undefined ||
+        (run.checkCancelAttemptedAt ?? null) !== expectedLastAttempt
       ) {
         return false;
       }
