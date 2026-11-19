@@ -259,6 +259,7 @@ export interface PublicOverviewCounts {
   claimed: number;
   publishedLast24h: number;
   failedLast24h: number;
+  cancelledLast24h: number;
   cleanupAttention: number;
 }
 

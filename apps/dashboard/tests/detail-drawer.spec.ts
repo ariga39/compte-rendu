@@ -226,7 +226,13 @@ test('closing the drawer on the current list focuses the page heading when the r
   const overview = (tasks: PublicTaskState[]): ApiPayload =>
     ok({
       generatedAt: NOW,
-      counts: { queued: 0, claimed: tasks.length, publishedLast24h: 0, failedLast24h: 0 },
+      counts: {
+        queued: 0,
+        claimed: tasks.length,
+        publishedLast24h: 0,
+        failedLast24h: 0,
+        cancelledLast24h: 0,
+      },
       cleanupAttention: 0,
       tasks,
       nextCursor: null,

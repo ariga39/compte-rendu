@@ -158,7 +158,9 @@ even when a newer Core sends a 90-minute deadline; an older Core omits the
 GitHub read-token expiry, and a newer Runner then falls back to the claim
 deadline. Deploy the managed inference Worker as well when the four-times grant
 policy must become six hours. An older inference Worker still issues two-hour
-grants, which cover a 90-minute attempt.
+grants, which cover a 90-minute attempt. When either the claim deadline or the GitHub
+credential expiry margin ends an attempt, the Runner callback and evidence
+manifest identify the limit. The dashboard reports the timeout.
 
 Deploy the application Worker with `POST /runner-read-token` before the Runner
 that uses it. The sbx Runner authenticates to the same callback origin and

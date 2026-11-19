@@ -41,7 +41,8 @@ export const createRunnerJobClient = ({
         signal: AbortSignal.timeout(8000),
       }),
     );
-    if (response.status !== 200) return false;
+    if (response.status === 202 || response.status === 404) return false;
+    if (response.status !== 200) throw new Error('Runner stop request failed');
     const state = await Schema.decodeUnknownPromise(RunnerJobResponse)(await response.json());
     return (
       state.id === jobId &&

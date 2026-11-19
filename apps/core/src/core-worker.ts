@@ -251,6 +251,7 @@ export const createCoreWorker = (
     env.RUNNER === undefined || env.RUNNER_AUTH_TOKEN === undefined
       ? undefined
       : createRunnerJobClient({ binding: env.RUNNER, authToken: env.RUNNER_AUTH_TOKEN });
+  const log = dependencies.log ?? createCloudflareOperationalLog();
   const coordinatorDependencies = {
     github,
     stateStore,
@@ -260,7 +261,7 @@ export const createCoreWorker = (
       schedule: async () => undefined,
       ...(runner === undefined ? {} : { cancel: runner.cancelJob }),
     },
-    log: dependencies.log ?? createCloudflareOperationalLog(),
+    log,
   } as const;
   const createCoordinator = (
     lifecycleLog: ReturnType<typeof createPostHogLifecycleLog>,
@@ -1110,7 +1111,7 @@ export const createCoreWorker = (
   };
 
   return {
-    ...createJobControl(stateStore, github, runner),
+    ...createJobControl(stateStore, github, runner, log),
     fetch: async (request, _env, context) => {
       if (new URL(request.url).pathname === '/review-configuration') {
         return handleReviewConfiguration(

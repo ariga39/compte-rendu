@@ -1,7 +1,7 @@
 import { expect, it, vi } from 'vitest';
 import { createCoreWorker } from '../apps/core/src/core-worker';
 import { createD1ReviewStateStore } from '../apps/core/src/review-state-store';
-import { REVIEW_ATTEMPT_BUDGET_MS } from '../packages/contracts/src';
+import { REVIEW_ATTEMPT_BUDGET_MS, type OperationalLogEvent } from '../packages/contracts/src';
 import { SqliteD1Database } from './support/d1-database';
 
 const deferred = <A>() => {
@@ -44,6 +44,7 @@ it('retries an unconfirmed operator stop, ends the Check, and acknowledges verif
     await state.claimNextJob!({ jobId: 'job-one', attempt: 1, occurredAt: now.toISOString() });
     const stops: Request[] = [];
     const updateCheckRun = vi.fn(async () => {});
+    const events: OperationalLogEvent[] = [];
     const core = createCoreWorker(
       {
         REVIEW_DB: database,
@@ -67,7 +68,11 @@ it('retries an unconfirmed operator stop, ends the Check, and acknowledges verif
           },
         },
       },
-      { stateStore: state, github: { updateCheckRun } },
+      {
+        stateStore: state,
+        log: { record: (event) => void events.push(event) },
+        github: { updateCheckRun },
+      },
     );
     const first = await core.cancelReview(runId, 123);
     expect(first.status).toBe(202);
@@ -85,6 +90,7 @@ it('retries an unconfirmed operator stop, ends the Check, and acknowledges verif
     expect((await core.cancelReview(runId, 123)).status).toBe(202);
     await core.reconcileCancellations(Date.now() + 61_000);
     expect((await core.cancelReview(runId, 123)).status).toBe(200);
+    expect(events).toEqual([]);
     expect(await state.getRunOutcome(runId)).toMatchObject({
       runnerJobId: 'job-one',
       status: 'cancelled',
@@ -240,3 +246,91 @@ it('releases a cancelled claim when token preparation finishes before Runner rec
     database.close();
   }
 });
+
+it.each(['lease', 'delivery'] as const)(
+  'identifies both cancellation failures at the %s boundary without exposing credentials',
+  async (boundary) => {
+    const database = new SqliteD1Database();
+    try {
+      const state = createD1ReviewStateStore(database);
+      const now = new Date();
+      const queued = await state.claimReview({
+        deliveryId: 'cancellation-delivery-failure',
+        occurredAt: now.toISOString(),
+        job: {
+          repositoryId: 1,
+          installationId: 2,
+          pullRequestNumber: 3,
+          baseSha: '1'.repeat(40),
+          headSha: '2'.repeat(40),
+          trigger: 'automatic',
+        },
+      });
+      if (queued.kind !== 'claimed') throw new Error('expected queued run');
+      const { runId } = queued;
+      await state.recordCheckRun!({ runId, checkRunId: 42 });
+      await state.claimNextJob!({ jobId: 'job-one', attempt: 1, occurredAt: now.toISOString() });
+      const failLease = async () => {
+        throw new Error('state credential ghp_state_secret');
+      };
+      const events: OperationalLogEvent[] = [];
+      const core = createCoreWorker(
+        {
+          REVIEW_DB: database,
+          GITHUB_APP_ID: '1',
+          GITHUB_APP_PRIVATE_KEY: 'test',
+          RUNNER_AUTH_TOKEN: 'test',
+          RUNNER: {
+            fetch: async () => {
+              return new Response('runner credential ghp_runner_secret', { status: 503 });
+            },
+          },
+        },
+        {
+          stateStore:
+            boundary === 'delivery'
+              ? state
+              : {
+                  ...state,
+                  recordRunnerStopAttempt: failLease,
+                  recordCheckCancellationAttempt: failLease,
+                },
+          log: { record: (event) => void events.push(event) },
+          github: {
+            updateCheckRun: async () => {
+              throw new Error('github credential ghp_check_secret');
+            },
+          },
+        },
+      );
+      expect((await core.cancelReview(runId, 123)).status).toBe(202);
+      await expect(core.reconcileCancellations(Date.now())).rejects.toThrow(
+        'Review cancellation delivery failed',
+      );
+      expect(events).toHaveLength(2);
+      expect(events).toEqual(
+        expect.arrayContaining([
+          {
+            phase: 'cancellation',
+            outcome: 'delivery_failed',
+            runId,
+            kind: 'runner-stop',
+          },
+          {
+            phase: 'cancellation',
+            outcome: 'delivery_failed',
+            runId,
+            kind: 'check-cancel',
+          },
+        ]),
+      );
+      expect(JSON.stringify(events)).not.toMatch(/ghp_|secret/);
+      await expect(state.listCancellationWork!(cancellationWindow())).resolves.toMatchObject([
+        { runId, needsRunnerStop: true, needsCheckReconciliation: true },
+      ]);
+      expect((await core.cancelReview(runId, 123)).status).toBe(202);
+    } finally {
+      database.close();
+    }
+  },
+);

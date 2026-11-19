@@ -1,4 +1,8 @@
-import { REVIEW_ATTEMPT_BUDGET_MS } from '@compte-rendu/contracts';
+import {
+  REVIEW_ATTEMPT_BUDGET_MS,
+  sanitizeOperationalLogEvent,
+  type OperationalLog,
+} from '@compte-rendu/contracts';
 import type { GitHubAdapter, ReviewCancellationWorkItem, ReviewStateQueries } from './index';
 import type { RunnerJobSubmitter } from './runner-job-client';
 
@@ -6,12 +10,42 @@ export function createJobControl(
   state: ReviewStateQueries,
   github: GitHubAdapter,
   runner?: RunnerJobSubmitter,
+  log?: OperationalLog,
 ) {
   const response = (status: number, pendingCleanup?: boolean) =>
     Response.json(pendingCleanup === undefined ? {} : { status: 'cancelled', pendingCleanup }, {
       status,
       headers: { 'cache-control': 'no-store' },
     });
+
+  const recordDeliveryFailure = async (runId: string, kind: 'runner-stop' | 'check-cancel') => {
+    if (log === undefined) return;
+    try {
+      await log.record(
+        sanitizeOperationalLogEvent({
+          phase: 'cancellation',
+          outcome: 'delivery_failed',
+          runId,
+          kind,
+        }),
+      );
+    } catch {
+      // Operational logging is best effort.
+    }
+  };
+
+  const deliver = async (
+    runId: string,
+    kind: 'runner-stop' | 'check-cancel',
+    delivery: () => Promise<void>,
+  ) => {
+    try {
+      await delivery();
+    } catch (error) {
+      await recordDeliveryFailure(runId, kind);
+      throw error;
+    }
+  };
 
   async function stop(item: ReviewCancellationWorkItem, occurredAt: string) {
     if (
@@ -85,7 +119,10 @@ export function createJobControl(
           runId,
         })) ?? [];
       const outcomes = await Promise.allSettled(
-        work.flatMap((item) => [stop(item, occurredAt), endCheck(item, occurredAt)]),
+        work.flatMap((item) => [
+          deliver(item.runId, 'runner-stop', () => stop(item, occurredAt)),
+          deliver(item.runId, 'check-cancel', () => endCheck(item, occurredAt)),
+        ]),
       );
       if (outcomes.some((outcome) => outcome.status === 'rejected'))
         throw new Error('Review cancellation delivery failed');
