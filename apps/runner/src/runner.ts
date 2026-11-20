@@ -1431,7 +1431,17 @@ export const createRunner = (options: RunnerOptions = {}) => {
     }
     return !unresolved;
   };
-  let grantRecovery = recoverPendingGrants().catch(() => false);
+  let grantsRecovered: boolean | undefined;
+  const startGrantRecovery = () => {
+    grantsRecovered = undefined;
+    return recoverPendingGrants()
+      .catch(() => false)
+      .then((recovered) => {
+        grantsRecovered = recovered;
+        return recovered;
+      });
+  };
+  let grantRecovery = startGrantRecovery();
   const activeJobCount = () =>
     [...jobs.values()].filter(
       (candidate) => candidate.state.status === 'queued' || candidate.state.status === 'running',
@@ -1451,6 +1461,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       draining,
       drained:
         draining &&
+        grantsRecovered === true &&
         activeJobs === 0 &&
         !claiming &&
         claimRequestId === undefined &&
@@ -1459,7 +1470,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         recoveringCleanup.size === 0,
       activeJobs,
       claimInFlight: claiming || (!claimPollingHalted && claimRequestId !== undefined),
-      claimPollingHalted,
+      claimPollingHalted: claimPollingHalted || grantsRecovered === false,
       cleanupBlockedJobs,
     };
   };
@@ -3649,7 +3660,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
             !(await previousRecovery) &&
             grantRecovery === previousRecovery
           ) {
-            grantRecovery = recoverPendingGrants().catch(() => false);
+            grantRecovery = startGrantRecovery();
           }
         }
         const report = { ...input, sandboxName, confirmedAt: await currentIso() };

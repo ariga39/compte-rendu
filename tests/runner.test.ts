@@ -9076,6 +9076,15 @@ describe('Runner LLM lifecycle failures', () => {
       await vi.waitFor(() => expect(blocked).toBe(true));
       expect(claims).toBe(0);
       expect(f.relay.activeTokens.size).toBe(1);
+      const maintenanceRequest = (path: string) =>
+        new Request(`http://runner/maintenance/${path}`, {
+          method: 'POST',
+          headers: { authorization: 'Bearer runner-test-token' },
+        });
+      expect(await (await restarted.handle(maintenanceRequest('drain'))).json()).toMatchObject({
+        drained: false,
+        claimPollingHalted: true,
+      });
       f.relay.setRejectRevoke(false);
       const manifest = failed.manifest;
       const recovery = await restarted.handle(
@@ -9097,6 +9106,13 @@ describe('Runner LLM lifecycle failures', () => {
       );
       expect(recovery.status).toBe(202);
       expect(f.relay.activeTokens.size).toBe(0);
+      await vi.waitFor(async () => {
+        expect(await (await restarted!.handle(maintenanceRequest('drain'))).json()).toMatchObject({
+          drained: true,
+          claimPollingHalted: false,
+        });
+      });
+      await restarted.handle(maintenanceRequest('resume'));
       await vi.waitFor(() => expect(claims).toBeGreaterThan(0));
     } finally {
       await restarted?.close();
@@ -10981,7 +10997,9 @@ describe('Runner maintenance drain', () => {
         cleanupBlockedJobs: 0,
       });
 
-      expect(await status(runner, 'POST', '/maintenance/drain')).toEqual({
+      await status(runner, 'POST', '/maintenance/drain');
+      await vi.waitFor(async () => expect((await status(runner)).drained).toBe(true));
+      expect(await status(runner)).toEqual({
         draining: true,
         drained: true,
         activeJobs: 0,
