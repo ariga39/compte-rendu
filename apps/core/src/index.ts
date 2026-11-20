@@ -2,6 +2,7 @@ import type { ModelUsageSummary } from '@compte-rendu/contracts';
 import type { PublicTaskFailure } from '@compte-rendu/contracts';
 import { DateTime, Effect, Option, Schema } from 'effect';
 import {
+  REVIEW_ATTEMPT_BUDGET_MS,
   PullRequestFacts,
   ReviewConfiguration,
   ReviewEvent,
@@ -398,6 +399,7 @@ export interface ReviewStateStore {
 }
 
 export interface ReviewStateQueries {
+  claimStalledPublications?(before: string, now: string, limit: number): Promise<readonly string[]>;
   listPriorReviewRunIds?(runId: string): Promise<readonly string[]>;
   recordEvidence(input: {
     runId: string;
@@ -680,7 +682,11 @@ export type ReviewPublicationCreateResult =
 
 export interface ReviewCoordinator {
   handleReviewEvent(event: unknown): Promise<ReviewDisposition>;
-  completeReview(input: { runId: string; output: unknown }): Promise<ReviewDisposition>;
+  completeReview(input: {
+    runId: string;
+    output: unknown;
+    reconcileClaimedAt?: string;
+  }): Promise<ReviewDisposition>;
 }
 
 export interface CoreEnv {
@@ -838,7 +844,7 @@ const recordPublicationTerminal = (
     : recordOperationalLog(log, { phase: 'publication', outcome: terminal.outcome, runId });
 
 const completeReviewEffect = Effect.fn('completeReview')(function* (
-  input: { runId: string; output: unknown },
+  input: { runId: string; output: unknown; reconcileClaimedAt?: string },
   github: GitHubAdapter,
   stateStore: ReviewCompletionStateStore,
   log: OperationalLog | undefined,
@@ -889,6 +895,11 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
     });
     return 'failed' as const;
   }
+  if (
+    input.reconcileClaimedAt !== undefined &&
+    (outcome.status !== 'scheduled' || outcome.publicationClaimedAt !== input.reconcileClaimedAt)
+  )
+    return 'ignored' as const;
   if (outcome.status === 'cancelled') return 'cancelled' as const;
   const updateCheck = Effect.fn('updateReviewCheck')(function* (status: 'failure' | 'cancelled') {
     if (outcome.checkRunId === undefined || github.updateCheckRun === undefined) return;
@@ -1083,57 +1094,59 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
     return yield* completionFailed('publication_uncertain');
   }
 
-  const target = yield* Effect.tryPromise({
-    try: () =>
-      github.loadReviewTarget!({
-        repositoryId: outcome.repositoryId,
-        pullRequestNumber: outcome.pullRequestNumber,
-        installationId: outcome.installationId,
-      }),
-    catch: () => undefined,
-  }).pipe(
-    Effect.flatMap((value) =>
-      value === undefined
-        ? Effect.succeed(undefined)
-        : Schema.decodeUnknownEffect(ReviewPublicationTarget)(value).pipe(
-            Effect.catch(() => Effect.succeed(undefined)),
-          ),
-    ),
-    Effect.catch(() => Effect.succeed(undefined)),
-  );
-
-  if (target !== undefined && target.headSha !== outcome.headSha) {
-    if (stateStore.markRunSuperseded === undefined) {
-      yield* recordPublicationTerminal(log, input.runId, {
-        outcome: 'failed',
-        reason: 'completion_failed',
-      });
-      return 'failed' as const;
-    }
-    const superseded = yield* Effect.tryPromise({
-      try: async () =>
-        stateStore.markRunSuperseded!({
-          runId: input.runId,
-          occurredAt: await Effect.runPromise(currentIso),
+  if (outcome.publicationClaimedAt === undefined) {
+    const target = yield* Effect.tryPromise({
+      try: () =>
+        github.loadReviewTarget!({
+          repositoryId: outcome.repositoryId,
+          pullRequestNumber: outcome.pullRequestNumber,
+          installationId: outcome.installationId,
         }),
       catch: () => undefined,
-    }).pipe(Effect.catch(() => Effect.succeed(false)));
-    if (!superseded) {
-      if (yield* cancellationWon) return 'cancelled' as const;
-      yield* recordPublicationTerminal(log, input.runId, {
-        outcome: 'failed',
-        reason: 'completion_failed',
-      });
-      return 'failed' as const;
-    }
-    yield* manualReaction('confused');
-    yield* updateCheck('cancelled');
-    yield* recordPublicationTerminal(log, input.runId, { outcome: 'superseded' });
-    return 'ignored' as const;
-  }
+    }).pipe(
+      Effect.flatMap((value) =>
+        value === undefined
+          ? Effect.succeed(undefined)
+          : Schema.decodeUnknownEffect(ReviewPublicationTarget)(value).pipe(
+              Effect.catch(() => Effect.succeed(undefined)),
+            ),
+      ),
+      Effect.catch(() => Effect.succeed(undefined)),
+    );
 
-  if (target === undefined) {
-    return yield* completionFailed('publication_uncertain');
+    if (target !== undefined && target.headSha !== outcome.headSha) {
+      if (stateStore.markRunSuperseded === undefined) {
+        yield* recordPublicationTerminal(log, input.runId, {
+          outcome: 'failed',
+          reason: 'completion_failed',
+        });
+        return 'failed' as const;
+      }
+      const superseded = yield* Effect.tryPromise({
+        try: async () =>
+          stateStore.markRunSuperseded!({
+            runId: input.runId,
+            occurredAt: await Effect.runPromise(currentIso),
+          }),
+        catch: () => undefined,
+      }).pipe(Effect.catch(() => Effect.succeed(false)));
+      if (!superseded) {
+        if (yield* cancellationWon) return 'cancelled' as const;
+        yield* recordPublicationTerminal(log, input.runId, {
+          outcome: 'failed',
+          reason: 'completion_failed',
+        });
+        return 'failed' as const;
+      }
+      yield* manualReaction('confused');
+      yield* updateCheck('cancelled');
+      yield* recordPublicationTerminal(log, input.runId, { outcome: 'superseded' });
+      return 'ignored' as const;
+    }
+
+    if (target === undefined) {
+      return yield* completionFailed('publication_uncertain');
+    }
   }
 
   const payload: ReviewPublicationPayload = formatReviewPublicationPayload({
@@ -1164,6 +1177,7 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
 
   const markerLookup = yield* lookupMarker();
   if (!markerLookup.ok) {
+    if (outcome.publicationClaimedAt !== undefined) return 'ignored' as const;
     return yield* completionFailed('marker_lookup_failed');
   }
 
@@ -1176,6 +1190,30 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
     return 'completed' as const;
   }
 
+  if (outcome.publicationClaimedAt !== undefined) {
+    // A successful marker lookup found no matching post. The prior Worker may
+    // still be publishing. Never issue another POST for this run.
+    const reconciledAt = yield* currentIso;
+    const age = Date.parse(reconciledAt) - Date.parse(outcome.publicationClaimedAt);
+    if (github.findReviewByMarker !== undefined && age >= REVIEW_ATTEMPT_BUDGET_MS) {
+      const failed = yield* Effect.tryPromise(() =>
+        stateStore.markSchedulingFailed({
+          runId: input.runId,
+          occurredAt: reconciledAt,
+          failure: { phase: 'publication', reason: 'publication_uncertain' },
+        }),
+      );
+      if (failed) {
+        yield* updateCheck('failure');
+        yield* recordPublicationTerminal(log, input.runId, {
+          outcome: 'failed',
+          reason: 'publication_uncertain',
+        });
+        return 'failed' as const;
+      }
+    }
+    return 'ignored' as const;
+  }
   if (stateStore.claimRunPublication !== undefined) {
     occurredAt = yield* currentIso;
     const publicationClaimed = yield* Effect.tryPromise({
@@ -1999,6 +2037,7 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
       checkSetupStatus: 'pending' | 'ready' | 'failed';
       checkSetupClaimedAt?: string;
       publicationClaimedAt?: string;
+      publishing?: boolean;
       cancelledAt?: string;
       cancelledByUid?: number;
       runnerStopAttemptedAt?: string;
@@ -2406,7 +2445,23 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
       run.checkSetupClaimedAt = undefined;
       return true;
     },
-    claimRunPublication: async ({ runId, occurredAt }) => {
+    claimStalledPublications: async (before, now, limit) => {
+      const due = [...runs.values()]
+        .filter(
+          (run) =>
+            run.status === 'scheduled' &&
+            run.publishing &&
+            run.evidence?.status === 'complete' &&
+            run.publicationClaimedAt &&
+            run.publicationClaimedAt <= before &&
+            run.updatedAt < now,
+        )
+        .sort((a, b) => a.updatedAt.localeCompare(b.updatedAt))
+        .slice(0, limit);
+      for (const run of due) run.updatedAt = now;
+      return due.map((run) => run.runId);
+    },
+    claimRunPublication: async ({ runId, occurredAt, publishing }) => {
       const run = runs.get(runId);
       if (
         run === undefined ||
@@ -2416,6 +2471,7 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
         return false;
       }
       run.publicationClaimedAt = occurredAt;
+      run.publishing = publishing;
       return true;
     },
     releaseRunPublicationClaim: async ({ runId, occurredAt }) => {

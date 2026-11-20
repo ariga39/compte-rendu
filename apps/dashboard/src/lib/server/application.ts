@@ -96,10 +96,12 @@ export async function runApplicationScheduled(
   controller: { scheduledTime: number },
   env: CoreWorkerEnv,
 ): Promise<void> {
-  const [metadata, relay, cancellations] = await Promise.allSettled([
+  const core = createCoreWorker(env);
+  const [metadata, relay, cancellations, publications] = await Promise.allSettled([
     runScheduledMetadataRefresh(env),
     env.INFERENCE_RELAY?.refreshCatalog(controller.scheduledTime),
-    createCoreWorker(env).reconcileCancellations(controller.scheduledTime),
+    core.reconcileCancellations(controller.scheduledTime),
+    core.reconcilePublications(controller.scheduledTime),
   ]);
   if (relay.status === 'rejected') {
     try {
@@ -109,6 +111,7 @@ export async function runApplicationScheduled(
     }
   }
   if (metadata.status === 'rejected') throw metadata.reason;
+  if (publications.status === 'rejected') throw new Error('Publication reconciliation failed');
   if (cancellations.status === 'rejected')
     throw new Error('Review cancellation reconciliation failed');
 }
