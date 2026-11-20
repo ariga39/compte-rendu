@@ -35,7 +35,7 @@ Check setup is best effort after durable admission, outside the webhook response
 path. Its D1 ownership lease prevents concurrent setup; late setup catches up to
 the persisted run. Check failure does not prevent execution or terminal feedback.
 A Check is queued until claim, in progress after claim, and successful only after
-publication. Failure completes the Check as failed. Supersession and manual cancellation complete it as cancelled, with distinct explanations.
+publication. On failure, Core requests a failed Check. A GitHub update error can leave the Check showing an earlier state. Supersession and manual cancellation complete it as cancelled, with distinct explanations.
 `details_url` points to that run's dashboard page. The configurable Check name
 also supplies the dashboard title.
 
@@ -57,8 +57,8 @@ analysis and tools are not results. There is no custom submission tool.
 A normally completed session with missing/invalid final JSON can receive one
 correction in the same live Sandbox, session, model and agent. Both calls share
 the original deadline. Abort, timeout, truncation, abnormal completion or ambiguous
-session identity do not authorize correction. Validation settles before grant
-revocation, final export and destruction. Unresolved invalid output publishes no
+session identity do not authorize correction. After any live correction, Runner revokes the model grant,
+exports and redacts evidence, and validates the archived final result before destruction. Unresolved invalid output publishes no
 vote; Runner neither extracts JSON substrings from prose nor infers a decision.
 
 The shared prompt asks for concise, adversarial review of necessity, correctness

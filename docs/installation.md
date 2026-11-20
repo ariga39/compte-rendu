@@ -110,17 +110,15 @@ each App has one webhook URL and secret; this does not require a router.
 
 ### Wrangler authentication
 
-This repository does not include Wrangler as a dependency. Use the temporary
-package invocation below; it is the package-run form documented by Cloudflare
-and keeps the repository dependency set unchanged.
+The dashboard workspace pins Wrangler 4.124.0. After installing dependencies,
+verify the local version from the repository root:
 
 ```sh
-corepack pnpm dlx wrangler@4.124.0 --version
+corepack pnpm --filter @compte-rendu/dashboard exec wrangler --version
 ```
 
-Verify that command reports `4.124.0` before an installation or update. Every
-Wrangler example in this manual uses that exact version. Do not use
-`pnpm exec wrangler`: there is no local Wrangler binary in this repository.
+The installation commands below use `corepack pnpm dlx wrangler@4.124.0`
+so they can also run before workspace dependencies are installed.
 
 For an interactive operator session, use Wrangler OAuth:
 
@@ -523,7 +521,7 @@ ${EDITOR:-vi} <ABSOLUTE_RUNNER_ENV_FILE>
 ```
 
 ```ini
-REVIEW_MODEL_CONFIG={"id":"opencode-go/deepseek-flash","definition":{"name":"DeepSeek V4.1 Flash","reasoning":true,"interleaved":{"field":"reasoning_content"},"limit":{"context":1000000,"output":384000},"cost":{"input":0.15,"output":0.6,"cache_read":0.003}}}
+REVIEW_MODEL_CONFIG={"id":"opencode-go/deepseek-flash","definition":{"name":"DeepSeek V4.1 Flash","reasoning":true,"limit":{"context":1000000,"output":384000},"cost":{"input":0.15,"output":0.6,"cache_read":0.003}}}
 MODEL_SECRET_COMMAND=<host-secret-resolver-command>
 RUNNER_AUTH_TOKEN=<runner-application-token>
 RUNNER_CALLBACK_URL=https://<INGRESS_HOST>/runner-callback
@@ -891,8 +889,9 @@ uses the temporary invocation described above.
    ```
 
    The lifecycle rule is evaluated by Cloudflare R2 and expires objects under
-   `reviews/` automatically. Do not add a cleanup Worker, cron, or maintenance
-   process.
+   `reviews/` automatically. Cleanup confirmation records use the separate
+   `cleanup-recoveries/` prefix and remain in R2 unless the bucket operator
+   configures a lifecycle rule for that prefix.
 
    Copy only the returned `database_id` into the renderer command below. Do
    not edit either tracked template or copy any account ID, token, or other

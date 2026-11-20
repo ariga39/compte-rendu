@@ -47,7 +47,8 @@ one correction using its existing analysis and the same session, model, agent
 and execution deadline. This applies to both one-model and multi-model jobs.
 Core and the callback never resume an agent. The lifecycle is: execute review →
 validate final output/completion → optionally correct in the same live Sandbox
-and session → validate again → export evidence → destroy Sandbox and scoped
+and session → revoke the model grant → export and redact evidence → validate the
+archived final result → destroy Sandbox and scoped
 resources → finalize manifest/callback → Core publication.
 
 No detached correction, new Sandbox, second review, or post-cleanup retry is
