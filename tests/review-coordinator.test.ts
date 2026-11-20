@@ -638,81 +638,111 @@ describe('Review coordinator', () => {
     });
   });
 
-  it('recognizes an existing review marker beyond the first page without loading PR files', async () => {
-    const stateStore = createInMemoryReviewStateStore();
-    const postedPayloads: string[] = [];
-    const fileRequests: string[] = [];
-    const pageOneReviews = Array.from({ length: 100 }, (_, index) => ({
-      id: index + 1,
-      body: null,
-    }));
-    let runId = '';
-    const fetcher: typeof fetch = async (input, init) => {
-      const inputUrl =
-        typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-      const url = new URL(inputUrl);
-      const method = init?.method ?? 'GET';
-      const pullRequestMatch = /^\/repos\/acme\/reviewed\/pulls\/(\d+)(?:\/|$)/.exec(url.pathname);
-      const pullRequestNumber = pullRequestMatch?.[1];
+  it.each([true, false])(
+    'recovers a legacy comment only when its App marker exists beyond the first page (%s)',
+    async (ownMarker) => {
+      const stateStore = createInMemoryReviewStateStore();
+      const postedPayloads: string[] = [];
+      const fileRequests: string[] = [];
+      const pageOneReviews = Array.from({ length: 100 }, (_, index) => ({
+        id: index + 1,
+        body: null,
+      }));
+      let runId = '';
+      const fetcher: typeof fetch = async (input, init) => {
+        const inputUrl =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const url = new URL(inputUrl);
+        const method = init?.method ?? 'GET';
+        const pullRequestMatch = /^\/repos\/acme\/reviewed\/pulls\/(\d+)(?:\/|$)/.exec(
+          url.pathname,
+        );
+        const pullRequestNumber = pullRequestMatch?.[1];
 
-      if (url.pathname === '/repositories/11') {
-        return new Response(JSON.stringify({ full_name: 'acme/reviewed' }));
-      }
-      if (pullRequestNumber !== undefined && url.pathname.endsWith(`/pulls/${pullRequestNumber}`)) {
-        return new Response(JSON.stringify({ head: { sha: eligiblePrivatePullRequest.headSha } }));
-      }
-      if (pullRequestNumber !== undefined && url.pathname.endsWith('/files')) {
-        fileRequests.push(url.pathname);
-        return new Response(JSON.stringify([]));
-      }
-      if (
-        pullRequestNumber !== undefined &&
-        url.pathname.endsWith('/reviews') &&
-        method === 'GET'
-      ) {
-        if (pullRequestNumber === '43' && url.searchParams.get('page') === '2') {
+        if (url.pathname === '/repositories/11') {
+          return new Response(JSON.stringify({ full_name: 'acme/reviewed' }));
+        }
+        if (
+          pullRequestNumber !== undefined &&
+          url.pathname.endsWith(`/pulls/${pullRequestNumber}`)
+        ) {
           return new Response(
-            JSON.stringify([{ id: 101, body: `<!-- compte-rendu:run:${runId} -->` }]),
+            JSON.stringify({ head: { sha: eligiblePrivatePullRequest.headSha } }),
           );
         }
-        return new Response(JSON.stringify(pageOneReviews));
-      }
-      if (
-        pullRequestNumber !== undefined &&
-        url.pathname.endsWith('/reviews') &&
-        method === 'POST'
-      ) {
-        if (typeof init?.body === 'string') postedPayloads.push(init.body);
-        return new Response(JSON.stringify({ id: 200, body: '<!-- published -->' }));
-      }
-      return new Response('{}', { status: 404 });
-    };
-    const coordinator = createReviewCoordinator({
-      github: createGitHubPublicationAdapter({ token: 'installation-token', fetch: fetcher }),
-      stateStore,
-      scheduler: {
-        schedule: async (_job, scheduledRunId) => {
-          runId = scheduledRunId;
+        if (pullRequestNumber !== undefined && url.pathname.endsWith('/files')) {
+          fileRequests.push(url.pathname);
+          return new Response(JSON.stringify([]));
+        }
+        if (
+          pullRequestNumber !== undefined &&
+          url.pathname.endsWith('/reviews') &&
+          method === 'GET'
+        ) {
+          if (pullRequestNumber === '43' && url.searchParams.get('page') === '2') {
+            if (!ownMarker) return Response.json([]);
+            return new Response(
+              JSON.stringify([
+                {
+                  id: 101,
+                  body: `<!-- compte-rendu:run:${runId} -->`,
+                  user: { type: 'Bot', login: 'review[bot]' },
+                  commit_id: eligiblePrivatePullRequest.headSha,
+                  state: 'COMMENTED',
+                },
+              ]),
+            );
+          }
+          return Response.json([
+            {
+              id: 1,
+              body: `<!-- compte-rendu:run:${runId} -->`,
+              user: { type: 'User', login: 'other' },
+            },
+            ...pageOneReviews.slice(1),
+          ]);
+        }
+        if (
+          pullRequestNumber !== undefined &&
+          url.pathname.endsWith('/reviews') &&
+          method === 'POST'
+        ) {
+          if (typeof init?.body === 'string') postedPayloads.push(init.body);
+          return new Response(JSON.stringify({ id: 200, body: '<!-- published -->' }));
+        }
+        return new Response('{}', { status: 404 });
+      };
+      const coordinator = createReviewCoordinator({
+        github: createGitHubPublicationAdapter({
+          token: 'installation-token',
+          getReviewAuthorLogin: async () => 'review[bot]',
+          fetch: fetcher,
+        }),
+        stateStore,
+        scheduler: {
+          schedule: async (_job, scheduledRunId) => {
+            runId = scheduledRunId;
+          },
         },
-      },
-    });
+      });
 
-    const secondEvent = {
-      ...eligiblePrivatePullRequest,
-      deliveryId: 'delivery-page-marker',
-      pullRequestNumber: 43,
-    };
-    expect(await coordinator.handleReviewEvent(secondEvent)).toBe('scheduled');
-    expect(
-      await coordinator.completeReview({
-        runId,
-        output: '## Review:\n\nAlready published.',
-      }),
-    ).toBe('completed');
-    expect(postedPayloads).toHaveLength(0);
-    expect(fileRequests).toHaveLength(0);
-    expect(await coordinator.handleReviewEvent(secondEvent)).toBe('completed');
-  });
+      const secondEvent = {
+        ...eligiblePrivatePullRequest,
+        deliveryId: 'delivery-page-marker',
+        pullRequestNumber: 43,
+      };
+      expect(await coordinator.handleReviewEvent(secondEvent)).toBe('scheduled');
+      expect(
+        await coordinator.completeReview({
+          runId,
+          output: '## Review:\n\nAlready published.',
+        }),
+      ).toBe('completed');
+      expect(postedPayloads).toHaveLength(ownMarker ? 0 : 1);
+      expect(fileRequests).toHaveLength(0);
+      expect(await coordinator.handleReviewEvent(secondEvent)).toBe('completed');
+    },
+  );
 
   it('persists completion in D1 so the coordinator replay is terminal', async () => {
     const database = new SqliteD1Database();
