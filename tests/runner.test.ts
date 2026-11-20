@@ -924,6 +924,7 @@ describe('Runner Job HTTP interface', () => {
 
   it('polls again after a hanging claim request reaches its finite timeout', async () => {
     let claims = 0;
+    const requestIds: string[] = [];
     let secondClaim!: () => void;
     const secondClaimObserved = new Promise<void>((resolve) => {
       secondClaim = resolve;
@@ -937,6 +938,8 @@ describe('Runner Job HTTP interface', () => {
       claimIntervalMs: 1,
       claimFetch: async (_input, init) => {
         claims += 1;
+        if (typeof init?.body !== 'string') throw new Error('missing claim body');
+        requestIds.push(JSON.parse(init.body).requestId);
         if (claims === 1) {
           return new Promise<Response>((_resolve, reject) => {
             init?.signal?.addEventListener('abort', () => reject(new Error('claim aborted')), {
@@ -951,6 +954,8 @@ describe('Runner Job HTTP interface', () => {
 
     await secondClaimObserved;
     expect(claims).toBeGreaterThanOrEqual(2);
+    expect(requestIds[0]).toEqual(expect.any(String));
+    expect(requestIds[1]).toBe(requestIds[0]);
     expect(
       (
         await runner.handle(

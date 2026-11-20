@@ -1,6 +1,7 @@
 import { DateTime, Effect, Option, Schema } from 'effect';
 import {
   DEFAULT_REVIEW_NAME,
+  readBoundedRequestBody,
   MAX_RUNNER_CALLBACK_BYTES,
   MAX_WEBHOOK_BYTES,
   REVIEW_ATTEMPT_BUDGET_MS,
@@ -908,8 +909,30 @@ export const createCoreWorker = (
     if (stateStore.claimNextJob === undefined) return new Response(null, { status: 503 });
 
     const occurredAt = await Effect.runPromise(DateTime.now.pipe(Effect.map(DateTime.formatIso)));
+    const body = await readBoundedRequestBody(request, 64 * 1024);
+    if (body.kind !== 'ok') return new Response(null, { status: 413 });
+    const parsed = Schema.decodeUnknownOption(
+      Schema.fromJsonString(
+        Schema.Struct({
+          requestId: Schema.optional(Schema.String.check(Schema.isUUID(4))),
+        }),
+      ),
+    )(body.text || '{}');
+    if (Option.isNone(parsed)) return new Response(null, { status: 400 });
+    const requestId = parsed.value.requestId;
     const jobId = globalThis.crypto.randomUUID();
-    const claim = await stateStore.claimNextJob({ jobId, attempt: 1, occurredAt });
+    const claim = await stateStore.claimNextJob({ jobId, requestId, attempt: 1, occurredAt });
+    if (claim.kind === 'preparing') {
+      const start = epochMilliseconds(claim.claimedAt);
+      if (
+        start !== undefined &&
+        Date.parse(occurredAt) >= start + REVIEW_ATTEMPT_BUDGET_MS &&
+        (await stateStore.expireUnpreparedClaim?.(claim.runId, claim.jobId, 1, occurredAt))
+      ) {
+        return new Response(null, { status: 204 });
+      }
+      return new Response(null, { status: 503 });
+    }
     if (claim.kind === 'empty') return new Response(null, { status: 204 });
 
     const claimedAt = claim.claimedAt;
@@ -921,12 +944,13 @@ export const createCoreWorker = (
       parsedCreatedAt !== undefined && parsedClaimedAt !== undefined
         ? Math.max(0, parsedClaimedAt - parsedCreatedAt)
         : 0;
-    recordLifecycle(lifecycleLog, {
-      event: 'review claimed',
-      runId: claim.runId,
-      trigger: claim.job.trigger,
-      queueWaitMs,
-    });
+    if (!claim.replay)
+      recordLifecycle(lifecycleLog, {
+        event: 'review claimed',
+        runId: claim.runId,
+        trigger: claim.job.trigger,
+        queueWaitMs,
+      });
 
     const releaseUndeliveredCancellation = async () => {
       const stopped = await stateStore.confirmRunnerDestroyed?.({
@@ -940,14 +964,16 @@ export const createCoreWorker = (
 
     let preparationFailure: PublicTaskFailure | undefined;
     try {
-      const reset = await Effect.runPromise(
-        resetPreviousReviewVerdicts(github, stateStore, claim.runId, claim.job).pipe(
-          Effect.match({
-            onFailure: () => ({ kind: 'failed' as const }),
-            onSuccess: (result) => result ?? { kind: 'reset' as const },
-          }),
-        ),
-      );
+      const reset = claim.replay
+        ? { kind: 'reset' as const }
+        : await Effect.runPromise(
+            resetPreviousReviewVerdicts(github, stateStore, claim.runId, claim.job).pipe(
+              Effect.match({
+                onFailure: () => ({ kind: 'failed' as const }),
+                onSuccess: (result) => result ?? { kind: 'reset' as const },
+              }),
+            ),
+          );
       if (reset.kind === 'failed') {
         preparationFailure = { phase: 'scheduling', reason: 'review_reset_failed' };
         throw new Error('Previous review reset failed');
@@ -1042,7 +1068,7 @@ export const createCoreWorker = (
         return new Response(null, { status: 204 });
       }
       const wroteInProgress =
-        current.checkRunId !== undefined && github.updateCheckRun !== undefined;
+        !claim.replay && current.checkRunId !== undefined && github.updateCheckRun !== undefined;
       if (wroteInProgress) {
         await github.updateCheckRun!({
           runId: claim.runId,
@@ -1085,11 +1111,20 @@ export const createCoreWorker = (
         }
         return releaseUndeliveredCancellation();
       }
+      if (
+        requestId &&
+        !claim.replay &&
+        !(await stateStore
+          .markClaimPrepared?.(claim.runId, jobId, claim.attempt)
+          .catch(() => false))
+      )
+        return new Response(null, { status: 503 });
       return new Response(JSON.stringify(input), {
         status: 200,
-        headers: { 'content-type': 'application/json; charset=utf-8' },
+        headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
       });
     } catch {
+      if (claim.replay) return new Response(null, { status: 503 });
       const current = await stateStore.getRunOutcome(claim.runId);
       if (
         current !== undefined &&

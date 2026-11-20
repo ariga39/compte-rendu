@@ -1377,6 +1377,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
   const jobs = new Map<string, RunnerJob>();
   const jobsByRun = new Map<string, RunnerJob>();
   let claiming = false;
+  let claimRequestId: string | undefined;
   const stopsDuringClaim = new Map<
     string,
     { deadline: number; timer: ReturnType<typeof setTimeout> }
@@ -1436,11 +1437,12 @@ export const createRunner = (options: RunnerOptions = {}) => {
         draining &&
         activeJobs === 0 &&
         !claiming &&
+        claimRequestId === undefined &&
         !claimPollingHalted &&
         cleanupBlockedJobs === 0 &&
         recoveringCleanup.size === 0,
       activeJobs,
-      claimInFlight: claiming,
+      claimInFlight: claiming || (!claimPollingHalted && claimRequestId !== undefined),
       claimPollingHalted,
       cleanupBlockedJobs,
     };
@@ -3905,6 +3907,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
     if (claiming || claimPollingHalted || draining || !hasCapacity()) return;
 
     claiming = true;
+    claimRequestId ??= randomUUID();
     let continuePolling = true;
     let admittedJob = false;
     let claimFailure:
@@ -3931,7 +3934,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
             authorization: `Bearer ${callbackToken}`,
             'content-type': 'application/json',
           },
-          body: JSON.stringify({}),
+          body: JSON.stringify({ requestId: claimRequestId }),
           signal: controller.signal,
         }),
         new Promise<Response>((_, reject) => {
@@ -3971,7 +3974,10 @@ export const createRunner = (options: RunnerOptions = {}) => {
         }
         claimPollingHalted = false;
         admittedJob = true;
-      } else if (response.status !== 204) {
+        claimRequestId = undefined;
+      } else if (response.status === 204) {
+        claimRequestId = undefined;
+      } else {
         claimFailure = { reason: 'http-error', status: response.status };
       }
     } catch {
@@ -3980,9 +3986,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
     } finally {
       if (timeout !== undefined) clearTimeout(timeout);
       claiming = false;
-      // Core allocates a fresh job ID on every poll. An undelivered claim
-      // cannot be admitted by a later poll, and has no local teardown proof.
-      forgetStops();
+      if (claimRequestId === undefined) forgetStops();
       if (claimFailure !== undefined) {
         await recordLog({
           phase: 'runner',

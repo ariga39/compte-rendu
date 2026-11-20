@@ -1479,6 +1479,7 @@ describe('Core Worker', () => {
         '0012_review_configuration.sql',
         '0013_model_usage.sql',
         '0014_failure_http_status.sql',
+        '0016_runner_claim_handoff.sql',
       ]);
       const migratedStore = createD1ReviewStateStore(database);
       if (migratedStore.claimNextJob === undefined) throw new Error('claim route is unavailable');
@@ -2921,6 +2922,74 @@ describe('Core Worker', () => {
       database.close();
     }
   });
+
+  it.each([false, true])(
+    'reconciles the same claim after a lost response (preparation expires: %s)',
+    async (expires) => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-09-01T00:00:00Z'));
+      const database = new SqliteD1Database();
+      const env = coreEnv(database);
+      let unblock!: () => void;
+      let began!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        unblock = resolve;
+      });
+      const preparing = new Promise<void>((resolve) => {
+        began = resolve;
+      });
+      const dependencies = {
+        github: {
+          getRepositoryUrl: async () => {
+            began();
+            await gate;
+            return 'https://github.com/acme/reviewed.git';
+          },
+        },
+        getReadInstallationToken: async () => ({
+          token: 'read-only',
+          expiresAt: '2026-09-01T01:20:00.000Z',
+        }),
+      };
+      const request = () =>
+        new Request('https://core.internal/runner-claims', {
+          method: 'POST',
+          headers: { 'x-compte-rendu-runner-claim': 'verified' },
+          body: JSON.stringify({ requestId: '89a128bf-2bda-4e85-ab11-be00c22c0675' }),
+        });
+      try {
+        const worker = createCoreWorker(env, dependencies);
+        await worker.fetch(
+          new Request('https://core.internal/review-events', {
+            method: 'POST',
+            body: JSON.stringify(eligibleEvent),
+          }),
+        );
+        const firstResponse = worker.fetch(request());
+        await preparing;
+        expect((await createCoreWorker(env, dependencies).fetch(request())).status).toBe(503);
+        if (expires) {
+          vi.setSystemTime(new Date('2026-09-01T01:31:00Z'));
+          expect((await createCoreWorker(env, dependencies).fetch(request())).status).toBe(204);
+          unblock();
+          expect((await firstResponse).status).not.toBe(200);
+          expect((await worker.fetch(request())).status).toBe(204);
+          return;
+        }
+        unblock();
+        const first = await firstResponse;
+        expect(first.status).toBe(200);
+        const replay = await createCoreWorker(env, dependencies).fetch(request());
+        expect(replay.status).toBe(200);
+        expect(replay.headers.get('cache-control')).toBe('no-store');
+        expect(await replay.json()).toEqual(await first.json());
+      } finally {
+        unblock();
+        database.close();
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it('derives the deadline from the durable claim time and passes the read-token expiry', async () => {
     const database = new SqliteD1Database();
