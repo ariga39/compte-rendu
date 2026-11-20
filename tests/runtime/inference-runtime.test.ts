@@ -146,6 +146,17 @@ describe('Inference Worker runtime boundaries', () => {
     ).resolves.toMatchObject({ kind: 'issued' });
   });
 
+  it('issues one frozen grant for a selection above the D1 parameter limit', async () => {
+    const routes = Array.from({ length: 101 }, (_, index) => `bulk-${index}`);
+    await runtime.RELAY_DB.prepare(
+      `INSERT INTO catalog_routes (route_id, upstream_model, provider_slug, credential_alias)
+       SELECT value, value, 'review-provider', 'review-alias' FROM json_each(?)`,
+    )
+      .bind(JSON.stringify(routes))
+      .run();
+    expect(await issue('runtime-many-routes', routes)).toBeTruthy();
+  });
+
   it('issues and revokes through the service-binding RPC interface', async () => {
     const now = await d1Now();
     const issued = await runtime.INFERENCE.issue({

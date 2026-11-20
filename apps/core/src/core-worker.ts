@@ -2,6 +2,7 @@ import { DateTime, Effect, Option, Schema } from 'effect';
 import {
   DEFAULT_REVIEW_NAME,
   MAX_RUNNER_CALLBACK_BYTES,
+  MAX_WEBHOOK_BYTES,
   REVIEW_ATTEMPT_BUDGET_MS,
   type PublicTaskFailure,
   MetadataInvalidationEvent,
@@ -739,7 +740,7 @@ export const createCoreWorker = (
 
   const handleMetadataInvalidation = async (request: Request): Promise<Response> => {
     const body = await request.arrayBuffer();
-    if (body.byteLength > 16 * 1024) return new Response(null, { status: 413 });
+    if (body.byteLength > MAX_WEBHOOK_BYTES) return new Response(null, { status: 413 });
     let event: typeof MetadataInvalidationEvent.Type;
     try {
       event = await Schema.decodeUnknownPromise(Schema.fromJsonString(MetadataInvalidationEvent), {

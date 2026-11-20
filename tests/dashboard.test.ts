@@ -967,11 +967,15 @@ describe('public dashboard reads are DB-only', () => {
         await send('installation_repositories', {
           action: 'removed',
           installation: { id: 7 },
-          repositories_removed: [{ id: 331 }],
+          repositories_removed: [
+            ...Array.from({ length: 2300 }, (_, i) => ({ id: 1000000 + i })),
+            { id: 331 },
+          ],
         })
       ).status,
     ).toBe(202);
     expect(await identityFor(await runIdFor(331))).toBe('anonymous');
+    expect(await identityFor(await runIdFor(332))).toBe('public');
 
     expect(
       (await send('installation', { action: 'deleted', installation: { id: 7 } })).status,

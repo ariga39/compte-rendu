@@ -50,6 +50,7 @@ export interface CoreServiceBinding {
 export const GitHubSha = Schema.String.check(Schema.isPattern(/^[0-9a-f]{40}$/i));
 
 export const MAX_REVIEW_RESULT_BYTES = 8 * 1024 * 1024;
+export const MAX_WEBHOOK_BYTES = 256 * 1024;
 export const MAX_RUNNER_CALLBACK_BYTES = 32 * 1024 * 1024;
 
 export const ReviewResult = Schema.String.check(
