@@ -65,6 +65,9 @@ export interface CoreWorkerEnv extends Partial<CoreEnv> {
 }
 
 export interface R2BucketLike {
+  readonly get?: (
+    key: string,
+  ) => Promise<{ size: number; arrayBuffer(): Promise<ArrayBuffer> } | null>;
   readonly put: (key: string, value: ArrayBuffer | string) => Promise<unknown>;
 }
 
@@ -145,6 +148,18 @@ const artifactMatchesMetadata = async (artifact: {
   ).join('');
   return sha256 === artifact.sha256.toLowerCase();
 };
+
+const PublicationArchive = Schema.fromJsonString(
+  Schema.Struct({
+    version: Schema.Literal(1),
+    runId: Schema.NonEmptyString,
+    jobId: Schema.NonEmptyString,
+    evidence: Schema.Struct({
+      manifest: Schema.Struct({ content: Schema.String }),
+      validatedReview: Schema.Struct({ content: Schema.String }),
+    }),
+  }),
+);
 
 const decodedJson = <A>(content: string, schema: Schema.ConstraintDecoder<A>): A | undefined => {
   const bytes = decodeArtifact(content);
@@ -228,7 +243,8 @@ const responseForDisposition = (
 export const createCoreWorker = (
   env: CoreWorkerEnv,
   dependencies: CoreWorkerDependencies = {},
-): WorkerEntrypoint<CoreWorkerEnv> & ReturnType<typeof createJobControl> => {
+): WorkerEntrypoint<CoreWorkerEnv> &
+  ReturnType<typeof createJobControl> & { reconcilePublications(now: number): Promise<void> } => {
   const tokenProvider = createGitHubAppTokenProvider({
     appId: env.GITHUB_APP_ID,
     privateKey: env.GITHUB_APP_PRIVATE_KEY,
@@ -1120,6 +1136,73 @@ export const createCoreWorker = (
   };
 
   return {
+    async reconcilePublications(now) {
+      const ids =
+        (await stateStore.claimStalledPublications?.(
+          new Date(now - REVIEW_ATTEMPT_BUDGET_MS).toISOString(),
+          new Date(now).toISOString(),
+          4,
+        )) ?? [];
+      const lifecycle = createPostHogLifecycleLog(env, undefined);
+      let incomplete = false;
+      for (const runId of ids) {
+        try {
+          const outcome = await stateStore.getRunOutcome(runId);
+          if (outcome?.status !== 'scheduled' || !outcome.publicationClaimedAt) continue;
+          const evidence = outcome.evidence;
+          const key = `reviews/${runId}`;
+          if (!evidence || evidence.key !== key || evidence.size > MAX_RUNNER_CALLBACK_BYTES)
+            throw new Error('Invalid evidence metadata');
+          const record = await env.EVIDENCE_BUCKET?.get?.(key);
+          if (!record || record.size !== evidence.size) throw new Error('Invalid evidence size');
+          const bytes = await record.arrayBuffer();
+          const hash = await crypto.subtle.digest('SHA-256', bytes);
+          const digest = Array.from(new Uint8Array(hash), (value) =>
+            value.toString(16).padStart(2, '0'),
+          ).join('');
+          if (digest !== evidence.sha256 || bytes.byteLength !== evidence.size)
+            throw new Error('Invalid evidence digest');
+          const archive = Schema.decodeUnknownSync(PublicationArchive)(
+            new TextDecoder().decode(bytes),
+          );
+          const manifest = decodedJson(archive.evidence.manifest.content, RunnerManifest);
+          if (
+            !manifest ||
+            !manifest.complete ||
+            manifest.terminal.status !== 'succeeded' ||
+            archive.runId !== runId ||
+            manifest.runId !== runId ||
+            archive.jobId !== outcome.runnerJobId ||
+            manifest.jobId !== archive.jobId ||
+            manifest.attempt !== outcome.runnerAttempt
+          )
+            throw new Error('Invalid evidence identity');
+          const review = decodeArtifact(archive.evidence.validatedReview.content);
+          if (!review) throw new Error('Invalid review artifact');
+          const output = manifest.result ?? new TextDecoder().decode(review);
+          await createCoordinator(lifecycle).completeReview({
+            runId,
+            output,
+            reconcileClaimedAt: outcome.publicationClaimedAt,
+          });
+          const settled = await stateStore.getRunOutcome(runId);
+          if (settled?.status === 'completed' && settled.checkRunId !== undefined) {
+            await github.updateCheckRun?.({
+              runId,
+              repositoryId: settled.repositoryId,
+              installationId: settled.installationId,
+              checkRunId: settled.checkRunId,
+              status: 'success',
+              decision: settled.decision,
+            });
+          }
+          if (!settled || settled.status === 'scheduled') incomplete = true;
+        } catch {
+          incomplete = true;
+        }
+      }
+      if (incomplete) throw new Error('Publication reconciliation incomplete');
+    },
     ...createJobControl(stateStore, github, runner, log),
     fetch: async (request, _env, context) => {
       if (new URL(request.url).pathname === '/review-configuration') {

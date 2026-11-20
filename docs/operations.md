@@ -364,8 +364,18 @@ An accepted replay means Core accepted the callback, **not** that a review was
 published. Inspect the job's database-backed dashboard status and GitHub review.
 Core retains its existing ownership and revision checks: an obsolete revision
 may become superseded, and an already failed run is not reopened. For an
-interrupted publication it checks the existing review marker, author, commit
-and review state before publishing. Repeating the operation uses the same run
+interrupted publication, Core looks for the App-authored marker on the recorded
+commit with the expected verdict. A matching review completes the run. A
+transient lookup error leaves it pending. Once a publication claim has been
+outstanding for a full review attempt budget, a successful lookup with no
+matching review settles the run as `publication_uncertain`. Reconciliation never
+issues another review POST for that claim. Inspect the GitHub PR before starting
+a new review.
+
+The application cron also reconciles up to four such publications per tick
+using the D1 ownership and the hash-verified R2 evidence already retained for
+the callback. Missing or inconsistent evidence leaves the run pending for
+investigation or authenticated callback replay. Repeating the operation uses the same run
 and cannot intentionally create a new review attempt. Retained evidence is not
 deleted after acceptance. If delivery remains uncertain, inspect the callback
 and Core diagnostics before retrying; do not edit the evidence or clear ownership.

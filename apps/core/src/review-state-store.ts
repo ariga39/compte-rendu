@@ -1223,6 +1223,17 @@ const createStore = (
     return result.meta.changes === 1;
   },
 
+  claimStalledPublications: async (before, now, limit) => {
+    const result = await database
+      .prepare(`UPDATE review_runs SET updated_at = ?
+      WHERE run_id IN (SELECT run_id FROM review_runs
+      WHERE status = 'scheduled' AND publication_started_at IS NOT NULL
+        AND publication_claimed_at <= ? AND evidence_status = 'complete' AND updated_at < ?
+      ORDER BY updated_at, run_id LIMIT ?) RETURNING run_id`)
+      .bind(now, before, now, limit)
+      .all<{ run_id: string }>();
+    return result.results.map((row) => row.run_id);
+  },
   claimRunPublication: async ({ runId, occurredAt, publishing }) => {
     const result = await database
       .prepare(
