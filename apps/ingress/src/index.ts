@@ -6,6 +6,7 @@ import {
   ReviewEvent,
   GitHubSha,
   MAX_RUNNER_CALLBACK_BYTES,
+  MAX_WEBHOOK_BYTES,
   type CoreServiceBinding,
   type OperationalLog,
   type OperationalLogEvent,
@@ -16,7 +17,7 @@ import {
 } from '@compte-rendu/contracts';
 import { createCloudflareOperationalLog } from './operational-log';
 
-export const MAX_WEBHOOK_BYTES = 256 * 1024;
+export { MAX_WEBHOOK_BYTES };
 
 export { createCloudflareOperationalLog } from './operational-log';
 

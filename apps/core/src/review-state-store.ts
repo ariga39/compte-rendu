@@ -1718,9 +1718,7 @@ const createStore = (
     nextRefreshAt,
   }) => {
     const scope =
-      repositoryIds.length === 0
-        ? ''
-        : ` AND repository_id IN (${repositoryIds.map(() => '?').join(', ')})`;
+      repositoryIds.length === 0 ? '' : ' AND repository_id IN (SELECT value FROM json_each(?))';
     const guard = visibility === 'unknown' ? " AND visibility != 'private'" : '';
     const result = await database
       .prepare(
@@ -1730,7 +1728,13 @@ const createStore = (
            revision = revision + 1, updated_at = ?
          WHERE installation_id = ?${scope}${guard}`,
       )
-      .bind(visibility, nextRefreshAt, updatedAt, installationId, ...repositoryIds)
+      .bind(
+        visibility,
+        nextRefreshAt,
+        updatedAt,
+        installationId,
+        ...(repositoryIds.length ? [JSON.stringify(repositoryIds)] : []),
+      )
       .run();
     return result.meta.changes;
   },

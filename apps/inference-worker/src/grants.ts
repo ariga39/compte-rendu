@@ -87,9 +87,9 @@ export const createGrantControl = (database: D1DatabaseLike): InferenceGrantCont
           `SELECT route_id AS routeId, upstream_model AS upstreamModel,
                  provider_slug AS providerSlug, credential_alias AS credentialAlias
           FROM catalog_routes
-          WHERE route_id IN (${decoded.value.snapshot.routes.map(() => '?').join(', ')})`,
+          WHERE route_id IN (SELECT value FROM json_each(?))`,
         )
-        .bind(...decoded.value.snapshot.routes)
+        .bind(JSON.stringify(decoded.value.snapshot.routes))
         .all<FrozenRoute>(),
     );
     const catalog = new Map(rows.results.map((route) => [route.routeId, route]));
