@@ -936,13 +936,13 @@ const createStore = (
     };
   },
 
-  claimNextJob: async ({ jobId, attempt, occurredAt }) => {
-    const row = await database
+  claimNextJob: async ({ jobId, requestId, attempt, occurredAt }) => {
+    let row = await database
       .prepare(
         `UPDATE review_runs
-         SET runner_job_id = ?, runner_attempt = ?, runner_cleanup_status = 'pending',
+         SET runner_job_id = ?, runner_attempt = ?, runner_claim_request_id = ?, runner_cleanup_status = 'pending',
            updated_at = ?, claimed_at = COALESCE(claimed_at, ?)
-         WHERE run_id = (
+         WHERE NOT EXISTS (SELECT 1 FROM review_runs WHERE runner_claim_request_id = ?) AND run_id = (
            SELECT run_id FROM review_runs
            WHERE status = 'scheduled' AND runner_job_id IS NULL
              AND NOT EXISTS (
@@ -957,11 +957,31 @@ const createStore = (
            repository_visibility_snapshot, base_ref, head_ref, review_configuration,
            claimed_at`,
       )
-      .bind(jobId, attempt, occurredAt, occurredAt)
+      .bind(jobId, attempt, requestId ?? null, occurredAt, occurredAt, requestId ?? null)
       .first<ClaimRow>();
 
+    const replay = row === null && requestId !== undefined;
+    if (row === null && requestId !== undefined) {
+      const existing = await database
+        .prepare(`SELECT run_id, installation_id, repository_id, pull_request_number,
+           base_sha, head_sha, trigger, comment_id, runner_job_id, runner_attempt,
+           repository_visibility_snapshot, base_ref, head_ref, review_configuration,
+           claimed_at, claim_prepared FROM review_runs WHERE runner_claim_request_id = ? AND runner_job_id IS NOT NULL AND runner_attempt = ? AND status = 'scheduled'`)
+        .bind(requestId, attempt)
+        .first<ClaimRow & { claim_prepared: number }>();
+      if (!existing) return { kind: 'empty' as const };
+      if (!existing.claim_prepared)
+        return {
+          kind: 'preparing' as const,
+          jobId: existing.runner_job_id,
+          runId: existing.run_id,
+          claimedAt: existing.claimed_at!,
+        };
+      row = existing;
+    }
     if (row === null) return { kind: 'empty' as const };
     return {
+      ...(replay && { replay: true as const }),
       kind: 'claimed' as const,
       runId: row.run_id,
       jobId: row.runner_job_id,
@@ -989,6 +1009,32 @@ const createStore = (
         ...(row.head_ref == null ? {} : { headRef: row.head_ref }),
       },
     };
+  },
+
+  expireUnpreparedClaim: async (runId, jobId, attempt, occurredAt) => {
+    const [run] = await database.batch([
+      database
+        .prepare(`UPDATE review_runs SET status = 'failed', updated_at = ?, terminal_at = ?,
+        failure_phase = 'scheduling', failure_reason = 'timeout',
+        runner_job_id = NULL, runner_attempt = NULL, runner_cleanup_status = NULL
+        WHERE run_id = ? AND runner_job_id = ? AND runner_attempt = ? AND status = 'scheduled' AND claim_prepared = 0`)
+        .bind(occurredAt, occurredAt, runId, jobId, attempt),
+      database
+        .prepare(
+          `UPDATE deliveries SET status = 'failed', updated_at = ? WHERE status = 'scheduled' AND delivery_id = (SELECT delivery_id FROM review_runs WHERE run_id = ? AND status = 'failed')`,
+        )
+        .bind(occurredAt, runId),
+    ]);
+    return run?.meta.changes === 1;
+  },
+  markClaimPrepared: async (runId, jobId, attempt) => {
+    const result = await database
+      .prepare(
+        `UPDATE review_runs SET claim_prepared = 1 WHERE run_id = ? AND runner_job_id = ? AND runner_attempt = ? AND status = 'scheduled'`,
+      )
+      .bind(runId, jobId, attempt)
+      .run();
+    return result.meta.changes === 1;
   },
 
   markSchedulingFailed: async ({ runId, occurredAt, releaseRunnerClaim, failure }) => {

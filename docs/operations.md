@@ -84,6 +84,7 @@ Interpret the boundaries separately:
   authentication, DNS, TLS, disk, or network fault. Check cancellation, timeout,
   process errors, and output truncation before drawing a conclusion.
 - Look up `inference_requests` by the Runner's job ID in the installation's relay D1 database. Compare route, model, status and reported tokens with the job's persisted usage. Gateway Analytics can confirm upstream model traffic; a failed stream alone cannot identify which hop interrupted it. See [usage and Gateway analytics](llm-service.md#reading-ai-gateway-analytics).
+- Each Runner poll carries a request UUID. A transport retry within the same Runner process keeps that UUID so Core can redeliver the prepared assignment with the original deadline and a fresh read grant. While preparation is in flight, the retry waits; a retry after the attempt budget can retire an unfinished preparation. Apply application D1 migration `0016_runner_claim_handoff.sql` and deploy the Worker before updating the Runner. Older Runners can still poll without an ID. If maintenance drain begins while a response is missing, the Runner reports the claim in flight. Resume the same process to reconcile that request before restarting the host.
 - Claim failures report whether polling continues or is halted. An ambiguous
   owned claim must remain halted; do not resume it by discarding the response
   or clearing database ownership without reconciling that exact job.

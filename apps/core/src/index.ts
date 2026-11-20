@@ -377,9 +377,15 @@ export interface ReviewStateStore {
         activeRunnerJob?: ActiveRunnerJob;
       }
   >;
-  claimNextJob?(input: { jobId: string; attempt: number; occurredAt: string }): Promise<
+  claimNextJob?(input: {
+    jobId: string;
+    requestId?: string;
+    attempt: number;
+    occurredAt: string;
+  }): Promise<
     | {
         kind: 'claimed';
+        replay?: true;
         runId: string;
         jobId: string;
         attempt: number;
@@ -387,7 +393,15 @@ export interface ReviewStateStore {
         job: ReviewJob;
       }
     | { kind: 'empty' }
+    | { kind: 'preparing'; runId: string; jobId: string; claimedAt: string }
   >;
+  expireUnpreparedClaim?(
+    runId: string,
+    jobId: string,
+    attempt: number,
+    occurredAt: string,
+  ): Promise<boolean>;
+  markClaimPrepared?(runId: string, jobId: string, attempt: number): Promise<boolean>;
   markSchedulingFailed(input: {
     failure?: PublicTaskFailure;
     runId: string;
@@ -1998,6 +2012,8 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
       claimedAt?: string;
       runnerJobId?: string;
       runnerAttempt?: number;
+      claimPrepared?: boolean;
+      claimRequestId?: string;
       runnerCleanupStatus?: RunnerCleanupStatus;
       cleanupCompletedAt?: string;
       evidence?: ReviewEvidenceMetadata;
@@ -2227,7 +2243,33 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
         ...(supersededRunIds.length === 0 ? {} : { supersededRunIds }),
       };
     },
-    claimNextJob: async ({ jobId, attempt, occurredAt }) => {
+    claimNextJob: async ({ jobId, requestId, attempt, occurredAt }) => {
+      const previous =
+        requestId && [...runs.values()].find((run) => run.claimRequestId === requestId);
+      if (previous) {
+        if (
+          previous.status !== 'scheduled' ||
+          previous.runnerAttempt !== attempt ||
+          !previous.runnerJobId
+        )
+          return { kind: 'empty' as const };
+        if (!previous.claimPrepared)
+          return {
+            kind: 'preparing' as const,
+            runId: previous.runId,
+            jobId: previous.runnerJobId,
+            claimedAt: previous.claimedAt!,
+          };
+        return {
+          kind: 'claimed' as const,
+          replay: true as const,
+          runId: previous.runId,
+          jobId: previous.runnerJobId,
+          attempt,
+          claimedAt: previous.claimedAt!,
+          job: previous.job,
+        };
+      }
       const activeSamePullRequest = (candidate: { runId: string; job: ReviewJob }) =>
         [...runs.values()].some(
           (active) =>
@@ -2250,6 +2292,7 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
         .sort((left, right) => left.createdAt.localeCompare(right.createdAt))[0];
       if (run === undefined) return { kind: 'empty' as const };
       run.runnerJobId = jobId;
+      run.claimRequestId = requestId;
       run.runnerAttempt = attempt;
       run.runnerCleanupStatus = 'pending';
       run.claimedAt ??= occurredAt;
@@ -2262,6 +2305,36 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
         claimedAt: run.claimedAt,
         job: run.job,
       };
+    },
+    expireUnpreparedClaim: async (runId, jobId, attempt, occurredAt) => {
+      const run = runs.get(runId);
+      if (
+        !run ||
+        run.status !== 'scheduled' ||
+        run.runnerJobId !== jobId ||
+        run.runnerAttempt !== attempt ||
+        run.claimPrepared
+      )
+        return false;
+      run.status = 'failed';
+      run.updatedAt = occurredAt;
+      run.runnerJobId = undefined;
+      run.runnerAttempt = undefined;
+      run.runnerCleanupStatus = undefined;
+      setDeliveryStatus(run.deliveryId, 'failed', occurredAt);
+      return true;
+    },
+    markClaimPrepared: async (runId, jobId, attempt) => {
+      const run = runs.get(runId);
+      if (
+        !run ||
+        run.status !== 'scheduled' ||
+        run.runnerJobId !== jobId ||
+        run.runnerAttempt !== attempt
+      )
+        return false;
+      run.claimPrepared = true;
+      return true;
     },
     markSchedulingFailed: async ({ runId, occurredAt, releaseRunnerClaim }) => {
       const run = runs.get(runId);
