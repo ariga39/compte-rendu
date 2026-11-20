@@ -606,6 +606,14 @@ export const createCoreWorker = (
     };
     if (callback.status === 'succeeded') {
       if (!(await completeCallbackEvidenceIsValid(callback))) {
+        const confirmed = await stateStore.confirmRunnerDestroyed?.({
+          runId: callback.runId,
+          jobId: callback.id,
+          attempt: callback.attempt,
+          occurredAt: callback.timestamps.cleanupCompletedAt,
+          expectedStatus: outcome.status,
+        });
+        if (!confirmed) return new Response(null, { status: 503 });
         const latest = await stateStore.getRunOutcome(callback.runId).catch(() => undefined);
         if (latest?.status === 'cancelled') return new Response(null, { status: 202 });
         if (outcome.status !== 'scheduled') return new Response(null, { status: 409 });

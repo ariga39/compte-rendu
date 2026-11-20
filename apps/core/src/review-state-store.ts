@@ -1420,14 +1420,20 @@ const createStore = (
     return result.meta.changes === 1;
   },
 
-  confirmRunnerDestroyed: async ({ runId, jobId, attempt, occurredAt }) => {
+  confirmRunnerDestroyed: async ({
+    runId,
+    jobId,
+    attempt,
+    occurredAt,
+    expectedStatus = 'cancelled',
+  }) => {
     const result = await database
       .prepare(
         `UPDATE review_runs SET runner_cleanup_status = 'destroyed',
            cleanup_completed_at = COALESCE(cleanup_completed_at, ?)
-         WHERE run_id = ? AND status = 'cancelled' AND runner_job_id = ? AND runner_attempt = ?`,
+         WHERE run_id = ? AND status = ? AND runner_job_id = ? AND runner_attempt = ?`,
       )
-      .bind(occurredAt, runId, jobId, attempt)
+      .bind(occurredAt, runId, expectedStatus, jobId, attempt)
       .run();
     return result.meta.changes === 1;
   },
