@@ -1,5 +1,6 @@
 import { Effect, Option, Schema } from 'effect';
 import {
+  RETRY_REVIEW_ACTION,
   MetadataInvalidationEvent,
   ReviewEvent,
   GitHubSha,
@@ -88,8 +89,12 @@ const IssueCommentWebhook = Schema.Struct({
   }),
 });
 
+const ReviewRetryAction = Schema.Struct({
+  action: Schema.Literal('requested_action'),
+  requested_action: Schema.Struct({ identifier: Schema.Literal(RETRY_REVIEW_ACTION) }),
+});
 const CheckRunRerequestWebhook = Schema.Struct({
-  action: RerequestedAction,
+  action: Schema.Literals(['rerequested', 'requested_action']),
   installation: Schema.Struct({ id: Schema.Int }),
   repository: Schema.Struct({ id: Schema.Int }),
   check_run: Schema.Struct({
@@ -504,7 +509,8 @@ const processWebhook = (request: Request, dependencies: IngressDependencies) =>
 
     const githubEvent = request.headers.get('x-github-event');
     if (githubEvent === 'check_run' || githubEvent === 'check_suite') {
-      if (action.action !== 'rerequested') {
+      const retryButton = githubEvent === 'check_run' && Schema.is(ReviewRetryAction)(decodedJson);
+      if (action.action !== 'rerequested' && !retryButton) {
         yield* recordOperationalLog(dependencies.log ?? createCloudflareOperationalLog(), {
           phase: 'ingress',
           outcome: 'ignored',

@@ -14,6 +14,7 @@ import type {
   PublicIdentity,
   TaskDetail,
   TaskState,
+  TimelineStage,
 } from './types';
 
 export interface Timing {
@@ -131,7 +132,7 @@ export function detailActive(model: DetailModel): boolean {
 }
 
 export interface TimelineEntry {
-  stage: string;
+  stage: TimelineStage;
   startedAt: string;
 }
 
@@ -142,6 +143,16 @@ export function mergeMilestones(detail: TaskDetail): TimelineEntry[] {
   }
   if (detail.task.publicationStartedAt) {
     recorded.push({ stage: 'publishing', startedAt: detail.task.publicationStartedAt });
+  }
+  const task = detail.task;
+  if (task.status === 'cancelled') {
+    if (task.terminalAt) recorded.push({ stage: 'cancelled', startedAt: task.terminalAt });
+    if (task.cleanupCompletedAt && (task.cleanup === 'destroyed' || task.cleanup === 'failed')) {
+      recorded.push({
+        stage: task.cleanup === 'destroyed' ? 'cleanup-confirmed' : 'cleanup-failed',
+        startedAt: task.cleanupCompletedAt,
+      });
+    }
   }
   const seen = new Set<string>();
   return recorded

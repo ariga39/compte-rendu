@@ -33,26 +33,37 @@ export default {
       return Response.json({ ...outcome, runId: run?.run_id });
     }
 
-    if (url.pathname === '/__test/failed-review' && request.method === 'POST') {
+    if (
+      ['/__test/failed-review', '/__test/cancelled-review'].includes(url.pathname) &&
+      request.method === 'POST'
+    ) {
       const stateStore = createD1ReviewStateStore(env.REVIEW_DB);
+      const pr = Number(url.searchParams.get('pr'));
       const claim = await stateStore.claimReview({
-        deliveryId: 'runtime-failed-review',
+        deliveryId: `runtime-original-${pr}`,
         job: {
           repositoryId: 11,
           installationId: 7,
-          pullRequestNumber: 43,
+          pullRequestNumber: pr,
           baseSha: '1111111111111111111111111111111111111111',
-          headSha: '2222222222222222222222222222222222222222',
+          headSha: url.pathname.endsWith('/failed-review') ? '2'.repeat(40) : '3'.repeat(40),
           trigger: 'automatic',
         },
         occurredAt: '2026-09-12T00:00:00.000Z',
       });
       if (claim.kind !== 'claimed') return new Response(null, { status: 409 });
       await stateStore.recordCheckRun?.({ runId: claim.runId, checkRunId: 321 });
-      await stateStore.markSchedulingFailed({
-        runId: claim.runId,
-        occurredAt: '2026-09-12T00:01:00.000Z',
-      });
+      if (url.pathname.endsWith('/cancelled-review')) {
+        await stateStore.cancelRun({
+          runId: claim.runId,
+          requestedByUid: 42,
+          occurredAt: '2026-09-12T00:01:00.000Z',
+        });
+      } else
+        await stateStore.markSchedulingFailed({
+          runId: claim.runId,
+          occurredAt: '2026-09-12T00:01:00.000Z',
+        });
       return Response.json({ runId: claim.runId, checkRunId: 321 });
     }
 

@@ -5,6 +5,7 @@ export { ModelUsageSummary } from './model-usage.ts';
 export * from './stream.ts';
 export * from './usage.ts';
 
+export const RETRY_REVIEW_ACTION = 'retry_review';
 export const DEFAULT_REVIEW_NAME = 'Compte-rendu review';
 export const PublicDashboardConfig = Schema.Struct({ name: Schema.String });
 

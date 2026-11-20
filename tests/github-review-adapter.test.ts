@@ -85,7 +85,11 @@ describe('per-run dashboard Check links', () => {
         status: 'cancelled',
         cancellationReason: 'manual',
       });
-      expect(checks[0]).toMatchObject({ status: 'completed', conclusion: 'cancelled' });
+      expect(checks[0]).toMatchObject({
+        status: 'completed',
+        conclusion: 'cancelled',
+        actions: [{ label: 'Run review again', identifier: 'retry_review' }],
+      });
       expect(checks[0].output?.summary).toContain('An operator cancelled this review.');
     },
   );

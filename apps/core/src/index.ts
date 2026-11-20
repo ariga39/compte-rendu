@@ -1946,7 +1946,7 @@ const createReviewEventHandler = (dependencies: AdmissionDependencies) => {
       outcome.checkRunId !== checkRunId ||
       outcome.repositoryId !== event.repositoryId ||
       outcome.installationId !== event.installationId ||
-      outcome.status !== 'failed'
+      (outcome.status !== 'failed' && outcome.status !== 'cancelled')
     ) {
       return 'ignored' as const;
     }

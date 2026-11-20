@@ -1,4 +1,4 @@
-import type { ExecutionStage, ProcessingStage, TaskState } from './types.ts';
+import type { TimelineStage, TaskState } from './types.ts';
 
 export const STATUS_LABEL: Record<string, string> = {
   scheduled: 'Queued',
@@ -64,7 +64,11 @@ export function isCancelling(task: TaskState): boolean {
   );
 }
 
-export function milestoneLabel(stage: ExecutionStage | ProcessingStage): string {
+export function milestoneLabel(stage: TimelineStage, status: TaskState['status']): string {
+  if (stage === 'cancelled') return 'Cancelled by operator';
+  if (stage === 'cleanup-confirmed') return 'Sandbox cleanup confirmed';
+  if (stage === 'cleanup-failed') return 'Sandbox cleanup failed';
+  if (stage === 'received' && status === 'cancelled') return 'Runner callback received';
   return STAGE_LABEL[stage] ?? PROCESSING_STAGE_LABEL[stage] ?? 'Not recorded';
 }
 

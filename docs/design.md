@@ -23,8 +23,9 @@ head SHA; a new head needs new authorization. Manual feedback uses GitHub
 reactions: `eyes` for admission, `confused` for denial/draft/supersession, and `-1`
 for an admitted run that fails. The published review is the success signal.
 
-`check_run.rerequested` and `check_suite.rerequested` can retry a failed review
-under the same current maintainer checks. A retry creates a fresh run and Sandbox.
+`check_run.rerequested` and `check_suite.rerequested` can retry a failed or manually cancelled review
+under the same current maintainer checks. Manually cancelled Checks also offer
+**Run review again** through the App’s `check_run.requested_action` handler. A retry creates a fresh run and Sandbox.
 Duplicate deliveries and already active/completed same-revision reviews do not
 create another review. Unknown Checks or uncertain authorization never start work.
 
