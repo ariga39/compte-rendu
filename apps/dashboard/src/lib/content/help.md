@@ -100,7 +100,7 @@ Times are the latest recorded observations, not live guarantees. Older reviews m
 - **Refresh now** is available on **Overview**, **History**, and review detail pages.
 - **Help** is a static page and does not refresh.
 
-**Last updated** is the time of the last successful data refresh for the page you are viewing. The data comes from stored review state. Reading it is read-only; the only change an authorized operator can make is cancelling a review that has not started publishing.
+**Last updated** is the time of the last successful data refresh for the page you are viewing. The data comes from stored review state. Authorized operators can cancel a review before publication starts and change the models for future reviews in Settings.
 
 ## Anonymous reviews
 

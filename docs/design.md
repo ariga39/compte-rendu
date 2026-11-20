@@ -34,7 +34,7 @@ Check setup is best effort after durable admission, outside the webhook response
 path. Its D1 ownership lease prevents concurrent setup; late setup catches up to
 the persisted run. Check failure does not prevent execution or terminal feedback.
 A Check is queued until claim, in progress after claim, and successful only after
-publication. Failure and supersession complete it as failure and cancelled.
+publication. Failure completes the Check as failed. Supersession and manual cancellation complete it as cancelled, with distinct explanations.
 `details_url` points to that run's dashboard page. The configurable Check name
 also supplies the dashboard title.
 
@@ -165,7 +165,7 @@ Orphan reconciliation remains [#66](https://github.com/ariga39/compte-rendu/issu
 Core freezes the operator's model selection and revision when admitting a run.
 Configuration changes affect new admissions, not queued/running jobs. The protected
 [configuration API](review-configuration.md) stores route IDs, not credentials or
-URLs. `selection: null` uses the Runner's configured default model.
+URLs. `selection: null` restores the installation default. For managed inference, Core snapshots `RELAY_DEFAULT_MODEL_ROUTE` as a single-reviewer selection at admission.
 
 One explicit reviewer runs directly; multiple reviewers use a supervisor and
 selected subagents in one Sandbox. Both use the same review prompt and final
@@ -273,7 +273,7 @@ do not become zero and are not publication gates. See [usage semantics](llm-serv
 [Dashboard behavior](public-dashboard-design.md) defines overview, filtered history,
 detail drawers, privacy and refresh. Every public read uses D1 only and triggers
 no GitHub or Runner request. Core refreshes repository metadata independently via
-its scheduled handler. Only currently verified public identity is disclosed;
+its scheduled handler. Signed-in operators can edit the review roster and cancel runs before publication starts. Cancellation and publication compete for durable ownership of the same run. The Worker retries the GitHub Check update and Runner stop independently. See [operator cancellation](operations.md#operator-cancellation). Only currently verified public identity is disclosed;
 private, unknown or expired identities are anonymous.
 
 Status is product state; assignment and stage timestamps are observations, not
@@ -327,7 +327,7 @@ An authenticated Runner maintenance operation can reconcile a failed sbx run
 whose original host-directory cleanup was confirmed and whose exact Sandbox is
 now absent. It rechecks scoped policies/secrets and revokes the job grant before
 reporting recovery. Original terminal evidence remains immutable; separate local
-and R2 recovery records provide the audit trail. Core matches the failed or superseded run,
+and R2 recovery records provide the audit trail. Core matches the failed, superseded or cancelled run,
 job, attempt and immutable SHAs before confirming cleanup. Destroyed cleanup is
 monotonic under delayed callbacks. The queued-task projection exposes an anonymous
 cleanup-block reason only when an unresolved terminal same-PR run blocks claiming.

@@ -96,7 +96,7 @@ merge approval. This feature does not change branch protection or auto-merge.
 
 The dashboard shows a Decision column with the exact labels above,
 and the same field in the detail drawer and Help. Keep Status for Queued,
-In progress, Published, Failed, and Superseded. Pending and historical unknown decisions display an em dash. A decision filter is not implemented.
+In progress, Published, Failed, Superseded, Cancelling and Cancelled. Pending and historical unknown decisions display an em dash. A decision filter is not implemented.
 Public APIs remain DB-only and retain the existing private-repository redaction.
 Do not expose finding text or repository identity through the new field.
 

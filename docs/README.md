@@ -3,27 +3,24 @@
 These guides describe the supported implementation. They separate current behavior
 from experiments and proposals; a research recommendation is not a shipped feature.
 
-| Need                                                             | Read                                            |
-| ---------------------------------------------------------------- | ----------------------------------------------- |
-| Understand admission, jobs, publication and component boundaries | [Architecture](design.md)                       |
-| Install an instance or change deployment settings                | [Installation](installation.md)                 |
-| Diagnose failures, upgrade, roll back or uninstall               | [Operations](operations.md)                     |
-| Configure model routes, credentials and job grants               | [Inference relay](llm-service.md)               |
-| Select one or several reviewers without restarting               | [Review configuration](review-configuration.md) |
-| Understand the final result, decisions and publication checks    | [Review decisions](review-decisions-design.md)  |
-| Understand dashboard state, privacy and refresh                  | [Dashboard](public-dashboard-design.md)         |
-| Understand trust boundaries and known limitations                | [Security](security.md)                         |
-| Understand local Worker integration coverage                     | [Runtime tracer](local-runtime-tracer.md)       |
-| Find older PoCs, source research and migration decisions         | [Archive](archive/README.md)                    |
+| Need                                                             | Read                                                                                    |
+| ---------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| Understand admission, jobs, publication and component boundaries | [Architecture](design.md)                                                               |
+| Install an instance or change deployment settings                | [Installation](installation.md)                                                         |
+| Diagnose failures, upgrade, roll back or uninstall               | [Operations](operations.md)                                                             |
+| Configure model routes, credentials and job grants               | [Inference relay](llm-service.md)                                                       |
+| Select one or several reviewers without restarting               | [Review configuration](review-configuration.md)                                         |
+| Understand the final result, decisions and publication checks    | [Review decisions](review-decisions-design.md)                                          |
+| Understand dashboard state, privacy and refresh                  | [Dashboard](public-dashboard-design.md)                                                 |
+| Understand trust boundaries and known limitations                | [Security](security.md)                                                                 |
+| Understand local Worker integration coverage                     | [Runtime tracer](local-runtime-tracer.md)                                               |
+| Sign in and grant operator access                                | [Dashboard authorization](review-configuration.md#dashboard-sign-in-and-model-settings) |
+| Stop a queued or running review                                  | [Operator cancellation](operations.md#operator-cancellation)                            |
+| Configure the OpenSandbox backend                                | [OpenSandbox](opensandbox.md)                                                           |
+| Find older PoCs, source research and migration decisions         | [Archive](archive/README.md)                                                            |
 
 For end users, the dashboard's `/help` page is rendered from
 [Help Markdown](../apps/dashboard/src/lib/content/help.md).
-
-## Proposed changes
-
-[Dashboard sign-in and review cancellation](dashboard-job-control-design.md) proposes global sign-in, operator cancellation and a 90-minute review budget.
-
-[Worker relay and AI Gateway migration](gateway-relay-design.md) records the design and staged rollout of managed inference.
 
 ## Maintenance
 
@@ -38,6 +35,7 @@ Archive superseded plans with their dates, sources and results intact.
 These are not shipped guarantees. Historical alternatives and optional hardening
 suggestions are not automatically backlog commitments.
 
-| Gap                                     | Issue                                                    |
-| --------------------------------------- | -------------------------------------------------------- |
-| Crash-time owned Sandbox reconciliation | [#66](https://github.com/ariga39/compte-rendu/issues/66) |
+| Gap                                     | Issue                                                      |
+| --------------------------------------- | ---------------------------------------------------------- |
+| Cancellation lifecycle telemetry        | [#268](https://github.com/ariga39/compte-rendu/issues/268) |
+| Crash-time owned Sandbox reconciliation | [#66](https://github.com/ariga39/compte-rendu/issues/66)   |

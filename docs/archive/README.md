@@ -9,6 +9,8 @@ and unimplemented alternatives are retained as evidence, not renewed commitments
 
 - [Sandbox/OpenCode remote PoC](sandbox-opencode-poc.md)
 - [Agent sandbox alternatives to Docker Sandboxes (sbx 0.39)](agent-sandbox-alternatives-research.md)
+- [Sandbox replacement research](sandbox-replacement-2026-11-research.md)
+- [OpenSandbox feasibility](opensandbox-adapter-feasibility.md) and [native probe](opensandbox-native-probe.md)
 - [Docker sbx versus NVIDIA OpenShell for static PR review](sbx-openshell-comparison.md)
 - [Docker Sandboxes OpenCode custom template research](docker-sandbox-custom-template-research.md)
 - [Docker Sandbox GitHub authentication decision for issue #99](docker-sandbox-custom-secret-auth-research.md)
@@ -24,16 +26,15 @@ and unimplemented alternatives are retained as evidence, not renewed commitments
 - [OpenCode final review output for issue #105](opencode-final-review-output-research.md)
 - [OpenCode final Markdown review submission research](opencode-final-review-submission-research.md)
 - [Review output reliability: structured-output best practice](review-output-reliability-research.md)
+- [Review-oriented skills and native review commands](review-oriented-skills-research.md)
 - [PR review skill source synthesis](pr-review-skill-research.md)
 - [Topic-specific review skills research (#211)](topic-review-skills-research.md)
 - [Expanded topic and comprehensive review skill comparison](review-skills-expanded-research.md)
 - [Complete pull-request context from GitHub](pr-context-github-api-research.md)
-- [External LLM service design](llm-service-design.md)
+- [Managed inference migration and pilot results](gateway-relay-design.md)
 
 ## Dashboard and operations
 
 - [Dashboard design-system research](dashboard-design-system-research.md)
 - [Runner concurrency hot reload: library choice (#161)](runner-settings-reload-research.md)
 - [PostHog observability fit](posthog-observability-research.md)
-
-- [Review-oriented skills and native review commands](review-oriented-skills-research.md): source comparison and decision to use one general review skill.
