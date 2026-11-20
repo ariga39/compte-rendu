@@ -273,35 +273,6 @@ describe('Webhook ingress', () => {
     expect(forwarded).toHaveLength(0);
   });
 
-  it('rejects an oversized runner callback Content-Length before buffering', async () => {
-    let bodyReads = 0;
-    const worker = createIngressWorker({
-      secret,
-      crypto: globalThis.crypto,
-      runnerCallbackToken: 'callback-token',
-      core: { fetch: async () => new Response(null, { status: 202 }) },
-    });
-    class TrackingRequest extends Request {
-      override arrayBuffer() {
-        bodyReads += 1;
-        return super.arrayBuffer();
-      }
-    }
-
-    const request = new TrackingRequest('https://ingress.internal/runner-callback', {
-      method: 'POST',
-      headers: {
-        authorization: 'Bearer callback-token',
-        'content-length': String(MAX_RUNNER_CALLBACK_BYTES + 1),
-      },
-      body: '{}',
-    });
-    const response = await worker.fetch(request);
-
-    expect(response.status).toBe(413);
-    expect(bodyReads).toBe(0);
-  });
-
   it('rejects a runner callback whose buffered body exceeds 32 MiB without contacting core', async () => {
     const forwarded: Request[] = [];
     const worker = createIngressWorker({
@@ -963,41 +934,60 @@ describe('Webhook ingress', () => {
       expect(cancelled).toBe(true);
     },
   );
-  it('rejects an over-cap Content-Length before reading the body', async () => {
-    let textReads = 0;
-    const body = new ReadableStream({
-      pull(controller) {
-        controller.enqueue(new TextEncoder().encode(JSON.stringify(payload)));
-        controller.close();
-      },
-    });
+  it.each([
+    ['/webhooks/github', MAX_WEBHOOK_BYTES, 400],
+    ['/runner-callback', MAX_RUNNER_CALLBACK_BYTES, 413],
+  ] as const)(
+    'rejects oversized Content-Length before pulling from %s',
+    async (path, limit, status) => {
+      let pulled = false;
+      const body = new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            pulled = true;
+            controller.close();
+          },
+        },
+        { highWaterMark: 0 },
+      );
+      const worker = createIngressWorker({
+        secret,
+        crypto: globalThis.crypto,
+        runnerCallbackToken: 'callback-token',
+        core: { fetch: async () => new Response(null, { status: 202 }) },
+      });
+      const request = new Request('https://example.com' + path, {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer callback-token',
+          'content-length': String(limit + 1),
+          'x-github-event': 'pull_request',
+        },
+        body,
+        duplex: 'half',
+      } as RequestInit & { duplex: 'half' });
+      expect((await worker.fetch(request)).status).toBe(status);
+      expect(pulled).toBe(false);
+    },
+  );
+
+  it('forwards a signed webhook at exactly the byte limit', async () => {
+    const forwarded: unknown[] = [];
     const worker = createIngressWorker({
       secret,
       crypto: globalThis.crypto,
       core: {
-        fetch: async () => new Response(null, { status: 202 }),
+        fetch: async (request) => {
+          forwarded.push(await request.json());
+          return new Response(null, { status: 202 });
+        },
       },
     });
-    class TrackingRequest extends Request {
-      override text() {
-        textReads += 1;
-        return super.text();
-      }
-    }
-    const request = new TrackingRequest('https://example.com/webhooks/github', {
-      method: 'POST',
-      headers: {
-        'content-length': String(MAX_WEBHOOK_BYTES + 1),
-        'x-github-event': 'pull_request',
-      },
-      body,
-      duplex: 'half',
-    } as RequestInit & { duplex: 'half' });
-
-    const response = await worker.fetch(request);
-
-    expect(response.status).toBe(400);
-    expect(textReads).toBe(0);
+    const value = { ...payload, padding: '界' };
+    const byteLength = new TextEncoder().encode(JSON.stringify(value)).byteLength;
+    value.padding += 'x'.repeat(MAX_WEBHOOK_BYTES - byteLength);
+    expect((await worker.fetch(await signedRequest(value))).status).toBe(202);
+    expect(forwarded).toContainEqual(expect.objectContaining({ deliveryId: 'delivery-1' }));
   });
   it('rejects a body above the ingress payload cap without contacting core', async () => {
     const forwarded: Request[] = [];
