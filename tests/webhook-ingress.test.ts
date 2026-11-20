@@ -920,6 +920,49 @@ describe('Webhook ingress', () => {
     expect(response.status).toBe(204);
     expect(forwarded).toHaveLength(0);
   });
+  it.each([
+    ['/webhooks/github', MAX_WEBHOOK_BYTES, 400],
+    ['/runner-progress', 16 * 1024, 413],
+  ] as const)(
+    'stops reading an oversized unknown-length request to %s',
+    async (path, limit, status) => {
+      let cancelled = false;
+      let sent = false;
+      const body = new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            if (sent) controller.close();
+            else controller.enqueue(new Uint8Array(limit + 1));
+            sent = true;
+          },
+          cancel() {
+            cancelled = true;
+          },
+        },
+        { highWaterMark: 0 },
+      );
+      const worker = createIngressWorker({
+        secret,
+        crypto: globalThis.crypto,
+        runnerCallbackToken: 'runner-secret',
+        core: {
+          fetch: async () => {
+            throw new Error('unexpected forward');
+          },
+        },
+      });
+      const response = await worker.fetch(
+        new Request('https://example.com' + path, {
+          method: 'POST',
+          headers: { authorization: 'Bearer runner-secret', 'x-github-event': 'pull_request' },
+          body,
+          duplex: 'half',
+        } as RequestInit & { duplex: 'half' }),
+      );
+      expect(response.status).toBe(status);
+      expect(cancelled).toBe(true);
+    },
+  );
   it('rejects an over-cap Content-Length before reading the body', async () => {
     let textReads = 0;
     const body = new ReadableStream({

@@ -1,4 +1,8 @@
-export { readBoundedBody, readBoundedRequestBody } from './read-request-body.ts';
+export {
+  readBoundedBody,
+  readBoundedRequestBytes,
+  readBoundedRequestBody,
+} from './read-request-body.ts';
 import { Schema } from 'effect';
 import { ModelUsageSummary } from './model-usage.ts';
 export { ModelUsageSummary } from './model-usage.ts';
