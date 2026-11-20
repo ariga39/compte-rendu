@@ -1,5 +1,6 @@
 import { Effect, Option, Schema } from 'effect';
 import {
+  readBoundedRequestBytes,
   RETRY_REVIEW_ACTION,
   MetadataInvalidationEvent,
   ReviewEvent,
@@ -211,7 +212,11 @@ const signatureBytes = (signature: string) => {
   return bytes;
 };
 
-const verifySignature = (body: string, signature: string, dependencies: IngressDependencies) =>
+const verifySignature = (
+  body: Uint8Array<ArrayBuffer>,
+  signature: string,
+  dependencies: IngressDependencies,
+) =>
   Effect.gen(function* () {
     const validSignature = yield* Effect.tryPromise({
       try: async () => {
@@ -223,12 +228,7 @@ const verifySignature = (body: string, signature: string, dependencies: IngressD
           ['verify'],
         );
 
-        return dependencies.crypto.subtle.verify(
-          'HMAC',
-          key,
-          signatureBytes(signature),
-          new TextEncoder().encode(body),
-        );
+        return dependencies.crypto.subtle.verify('HMAC', key, signatureBytes(signature), body);
       },
       catch: () => invalidWebhook('Webhook signature could not be verified', 'invalid_signature'),
     });
@@ -347,20 +347,11 @@ const isAllowedBotAuthor = Effect.fn('isAllowedBotAuthor')(function* (
 
 const processWebhook = (request: Request, dependencies: IngressDependencies) =>
   Effect.gen(function* () {
-    const contentLength = request.headers.get('content-length');
-    if (contentLength !== null && Number.parseInt(contentLength, 10) > MAX_WEBHOOK_BYTES) {
-      return yield* invalidWebhook('Webhook body exceeds the accepted limit');
-    }
-
     const body = yield* Effect.tryPromise({
-      try: () => request.text(),
+      try: () => readBoundedRequestBytes(request, MAX_WEBHOOK_BYTES),
       catch: () => invalidWebhook('Webhook body could not be read'),
     });
-    const bodyBytes = new TextEncoder().encode(body);
-
-    if (bodyBytes.byteLength > MAX_WEBHOOK_BYTES) {
-      return yield* invalidWebhook('Webhook body exceeds the accepted limit');
-    }
+    if (body === undefined) return yield* invalidWebhook('Webhook body exceeds the accepted limit');
 
     const signature = yield* Schema.decodeUnknownEffect(Signature)(
       request.headers.get('x-hub-signature-256'),
@@ -371,7 +362,7 @@ const processWebhook = (request: Request, dependencies: IngressDependencies) =>
     );
     yield* verifySignature(body, signature, dependencies);
 
-    const decodedJson = yield* readJson(body);
+    const decodedJson = yield* readJson(new TextDecoder().decode(body));
     const action = yield* Schema.decodeUnknownEffect(WebhookAction)(decodedJson).pipe(
       Effect.mapError(() => invalidWebhook('Webhook action is missing')),
     );
@@ -757,14 +748,8 @@ const forwardRunnerCallback = async (request: Request, dependencies: IngressDepe
     return new Response(null, { status: 401 });
   }
 
-  const contentLength = request.headers.get('content-length');
-  if (contentLength !== null && Number(contentLength) > MAX_RUNNER_CALLBACK_BYTES) {
-    return new Response(null, { status: 413 });
-  }
-  const body = await request.arrayBuffer();
-  if (body.byteLength > MAX_RUNNER_CALLBACK_BYTES) {
-    return new Response(null, { status: 413 });
-  }
+  const body = await readBoundedRequestBytes(request, MAX_RUNNER_CALLBACK_BYTES);
+  if (body === undefined) return new Response(null, { status: 413 });
   const forwarded = await dependencies.core.fetch(
     new Request('https://core.internal/runner-results', {
       method: 'POST',
@@ -788,8 +773,8 @@ const forwardRunnerCleanupRecovery = async (
   ) {
     return new Response(null, { status: 401 });
   }
-  const body = await request.arrayBuffer();
-  if (body.byteLength > 64 * 1024) return new Response(null, { status: 413 });
+  const body = await readBoundedRequestBytes(request, 64 * 1024);
+  if (body === undefined) return new Response(null, { status: 413 });
   const forwarded = await dependencies.core.fetch(
     new Request('https://core.internal/runner-cleanup-recovery', {
       method: 'POST',
@@ -814,8 +799,8 @@ const forwardRunnerClaim = async (request: Request, dependencies: IngressDepende
     return new Response(null, { status: 401 });
   }
 
-  const body = await request.arrayBuffer();
-  if (body.byteLength > 64 * 1024) return new Response(null, { status: 413 });
+  const body = await readBoundedRequestBytes(request, 64 * 1024);
+  if (body === undefined) return new Response(null, { status: 413 });
   const forwarded = await dependencies.core.fetch(
     new Request('https://core.internal/runner-claims', {
       method: 'POST',
@@ -840,8 +825,8 @@ const forwardRunnerReadToken = async (request: Request, dependencies: IngressDep
   ) {
     return new Response(null, { status: 401 });
   }
-  const body = await request.arrayBuffer();
-  if (body.byteLength > MAX_RUNNER_READ_TOKEN_BYTES) {
+  const body = await readBoundedRequestBytes(request, MAX_RUNNER_READ_TOKEN_BYTES);
+  if (body === undefined) {
     return new Response(null, { status: 413 });
   }
   const forwarded = await dependencies.core.fetch(
@@ -887,8 +872,8 @@ const forwardRunnerProgress = async (request: Request, dependencies: IngressDepe
   ) {
     return new Response(null, { status: 401 });
   }
-  const body = await request.arrayBuffer();
-  if (body.byteLength > MAX_RUNNER_PROGRESS_BYTES) return new Response(null, { status: 413 });
+  const body = await readBoundedRequestBytes(request, MAX_RUNNER_PROGRESS_BYTES);
+  if (body === undefined) return new Response(null, { status: 413 });
   const forwarded = await dependencies.core.fetch(
     new Request('https://core.internal/runner-progress', {
       method: 'POST',
