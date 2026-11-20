@@ -4280,7 +4280,12 @@ describe('Core Worker', () => {
       occurredAt: '2026-09-01T00:00:00.000Z',
     });
     if (claimed.kind !== 'claimed') throw new Error('invalid evidence run was not claimed');
-    await stateStore.recordRunnerJob({ runId: claimed.runId, jobId: 'runner-job-1', attempt: 1 });
+    await stateStore.claimNextJob!({
+      jobId: 'runner-job-1',
+      attempt: 1,
+      occurredAt: '2026-09-01T00:01:00.000Z',
+    });
+
     const stored: unknown[] = [];
     const reactions: unknown[] = [];
     const worker = createCoreWorker(
@@ -4318,6 +4323,19 @@ describe('Core Worker', () => {
       await expect(stateStore.getRunOutcome(claimed.runId)).resolves.toMatchObject({
         status: 'failed',
       });
+      const replacement = await stateStore.claimReview({
+        deliveryId: 'delivery-after-rejected-evidence',
+        job: { ...eligibleEvent, trigger: 'manual', commentId: 23 },
+        occurredAt: '2026-09-01T01:00:00.000Z',
+      });
+      if (replacement.kind !== 'claimed') throw new Error('replacement was not queued');
+      await expect(
+        stateStore.claimNextJob!({
+          jobId: 'replacement-job',
+          attempt: 1,
+          occurredAt: '2026-09-01T01:01:00.000Z',
+        }),
+      ).resolves.toMatchObject({ kind: 'claimed', runId: replacement.runId });
       expect(stored).toHaveLength(0);
       expect(reactions).toEqual([
         { repositoryId: 11, installationId: 7, commentId: 987654, content: '-1' },

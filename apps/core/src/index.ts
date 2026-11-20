@@ -450,6 +450,7 @@ export interface ReviewStateQueries {
     expectedLastAttempt: string | null;
   }): Promise<boolean>;
   confirmRunnerDestroyed?(input: {
+    expectedStatus?: ReviewOutcome['status'];
     runId: string;
     jobId: string;
     attempt: number;
@@ -2562,11 +2563,17 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
       run.runnerStopAttemptedAt = occurredAt;
       return true;
     },
-    confirmRunnerDestroyed: async ({ runId, jobId, attempt, occurredAt }) => {
+    confirmRunnerDestroyed: async ({
+      runId,
+      jobId,
+      attempt,
+      occurredAt,
+      expectedStatus = 'cancelled',
+    }) => {
       const run = runs.get(runId);
       if (
         run === undefined ||
-        run.status !== 'cancelled' ||
+        run.status !== expectedStatus ||
         run.runnerJobId !== jobId ||
         run.runnerAttempt !== attempt
       ) {
