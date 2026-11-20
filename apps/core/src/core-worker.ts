@@ -922,18 +922,29 @@ export const createCoreWorker = (
     const requestId = parsed.value.requestId;
     const jobId = globalThis.crypto.randomUUID();
     const claim = await stateStore.claimNextJob({ jobId, requestId, attempt: 1, occurredAt });
-    if (claim.kind === 'preparing') {
+    if (claim.kind === 'empty') return new Response(null, { status: 204 });
+    if (claim.kind === 'preparing' || claim.replay) {
       const start = epochMilliseconds(claim.claimedAt);
-      if (
-        start !== undefined &&
-        Date.parse(occurredAt) >= start + REVIEW_ATTEMPT_BUDGET_MS &&
-        (await stateStore.expireUnpreparedClaim?.(claim.runId, claim.jobId, 1, occurredAt))
-      ) {
+      if (start !== undefined && Date.parse(occurredAt) >= start + REVIEW_ATTEMPT_BUDGET_MS) {
+        const outcome = await stateStore.getRunOutcome(claim.runId);
+        if (outcome?.status !== 'scheduled') return new Response(null, { status: 204 });
+        if (!(await stateStore.expireClaimHandoff?.(claim.runId, claim.jobId, 1, occurredAt)))
+          return new Response(null, { status: 503 });
+        const failure = { phase: 'scheduling', reason: 'timeout' } as const;
+        const failed = await markRunFailed(outcome, claim.runId, occurredAt, undefined, failure);
+        if (failed?.status === 'failed')
+          await recordFinishedLifecycle(
+            lifecycleLog,
+            failed,
+            'failed',
+            undefined,
+            failure,
+            claim.runId,
+          );
         return new Response(null, { status: 204 });
       }
-      return new Response(null, { status: 503 });
+      if (claim.kind === 'preparing') return new Response(null, { status: 503 });
     }
-    if (claim.kind === 'empty') return new Response(null, { status: 204 });
 
     const claimedAt = claim.claimedAt;
     const claimedOutcome = await stateStore.getRunOutcome(claim.runId).catch(() => undefined);
@@ -1124,7 +1135,6 @@ export const createCoreWorker = (
         headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
       });
     } catch {
-      if (claim.replay) return new Response(null, { status: 503 });
       const current = await stateStore.getRunOutcome(claim.runId);
       if (
         current !== undefined &&
@@ -1133,6 +1143,10 @@ export const createCoreWorker = (
         return new Response(null, { status: 204 });
       }
       if (current?.status === 'cancelled') return releaseUndeliveredCancellation();
+      if (claim.replay)
+        return new Response(null, {
+          status: current && current.status !== 'scheduled' ? 204 : 503,
+        });
       const failedAt = await Effect.runPromise(DateTime.now.pipe(Effect.map(DateTime.formatIso)));
       if (current === undefined) {
         await stateStore.markSchedulingFailed({

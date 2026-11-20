@@ -1011,13 +1011,13 @@ const createStore = (
     };
   },
 
-  expireUnpreparedClaim: async (runId, jobId, attempt, occurredAt) => {
+  expireClaimHandoff: async (runId, jobId, attempt, occurredAt) => {
     const [run] = await database.batch([
       database
         .prepare(`UPDATE review_runs SET status = 'failed', updated_at = ?, terminal_at = ?,
         failure_phase = 'scheduling', failure_reason = 'timeout',
         runner_job_id = NULL, runner_attempt = NULL, runner_cleanup_status = NULL
-        WHERE run_id = ? AND runner_job_id = ? AND runner_attempt = ? AND status = 'scheduled' AND claim_prepared = 0`)
+        WHERE run_id = ? AND runner_job_id = ? AND runner_attempt = ? AND status = 'scheduled' AND publication_claimed_at IS NULL`)
         .bind(occurredAt, occurredAt, runId, jobId, attempt),
       database
         .prepare(
