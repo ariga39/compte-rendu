@@ -395,7 +395,7 @@ export interface ReviewStateStore {
     | { kind: 'empty' }
     | { kind: 'preparing'; runId: string; jobId: string; claimedAt: string }
   >;
-  expireUnpreparedClaim?(
+  expireClaimHandoff?(
     runId: string,
     jobId: string,
     attempt: number,
@@ -2306,14 +2306,14 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
         job: run.job,
       };
     },
-    expireUnpreparedClaim: async (runId, jobId, attempt, occurredAt) => {
+    expireClaimHandoff: async (runId, jobId, attempt, occurredAt) => {
       const run = runs.get(runId);
       if (
         !run ||
         run.status !== 'scheduled' ||
         run.runnerJobId !== jobId ||
         run.runnerAttempt !== attempt ||
-        run.claimPrepared
+        run.publicationClaimedAt !== undefined
       )
         return false;
       run.status = 'failed';

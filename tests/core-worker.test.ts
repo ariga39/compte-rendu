@@ -2938,9 +2938,16 @@ describe('Core Worker', () => {
       const preparing = new Promise<void>((resolve) => {
         began = resolve;
       });
+      const checks: string[] = [];
+      let lookupUnavailable = false;
       const dependencies = {
         github: {
+          createCheckRun: async () => ({ id: 333 }),
+          updateCheckRun: async ({ status }: { status: string }) => {
+            checks.push(status);
+          },
           getRepositoryUrl: async () => {
+            if (lookupUnavailable) throw new Error('unavailable');
             began();
             await gate;
             return 'https://github.com/acme/reviewed.git';
@@ -2974,6 +2981,7 @@ describe('Core Worker', () => {
           unblock();
           expect((await firstResponse).status).not.toBe(200);
           expect((await worker.fetch(request())).status).toBe(204);
+          expect(checks).toContain('failure');
           return;
         }
         unblock();
@@ -2983,6 +2991,11 @@ describe('Core Worker', () => {
         expect(replay.status).toBe(200);
         expect(replay.headers.get('cache-control')).toBe('no-store');
         expect(await replay.json()).toEqual(await first.json());
+        lookupUnavailable = true;
+        expect((await worker.fetch(request())).status).toBe(503);
+        vi.setSystemTime(new Date('2026-09-01T01:31:00Z'));
+        expect((await worker.fetch(request())).status).toBe(204);
+        expect(checks).toContain('failure');
       } finally {
         unblock();
         database.close();
