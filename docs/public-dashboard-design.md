@@ -1,30 +1,29 @@
 # Public review dashboard
 
-The dashboard is public and read-only. It shows persisted review runs, their
-lifecycle and history. Every page/API read uses D1 only: it never contacts Runner
-or GitHub, inspects live processes or queues metadata work. Core refreshes
-repository metadata independently. End-user instructions live in
-[Help Markdown](../apps/dashboard/src/lib/content/help.md).
+Anyone can read review history and job details. The application Worker serves these
+reads from Core's D1 projection. Signed-in operators can also change review models
+and cancel eligible jobs. See the [Help Markdown](../apps/dashboard/src/lib/content/help.md).
 
 ## Pages and language
 
-| Page             | Behavior                                                                         |
-| ---------------- | -------------------------------------------------------------------------------- |
-| `/`              | Queued/in-progress counts, last-24-hour published/failed counts and current work |
-| `/history`       | Newest-admitted-first history, status/date filters and cursor pagination         |
-| `/jobs/<run-id>` | Shareable detail, recorded revision, decision and lifecycle                      |
-| `/help`          | Markdown documentation, not a refreshable data page                              |
+| Page             | Behavior                                                                                        |
+| ---------------- | ----------------------------------------------------------------------------------------------- |
+| `/`              | Queued/in-progress counts, last-24-hour published, failed and cancelled counts and current work |
+| `/history`       | Newest-admitted-first history, status/date filters and cursor pagination                        |
+| `/jobs/<run-id>` | Shareable detail, recorded revision, decision and lifecycle                                     |
+| `/settings`      | Model catalog and revision-checked selection for authorized operators                           |
+| `/help`          | Markdown documentation, not a refreshable data page                                             |
 
 A task is one admitted Core run, not a webhook or a PR. Retries have separate
 runs/URLs; ignored events do not appear. One multi-model review still has one task.
 
-UI labels are Queued, In progress, Published, Failed and Superseded. Published
+UI labels are Queued, In progress, Published, Failed, Superseded and Cancelled. A claimed cancellation with pending or unknown cleanup shows Cancelling in history and detail. Cleanup failure is shown separately. Published
 means Core recorded publication, not a successful model exit. Decision is separate:
 Approve, Request changes or Comment; unknown historical decisions show an em dash.
 The decision records the original review, not current GitHub merge eligibility.
 Resource cleanup is in technical details, not a primary count or filter.
 
-Counts come from an aggregate query. Published/failed last-24-hour counts use the
+Counts come from an aggregate query. Published, failed and cancelled last-24-hour counts use the
 admission timestamp, not a guessed terminal time. Current work lists claimed runs
 first, then queued work oldest first. History lists newest first. A page has 25
 items. Filters use receipt dates and the same status predicates as the table;
@@ -52,7 +51,7 @@ same DB-backed public projection used by the JSON API. Known-private and unknown
 repository identities remain anonymous in HTML as well as JSON. Responses use
 `Cache-Control: no-store`. TanStack Query prefetch/dehydrate/hydrate transfers
 the initial cache without a duplicate task fetch; browser navigation and refresh
-continue through Query. See [SSR implementation](single-worker-ssr.md). Carbon Svelte supplies components and spacing;
+continue through Query. Each server request creates its own QueryClient. Only successful public query data is dehydrated for the browser. Carbon Svelte supplies components and spacing;
 IBM Plex Mono is served locally for all text. Tables have named columns, readable
 cell spacing, text status labels, keyboard focus and horizontal overflow on narrow
 screens. Loading, empty, stale, failure and missing-task states remain distinct.
@@ -73,7 +72,7 @@ this restoration path and retain the saved list scroll position.
 
 ## Database lifecycle and progress
 
-Product status remains `scheduled | completed | failed | superseded`. Separate
+Product status remains `scheduled | completed | failed | superseded | cancelled`. Separate
 facts describe assignment, execution stage, Core processing, decision and cleanup.
 Core owns product state; Runner observations do not overwrite it.
 
@@ -154,7 +153,7 @@ Identity expires five minutes after verification start. Failed refreshes never
 extend that limit. A visibility change can remain visible until observation or
 expiry; already disclosed information cannot be retracted. Browser expiry uses
 server-relative lifetime and elapsed time, including offline/hidden-tab resume,
-so browser clock skew cannot extend it. Normal browsing makes zero GitHub calls.
+so browser clock skew cannot extend it. Public job reads use D1. The header separately fetches `/api/session`; a signed-in session is verified with GitHub.
 
 Each refresh reports `dueAtStart`, `oldestDueAgeMs`, `durationMs` and
 `budgetExhausted` alongside dispatched/failed/skipped counts, without repository
@@ -194,7 +193,7 @@ Other Apps' or Actions' status links are not changed. The Check name comes from
 Public reads are `/api/dashboard-config`, `/api/dashboard`, `/api/jobs` and
 `/api/jobs/:runId`. A scoped cursor mismatch is 400, a missing run is 404 and a
 failed DB read is 503. They neither fetch external state nor expose raw evidence.
-The separate configuration API is authenticated and is not a dashboard editor.
+The browser editor at `/settings` uses the authenticated `/api/model-settings` endpoint. Command-line operators use the separate bearer-protected `/api/review-configuration` endpoint.
 
 Tests exercise public Worker HTTP with fresh instances sharing D1, authenticated
 progress/terminal callbacks, the store query seam and TypeScript Playwright

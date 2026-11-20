@@ -1,6 +1,6 @@
 # Move review inference to Cloudflare AI Gateway
 
-**Original migration design for [issue 236](https://github.com/ariga39/compte-rendu/issues/236).** The managed relay now ships. Use the [current deployment guide](installation.md#configure-the-managed-inference-relay) for new installations.
+**Original migration design for [issue 236](https://github.com/ariga39/compte-rendu/issues/236).** The managed relay now ships. Use the [current deployment guide](../installation.md#configure-the-managed-inference-relay) for new installations.
 
 Original scope: replace the Runner host’s Node LLM service and LiteLLM for the OpenCode Go review workload. Keep one review job, its existing sandbox and one GitHub verdict. An operator must still be able to select a newly discovered model without redeploying or restarting a Runner. Each installation migrates independently.
 
@@ -12,7 +12,7 @@ The first attempt exercised the failure path. Dropping the configured upstream b
 
 ## Why D1
 
-The old lease implementation already exposed two operational failure modes. During production execution, an exec timeout ended the caller’s wait while the process continued. The lease alarm destroyed its sandbox first, and normal cleanup of that same lease returned 409. Removing the old DO classes later caused deployment error 10064 until the applied class history was preserved and a retirement migration was deployed. These incidents concern cleanup ordering and class migrations. They do not establish a general storage corruption defect. [Production report #45](https://github.com/ariga39/compte-rendu/issues/45) · [Cleanup fix #47](https://github.com/ariga39/compte-rendu/issues/47) · [Retirement incident #77](https://github.com/ariga39/compte-rendu/issues/77) · [Migration record](archive/cloudflare-durable-object-retirement.md)
+The old lease implementation already exposed two operational failure modes. During production execution, an exec timeout ended the caller’s wait while the process continued. The lease alarm destroyed its sandbox first, and normal cleanup of that same lease returned 409. Removing the old DO classes later caused deployment error 10064 until the applied class history was preserved and a retirement migration was deployed. These incidents concern cleanup ordering and class migrations. They do not establish a general storage corruption defect. [Production report #45](https://github.com/ariga39/compte-rendu/issues/45) · [Cleanup fix #47](https://github.com/ariga39/compte-rendu/issues/47) · [Retirement incident #77](https://github.com/ariga39/compte-rendu/issues/77) · [Migration record](cloudflare-durable-object-retirement.md)
 
 Use conditional D1 writes for the three pieces of shared state: grants, request accounting and the model catalog. A normal Worker invocation owns each upstream stream. Revocation closes admission. Each Worker can finish a stream admitted before the revocation transaction. There is no actor library, per-job server, mailbox or alarm scheduler to operate.
 
@@ -95,7 +95,7 @@ A custom provider is registered with its complete HTTPS base URL including any p
 
 Configure providers once per installation with a stable route prefix, gateway provider slug, credential alias, protocol and catalog source. Keep historical explicit aliases with their original meanings. Preserve IDs such as `review-provider/<native-model>` when moving an installation; the UI may continue displaying just the model name. The upstream receives the native ID. The canonical OpenCode provider identity and any required session headers must work for a custom base URL.
 
-The application Worker's minute cron refreshes the [selectable model catalog](review-configuration.md#selectable-model-catalog). Each configured provider contributes its last complete list. The picker and settings writes use active candidates; grant issuance uses immutable route mappings. An older queued job therefore retains its original route after withdrawal from discovery. Removing the upstream provider or credential itself still requires checking outstanding jobs and grants.
+The application Worker's minute cron refreshes the [selectable model catalog](../review-configuration.md#selectable-model-catalog). Each configured provider contributes its last complete list. The picker and settings writes use active candidates; grant issuance uses immutable route mappings. An older queued job therefore retains its original route after withdrawal from discovery. Removing the upstream provider or credential itself still requires checking outstanding jobs and grants.
 
 Read the catalog and its refresh status through the authenticated operator
 endpoint `GET /api/review-configuration/catalog`. Neither reading this endpoint
@@ -133,8 +133,8 @@ Roll back one instance by draining, completing remote revocations and pending ma
 
 ## References
 
-- [Current LLM contracts and discovery](llm-service.md)
-- [Selection snapshots and operator API](review-configuration.md)
-- [Sandbox rollout and operational recovery](operations.md)
+- [Current LLM contracts and discovery](../llm-service.md)
+- [Selection snapshots and operator API](../review-configuration.md)
+- [Sandbox rollout and operational recovery](../operations.md)
 - [Cloudflare AI Gateway authentication](https://developers.cloudflare.com/ai-gateway/configuration/authentication/)
 - [Cloudflare AI Gateway BYOK](https://developers.cloudflare.com/ai-gateway/configuration/bring-your-own-keys/)

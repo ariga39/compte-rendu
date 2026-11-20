@@ -152,28 +152,17 @@ For a normal compatible release:
 
 ### Review deadline rollout
 
-The 90-minute review deadline is carried on the Runner claim, so Core and Runner
-may roll forward in either order. An older Runner keeps its own 30-minute limit
-even when a newer Core sends a 90-minute deadline; an older Core omits the
-GitHub read-token expiry, and a newer Runner then falls back to the claim
-deadline. Deploy the managed inference Worker as well when the four-times grant
-policy must become six hours. An older inference Worker still issues two-hour
-grants, which cover a 90-minute attempt. When either the claim deadline or the GitHub
-credential expiry margin ends an attempt, the Runner callback and evidence
-manifest identify the limit. The dashboard reports the timeout.
+Core sets a 90-minute deadline at claim time. Deploy the application Worker with
+`POST /runner-read-token` before upgrading the sbx Runner. A successful refresh
+replaces the active Sandbox's private GitHub token file. If renewal fails,
+the Runner uses the earlier of the claim deadline and the current token's expiry
+minus one minute. OpenShell and OpenSandbox use the initial token's expiry margin.
+The callback and evidence manifest identify the limiting clock for an exhausted
+attempt. The dashboard reports a timeout.
 
-Deploy the application Worker with `POST /runner-read-token` before the Runner
-that uses it. The sbx Runner authenticates to the same callback origin and
-rotates the active Sandbox's private token file. Rotation requires no additional
-GitHub permissions or configuration. Renewal failure keeps the current token's
-expiry limit. OpenShell and OpenSandbox retain the initial credential cap.
-
-Drain Runner before replacing its binary so every running attempt finishes under
-the version that admitted it. Do not reset a job's deadline during the restart;
-queued work is claimed after resume under the new deployment. To roll back to 30
-minutes, restore the previous Core and Runner deployments and drain the newer
-Runner before replacement. There is no schema migration for this rollback, and
-the older components ignore fields they do not know.
+Drain before replacing the Runner binary. Queued jobs receive their deadline when
+claimed after resume. The inference Worker issues six-hour grants, independently
+of the execution deadline.
 
 ### Migrating an existing two-Worker installation
 
@@ -298,7 +287,7 @@ errors, truncated inventory or failed removal leave cleanup unresolved.
 The original callback, manifest and terminal failure stay unchanged. Runner writes
 `cleanup-recovery.json` separately and sends an authenticated recovery report.
 Core retains a separate `cleanup-recoveries/` audit object and updates only the
-matching failed or superseded run's cleanup state and completion time. The original
+matching failed, superseded or cancelled run's cleanup state and completion time. The original
 terminal status and job identity remain unchanged; confirmed destruction releases
 the same-PR queue block without discarding recovery identity. New same-PR work can
 then be claimed. A delayed original callback cannot reverse

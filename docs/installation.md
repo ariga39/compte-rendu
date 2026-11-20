@@ -1,6 +1,6 @@
 # Installation and operations
 
-This guide installs one SvelteKit Worker and the self-hosted Runner.
+This guide installs the SvelteKit application Worker and the self-hosted Runner. Managed inference also requires an inference Worker and AI Gateway.
 For diagnosis, upgrades, rollback and uninstall, use [Operations](operations.md).
 It assumes one Cloudflare account, one or more explicitly allowlisted GitHub App installations, and the
 repository checkout that contains this file. It does not create resources or
@@ -856,8 +856,7 @@ corepack pnpm dlx wrangler@4.124.0 vpc service create <RUNNER_SERVICE_NAME> \
 ```
 
 Pass that UUID to `render:wrangler` as `<RUNNER_VPC_SERVICE_ID>`. Set the
-same bearer value in `RUNNER_AUTH_TOKEN` on the runner host and the core
-Worker secret; the model resolver command and token stay on the runner host.
+same bearer value in `RUNNER_AUTH_TOKEN` on the runner host and the application Worker secret. For managed inference, configure the upstream credential in AI Gateway.
 
 The VPC Service UUID is deployment data and does not belong in the tracked
 template. Also enable a `workers.dev` subdomain for the public ingress URL. See
@@ -947,8 +946,7 @@ uses the temporary invocation described above.
    corepack pnpm dlx wrangler@4.124.0 secret put RUNNER_AUTH_TOKEN --config apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc
    ```
 
-   The private key and Runner authentication credential belong only to
-   `<INSTANCE_NAME>-ingress`; the model credential remains on the runner host.
+   The application Worker holds the GitHub App private key and shares the Runner authentication token with the Runner. In managed relay mode, AI Gateway holds the upstream model credential and the inference Worker holds the Gateway Run token.
    Cloudflare's `secret put` creates and deploys a new Worker version
    immediately, so complete the D1 migration before these commands. Worker
    secrets are encrypted bindings and are intentionally separate from
@@ -992,7 +990,7 @@ uses the temporary invocation described above.
    On each upgrade, merge tracked template changes into those retained files as
    described in [Update and rollback](operations.md#update-and-rollback).
 
-The deployed variables-versus-secrets inventory is deliberately small:
+The application Worker needs the following base settings. Add the [dashboard login configuration](review-configuration.md#dashboard-sign-in-and-model-settings) for operator access and the [relay bindings](#configure-the-managed-inference-relay) for managed inference.
 
 | Worker                    | Plain variable                                               | Secrets                                                                                  | Non-secret bindings                                |
 | ------------------------- | ------------------------------------------------------------ | ---------------------------------------------------------------------------------------- | -------------------------------------------------- |
@@ -1040,40 +1038,10 @@ frozen when admitted. OpenShell does not support this multi-model path yet.
 
 Configure the [relay model catalog](llm-service.md#managed-relay-model-catalog) and verify it lists every selected route. Preserve old route IDs and their mappings while queued and running jobs reference them.
 
-Set a dedicated `REVIEW_CONFIGURATION_TOKEN` secret on the public SvelteKit Worker. The protected
-`GET /api/review-configuration` and `PUT /api/review-configuration` endpoints on
-the ingress origin require `Authorization: Bearer <operator token>`. They are
-not public dashboard APIs; do not put this token in browser code or URL parameters.
-The Runner callback token does not authorize configuration changes.
-
-Read the current configuration, then send its `revision` with a complete
-replacement selection. For example, if GET returned revision 0:
-
-```json
-{
-  "revision": 0,
-  "selection": {
-    "reviewers": ["deepseek-v4.1-flash", "step-5-preview"],
-    "synthesis": "deepseek-v4.1-flash"
-  }
-}
-```
-
-A successful PUT returns the new revision. A stale revision returns 409: reload
-and reconcile the setting before saving again. Invalid settings are rejected.
-To return new jobs to single-model review, PUT the current revision with
-`"selection": null`. Changes apply only to newly admitted jobs; queued and
-running jobs retain their frozen selection. No Runner restart is required for
-this selection change.
-
-Each job uses one Sandbox and one concurrency slot. A supervisor asks the
-configured models for independent reviews and combines their reports into one
-final decision and Markdown review. The agent manages the internal workflow;
-child reports do not have to follow a separate submission schema. All sessions
-share the job deadline and route-restricted grant. The retained `multi-review.json`,
-session exports, and manifest record the frozen selection and available session
-evidence. Runner validates the final submission and root-session completion.
-The public dashboard shows one job and one final decision; it has no settings editor.
+Set the installation default with `RELAY_DEFAULT_MODEL_ROUTE`. Sign in to
+`/settings` to select one reviewer for direct review or multiple reviewers
+and a synthesis model. Changes apply to newly admitted jobs. For access setup,
+the bearer-protected API and revision conflicts, see [review configuration](review-configuration.md).
 
 ### First-deployment acceptance gate
 
@@ -1138,10 +1106,7 @@ head SHA, and the single installation ID in the generated config.
 The unified SvelteKit Worker serves `/`, `/history`, `/help`, and `/jobs/<RUN_ID>`. The Help
 page explains navigation, task states, cleanup, refresh, and privacy. Its source is
 `apps/dashboard/src/lib/content/help.md`, compiled into the page by mdsvex at build time. Its public
-read APIs use only D1 through Core. Opening or refreshing these pages never
-queries GitHub or the Runner. The pages expose operational status and recorded
-milestones, not review bodies, evidence, logs, credentials, or administrative
-controls. A claimed row is a durable assignment, not proof of a live process.
+read APIs use only D1 through Core. Anonymous reads return recorded status and milestones. The header checks the current session separately. An authorized operator may cancel an eligible review from its detail view. A claimed row is a durable assignment, not proof of a live process.
 
 Set the optional Worker variable `DASHBOARD_ORIGIN` to the canonical HTTPS origin
 of the deployed Worker, without a path, query, or fragment. Enable it only after

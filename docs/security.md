@@ -7,16 +7,17 @@ record historical assumptions and observations, not current deployment policy.
 
 ## Trust boundaries
 
-| Boundary                       | Control                                                                                    |
-| ------------------------------ | ------------------------------------------------------------------------------------------ |
-| GitHub → public Worker         | HMAC verification, bounded payload, installation allowlist and event policy                |
-| Maintainer → review admission  | Current GitHub permission and immutable head checks                                        |
-| Runner → public Worker         | Authenticated claim/progress/callback, persisted job/attempt ownership                     |
-| Agent → GitHub                 | Repository-scoped read token injected through the runtime proxy; no publication credential |
-| Agent → model                  | Direct-provider proxy, or restricted expiring job grant to the managed inference Worker    |
-| Inference Worker → AI Gateway  | Account-scoped Gateway Run token and BYOK alias from the frozen grant mapping              |
-| Runner → host resources        | Per-job runtime ownership, bounded commands, deadlines, redaction and confirmed teardown   |
-| Core module → public dashboard | DB-only projection; unknown/private/expired repository identity removed server-side        |
+| Boundary                                | Control                                                                                             |
+| --------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| GitHub → public Worker                  | HMAC verification, bounded payload, installation allowlist and event policy                         |
+| Maintainer → review admission           | Current GitHub permission and immutable head checks                                                 |
+| Dashboard operator → application Worker | GitHub App user session, current GitHub identity, instance UID allowlist and same-origin mutations  |
+| Runner → public Worker                  | Authenticated claim, progress, read-token renewal and callback with persisted job/attempt ownership |
+| Agent → GitHub                          | Repository-scoped read token injected through the runtime proxy; no publication credential          |
+| Agent → model                           | Direct-provider proxy, or restricted expiring job grant to the managed inference Worker             |
+| Inference Worker → AI Gateway           | Account-scoped Gateway Run token and BYOK alias from the frozen grant mapping                       |
+| Runner → host resources                 | Per-job runtime ownership, bounded commands, deadlines, redaction and confirmed teardown            |
+| Core module → public dashboard          | DB-only projection; unknown/private/expired repository identity removed server-side                 |
 
 The public SvelteKit Worker holds the GitHub App private key and Runner secrets.
 Its Core module publishes reviews; it is an internal code boundary, not a separate
