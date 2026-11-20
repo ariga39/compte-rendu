@@ -521,6 +521,13 @@ dialog.cancel-confirm::backdrop {
 .timeline li[data-stage='received'] {
   --stage-color: #3ddbd9;
 }
+.timeline li[data-stage='cancelled'] {
+  --stage-color: #f1c21b;
+}
+.timeline li[data-stage='cleanup-failed'] {
+  --stage-color: #ff8389;
+}
+.timeline li[data-stage='cleanup-confirmed'],
 .timeline li[data-stage='publishing'] {
   --stage-color: #42be65;
 }

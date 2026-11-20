@@ -39,7 +39,7 @@
     liveIdentity,
     mergeMilestones,
   } from '#lib/model.ts';
-  import type { DetailModel, ExecutionStage, ProcessingStage } from '#lib/types.ts';
+  import type { DetailModel } from '#lib/types.ts';
 
   interface DetailNav {
     hasPrev: boolean;
@@ -545,7 +545,7 @@
               {@const current = index === currentIndex}
               {@const elapsed = Date.parse(milestone.startedAt) - Date.parse(view.receivedAt)}
               <li data-stage={milestone.stage} aria-current={current ? 'step' : undefined}>
-                <strong>{milestoneLabel(milestone.stage as ExecutionStage | ProcessingStage)}</strong>
+                <strong>{milestoneLabel(milestone.stage, view.status)}</strong>
                 {#if current}<span class="current-stage">Current</span>{/if}
                 <time datetime={milestone.startedAt}>{absoluteTime(milestone.startedAt)}</time>
                 {#if elapsed >= 0}<small title="Elapsed since received">+{formatDuration(elapsed)}</small>{/if}
@@ -562,7 +562,7 @@
         <StructuredList>
           {@render timeFact('Received', view.receivedAt)}
           {@render timeFact('Assigned', view.claimedAt)}
-          {@render timeFact('Finished', view.terminalAt)}
+          {@render timeFact(view.status === 'cancelled' ? 'Cancelled' : 'Finished', view.terminalAt)}
           {@render textFact('Time in queue', formatDuration(view.queueWaitMs))}
           {@render textFact('Total time', formatDuration(view.totalDurationMs))}
           {@render textFact(

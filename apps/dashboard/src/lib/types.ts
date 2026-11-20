@@ -29,6 +29,12 @@ export type ProcessingMilestone = PublicTaskDetail['processingMilestones'][numbe
 export type TaskDetail = PublicTaskDetail;
 
 export type ProcessingStage = 'received' | 'publishing';
+export type TimelineStage =
+  | ExecutionStage
+  | ProcessingStage
+  | 'cancelled'
+  | 'cleanup-confirmed'
+  | 'cleanup-failed';
 
 export type StatusFilter =
   | 'all'

@@ -1,5 +1,5 @@
 import { Schema } from 'effect';
-import { DEFAULT_REVIEW_NAME, GitHubSha } from '@compte-rendu/contracts';
+import { DEFAULT_REVIEW_NAME, GitHubSha, RETRY_REVIEW_ACTION } from '@compte-rendu/contracts';
 import { GitHubNotFoundError, GitHubRequestError, parseRetryAfterMs } from './github-http';
 import type { GitHubAdapter } from './index';
 import { formatReviewPublicationMarker } from './review-publication-format';
@@ -491,11 +491,20 @@ export const createGitHubPublicationAdapter = (
               : {
                   status: 'completed',
                   conclusion: status,
+                  ...(cancellationReason === 'manual' && {
+                    actions: [
+                      {
+                        label: 'Run review again',
+                        description: 'Review the current PR revision',
+                        identifier: RETRY_REVIEW_ACTION,
+                      },
+                    ],
+                  }),
                   output: {
                     title: 'Review cancelled',
                     summary:
                       cancellationReason === 'manual'
-                        ? 'An operator cancelled this review.'
+                        ? 'An operator cancelled this review. Use Run review again or comment `/ai-review` on the pull request to start a new review.'
                         : 'A newer pull request revision replaced this run.',
                   },
                 };

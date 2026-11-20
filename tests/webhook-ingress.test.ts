@@ -1294,7 +1294,10 @@ describe('Webhook ingress', () => {
     });
   });
 
-  it('ignores non-rerequested check events without contacting core', async () => {
+  it.each([
+    { action: 'completed' },
+    { action: 'requested_action', requested_action: { identifier: 'other' } },
+  ])('ignores unsupported Check action $action without contacting core', async (action) => {
     const forwarded: Request[] = [];
     const { events, log } = collectingLog();
     const worker = createIngressWorker({
@@ -1309,7 +1312,7 @@ describe('Webhook ingress', () => {
       },
     });
     const checkRun = await signedRequest({
-      action: 'completed',
+      ...action,
       installation: { id: 7 },
       repository: { id: 11 },
       check_run: { id: 555, external_id: 'run-ext-1' },

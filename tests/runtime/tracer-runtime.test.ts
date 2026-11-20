@@ -144,51 +144,61 @@ describe('local Worker runtime tracer', () => {
     expect(await runtimeHarness.readDeliveryOutcome(invalidDeliveryId)).toBeUndefined();
   });
 
-  it('routes a signed Check re-run through the unified application to a fresh current-revision Job', async () => {
-    const fixture = await SELF.fetch('https://tracer.internal/__test/failed-review', {
-      method: 'POST',
-    });
-    expect(fixture.status).toBe(200);
-    const failed = (await fixture.json()) as { runId: string; checkRunId: number };
-    const rerunPayload = {
-      action: 'rerequested',
-      installation: { id: 7 },
-      repository: { id: 11 },
-      sender: { login: 'maintainer' },
-      check_run: { id: failed.checkRunId, external_id: failed.runId, pull_requests: [] },
-    };
-    const rerunDelivery = 'runtime-check-rerequest';
-    const response = await runtimeHarness.send(
-      await signedWebhook(rerunDelivery, 'check_run', rerunPayload),
-    );
-    expect(response.status).toBe(202);
+  it.each([
+    ['failed', 'rerequested', 43],
+    ['cancelled', 'rerequested', 46],
+    ['cancelled', 'requested_action', 47],
+  ] as const)(
+    'restarts a %s review through a signed %s Check event',
+    async (status, action, pr) => {
+      const fixture = await SELF.fetch(`https://tracer.internal/__test/${status}-review?pr=${pr}`, {
+        method: 'POST',
+      });
+      expect(fixture.status).toBe(200);
+      const original = (await fixture.json()) as { runId: string; checkRunId: number };
+      const rerunPayload = {
+        action,
+        ...(action === 'requested_action'
+          ? { requested_action: { identifier: 'retry_review' } }
+          : {}),
+        installation: { id: 7 },
+        repository: { id: 11 },
+        sender: { login: 'maintainer' },
+        check_run: { id: original.checkRunId, external_id: original.runId, pull_requests: [] },
+      };
+      const rerunDelivery = `runtime-check-rerequest-${pr}`;
+      const response = await runtimeHarness.send(
+        await signedWebhook(rerunDelivery, 'check_run', rerunPayload),
+      );
+      expect(response.status).toBe(202);
 
-    const claim = await runtimeHarness.claim();
-    expect(claim.status).toBe(200);
-    const claimed = (await claim.json()) as CapturedRunnerJob;
-    expect(claimed).toMatchObject({
-      runId: expect.any(String),
-      attempt: 1,
-      pullRequestNumber: 43,
-      baseSha: '1111111111111111111111111111111111111111',
-      headSha: '3333333333333333333333333333333333333333',
-    });
-    expect(claimed.runId).not.toBe(failed.runId);
-    expect(await runtimeHarness.readDeliveryOutcome('runtime-failed-review')).toMatchObject({
-      runId: failed.runId,
-      status: 'failed',
-    });
+      const claim = await runtimeHarness.claim();
+      expect(claim.status).toBe(200);
+      const claimed = (await claim.json()) as CapturedRunnerJob;
+      expect(claimed).toMatchObject({
+        runId: expect.any(String),
+        attempt: 1,
+        pullRequestNumber: pr,
+        baseSha: '1111111111111111111111111111111111111111',
+        headSha: '3333333333333333333333333333333333333333',
+      });
+      expect(claimed.runId).not.toBe(original.runId);
+      expect(await runtimeHarness.readDeliveryOutcome(`runtime-original-${pr}`)).toMatchObject({
+        runId: original.runId,
+        status,
+      });
 
-    const replay = await runtimeHarness.send(
-      await signedWebhook(rerunDelivery, 'check_run', rerunPayload),
-    );
-    expect(replay.status).toBe(202);
-    expect(await runtimeHarness.readDeliveryOutcome(rerunDelivery)).toMatchObject({
-      runId: claimed.runId,
-      status: 'scheduled',
-    });
-    expect((await runtimeHarness.claim()).status).toBe(204);
-  });
+      const replay = await runtimeHarness.send(
+        await signedWebhook(rerunDelivery, 'check_run', rerunPayload),
+      );
+      expect(replay.status).toBe(202);
+      expect(await runtimeHarness.readDeliveryOutcome(rerunDelivery)).toMatchObject({
+        runId: claimed.runId,
+        status: 'scheduled',
+      });
+      expect((await runtimeHarness.claim()).status).toBe(204);
+    },
+  );
 
   it('renews a claimed read token through the unified application ingress', async () => {
     const renewalDelivery = 'runtime-tracer-read-renewal';

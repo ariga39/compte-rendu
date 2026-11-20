@@ -57,9 +57,49 @@ test('a cancelled review is distinct from failure and supersession', async ({
   await expect.poll(() => statusOf(page)).toBe('Cancelled');
   const text = (await page.locator('#content').textContent())?.replace(/\s+/g, ' ') ?? '';
   expect(text).toContain('Review cancelled; no review was published.');
+  await expect(page.getByRole('list', { name: 'Timeline' }).locator('li strong')).toHaveText([
+    'Cancelled by operator',
+  ]);
   expect(text).not.toContain('Did not finish successfully.');
   expect(text).not.toContain('A newer revision replaced this review.');
   await expect(page.locator('[data-testid="cancel-review"]')).toHaveCount(0);
+});
+
+test('timeline places the operator cancellation between review and teardown', async ({
+  page,
+  harness,
+  base,
+}) => {
+  const task = publicTask('cancel-timeline', {
+    status: 'cancelled',
+    dispatch: null,
+    claimedAt: NOW,
+    terminalAt: '2026-10-16T12:00:05.000Z',
+    cleanup: 'destroyed',
+    cleanupCompletedAt: '2026-10-16T12:00:14.000Z',
+    resultReceivedAt: '2026-10-16T12:00:15.000Z',
+  });
+  harness.setHandler(() =>
+    ok({
+      ...detailData(task),
+      milestones: [
+        { stage: 'agent', startedAt: NOW },
+        { stage: 'cleanup', startedAt: '2026-10-16T12:00:10.000Z' },
+      ],
+    }),
+  );
+  await page.goto(`${base}/jobs/cancel-timeline`);
+  const timeline = page.getByRole('list', { name: 'Timeline' });
+  await expect(timeline.locator('li strong')).toHaveText([
+    'Reviewing',
+    'Cancelled by operator',
+    'Finishing up',
+    'Sandbox cleanup confirmed',
+    'Runner callback received',
+  ]);
+  await expect(
+    timeline.getByText('Cancelled by operator').locator('..').locator('time'),
+  ).toHaveAttribute('datetime', task.terminalAt!);
 });
 
 test('a claimed cancellation stays Cancelling until cleanup is confirmed', async ({
