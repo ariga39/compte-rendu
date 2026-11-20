@@ -61,6 +61,7 @@ const ListedReview = Schema.Struct({
   ...ConfirmedReview.fields,
   user: Schema.NullOr(ConfirmedReview.fields.user),
 });
+const ReviewAuthor = Schema.Struct({ user: ListedReview.fields.user });
 const expectedReviewState = (event: 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT') =>
   event === 'APPROVE'
     ? 'APPROVED'
@@ -199,6 +200,7 @@ export const createGitHubPublicationAdapter = (
     value: unknown,
     expected: { headSha: string; event: 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT' },
     allowDismissed: boolean,
+    appLogin: string | undefined,
   ) => {
     let review: typeof ConfirmedReview.Type;
     try {
@@ -207,9 +209,9 @@ export const createGitHubPublicationAdapter = (
       throw new ReviewConfirmationFailed('GitHub review response is invalid');
     }
     if (
-      options.getReviewAuthorLogin === undefined ||
+      appLogin === undefined ||
       review.user.type !== 'Bot' ||
-      review.user.login !== (await options.getReviewAuthorLogin()) ||
+      review.user.login !== appLogin ||
       review.commit_id !== expected.headSha ||
       (review.state !== expectedReviewState(expected.event) &&
         !(allowDismissed && review.state === 'DISMISSED'))
@@ -229,8 +231,9 @@ export const createGitHubPublicationAdapter = (
     pullRequestNumber: number;
     installationId: number;
     marker: string;
-    expected?: { headSha: string; event: 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT' };
+    expected: { headSha: string; event: 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT' };
   }) => {
+    let appLogin: string | undefined;
     for (let page = 1; page <= maxReviewPages; page += 1) {
       const value = await requestJson(
         installationId,
@@ -238,11 +241,15 @@ export const createGitHubPublicationAdapter = (
       );
       const reviews = await Schema.decodeUnknownPromise(Schema.Array(Schema.Unknown))(value);
       const parsedReviews = await Schema.decodeUnknownPromise(ReviewRecords)(reviews);
-      const index = parsedReviews.findIndex((review) => review.body?.includes(marker));
-      if (index !== -1)
-        return expected === undefined
-          ? parsedReviews[index]
-          : confirmReview(reviews[index], expected, true);
+      for (const [index, record] of parsedReviews.entries()) {
+        if (!record.body?.includes(marker)) continue;
+        const { user } = await Schema.decodeUnknownPromise(ReviewAuthor)(reviews[index]);
+        if (!user || user.type !== 'Bot') continue;
+        appLogin ??= await options.getReviewAuthorLogin?.();
+        if (!appLogin) throw new ReviewConfirmationFailed('GitHub review author is unavailable');
+        if (user.login !== appLogin) continue;
+        return confirmReview(reviews[index], expected, true, appLogin);
+      }
       if (reviews.length < pageSize) return undefined;
     }
     throw new Error('GitHub review listing exceeded the safe page limit');
@@ -253,7 +260,7 @@ export const createGitHubPublicationAdapter = (
     pullRequestNumber: number;
     installationId: number;
     marker: string;
-    expected?: { headSha: string; event: 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT' };
+    expected: { headSha: string; event: 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT' };
   }) => {
     let attempt = 0;
     while (attempt < 2) {
@@ -627,6 +634,7 @@ export const createGitHubPublicationAdapter = (
                     value,
                     { headSha: payload.commit_id, event: payload.event },
                     false,
+                    await options.getReviewAuthorLogin?.(),
                   )
                 : await Schema.decodeUnknownPromise(CreatedReview)(value),
             };
@@ -641,9 +649,7 @@ export const createGitHubPublicationAdapter = (
                   pullRequestNumber,
                   installationId,
                   marker,
-                  ...(verifyPublication
-                    ? { expected: { headSha: payload.commit_id, event: payload.event } }
-                    : {}),
+                  expected: { headSha: payload.commit_id, event: payload.event },
                 });
               } catch {
                 throw new MarkerLookupFailed('GitHub review marker lookup failed');

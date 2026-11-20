@@ -651,7 +651,7 @@ export interface GitHubAdapter {
     pullRequestNumber: number;
     installationId: number;
     marker: string;
-    expected?: { headSha: GitHubShaValue; event: ReviewPublicationPayload['event'] };
+    expected: { headSha: GitHubShaValue; event: ReviewPublicationPayload['event'] };
   }): Promise<unknown>;
   dismissPreviousReviews?(input: {
     repositoryId: number;
@@ -1155,14 +1155,7 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
               pullRequestNumber: outcome.pullRequestNumber,
               installationId: outcome.installationId,
               marker,
-              ...(typeof decodedOutput === 'string'
-                ? {}
-                : {
-                    expected: {
-                      headSha: outcome.headSha!,
-                      event: payload.event,
-                    },
-                  }),
+              expected: { headSha: outcome.headSha!, event: payload.event },
             }),
           catch: () => undefined,
         }).pipe(

@@ -156,6 +156,7 @@ describe('structured review publication confirmation', () => {
       });
       if (scenario === 'valid' || scenario === 'dismissed')
         expect(await result).toMatchObject({ id: 123, state: record.state });
+      else if (scenario === 'author') await expect(result).resolves.toBeUndefined();
       else await expect(result).rejects.toThrow();
     },
   );
