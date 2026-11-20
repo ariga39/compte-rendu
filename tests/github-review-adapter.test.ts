@@ -91,6 +91,7 @@ describe('per-run dashboard Check links', () => {
         actions: [{ label: 'Run review again', identifier: 'retry_review' }],
       });
       expect(checks[0].output?.summary).toContain('An operator cancelled this review.');
+      expect(checks[0].output?.summary).toContain('wait for cleanup confirmation');
     },
   );
 });

@@ -504,7 +504,7 @@ export const createGitHubPublicationAdapter = (
                     title: 'Review cancelled',
                     summary:
                       cancellationReason === 'manual'
-                        ? 'An operator cancelled this review. Use Run review again or comment `/ai-review` on the pull request to start a new review.'
+                        ? 'An operator cancelled this review. If a Sandbox was assigned, wait for cleanup confirmation in the task details before retrying. Use Run review again or comment `/ai-review` on the pull request to start a new review.'
                         : 'A newer pull request revision replaced this run.',
                   },
                 };

@@ -51,7 +51,7 @@ Reviews are listed newest first, and filters stay in the page address so a filte
 
 ## Review details
 
-- **Received**, **Assigned**, and **Finished** are the recorded times for the review. Assigned means a runner took the review; it is not the start of execution.
+- **Received** and **Assigned** show when the review entered the queue and when a runner took it. The end time is labelled **Finished**, or **Cancelled** for a cancelled review. Assigned means a runner took the review; it is not the start of execution.
 - **Time in queue** and **Total time** are shown when both endpoints were recorded.
 - **Last progress update** is the most recent progress report, when there is one.
 - **Decision** is the review's conclusion: **Approve**, **Request changes**, or **Comment**, explained below.
@@ -67,7 +67,7 @@ Authorized operators see **Cancel review** on a queued or in-progress review unt
 
 After a cancellation is accepted, the review shows **Cancelling** while execution stops and resource cleanup is confirmed. It changes to **Cancelled** when no cleanup is outstanding. If cleanup fails, the review still shows **Cancelled** and **Cleanup failed** separately because an operator may need to intervene. A queued review that never reached a runner becomes **Cancelled** without a cleanup warning.
 
-The timeline shows when the operator cancelled the review and when sandbox cleanup finished, if recorded. To start a fresh review, a repository maintainer can select **Run review again** on the cancelled GitHub Check. For older Checks without that action, comment `/ai-review` on the PR.
+For cancelled reviews, the timeline marks the operator cancellation, the cleanup outcome and the Runner callback at their recorded times. If a Sandbox was assigned, wait for cleanup confirmation before retrying. To start a fresh review, a repository maintainer can select **Run review again** on the cancelled GitHub Check. For older Checks without that action, comment `/ai-review` on the PR.
 
 Cancellation is durable: refreshing the page, closing the tab, or signing out does not restart the review. If publication has already started, or the review has already reached another final state, cancellation is refused and the latest details are shown instead. An existing GitHub review is never withdrawn.
 
