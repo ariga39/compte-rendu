@@ -38,7 +38,13 @@ the persisted run. Check failure does not prevent execution or terminal feedback
 A Check is queued until claim, in progress after claim, and successful only after
 publication. On failure, Core requests a failed Check. A GitHub update error can leave the Check showing an earlier state. Supersession and manual cancellation complete it as cancelled, with distinct explanations.
 `details_url` points to that run's dashboard page. The configurable Check name
-also supplies the dashboard title.
+also supplies the dashboard title. A terminal Check update that GitHub temporarily
+rejects leaves durable D1 delivery work for the exact existing Check. The scheduled
+handler retries it from the persisted run status and decision; late setup and
+duplicate callbacks use the same path. Reconciliation never creates another Check
+or review, never regresses a terminal Check, and rotates bounded sweeps by last
+attempt so one unavailable Check cannot starve later runs. Manual cancellation keeps
+its separate reconciliation timestamps.
 
 Core is the only GitHub publisher. It derives repository, PR and commit from the
 admitted run, rechecks the head, and uses a publication claim plus run marker to

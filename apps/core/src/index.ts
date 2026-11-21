@@ -334,6 +334,11 @@ export type ReviewCancellationResult =
     }
   | { readonly kind: 'not_found'; readonly runId: string };
 
+export interface ReviewCheckDeliveryWorkItem {
+  readonly runId: string;
+  readonly checkRunId: number;
+}
+
 export interface ReviewCancellationWorkItem {
   readonly runId: string;
   readonly cancelledAt: string;
@@ -441,6 +446,20 @@ export interface ReviewStateQueries {
     setupClaim?: string;
   }): Promise<boolean>;
   markCheckSetupFailed?(input: { runId: string; setupClaim?: string }): Promise<boolean>;
+  claimCheckDelivery?(input: {
+    runId: string;
+    checkRunId: number;
+    occurredAt: string;
+    reopen?: boolean;
+  }): Promise<boolean>;
+  confirmCheckDelivery?(input: {
+    runId: string;
+    checkRunId: number;
+    occurredAt: string;
+  }): Promise<boolean>;
+  listPendingCheckDeliveries?(input: {
+    limit: number;
+  }): Promise<readonly ReviewCheckDeliveryWorkItem[]>;
   markRunCompleted(input: { runId: string; occurredAt: string }): Promise<boolean>;
   markRunSuperseded(input: {
     runId: string;
@@ -916,16 +935,16 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
   )
     return 'ignored' as const;
   if (outcome.status === 'cancelled') return 'cancelled' as const;
-  const updateCheck = Effect.fn('updateReviewCheck')(function* (status: 'failure' | 'cancelled') {
+  const updateCheck = Effect.fn('updateReviewCheck')(function* () {
     if (outcome.checkRunId === undefined || github.updateCheckRun === undefined) return;
+    const checkOccurredAt = yield* currentIso;
     yield* Effect.tryPromise({
       try: () =>
-        github.updateCheckRun!({
+        publishTerminalCheck({
+          github,
+          stateStore,
           runId: input.runId,
-          repositoryId: outcome.repositoryId,
-          installationId: outcome.installationId,
-          checkRunId: outcome.checkRunId!,
-          status,
+          occurredAt: checkOccurredAt,
         }),
       catch: () => undefined,
     }).pipe(Effect.catch(() => Effect.succeed(undefined)));
@@ -941,7 +960,7 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
     claimed: boolean,
   ) {
     if (!claimed) return;
-    yield* updateCheck('failure');
+    yield* updateCheck();
     if (github.createIssueComment === undefined) return;
     const created = yield* Effect.tryPromise({
       try: async () => {
@@ -983,7 +1002,7 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
         catch: () => undefined,
       }).pipe(Effect.catch(() => Effect.succeed(undefined)));
     }
-    yield* updateCheck('cancelled');
+    yield* updateCheck();
     yield* recordPublicationTerminal(log, input.runId, { outcome: 'superseded' });
     return 'ignored' as const;
   }
@@ -1154,7 +1173,7 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
         return 'failed' as const;
       }
       yield* manualReaction('confused');
-      yield* updateCheck('cancelled');
+      yield* updateCheck();
       yield* recordPublicationTerminal(log, input.runId, { outcome: 'superseded' });
       return 'ignored' as const;
     }
@@ -1219,7 +1238,7 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
         }),
       );
       if (failed) {
-        yield* updateCheck('failure');
+        yield* updateCheck();
         yield* recordPublicationTerminal(log, input.runId, {
           outcome: 'failed',
           reason: 'publication_uncertain',
@@ -1292,7 +1311,7 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
       return 'failed' as const;
     }
     yield* manualReaction('confused');
-    yield* updateCheck('cancelled');
+    yield* updateCheck();
     yield* recordPublicationTerminal(log, input.runId, { outcome: 'superseded' });
     return 'ignored' as const;
   }
@@ -1342,6 +1361,64 @@ const checkStatusForOutcome = (
           ? 'in_progress'
           : undefined;
 
+export const publishTerminalCheck = async (input: {
+  github: GitHubAdapter;
+  stateStore: ReviewCompletionStateStore;
+  runId: string;
+  occurredAt: string;
+  reopen?: boolean;
+}): Promise<boolean> => {
+  const { github, stateStore, runId, occurredAt, reopen } = input;
+  if (github.updateCheckRun === undefined || stateStore.getRunOutcome === undefined) return false;
+  const getRunOutcome = stateStore.getRunOutcome;
+  const outcome = await getRunOutcome(runId);
+  const status = checkStatusForOutcome(outcome);
+  if (
+    outcome === undefined ||
+    outcome.checkRunId === undefined ||
+    status === undefined ||
+    status === 'in_progress' ||
+    outcome.status === 'cancelled'
+  ) {
+    return false;
+  }
+  const checkRunId = outcome.checkRunId;
+  // Manual cancellation keeps its independent reconciliation timestamps.
+  if (
+    stateStore.claimCheckDelivery !== undefined &&
+    !(await stateStore.claimCheckDelivery({
+      runId,
+      checkRunId,
+      occurredAt,
+      ...(reopen === undefined ? {} : { reopen }),
+    }))
+  ) {
+    return false;
+  }
+  const current = await getRunOutcome(runId);
+  const currentStatus = checkStatusForOutcome(current);
+  if (
+    current === undefined ||
+    current.checkRunId !== checkRunId ||
+    currentStatus !== status ||
+    current.status === 'cancelled'
+  ) {
+    return false;
+  }
+  await github.updateCheckRun({
+    runId,
+    repositoryId: current.repositoryId,
+    installationId: current.installationId,
+    checkRunId,
+    status,
+    ...(status === 'success' && current.decision !== undefined
+      ? { decision: current.decision }
+      : {}),
+  });
+  await stateStore.confirmCheckDelivery?.({ runId, checkRunId, occurredAt });
+  return true;
+};
+
 const checkSetupLeaseDuration = { minutes: 1 } as const;
 
 const setupCheck = Effect.fn('setupCheck')(function* (
@@ -1389,25 +1466,55 @@ const setupCheck = Effect.fn('setupCheck')(function* (
           catch: () => undefined,
         }).pipe(Effect.catch(() => Effect.succeed(undefined)));
         const status = checkStatusForOutcome(current);
-        if (current !== undefined && status !== undefined && github.updateCheckRun !== undefined) {
-          yield* Effect.tryPromise({
+        const occurredAt = DateTime.formatIso(yield* DateTime.now);
+        const deliverTerminal = (outcome: ReviewOutcome, reopen = false) =>
+          Effect.tryPromise({
+            try: () =>
+              publishTerminalCheck({
+                github,
+                stateStore,
+                runId,
+                occurredAt,
+                ...(reopen ? { reopen: true } : {}),
+              }).then(() => outcome),
+            catch: () => undefined,
+          }).pipe(Effect.catch(() => Effect.succeed(undefined)));
+        const endCancelled = (outcome: ReviewOutcome) =>
+          Effect.tryPromise({
             try: () =>
               github.updateCheckRun!({
                 runId,
-                repositoryId: current.repositoryId,
-                installationId: current.installationId,
+                repositoryId: outcome.repositoryId,
+                installationId: outcome.installationId,
                 checkRunId: checkRun.id,
-                status,
-                ...(current.status === 'cancelled'
-                  ? { cancellationReason: 'manual' as const }
-                  : {}),
-                ...(status === 'success' && current.decision !== undefined
-                  ? { decision: current.decision }
-                  : {}),
-              }),
+                status: 'cancelled',
+                cancellationReason: 'manual',
+              }).then(() =>
+                stateStore.confirmCheckCancelled?.({
+                  runId,
+                  checkRunId: checkRun.id,
+                  occurredAt,
+                }),
+              ),
             catch: () => undefined,
           }).pipe(Effect.catch(() => Effect.succeed(undefined)));
-          if (status === 'in_progress') {
+        if (current !== undefined && status !== undefined && github.updateCheckRun !== undefined) {
+          if (current.status === 'cancelled') {
+            yield* endCancelled(current);
+          } else if (status !== 'in_progress') {
+            yield* deliverTerminal(current);
+          } else {
+            yield* Effect.tryPromise({
+              try: () =>
+                github.updateCheckRun!({
+                  runId,
+                  repositoryId: current.repositoryId,
+                  installationId: current.installationId,
+                  checkRunId: checkRun.id,
+                  status,
+                }),
+              catch: () => undefined,
+            }).pipe(Effect.catch(() => Effect.succeed(undefined)));
             const latest = yield* Effect.tryPromise({
               try: () => getRunOutcome(runId),
               catch: () => undefined,
@@ -1418,23 +1525,8 @@ const setupCheck = Effect.fn('setupCheck')(function* (
               latestStatus !== undefined &&
               latestStatus !== 'in_progress'
             ) {
-              yield* Effect.tryPromise({
-                try: () =>
-                  github.updateCheckRun!({
-                    runId,
-                    repositoryId: latest.repositoryId,
-                    installationId: latest.installationId,
-                    checkRunId: checkRun.id,
-                    status: latestStatus,
-                    ...(latest.status === 'cancelled'
-                      ? { cancellationReason: 'manual' as const }
-                      : {}),
-                    ...(latestStatus === 'success' && latest.decision !== undefined
-                      ? { decision: latest.decision }
-                      : {}),
-                  }),
-                catch: () => undefined,
-              }).pipe(Effect.catch(() => Effect.succeed(undefined)));
+              if (latest.status === 'cancelled') yield* endCancelled(latest);
+              else yield* deliverTerminal(latest, true);
             }
           }
         }
@@ -1546,12 +1638,11 @@ const claimAndSchedule = (
         if (supersededOutcome?.checkRunId !== undefined && github.updateCheckRun !== undefined) {
           yield* Effect.tryPromise({
             try: () =>
-              github.updateCheckRun!({
+              publishTerminalCheck({
+                github,
+                stateStore,
                 runId: supersededRunId,
-                repositoryId: supersededOutcome.repositoryId,
-                installationId: supersededOutcome.installationId,
-                checkRunId: supersededOutcome.checkRunId!,
-                status: 'cancelled',
+                occurredAt,
               }),
             catch: () => undefined,
           }).pipe(Effect.catch(() => Effect.succeed(undefined)));
@@ -1604,12 +1695,11 @@ const claimAndSchedule = (
       if (supersededOutcome?.checkRunId !== undefined && github.updateCheckRun !== undefined) {
         yield* Effect.tryPromise({
           try: () =>
-            github.updateCheckRun!({
+            publishTerminalCheck({
+              github,
+              stateStore,
               runId: claim.activeRunnerJob!.runId,
-              repositoryId: supersededOutcome.repositoryId,
-              installationId: supersededOutcome.installationId,
-              checkRunId: supersededOutcome.checkRunId!,
-              status: 'cancelled',
+              occurredAt,
             }),
           catch: () => undefined,
         }).pipe(Effect.catch(() => Effect.succeed(undefined)));
@@ -2060,6 +2150,16 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
       runnerStopAttemptedAt?: string;
       checkCancelAttemptedAt?: string;
       checkCancelReconciledAt?: string;
+    }
+  >();
+  const checkDeliveries = new Map<
+    string,
+    {
+      checkRunId: number;
+      status: 'pending' | 'confirmed';
+      createdAt: string;
+      attemptedAt: string;
+      confirmedAt?: string;
     }
   >();
   let nextRunId = 1;
@@ -2519,6 +2619,55 @@ export const createInMemoryReviewStateStore = (): ReviewPublicationStateStore =>
       run.checkSetupClaimedAt = undefined;
       return true;
     },
+    claimCheckDelivery: async ({ runId, checkRunId, occurredAt, reopen }) => {
+      const delivery = checkDeliveries.get(runId);
+      if (delivery === undefined) {
+        checkDeliveries.set(runId, {
+          checkRunId,
+          status: 'pending',
+          createdAt: occurredAt,
+          attemptedAt: occurredAt,
+        });
+        return true;
+      }
+      if (delivery.checkRunId !== checkRunId) return false;
+      if (delivery.status !== 'pending' && reopen !== true) return false;
+      delivery.status = 'pending';
+      delivery.attemptedAt = occurredAt;
+      delivery.confirmedAt = undefined;
+      return true;
+    },
+    confirmCheckDelivery: async ({ runId, checkRunId, occurredAt }) => {
+      const delivery = checkDeliveries.get(runId);
+      if (
+        delivery === undefined ||
+        delivery.status !== 'pending' ||
+        delivery.checkRunId !== checkRunId
+      ) {
+        return false;
+      }
+      delivery.status = 'confirmed';
+      delivery.confirmedAt = delivery.confirmedAt ?? occurredAt;
+      return true;
+    },
+    listPendingCheckDeliveries: async ({ limit }) =>
+      [...checkDeliveries.entries()]
+        .filter(([runId, delivery]) => {
+          const run = runs.get(runId);
+          return (
+            delivery.status === 'pending' &&
+            run !== undefined &&
+            run.checkRunId === delivery.checkRunId &&
+            (run.status === 'completed' || run.status === 'failed' || run.status === 'superseded')
+          );
+        })
+        .sort(
+          ([, left], [, right]) =>
+            left.attemptedAt.localeCompare(right.attemptedAt) ||
+            left.createdAt.localeCompare(right.createdAt),
+        )
+        .slice(0, limit)
+        .map(([runId, delivery]) => ({ runId, checkRunId: delivery.checkRunId })),
     claimStalledPublications: async (before, now, limit) => {
       const due = [...runs.values()]
         .filter(

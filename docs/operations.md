@@ -388,6 +388,16 @@ and cannot intentionally create a new review attempt. Retained evidence is not
 deleted after acceptance. If delivery remains uncertain, inspect the callback
 and Core diagnostics before retrying; do not edit the evidence or clear ownership.
 
+Terminal Check delivery is independent of publication. If GitHub transiently
+rejects the final PATCH, D1 retains pending work for that run's exact Check. The
+same cron retries it from the persisted terminal status and decision, including
+after a Worker restart, late Check setup or a duplicate callback. A bounded sweep
+takes the least recently attempted rows first, so a permanently unavailable Check
+does not block later deliveries. Retries only update the recorded Check; they do
+not create another Check or post another review, and a terminal Check is never
+moved back to an earlier state. Existing historical completed Checks are not swept.
+Manual cancellation continues to use its own Check reconciliation timestamps.
+
 ## Uninstall and cleanup
 
 This is destructive. Confirm the repository owner wants the run history and
