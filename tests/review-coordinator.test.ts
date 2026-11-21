@@ -317,7 +317,7 @@ describe('Review coordinator', () => {
     expect(await coordinator.completeReview({ runId: claimed.runId, output: '' })).toBe('failed');
     expect(reactions).toEqual(['-1']);
     expect(comments).toEqual([
-      `Review failed before a result could be published. Please retry with \`/ai-review\`.\n\n<!-- compte-rendu:failure:run:${claimed.runId} -->`,
+      `Review job failed. Check the reviews on this commit before retrying with \`/ai-review\`.\n\n<!-- compte-rendu:failure:run:${claimed.runId} -->`,
     ]);
     expect(checks).toEqual(['failure']);
   });
@@ -357,7 +357,7 @@ describe('Review coordinator', () => {
     expect(await coordinator.completeReview({ runId: claimed.runId, output: '' })).toBe('failed');
     expect(await coordinator.completeReview({ runId: claimed.runId, output: '' })).toBe('failed');
     expect(comments).toEqual([
-      `Review failed before a result could be published. Please retry with \`/ai-review\`.\n\n<!-- compte-rendu:failure:run:${claimed.runId} -->`,
+      `Review job failed. Check the reviews on this commit before retrying with \`/ai-review\`.\n\n<!-- compte-rendu:failure:run:${claimed.runId} -->`,
     ]);
   });
 
@@ -627,7 +627,7 @@ describe('Review coordinator', () => {
     ).toBe('failed');
     expect(remoteReviews).toHaveLength(1);
     expect(failureComments).toEqual([
-      `Review failed before a result could be published. Please retry with \`/ai-review\`.\n\n<!-- compte-rendu:failure:run:${runId} -->`,
+      `Review job failed. Check the reviews on this commit before retrying with \`/ai-review\`.\n\n<!-- compte-rendu:failure:run:${runId} -->`,
     ]);
     expect(await coordinator.handleReviewEvent(eligiblePrivatePullRequest)).toBe('failed');
     expect(events).toContainEqual({
