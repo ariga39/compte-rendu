@@ -133,6 +133,23 @@ describe('local Worker runtime tracer', () => {
     });
   });
 
+  it('accepts a signed installation removal larger than the D1 parameter limit', async () => {
+    const removed = Array.from({ length: 101 }, (_, i) => ({
+      id: 5000 + i,
+      name: `repo-${i}`,
+      full_name: `acme/repo-${i}`,
+      private: false,
+    }));
+    const response = await runtimeHarness.send(
+      await signedWebhook('runtime-bulk-removal', 'installation_repositories', {
+        action: 'removed',
+        installation: { id: 7 },
+        repositories_removed: removed,
+      }),
+    );
+    expect(response.status).toBe(202);
+  });
+
   it('rejects an invalid signature before admission and leaves no runtime outcome', async () => {
     const request = await signedWebhook(invalidDeliveryId);
     request.headers.set('x-hub-signature-256', `sha256=${'0'.repeat(64)}`);
