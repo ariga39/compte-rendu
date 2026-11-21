@@ -385,7 +385,6 @@ const waitForTerminal = async (
   runner: ReturnType<typeof createRunner>,
   jobId: string,
   attempts = 50,
-  advanceClock?: () => Promise<void>,
 ) => {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     const response = await runner.handle(
@@ -400,48 +399,16 @@ const waitForTerminal = async (
     };
     if (state.status === 'succeeded' || state.status === 'failed' || state.status === 'aborted')
       return state;
-    if (advanceClock === undefined) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    } else {
-      await advanceClock();
-    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error('Runner Job did not reach a terminal state');
 };
 
-// Advance fake timers only at public mock seams, then use a real timer for
-// cleanup's real filesystem work. This keeps the fake clock from racing the
-// event loop under CI load.
-const createSeamClock = (signals: {
-  readonly agentStarted: () => boolean;
-  readonly refreshStarted: () => boolean;
-  readonly agentDone: () => boolean;
-  readonly refreshAdvanceMs?: number;
-  readonly finishAdvanceMs?: number;
-}) => {
-  let realTimers = false;
-  const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
-  return async () => {
-    if (!signals.agentStarted()) {
-      await tick();
-      return;
-    }
-    if (!signals.refreshStarted()) {
-      await vi.advanceTimersByTimeAsync(signals.refreshAdvanceMs ?? 400);
-      await tick();
-      return;
-    }
-    if (!signals.agentDone()) {
-      await vi.advanceTimersByTimeAsync(signals.finishAdvanceMs ?? 1000);
-      await tick();
-      return;
-    }
-    if (!realTimers) {
-      realTimers = true;
-      vi.useRealTimers();
-    }
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  };
+// Trigger the refresh halfway through the 700ms fixture credential's life
+// while the agent is running. Filesystem completion and terminal polling use real time.
+const triggerAgentRefresh = async () => {
+  await vi.advanceTimersByTimeAsync(400);
+  vi.useRealTimers();
 };
 
 const runAgentScenario = async (scenario: {
@@ -671,15 +638,12 @@ const runReminderScenario = async (scenario: {
   advanceOnCreateMs?: number;
   createTimedOut?: boolean;
   advanceOnSessionExportMs?: number;
-  agentDelayMs?: number;
+  duringAgent?: () => Promise<void>;
   expectedRotatedToken?: string;
   readTokenFetch?: typeof fetch;
   cleanupStderr?: string;
   logEvents?: unknown[];
   terminalAttempts?: number;
-  driveClock?: () => Promise<void>;
-  onAgentStart?: () => void;
-  onAgentDone?: () => void;
 }) => {
   const baseSha = '1111111111111111111111111111111111111111';
   const headSha = '2222222222222222222222222222222222222222';
@@ -695,6 +659,10 @@ const runReminderScenario = async (scenario: {
     readonly authorization: string | null;
     readonly body: Record<string, unknown>;
   }> = [];
+  let resumeTerminalPolling!: () => void;
+  const agentClockRestored = new Promise<void>((resolve) => {
+    resumeTerminalPolling = resolve;
+  });
   let githubTokenPath: string | undefined;
   let githubSecretArgs: readonly string[] | undefined;
   let agentRuns = 0;
@@ -769,12 +737,10 @@ const runReminderScenario = async (scenario: {
         agentRuns += 1;
         agentCommands.push([...args]);
         agentTimeouts.push(options.timeoutMs);
-        scenario.onAgentStart?.();
         githubTokenSnapshots.push(await readGithubToken());
         await writeEvidenceFixture(args, options, round.output);
-        if (scenario.agentDelayMs !== undefined) {
-          await new Promise((resolve) => setTimeout(resolve, scenario.agentDelayMs));
-        }
+        await scenario.duringAgent?.();
+        resumeTerminalPolling();
         if (scenario.expectedRotatedToken !== undefined) {
           // The on-demand secret command reads a real file. A response from
           // Core can precede the atomic rename that makes it visible here.
@@ -784,7 +750,6 @@ const runReminderScenario = async (scenario: {
         if (round.advanceMs !== undefined) {
           vi.setSystemTime(Date.now() + round.advanceMs);
         }
-        scenario.onAgentDone?.();
         return {
           exitCode: round.exitCode ?? 0,
           stdout: `${round.output}\n`,
@@ -851,12 +816,8 @@ const runReminderScenario = async (scenario: {
     }),
   );
   const { id } = (await submitted.json()) as { id: string };
-  const terminal = await waitForTerminal(
-    runner,
-    id,
-    scenario.terminalAttempts,
-    scenario.driveClock,
-  );
+  if (scenario.duringAgent) await agentClockRestored;
+  const terminal = await waitForTerminal(runner, id, scenario.terminalAttempts);
   const manifest = JSON.parse(
     await readFile(
       join(sharedEvidenceRoot, terminal.evidenceId as string, 'manifest.json'),
@@ -2402,13 +2363,10 @@ describe('Runner Job HTTP interface', () => {
   });
 
   it('rotates the same sandbox credential before its first expiry during a long run', async () => {
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
     const start = Date.now();
     const markdown = '## Review:\n\nRotated credential.';
     const requestBodies: Array<Record<string, unknown>> = [];
-    let agentStarted = false;
-    let agentDone = false;
-    let refreshStarted = false;
     try {
       const result = await runReminderScenario({
         runId: 'run-read-token-rotated',
@@ -2416,19 +2374,8 @@ describe('Runner Job HTTP interface', () => {
         repositoryReadTokenExpiresAt: start + 700,
         expectedRotatedToken: 'rotated-github-read-token',
         terminalAttempts: 300,
-        driveClock: createSeamClock({
-          agentStarted: () => agentStarted,
-          refreshStarted: () => refreshStarted,
-          agentDone: () => agentDone,
-        }),
-        onAgentStart: () => {
-          agentStarted = true;
-        },
-        onAgentDone: () => {
-          agentDone = true;
-        },
+        duringAgent: triggerAgentRefresh,
         readTokenFetch: async (_input, init) => {
-          refreshStarted = true;
           requestBodies.push(
             typeof init?.body === 'string'
               ? (JSON.parse(init.body) as Record<string, unknown>)
@@ -2477,14 +2424,11 @@ describe('Runner Job HTTP interface', () => {
   });
 
   it('retains the rotated read token for cleanup diagnostic redaction', async () => {
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
     const start = Date.now();
     const markdown = '## Review:\n\nRotated canary.';
     const canary = 'synthetic-rotated-canary';
     const logEvents: unknown[] = [];
-    let agentStarted = false;
-    let agentDone = false;
-    let refreshStarted = false;
     try {
       const result = await runReminderScenario({
         runId: 'run-read-token-cleanup-redaction',
@@ -2494,19 +2438,8 @@ describe('Runner Job HTTP interface', () => {
         terminalAttempts: 300,
         cleanupStderr: `cleanup failed: ${canary}`,
         logEvents,
-        driveClock: createSeamClock({
-          agentStarted: () => agentStarted,
-          refreshStarted: () => refreshStarted,
-          agentDone: () => agentDone,
-        }),
-        onAgentStart: () => {
-          agentStarted = true;
-        },
-        onAgentDone: () => {
-          agentDone = true;
-        },
+        duringAgent: triggerAgentRefresh,
         readTokenFetch: async () => {
-          refreshStarted = true;
           return Response.json({
             token: canary,
             expiresAt: new Date(Date.now() + 100 * 60 * 1000).toISOString(),
@@ -2617,34 +2550,21 @@ describe('Runner Job HTTP interface', () => {
   );
 
   it('ignores a read-token refresh response that arrives after cleanup', async () => {
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
     const start = Date.now();
     const markdown = '## Review:\n\nLate refresh ignored.';
     let releaseRefresh!: (response: Response) => void;
     const refreshResponse = new Promise<Response>((resolve) => {
       releaseRefresh = resolve;
     });
-    let agentStarted = false;
-    let agentDone = false;
     let refreshStarted = false;
     try {
       const result = await runReminderScenario({
         runId: 'run-read-token-cleanup-race',
         claimDeadlineAt: start + 90 * 60 * 1000,
         repositoryReadTokenExpiresAt: start + 700,
-        agentDelayMs: 1000,
         terminalAttempts: 300,
-        driveClock: createSeamClock({
-          agentStarted: () => agentStarted,
-          refreshStarted: () => refreshStarted,
-          agentDone: () => agentDone,
-        }),
-        onAgentStart: () => {
-          agentStarted = true;
-        },
-        onAgentDone: () => {
-          agentDone = true;
-        },
+        duringAgent: triggerAgentRefresh,
         readTokenFetch: async () => {
           refreshStarted = true;
           return refreshResponse;
