@@ -468,6 +468,12 @@ export type OperationalLogEvent =
     }
   | {
       readonly phase: 'publication';
+      readonly outcome: 'reconciliation_incomplete';
+      readonly runId: string;
+      readonly reason: 'state' | 'evidence' | 'publication' | 'check';
+    }
+  | {
+      readonly phase: 'publication';
       readonly outcome: 'published';
       readonly runId: string;
     }

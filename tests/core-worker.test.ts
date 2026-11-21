@@ -3542,9 +3542,12 @@ describe('Core Worker', () => {
       });
       const newPublications: unknown[] = [];
       const markerLookups: unknown[] = [];
+      const { fetcher, requests } = capturePostHogTransport();
+      const diagnostics: unknown[] = [];
       const worker = createCoreWorker(
         {
           ...coreEnv(database),
+          ...postHogTestDefaults.environment,
           EVIDENCE_BUCKET: {
             put: async (key, data) => {
               if (typeof data === 'string') archive.set(key, data);
@@ -3558,6 +3561,11 @@ describe('Core Worker', () => {
           },
         },
         {
+          log: {
+            record: (event) => {
+              diagnostics.push(event);
+            },
+          },
           github: {
             loadReviewTarget: async () => ({ headSha: eligibleEvent.headSha }),
             findReviewByMarker: async (input) => {
@@ -3600,9 +3608,29 @@ describe('Core Worker', () => {
           archive.set(key, original.replace('"version":1', '"version":2'));
           await expect(worker.reconcilePublications(now)).rejects.toThrow();
           expect((await stateStore.getRunOutcome(claimed.runId))?.status).toBe('scheduled');
+          expect(diagnostics).toContainEqual({
+            phase: 'publication',
+            outcome: 'reconciliation_incomplete',
+            runId: claimed.runId,
+            reason: 'evidence',
+          });
           archive.set(key, original);
+          await expect(worker.reconcilePublications(now + 60_000)).rejects.toThrow();
+          expect(diagnostics).toContainEqual({
+            phase: 'publication',
+            outcome: 'reconciliation_incomplete',
+            runId: claimed.runId,
+            reason: 'publication',
+          });
           markerAvailable = true;
-          await worker.reconcilePublications(now + 60_000);
+          await worker.reconcilePublications(now + 120_000);
+          expect(await postHogEvents(requests)).toContainEqual(
+            expect.objectContaining({
+              event: 'review finished',
+              distinct_id: claimed.runId,
+              properties: expect.objectContaining({ outcome: published ? 'completed' : 'failed' }),
+            }),
+          );
           expect((await stateStore.getRunOutcome(claimed.runId))?.status).toBe(
             published ? 'completed' : 'failed',
           );
@@ -3623,6 +3651,7 @@ describe('Core Worker', () => {
           ...(published && { decision: 'request_changes' }),
         });
       } finally {
+        fetcher.mockRestore();
         database.close();
       }
     },
@@ -4367,7 +4396,7 @@ describe('Core Worker', () => {
           conclusion: 'failure',
           output: {
             title: 'Review failed',
-            summary: 'See the failure comment on this pull request.',
+            summary: 'Open the job details for the recorded failure.',
           },
         },
       },
