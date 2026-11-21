@@ -1143,12 +1143,17 @@ export const createCoreWorker = (
           new Date(now).toISOString(),
           4,
         )) ?? [];
-      const lifecycle = createPostHogLifecycleLog(env, undefined);
+      const captures: Promise<unknown>[] = [];
+      const lifecycle = createPostHogLifecycleLog(env, {
+        waitUntil: (task) => captures.push(task),
+      });
       let incomplete = false;
       for (const runId of ids) {
+        let reason: 'state' | 'evidence' | 'publication' | 'check' = 'state';
         try {
           const outcome = await stateStore.getRunOutcome(runId);
           if (outcome?.status !== 'scheduled' || !outcome.publicationClaimedAt) continue;
+          reason = 'evidence';
           const evidence = outcome.evidence;
           const key = `reviews/${runId}`;
           if (!evidence || evidence.key !== key || evidence.size > MAX_RUNNER_CALLBACK_BYTES)
@@ -1180,13 +1185,30 @@ export const createCoreWorker = (
           const review = decodeArtifact(archive.evidence.validatedReview.content);
           if (!review) throw new Error('Invalid review artifact');
           const output = manifest.result ?? new TextDecoder().decode(review);
-          await createCoordinator(lifecycle).completeReview({
+          reason = 'publication';
+          const disposition = await createCoordinator(lifecycle).completeReview({
             runId,
             output,
             reconcileClaimedAt: outcome.publicationClaimedAt,
           });
           const settled = await stateStore.getRunOutcome(runId);
-          if (settled?.status === 'completed' && settled.checkRunId !== undefined) {
+          if (!settled || settled.status === 'scheduled')
+            throw new Error('Publication still pending');
+          if (
+            (settled.status === 'completed' || settled.status === 'failed') &&
+            disposition === settled.status
+          ) {
+            await recordFinishedLifecycle(
+              lifecycle,
+              settled,
+              settled.status,
+              undefined,
+              settled.status === 'failed' ? { phase: 'publication', reason: 'unknown' } : undefined,
+              runId,
+            );
+          }
+          if (settled.status === 'completed' && settled.checkRunId !== undefined) {
+            reason = 'check';
             await github.updateCheckRun?.({
               runId,
               repositoryId: settled.repositoryId,
@@ -1196,11 +1218,21 @@ export const createCoreWorker = (
               decision: settled.decision,
             });
           }
-          if (!settled || settled.status === 'scheduled') incomplete = true;
         } catch {
           incomplete = true;
+          try {
+            await log.record({
+              phase: 'publication',
+              outcome: 'reconciliation_incomplete',
+              runId,
+              reason,
+            });
+          } catch {
+            // Continue reconciling other runs if the log sink fails.
+          }
         }
       }
+      await Promise.allSettled(captures);
       if (incomplete) throw new Error('Publication reconciliation incomplete');
     },
     ...createJobControl(stateStore, github, runner, log),

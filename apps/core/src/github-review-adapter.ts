@@ -492,7 +492,7 @@ export const createGitHubPublicationAdapter = (
                   conclusion: status,
                   output: {
                     title: 'Review failed',
-                    summary: 'See the failure comment on this pull request.',
+                    summary: 'Open the job details for the recorded failure.',
                   },
                 }
               : {
