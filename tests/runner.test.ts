@@ -5,7 +5,9 @@ import { join } from 'node:path';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 import {
   createRunner as createProductionRunner,
+  runProcess,
   type RunnerProcess,
+  type RunnerProcessOptions,
   type RunnerProcessResult,
 } from '../apps/runner/src/runner';
 import { createCoreWorker } from '../apps/core/src/core-worker';
@@ -468,6 +470,8 @@ const runAgentScenario = async (scenario: {
   relayControl?: RelayControl;
   sessionExport?: string;
   evidenceRoot?: string;
+  repositoryReadToken?: string;
+  agentProcess?: (options: RunnerProcessOptions) => Promise<RunnerProcessResult>;
   logEvents?: unknown[];
   onRunner?: (runner: ReturnType<typeof createRunner>) => void;
   terminalAttempts?: number;
@@ -535,6 +539,14 @@ const runAgentScenario = async (scenario: {
             },
           },
     process: async (_command, args, options = {}) => {
+      const isAgent = args[0] === 'exec' && args.includes('--agent');
+      if (isAgent && scenario.agentProcess !== undefined) {
+        await scenario.onAgentStart?.();
+        await scenario.agentGate;
+        agentInvoked = true;
+        agentArgs = args;
+        return scenario.agentProcess(options);
+      }
       await writeEvidenceFixture(args, options, scenario.output);
       if (args[0] === 'cp' && /opencode-export-[A-Za-z0-9._:-]+\.json$/.test(args[1])) {
         const sessionExport =
@@ -559,7 +571,6 @@ const runAgentScenario = async (scenario: {
       if (args[0] === 'policy' && args[1] === 'rm') {
         removedRuleIds.push(args[args.indexOf('--id') + 1]);
       }
-      const isAgent = args[0] === 'exec' && args.includes('--agent');
       if (isAgent) {
         await scenario.onAgentStart?.();
         await scenario.agentGate;
@@ -615,6 +626,9 @@ const runAgentScenario = async (scenario: {
       body: JSON.stringify({
         ...runnerJobFields,
         ...(reviewConfiguration === undefined ? {} : { reviewConfiguration }),
+        ...(scenario.repositoryReadToken === undefined
+          ? {}
+          : { repositoryReadToken: scenario.repositoryReadToken }),
         runId: scenario.runId,
         attempt: 1,
         repositoryUrl: 'https://github.com/acme/reviewed.git',
@@ -655,6 +669,7 @@ type ReminderRound = {
   readonly exitCode?: number;
   readonly timedOut?: boolean;
   readonly truncated?: boolean;
+  readonly credentialObserved?: boolean;
   readonly advanceMs?: number;
   readonly exportFinish?: string;
   readonly finalText?: string | null;
@@ -790,6 +805,7 @@ const runReminderScenario = async (scenario: {
           stdout: `${round.output}\n`,
           timedOut: round.timedOut ?? false,
           truncated: round.truncated ?? false,
+          ...(round.credentialObserved === true ? { credentialObserved: true } : {}),
         };
       }
       await writeEvidenceFixture(args, options, '');
@@ -1630,6 +1646,42 @@ describe('Runner Job HTTP interface', () => {
     });
   });
 
+  it('rejects a valid result when a job credential appears only on stderr', async () => {
+    const credential = 'stderr-only-job-credential';
+    const resultLine = finalMarkdownJsonl();
+    const { terminal, manifest } = await runAgentScenario({
+      runId: 'run-282-stderr-credential',
+      output: resultLine,
+      repositoryReadToken: credential,
+      agentProcess: (options) =>
+        runProcess(
+          'sh',
+          ['-c', `printf '%s\\n' '${resultLine}'; printf 'warning ${credential}\\n' >&2`],
+          {
+            ...options,
+            stderrRedactions: [...(options.stderrRedactions ?? []), credential],
+          },
+        ),
+    });
+
+    expect(terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'evidence' },
+      evidence: { status: 'incomplete' },
+      sandbox: { cleanup: 'destroyed' },
+    });
+    expect(terminal).not.toHaveProperty('result');
+    expect(manifest).toMatchObject({
+      evidence: { status: 'incomplete' },
+      evidenceFailure: 'credential-in-output',
+      terminal: { status: 'failed', reason: 'evidence' },
+    });
+    const archive = join(sharedEvidenceRoot, terminal.evidenceId as string);
+    const stderrEvidence = await readFile(join(archive, 'opencode.stderr'), 'utf8');
+    expect(stderrEvidence).toBe('warning [redacted]\n');
+    expect(stderrEvidence).not.toContain(credential);
+  });
+
   it('does not treat stderr capture truncation alone as invalid output', async () => {
     const { terminal, manifest } = await runAgentScenario({
       runId: 'run-90-stderr-truncated-only',
@@ -1850,6 +1902,35 @@ describe('Runner Job HTTP interface', () => {
     await expect(readFile(join(evidencePath, 'validated-review.md'), 'utf8')).resolves.toBe(
       reminderMarkdown,
     );
+  });
+
+  it('rejects a correction that observed a job credential on its scrubbed stream', async () => {
+    const reminderMarkdown = '## Review:\n\nCorrection with credential.';
+    const result = await runReminderScenario({
+      runId: 'run-282-correction-credential',
+      rounds: [
+        { output: completedWithoutSubmitJsonl('session-reminder'), finalText: null },
+        {
+          output: finalMarkdownJsonl(reminderMarkdown, 'session-reminder'),
+          finalText: JSON.stringify({ decision: 'comment', markdown: reminderMarkdown }),
+          credentialObserved: true,
+        },
+      ],
+    });
+
+    expect(result.agentRuns).toBe(2);
+    expect(result.terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'evidence' },
+      evidence: { status: 'incomplete' },
+      sandbox: { cleanup: 'destroyed' },
+    });
+    expect(result.terminal).not.toHaveProperty('result');
+    expect(result.manifest).toMatchObject({
+      evidence: { status: 'incomplete' },
+      evidenceFailure: 'credential-in-output',
+      terminal: { status: 'failed', reason: 'evidence' },
+    });
   });
 
   it('accepts a V2 final-text session with one correction turn', async () => {
