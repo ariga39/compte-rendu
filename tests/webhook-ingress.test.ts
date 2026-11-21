@@ -99,6 +99,24 @@ describe('Webhook ingress', () => {
     expect(forwarded[0]?.headers.get('x-compte-rendu-runner-claim')).toBe('verified');
   });
 
+  it('forwards an empty Runner claim without creating a response body', async () => {
+    const worker = createIngressWorker({
+      secret,
+      crypto: globalThis.crypto,
+      runnerCallbackToken: 'callback-token',
+      core: { fetch: async () => new Response(null, { status: 204 }) },
+    });
+    const reply = await worker.fetch(
+      new Request('https://ingress.internal/runner-claim', {
+        method: 'POST',
+        headers: { authorization: 'Bearer callback-token' },
+        body: '{}',
+      }),
+    );
+    expect(reply.status).toBe(204);
+    expect(reply.body).toBeNull();
+  });
+
   it('rejects an unauthenticated Runner claim without contacting core', async () => {
     const forwarded: Request[] = [];
     const worker = createIngressWorker({
