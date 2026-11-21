@@ -3638,6 +3638,16 @@ describe('Core Worker', () => {
           expect((await worker.fetch(request())).status).toBe(published ? 202 : 503);
         }
         expect((await worker.fetch(request())).status).toBe(202);
+        if (scheduled) {
+          const finished = (await postHogEvents(requests)).filter(
+            (event) =>
+              typeof event === 'object' &&
+              event !== null &&
+              'event' in event &&
+              event.event === 'review finished',
+          );
+          expect(finished).toHaveLength(1);
+        }
         expect(newPublications).toEqual([]);
         expect(markerLookups).toContainEqual({
           repositoryId: 11,

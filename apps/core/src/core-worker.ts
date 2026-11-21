@@ -695,7 +695,6 @@ export const createCoreWorker = (
       }
       if (outcome.status === 'failed') {
         await markCallbackFailed();
-        await recordFinishedLifecycle(lifecycleLog, outcome, 'failed', callback);
         return new Response(null, { status: 202 });
       }
       if (outcome.status !== 'scheduled') return new Response(null, { status: 202 });
