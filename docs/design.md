@@ -20,8 +20,9 @@ Human events and manual requests do not consult that Bot allowlist.
 Public fork PRs and non-allowlisted Bot PRs require `/ai-review` from a user with
 current `write`, `maintain` or `admin` permission. Approval binds to the observed
 head SHA; a new head needs new authorization. Manual feedback uses GitHub
-reactions: `eyes` for admission, `confused` for denial/draft/supersession, and `-1`
-for an admitted run that fails. The published review is the success signal.
+reactions: `eyes` for admission, `confused` for denial or a draft, and `-1`
+for an admitted run that fails. Supersession during completion also adds
+`confused`; a queued run superseded before execution can have only its Check updated. The published review is the success signal.
 
 `check_run.rerequested` and `check_suite.rerequested` can retry a failed or manually cancelled review
 under the same current maintainer checks. Manually cancelled Checks also offer
@@ -41,8 +42,8 @@ also supplies the dashboard title.
 
 Core is the only GitHub publisher. It derives repository, PR and commit from the
 admitted run, rechecks the head, and uses a publication claim plus run marker to
-suppress duplicates. New structured results also verify the returned/recovered
-review author, commit and state. A changed head is superseded without a stale
+suppress duplicates. Marker recovery verifies the App author, commit and review
+state for both structured results and legacy comment-only reviews. A changed head is superseded without a stale
 vote. GitHub reads and the subsequent POST are not atomic; an ambiguous response
 is not proof that no review was published.
 
