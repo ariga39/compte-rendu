@@ -20,6 +20,7 @@ import {
   createGitHubPublicationAdapter,
   createGitHubAppTokenProvider,
   createReviewCoordinator,
+  publishTerminalCheck,
   resetPreviousReviewVerdicts,
   createRunnerJobClient,
   type CoreLifecycleLog,
@@ -245,7 +246,10 @@ export const createCoreWorker = (
   env: CoreWorkerEnv,
   dependencies: CoreWorkerDependencies = {},
 ): WorkerEntrypoint<CoreWorkerEnv> &
-  ReturnType<typeof createJobControl> & { reconcilePublications(now: number): Promise<void> } => {
+  ReturnType<typeof createJobControl> & {
+    reconcileCheckDeliveries(now: number): Promise<void>;
+    reconcilePublications(now: number): Promise<void>;
+  } => {
   const tokenProvider = createGitHubAppTokenProvider({
     appId: env.GITHUB_APP_ID,
     privateKey: env.GITHUB_APP_PRIVATE_KEY,
@@ -421,21 +425,8 @@ export const createCoreWorker = (
         })
         .catch(() => undefined);
     }
-    if (
-      notificationClaimed &&
-      failed &&
-      winner.checkRunId !== undefined &&
-      github.updateCheckRun !== undefined
-    ) {
-      await github
-        .updateCheckRun({
-          runId,
-          repositoryId: winner.repositoryId,
-          installationId: winner.installationId,
-          checkRunId: winner.checkRunId,
-          status: 'failure',
-        })
-        .catch(() => undefined);
+    if (failed && winner.checkRunId !== undefined && github.updateCheckRun !== undefined) {
+      await publishTerminalCheck({ github, stateStore, runId, occurredAt }).catch(() => undefined);
     }
     if (notificationClaimed && failed && github.createIssueComment !== undefined) {
       try {
@@ -588,6 +579,14 @@ export const createCoreWorker = (
         .catch(() => false);
     }
     if (outcome.status === 'completed') {
+      if (outcome.checkRunId !== undefined && github.updateCheckRun !== undefined) {
+        await publishTerminalCheck({
+          github,
+          stateStore,
+          runId: callback.runId,
+          occurredAt: new Date().toISOString(),
+        }).catch(() => undefined);
+      }
       return new Response(null, { status: outcome.evidence === undefined ? 409 : 202 });
     }
     const markCallbackFailed = async () => {
@@ -690,6 +689,14 @@ export const createCoreWorker = (
             content: 'confused',
           });
         }
+        if (outcome.checkRunId !== undefined && github.updateCheckRun !== undefined) {
+          await publishTerminalCheck({
+            github,
+            stateStore,
+            runId: callback.runId,
+            occurredAt: new Date().toISOString(),
+          }).catch(() => undefined);
+        }
         await recordFinishedLifecycle(lifecycleLog, outcome, 'superseded', callback);
         return new Response(null, { status: 202 });
       }
@@ -727,16 +734,12 @@ export const createCoreWorker = (
         finalOutcome.checkRunId !== undefined &&
         github.updateCheckRun !== undefined
       ) {
-        await github
-          .updateCheckRun({
-            runId: callback.runId,
-            repositoryId: finalOutcome.repositoryId,
-            installationId: finalOutcome.installationId,
-            checkRunId: finalOutcome.checkRunId,
-            status: 'success',
-            ...(finalOutcome.decision === undefined ? {} : { decision: finalOutcome.decision }),
-          })
-          .catch(() => undefined);
+        await publishTerminalCheck({
+          github,
+          stateStore,
+          runId: callback.runId,
+          occurredAt: new Date().toISOString(),
+        }).catch(() => undefined);
       }
       return new Response(null, { status: finalOutcome.status === 'failed' ? 503 : 202 });
     }
@@ -999,15 +1002,12 @@ export const createCoreWorker = (
         if (superseded?.status !== 'superseded' || superseded.runnerJobId !== undefined)
           throw new Error('Supersession failed');
         if (superseded.checkRunId !== undefined && github.updateCheckRun !== undefined) {
-          await github
-            .updateCheckRun({
-              runId: claim.runId,
-              repositoryId: superseded.repositoryId,
-              installationId: superseded.installationId,
-              checkRunId: superseded.checkRunId,
-              status: 'cancelled',
-            })
-            .catch(() => undefined);
+          await publishTerminalCheck({
+            github,
+            stateStore,
+            runId: claim.runId,
+            occurredAt,
+          }).catch(() => undefined);
         }
         await recordFinishedLifecycle(
           lifecycleLog,
@@ -1184,6 +1184,24 @@ export const createCoreWorker = (
   };
 
   return {
+    async reconcileCheckDeliveries(now) {
+      const work = (await stateStore.listPendingCheckDeliveries?.({ limit: 8 })) ?? [];
+      const occurredAt = new Date(now).toISOString();
+      let incomplete = false;
+      for (const item of work) {
+        try {
+          const outcome = await stateStore.getRunOutcome(item.runId);
+          if (outcome === undefined || outcome.checkRunId !== item.checkRunId) {
+            incomplete = true;
+            continue;
+          }
+          await publishTerminalCheck({ github, stateStore, runId: item.runId, occurredAt });
+        } catch {
+          incomplete = true;
+        }
+      }
+      if (incomplete) throw new Error('Check delivery reconciliation incomplete');
+    },
     async reconcilePublications(now) {
       const ids =
         (await stateStore.claimStalledPublications?.(
@@ -1257,13 +1275,11 @@ export const createCoreWorker = (
           }
           if (settled.status === 'completed' && settled.checkRunId !== undefined) {
             reason = 'check';
-            await github.updateCheckRun?.({
+            await publishTerminalCheck({
+              github,
+              stateStore,
               runId,
-              repositoryId: settled.repositoryId,
-              installationId: settled.installationId,
-              checkRunId: settled.checkRunId,
-              status: 'success',
-              decision: settled.decision,
+              occurredAt: new Date(now).toISOString(),
             });
           }
         } catch {

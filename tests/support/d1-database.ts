@@ -74,6 +74,7 @@ export class SqliteD1Database implements D1DatabaseLike {
       '0014_failure_http_status.sql',
       '0015_review_cancellation.sql',
       '0016_runner_claim_handoff.sql',
+      '0017_review_check_delivery.sql',
     ],
     private readonly migrationsDirectory = '../../apps/core/migrations',
   ) {

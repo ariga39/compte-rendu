@@ -2094,6 +2094,438 @@ describe('Core Worker', () => {
     }
   });
 
+  it('retries a transient terminal Check update from a fresh Worker without another review or Check', async () => {
+    const database = new SqliteD1Database();
+    const stateStore = createD1ReviewStateStore(database);
+    const claimed = await stateStore.claimReview({
+      deliveryId: 'delivery-check-retry-success',
+      job: {
+        repositoryId: 11,
+        pullRequestNumber: 42,
+        installationId: 7,
+        baseSha: eligibleEvent.baseSha,
+        headSha: eligibleEvent.headSha,
+        trigger: 'automatic',
+      },
+      occurredAt: '2026-09-01T00:00:00.000Z',
+    });
+    if (claimed.kind !== 'claimed') throw new Error('retry run was not claimed');
+    await stateStore.recordRunnerJob({ runId: claimed.runId, jobId: 'runner-job-1', attempt: 1 });
+    await stateStore.recordCheckRun?.({ runId: claimed.runId, checkRunId: 321 });
+    const reviews: unknown[] = [];
+    const createChecks: unknown[] = [];
+    const firstUpdates: unknown[] = [];
+    const firstWorker = createCoreWorker(
+      {
+        REVIEW_DB: database,
+        GITHUB_APP_ID: '1234567',
+        GITHUB_APP_PRIVATE_KEY: 'test-private-key',
+        EVIDENCE_BUCKET: { put: async () => undefined },
+      },
+      {
+        stateStore,
+        github: {
+          createCheckRun: async (input) => {
+            createChecks.push(input);
+            return { id: 999 };
+          },
+          loadReviewTarget: async () => ({ headSha: eligibleEvent.headSha }),
+          createReview: async ({ payload }) => {
+            reviews.push(payload);
+            return { kind: 'created', review: payload };
+          },
+          updateCheckRun: async (input) => {
+            firstUpdates.push(input);
+            throw new Error('Checks API temporarily unavailable');
+          },
+        },
+      },
+    );
+    const callbackBody = await successfulCallback(claimed.runId);
+    const callback = () =>
+      new Request('https://core.internal/runner-results', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-compte-rendu-runner-callback': 'verified',
+        },
+        body: callbackBody,
+      });
+
+    try {
+      expect((await firstWorker.fetch(callback())).status).toBe(202);
+      expect(await stateStore.getRunOutcome(claimed.runId)).toMatchObject({ status: 'completed' });
+      expect(reviews).toHaveLength(1);
+      expect(firstUpdates).toEqual([
+        {
+          runId: claimed.runId,
+          repositoryId: 11,
+          installationId: 7,
+          checkRunId: 321,
+          status: 'success',
+        },
+      ]);
+
+      const retriedUpdates: unknown[] = [];
+      const freshWorker = createCoreWorker(
+        {
+          REVIEW_DB: database,
+          GITHUB_APP_ID: '1234567',
+          GITHUB_APP_PRIVATE_KEY: 'test-private-key',
+          EVIDENCE_BUCKET: { put: async () => undefined },
+        },
+        {
+          stateStore: createD1ReviewStateStore(database),
+          github: {
+            createCheckRun: async (input) => {
+              createChecks.push(input);
+              return { id: 999 };
+            },
+            createReview: async ({ payload }) => {
+              reviews.push(payload);
+              return { kind: 'created', review: payload };
+            },
+            updateCheckRun: async (input) => {
+              retriedUpdates.push(input);
+            },
+          },
+        },
+      );
+      await freshWorker.reconcileCheckDeliveries(Date.now());
+      expect(retriedUpdates).toEqual([
+        {
+          runId: claimed.runId,
+          repositoryId: 11,
+          installationId: 7,
+          checkRunId: 321,
+          status: 'success',
+        },
+      ]);
+      expect(reviews).toHaveLength(1);
+      expect(createChecks).toEqual([]);
+
+      await freshWorker.reconcileCheckDeliveries(Date.now());
+      expect(retriedUpdates).toHaveLength(1);
+    } finally {
+      database.close();
+    }
+  });
+
+  it('retries a failed terminal Check after a duplicate callback without reposting the review', async () => {
+    const database = new SqliteD1Database();
+    const stateStore = createD1ReviewStateStore(database);
+    const claimed = await stateStore.claimReview({
+      deliveryId: 'delivery-check-retry-duplicate-callback',
+      job: {
+        repositoryId: 11,
+        pullRequestNumber: 42,
+        installationId: 7,
+        baseSha: eligibleEvent.baseSha,
+        headSha: eligibleEvent.headSha,
+        trigger: 'automatic',
+      },
+      occurredAt: '2026-09-01T00:00:00.000Z',
+    });
+    if (claimed.kind !== 'claimed') throw new Error('retry run was not claimed');
+    await stateStore.recordRunnerJob({ runId: claimed.runId, jobId: 'runner-job-1', attempt: 1 });
+    await stateStore.recordCheckRun?.({ runId: claimed.runId, checkRunId: 321 });
+    const reviews: unknown[] = [];
+    let checkAvailable = false;
+    const updates: string[] = [];
+    const worker = createCoreWorker(
+      {
+        REVIEW_DB: database,
+        GITHUB_APP_ID: '1234567',
+        GITHUB_APP_PRIVATE_KEY: 'test-private-key',
+        EVIDENCE_BUCKET: { put: async () => undefined },
+      },
+      {
+        stateStore,
+        github: {
+          loadReviewTarget: async () => ({ headSha: eligibleEvent.headSha }),
+          createReview: async ({ payload }) => {
+            reviews.push(payload);
+            return { kind: 'created', review: payload };
+          },
+          updateCheckRun: async ({ status }) => {
+            if (!checkAvailable) throw new Error('Checks API temporarily unavailable');
+            updates.push(status);
+          },
+        },
+      },
+    );
+    const callbackBody = await successfulCallback(claimed.runId);
+    const callback = () =>
+      new Request('https://core.internal/runner-results', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-compte-rendu-runner-callback': 'verified',
+        },
+        body: callbackBody,
+      });
+
+    try {
+      expect((await worker.fetch(callback())).status).toBe(202);
+      expect(reviews).toHaveLength(1);
+      checkAvailable = true;
+      expect((await worker.fetch(callback())).status).toBe(202);
+      expect(reviews).toHaveLength(1);
+      expect(updates).toEqual(['success']);
+    } finally {
+      database.close();
+    }
+  });
+
+  it('retries a terminal Check after late Check setup when the first catch-up fails', async () => {
+    const database = new SqliteD1Database();
+    const backgroundTasks: Promise<unknown>[] = [];
+    const check = deferred<{ id: number }>();
+    const checkRequests: unknown[] = [];
+    const firstUpdates: unknown[] = [];
+    const retriedUpdates: unknown[] = [];
+    let checkAvailable = false;
+    const worker = createCoreWorker(
+      {
+        ...coreEnv(database),
+        EVIDENCE_BUCKET: { put: async () => undefined },
+      },
+      {
+        github: {
+          createCheckRun: async (input) => {
+            checkRequests.push(input);
+            return check.promise;
+          },
+          updateCheckRun: async (input) => {
+            firstUpdates.push(input);
+            if (!checkAvailable) throw new Error('Checks API temporarily unavailable');
+            retriedUpdates.push(input);
+          },
+          getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+          loadReviewTarget: async () => ({ headSha: eligibleEvent.headSha }),
+          createReview: async ({ payload }) => ({ kind: 'created', review: payload }),
+        },
+        getReadInstallationToken: async () => ({
+          token: 'repository-read-token',
+          expiresAt: '2026-09-01T01:00:00.000Z',
+        }),
+      },
+    );
+    const context = { waitUntil: (task: Promise<unknown>) => backgroundTasks.push(task) };
+
+    try {
+      expect(
+        (
+          await worker.fetch(
+            new Request('https://core.internal/review-events', {
+              method: 'POST',
+              body: JSON.stringify({
+                ...eligibleEvent,
+                deliveryId: 'delivery-check-retry-late-setup',
+              }),
+            }),
+            undefined,
+            context,
+          )
+        ).status,
+      ).toBe(202);
+      const claim = await worker.fetch(
+        new Request('https://core.internal/runner-claims', {
+          method: 'POST',
+          headers: { 'x-compte-rendu-runner-claim': 'verified' },
+        }),
+      );
+      expect(claim.status).toBe(200);
+      const claimed = (await claim.json()) as { id: string; runId: string };
+      expect(
+        (
+          await worker.fetch(
+            new Request('https://core.internal/runner-results', {
+              method: 'POST',
+              headers: {
+                'content-type': 'application/json',
+                'x-compte-rendu-runner-callback': 'verified',
+              },
+              body: await successfulCallback(claimed.runId, claimed.id),
+            }),
+          )
+        ).status,
+      ).toBe(202);
+      check.resolve({ id: 322 });
+      await Promise.all(backgroundTasks);
+      expect(firstUpdates).toEqual([
+        {
+          runId: claimed.runId,
+          repositoryId: 11,
+          installationId: 7,
+          checkRunId: 322,
+          status: 'success',
+        },
+      ]);
+
+      checkAvailable = true;
+      await worker.reconcileCheckDeliveries(Date.now());
+      expect(retriedUpdates).toEqual([
+        {
+          runId: claimed.runId,
+          repositoryId: 11,
+          installationId: 7,
+          checkRunId: 322,
+          status: 'success',
+        },
+      ]);
+      expect(checkRequests).toHaveLength(1);
+    } finally {
+      check.resolve({ id: 322 });
+      await Promise.all(backgroundTasks);
+      database.close();
+    }
+  });
+
+  it('retries a failed Check after a failed callback without posting another review', async () => {
+    const database = new SqliteD1Database();
+    const stateStore = createD1ReviewStateStore(database);
+    const claimed = await stateStore.claimReview({
+      deliveryId: 'delivery-check-retry-failure',
+      job: {
+        repositoryId: 11,
+        pullRequestNumber: 42,
+        installationId: 7,
+        baseSha: eligibleEvent.baseSha,
+        headSha: eligibleEvent.headSha,
+        trigger: 'automatic',
+      },
+      occurredAt: '2026-09-01T00:00:00.000Z',
+    });
+    if (claimed.kind !== 'claimed') throw new Error('failure run was not claimed');
+    await stateStore.recordRunnerJob({ runId: claimed.runId, jobId: 'runner-job-1', attempt: 1 });
+    await stateStore.recordCheckRun?.({ runId: claimed.runId, checkRunId: 321 });
+    const reviews: unknown[] = [];
+    const firstUpdates: string[] = [];
+    const retriedUpdates: string[] = [];
+    let checkAvailable = false;
+    const github = {
+      loadReviewTarget: async () => ({ headSha: eligibleEvent.headSha }),
+      createReview: async ({ payload }: { payload: unknown }) => {
+        reviews.push(payload);
+        return { kind: 'created' as const, review: payload };
+      },
+      updateCheckRun: async ({ status }: { status: string }) => {
+        if (!checkAvailable) {
+          firstUpdates.push(status);
+          throw new Error('Checks API temporarily unavailable');
+        }
+        retriedUpdates.push(status);
+      },
+    };
+    const worker = createCoreWorker(
+      {
+        REVIEW_DB: database,
+        GITHUB_APP_ID: '1234567',
+        GITHUB_APP_PRIVATE_KEY: 'test-private-key',
+        EVIDENCE_BUCKET: { put: async () => undefined },
+      },
+      { stateStore, github },
+    );
+    const callbackBody = await failedCallback(claimed.runId);
+    const callback = () =>
+      new Request('https://core.internal/runner-results', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-compte-rendu-runner-callback': 'verified',
+        },
+        body: callbackBody,
+      });
+
+    try {
+      expect((await worker.fetch(callback())).status).toBe(202);
+      expect(await stateStore.getRunOutcome(claimed.runId)).toMatchObject({ status: 'failed' });
+      expect(reviews).toEqual([]);
+      expect(firstUpdates).toEqual(['failure']);
+
+      checkAvailable = true;
+      expect((await worker.fetch(callback())).status).toBe(202);
+      expect(retriedUpdates).toEqual(['failure']);
+      expect(reviews).toEqual([]);
+
+      const freshWorker = createCoreWorker(
+        {
+          REVIEW_DB: database,
+          GITHUB_APP_ID: '1234567',
+          GITHUB_APP_PRIVATE_KEY: 'test-private-key',
+          EVIDENCE_BUCKET: { put: async () => undefined },
+        },
+        { stateStore: createD1ReviewStateStore(database), github },
+      );
+      await freshWorker.reconcileCheckDeliveries(Date.now());
+      expect(retriedUpdates).toEqual(['failure']);
+      expect(reviews).toEqual([]);
+    } finally {
+      database.close();
+    }
+  });
+
+  it('rotates pending Check deliveries so an unavailable Check cannot starve later rows', async () => {
+    const database = new SqliteD1Database();
+    const stateStore = createD1ReviewStateStore(database);
+    const runIds: string[] = [];
+    try {
+      for (let index = 1; index <= 10; index += 1) {
+        const claimed = await stateStore.claimReview({
+          deliveryId: `delivery-check-sweep-${index}`,
+          job: {
+            repositoryId: 11,
+            pullRequestNumber: 100 + index,
+            installationId: 7,
+            baseSha: eligibleEvent.baseSha,
+            headSha: eligibleEvent.headSha,
+            trigger: 'automatic',
+          },
+          occurredAt: `2026-09-01T00:00:0${index}.000Z`,
+        });
+        if (claimed.kind !== 'claimed') throw new Error('sweep run was not claimed');
+        await stateStore.recordCheckRun!({
+          runId: claimed.runId,
+          checkRunId: 1000 + index,
+        });
+        await stateStore.markRunCompleted({
+          runId: claimed.runId,
+          occurredAt: `2026-09-01T00:01:0${index % 10}.000Z`,
+        });
+        await stateStore.claimCheckDelivery!({
+          runId: claimed.runId,
+          checkRunId: 1000 + index,
+          occurredAt: `2026-09-01T00:02:${String(index).padStart(2, '0')}.000Z`,
+        });
+        runIds.push(claimed.runId);
+      }
+
+      const updates: number[] = [];
+      const worker = createCoreWorker(coreEnv(database), {
+        stateStore,
+        github: {
+          updateCheckRun: async ({ checkRunId }) => {
+            if (checkRunId !== 1010) throw new Error('Check is permanently unavailable');
+            updates.push(checkRunId);
+          },
+        },
+      });
+
+      await expect(worker.reconcileCheckDeliveries(Date.now())).rejects.toThrow(
+        'Check delivery reconciliation incomplete',
+      );
+      expect(updates).not.toContain(1010);
+      await expect(worker.reconcileCheckDeliveries(Date.now() + 60_000)).rejects.toThrow(
+        'Check delivery reconciliation incomplete',
+      );
+      expect(updates).toContain(1010);
+      expect(runIds).toHaveLength(10);
+    } finally {
+      database.close();
+    }
+  });
+
   it('marks the persisted Check in progress when the Runner claims its Job', async () => {
     const database = new SqliteD1Database();
     const updates: unknown[] = [];
