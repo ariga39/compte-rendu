@@ -112,6 +112,10 @@ describe('local Worker runtime tracer', () => {
 
     const claim = await runtimeHarness.claim();
     expect(claim.status).toBe(200);
+    expect(claim.headers.get('cache-control')).toBe('no-store');
+    const empty = await runtimeHarness.claim();
+    expect(empty.status).toBe(204);
+    expect(await empty.text()).toBe('');
     const claimed = (await claim.json()) as CapturedRunnerJob & { readonly id: string };
     expect(claimed).toMatchObject({
       id: expect.any(String),

@@ -802,7 +802,7 @@ const forwardRunnerClaim = async (request: Request, dependencies: IngressDepende
 
   const body = await readBoundedRequestBytes(request, 64 * 1024);
   if (body === undefined) return new Response(null, { status: 413 });
-  const forwarded = await dependencies.core.fetch(
+  return dependencies.core.fetch(
     new Request('https://core.internal/runner-claims', {
       method: 'POST',
       headers: {
@@ -812,11 +812,6 @@ const forwardRunnerClaim = async (request: Request, dependencies: IngressDepende
       body,
     }),
   );
-  const responseBody = await forwarded.arrayBuffer();
-  return new Response(responseBody, {
-    status: forwarded.status,
-    headers: forwarded.headers,
-  });
 };
 
 const forwardRunnerReadToken = async (request: Request, dependencies: IngressDependencies) => {
