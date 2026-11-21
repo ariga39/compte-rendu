@@ -5929,7 +5929,7 @@ describe('Runner Job HTTP interface', () => {
         truncated: false,
       }),
     });
-    const request = (attempt: number) =>
+    const request = (attempt: number, token = 'checkout-token-for-test') =>
       new Request('http://runner/jobs', {
         method: 'POST',
         headers: {
@@ -5944,14 +5944,18 @@ describe('Runner Job HTTP interface', () => {
           repositoryUrl: 'https://github.com/acme/reviewed.git',
           baseSha: '1111111111111111111111111111111111111111',
           headSha: '2222222222222222222222222222222222222222',
-          repositoryReadToken: 'checkout-token-for-test',
+          repositoryReadToken: token,
         }),
       });
 
     const first = await runner.handle(request(1));
     const duplicate = await runner.handle(request(1));
     const firstState = (await first.clone().json()) as { id: string; attempt: number };
-    await waitForTerminal(runner, firstState.id);
+    const terminal = await waitForTerminal(runner, firstState.id);
+    const repeated = await runner.handle(request(1));
+    expect(repeated.status).toBe(202);
+    expect(await repeated.json()).toEqual(terminal);
+    expect((await runner.handle(request(1, 'different-token'))).status).toBe(409);
     const retry = await runner.handle(request(2));
     const duplicateState = (await duplicate.json()) as { id: string; attempt: number };
     const retryState = (await retry.json()) as { id: string; attempt: number };

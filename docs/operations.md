@@ -237,6 +237,13 @@ replacement; unresolved delivery uses the recovery guidance below. If multiple
 Runners share an sbx daemon/cgroup or inference service, drain each affected
 Runner and check Sandbox inventory before restarting shared services.
 
+The authenticated job endpoints keep terminal responses and detect duplicate
+admissions for the lifetime of the Runner process. Once destruction is confirmed,
+Runner releases the sandbox client and moves the response into a private temporary
+SQLite database. Its disk usage grows with completed jobs until process exit.
+Unconfirmed cleanup remains a live drain blocker. Retained callback and evidence
+files support recovery across restarts.
+
 For the first upgrade from a Runner without these endpoints, arrange a quiet
 window and wait for queued and claimed work to finish. Disabling webhooks alone
 does not remove queued work; zero concurrency is invalid.

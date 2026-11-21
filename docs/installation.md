@@ -384,6 +384,9 @@ path in this repository or in an issue/comment.
 
 ## Sandbox host and Runner
 
+Run the Runner on Node.js 24 LTS. Its process-local job history uses the
+built-in `node:sqlite` module and the host temporary directory.
+
 Before starting, install Docker Sandboxes with `sbx` 0.48.0, complete Docker
 login, ensure the service environment exposes both the Sandboxes daemon and
 `mkfs.ext4`, and initialize the host policy once. An auto-started `sandboxd`

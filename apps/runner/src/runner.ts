@@ -45,6 +45,7 @@ import {
   type SandboxRuntimeFactory,
   type SandboxRuntimeKind,
 } from './sandbox-runtime.js';
+import { createTerminalJobHistory } from './terminal-job-history.js';
 import { confirmSbxCleanup } from './cleanup-recovery.js';
 import { createOpenSandboxRuntimeFactory } from './sandbox-runtime-opensandbox.js';
 import { createSbxRuntimeFactory } from './sandbox-runtime-sbx.js';
@@ -607,6 +608,7 @@ type MaintenanceStatus = {
 type RunnerJob = {
   usage?: ModelUsageSummary;
   readonly state: RunnerJobState;
+  readonly admissionKey: string;
   readonly id: string;
   readonly sandboxName: string;
   readonly input: RunnerJobInputState;
@@ -1376,6 +1378,20 @@ export const createRunner = (options: RunnerOptions = {}) => {
   const recoveringCleanup = new Set<string>();
   const jobs = new Map<string, RunnerJob>();
   const jobsByRun = new Map<string, RunnerJob>();
+  let history: ReturnType<typeof createTerminalJobHistory> | undefined;
+  const retireDestroyedJob = (job: RunnerJob) => {
+    if (job.state.sandbox.cleanup !== 'destroyed') return;
+    try {
+      history ??= createTerminalJobHistory();
+      history.save(job.state, job.admissionKey);
+    } catch {
+      // Retain lookup and duplicate protection if temporary storage is unavailable.
+      return;
+    }
+    jobs.delete(job.id);
+    jobsByRun.delete(`${job.input.runId}:${job.input.attempt}`);
+  };
+
   let claiming = false;
   const stopsDuringClaim = new Map<
     string,
@@ -3416,6 +3432,10 @@ export const createRunner = (options: RunnerOptions = {}) => {
       job.diagnosticCheckoutToken = '';
       job.grantToken = '';
       job.readTokenSecrets = [];
+      job.sandboxRuntime = undefined;
+      job.multiReview = undefined;
+      job.sessionIds = [];
+      retireDestroyedJob(job);
       job.resolveDone();
       requestNextJob?.();
     }
@@ -3424,22 +3444,35 @@ export const createRunner = (options: RunnerOptions = {}) => {
   const publicState = (job: RunnerJob) => ({ ...job.state });
 
   const admitJob = async (input: RunnerJobInputState, claimed: boolean): Promise<Response> => {
-    const sameInput = (job: RunnerJob) =>
-      job.input.id === input.id &&
-      job.input.runId === input.runId &&
-      job.input.attempt === input.attempt &&
-      job.input.repositoryUrl === input.repositoryUrl &&
-      job.input.repositoryName === input.repositoryName &&
-      job.input.pullRequestNumber === input.pullRequestNumber &&
-      job.input.baseSha === input.baseSha &&
-      job.input.headSha === input.headSha &&
-      job.input.repositoryReadToken === input.repositoryReadToken;
+    const admissionKey = createHash('sha256')
+      .update(
+        JSON.stringify([
+          input.id,
+          input.runId,
+          input.attempt,
+          input.repositoryUrl,
+          input.repositoryName,
+          input.pullRequestNumber,
+          input.baseSha,
+          input.headSha,
+          input.repositoryReadToken,
+        ]),
+      )
+      .digest('hex');
     const existingById = jobs.get(input.id);
-    if (existingById !== undefined) {
-      return jsonResponse(sameInput(existingById) ? 202 : 409, publicState(existingById));
-    }
+    if (existingById !== undefined)
+      return jsonResponse(
+        existingById.admissionKey === admissionKey ? 202 : 409,
+        publicState(existingById),
+      );
     const existing = jobsByRun.get(`${input.runId}:${input.attempt}`);
     if (existing !== undefined) return jsonResponse(409, publicState(existing));
+    const retired = history?.find(input.id, input.runId, input.attempt);
+    if (retired)
+      return new Response(retired.state, {
+        status: retired.admission_key === admissionKey ? 202 : 409,
+        headers: { 'content-type': 'application/json; charset=utf-8' },
+      });
     if (!claimed && draining) {
       return jsonResponse(503, { error: 'runner draining' });
     }
@@ -3482,6 +3515,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         ? 'credential'
         : 'claim';
     const job: RunnerJob = {
+      admissionKey,
       state: {
         id,
         runId: input.runId,
@@ -3645,7 +3679,11 @@ export const createRunner = (options: RunnerOptions = {}) => {
           if (response.status !== 202)
             return jsonResponse(502, { error: 'cleanup recovery delivery rejected' });
           const job = jobs.get(input.jobId);
-          if (job !== undefined) update(job, { sandbox: { cleanup: 'destroyed' } });
+          if (job !== undefined) {
+            update(job, { sandbox: { cleanup: 'destroyed' } });
+            if (job.state.status === 'failed' || job.state.status === 'aborted')
+              retireDestroyedJob(job);
+          }
           requestNextJob?.();
           return jsonResponse(202, { accepted: true });
         } finally {
@@ -3816,6 +3854,13 @@ export const createRunner = (options: RunnerOptions = {}) => {
     if (match === null) return jsonResponse(404, { error: 'not found' });
     const job = jobs.get(match[1]);
     if (job === undefined) {
+      if (request.method === 'GET' || request.method === 'DELETE') {
+        const retired = history?.find(match[1]);
+        if (retired)
+          return new Response(retired.state, {
+            headers: { 'content-type': 'application/json; charset=utf-8' },
+          });
+      }
       const deadline = Number(request.headers.get('x-compte-rendu-claim-deadline'));
       if (
         request.method === 'DELETE' &&
@@ -4023,6 +4068,8 @@ export const createRunner = (options: RunnerOptions = {}) => {
     handle,
     close: async () => {
       forgetStops();
+      history?.close();
+      history = undefined;
       await settingsWatcher?.close();
     },
   };
