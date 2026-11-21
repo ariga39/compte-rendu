@@ -2184,7 +2184,7 @@ describe('Core Worker', () => {
       );
 
       expect(claim.status).toBe(503);
-      expect(comments).toEqual([expect.stringContaining('Review failed')]);
+      expect(comments).toEqual([expect.stringContaining('Review job failed')]);
       expect(checks).toEqual(['failure']);
     } finally {
       database.close();
@@ -3688,7 +3688,7 @@ describe('Core Worker', () => {
       expect((await worker.fetch(request())).status).toBe(503);
       expect((await worker.fetch(request())).status).toBe(202);
       expect(comments).toEqual([
-        `Review failed before a result could be published. Please retry with \`/ai-review\`.\n\n<!-- compte-rendu:failure:run:${claimed.runId} -->`,
+        `Review job failed. Check the reviews on this commit before retrying with \`/ai-review\`.\n\n<!-- compte-rendu:failure:run:${claimed.runId} -->`,
       ]);
       expect(checkUpdates.at(-1)).toBe('failure');
       expect(await stateStore.getRunOutcome(claimed.runId)).toMatchObject({ status: 'failed' });
@@ -3941,7 +3941,7 @@ describe('Core Worker', () => {
           repositoryId: 11,
           pullRequestNumber: 42,
           installationId: 7,
-          body: `Review failed before a result could be published. Please retry with \`/ai-review\`.\n\n<!-- compte-rendu:failure:run:${claimed.runId} -->`,
+          body: `Review job failed. Check the reviews on this commit before retrying with \`/ai-review\`.\n\n<!-- compte-rendu:failure:run:${claimed.runId} -->`,
         },
       ]);
       expect(checkUpdates).toEqual([
@@ -4080,7 +4080,7 @@ describe('Core Worker', () => {
         ).status,
       ).toBe(202);
       expect(comments).toEqual([
-        `Review failed before a result could be published. Please retry with \`/ai-review\`.\n\n<!-- compte-rendu:failure:run:${claimed.runId} -->`,
+        `Review job failed. Check the reviews on this commit before retrying with \`/ai-review\`.\n\n<!-- compte-rendu:failure:run:${claimed.runId} -->`,
       ]);
       expect(checkUpdates).toEqual(['failure']);
     } finally {
@@ -4143,7 +4143,7 @@ describe('Core Worker', () => {
       expect((await worker.fetch(request())).status).toBe(503);
       expect((await worker.fetch(request())).status).toBe(202);
       expect(comments).toEqual([
-        `Review failed before a result could be published. Please retry with \`/ai-review\`.\n\n<!-- compte-rendu:failure:run:${claimed.runId} -->`,
+        `Review job failed. Check the reviews on this commit before retrying with \`/ai-review\`.\n\n<!-- compte-rendu:failure:run:${claimed.runId} -->`,
       ]);
     } finally {
       database.close();
