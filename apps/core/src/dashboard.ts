@@ -478,13 +478,14 @@ export const refreshRepositoryMetadata = async (
         return;
       }
       if (error instanceof GitHubRequestError && error.status === 404) {
+        const retryAt = await isoFromMs(Date.parse(now) + DAY_MS);
         const revoked = await store.invalidateRepositoryMetadata?.({
           installationId: row.installationId,
           repositoryId: row.repositoryId,
           visibility: 'unknown',
           expectedRevision: row.revision,
           updatedAt: now,
-          nextRefreshAt,
+          nextRefreshAt: retryAt,
         });
         if (revoked !== true) {
           await store.deferRepositoryRefresh!({
@@ -492,7 +493,7 @@ export const refreshRepositoryMetadata = async (
             repositoryId: row.repositoryId,
             expectedRevision: row.revision,
             claimedAt: now,
-            nextRefreshAt,
+            nextRefreshAt: retryAt,
             updatedAt: now,
           });
         }

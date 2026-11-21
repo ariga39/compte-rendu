@@ -554,15 +554,23 @@ describe('public dashboard reads are DB-only', () => {
         }
       ).task.identity.kind;
     expect(await identity()).toBe('public');
-    await runScheduledMetadataRefresh(coreEnv(database), {
-      stateStore: store,
-      github: {
-        getRepositoryMetadata: async () => {
-          throw new GitHubRequestError(404);
+    const refresh = (now: string, accessible: boolean) =>
+      refreshRepositoryMetadata({
+        stateStore: store,
+        now,
+        github: {
+          getRepositoryMetadata: async () => {
+            if (!accessible) throw new GitHubRequestError(404);
+            return { full_name: 'acme/reviewed', visibility: 'public' };
+          },
         },
-      },
-    });
+      });
+    await refresh('2998-01-01T00:00:00.000Z', false);
     expect(await identity()).toBe('anonymous');
+    await refresh('2998-01-01T00:02:00.000Z', true);
+    expect(await identity()).toBe('anonymous');
+    await refresh('2998-01-02T00:00:00.000Z', true);
+    expect(await identity()).toBe('public');
   });
 
   it('skips refresh dispatch while a throttle cooldown is active', async () => {
