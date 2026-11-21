@@ -46,6 +46,11 @@ import {
   type SandboxRuntimeKind,
 } from './sandbox-runtime.js';
 import { createTerminalJobHistory } from './terminal-job-history.js';
+import {
+  appendFileBytes,
+  createBoundedFileSink,
+  createCredentialObserver,
+} from './bounded-file-capture.js';
 import { confirmSbxCleanup } from './cleanup-recovery.js';
 import { createOpenSandboxRuntimeFactory } from './sandbox-runtime-opensandbox.js';
 import { createSbxRuntimeFactory } from './sandbox-runtime-sbx.js';
@@ -410,17 +415,58 @@ const stop = (child: ChildProcess, signal: NodeJS.Signals = 'SIGTERM') => {
   }
 };
 
-const runProcess: RunnerProcess = (command, args, options = {}) =>
-  new Promise<RunnerProcessResult>((resolve) => {
+/**
+ * Local spawn implementation of the Runner process port. Evidence files share
+ * the same byte budget as in-memory capture, including append rounds.
+ */
+export const runProcess: RunnerProcess = async (command, args, options = {}) => {
+  const maxBytes = options.maxBytes ?? 0;
+  const captureStdout = options.captureStdout === true || options.stdoutFilePath !== undefined;
+  const captureStderr = options.captureStderr === true || options.stderrFilePath !== undefined;
+  const stderrRedactions = (options.stderrRedactions ?? [])
+    .filter((value) => value.length > 0)
+    .sort((left, right) => right.length - left.length);
+  const credentialValues = (options.credentialValues ?? []).filter((value) => value.length > 0);
+  const fileRedactions = [...new Set([...stderrRedactions, ...credentialValues])].sort(
+    (left, right) => right.length - left.length,
+  );
+  const credentialObserver = createCredentialObserver(credentialValues);
+  const existingStdoutBytes =
+    options.stdoutFilePath !== undefined && options.fileAppend === true && maxBytes > 0
+      ? await appendFileBytes(options.stdoutFilePath)
+      : 0;
+  const existingStderrBytes =
+    options.stderrFilePath !== undefined && options.fileAppend === true && maxBytes > 0
+      ? await appendFileBytes(options.stderrFilePath)
+      : 0;
+  const failure = (streamError: boolean): RunnerProcessResult => ({
+    exitCode: 1,
+    stdout: '',
+    ...(captureStderr ? { stderr: '' } : {}),
+    ...(streamError ? { streamError: true } : {}),
+    timedOut: false,
+    truncated: false,
+  });
+  if (existingStdoutBytes === undefined || existingStderrBytes === undefined) {
+    return failure(true);
+  }
+  if (options.signal?.aborted === true) return failure(false);
+
+  const memoryLimit = maxBytes > 0 ? maxBytes : 0;
+  const fileLimit = maxBytes > 0 ? maxBytes : Number.POSITIVE_INFINITY;
+
+  return new Promise<RunnerProcessResult>((resolve) => {
     const chunks: Buffer[] = [];
     const stderrChunks: Buffer[] = [];
     let stderrPending = '';
-    const captureStdout = options.captureStdout === true || options.stdoutFilePath !== undefined;
-    const captureStderr = options.captureStderr === true || options.stderrFilePath !== undefined;
-    const stderrRedactions = (options.stderrRedactions ?? []).filter((value) => value.length > 0);
-    const maxBytes = options.maxBytes ?? 0;
-    let bytes = 0;
-    let stderrBytes = 0;
+    let stdoutRemaining =
+      options.stdoutFilePath !== undefined && maxBytes > 0
+        ? Math.max(0, memoryLimit - existingStdoutBytes)
+        : memoryLimit;
+    let stderrRemaining =
+      options.stderrFilePath !== undefined && maxBytes > 0
+        ? Math.max(0, memoryLimit - existingStderrBytes)
+        : memoryLimit;
     let stderrTruncated = false;
     let streamError = false;
     let truncated = false;
@@ -433,14 +479,32 @@ const runProcess: RunnerProcess = (command, args, options = {}) =>
     let child: ChildProcess;
     let stdoutHandle: WriteStream | undefined;
     let stderrHandle: WriteStream | undefined;
+    let stdoutSink: ReturnType<typeof createBoundedFileSink> | undefined;
+    let stderrSink: ReturnType<typeof createBoundedFileSink> | undefined;
 
     try {
       const fileFlags = options.fileAppend === true ? 'a' : 'w';
       if (options.stdoutFilePath !== undefined) {
         stdoutHandle = createWriteStream(options.stdoutFilePath, { flags: fileFlags, mode: 0o600 });
+        stdoutSink = createBoundedFileSink({
+          limit:
+            options.fileAppend === true && maxBytes > 0
+              ? Math.max(0, fileLimit - existingStdoutBytes)
+              : fileLimit,
+          secrets: fileRedactions,
+          write: (chunk) => stdoutHandle?.write(chunk),
+        });
       }
       if (options.stderrFilePath !== undefined) {
         stderrHandle = createWriteStream(options.stderrFilePath, { flags: fileFlags, mode: 0o600 });
+        stderrSink = createBoundedFileSink({
+          limit:
+            options.fileAppend === true && maxBytes > 0
+              ? Math.max(0, fileLimit - existingStderrBytes)
+              : fileLimit,
+          secrets: fileRedactions,
+          write: (chunk) => stderrHandle?.write(chunk),
+        });
       }
     } catch {
       // Evidence finalization fails closed if a stream cannot be created.
@@ -453,28 +517,65 @@ const runProcess: RunnerProcess = (command, args, options = {}) =>
       streamError = true;
     });
 
+    const appendStdout = (buffer: Buffer) => {
+      if (!truncated) {
+        if (buffer.length > stdoutRemaining) {
+          const kept = buffer.subarray(0, Math.max(0, stdoutRemaining));
+          if (kept.length > 0) {
+            chunks.push(Buffer.from(kept));
+            stdoutRemaining -= kept.length;
+          }
+          truncated = true;
+        } else {
+          chunks.push(buffer);
+          stdoutRemaining -= buffer.length;
+        }
+      }
+      stdoutSink?.write(buffer);
+      if (stdoutSink?.truncated === true) truncated = true;
+    };
+
     const appendStderr = (value: string) => {
       if (value.length === 0) return;
       const buffer = new TextEncoder().encode(value);
-      if (stderrTruncated) return;
-      if (stderrBytes + buffer.length > maxBytes) {
-        stderrChunks.push(Buffer.from(buffer.subarray(0, Math.max(0, maxBytes - stderrBytes))));
-        stderrBytes = maxBytes;
-        stderrTruncated = true;
-        return;
+      if (!stderrTruncated) {
+        if (buffer.length > stderrRemaining) {
+          const kept = buffer.subarray(0, Math.max(0, stderrRemaining));
+          if (kept.length > 0) {
+            stderrChunks.push(Buffer.from(kept));
+            stderrRemaining -= kept.length;
+          }
+          stderrTruncated = true;
+        } else {
+          stderrChunks.push(Buffer.from(buffer));
+          stderrRemaining -= buffer.length;
+        }
       }
-      stderrChunks.push(Buffer.from(buffer));
-      stderrBytes += buffer.length;
+      stderrSink?.write(buffer);
+      if (stderrSink?.truncated === true) stderrTruncated = true;
     };
 
     const flushStderr = (value: string, final: boolean) => {
       stderrPending += value;
-      const keep = final
-        ? 0
-        : Math.max(0, ...stderrRedactions.map((redaction) => redaction.length));
-      if (stderrPending.length <= keep) return;
-      const processable = stderrPending.slice(0, stderrPending.length - keep);
-      stderrPending = stderrPending.slice(stderrPending.length - keep);
+      let keep = 0;
+      if (!final) {
+        for (const redaction of stderrRedactions) {
+          const limit = Math.min(redaction.length, stderrPending.length);
+          for (let length = limit; length > 0; length -= 1) {
+            if (!stderrPending.endsWith(redaction.slice(0, length))) continue;
+            const extendable =
+              length < redaction.length ||
+              stderrRedactions.some(
+                (other) => other.length > length && other.startsWith(redaction),
+              );
+            if (extendable) keep = Math.max(keep, length);
+            break;
+          }
+        }
+      }
+      const cut = stderrPending.length - keep;
+      const processable = stderrPending.slice(0, cut);
+      stderrPending = stderrPending.slice(cut);
       let redacted = processable;
       for (const valueToRedact of stderrRedactions) {
         redacted = redacted.replaceAll(valueToRedact, '[redacted]');
@@ -488,6 +589,8 @@ const runProcess: RunnerProcess = (command, args, options = {}) =>
       if (timeout !== undefined) clearTimeout(timeout);
       if (killTimeout !== undefined) clearTimeout(killTimeout);
       flushStderr('', true);
+      stdoutSink?.finish();
+      stderrSink?.finish();
       const finishStreams = () =>
         resolve({
           exitCode: exitCode ?? 1,
@@ -497,6 +600,7 @@ const runProcess: RunnerProcess = (command, args, options = {}) =>
           streamError,
           timedOut,
           truncated,
+          ...(credentialObserver.observed ? { credentialObserved: true } : {}),
           ...(processError ? { processError: true } : {}),
           ...(errorCode === undefined ? {} : { errorCode }),
         });
@@ -532,21 +636,15 @@ const runProcess: RunnerProcess = (command, args, options = {}) =>
     if (captureStdout && child.stdout !== null) {
       child.stdout.on('data', (chunk: Buffer | string) => {
         const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-        stdoutHandle?.write(buffer);
-        if (truncated) return;
-        if (bytes + buffer.length > maxBytes) {
-          truncated = true;
-          return;
-        }
-        chunks.push(buffer);
-        bytes += buffer.length;
+        credentialObserver.observeStdout(buffer);
+        appendStdout(buffer);
       });
     }
 
     if (captureStderr && child.stderr !== null) {
       child.stderr.on('data', (chunk: Buffer | string) => {
         const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-        stderrHandle?.write(buffer);
+        credentialObserver.observeStderr(buffer);
         flushStderr(new TextDecoder().decode(buffer), false);
       });
     }
@@ -564,6 +662,7 @@ const runProcess: RunnerProcess = (command, args, options = {}) =>
     child.once('error', handleSpawnError);
     child.once('close', (exitCode) => finish(exitCode));
   });
+};
 
 type RunnerJobState = RunnerJobResponseValue;
 type RunnerFailureCauseValue = typeof RunnerFailureCause.Type;
@@ -798,6 +897,7 @@ const mergedAgentResult = (
     stdout,
     stderr: (first.stderr ?? '') + (reminder.stderr ?? ''),
     stderrTruncated: first.stderrTruncated === true || reminder.stderrTruncated === true,
+    credentialObserved: first.credentialObserved === true || reminder.credentialObserved === true,
     streamError: first.streamError === true || reminder.streamError === true,
     timedOut: first.timedOut || reminder.timedOut,
     truncated:
@@ -1660,6 +1760,11 @@ export const createRunner = (options: RunnerOptions = {}) => {
             job.grantToken,
             ...(processOptions.stderrRedactions ?? []),
           ].filter((value): value is string => value !== undefined && value.length > 0),
+          credentialValues: [
+            ...readTokenSecretValues(job),
+            job.grantToken,
+            ...(processOptions.credentialValues ?? []),
+          ].filter((value): value is string => value !== undefined && value.length > 0),
         }).catch(failed),
         stopped,
       ]);
@@ -1701,6 +1806,11 @@ export const createRunner = (options: RunnerOptions = {}) => {
                 job.grantToken,
                 job.input.repositoryUrl,
               ].filter((value): value is string => value !== undefined && value.length > 0),
+        credentialValues: [
+          ...readTokenSecretValues(job),
+          job.grantToken,
+          ...(processOptions.credentialValues ?? []),
+        ].filter((value): value is string => value !== undefined && value.length > 0),
         maxBytes:
           diagnostic === undefined
             ? processOptions.maxBytes
@@ -3059,6 +3169,16 @@ export const createRunner = (options: RunnerOptions = {}) => {
             evidenceFailure = 'archive-incomplete';
             evidenceComplete = false;
           }
+        }
+      }
+      // Raw stream observation survives pre-write redaction: an actual job
+      // credential in model output is never publishable even when the evidence
+      // files no longer contain the secret.
+      if (agent?.credentialObserved === true) {
+        failure ??= { reason: 'evidence' };
+        if (evidenceReady) {
+          evidenceComplete = false;
+          evidenceFailure = 'credential-in-output';
         }
       }
       // A process that echoed the grant into its output must fail closed: the

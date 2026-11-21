@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -302,6 +302,257 @@ describe('executeOpenSandboxCommand', () => {
     }
   });
 
+  it('bounds stdout and stderr files to maxBytes and keeps the in-limit prefix', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'cr-osb-execution-'));
+    const stdoutFilePath = join(directory, 'stdout.log');
+    const stderrFilePath = join(directory, 'stderr.log');
+    try {
+      const fixture = commandFixture(
+        streamOf([
+          { type: 'stdout', text: 'hello', timestamp: 1 },
+          { type: 'stdout', text: 'world', timestamp: 2 },
+          { type: 'stderr', text: 'abcdef', timestamp: 3 },
+          { type: 'stderr', text: 'ghij', timestamp: 4 },
+          { type: 'execution_complete', timestamp: 5, execution_time: 1 },
+        ]),
+      );
+
+      const result = await executeOpenSandboxCommand(
+        { commands: fixture.commands },
+        ['sh', '-c', 'printf helloworld; printf abcdefghij >&2'],
+        {
+          captureStdout: true,
+          captureStderr: true,
+          maxBytes: 8,
+          stdoutFilePath,
+          stderrFilePath,
+        },
+      );
+
+      expect(result.stdout).toBe('hellowor');
+      expect(result.stderr).toBe('abcdefgh');
+      expect(result.truncated).toBe(true);
+      expect(result.stderrTruncated).toBe(true);
+      await expect(readFile(stdoutFilePath, 'utf8')).resolves.toBe('hellowor');
+      await expect(readFile(stderrFilePath, 'utf8')).resolves.toBe('abcdefgh');
+      expect((await stat(stdoutFilePath)).size).toBe(8);
+      expect((await stat(stderrFilePath)).size).toBe(8);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('drops a trailing secret prefix from a truncated stdout file across chunks', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'cr-osb-execution-'));
+    const stdoutFilePath = join(directory, 'stdout.log');
+    const secret = 'CANARYSECRET';
+    try {
+      const fixture = commandFixture(
+        streamOf([
+          { type: 'stdout', text: 'okokokCA', timestamp: 1 },
+          { type: 'stdout', text: 'NARYSECRETTAIL', timestamp: 2 },
+          { type: 'execution_complete', timestamp: 3, execution_time: 1 },
+        ]),
+      );
+
+      const result = await executeOpenSandboxCommand(
+        { commands: fixture.commands },
+        ['sh', '-c', 'printf output'],
+        {
+          captureStdout: true,
+          stderrRedactions: [secret],
+          maxBytes: 8,
+          stdoutFilePath,
+        },
+      );
+
+      expect(result.stdout).toBe('okokokCA');
+      expect(result.truncated).toBe(true);
+      await expect(readFile(stdoutFilePath, 'utf8')).resolves.toBe('okokok');
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed when append sizing fails for a non-ENOENT reason', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'cr-osb-execution-'));
+    const blocker = join(directory, 'blocker');
+    await writeFile(blocker, 'not a directory', { mode: 0o600 });
+    try {
+      const fixture = commandFixture(
+        streamOf([{ type: 'execution_complete', timestamp: 1, execution_time: 1 }]),
+      );
+
+      const result = await executeOpenSandboxCommand(
+        { commands: fixture.commands },
+        ['sh', '-c', 'printf output'],
+        {
+          captureStdout: true,
+          maxBytes: 8,
+          stdoutFilePath: join(blocker, 'stdout.log'),
+          fileAppend: true,
+        },
+      );
+
+      expect(result.exitCode).not.toBe(0);
+      expect(result.streamError).toBe(true);
+      expect(fixture.request()).toBeUndefined();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('does not start after an abort observed during append initialization', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'cr-osb-execution-'));
+    const stdoutFilePath = join(directory, 'stdout.log');
+    await writeFile(stdoutFilePath, 'old', { mode: 0o600 });
+    try {
+      const fixture = commandFixture(
+        streamOf([{ type: 'execution_complete', timestamp: 1, execution_time: 1 }]),
+      );
+      const controller = new AbortController();
+      controller.abort();
+
+      const result = await executeOpenSandboxCommand(
+        { commands: fixture.commands },
+        ['sh', '-c', 'printf output'],
+        {
+          captureStdout: true,
+          maxBytes: 8,
+          stdoutFilePath,
+          fileAppend: true,
+          signal: controller.signal,
+        },
+      );
+
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stdout).toBe('');
+      expect(fixture.request()).toBeUndefined();
+      await expect(readFile(stdoutFilePath, 'utf8')).resolves.toBe('old');
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('applies maxBytes to the aggregate file across an append and reports truncation', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'cr-osb-execution-'));
+    const stdoutFilePath = join(directory, 'stdout.log');
+    await writeFile(stdoutFilePath, '123456', { mode: 0o600 });
+    try {
+      const fixture = commandFixture(
+        streamOf([
+          { type: 'stdout', text: 'abcdef', timestamp: 1 },
+          { type: 'execution_complete', timestamp: 2, execution_time: 1 },
+        ]),
+      );
+
+      const result = await executeOpenSandboxCommand(
+        { commands: fixture.commands },
+        ['sh', '-c', 'printf abcdef'],
+        {
+          captureStdout: true,
+          maxBytes: 8,
+          stdoutFilePath,
+          fileAppend: true,
+        },
+      );
+
+      expect(result.stdout).toBe('ab');
+      expect(result.truncated).toBe(true);
+      await expect(readFile(stdoutFilePath, 'utf8')).resolves.toBe('123456ab');
+      expect((await stat(stdoutFilePath)).size).toBe(8);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('redacts stderr before writing the evidence file', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'cr-osb-execution-'));
+    const stderrFilePath = join(directory, 'stderr.log');
+    try {
+      const fixture = commandFixture(
+        streamOf([
+          { type: 'stderr', text: 'before s3c', timestamp: 1 },
+          { type: 'stderr', text: 'r3t after', timestamp: 2 },
+          { type: 'execution_complete', timestamp: 3, execution_time: 1 },
+        ]),
+      );
+
+      const result = await executeOpenSandboxCommand(
+        { commands: fixture.commands },
+        ['sh', '-c', 'printf secret >&2'],
+        {
+          captureStderr: true,
+          stderrRedactions: ['s3cr3t'],
+          credentialValues: ['s3cr3t'],
+          maxBytes: 64,
+          stderrFilePath,
+        },
+      );
+
+      expect(result.credentialObserved).toBe(true);
+      expect(result.stderr).toBe('before [redacted] after');
+      await expect(readFile(stderrFilePath, 'utf8')).resolves.toBe('before [redacted] after');
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('observes credentials per stream without combining stdout and stderr', async () => {
+    const fixture = commandFixture(
+      streamOf([
+        { type: 'stdout', text: 'SEC', timestamp: 1 },
+        { type: 'stderr', text: 'RET', timestamp: 2 },
+        { type: 'execution_complete', timestamp: 3, execution_time: 1 },
+      ]),
+    );
+
+    const result = await executeOpenSandboxCommand(
+      { commands: fixture.commands },
+      ['sh', '-c', 'printf SEC; printf RET >&2'],
+      {
+        captureStdout: true,
+        captureStderr: true,
+        credentialValues: ['SECRET'],
+        maxBytes: 64,
+      },
+    );
+
+    expect(result.credentialObserved).not.toBe(true);
+  });
+
+  it('does not write a partially cut credential when the file limit is reached', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'cr-osb-execution-'));
+    const stderrFilePath = join(directory, 'stderr.log');
+    const secret = 'SECRETVALUE';
+    try {
+      const fixture = commandFixture(
+        streamOf([
+          { type: 'stderr', text: `12345${secret}`, timestamp: 1 },
+          { type: 'execution_complete', timestamp: 2, execution_time: 1 },
+        ]),
+      );
+
+      const result = await executeOpenSandboxCommand(
+        { commands: fixture.commands },
+        ['sh', '-c', 'printf secret >&2'],
+        {
+          captureStderr: true,
+          stderrRedactions: [secret],
+          maxBytes: 9,
+          stderrFilePath,
+        },
+      );
+
+      await expect(readFile(stderrFilePath, 'utf8')).resolves.toBe('12345[red');
+      expect(result.stderr).toBe('12345[red');
+      expect(result.stderrTruncated).toBe(true);
+      expect(await readFile(stderrFilePath, 'utf8')).not.toContain('SEC');
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('redacts a secret split across stderr chunks', async () => {
     const fixture = commandFixture(
       streamOf([
@@ -336,7 +587,7 @@ describe('executeOpenSandboxCommand', () => {
     );
 
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toBe('hello');
+    expect(result.stdout).toBe('hellowor');
     expect(result.truncated).toBe(true);
   });
 

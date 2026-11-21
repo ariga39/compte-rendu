@@ -125,6 +125,8 @@ export type RunnerProcessResult = {
   readonly stdout: string;
   readonly stderr?: string;
   readonly stderrTruncated?: boolean;
+  /** A real job credential was observed before output redaction. */
+  readonly credentialObserved?: boolean;
   readonly streamError?: boolean;
   readonly timedOut: boolean;
   readonly truncated: boolean;
@@ -142,6 +144,8 @@ export type RunnerProcessOptions = {
   readonly captureStdout?: boolean;
   readonly captureStderr?: boolean;
   readonly stderrRedactions?: readonly string[];
+  /** Real job credentials to detect in raw output before redaction. */
+  readonly credentialValues?: readonly string[];
   readonly maxBytes?: number;
   readonly timeoutMs?: number;
   readonly env?: NodeJS.ProcessEnv;

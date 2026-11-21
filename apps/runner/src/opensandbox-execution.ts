@@ -1,5 +1,10 @@
 import { createWriteStream, type WriteStream } from 'node:fs';
 import type { Sandbox } from '@alibaba-group/opensandbox';
+import {
+  appendFileBytes,
+  createBoundedFileSink,
+  createCredentialObserver,
+} from './bounded-file-capture';
 import type { RunnerProcessOptions, RunnerProcessResult } from './sandbox-runtime';
 
 const INIT_ABORT_GRACE_MS = 500;
@@ -10,9 +15,15 @@ export const executeOpenSandboxCommand = async (
   options: RunnerProcessOptions & { signal?: AbortSignal; workingDirectory?: string },
 ): Promise<RunnerProcessResult> => {
   const signal = options.signal;
-  if (signal?.aborted === true) {
-    return { exitCode: 1, stdout: '', stderr: '', timedOut: false, truncated: false };
-  }
+  const isAborted = (): boolean => signal?.aborted === true;
+  const aborted = (): RunnerProcessResult => ({
+    exitCode: 1,
+    stdout: '',
+    stderr: '',
+    timedOut: false,
+    truncated: false,
+  });
+  if (isAborted()) return aborted();
   const maxBytes = options.maxBytes ?? 0;
   const captureStdoutRequested =
     options.captureStdout === true || options.stdoutFilePath !== undefined;
@@ -21,10 +32,38 @@ export const executeOpenSandboxCommand = async (
   const stderrRedactions = (options.stderrRedactions ?? [])
     .filter((value) => value.length > 0)
     .sort((left, right) => right.length - left.length);
+  const credentialValues = (options.credentialValues ?? []).filter((value) => value.length > 0);
+  const fileRedactions = [...new Set([...stderrRedactions, ...credentialValues])].sort(
+    (left, right) => right.length - left.length,
+  );
+  const credentialObserver = createCredentialObserver(credentialValues);
+  const existingStdoutBytes =
+    options.stdoutFilePath !== undefined && options.fileAppend === true && maxBytes > 0
+      ? await appendFileBytes(options.stdoutFilePath)
+      : 0;
+  const existingStderrBytes =
+    options.stderrFilePath !== undefined && options.fileAppend === true && maxBytes > 0
+      ? await appendFileBytes(options.stderrFilePath)
+      : 0;
+  if (existingStdoutBytes === undefined || existingStderrBytes === undefined) {
+    return { ...aborted(), streamError: true };
+  }
+  if (isAborted()) return aborted();
+
   const stdoutChunks: Buffer[] = [];
   const stderrChunks: Buffer[] = [];
-  let stdoutBytes = 0;
-  let stderrBytes = 0;
+  let stdoutRemaining =
+    options.stdoutFilePath !== undefined && maxBytes > 0
+      ? Math.max(0, maxBytes - existingStdoutBytes)
+      : maxBytes > 0
+        ? maxBytes
+        : Number.POSITIVE_INFINITY;
+  let stderrRemaining =
+    options.stderrFilePath !== undefined && maxBytes > 0
+      ? Math.max(0, maxBytes - existingStderrBytes)
+      : maxBytes > 0
+        ? maxBytes
+        : Number.POSITIVE_INFINITY;
   let truncated = false;
   let stderrTruncated = false;
   let stderrPending = '';
@@ -36,14 +75,36 @@ export const executeOpenSandboxCommand = async (
   let streamError = false;
   let stdoutFile: WriteStream | undefined;
   let stderrFile: WriteStream | undefined;
+  let stdoutSink: ReturnType<typeof createBoundedFileSink> | undefined;
+  let stderrSink: ReturnType<typeof createBoundedFileSink> | undefined;
 
   try {
     const flags = options.fileAppend === true ? 'a' : 'w';
     if (options.stdoutFilePath !== undefined) {
       stdoutFile = createWriteStream(options.stdoutFilePath, { flags, mode: 0o600 });
+      stdoutSink = createBoundedFileSink({
+        limit:
+          options.fileAppend === true && maxBytes > 0
+            ? Math.max(0, maxBytes - existingStdoutBytes)
+            : maxBytes > 0
+              ? maxBytes
+              : Number.POSITIVE_INFINITY,
+        secrets: fileRedactions,
+        write: (chunk) => stdoutFile?.write(chunk),
+      });
     }
     if (options.stderrFilePath !== undefined) {
       stderrFile = createWriteStream(options.stderrFilePath, { flags, mode: 0o600 });
+      stderrSink = createBoundedFileSink({
+        limit:
+          options.fileAppend === true && maxBytes > 0
+            ? Math.max(0, maxBytes - existingStderrBytes)
+            : maxBytes > 0
+              ? maxBytes
+              : Number.POSITIVE_INFINITY,
+        secrets: fileRedactions,
+        write: (chunk) => stderrFile?.write(chunk),
+      });
     }
   } catch {
     streamError = true;
@@ -71,30 +132,41 @@ export const executeOpenSandboxCommand = async (
   };
 
   const captureStdout = (text: string): void => {
-    if (truncated) return;
     const chunk = Buffer.from(text, 'utf8');
-    if (maxBytes > 0 && stdoutBytes + chunk.length > maxBytes) {
-      truncated = true;
-      return;
+    if (!truncated) {
+      if (chunk.length > stdoutRemaining) {
+        const kept = chunk.subarray(0, Math.max(0, stdoutRemaining));
+        if (kept.length > 0) {
+          stdoutChunks.push(Buffer.from(kept));
+          stdoutRemaining -= kept.length;
+        }
+        truncated = true;
+      } else {
+        stdoutChunks.push(chunk);
+        stdoutRemaining -= chunk.length;
+      }
     }
-    stdoutChunks.push(chunk);
-    stdoutBytes += chunk.length;
+    stdoutSink?.write(chunk);
+    if (stdoutSink?.truncated === true) truncated = true;
   };
 
   const captureStderr = (text: string): void => {
-    if (stderrTruncated) return;
     const chunk = Buffer.from(text, 'utf8');
-    if (maxBytes > 0 && stderrBytes + chunk.length > maxBytes) {
-      const remaining = maxBytes - stderrBytes;
-      if (remaining > 0) {
-        stderrChunks.push(chunk.subarray(0, remaining));
-        stderrBytes += remaining;
+    if (!stderrTruncated) {
+      if (chunk.length > stderrRemaining) {
+        const kept = chunk.subarray(0, Math.max(0, stderrRemaining));
+        if (kept.length > 0) {
+          stderrChunks.push(Buffer.from(kept));
+          stderrRemaining -= kept.length;
+        }
+        stderrTruncated = true;
+      } else {
+        stderrChunks.push(chunk);
+        stderrRemaining -= chunk.length;
       }
-      stderrTruncated = true;
-      return;
     }
-    stderrChunks.push(chunk);
-    stderrBytes += chunk.length;
+    stderrSink?.write(chunk);
+    if (stderrSink?.truncated === true) stderrTruncated = true;
   };
 
   const redact = (text: string): string => {
@@ -122,9 +194,7 @@ export const executeOpenSandboxCommand = async (
     const cut = stderrPending.length - keep;
     const ready = stderrPending.slice(0, cut);
     stderrPending = stderrPending.slice(cut);
-    const redacted = redact(ready);
-    stderrFile?.write(redacted);
-    captureStderr(redacted);
+    captureStderr(redact(ready));
   };
 
   const stop = (id: string): Promise<void> => {
@@ -165,11 +235,12 @@ export const executeOpenSandboxCommand = async (
           if (signal?.aborted === true) await stop(id);
         },
         onStdout: (message) => {
+          credentialObserver.observeStdout(Buffer.from(message.text, 'utf8'));
           if (!captureStdoutRequested) return;
-          stdoutFile?.write(message.text);
           captureStdout(message.text);
         },
         onStderr: (message) => {
+          credentialObserver.observeStderr(Buffer.from(message.text, 'utf8'));
           if (!captureStderrRequested) return;
           flushStderr(message.text, false);
         },
@@ -181,6 +252,8 @@ export const executeOpenSandboxCommand = async (
     if (incomplete && executionId !== undefined) await stop(executionId);
     else if (interrupt !== undefined) await interrupt;
     flushStderr('', true);
+    stdoutSink?.finish();
+    stderrSink?.finish();
     await closeFiles();
     const exitCode = execution.exitCode ?? 1;
     return {
@@ -195,6 +268,7 @@ export const executeOpenSandboxCommand = async (
       ...(interruptFailed || streamError || incomplete ? { streamError: true } : {}),
       timedOut: false,
       truncated,
+      ...(credentialObserver.observed ? { credentialObserved: true } : {}),
     };
   } catch {
     if (executionId !== undefined) await stop(executionId);
@@ -207,6 +281,7 @@ export const executeOpenSandboxCommand = async (
       timedOut: false,
       truncated: false,
       streamError: true,
+      ...(credentialObserver.observed ? { credentialObserved: true } : {}),
     };
   } finally {
     if (abortGrace !== undefined) clearTimeout(abortGrace);

@@ -208,6 +208,8 @@ declare class Buffer extends Uint8Array {
   static from(value: string | Uint8Array | ArrayBuffer): Buffer;
   static from(value: string, encoding: string): Buffer;
   equals(other: Uint8Array): boolean;
+  includes(value: number | string | Uint8Array, byteOffset?: number): boolean;
+  indexOf(value: number | string | Uint8Array, byteOffset?: number): number;
   toString(encoding?: string): string;
 }
 
