@@ -68,6 +68,9 @@ const readSource = async (
   const models: Record<string, RouteModel> = {};
   const allowedProfiles = sourceProfiles(source);
   const preferredProfile = sourceDefaultProfile(source);
+  // A source with no profile configuration keeps the historical behaviour:
+  // every discovered ID is published as a Chat Completions route.
+  const qualified = source.profiles !== undefined || source.profile !== undefined;
   let rejected = 0;
   const visited = new Set([url]);
   const signal = AbortSignal.timeout(CATALOG_TIMEOUT_MS);
@@ -90,18 +93,20 @@ const readSource = async (
       const profile =
         override !== undefined
           ? override.profile
-          : entry.profiles === null
-            ? preferredProfile
-            : (() => {
-                const supported = allowedProfiles.filter((candidate) =>
-                  entry.profiles!.includes(candidate),
-                );
-                if (supported.length === 0) return undefined;
-                if (entry.recommended !== null && supported.includes(entry.recommended))
-                  return entry.recommended;
-                if (supported.includes(preferredProfile)) return preferredProfile;
-                return supported[0];
-              })();
+          : !qualified
+            ? 'chat'
+            : entry.profiles === null
+              ? preferredProfile
+              : (() => {
+                  const supported = allowedProfiles.filter((candidate) =>
+                    entry.profiles!.includes(candidate),
+                  );
+                  if (supported.length === 0) return undefined;
+                  if (entry.recommended !== null && supported.includes(entry.recommended))
+                    return entry.recommended;
+                  if (supported.includes(preferredProfile)) return preferredProfile;
+                  return supported[0];
+                })();
       // A well-formed model that offers none of the configured protocols is
       // omitted rather than failing the source snapshot.
       if (profile === undefined) continue;

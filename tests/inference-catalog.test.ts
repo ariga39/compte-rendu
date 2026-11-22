@@ -868,6 +868,34 @@ it('keeps unqualified ID-only discovery unchanged', async () => {
   }
 });
 
+it('keeps an unqualified rich source on its historical chat-only semantics', async () => {
+  const db = database();
+  try {
+    vi.stubGlobal('fetch', async () =>
+      Response.json({
+        data: [{ id: 'responses-only', api: { responses: {} }, recommended_api: 'responses' }],
+      }),
+    );
+    const catalog = createRelayCatalog(db, [
+      {
+        url: 'https://models.example/models',
+        prefix: 'p/',
+        providerSlug: 'custom-review',
+        credentialAlias: 'default',
+      },
+    ]);
+    await catalog.refresh(10);
+    expect((await catalog.get()).routes).toEqual(['p/responses-only']);
+    expect(
+      db.database
+        .prepare('SELECT profile FROM catalog_routes WHERE route_id = ?')
+        .get('p/responses-only'),
+    ).toEqual({ profile: 'chat' });
+  } finally {
+    db.close();
+  }
+});
+
 it('honours recommended_api before the configured profile order', async () => {
   const db = database();
   try {
