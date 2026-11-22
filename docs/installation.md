@@ -1265,7 +1265,8 @@ settings forward.
    revoked, legacy null-snapshot jobs have finished, and recovery markers are
    clear. Configure the existing callback URL and bearer, the HTTPS inference
    model base on port 443 ending in `/v1`, and the relay issuer generation.
-   For a roster that includes a Responses model, set `RUNNER_LLM_GRANT_VERSION=2`
+   If any reviewer or synthesis route uses a protocol other than Chat Completions,
+   set `RUNNER_LLM_GRANT_VERSION=2`
    in the Runner service environment after deploying both Workers. Restart the drained
    Runner to load the setting and check its maintenance status. The Runner uses each
    route's frozen profile to configure OpenCode. Before enabling another protocol,
