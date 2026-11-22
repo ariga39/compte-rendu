@@ -135,7 +135,10 @@ route uses the Google Generative Language v1beta endpoint.
 Choose discovery according to how that provider exposes its model list.
 
 - For a public list, set `url` to its credential-free HTTPS endpoint and
-  `prefix` to the prefix for discovered review routes.
+  `prefix` to the prefix for discovered review routes. Public lists use the
+  generic catalog envelope (`data` with model IDs or capability metadata), even
+  when inference uses a native Gateway destination. Use Gateway discovery to
+  read the vendor's native list and cursor format.
 - For a protected list, set `"discovery": "gateway"` and `prefix`. The relay
   calls the provider's `/models` endpoint through Gateway using its BYOK alias.
   Confirm this endpoint lists the selected models before cutover.
@@ -146,7 +149,11 @@ Choose discovery according to how that provider exposes its model list.
 Custom and OpenAI destinations default to Chat Completions. Anthropic and
 Google AI Studio default to their native protocols as described above. Set
 `profile` to a default profile or `profiles` to the distinct profiles a rich
-catalog may publish (`chat`, `responses`, `messages`, `gemini`). Rich entries
+catalog may publish (`chat`, `responses`, `messages`, `gemini`). If both keys
+are present, `profiles` must include the default. Before upgrading an existing
+configuration that excludes its default, add the default to the allowed list
+if that protocol should be selectable, or change the default to an allowed
+profile. Rich entries
 are filtered from their advertised `api` operations; models that advertise no
 configured protocol are omitted. `models` is an explicit allowlist keyed by
 review route ID. Use it for ID-only endpoints that list unrelated models: only
