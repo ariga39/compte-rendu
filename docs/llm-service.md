@@ -124,6 +124,9 @@ to select custom providers, so `openai` and `custom-openai` both select
 For a provider account hosted directly by Anthropic or Google AI Studio, use
 `native:anthropic` or `native:google-ai-studio` with a BYOK alias for that
 provider. Their bundled adapters use the native `messages` or `gemini` profile.
+Deploy the corresponding inference endpoint before enabling its routes in a
+roster. Catalog discovery and grant issuance can succeed before the deployed
+Worker serves that protocol.
 Gateway discovery follows Anthropic’s `after_id` cursor or Google's
 `pageToken` cursor. Declare verified routes in `models` when the list supplies
 IDs without tool capability metadata, or use explicit aliases. The Gemini
