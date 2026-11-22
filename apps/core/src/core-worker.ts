@@ -1,5 +1,6 @@
 import { DateTime, Effect, Option, Schema } from 'effect';
 import {
+  createCloudflareOperationalLog,
   DEFAULT_REVIEW_NAME,
   readBoundedRequestBody,
   MAX_RUNNER_CALLBACK_BYTES,
@@ -33,7 +34,6 @@ import {
 import type { D1DatabaseLike } from './review-state-store';
 import { createJobControl } from './job-control';
 import type { WorkerEntrypoint } from '@compte-rendu/contracts';
-import { createCloudflareOperationalLog } from './operational-log';
 import { createPostHogLifecycleLog } from './posthog';
 import { handleReviewConfiguration } from './review-configuration';
 import type { OperationalLog } from '@compte-rendu/contracts';

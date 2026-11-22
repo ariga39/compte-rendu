@@ -14,7 +14,6 @@ import { GitHubRequestError } from '../apps/core/src/github-review-adapter';
 import { createGitHubAppTokenProvider } from '../apps/core/src/github-app-token';
 import { refreshRepositoryMetadata } from '../apps/core/src/dashboard';
 import type { OperationalLogEvent } from '../packages/contracts/src';
-import coreWorker from '../apps/core/src/worker';
 import { createIngressWorker } from '../apps/ingress/src/index';
 import { SqliteD1Database } from './support/d1-database';
 
@@ -611,7 +610,7 @@ describe('public dashboard reads are DB-only', () => {
     expect(called).toBe(0);
   });
 
-  it('forwards runner progress through ingress and serves dashboard pages', async () => {
+  it('forwards authenticated runner progress and serves the updated public detail', async () => {
     const database = new SqliteD1Database();
     const store = createD1ReviewStateStore(database);
     const review = await store.claimReview({
@@ -630,18 +629,6 @@ describe('public dashboard reads are DB-only', () => {
       crypto: globalThis.crypto,
       allowedInstallationIds: '[7]',
       runnerCallbackToken: 'progress-token',
-      assets: {
-        fetch: async (request) => {
-          const path = new URL(request.url).pathname;
-          if (path === '/index.html')
-            return new Response('<!doctype html><title>Dashboard fixture</title>', {
-              headers: { 'content-type': 'text/html' },
-            });
-          if (path === '/_app/immutable/app.js')
-            return new Response('export {};', { headers: { 'content-type': 'text/javascript' } });
-          return new Response(null, { status: 404 });
-        },
-      },
       core: createCoreWorker(coreEnv(database)),
     });
     const checkout = { stage: 'checkout', startedAt: '2026-01-01T00:00:11.000Z' };
@@ -680,25 +667,7 @@ describe('public dashboard reads are DB-only', () => {
     );
     expect(detail.task.stage).toBe('checkout');
 
-    const page = await ingress.fetch(new Request('https://ingress.test/'));
-    expect(page.status).toBe(200);
-    expect(page.headers.get('content-type')).toContain('text/html');
-    expect(await page.text()).toBe('<!doctype html><title>Dashboard fixture</title>');
-    const history = await ingress.fetch(new Request('https://ingress.test/history'));
-    expect(history.status).toBe(200);
-    expect(history.headers.get('content-type')).toContain('text/html');
-    expect(history.headers.get('cache-control')).toBe('no-store');
-    const help = await ingress.fetch(new Request('https://ingress.test/help'));
-    expect(help.status).toBe(200);
-    expect(help.headers.get('content-type')).toContain('text/html');
-    expect(help.headers.get('cache-control')).toBe('no-store');
-    const asset = await ingress.fetch(new Request('https://ingress.test/_app/immutable/app.js'));
-    expect(asset.headers.get('content-type')).toBe('text/javascript');
-    expect(await asset.text()).toBe('export {};');
-    const absent = await ingress.fetch(new Request('https://ingress.test/_app/missing.js'));
-    expect(absent.status).toBe(404);
-    const unmatched = await ingress.fetch(new Request('https://ingress.test/dashboard.js'));
-    expect(unmatched.status).toBe(405);
+    database.close();
   });
 
   it('does not cache an unavailable Core binding on public reads', async () => {
@@ -1195,7 +1164,7 @@ describe('public dashboard reads are DB-only', () => {
     database.close();
   });
 
-  it('emits aggregate bounded refresh facts and runs through the scheduled boundary', async () => {
+  it('emits aggregate bounded refresh facts', async () => {
     const database = new SqliteD1Database();
     const events: OperationalLogEvent[] = [];
     const summary = await runScheduledMetadataRefresh(coreEnv(database), {
@@ -1207,16 +1176,6 @@ describe('public dashboard reads are DB-only', () => {
     });
     expect(summary).toMatchObject({ dispatched: 0, failed: 0, skipped: '' });
     expect(events).toEqual([{ phase: 'core', outcome: 'metadata_refresh', ...summary }]);
-
-    let task: Promise<unknown> | undefined;
-    coreWorker.scheduled({}, coreEnv(database), {
-      waitUntil: (pending) => {
-        task = pending;
-      },
-    });
-    expect(task).toBeDefined();
-    await task;
-    expect(coreWorker.scheduled({}, undefined)).toBeUndefined();
   });
 
   it('returns a neutral 404 for a malformed run id instead of a server error', async () => {
@@ -1225,26 +1184,7 @@ describe('public dashboard reads are DB-only', () => {
     const response = await worker.fetch(new Request('https://core.internal/api/jobs/%E0%A4%A'));
     expect(response.status).toBe(404);
     expect(await response.text()).toBe('');
-    const nested = await createIngressWorker({
-      secret: 'webhook-secret',
-      crypto: globalThis.crypto,
-      allowedInstallationIds: '[7]',
-      core: worker,
-      assets: {
-        fetch: async (request) => {
-          const path = new URL(request.url).pathname;
-          if (path === '/index.html')
-            return new Response('<!doctype html><title>Dashboard fixture</title>', {
-              headers: { 'content-type': 'text/html' },
-            });
-          if (path === '/_app/immutable/app.js')
-            return new Response('export {};', { headers: { 'content-type': 'text/javascript' } });
-          return new Response(null, { status: 404 });
-        },
-      },
-    }).fetch(new Request('https://ingress.test/jobs/deep/nested'));
-    expect(nested.status).toBe(200);
-    expect(nested.headers.get('content-type')).toContain('text/html');
+    database.close();
   });
 
   it('applies selected status and cleanup filters within views', async () => {

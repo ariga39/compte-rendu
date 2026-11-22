@@ -13,7 +13,6 @@ import {
   type PullRequestFacts as PullRequestFactsType,
   type OperationalLog,
   type OperationalLogEvent,
-  type WorkerEntrypoint,
   sanitizeOperationalLogEvent,
 } from '@compte-rendu/contracts';
 import type { RunnerJobBinding } from './runner-job-client';
@@ -2132,9 +2131,3 @@ export function createReviewCoordinator(dependencies: AdmissionDependencies): Re
       ).catch(() => 'failed' as const),
   };
 }
-
-const core: WorkerEntrypoint = {
-  fetch: () => Effect.runPromise(Effect.succeed(new Response(null, { status: 501 }))),
-};
-
-export default core;
