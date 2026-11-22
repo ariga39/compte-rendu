@@ -8,6 +8,7 @@ import {
   type D1DatabaseLike,
   type IssueGrantInput,
   type IssueGrantResult,
+  type IssueGrantV2Result,
   type RevokeGrantInput,
   type RevokeGrantResult,
 } from './grants.ts';
@@ -141,6 +142,10 @@ export class InferenceWorker extends WorkerEntrypoint<InferenceWorkerEnv> {
 
   issue(input: IssueGrantInput): Promise<IssueGrantResult> {
     return createGrantControl(this.env.RELAY_DB).issue(input);
+  }
+
+  issueV2(input: IssueGrantInput): Promise<IssueGrantV2Result> {
+    return createGrantControl(this.env.RELAY_DB).issueV2(input);
   }
 
   revoke(input: RevokeGrantInput): Promise<RevokeGrantResult> {

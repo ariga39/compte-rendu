@@ -13,6 +13,7 @@ import type {
   D1DatabaseLike,
   IssueGrantInput,
   IssueGrantResult,
+  IssueGrantV2Result,
   RevokeGrantInput,
   RevokeGrantResult,
 } from '../../apps/inference-worker/src/grants';
@@ -25,6 +26,7 @@ interface InferenceBinding {
   refreshCatalog(at: number): Promise<void>;
   fetch(request: Request): Promise<Response>;
   issue(input: IssueGrantInput): Promise<IssueGrantResult>;
+  issueV2(input: IssueGrantInput): Promise<IssueGrantV2Result>;
   revoke(input: RevokeGrantInput): Promise<RevokeGrantResult>;
   usage(input: { jobId: string }): Promise<ModelUsageSummary | null>;
   sweep(): Promise<number>;
@@ -181,6 +183,24 @@ describe('Inference Worker runtime boundaries', () => {
         latestIssueDeadline: (await d1Now()) + 60_000,
       }),
     ).resolves.toEqual({ kind: 'duplicate' });
+  });
+
+  it('issues a versioned grant with client descriptors over RPC', async () => {
+    const now = await d1Now();
+    const issued = await runtime.INFERENCE.issueV2({
+      jobId: 'runtime-rpc-v2',
+      snapshot: { routes: ['deepseek-review'] },
+      latestIssueDeadline: now + 60_000,
+    });
+    expect(issued).toMatchObject({
+      kind: 'issued',
+      descriptors: [{ routeId: 'deepseek-review', profile: 'chat' }],
+    });
+    if (issued.kind !== 'issued') throw new Error('expected an issued grant');
+    expect(issued.descriptors[0]).not.toHaveProperty('upstreamModel');
+    await expect(runtime.INFERENCE.revoke({ jobId: 'runtime-rpc-v2' })).resolves.toEqual({
+      kind: 'revoked',
+    });
   });
 
   it('rejects an expired issue deadline over RPC', async () => {
