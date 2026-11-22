@@ -203,13 +203,18 @@ export const relayInference = (options: InferenceRelayOptions): Effect.Effect<Re
     };
     const completeStream = async (output: ReadableStreamDefaultController<Uint8Array>) => {
       if (failureStarted) return;
-      completed = true;
       await finishOnce(true);
+      completed = true;
       cleanup();
-      flushTerminal(output);
-      closed = true;
-      output.close();
-      await cancelUpstream();
+      try {
+        if (!closed) {
+          flushTerminal(output);
+          output.close();
+        }
+      } finally {
+        closed = true;
+        await cancelUpstream();
+      }
     };
 
     const responseBody = new ReadableStream<Uint8Array>(
