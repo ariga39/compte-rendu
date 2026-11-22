@@ -2,7 +2,11 @@ import { createRelayCatalog } from './catalog';
 import { RelayCatalogSources } from './catalog-config';
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import { Effect, Option, Schema } from 'effect';
-import { readBoundedRequestBody, type ModelUsageSummary } from '@compte-rendu/contracts';
+import {
+  readBoundedRequestBody,
+  type ModelProfile,
+  type ModelUsageSummary,
+} from '@compte-rendu/contracts';
 import {
   createGrantControl,
   type D1DatabaseLike,
@@ -20,6 +24,12 @@ import {
   type AuthenticatedGrant,
 } from './ledger.ts';
 import { relayInference, validateChatBody, type GatewayConfig } from './relay.ts';
+import {
+  buildMessagesUpstreamBody,
+  relayMessages,
+  selectMessagesRoute,
+  validateMessagesBody,
+} from './messages.ts';
 import { protocolForPath } from './protocols.ts';
 import { relayResponses, responsesUpstreamBody, validateResponsesBody } from './responses.ts';
 import type { FrozenRoute } from './routes.ts';
@@ -69,11 +79,26 @@ const selectedRoute = (
   return grant.routes.find((route) => route.routeId === model) ?? null;
 };
 
+const validateForProfile = (
+  profile: ModelProfile,
+  raw: unknown,
+): Record<string, unknown> | null => {
+  if (profile === 'responses') return validateResponsesBody(raw);
+  if (profile === 'messages') return validateMessagesBody(raw);
+  return validateChatBody(raw);
+};
+
+const routeForProfile = (
+  profile: ModelProfile,
+  grant: AuthenticatedGrant,
+  body: Record<string, unknown>,
+): FrozenRoute | null => {
+  if (profile === 'messages') return selectMessagesRoute(grant.routes, body);
+  return selectedRoute(grant, body);
+};
+
 export class InferenceWorker extends WorkerEntrypoint<InferenceWorkerEnv> {
-  private async handleInference(
-    request: Request,
-    profile: 'chat' | 'responses',
-  ): Promise<Response> {
+  private async handleInference(request: Request, profile: ModelProfile): Promise<Response> {
     const grant = await authenticateGrant(this.env.RELAY_DB, request.headers.get('authorization'));
     if (grant === null) return error(401, 'unauthorized');
     const gateway = gatewayConfig(this.env);
@@ -87,9 +112,9 @@ export class InferenceWorker extends WorkerEntrypoint<InferenceWorkerEnv> {
     } catch {
       return error(400, 'invalid request');
     }
-    const body = profile === 'responses' ? validateResponsesBody(raw) : validateChatBody(raw);
+    const body = validateForProfile(profile, raw);
     if (body === null) return error(400, 'invalid request');
-    const route = selectedRoute(grant, body);
+    const route = routeForProfile(profile, grant, body);
     if (route?.profile !== profile) return error(403, 'route forbidden');
 
     const requestId = crypto.randomUUID();
@@ -105,6 +130,21 @@ export class InferenceWorker extends WorkerEntrypoint<InferenceWorkerEnv> {
           grant,
           route,
           body: responsesUpstreamBody(body, route),
+          request,
+          waitUntil: (task) => this.ctx.waitUntil(task),
+        }),
+      );
+    }
+
+    if (profile === 'messages') {
+      return Effect.runPromise(
+        relayMessages({
+          database: this.env.RELAY_DB,
+          requestId,
+          gateway,
+          grant,
+          route,
+          body: buildMessagesUpstreamBody(route, body),
           request,
           waitUntil: (task) => this.ctx.waitUntil(task),
         }),

@@ -97,6 +97,13 @@ Only `response.completed` with a completed response and a durable usage update
 ends the stream successfully. Incomplete or failed turns keep partial usage.
 Responses terminal events are capped at 4 MiB; larger events fail the turn.
 
+Messages routes use `POST /v1/messages` with streaming, local function tools and
+signed thinking/tool continuations. The relay accepts inline tool results and
+rejects hosted tools, remote media, file ids and server-state references. Only a
+complete `message_stop` ends the turn successfully; `max_tokens` and `pause_turn`
+keep partial usage and fail the stream. A protocol refusal may finish the
+transport turn but is never accepted as a review result.
+
 ### Managed relay model catalog
 
 Set the inference Worker's `RELAY_CATALOG_SOURCES` variable to a JSON array.

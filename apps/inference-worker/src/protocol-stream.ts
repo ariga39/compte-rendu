@@ -32,6 +32,8 @@ export interface ProtocolStreamAdapter {
   }): Record<string, string>;
   observe(frame: SseFrame): StreamObservationDetails;
   encode(frame: SseFrame): Uint8Array;
+  /** Create a fresh adapter for one request when observation is stateful. */
+  create?(): ProtocolStreamAdapter;
 }
 
 export interface ProtocolStreamOptions {
@@ -83,8 +85,8 @@ const headersFor = (
 
 export const relayProtocolStream = (options: ProtocolStreamOptions): Effect.Effect<Response> =>
   Effect.gen(function* () {
-    const { database, requestId, gateway, grant, route, body, request, waitUntil, adapter } =
-      options;
+    const { database, requestId, gateway, grant, route, body, request, waitUntil } = options;
+    const adapter = options.adapter.create?.() ?? options.adapter;
     const fetchUpstream = options.fetch ?? globalThis.fetch;
     const controller = new AbortController();
     const usage: { -readonly [K in keyof UpstreamUsage]: UpstreamUsage[K] } = {

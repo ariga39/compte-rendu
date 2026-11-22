@@ -1,0 +1,154 @@
+{
+  "source": "OpenCode 2.0.32 pinned CLI loopback capture; sanitized, synthetic text, one representative tool schema",
+  "requests": {
+    "title": {
+      "model": "review-provider/claude-x",
+      "system": [
+        {
+          "type": "text",
+          "text": "Generate a short title for this review.",
+          "cache_control": {
+            "type": "ephemeral"
+          }
+        }
+      ],
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Review this change.",
+              "cache_control": {
+                "type": "ephemeral"
+              }
+            }
+          ]
+        }
+      ],
+      "stream": true,
+      "max_tokens": 32000
+    },
+    "main": {
+      "model": "review-provider/claude-x",
+      "system": [
+        {
+          "type": "text",
+          "text": "Review this change.",
+          "cache_control": {
+            "type": "ephemeral"
+          }
+        }
+      ],
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Review this change.",
+              "cache_control": {
+                "type": "ephemeral"
+              }
+            }
+          ]
+        }
+      ],
+      "tools": [
+        {
+          "name": "read",
+          "description": "Read a repository file",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path"
+            ]
+          }
+        }
+      ],
+      "stream": true,
+      "max_tokens": 32000
+    },
+    "continuation": {
+      "model": "review-provider/claude-x",
+      "system": [
+        {
+          "type": "text",
+          "text": "Review this change.",
+          "cache_control": {
+            "type": "ephemeral"
+          }
+        }
+      ],
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Review this change.",
+              "cache_control": {
+                "type": "ephemeral"
+              }
+            }
+          ]
+        },
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "thinking",
+              "thinking": "Inspect the example file.",
+              "signature": "synthetic-signature-messages"
+            },
+            {
+              "type": "tool_use",
+              "id": "toolu_synthetic",
+              "name": "read",
+              "input": {
+                "path": "src/example.ts"
+              }
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "toolu_synthetic",
+              "content": "export const value = 1;",
+              "cache_control": {
+                "type": "ephemeral"
+              }
+            }
+          ]
+        }
+      ],
+      "tools": [
+        {
+          "name": "read",
+          "description": "Read a repository file",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path"
+            ]
+          }
+        }
+      ],
+      "stream": true,
+      "max_tokens": 32000
+    }
+  }
+}
