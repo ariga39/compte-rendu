@@ -166,6 +166,21 @@ describe('Gemini public workerd route', () => {
     await runtime.INFERENCE.revoke({ jobId: 'gemini-blocked' });
   });
 
+  it('fails an in-band error even if STOP follows it', async () => {
+    const jobId = 'gemini-error-before-stop';
+    await control(jobId);
+    const token = await issueGrant(jobId, [geminiRoute]);
+    const response = await post(
+      token,
+      geminiPath(geminiRouteHandle(geminiRoute.routeId)),
+      geminiBody(),
+    );
+    await expect(response.text()).rejects.toThrow();
+    await expect(runtime.INFERENCE.usage({ jobId })).resolves.toMatchObject({
+      models: [{ incompleteRequests: 1, inputTokens: { total: 12 } }],
+    });
+  });
+
   it('accepts only the v1beta streaming path and a granted Gemini profile', async () => {
     await control('gemini-success');
     const token = await issueGrant('gemini-denied', [geminiRoute, messagesRoute]);

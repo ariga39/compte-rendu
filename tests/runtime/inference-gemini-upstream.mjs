@@ -88,6 +88,13 @@ export const geminiProtocolStream = (scenario, body) => {
       return hasFunctionResponse(body) ? geminiSuccessWire() : geminiToolWire();
     case 'gemini-max-tokens':
       return geminiMaxTokensWire();
+    case 'gemini-error-before-stop':
+      return (
+        geminiFrame({
+          error: { message: 'upstream diagnostic' },
+          usageMetadata: { promptTokenCount: 12 },
+        }) + geminiSuccessWire()
+      );
     case 'gemini-blocked':
       return geminiBlockedWire();
     default:
