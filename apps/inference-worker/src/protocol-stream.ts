@@ -21,9 +21,7 @@ export interface StreamObservationDetails {
 }
 
 export interface ProtocolStreamAdapter {
-  readonly name: string;
   readonly maxTerminalBytes: number;
-  readonly maxBufferedFrameBytes?: number;
   upstreamPath(route: FrozenRoute): GatewayPath;
   headers?(context: {
     readonly gateway: GatewayConfig;
@@ -202,7 +200,7 @@ export const relayProtocolStream = (options: ProtocolStreamOptions): Effect.Effe
     }
 
     const decoder = createBoundedSseDecoder(
-      adapter.maxBufferedFrameBytes ?? adapter.maxTerminalBytes + DEFAULT_SSE_FRAME_OVERHEAD_BYTES,
+      adapter.maxTerminalBytes + DEFAULT_SSE_FRAME_OVERHEAD_BYTES,
     );
     reader = upstream.body.pipeThrough(decoder).getReader();
 

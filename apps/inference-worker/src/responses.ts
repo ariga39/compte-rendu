@@ -9,8 +9,6 @@ import type {
 } from './protocol-stream.ts';
 import { encodeSseFrame, relayProtocolStream } from './protocol-stream.ts';
 
-// Responses subset for the first release. The profiles branch owns the shared
-// profile/request schemas; this module should import them when integrated.
 export const MAX_RESPONSES_OUTPUT_TOKENS = 256_000;
 // One terminal event repeats the full output. This is a policy ceiling, not a
 // measured provider maximum. Workerd tests cover a successful terminal above
@@ -264,7 +262,6 @@ export const observeResponsesFrame = (frame: SseFrame): StreamObservationDetails
 };
 
 export const ResponsesStreamAdapter: ProtocolStreamAdapter = {
-  name: 'responses',
   maxTerminalBytes: MAX_RESPONSES_TERMINAL_BYTES,
   upstreamPath: () => '/responses',
   observe: observeResponsesFrame,
@@ -273,5 +270,3 @@ export const ResponsesStreamAdapter: ProtocolStreamAdapter = {
 
 export const relayResponses = (options: Omit<ProtocolStreamOptions, 'adapter'>) =>
   relayProtocolStream({ ...options, adapter: ResponsesStreamAdapter });
-
-export type ResponsesStreamOptions = Omit<ProtocolStreamOptions, 'adapter'>;

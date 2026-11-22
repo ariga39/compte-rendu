@@ -84,7 +84,7 @@ const readSource = async (
       'discovery' in source ? source.providerSlug : undefined,
     );
     rejected += result.rejected;
-    const overrides = 'models' in source ? source.models : undefined;
+    const overrides = source.models;
     for (const entry of result.models) {
       const routeId = source.prefix + entry.id;
       if (!validId(entry.id) || !validId(routeId)) {
@@ -180,7 +180,7 @@ function candidateSources(sources: readonly Source[], gateway: GatewayConfig | n
         resolved: {},
         invalid: false,
       };
-      const overrides = 'models' in source ? source.models : undefined;
+      const overrides = source.models;
       for (const [id, model] of Object.entries(source.aliases)) {
         group.models[id] = model;
         const override = overrides?.[id];
