@@ -1,3 +1,4 @@
+import { geminiProtocolStream } from './inference-gemini-upstream.mjs';
 import { messagesProtocolStream } from './inference-messages-upstream.mjs';
 
 const encoder = new TextEncoder();
@@ -427,6 +428,8 @@ export default {
 
     const messages = messagesProtocolStream(scenario, body);
     if (messages !== null) return streamResponse(messages);
+    const gemini = geminiProtocolStream(scenario, body);
+    if (gemini !== null) return streamResponse(gemini);
     if (scenario === 'responses-success') return streamResponse(responsesSuccessWire());
     if (scenario === 'responses-incomplete') return streamResponse(responsesIncompleteWire());
     if (scenario === 'responses-failed') return streamResponse(responsesFailedWire());

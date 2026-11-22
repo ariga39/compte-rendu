@@ -97,6 +97,7 @@ export default defineConfig({
       'tests/runtime/inference-runtime.test.ts',
       'tests/runtime/inference-responses.test.ts',
       'tests/runtime/inference-messages.test.ts',
+      'tests/runtime/inference-gemini.test.ts',
     ],
     setupFiles: ['tests/runtime/inference-setup.ts'],
   },

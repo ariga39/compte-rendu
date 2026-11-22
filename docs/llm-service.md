@@ -92,7 +92,8 @@ job and triggers grant cleanup.
 Chat routes use `POST /v1/chat/completions`. Responses routes use
 `POST /v1/responses` with foreground streaming, local function tools and
 `store: false`. The relay accepts inline tool results and encrypted reasoning
-replay. It rejects hosted tools, remote references and cross-protocol calls.
+replay. It rejects hosted tools, remote references and cross-protocol calls. Usage counts thoughts in output and reports them
+separately as reasoning.
 Only `response.completed` with a completed response and a durable usage update
 ends the stream successfully. Incomplete or failed turns keep partial usage.
 Responses terminal events are capped at 4 MiB; larger events fail the turn.
@@ -103,6 +104,16 @@ rejects hosted tools, remote media, file ids and server-state references. Only a
 complete `message_stop` ends the turn successfully; `max_tokens` and `pause_turn`
 keep partial usage and fail the stream. A protocol refusal may finish the
 transport turn but is never accepted as a review result.
+
+Gemini routes use
+`POST /v1beta/models/<handle>:streamGenerateContent?alt=sse`, where the handle is
+`r-` plus the unpadded base64url route ID. Set the pinned Google provider's
+baseURL to `<relay>/v1beta`; a bare relay origin produces `/models/...` and is
+intentionally not accepted. The relay maps the handle to the frozen upstream
+model, accepts local function calls with thought signatures and function
+responses, and rejects hosted tools, file or inline media, cached server content
+and cross-protocol calls. Usage counts thoughts in output and reports them
+separately as reasoning.
 
 ### Managed relay model catalog
 
