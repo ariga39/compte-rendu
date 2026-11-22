@@ -1,22 +1,15 @@
-import type { PublicHistoryPage, PublicTaskDetail, PublicTaskState } from '@compte-rendu/contracts';
+import type { PublicTaskState } from '@compte-rendu/contracts';
 import { publicTask } from './sample-task.ts';
-import { expect, test, type ApiHandler, type ApiPayload } from './fixtures';
-
-const NOW = '2026-10-16T12:00:00.000Z';
-const ok = (json: unknown): ApiPayload => ({ status: 200, json });
-
-const historyPage = (tasks: PublicTaskState[]): PublicHistoryPage => ({
-  generatedAt: NOW,
-  tasks,
-  nextCursor: null,
-});
-
-const detailData = (task: PublicTaskState): PublicTaskDetail => ({
-  generatedAt: NOW,
-  task,
-  milestones: [],
-  processingMilestones: [],
-});
+import {
+  detailData,
+  expect,
+  historyPage,
+  NOW,
+  ok,
+  test,
+  type ApiHandler,
+  type ApiPayload,
+} from './fixtures';
 
 const cancellable = () =>
   publicTask('run-1', {

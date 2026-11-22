@@ -1,14 +1,6 @@
-import type {
-  PublicHistoryPage,
-  PublicOverview,
-  PublicTaskDetail,
-  PublicTaskState,
-} from '@compte-rendu/contracts';
+import type { PublicHistoryPage, PublicOverview, PublicTaskState } from '@compte-rendu/contracts';
 import type { Page } from '@playwright/test';
-import { expect, test, type ApiPayload } from './fixtures';
-
-const NOW = '2026-10-16T12:00:00.000Z';
-const ok = (json: unknown): ApiPayload => ({ status: 200, json });
+import { detailData, expect, historyPage, NOW, ok, test, type ApiPayload } from './fixtures';
 
 const task = (overrides: Partial<PublicTaskState> = {}): PublicTaskState => ({
   runId: 'run-1',
@@ -34,23 +26,10 @@ const task = (overrides: Partial<PublicTaskState> = {}): PublicTaskState => ({
   ...overrides,
 });
 
-const historyPage = (tasks: PublicTaskState[] = []): PublicHistoryPage => ({
-  generatedAt: NOW,
-  tasks,
-  nextCursor: null,
-});
-
 const overview = (): PublicOverview & PublicHistoryPage => ({
-  ...historyPage(),
+  ...historyPage([]),
   counts: { queued: 0, claimed: 0, publishedLast24h: 0, failedLast24h: 0, cancelledLast24h: 0 },
   cleanupAttention: 0,
-});
-
-const detailData = (single: PublicTaskState): PublicTaskDetail => ({
-  generatedAt: NOW,
-  task: single,
-  milestones: [],
-  processingMilestones: [],
 });
 
 const signedIn = (login: string, operator: boolean): ApiPayload => ({

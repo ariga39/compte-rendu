@@ -3,6 +3,12 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { extname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test as base, expect, type Page } from '@playwright/test';
+import type {
+  PublicHistoryPage,
+  PublicMilestone,
+  PublicTaskDetail,
+  PublicTaskState,
+} from '@compte-rendu/contracts';
 
 const buildRoot = resolve(fileURLToPath(new URL('../.svelte-kit/output/client', import.meta.url)));
 
@@ -29,6 +35,32 @@ export interface ApiPayload {
 export type ApiResponse = ApiPayload | { promise: Promise<ApiPayload> } | { destroy: true };
 
 export type ApiHandler = (url: URL, request: IncomingMessage) => ApiResponse;
+
+export const NOW = '2026-10-16T12:00:00.000Z';
+
+export const ok = (json: unknown): ApiPayload => ({ status: 200, json });
+
+export const historyPage = (
+  tasks: PublicTaskState[] = [],
+  nextCursor: string | null = null,
+): PublicHistoryPage => ({ generatedAt: NOW, tasks, nextCursor });
+
+export const detailData = (
+  task: PublicTaskState,
+  milestones: PublicMilestone[] = [],
+  processingMilestones: PublicTaskDetail['processingMilestones'] = [],
+): PublicTaskDetail => ({ generatedAt: NOW, task, milestones, processingMilestones });
+
+export const listAndDetails =
+  (tasks: PublicTaskState[]): ApiHandler =>
+  (url) => {
+    if (url.pathname.startsWith('/api/jobs/')) {
+      const runId = url.pathname.slice('/api/jobs/'.length);
+      const task = tasks.find((entry) => entry.runId === runId);
+      return task === undefined ? { status: 404 } : ok(detailData(task));
+    }
+    return ok(historyPage(tasks));
+  };
 
 export interface HarnessState {
   requests: string[];

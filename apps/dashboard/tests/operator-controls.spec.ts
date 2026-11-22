@@ -1,33 +1,6 @@
-import type { PublicHistoryPage, PublicTaskDetail, PublicTaskState } from '@compte-rendu/contracts';
+import type { PublicTaskState } from '@compte-rendu/contracts';
 import { publicTask } from './sample-task.ts';
-import { expect, test, type ApiHandler, type ApiPayload } from './fixtures';
-
-const NOW = '2026-10-16T12:00:00.000Z';
-const ok = (json: unknown): ApiPayload => ({ status: 200, json });
-
-const historyPage = (tasks: PublicTaskState[]): PublicHistoryPage => ({
-  generatedAt: NOW,
-  tasks,
-  nextCursor: null,
-});
-
-const detailData = (task: PublicTaskState): PublicTaskDetail => ({
-  generatedAt: NOW,
-  task,
-  milestones: [],
-  processingMilestones: [],
-});
-
-const listAndDetails =
-  (tasks: PublicTaskState[]): ApiHandler =>
-  (url) => {
-    if (url.pathname.startsWith('/api/jobs/')) {
-      const runId = url.pathname.slice('/api/jobs/'.length);
-      const found = tasks.find((task) => task.runId === runId);
-      return found === undefined ? { status: 404 } : ok(detailData(found));
-    }
-    return ok(historyPage(tasks));
-  };
+import { detailData, expect, historyPage, listAndDetails, NOW, ok, test } from './fixtures';
 
 const statusOf = async (page: import('@playwright/test').Page) =>
   (await page.locator('.review-heading .bx--tag').textContent())?.trim() ?? '';
