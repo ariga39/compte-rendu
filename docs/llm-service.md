@@ -92,8 +92,7 @@ job and triggers grant cleanup.
 Chat routes use `POST /v1/chat/completions`. Responses routes use
 `POST /v1/responses` with foreground streaming, local function tools and
 `store: false`. The relay accepts inline tool results and encrypted reasoning
-replay. It rejects hosted tools, remote references and cross-protocol calls. Usage counts thoughts in output and reports them
-separately as reasoning.
+replay. It rejects hosted tools, remote references and cross-protocol calls.
 Only `response.completed` with a completed response and a durable usage update
 ends the stream successfully. Incomplete or failed turns keep partial usage.
 Responses terminal events are capped at 4 MiB; larger events fail the turn.
