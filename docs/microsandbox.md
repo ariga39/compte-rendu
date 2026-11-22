@@ -42,6 +42,7 @@ and disable DNS rebinding protection. Use this only with trusted DNS and
 operator-controlled GitHub and relay destinations. The guest still uses
 restricted security, deny-by-default egress and the two host/443 rules. With
 the option unset, Runner uses multi-tenant and keeps rebinding protection.
+Both profiles cap each VM at 1,024 TCP connections and 1,024 UDP relay sessions.
 
 ## Isolation and operation
 

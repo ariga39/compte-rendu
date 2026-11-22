@@ -11944,6 +11944,8 @@ describe('Runner confirmed cleanup recovery', () => {
           enabled ? 'single-tenant' : 'multi-tenant',
         );
         expect(args.includes('--no-dns-rebind-protection')).toBe(enabled);
+        expect(args[args.indexOf('--max-tcp-connections') + 1]).toBe('1024');
+        expect(args[args.indexOf('--max-udp-connections') + 1]).toBe('1024');
         expect(args[args.indexOf('--security') + 1]).toBe('restricted');
         expect(args[args.indexOf('--net-default') + 1]).toBe('deny');
         expect(args[args.indexOf('--net-rule') + 1]).toBe(
