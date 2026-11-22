@@ -3,6 +3,7 @@ import type { ModelProfile } from '@compte-rendu/contracts';
 export const protocolPaths = {
   '/v1/chat/completions': 'chat',
   '/v1/responses': 'responses',
+  '/v1/messages': 'messages',
 } as const satisfies Record<string, ModelProfile>;
 
 export const protocolForPath = (pathname: string) =>

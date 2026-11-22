@@ -1,3 +1,5 @@
+import { messagesProtocolStream } from './inference-messages-upstream.mjs';
+
 const encoder = new TextEncoder();
 
 let scenario = 'success';
@@ -423,6 +425,8 @@ export default {
       body,
     });
 
+    const messages = messagesProtocolStream(scenario, body);
+    if (messages !== null) return streamResponse(messages);
     if (scenario === 'responses-success') return streamResponse(responsesSuccessWire());
     if (scenario === 'responses-incomplete') return streamResponse(responsesIncompleteWire());
     if (scenario === 'responses-failed') return streamResponse(responsesFailedWire());

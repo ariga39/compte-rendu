@@ -26,6 +26,21 @@ await build({
   },
 });
 
+const upstreamDirectory = resolve('tests/runtime/.generated/inference-upstream');
+await build({
+  configFile: false,
+  root: process.cwd(),
+  build: {
+    lib: {
+      entry: resolve('tests/runtime/inference-upstream-entry.mjs'),
+      formats: ['es'],
+      fileName: 'upstream',
+    },
+    outDir: upstreamDirectory,
+    emptyOutDir: true,
+  },
+});
+
 await mkdir(outputDirectory, { recursive: true });
 const migrations = await readD1Migrations(resolve('apps/inference-worker/migrations'));
 await writeFile(
@@ -66,7 +81,7 @@ const workerPoolOptions = {
       },
       {
         name: 'compte-rendu-controlled-upstream',
-        scriptPath: resolve('tests/runtime/inference-upstream-entry.mjs'),
+        scriptPath: resolve(upstreamDirectory, 'upstream.mjs'),
         modules: true,
         compatibilityDate: '2026-08-22',
       },
@@ -81,6 +96,7 @@ export default defineConfig({
     include: [
       'tests/runtime/inference-runtime.test.ts',
       'tests/runtime/inference-responses.test.ts',
+      'tests/runtime/inference-messages.test.ts',
     ],
     setupFiles: ['tests/runtime/inference-setup.ts'],
   },
