@@ -1,5 +1,6 @@
 import { DateTime, Effect, Option, Schema } from 'effect';
 import {
+  type ModelRouteDescriptor,
   type ModelUsageSummary,
   RUNNER_LLM_CONTROL_TIMEOUT_MS,
   readBoundedRequestBody,
@@ -27,6 +28,19 @@ export interface RelayControl {
     | { kind: 'issued'; token: string; expiresAt: string }
     | { kind: 'duplicate' | 'deadline-exceeded' | 'invalid' }
   >;
+  issueV2?(input: {
+    jobId: string;
+    snapshot: { routes: readonly string[] };
+    latestIssueDeadline: number;
+  }): Promise<
+    | {
+        kind: 'issued';
+        token: string;
+        expiresAt: string;
+        descriptors: readonly ModelRouteDescriptor[];
+      }
+    | { kind: 'duplicate' | 'deadline-exceeded' | 'invalid' }
+  >;
 }
 
 export async function handleRunnerLlmControl(
@@ -35,17 +49,20 @@ export async function handleRunnerLlmControl(
   callbackToken?: string,
 ) {
   const path = new URL(request.url).pathname;
-  if (!['/runner-llm/issue', '/runner-llm/usage', '/runner-llm/revoke'].includes(path))
+  const issuePath = path === '/runner-llm/issue-v2' ? 2 : path === '/runner-llm/issue' ? 1 : null;
+  if (issuePath === null && !['/runner-llm/usage', '/runner-llm/revoke'].includes(path))
     return new Response(null, { status: 404 });
   if (request.method !== 'POST') return new Response(null, { status: 405 });
   if (!callbackToken || request.headers.get('authorization') !== 'Bearer ' + callbackToken)
     return new Response(null, { status: 401 });
   if (!env.INFERENCE_RELAY) return new Response(null, { status: 503 });
+  if (issuePath === 2 && env.INFERENCE_RELAY.issueV2 === undefined)
+    return new Response(null, { status: 503 });
   try {
     const payload = await readBoundedRequestBody(request, 16 * 1024);
     if (payload.kind !== 'ok') return new Response(null, { status: 413 });
     const body = payload.text;
-    if (path !== '/runner-llm/issue') {
+    if (issuePath === null) {
       const job = Schema.decodeUnknownOption(
         Schema.fromJsonString(Schema.Struct({ jobId: JobId })),
         { onExcessProperty: 'error' },
@@ -80,10 +97,29 @@ export async function handleRunnerLlmControl(
     if (selection.reviewers.length > 1) allowed.add(selection.synthesis);
     if (routes.length !== allowed.size || routes.some((route) => !allowed.has(route)))
       return new Response(null, { status: 409 });
+    const snapshot = { routes: [...allowed] };
+    const latestIssueDeadline = now + RUNNER_LLM_CONTROL_TIMEOUT_MS;
+    if (issuePath === 2) {
+      const reply = await env.INFERENCE_RELAY.issueV2!({
+        jobId,
+        snapshot,
+        latestIssueDeadline,
+      });
+      if (reply.kind !== 'issued')
+        return new Response(null, { status: reply.kind === 'duplicate' ? 409 : 503 });
+      return Response.json(
+        {
+          token: reply.token,
+          expiresAt: reply.expiresAt,
+          descriptors: reply.descriptors,
+        },
+        { status: 201, headers: { 'cache-control': 'no-store' } },
+      );
+    }
     const reply = await env.INFERENCE_RELAY.issue({
       jobId,
-      snapshot: { routes: [...allowed] },
-      latestIssueDeadline: now + RUNNER_LLM_CONTROL_TIMEOUT_MS,
+      snapshot,
+      latestIssueDeadline,
     });
     if (reply.kind !== 'issued')
       return new Response(null, { status: reply.kind === 'duplicate' ? 409 : 503 });
