@@ -11945,6 +11945,9 @@ describe('Runner confirmed cleanup recovery', () => {
         sandbox: { cleanup: 'destroyed' },
       });
       expect(success.manifest.runtime).toBe('microsandbox');
+      expect(success.createArgs).toContain(
+        'allow@inference.example:tcp:443,allow@api.github.com:tcp:443',
+      );
       const failed = await runAgentScenario({
         ...scenario,
         runId: 'msb-cleanup',
