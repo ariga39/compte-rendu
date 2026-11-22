@@ -12,9 +12,7 @@ export const gatewayHeaders = (gateway: GatewayConfig, alias: string) => ({
   'cf-aig-skip-cache': 'true',
   'cf-aig-byok-alias': alias,
 });
-export const gatewayUrl = (
-  gateway: GatewayConfig,
-  slug: string,
-  path: '/models' | '/chat/completions',
-) =>
+export type GatewayPath = `/${string}`;
+
+export const gatewayUrl = (gateway: GatewayConfig, slug: string, path: GatewayPath) =>
   `https://gateway.ai.cloudflare.com/v1/${gateway.accountId}/${gateway.gatewayId}/${gatewayProviderPath(slug)}${path}`;

@@ -78,7 +78,10 @@ export default defineConfig({
   plugins: [cloudflareTest(workerPoolOptions)],
   test: {
     name: 'inference-worker-runtime',
-    include: ['tests/runtime/inference-runtime.test.ts'],
+    include: [
+      'tests/runtime/inference-runtime.test.ts',
+      'tests/runtime/inference-responses.test.ts',
+    ],
     setupFiles: ['tests/runtime/inference-setup.ts'],
   },
 });

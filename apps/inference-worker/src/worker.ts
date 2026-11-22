@@ -19,12 +19,9 @@ import {
   sweep,
   type AuthenticatedGrant,
 } from './ledger.ts';
-import {
-  isChatCompletionPath,
-  relayInference,
-  validateChatBody,
-  type GatewayConfig,
-} from './relay.ts';
+import { relayInference, validateChatBody, type GatewayConfig } from './relay.ts';
+import { protocolForPath } from './protocols.ts';
+import { relayResponses, responsesUpstreamBody, validateResponsesBody } from './responses.ts';
 import type { FrozenRoute } from './routes.ts';
 
 const INFERENCE_MAX_BYTES = 16 * 1024 * 1024;
@@ -73,11 +70,10 @@ const selectedRoute = (
 };
 
 export class InferenceWorker extends WorkerEntrypoint<InferenceWorkerEnv> {
-  private inference(request: Request): Promise<Response> {
-    return this.handleInference(request);
-  }
-
-  private async handleInference(request: Request): Promise<Response> {
+  private async handleInference(
+    request: Request,
+    profile: 'chat' | 'responses',
+  ): Promise<Response> {
     const grant = await authenticateGrant(this.env.RELAY_DB, request.headers.get('authorization'));
     if (grant === null) return error(401, 'unauthorized');
     const gateway = gatewayConfig(this.env);
@@ -91,14 +87,29 @@ export class InferenceWorker extends WorkerEntrypoint<InferenceWorkerEnv> {
     } catch {
       return error(400, 'invalid request');
     }
-    const body = validateChatBody(raw);
+    const body = profile === 'responses' ? validateResponsesBody(raw) : validateChatBody(raw);
     if (body === null) return error(400, 'invalid request');
     const route = selectedRoute(grant, body);
-    if (route === null || route.profile !== 'chat') return error(403, 'route forbidden');
+    if (route?.profile !== profile) return error(403, 'route forbidden');
 
     const requestId = crypto.randomUUID();
     const admitted = await admitRequest(this.env.RELAY_DB, requestId, grant, route);
     if (!admitted) return error(401, 'unauthorized');
+
+    if (profile === 'responses') {
+      return Effect.runPromise(
+        relayResponses({
+          database: this.env.RELAY_DB,
+          requestId,
+          gateway,
+          grant,
+          route,
+          body: responsesUpstreamBody(body, route),
+          request,
+          waitUntil: (task) => this.ctx.waitUntil(task),
+        }),
+      );
+    }
 
     return Effect.runPromise(
       relayInference({
@@ -116,13 +127,14 @@ export class InferenceWorker extends WorkerEntrypoint<InferenceWorkerEnv> {
 
   fetch(request: Request): Response | Promise<Response> {
     const url = new URL(request.url);
-    if (!isChatCompletionPath(url.pathname)) {
+    const profile = protocolForPath(url.pathname);
+    if (profile === null) {
       return new Response(null, { status: 404, headers: { 'cache-control': 'no-store' } });
     }
     if (request.method !== 'POST') {
       return new Response(null, { status: 405, headers: { 'cache-control': 'no-store' } });
     }
-    return this.inference(request);
+    return this.handleInference(request, profile);
   }
 
   #modelCatalog() {
