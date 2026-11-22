@@ -339,7 +339,7 @@ const deferredTerminalResponse = (model) => {
           step = 2;
           await new Promise((resolve) => setTimeout(resolve, 50));
           controller.enqueue(encoder.encode(usageFrame(model) + 'data: [DONE]\n\n'));
-          controller.close();
+          // The provider keeps its response open after the protocol terminator.
         }
       },
     }),

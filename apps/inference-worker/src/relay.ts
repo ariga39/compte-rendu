@@ -209,6 +209,7 @@ export const relayInference = (options: InferenceRelayOptions): Effect.Effect<Re
       flushTerminal(output);
       closed = true;
       output.close();
+      await cancelUpstream();
     };
 
     const responseBody = new ReadableStream<Uint8Array>(
