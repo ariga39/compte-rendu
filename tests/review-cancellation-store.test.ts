@@ -44,22 +44,7 @@ const evidence = (key: string) => ({
 
 describe('cancellation migration', () => {
   it('upgrades existing runs and deliveries without losing rows or uniqueness rules', async () => {
-    const database = new SqliteD1Database([
-      '0001_review_state.sql',
-      '0002_allow_manual_retry.sql',
-      '0003_runner_evidence.sql',
-      '0004_runner_admission.sql',
-      '0005_publication_claim.sql',
-      '0006_review_check_runs.sql',
-      '0007_check_setup_lease.sql',
-      '0008_runner_cleanup.sql',
-      '0009_dashboard_lifecycle.sql',
-      '0010_review_branch_refs.sql',
-      '0011_review_decision.sql',
-      '0012_review_configuration.sql',
-      '0013_model_usage.sql',
-      '0014_failure_http_status.sql',
-    ]);
+    const database = new SqliteD1Database('core', '0014_failure_http_status.sql');
     const legacyRunId = 'legacy-before-cancellation';
     database.database.exec(`
       INSERT INTO deliveries (
@@ -82,7 +67,7 @@ describe('cancellation migration', () => {
     `);
 
     try {
-      database.applyMigrations(['0015_review_cancellation.sql']);
+      database.migrateThrough('0015_review_cancellation.sql');
       const store = createD1ReviewStateStore(database);
       await expect(
         store.cancelRun({
