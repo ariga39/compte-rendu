@@ -4,7 +4,6 @@ import { createRunner } from '../apps/runner/src/runner';
 import { createCoreWorker } from '../apps/core/src/core-worker';
 import {
   createD1ReviewStateStore,
-  createInMemoryReviewStateStore,
   type ReviewJob,
   type ReviewPublicationStateStore,
 } from '../apps/core/src/index';
@@ -5320,7 +5319,7 @@ describe('Core Worker', () => {
   it('returns 503 and records a retryable state failure when claiming fails', async () => {
     const database = new SqliteD1Database();
     const events: OperationalLogEvent[] = [];
-    const baseStateStore = createInMemoryReviewStateStore();
+    const baseStateStore = createD1ReviewStateStore(database);
     const stateStore = {
       ...baseStateStore,
       claimReview: async () => {
@@ -5474,9 +5473,7 @@ describe('Runner claim serialization', () => {
     trigger: 'automatic',
   });
 
-  const exerciseSamePullRequestExclusion = async (
-    store: ReturnType<typeof createInMemoryReviewStateStore>,
-  ) => {
+  const exerciseSamePullRequestExclusion = async (store: ReviewPublicationStateStore) => {
     if (store.claimNextJob === undefined) throw new Error('claim is unavailable');
     const initial = await store.claimReview({
       deliveryId: 'delivery-serial-old',
@@ -5544,11 +5541,6 @@ describe('Runner claim serialization', () => {
     }
   });
 
-  it('applies the same exclusion in the in-memory store', async () => {
-    const store = createInMemoryReviewStateStore();
-    await exerciseSamePullRequestExclusion(store);
-  });
-
   const evidenceFor = (runId: string) => ({
     key: `reviews/${runId}`,
     status: 'incomplete' as const,
@@ -5558,8 +5550,8 @@ describe('Runner claim serialization', () => {
   });
 
   const exerciseFailedCleanupExclusion = async (
-    store: ReturnType<typeof createInMemoryReviewStateStore>,
-    fresh: ReturnType<typeof createInMemoryReviewStateStore>,
+    store: ReviewPublicationStateStore,
+    fresh: ReviewPublicationStateStore,
   ) => {
     if (store.claimNextJob === undefined || fresh.claimNextJob === undefined) {
       throw new Error('claim is unavailable');
@@ -5637,11 +5629,6 @@ describe('Runner claim serialization', () => {
     } finally {
       database.close();
     }
-  });
-
-  it('applies the failed-cleanup exclusion in the in-memory store', async () => {
-    const store = createInMemoryReviewStateStore();
-    await exerciseFailedCleanupExclusion(store, store);
   });
 
   const claimRequest = () =>

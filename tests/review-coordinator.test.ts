@@ -1,9 +1,9 @@
+import { createTestReviewStore } from './support/review-store';
 import { describe, expect, it } from 'vitest';
 import {
   createReviewCoordinator,
   createD1ReviewStateStore,
   createGitHubPublicationAdapter,
-  createInMemoryReviewStateStore,
   type ReviewJob,
   type ReviewPublicationCreateResult,
   type ReviewPublicationPayload,
@@ -22,7 +22,7 @@ const currentFacts = {
 } as const;
 
 const seedFailedCheckRun = async (
-  stateStore: ReturnType<typeof createInMemoryReviewStateStore>,
+  stateStore: ReturnType<typeof createTestReviewStore>,
   input: { deliveryId: string; pullRequestNumber?: number; checkRunId?: number },
 ) => {
   const claim = await stateStore.claimReview({
@@ -70,7 +70,7 @@ describe('Review coordinator', () => {
     const reviews: unknown[] = [];
     let runId = '';
     const coordinator = createReviewCoordinator({
-      stateStore: createInMemoryReviewStateStore(),
+      stateStore: createTestReviewStore(),
       scheduler: {
         schedule: async (_job, id) => {
           runId = id;
@@ -96,7 +96,7 @@ describe('Review coordinator', () => {
   ] as const)(
     'publishes a structured %s decision for the admitted revision',
     async (decision, event) => {
-      const stateStore = createInMemoryReviewStateStore();
+      const stateStore = createTestReviewStore();
       const reviews: ReviewPublicationPayload[] = [];
       let runId = '';
       const coordinator = createReviewCoordinator({
@@ -136,7 +136,7 @@ describe('Review coordinator', () => {
   );
 
   it('reports cancellation when it wins before the GitHub publication claim', async () => {
-    const stateStore = createInMemoryReviewStateStore();
+    const stateStore = createTestReviewStore();
     let runId = '';
     const reviews: ReviewPublicationPayload[] = [];
     const coordinator = createReviewCoordinator({
@@ -168,7 +168,7 @@ describe('Review coordinator', () => {
   });
 
   it('publishes the Markdown output as a body-only COMMENT for the admitted head', async () => {
-    const stateStore = createInMemoryReviewStateStore();
+    const stateStore = createTestReviewStore();
     const reviews: ReviewPublicationPayload[] = [];
     let runId = '';
     const finalMarkdown = '## Review:\n\nUse `{body}` exactly.\n';
@@ -204,7 +204,7 @@ describe('Review coordinator', () => {
   });
 
   it('records publication success after completeReview publishes', async () => {
-    const stateStore = createInMemoryReviewStateStore();
+    const stateStore = createTestReviewStore();
     const events: unknown[] = [];
     let runId = '';
     const coordinator = createReviewCoordinator({
@@ -244,7 +244,7 @@ describe('Review coordinator', () => {
   });
 
   it('records invalid output when completeReview rejects the agent result', async () => {
-    const stateStore = createInMemoryReviewStateStore();
+    const stateStore = createTestReviewStore();
     const events: unknown[] = [];
     let runId = '';
     const coordinator = createReviewCoordinator({
@@ -278,7 +278,7 @@ describe('Review coordinator', () => {
   });
 
   it('gives a manual failed completion the existing negative feedback', async () => {
-    const stateStore = createInMemoryReviewStateStore();
+    const stateStore = createTestReviewStore();
     const reactions: string[] = [];
     const comments: string[] = [];
     const checks: string[] = [];
@@ -323,7 +323,7 @@ describe('Review coordinator', () => {
   });
 
   it('retries a terminal failure notification that GitHub did not create', async () => {
-    const stateStore = createInMemoryReviewStateStore();
+    const stateStore = createTestReviewStore();
     const claimed = await stateStore.claimReview({
       deliveryId: 'automatic-completion-failure-comment-retry',
       job: {
@@ -362,7 +362,7 @@ describe('Review coordinator', () => {
   });
 
   it('gives a manual superseded completion confused feedback', async () => {
-    const stateStore = createInMemoryReviewStateStore();
+    const stateStore = createTestReviewStore();
     const reactions: string[] = [];
     const claimed = await stateStore.claimReview({
       deliveryId: 'manual-completion-superseded',
@@ -402,7 +402,7 @@ describe('Review coordinator', () => {
   });
 
   it('marks a review superseded when the head changes at the POST edge', async () => {
-    const stateStore = createInMemoryReviewStateStore();
+    const stateStore = createTestReviewStore();
     const reviews: ReviewPublicationPayload[] = [];
     const checkUpdates: string[] = [];
     const events: unknown[] = [];
@@ -465,7 +465,7 @@ describe('Review coordinator', () => {
   });
 
   it('cancels an old Check when supersession races Check setup', async () => {
-    const stateStore = createInMemoryReviewStateStore();
+    const stateStore = createTestReviewStore();
     let signalOldCheckStarted!: () => void;
     const oldCheckStarted = new Promise<void>((resolve) => {
       signalOldCheckStarted = resolve;
@@ -511,7 +511,7 @@ describe('Review coordinator', () => {
   });
 
   it('retries one transient GitHub POST and exposes one completed review', async () => {
-    const stateStore = createInMemoryReviewStateStore();
+    const stateStore = createTestReviewStore();
     const postedReviews: unknown[] = [];
     let transientFailure = true;
     let runId = '';
@@ -541,7 +541,7 @@ describe('Review coordinator', () => {
           return new Response('{}', { status: 503 });
         }
         postedReviews.push(init?.body ?? null);
-        return new Response(JSON.stringify({ id: 1, body: '<!-- compte-rendu:run:run-1 -->' }));
+        return new Response(JSON.stringify({ id: 1, body: `<!-- compte-rendu:run:${runId} -->` }));
       }
       return new Response('{}', { status: 404 });
     };
@@ -567,7 +567,7 @@ describe('Review coordinator', () => {
   });
 
   it('fails closed when marker recovery is exhausted after an uncertain POST', async () => {
-    const stateStore = createInMemoryReviewStateStore();
+    const stateStore = createTestReviewStore();
     let runId = '';
     const remoteReviews: string[] = [];
     const failureComments: string[] = [];
@@ -641,7 +641,7 @@ describe('Review coordinator', () => {
   it.each([true, false])(
     'recovers a legacy comment only when its App marker exists beyond the first page (%s)',
     async (ownMarker) => {
-      const stateStore = createInMemoryReviewStateStore();
+      const stateStore = createTestReviewStore();
       const postedPayloads: string[] = [];
       const fileRequests: string[] = [];
       const pageOneReviews = Array.from({ length: 100 }, (_, index) => ({
@@ -982,7 +982,7 @@ describe('Review coordinator', () => {
   });
 
   it('supersedes without publishing when the current head has changed', async () => {
-    const stateStore = createInMemoryReviewStateStore();
+    const stateStore = createTestReviewStore();
     const reviews: ReviewPublicationPayload[] = [];
     let runId = '';
     const coordinator = createReviewCoordinator({
@@ -1017,7 +1017,7 @@ describe('Review coordinator', () => {
   });
 
   it('converges an uncertain publication and repeated completion to one review', async () => {
-    const stateStore = createInMemoryReviewStateStore();
+    const stateStore = createTestReviewStore();
     const reviews: ReviewPublicationPayload[] = [];
     let existingReview: ReviewPublicationPayload | undefined;
     let runId = '';
@@ -1058,9 +1058,10 @@ describe('Review coordinator', () => {
 
   it('passes the claimed run id to the scheduler through the public seam', async () => {
     const scheduled: Array<{ job: ReviewJob; runId: string }> = [];
+    const stateStore = createTestReviewStore();
     const coordinator = createReviewCoordinator({
       github: {},
-      stateStore: createInMemoryReviewStateStore(),
+      stateStore,
       scheduler: {
         schedule: async (job, runId) => {
           scheduled.push({ job, runId });
@@ -1072,7 +1073,10 @@ describe('Review coordinator', () => {
 
     expect(disposition).toBe('scheduled');
     expect(scheduled).toHaveLength(1);
-    expect(scheduled[0].runId).toBe('run-1');
+    expect(await stateStore.getRunOutcome(scheduled[0].runId)).toMatchObject({
+      deliveryId: eligiblePrivatePullRequest.deliveryId,
+      status: 'scheduled',
+    });
   });
 
   it('does not let a late old-head delivery supersede the newer active run', async () => {
@@ -1223,7 +1227,7 @@ describe('Review coordinator', () => {
     const scheduled: ReviewJob[] = [];
     const coordinator = createReviewCoordinator({
       github: {},
-      stateStore: createInMemoryReviewStateStore(),
+      stateStore: createTestReviewStore(),
       scheduler: {
         schedule: async (job) => {
           scheduled.push(job);
@@ -1247,7 +1251,7 @@ describe('Review coordinator', () => {
     const scheduled: ReviewJob[] = [];
     const coordinator = createReviewCoordinator({
       github: {},
-      stateStore: createInMemoryReviewStateStore(),
+      stateStore: createTestReviewStore(),
       scheduler: {
         schedule: async (job) => {
           scheduled.push(job);
@@ -1271,7 +1275,7 @@ describe('Review coordinator', () => {
     const scheduled: ReviewJob[] = [];
     const coordinator = createReviewCoordinator({
       github: {},
-      stateStore: createInMemoryReviewStateStore(),
+      stateStore: createTestReviewStore(),
       scheduler: {
         schedule: async (job) => {
           scheduled.push(job);
@@ -1298,7 +1302,7 @@ describe('Review coordinator', () => {
     const scheduled: ReviewJob[] = [];
     const coordinator = createReviewCoordinator({
       github: {},
-      stateStore: createInMemoryReviewStateStore(),
+      stateStore: createTestReviewStore(),
       scheduler: {
         schedule: async (job) => {
           scheduled.push(job);
@@ -1340,7 +1344,7 @@ describe('Review coordinator', () => {
           reactions.push(input);
         },
       },
-      stateStore: createInMemoryReviewStateStore(),
+      stateStore: createTestReviewStore(),
       scheduler: {
         schedule: async (job) => {
           scheduled.push(job);
@@ -1384,7 +1388,7 @@ describe('Review coordinator', () => {
   });
 
   it('schedules a fresh manual delivery after its same-head run failed', async () => {
-    const stateStore = createInMemoryReviewStateStore();
+    const stateStore = createTestReviewStore();
     const scheduled: Array<{ job: ReviewJob; runId: string }> = [];
     let attempts = 0;
     let failedRunId = '';
@@ -1451,7 +1455,7 @@ describe('Review coordinator', () => {
   });
 
   it('schedules a fresh manual run for a failed Check re-request without a comment reaction', async () => {
-    const stateStore = createInMemoryReviewStateStore();
+    const stateStore = createTestReviewStore();
     const scheduled: Array<{ job: ReviewJob; runId: string }> = [];
     const reactions: unknown[] = [];
     const claim = await stateStore.claimReview({
@@ -1531,7 +1535,7 @@ describe('Review coordinator', () => {
   });
 
   it('ignores a check re-request whose Check Run id is not the failed run', async () => {
-    const stateStore = createInMemoryReviewStateStore();
+    const stateStore = createTestReviewStore();
     const failedRunId = await seedFailedCheckRun(stateStore, { deliveryId: 'delivery-check-own' });
     const scheduled: ReviewJob[] = [];
     let reads = 0;
@@ -1571,7 +1575,7 @@ describe('Review coordinator', () => {
   });
 
   it('ignores a check re-request for an unknown or nonfailed run without scheduling', async () => {
-    const stateStore = createInMemoryReviewStateStore();
+    const stateStore = createTestReviewStore();
     const scheduled: ReviewJob[] = [];
     const coordinator = createReviewCoordinator({
       github: {
@@ -1631,7 +1635,7 @@ describe('Review coordinator', () => {
   });
 
   it('does not schedule a check re-request when the current sender is not authorized', async () => {
-    const stateStore = createInMemoryReviewStateStore();
+    const stateStore = createTestReviewStore();
     const failedRunId = await seedFailedCheckRun(stateStore, {
       deliveryId: 'delivery-check-denied',
     });
@@ -1670,7 +1674,7 @@ describe('Review coordinator', () => {
   });
 
   it('fails retryably when the stored Check ownership read is uncertain', async () => {
-    const baseStateStore = createInMemoryReviewStateStore();
+    const baseStateStore = createTestReviewStore();
     const events: unknown[] = [];
     const stateStore = {
       ...baseStateStore,
@@ -1712,7 +1716,7 @@ describe('Review coordinator', () => {
   });
 
   it('does not schedule a duplicate check re-request delivery twice', async () => {
-    const stateStore = createInMemoryReviewStateStore();
+    const stateStore = createTestReviewStore();
     const failedRunId = await seedFailedCheckRun(stateStore, { deliveryId: 'delivery-check-dup' });
     const scheduled: Array<{ job: ReviewJob; runId: string }> = [];
     const coordinator = createReviewCoordinator({
@@ -1747,7 +1751,7 @@ describe('Review coordinator', () => {
   });
 
   it('reuses current admission when a same-revision check rerequest races an active run', async () => {
-    const stateStore = createInMemoryReviewStateStore();
+    const stateStore = createTestReviewStore();
     const failedRunId = await seedFailedCheckRun(stateStore, {
       deliveryId: 'delivery-check-active-race',
     });
@@ -1793,7 +1797,7 @@ describe('Review coordinator', () => {
   });
 
   it('resolves the latest product Check for a rerequested suite and schedules a fresh run', async () => {
-    const stateStore = createInMemoryReviewStateStore();
+    const stateStore = createTestReviewStore();
     const failedRunId = await seedFailedCheckRun(stateStore, { deliveryId: 'delivery-suite' });
     const suiteLookups: unknown[] = [];
     const scheduled: Array<{ job: ReviewJob; runId: string }> = [];
@@ -1836,7 +1840,7 @@ describe('Review coordinator', () => {
   });
 
   it('ignores a suite re-request that resolves no unique product Check', async () => {
-    const stateStore = createInMemoryReviewStateStore();
+    const stateStore = createTestReviewStore();
     const failedRunId = await seedFailedCheckRun(stateStore, { deliveryId: 'delivery-suite-amb' });
     const scheduled: ReviewJob[] = [];
     const run = async (candidates: readonly { id: number; externalId: string | null }[]) => {
@@ -1876,7 +1880,7 @@ describe('Review coordinator', () => {
   });
 
   it('fails retryably when the suite Check lookup is uncertain', async () => {
-    const stateStore = createInMemoryReviewStateStore();
+    const stateStore = createTestReviewStore();
     const events: unknown[] = [];
     const coordinator = createReviewCoordinator({
       github: {
@@ -1935,7 +1939,7 @@ describe('Review coordinator', () => {
         },
         getCommenterPermission: async () => 'maintain',
       },
-      stateStore: createInMemoryReviewStateStore(),
+      stateStore: createTestReviewStore(),
       scheduler: {
         schedule: async (job) => {
           scheduled.push(job);
@@ -1974,7 +1978,7 @@ describe('Review coordinator', () => {
           reactions.push(input);
         },
       },
-      stateStore: createInMemoryReviewStateStore(),
+      stateStore: createTestReviewStore(),
       scheduler: {
         schedule: async (job) => {
           scheduled.push(job);
@@ -2007,7 +2011,7 @@ describe('Review coordinator', () => {
   });
 
   it('keeps a scheduled manual run when its eyes reaction is temporarily unavailable', async () => {
-    const stateStore = createInMemoryReviewStateStore();
+    const stateStore = createTestReviewStore();
     const scheduled: Array<{ job: ReviewJob; runId: string }> = [];
     const coordinator = createReviewCoordinator({
       github: {
@@ -2104,7 +2108,7 @@ describe('Review coordinator', () => {
     const scheduled: ReviewJob[] = [];
     const coordinator = createReviewCoordinator({
       github: {},
-      stateStore: createInMemoryReviewStateStore(),
+      stateStore: createTestReviewStore(),
       scheduler: {
         schedule: async (job) => {
           scheduled.push(job);
@@ -2134,7 +2138,7 @@ describe('Review coordinator', () => {
     const scheduled: ReviewJob[] = [];
     const coordinator = createReviewCoordinator({
       github: {},
-      stateStore: createInMemoryReviewStateStore(),
+      stateStore: createTestReviewStore(),
       scheduler: {
         schedule: async (job) => {
           scheduled.push(job);
@@ -2156,7 +2160,7 @@ describe('Review coordinator', () => {
 
   it('persists an awaiting-approval outcome before replaying the delivery', async () => {
     const scheduled: ReviewJob[] = [];
-    const stateStore = createInMemoryReviewStateStore();
+    const stateStore = createTestReviewStore();
     const coordinator = createReviewCoordinator({
       github: {},
       stateStore,
@@ -2197,7 +2201,7 @@ describe('Review coordinator', () => {
           }),
           getCommenterPermission: async () => permission,
         },
-        stateStore: createInMemoryReviewStateStore(),
+        stateStore: createTestReviewStore(),
         scheduler: {
           schedule: async (job) => {
             scheduled.push(job);
@@ -2236,7 +2240,7 @@ describe('Review coordinator', () => {
         }),
         getCommenterPermission: async () => 'write',
       },
-      stateStore: createInMemoryReviewStateStore(),
+      stateStore: createTestReviewStore(),
       scheduler: {
         schedule: async (job) => {
           scheduled.push(job);
@@ -2276,7 +2280,7 @@ describe('Review coordinator', () => {
       const scheduled: ReviewJob[] = [];
       const coordinator = createReviewCoordinator({
         github: {},
-        stateStore: createInMemoryReviewStateStore(),
+        stateStore: createTestReviewStore(),
         scheduler: {
           schedule: async (job) => {
             scheduled.push(job);
@@ -2310,7 +2314,7 @@ describe('Review coordinator', () => {
           }),
           getCommenterPermission: async () => 'maintain',
         },
-        stateStore: createInMemoryReviewStateStore(),
+        stateStore: createTestReviewStore(),
         scheduler: {
           schedule: async (job) => {
             scheduled.push(job);
@@ -2336,71 +2340,63 @@ describe('Review coordinator', () => {
   });
 });
 
-it.each(['memory', 'd1'] as const)(
-  'retains superseded recovery identity while unblocking the next claim (%s)',
-  async (backend) => {
-    const database = backend === 'd1' ? new SqliteD1Database() : undefined;
-    const store = database ? createD1ReviewStateStore(database) : createInMemoryReviewStateStore();
-    const at = '2026-11-17T00:00:00.000Z';
-    const job: ReviewJob = {
-      repositoryId: 11,
-      installationId: 7,
-      pullRequestNumber: 42,
-      baseSha: eligiblePrivatePullRequest.baseSha,
-      headSha: eligiblePrivatePullRequest.headSha,
-      trigger: 'automatic',
-    };
-    try {
-      const first = await store.claimReview({ deliveryId: 'recovery-old', job, occurredAt: at });
-      if (first.kind !== 'claimed') throw new Error('not scheduled');
-      await store.claimNextJob!({ jobId: 'old-job', attempt: 1, occurredAt: at });
-      await store.recordEvidence({
-        runId: first.runId,
-        evidence: {
-          key: 'old-evidence',
-          status: 'incomplete',
-          size: 1,
-          sha256: 'a'.repeat(64),
-          uploadedAt: at,
-        },
-        sandboxCleanup: 'failed',
-      });
-      const next = await store.claimReview({
-        deliveryId: 'recovery-next',
-        job: { ...job, headSha: currentFacts.headSha },
-        occurredAt: at,
-      });
-      if (next.kind !== 'claimed') throw new Error('replacement not scheduled');
-      await store.markRunSuperseded!({ runId: first.runId, occurredAt: at });
-      expect(await store.claimNextJob!({ jobId: 'next-job', attempt: 1, occurredAt: at })).toEqual({
-        kind: 'empty',
-      });
-      const report = {
-        runId: first.runId,
-        jobId: 'old-job',
-        attempt: 1,
-        evidenceId: 'old-evidence',
-        baseSha: job.baseSha,
-        headSha: job.headSha,
-        sandboxName: 'compte-rendu-old-job',
-        confirmedAt: at,
-      };
-      expect(await store.validateRunnerCleanupRecovery!(report)).toEqual({ kind: 'recoverable' });
-      expect(await store.recoverRunnerCleanup!(report)).toMatchObject({ kind: 'recovered' });
-      expect(await store.recoverRunnerCleanup!(report)).toMatchObject({
-        kind: 'already',
-        cleanupCompletedAt: at,
-      });
-      expect(await store.getRunOutcome!(first.runId)).toMatchObject({
-        status: 'superseded',
-        runnerJobId: 'old-job',
-        runnerAttempt: 1,
-      });
-      expect(
-        await store.claimNextJob!({ jobId: 'next-job', attempt: 1, occurredAt: at }),
-      ).toMatchObject({ kind: 'claimed', runId: next.runId });
-    } finally {
-      database?.close();
-    }
-  },
-);
+it('retains superseded recovery identity while unblocking the next claim', async () => {
+  const store = createTestReviewStore();
+  const at = '2026-11-17T00:00:00.000Z';
+  const job: ReviewJob = {
+    repositoryId: 11,
+    installationId: 7,
+    pullRequestNumber: 42,
+    baseSha: eligiblePrivatePullRequest.baseSha,
+    headSha: eligiblePrivatePullRequest.headSha,
+    trigger: 'automatic',
+  };
+  const first = await store.claimReview({ deliveryId: 'recovery-old', job, occurredAt: at });
+  if (first.kind !== 'claimed') throw new Error('not scheduled');
+  await store.claimNextJob!({ jobId: 'old-job', attempt: 1, occurredAt: at });
+  await store.recordEvidence({
+    runId: first.runId,
+    evidence: {
+      key: 'old-evidence',
+      status: 'incomplete',
+      size: 1,
+      sha256: 'a'.repeat(64),
+      uploadedAt: at,
+    },
+    sandboxCleanup: 'failed',
+  });
+  const next = await store.claimReview({
+    deliveryId: 'recovery-next',
+    job: { ...job, headSha: currentFacts.headSha },
+    occurredAt: at,
+  });
+  if (next.kind !== 'claimed') throw new Error('replacement not scheduled');
+  await store.markRunSuperseded!({ runId: first.runId, occurredAt: at });
+  expect(await store.claimNextJob!({ jobId: 'next-job', attempt: 1, occurredAt: at })).toEqual({
+    kind: 'empty',
+  });
+  const report = {
+    runId: first.runId,
+    jobId: 'old-job',
+    attempt: 1,
+    evidenceId: 'old-evidence',
+    baseSha: job.baseSha,
+    headSha: job.headSha,
+    sandboxName: 'compte-rendu-old-job',
+    confirmedAt: at,
+  };
+  expect(await store.validateRunnerCleanupRecovery!(report)).toEqual({ kind: 'recoverable' });
+  expect(await store.recoverRunnerCleanup!(report)).toMatchObject({ kind: 'recovered' });
+  expect(await store.recoverRunnerCleanup!(report)).toMatchObject({
+    kind: 'already',
+    cleanupCompletedAt: at,
+  });
+  expect(await store.getRunOutcome!(first.runId)).toMatchObject({
+    status: 'superseded',
+    runnerJobId: 'old-job',
+    runnerAttempt: 1,
+  });
+  expect(
+    await store.claimNextJob!({ jobId: 'next-job', attempt: 1, occurredAt: at }),
+  ).toMatchObject({ kind: 'claimed', runId: next.runId });
+});

@@ -1,9 +1,8 @@
+import { createTestReviewStore } from './support/review-store';
 import { describe, expect, it } from 'vitest';
 import {
   createD1ReviewStateStore,
-  createInMemoryReviewStateStore,
   type ReviewJob,
-  type ReviewStateQueries,
   type ReviewStateStore,
 } from '../apps/core/src/index';
 import { SqliteD1Database } from './support/d1-database';
@@ -20,8 +19,6 @@ const job = (overrides: Partial<ReviewJob> = {}): ReviewJob => ({
   trigger: 'automatic',
   ...overrides,
 });
-
-type CancellationStore = ReviewStateStore & ReviewStateQueries;
 
 const schedule = async (
   store: ReviewStateStore,
@@ -113,12 +110,9 @@ describe('cancellation migration', () => {
   });
 });
 
-describe.each([
-  ['D1', () => createD1ReviewStateStore(new SqliteD1Database())],
-  ['in-memory', () => createInMemoryReviewStateStore()],
-] as const)('%s cancellation store', (_name, createStore) => {
+describe('D1 cancellation store', () => {
   it('atomically cancels a queued run so a racing claim cannot take it', async () => {
-    const store = createStore() as CancellationStore;
+    const store = createTestReviewStore();
     const runId = await schedule(store, 'cancel-queued');
 
     await expect(
@@ -176,7 +170,7 @@ describe.each([
   });
 
   it('retains runner identity and beats publication without losing the disposition to late callbacks', async () => {
-    const store = createStore() as CancellationStore;
+    const store = createTestReviewStore();
     const runId = await schedule(store, 'cancel-claimed');
     await store.recordRunnerJob({ runId, jobId: 'runner-job-1', attempt: 1 });
 
@@ -270,7 +264,7 @@ describe.each([
   });
 
   it('reports a conflict for a publication claim or any other terminal state', async () => {
-    const store = createStore() as CancellationStore;
+    const store = createTestReviewStore();
     const publishedRun = await schedule(store, 'cancel-published');
     await store.recordRunnerJob({
       runId: publishedRun,
@@ -331,7 +325,7 @@ describe.each([
   });
 
   it('allows a fresh manual retry only after the cancelled runner claim is torn down', async () => {
-    const store = createStore() as CancellationStore;
+    const store = createTestReviewStore();
     const runId = await schedule(store, 'cancel-before-retry');
     await store.recordRunnerJob({ runId, jobId: 'runner-job-retry', attempt: 1 });
     await store.cancelRun({
@@ -371,7 +365,7 @@ describe.each([
   });
 
   it('blocks a same-pull-request replacement until the cancelled claim cleanup is confirmed', async () => {
-    const store = createStore() as CancellationStore;
+    const store = createTestReviewStore();
     const cancelledRun = await schedule(store, 'blocking-cancel');
     await store.recordRunnerJob({
       runId: cancelledRun,
@@ -412,7 +406,7 @@ describe.each([
   });
 
   it('guards check setup and exposes an in-flight check for cancellation reconciliation', async () => {
-    const store = createStore() as CancellationStore;
+    const store = createTestReviewStore();
     const runId = await schedule(store, 'cancel-check-setup');
     await expect(
       store.claimCheckSetup?.({
@@ -496,7 +490,7 @@ describe.each([
   });
 
   it('retains the first confirmed teardown time when a later callback supplies it', async () => {
-    const store = createStore() as CancellationStore;
+    const store = createTestReviewStore();
     const runId = await schedule(store, 'late-cleanup-time');
     await store.recordRunnerJob({ runId, jobId: 'job', attempt: 1 });
     await store.cancelRun({ runId, requestedByUid: 1, occurredAt: '2026-11-19T00:01:00.000Z' });
@@ -520,7 +514,7 @@ describe.each([
   });
 
   it('reopens a reconciled Check cancellation after a stale in-progress write', async () => {
-    const store = createStore() as CancellationStore;
+    const store = createTestReviewStore();
     const runId = await schedule(store, 'cancel-check-reopen');
     const scheduledRun = await schedule(store, 'cancel-check-reopen-scheduled', {
       ...job(),
@@ -594,7 +588,7 @@ describe.each([
   });
 
   it('recovers a failed cancelled-run cleanup and keeps destroyed teardown monotonic', async () => {
-    const store = createStore() as CancellationStore;
+    const store = createTestReviewStore();
     const runId = await schedule(store, 'cancel-cleanup-recovery');
     await store.recordRunnerJob({
       runId,
@@ -647,7 +641,7 @@ describe.each([
   });
 
   it('exposes the original claim time and separates old cleanup blockers from retryable stops', async () => {
-    const store = createStore() as CancellationStore;
+    const store = createTestReviewStore();
     const runId = await schedule(store, 'recovery-window');
     await expect(
       store.claimNextJob?.({
@@ -751,7 +745,7 @@ describe.each([
   });
 
   it('limits cancellation work to an optional runId for an immediate targeted stop', async () => {
-    const store = createStore() as CancellationStore;
+    const store = createTestReviewStore();
     const firstRun = await schedule(store, 'targeted-first', job({ pullRequestNumber: 201 }));
     await store.recordRunnerJob({ runId: firstRun, jobId: 'targeted-job-1', attempt: 1 });
     await store.cancelRun({
@@ -793,7 +787,7 @@ describe.each([
   });
 
   it('leases one stop and one Check dispatch per observed attempt snapshot', async () => {
-    const store = createStore() as CancellationStore;
+    const store = createTestReviewStore();
     const runId = await schedule(store, 'cancellation-cas');
     await store.recordRunnerJob({ runId, jobId: 'cas-job', attempt: 1 });
     await store.recordCheckRun?.({ runId, checkRunId: 321 });
@@ -904,7 +898,7 @@ describe.each([
   });
 
   it('returns a bounded, retry-aware cancellation work list', async () => {
-    const store = createStore() as CancellationStore;
+    const store = createTestReviewStore();
     const runIds: string[] = [];
     for (let index = 0; index < 3; index += 1) {
       const runId = await schedule(store, `work-${index}`, job({ pullRequestNumber: 100 + index }));
