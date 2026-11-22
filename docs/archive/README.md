@@ -9,6 +9,7 @@ and unimplemented alternatives are retained as evidence, not renewed commitments
 
 - [Sandbox/OpenCode remote PoC](sandbox-opencode-poc.md)
 - [Agent sandbox alternatives to Docker Sandboxes (sbx 0.39)](agent-sandbox-alternatives-research.md)
+- [Native nono and microsandbox trials (November 22)](sandbox-replacement-rollout-research.md)
 - [Sandbox replacement research](sandbox-replacement-2026-11-research.md)
 - [OpenSandbox feasibility](opensandbox-adapter-feasibility.md) and [native probe](opensandbox-native-probe.md)
 - [Docker sbx versus NVIDIA OpenShell for static PR review](sbx-openshell-comparison.md)

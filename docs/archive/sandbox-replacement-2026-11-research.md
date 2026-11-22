@@ -1,5 +1,7 @@
 # Sandbox replacement research — 2026-11-17
 
+The [November 22 native trials](sandbox-replacement-rollout-research.md) update the ordering below for the current Runner host.
+
 Status: research only. No candidate below was installed, deployed, or tested for this
 note. The repo's existing files `docs/agent-sandbox-alternatives-research.md` and
 `docs/sbx-openshell-comparison.md` are historical; their OpenShell-first conclusion
