@@ -58,6 +58,10 @@ const messagesContinuation = () => {
             signature: 'synthetic-signature-messages',
           },
           {
+            type: 'redacted_thinking',
+            data: 'opaque-redacted-thinking',
+          },
+          {
             type: 'tool_use',
             id: 'toolu_synthetic',
             name: 'read',
@@ -151,6 +155,8 @@ describe('Messages public workerd route', () => {
     };
     expect(continuation.messages).toEqual(messagesContinuation().messages);
     expect(state.requests[1]!.body).toContain('synthetic-signature-messages');
+    expect(state.requests[1]!.body).toContain('redacted_thinking');
+    expect(state.requests[1]!.body).toContain('opaque-redacted-thinking');
     expect(state.requests[1]!.body).toContain('tool_result');
     await runtime.INFERENCE.revoke({ jobId: 'messages-tool' });
   });
@@ -197,18 +203,26 @@ describe('Messages public workerd route', () => {
     await runtime.INFERENCE.revoke({ jobId: 'messages-missing-stop' });
   });
 
-  it('isolates terminal state between requests', async () => {
-    await control('messages-max-tokens');
-    const first = await issueGrant('messages-state-first', [messagesRoute]);
-    await expect(
-      (await post(first, '/v1/messages?beta=true', messagesBody())).text(),
-    ).rejects.toThrow();
+  it('does not complete when message_stop data has the wrong type', async () => {
+    await control('messages-wrong-stop-type');
+    const token = await issueGrant('messages-wrong-stop-type', [messagesRoute]);
+    const response = await post(token, '/v1/messages?beta=true', messagesBody());
+    expect(response.status).toBe(200);
+    await expect(response.text()).rejects.toThrow();
+    await runtime.INFERENCE.revoke({ jobId: 'messages-wrong-stop-type' });
+  });
 
+  it('isolates terminal state between requests', async () => {
     await control('messages-success');
+    const first = await issueGrant('messages-state-first', [messagesRoute]);
+    const completed = await post(first, '/v1/messages?beta=true', messagesBody());
+    expect(await completed.text()).toContain('event: message_stop');
+
+    await control('messages-missing-stop');
     const second = await issueGrant('messages-state-second', [messagesRoute]);
     const response = await post(second, '/v1/messages?beta=true', messagesBody());
     expect(response.status).toBe(200);
-    expect(await response.text()).toContain('event: message_stop');
+    await expect(response.text()).rejects.toThrow();
     await runtime.INFERENCE.revoke({ jobId: 'messages-state-first' });
     await runtime.INFERENCE.revoke({ jobId: 'messages-state-second' });
   });
@@ -224,6 +238,11 @@ describe('Messages public workerd route', () => {
     ).toBe(400);
     expect(
       (await post(token, '/v1/messages', { ...silent, container: 'container_1' })).status,
+    ).toBe(400);
+    expect((await post(token, '/v1/messages', { ...silent, stream: false })).status).toBe(400);
+    expect((await post(token, '/v1/messages', { ...silent, stream: undefined })).status).toBe(400);
+    expect(
+      (await post(token, '/v1/messages', { ...silent, tool_choice: { type: 'tool' } })).status,
     ).toBe(400);
     expect((await post('not-a-valid-token', '/v1/messages', silent)).status).toBe(401);
     expect((await upstreamState()).requests).toHaveLength(0);

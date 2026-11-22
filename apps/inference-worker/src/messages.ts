@@ -39,6 +39,10 @@ const ThinkingBlock = Schema.Struct({
   thinking: Schema.String,
   signature: Schema.NonEmptyString,
 });
+const RedactedThinkingBlock = Schema.Struct({
+  type: Schema.Literal('redacted_thinking'),
+  data: Schema.NonEmptyString,
+});
 const ToolUseBlock = Schema.Struct({
   type: Schema.Literal('tool_use'),
   id: Schema.NonEmptyString,
@@ -54,7 +58,12 @@ const ToolResultBlock = Schema.Struct({
   cache_control: Schema.optionalKey(CacheControl),
 });
 const UserBlock = Schema.Union([TextBlock, ToolResultBlock]);
-const AssistantBlock = Schema.Union([TextBlock, ThinkingBlock, ToolUseBlock]);
+const AssistantBlock = Schema.Union([
+  TextBlock,
+  ThinkingBlock,
+  RedactedThinkingBlock,
+  ToolUseBlock,
+]);
 const UserMessage = Schema.Struct({
   role: Schema.Literal('user'),
   content: Schema.Union([Schema.String, Schema.Array(UserBlock)]),
@@ -75,8 +84,8 @@ const ToolChoice = Schema.Struct({
   name: Schema.optionalKey(Schema.NonEmptyString),
   disable_parallel_tool_use: Schema.optionalKey(Schema.Boolean),
 }).check(
-  Schema.makeFilter((choice) => choice.type === 'tool' || choice.name === undefined, {
-    expected: 'tool_choice name only for type tool',
+  Schema.makeFilter((choice) => (choice.type === 'tool') === (choice.name !== undefined), {
+    expected: 'tool_choice name required only for type tool',
   }),
 );
 const Thinking = Schema.Struct({
@@ -97,7 +106,7 @@ const MessagesRequest = Schema.Struct({
   ),
   tools: Schema.optionalKey(Schema.Array(MessagesTool).check(Schema.isMaxLength(MAX_TOOLS))),
   tool_choice: Schema.optionalKey(ToolChoice),
-  stream: Schema.optionalKey(Schema.Boolean),
+  stream: Schema.Literal(true),
   max_tokens: Schema.optionalKey(MaxTokens),
   temperature: Schema.optionalKey(
     Schema.Number.check(Schema.isGreaterThanOrEqualTo(0), Schema.isLessThanOrEqualTo(2)),
@@ -159,6 +168,7 @@ const MessageDelta = Schema.Struct({
   ),
   usage: Schema.optionalKey(Schema.Unknown),
 });
+const MessageStop = Schema.Struct({ type: Schema.Literal('message_stop') });
 const ErrorFrame = Schema.Struct({
   type: Schema.optionalKey(Schema.String),
   error: Schema.optionalKey(Schema.Unknown),
@@ -167,6 +177,9 @@ const decodeMessageStart = Schema.decodeUnknownOption(Schema.fromJsonString(Mess
   onExcessProperty: 'ignore',
 });
 const decodeMessageDelta = Schema.decodeUnknownOption(Schema.fromJsonString(MessageDelta), {
+  onExcessProperty: 'ignore',
+});
+const decodeMessageStop = Schema.decodeUnknownOption(Schema.fromJsonString(MessageStop), {
   onExcessProperty: 'ignore',
 });
 const decodeErrorFrame = Schema.decodeUnknownOption(Schema.fromJsonString(ErrorFrame), {
@@ -238,6 +251,7 @@ const createMessagesAdapter = (): ProtocolStreamAdapter => {
       )
         return { observation: 'event' };
       if (frame.event === 'message_stop') {
+        if (Option.isNone(decodeMessageStop(frame.data))) return { observation: 'failure' };
         if (stopReason === undefined || stopReason === null || !completeStops.has(stopReason))
           return { observation: 'failure' };
         return { observation: 'terminal' };

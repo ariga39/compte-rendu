@@ -28,6 +28,10 @@ describe('Messages request admission', () => {
           type: 'thinking',
           signature: 'synthetic-signature-messages',
         }),
+        expect.objectContaining({
+          type: 'redacted_thinking',
+          data: 'opaque-redacted-thinking',
+        }),
         expect.objectContaining({ type: 'tool_use', id: 'toolu_synthetic' }),
       ]),
     );
@@ -36,6 +40,20 @@ describe('Messages request admission', () => {
         expect.objectContaining({ type: 'tool_result', tool_use_id: 'toolu_synthetic' }),
       ]),
     );
+  });
+
+  it('requires stream and a matching tool_choice name', () => {
+    expect(validateMessagesBody(main)).not.toBeNull();
+    expect(
+      validateMessagesBody({ ...main, tool_choice: { type: 'tool', name: 'read' } }),
+    ).not.toBeNull();
+    expect(validateMessagesBody({ ...main, tool_choice: { type: 'auto' } })).not.toBeNull();
+    expect(validateMessagesBody({ ...main, stream: false })).toBeNull();
+    expect(validateMessagesBody({ ...main, stream: undefined })).toBeNull();
+    expect(validateMessagesBody({ ...main, tool_choice: { type: 'tool' } })).toBeNull();
+    expect(
+      validateMessagesBody({ ...main, tool_choice: { type: 'auto', name: 'read' } }),
+    ).toBeNull();
   });
 
   it('rejects hosted tools, remote media, file ids, state references and unsigned thinking', () => {
@@ -82,6 +100,20 @@ describe('Messages request admission', () => {
           },
         ],
       },
+      {
+        ...main,
+        messages: [
+          ...(main.messages as readonly unknown[]),
+          {
+            role: 'assistant',
+            content: [{ type: 'redacted_thinking' }],
+          },
+        ],
+      },
+      { ...main, stream: false },
+      { ...main, stream: undefined },
+      { ...main, tool_choice: { type: 'tool' } },
+      { ...main, tool_choice: { type: 'auto', name: 'read' } },
       {
         ...main,
         messages: [
@@ -149,9 +181,12 @@ describe('Messages SSE observation', () => {
   });
 
   it('requires a successful stop reason and isolates state per request', () => {
-    expect(messagesAdapter.create!().observe({ event: 'message_stop', data: '{}' })).toEqual({
-      observation: 'failure',
-    });
+    expect(
+      messagesAdapter.create!().observe({
+        event: 'message_stop',
+        data: JSON.stringify({ type: 'message_stop' }),
+      }),
+    ).toEqual({ observation: 'failure' });
     const completed = messagesAdapter.create!();
     expect(
       completed.observe({
@@ -159,12 +194,18 @@ describe('Messages SSE observation', () => {
         data: JSON.stringify({ type: 'message_delta', delta: { stop_reason: 'end_turn' } }),
       }),
     ).toEqual({ observation: 'event' });
-    expect(completed.observe({ event: 'message_stop', data: '{}' })).toEqual({
-      observation: 'terminal',
-    });
-    expect(messagesAdapter.create!().observe({ event: 'message_stop', data: '{}' })).toEqual({
-      observation: 'failure',
-    });
+    expect(
+      completed.observe({
+        event: 'message_stop',
+        data: JSON.stringify({ type: 'message_stop' }),
+      }),
+    ).toEqual({ observation: 'terminal' });
+    expect(
+      messagesAdapter.create!().observe({
+        event: 'message_stop',
+        data: JSON.stringify({ type: 'message_stop' }),
+      }),
+    ).toEqual({ observation: 'failure' });
     const refused = messagesAdapter.create!();
     expect(
       refused.observe({
@@ -172,9 +213,12 @@ describe('Messages SSE observation', () => {
         data: JSON.stringify({ type: 'message_delta', delta: { stop_reason: 'refusal' } }),
       }),
     ).toEqual({ observation: 'event' });
-    expect(refused.observe({ event: 'message_stop', data: '{}' })).toEqual({
-      observation: 'terminal',
-    });
+    expect(
+      refused.observe({
+        event: 'message_stop',
+        data: JSON.stringify({ type: 'message_stop' }),
+      }),
+    ).toEqual({ observation: 'terminal' });
     const truncated = messagesAdapter.create!();
     expect(
       truncated.observe({
@@ -186,9 +230,12 @@ describe('Messages SSE observation', () => {
         }),
       }),
     ).toEqual({ observation: 'failure', usage: { outputTokens: 3 } });
-    expect(truncated.observe({ event: 'message_stop', data: '{}' })).toEqual({
-      observation: 'failure',
-    });
+    expect(
+      truncated.observe({
+        event: 'message_stop',
+        data: JSON.stringify({ type: 'message_stop' }),
+      }),
+    ).toEqual({ observation: 'failure' });
     for (const frame of [
       { event: 'error', data: '{}' },
       { event: 'unknown_future_event', data: '{}' },
