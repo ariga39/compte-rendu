@@ -28,6 +28,11 @@ export const ModelRouteOverride = Schema.Struct({
 });
 export type ModelRouteOverride = typeof ModelRouteOverride.Type;
 const routeOverrides = Schema.Record(RouteId, ModelRouteOverride);
+function nativeProfile(slug: string): ModelProfile | undefined {
+  if (slug === 'native:anthropic') return 'messages';
+  if (slug === 'native:google-ai-studio') return 'gemini';
+  return undefined;
+}
 export const RelayCatalogSource = Schema.Union([
   Schema.Struct({
     ...providerFields,
@@ -55,12 +60,26 @@ export const RelayCatalogSource = Schema.Union([
     ),
     models: Schema.optionalKey(routeOverrides),
   }),
-]);
+]).check(
+  Schema.makeFilter(
+    (source) => {
+      const required = nativeProfile(source.providerSlug);
+      if (!required) return true;
+      const profiles = [
+        ...(source.profile ? [source.profile] : []),
+        ...(source.profiles ?? []),
+        ...Object.values(source.models ?? {}).map((m) => m.profile),
+      ];
+      return profiles.every((profile) => profile === required);
+    },
+    { expected: 'profile supported by the native Gateway destination' },
+  ),
+);
 export const RelayCatalogSources = Schema.Array(RelayCatalogSource).check(Schema.isMinLength(1));
 export type RelayCatalogSource = typeof RelayCatalogSource.Type;
 
 export const sourceProfiles = (source: RelayCatalogSource): readonly ModelProfile[] =>
-  source.profiles ?? (source.profile === undefined ? ['chat'] : [source.profile]);
+  source.profiles ?? [source.profile ?? nativeProfile(source.providerSlug) ?? 'chat'];
 
 export const sourceDefaultProfile = (source: RelayCatalogSource): ModelProfile =>
   source.profile ?? sourceProfiles(source)[0] ?? 'chat';

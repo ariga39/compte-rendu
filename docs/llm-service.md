@@ -121,6 +121,14 @@ Every source names a Gateway destination in `providerSlug` and its BYOK credenti
 Use `native:openai` for Cloudflare’s built-in OpenAI provider. Bare names continue
 to select custom providers, so `openai` and `custom-openai` both select
 `/custom-openai`. Use a new route ID when changing an existing route’s destination.
+For a provider account hosted directly by Anthropic or Google AI Studio, use
+`native:anthropic` or `native:google-ai-studio` with a BYOK alias for that
+provider. Their bundled adapters use the native `messages` or `gemini` profile.
+Gateway discovery follows Anthropic’s `after_id` cursor or Google's
+`pageToken` cursor. Declare verified routes in `models` when the list supplies
+IDs without tool capability metadata, or use explicit aliases. The Gemini
+route uses the Google Generative Language v1beta endpoint.
+
 Choose discovery according to how that provider exposes its model list.
 
 - For a public list, set `url` to its credential-free HTTPS endpoint and

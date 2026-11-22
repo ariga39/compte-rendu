@@ -50,6 +50,8 @@ export const legacyFrozenMapping = (
   routes.map(({ profile: _profile, limit: _limit, ...route }) => route);
 
 export const gatewayProviderPath = (providerSlug: string): string => {
+  if (providerSlug === 'native:anthropic') return 'anthropic/v1';
+  if (providerSlug === 'native:google-ai-studio') return 'google-ai-studio/v1beta';
   if (providerSlug === 'native:openai') return 'openai';
   return providerSlug.startsWith('custom-') ? providerSlug : `custom-${providerSlug}`;
 };

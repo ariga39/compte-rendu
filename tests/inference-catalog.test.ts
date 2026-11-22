@@ -413,6 +413,74 @@ it.each([
   },
 );
 
+it.each([
+  {
+    providerSlug: 'native:anthropic',
+    path: 'anthropic/v1',
+    cursor: 'after_id=claude-a',
+    pages: [
+      { data: [{ id: 'claude-a' }], has_more: true, last_id: 'claude-a' },
+      { data: [{ id: 'claude-b' }], has_more: false },
+    ],
+    models: ['p/claude-a', 'p/claude-b'],
+  },
+  {
+    providerSlug: 'native:google-ai-studio',
+    path: 'google-ai-studio/v1beta',
+    cursor: 'pageToken=more%2Bmodels',
+    pages: [
+      {
+        models: [{ name: 'models/gemini-a', supportedGenerationMethods: ['generateContent'] }],
+        nextPageToken: 'more+models',
+      },
+      {
+        models: [
+          { name: 'models/embed', supportedGenerationMethods: ['embedContent'] },
+          { name: 'models/gemini-b', supportedGenerationMethods: ['generateContent'] },
+        ],
+      },
+    ],
+    models: ['p/gemini-a', 'p/gemini-b'],
+  },
+])(
+  'discovers all native BYOK pages for $providerSlug',
+  async ({ providerSlug, path, cursor, pages, models }) => {
+    const db = database();
+    try {
+      const urls: string[] = [];
+      vi.stubGlobal('fetch', async (url: string) => {
+        urls.push(url);
+        return Response.json(pages[urls.length - 1]);
+      });
+      const sources = Schema.decodeUnknownSync(RelayCatalogSources)([
+        {
+          discovery: 'gateway',
+          prefix: 'p/',
+          providerSlug,
+          credentialAlias: 'review',
+          models: Object.fromEntries(
+            models.map((id) => [
+              id,
+              { profile: providerSlug === 'native:anthropic' ? 'messages' : 'gemini' },
+            ]),
+          ),
+        },
+      ]);
+      const catalog = createRelayCatalog(db, sources, {
+        accountId: 'account',
+        gatewayId: 'gateway',
+        runToken: 'test',
+      });
+      await catalog.refresh(60);
+      const first = `https://gateway.ai.cloudflare.com/v1/account/gateway/${path}/models`;
+      expect(await catalog.get()).toMatchObject({ routes: models, lastRefreshError: null });
+      expect(urls).toEqual([first, first + '?' + cursor]);
+    } finally {
+      db.close();
+    }
+  },
+);
+
 it('freezes the alias-only source provider and credential on a legacy grant', async () => {
   const db = database();
   try {

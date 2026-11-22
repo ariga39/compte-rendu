@@ -4,7 +4,7 @@ import { ModelRouteId } from '@compte-rendu/contracts';
 export const RouteId = ModelRouteId;
 
 export const ProviderSlug = Schema.Union([
-  Schema.Literal('native:openai'),
+  Schema.Literals(['native:openai', 'native:anthropic', 'native:google-ai-studio']),
   Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/)),
 ]);
 
