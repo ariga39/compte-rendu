@@ -368,42 +368,49 @@ it('presents a discovered route instead of an alias with the same provider, cred
   }
 });
 
-it('discovers a private provider catalog only through its trusted Gateway BYOK route', async () => {
-  const db = database();
-  try {
-    const observed: { url: string; headers: Headers; redirect?: RequestRedirect }[] = [];
-    vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
-      observed.push({ url, headers: new Headers(init.headers), redirect: init.redirect });
-      return Response.json({ data: [{ id: 'custom-model' }] });
-    });
-    const configured = {
-      discovery: 'gateway',
-      prefix: 'p/',
-      providerSlug: 'custom-private',
-      credentialAlias: 'billing',
-    };
-    const decode = Schema.decodeUnknownSync(RelayCatalogSources, { onExcessProperty: 'error' });
-    const catalog = createRelayCatalog(db, decode([configured]), {
-      accountId: 'account',
-      gatewayId: 'gateway',
-      runToken: 'test-run-token',
-    });
-    await catalog.refresh(60);
-    expect(await catalog.get()).toMatchObject({
-      routes: ['p/custom-model'],
-      lastRefreshError: null,
-    });
-    expect(observed[0]?.url).toBe(
-      'https://gateway.ai.cloudflare.com/v1/account/gateway/custom-private/models',
-    );
-    expect(observed[0]?.headers.get('cf-aig-authorization')).toBe('Bearer test-run-token');
-    expect(observed[0]?.headers.get('cf-aig-byok-alias')).toBe('billing');
-    expect(observed[0]?.redirect).toBe('manual');
-    expect(() => decode([{ ...configured, url: 'https://other.example' }])).toThrow();
-  } finally {
-    db.close();
-  }
-});
+it.each([
+  ['custom-private', 'custom-private'],
+  ['openai', 'custom-openai'],
+  ['native:openai', 'openai'],
+])(
+  'discovers the catalog for %s through its frozen Gateway destination',
+  async (providerSlug, path) => {
+    const db = database();
+    try {
+      const observed: { url: string; headers: Headers; redirect?: RequestRedirect }[] = [];
+      vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
+        observed.push({ url, headers: new Headers(init.headers), redirect: init.redirect });
+        return Response.json({ data: [{ id: 'custom-model' }] });
+      });
+      const configured = {
+        discovery: 'gateway',
+        prefix: 'p/',
+        providerSlug,
+        credentialAlias: 'billing',
+      };
+      const decode = Schema.decodeUnknownSync(RelayCatalogSources, { onExcessProperty: 'error' });
+      const catalog = createRelayCatalog(db, decode([configured]), {
+        accountId: 'account',
+        gatewayId: 'gateway',
+        runToken: 'test-run-token',
+      });
+      await catalog.refresh(60);
+      expect(await catalog.get()).toMatchObject({
+        routes: ['p/custom-model'],
+        lastRefreshError: null,
+      });
+      expect(observed[0]?.url).toBe(
+        `https://gateway.ai.cloudflare.com/v1/account/gateway/${path}/models`,
+      );
+      expect(observed[0]?.headers.get('cf-aig-authorization')).toBe('Bearer test-run-token');
+      expect(observed[0]?.headers.get('cf-aig-byok-alias')).toBe('billing');
+      expect(observed[0]?.redirect).toBe('manual');
+      expect(() => decode([{ ...configured, url: 'https://other.example' }])).toThrow();
+    } finally {
+      db.close();
+    }
+  },
+);
 
 it('freezes the alias-only source provider and credential on a legacy grant', async () => {
   const db = database();

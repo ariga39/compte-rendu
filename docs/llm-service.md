@@ -79,7 +79,10 @@ allowance consumption. Consult the provider’s billing data for that amount.
 ### Managed relay model catalog
 
 Set the inference Worker's `RELAY_CATALOG_SOURCES` variable to a JSON array.
-Every source names a Gateway custom provider and its BYOK credential alias.
+Every source names a Gateway destination in `providerSlug` and its BYOK credential alias.
+Use `native:openai` for Cloudflare’s built-in OpenAI provider. Bare names continue
+to select custom providers, so `openai` and `custom-openai` both select
+`/custom-openai`. Use a new route ID when changing an existing route’s destination.
 Choose discovery according to how that provider exposes its model list.
 
 - For a public list, set `url` to its credential-free HTTPS endpoint and
