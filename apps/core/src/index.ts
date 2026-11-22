@@ -241,10 +241,8 @@ export interface PublicRunRow {
   failureReason: string | null;
   failureHttpStatus: number | null;
   runnerJobId: string | null;
-  evidenceStatus: 'complete' | 'incomplete' | null;
   runnerCleanupStatus: 'pending' | 'destroyed' | 'failed' | null;
   queueBlockReason: 'cleanup' | null;
-  publicationClaimedAt: string | null;
   progressStage: 'checkout' | 'sandbox' | 'agent' | 'evidence' | 'cleanup' | null;
   lastProgressAt: string | null;
   progressMilestones: string | null;
@@ -506,7 +504,6 @@ export interface ReviewStateQueries {
   completeRunPublication(input: {
     runId: string;
     occurredAt: string;
-    fingerprints: readonly string[];
     decision?: ReviewDecision;
   }): Promise<boolean>;
   recordResultReceived?(input: {
@@ -896,7 +893,7 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
     return 'failed' as const;
   }
   let decision: ReviewDecision | undefined;
-  const completeRun = Effect.fn('completeRun')(function* (fingerprints: readonly string[]) {
+  const completeRun = Effect.fn('completeRun')(function* () {
     const completedAt = yield* currentIso;
     return yield* Effect.tryPromise({
       try: () =>
@@ -905,7 +902,6 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
           : stateStore.completeRunPublication({
               runId: input.runId,
               occurredAt: completedAt,
-              fingerprints,
               decision,
             }),
       catch: () => undefined,
@@ -1210,7 +1206,7 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
   }
 
   if (markerLookup.review !== undefined) {
-    const completed = yield* completeRun([]);
+    const completed = yield* completeRun();
     if (!completed) {
       return yield* completionFailed('completion_failed');
     }
@@ -1312,7 +1308,7 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
   if (publication === false || publication === undefined) {
     const recoveredLookup = yield* lookupMarker();
     if (recoveredLookup.ok && recoveredLookup.review !== undefined) {
-      const completed = yield* completeRun([]);
+      const completed = yield* completeRun();
       if (!completed) {
         return yield* completionFailed('completion_failed');
       }
@@ -1323,7 +1319,7 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
       recoveredLookup.ok ? 'publication_uncertain' : 'marker_lookup_failed',
     );
   }
-  const completed = yield* completeRun([]);
+  const completed = yield* completeRun();
   if (!completed) {
     return yield* completionFailed('completion_failed');
   }

@@ -50,7 +50,6 @@ describe('new review round resets prior GitHub verdicts', () => {
       await store.completeRunPublication({
         runId: previous.runId,
         occurredAt: '2026-10-01T00:01:00.000Z',
-        fingerprints: [],
         decision: 'request_changes',
       });
       const reviews = [
@@ -157,7 +156,6 @@ const resetFixture = async () => {
   await store.completeRunPublication({
     runId: previous.runId,
     occurredAt: '2026-10-01T00:01:00.000Z',
-    fingerprints: [],
     decision: 'approve',
   });
   const reviews = [review(1, previous.runId, 'APPROVED')];
@@ -393,7 +391,6 @@ it('does not clear this round or repeat the reset when a delivery is replayed', 
     await f.store.completeRunPublication({
       runId,
       occurredAt: new Date().toISOString(),
-      fingerprints: [],
       decision: 'request_changes',
     });
     expect((await f.send()).status).toBe(202);

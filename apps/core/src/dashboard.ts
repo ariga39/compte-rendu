@@ -3,6 +3,7 @@ import {
   ModelUsageSummary,
   PublicTaskFailure,
   PublicMilestone,
+  REVIEW_PROGRESS_STAGES,
   type PublicTaskState,
 } from '@compte-rendu/contracts';
 import { GitHubRequestError } from './github-review-adapter';
@@ -515,7 +516,7 @@ export const validateProgressSnapshot = (snapshot: {
   stage: string;
   milestones: readonly { stage: string; startedAt: string }[];
 }): boolean => {
-  const stages = ['checkout', 'sandbox', 'agent', 'evidence', 'cleanup'] as const;
+  const stages = REVIEW_PROGRESS_STAGES;
   if (snapshot.milestones.length === 0) return false;
   let lastIndex = -1;
   let previousStartedAt: string | undefined;

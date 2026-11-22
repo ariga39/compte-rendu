@@ -97,7 +97,6 @@ describe('public dashboard reads are DB-only', () => {
       store.completeRunPublication({
         runId: claimed.runId,
         occurredAt: new Date().toISOString(),
-        fingerprints: [],
       }),
     ]);
     const snapshot = await asJson<{
@@ -163,7 +162,6 @@ describe('public dashboard reads are DB-only', () => {
     await store.completeRunPublication({
       runId: claimed.runId,
       occurredAt: '2026-01-01T00:01:00.000Z',
-      fingerprints: [],
       decision: 'request_changes',
     });
     const fresh = createCoreWorker(coreEnv(database));

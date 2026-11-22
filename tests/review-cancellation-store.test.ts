@@ -199,7 +199,6 @@ describe('D1 cancellation store', () => {
       store.completeRunPublication({
         runId,
         occurredAt: '2026-11-19T00:02:00.000Z',
-        fingerprints: ['finding-1'],
         decision: 'approve',
       }),
     ).resolves.toBe(false);
@@ -285,7 +284,6 @@ describe('D1 cancellation store', () => {
       store.completeRunPublication({
         runId: completedRun,
         occurredAt: '2026-11-19T00:02:00.000Z',
-        fingerprints: [],
       }),
     ).resolves.toBe(true);
     await expect(
