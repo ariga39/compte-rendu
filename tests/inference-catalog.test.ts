@@ -10,6 +10,7 @@ const migrations = [
   '0002_requests.sql',
   '0003_catalog.sql',
   '0004_catalog_sources.sql',
+  '0005_route_profiles.sql',
 ];
 const migrationsDirectory = '../../apps/inference-worker/migrations';
 const database = () => new SqliteD1Database(migrations, migrationsDirectory);
@@ -662,6 +663,249 @@ it('rejects a snapshot with an invalid combined ID length without publishing a p
   } finally {
     db.close();
   }
+});
+
+it('publishes only configured protocols from a rich catalog and freezes them in a v2 grant', async () => {
+  const db = database();
+  const source = {
+    url: 'https://models.example/v1/models',
+    prefix: 'go/',
+    providerSlug: 'custom-go',
+    credentialAlias: 'default',
+    profiles: ['chat', 'responses', 'messages', 'gemini'] as const,
+  };
+  try {
+    vi.stubGlobal('fetch', async () =>
+      Response.json({
+        data: [
+          {
+            id: 'chat-model',
+            api: { 'chat-completions': {} },
+            recommended_api: 'chat-completions',
+          },
+          { id: 'responses-model', api: { responses: {} }, recommended_api: 'responses' },
+          { id: 'messages-model', api: { messages: {} }, recommended_api: 'messages' },
+          { id: 'gemini-model', api: { 'generate-content': {} }, recommended_api: 'interactions' },
+          { id: 'interactions-model', api: { interactions: {} }, recommended_api: 'interactions' },
+          {
+            id: 'no-tools-model',
+            api: { 'chat-completions': {} },
+            capabilities: { tools: { supported: false } },
+          },
+          { id: 'both-model', api: { 'chat-completions': {}, responses: {} } },
+        ],
+      }),
+    );
+    const catalog = createRelayCatalog(db, [source]);
+    await catalog.refresh(50);
+    expect(await catalog.get()).toMatchObject({
+      routes: [
+        'go/both-model',
+        'go/chat-model',
+        'go/gemini-model',
+        'go/messages-model',
+        'go/responses-model',
+      ],
+      lastRefreshError: null,
+    });
+    const profiles = db.database
+      .prepare('SELECT route_id, profile FROM catalog_routes ORDER BY route_id')
+      .all() as unknown as ReadonlyArray<{
+      readonly route_id: string;
+      readonly profile: string;
+    }>;
+    expect(profiles).toEqual([
+      { route_id: 'go/both-model', profile: 'chat' },
+      { route_id: 'go/chat-model', profile: 'chat' },
+      { route_id: 'go/gemini-model', profile: 'gemini' },
+      { route_id: 'go/messages-model', profile: 'messages' },
+      { route_id: 'go/responses-model', profile: 'responses' },
+    ]);
+  } finally {
+    db.close();
+  }
+});
+
+it('exposes only the explicit allowlist from an ID-only listing and freezes configured limits', async () => {
+  const db = database();
+  const source = {
+    url: 'https://api.openai.example/v1/models',
+    prefix: 'openai-platform/',
+    providerSlug: 'custom-openai',
+    credentialAlias: 'sol',
+    models: {
+      'openai-platform/gpt-6.2-sol': {
+        profile: 'responses' as const,
+        limit: { context: 1_050_000, output: 128_000 },
+      },
+    },
+  };
+  try {
+    vi.stubGlobal('fetch', async () =>
+      Response.json({
+        data: [{ id: 'gpt-6.2-sol' }, { id: 'non-review-model' }, { id: 'text-embedding-3-large' }],
+      }),
+    );
+    const catalog = createRelayCatalog(db, [source]);
+    await catalog.refresh(50);
+    expect(await catalog.get()).toMatchObject({
+      routes: ['openai-platform/gpt-6.2-sol'],
+      lastRefreshError: null,
+    });
+    expect(
+      db.database
+        .prepare('SELECT profile, limit_json FROM catalog_routes WHERE route_id = ?')
+        .get('openai-platform/gpt-6.2-sol'),
+    ).toEqual({
+      profile: 'responses',
+      limit_json: '{"context":1050000,"output":128000}',
+    });
+
+    const changed = createRelayCatalog(db, [
+      {
+        ...source,
+        models: {
+          'openai-platform/gpt-6.2-sol': {
+            profile: 'responses',
+            limit: { context: 1_050_000, output: 100_000 },
+          },
+        },
+      },
+    ]);
+    await changed.refresh(100);
+    expect(await changed.get()).toMatchObject({
+      routes: ['openai-platform/gpt-6.2-sol'],
+      lastSuccessAt: new Date(50).toISOString(),
+      lastRefreshError: 'route mapping conflict',
+    });
+    expect(
+      db.database
+        .prepare('SELECT profile, limit_json FROM catalog_routes WHERE route_id = ?')
+        .get('openai-platform/gpt-6.2-sol'),
+    ).toEqual({
+      profile: 'responses',
+      limit_json: '{"context":1050000,"output":128000}',
+    });
+  } finally {
+    db.close();
+  }
+});
+
+it('keeps unqualified ID-only discovery unchanged', async () => {
+  const db = database();
+  try {
+    vi.stubGlobal('fetch', async () =>
+      Response.json({ data: [{ id: 'first' }, { id: 'second' }] }),
+    );
+    const catalog = createRelayCatalog(db, [
+      {
+        url: 'https://models.example/models',
+        prefix: 'p/',
+        providerSlug: 'custom-review',
+        credentialAlias: 'default',
+      },
+    ]);
+    await catalog.refresh(10);
+    expect((await catalog.get()).routes).toEqual(['p/first', 'p/second']);
+    expect(db.database.prepare('SELECT DISTINCT profile FROM catalog_routes').all()).toEqual([
+      { profile: 'chat' },
+    ]);
+  } finally {
+    db.close();
+  }
+});
+
+it('honours recommended_api before the configured profile order', async () => {
+  const db = database();
+  try {
+    vi.stubGlobal('fetch', async () =>
+      Response.json({
+        data: [
+          {
+            id: 'both',
+            api: { 'chat-completions': {}, responses: {} },
+            recommended_api: 'responses',
+          },
+        ],
+      }),
+    );
+    const catalog = createRelayCatalog(db, [
+      {
+        url: 'https://models.example/models',
+        prefix: 'p/',
+        providerSlug: 'custom-review',
+        credentialAlias: 'default',
+        profiles: ['chat', 'responses'],
+      },
+    ]);
+    await catalog.refresh(10);
+    expect(
+      db.database.prepare('SELECT profile FROM catalog_routes WHERE route_id = ?').get('p/both'),
+    ).toEqual({ profile: 'responses' });
+  } finally {
+    db.close();
+  }
+});
+
+it('treats a profile change for an existing route as an immutable conflict', async () => {
+  const db = database();
+  const base = {
+    providerSlug: 'custom-legacy',
+    credentialAlias: 'default',
+    aliases: { 'legacy-review': 'legacy-model' },
+    profile: 'chat' as const,
+  };
+  try {
+    await createRelayCatalog(db, [base]).refresh(100);
+    const changed = createRelayCatalog(db, [{ ...base, profile: 'responses' }]);
+    await changed.refresh(200);
+    expect(await changed.get()).toMatchObject({
+      routes: ['legacy-review'],
+      lastSuccessAt: new Date(100).toISOString(),
+      lastRefreshError: 'route mapping conflict',
+    });
+    expect(
+      db.database
+        .prepare('SELECT profile FROM catalog_routes WHERE route_id = ?')
+        .get('legacy-review'),
+    ).toEqual({ profile: 'chat' });
+  } finally {
+    db.close();
+  }
+});
+
+it('rejects duplicate or oversized configured profile lists', () => {
+  const decode = Schema.decodeUnknownSync(RelayCatalogSources, { onExcessProperty: 'error' });
+  const base = {
+    providerSlug: 'custom-review',
+    credentialAlias: 'default',
+    aliases: { review: 'model' },
+  };
+  expect(() => decode([{ ...base, profiles: ['chat', 'chat'] }])).toThrow();
+  expect(() => decode([{ ...base, profiles: [] }])).toThrow();
+  expect(() =>
+    decode([{ ...base, profiles: ['chat', 'responses', 'messages', 'gemini', 'chat'] }]),
+  ).toThrow();
+  expect(() => decode([{ ...base, profiles: ['unknown'] }])).toThrow();
+  expect(
+    decode([
+      {
+        ...base,
+        models: {
+          review: { profile: 'responses', limit: { context: 1000, output: 200 } },
+        },
+      },
+    ]),
+  ).toHaveLength(1);
+  expect(() =>
+    decode([
+      {
+        ...base,
+        models: { review: { profile: 'responses', limit: { context: 0 } } },
+      },
+    ]),
+  ).toThrow();
+  expect(() => decode([{ ...base, models: { review: { profile: 'unknown' } } }])).toThrow();
 });
 
 it('preserves choices when a provider sends malformed continuation metadata', async () => {

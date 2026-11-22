@@ -1,6 +1,7 @@
 import { Schema } from 'effect';
+import { ModelRouteId } from '@compte-rendu/contracts';
 
-export const RouteId = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9._:/-]{1,128}$/));
+export const RouteId = ModelRouteId;
 
 export const ProviderSlug = Schema.Union([
   Schema.Literal('native:openai'),

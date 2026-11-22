@@ -1,4 +1,4 @@
-import { readBoundedBody } from '@compte-rendu/contracts';
+import { ModelProfile, readBoundedBody } from '@compte-rendu/contracts';
 import { Option, Schema } from 'effect';
 
 const MAX_CATALOG_BYTES = 256 * 1024;
@@ -12,7 +12,35 @@ export const CatalogModelId = Schema.String.check(
   Schema.isPattern(/^[A-Za-z0-9._:/-]+$/),
 );
 
-const CatalogEntry = Schema.Struct({ id: Schema.String });
+const apiEndpoints = {
+  'chat-completions': Schema.optionalKey(Schema.Unknown),
+  responses: Schema.optionalKey(Schema.Unknown),
+  messages: Schema.optionalKey(Schema.Unknown),
+  'generate-content': Schema.optionalKey(Schema.Unknown),
+  interactions: Schema.optionalKey(Schema.Unknown),
+} as const;
+const ApiProfile = {
+  'chat-completions': 'chat',
+  responses: 'responses',
+  messages: 'messages',
+  'generate-content': 'gemini',
+} as const satisfies Record<string, ModelProfile>;
+const CatalogEntry = Schema.Struct({
+  id: Schema.String,
+  api: Schema.optionalKey(Schema.Struct(apiEndpoints)),
+  recommended_api: Schema.optionalKey(Schema.String),
+  capabilities: Schema.optionalKey(
+    Schema.Struct({
+      tools: Schema.optionalKey(Schema.Struct({ supported: Schema.optionalKey(Schema.Boolean) })),
+    }),
+  ),
+});
+export interface CatalogModel {
+  readonly id: string;
+  /** Null means an ID-only listing without protocol metadata. */
+  readonly profiles: readonly ModelProfile[] | null;
+  readonly recommended: ModelProfile | null;
+}
 const optionalLink = Schema.optionalKey(Schema.NullOr(Schema.NonEmptyString));
 const noCursor = Schema.optionalKey(Schema.NullOr(Schema.Literal('')));
 const paginationFields = {
@@ -44,6 +72,24 @@ const linkHeader = (response: Response): string[] => {
     targets.push(match[1]);
   }
   return targets;
+};
+
+const catalogModel = (entry: typeof CatalogEntry.Type): CatalogModel => {
+  const supported =
+    entry.api === undefined
+      ? null
+      : entry.capabilities?.tools?.supported === false
+        ? []
+        : (Object.keys(ApiProfile) as (keyof typeof ApiProfile)[])
+            .filter(
+              (name) => Object.hasOwn(entry.api!, name) && entry.api![name] !== null,
+            )
+            .map((name) => ApiProfile[name]);
+  const recommended =
+    entry.recommended_api === undefined
+      ? null
+      : (Object.entries(ApiProfile).find(([name]) => name === entry.recommended_api)?.[1] ?? null);
+  return { id: entry.id, profiles: supported, recommended };
 };
 
 export const readModelCatalogPage = async (response: Response, currentUrl: string) => {
@@ -78,12 +124,12 @@ export const readModelCatalogPage = async (response: Response, currentUrl: strin
   )
     throw new Error('incomplete catalog');
 
-  const ids: string[] = [];
+  const models: CatalogModel[] = [];
   let rejected = 0;
   for (const entry of page.data) {
     const model = Schema.decodeUnknownOption(CatalogEntry)(entry);
     if (Option.isNone(model)) rejected++;
-    else ids.push(model.value.id);
+    else models.push(catalogModel(model.value));
   }
-  return { ids, rejected, next };
+  return { models, rejected, next };
 };
