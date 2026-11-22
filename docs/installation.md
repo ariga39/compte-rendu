@@ -1222,7 +1222,9 @@ corepack pnpm render:wrangler ariga39-ai-reviewers <GITHUB_APP_ID> <D1_DATABASE_
 Use one relay D1 database, inference hostname, Gateway, BYOK credential and scoped
 Gateway Run token per installation. Provision them in the same account as the
 application Worker. Give the relay only its own D1 binding. In AI Gateway, set
-the custom provider's full upstream API base including its `/v1` path. Store the
+the upstream API base (including its version path) when using a custom provider.
+For a built-in provider, select its native Gateway destination and provision the
+BYOK alias for that provider in this gateway. Store the
 upstream credential in that account's Secrets Store and select its BYOK alias.
 The Run token belongs in the inference Worker's `AI_GATEWAY_RUN_TOKEN` secret.
 The Runner receives job grants through the existing authenticated callback origin.
@@ -1263,7 +1265,12 @@ settings forward.
    revoked, legacy null-snapshot jobs have finished, and recovery markers are
    clear. Configure the existing callback URL and bearer, the HTTPS inference
    model base on port 443 ending in `/v1`, and the relay issuer generation.
-4. Resume one installation and run a fresh PR review. Verify the published
+   For a roster that includes non-Chat models, set `RUNNER_LLM_GRANT_VERSION=2`
+   after deploying both Workers. The Runner uses each route's frozen profile
+   to configure OpenCode. Version 1 remains available for Chat-only rosters.
+4. Resume the Runner and save the new roster in the dashboard. Keep the existing
+   synthesis route if you are only adding an independent reviewer. Run a fresh PR review. Verify the published
    review is for the claimed revision, the check terminates, D1 records usage
    per model, grant reuse is denied after cleanup, and the sandbox is gone.
-5. To roll back, drain the Runner and resolve outstanding grants on their issuing backend before restoring the previous binary and its matching configuration. See the [upgrade procedure](llm-service.md#upgrading-an-installation-with-the-former-local-service).
+5. Before reverting to a v1 Runner, restore a Chat-only roster and allow jobs
+   already admitted with a non-Chat model to finish. To roll back, drain the Runner and resolve outstanding grants on their issuing backend before restoring the previous binary and its matching configuration. See the [upgrade procedure](llm-service.md#upgrading-an-installation-with-the-former-local-service).
