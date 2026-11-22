@@ -79,14 +79,10 @@ const FunctionCallItem = Schema.Struct({
   status: Schema.optionalKey(Schema.Literal('completed')),
 });
 
-const FunctionCallOutputPart = Schema.Struct({
-  type: Schema.Literal('input_text'),
-  text: Schema.String,
-});
 const FunctionCallOutputItem = Schema.Struct({
   type: Schema.Literal('function_call_output'),
   call_id: CallId,
-  output: Schema.Union([Schema.String, Schema.Array(FunctionCallOutputPart)]),
+  output: Schema.Union([Schema.String, Schema.Array(InputTextPart)]),
 });
 
 const ReasoningSummaryPart = Schema.Struct({
