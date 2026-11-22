@@ -70,8 +70,7 @@ const readSource = async (
   const models: Record<string, RouteModel> = {};
   const allowedProfiles = sourceProfiles(source);
   const preferredProfile = sourceDefaultProfile(source);
-  // A source with no profile configuration keeps the historical behaviour:
-  // every discovered ID is published as a Chat Completions route.
+  // Legacy sources default to Chat. Native Messages and Gemini sources use their protocol.
   const qualified =
     source.profiles !== undefined || source.profile !== undefined || preferredProfile !== 'chat';
   let rejected = 0;

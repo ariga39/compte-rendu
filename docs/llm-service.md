@@ -140,7 +140,8 @@ Choose discovery according to how that provider exposes its model list.
   upstream model ID. A source with only aliases makes no discovery request.
   A discovery source can also declare aliases for the same upstream.
 
-Sources without profile configuration remain Chat Completions sources. Set
+Custom and OpenAI destinations default to Chat Completions. Anthropic and
+Google AI Studio default to their native protocols as described above. Set
 `profile` to a default profile or `profiles` to the distinct profiles a rich
 catalog may publish (`chat`, `responses`, `messages`, `gemini`). Rich entries
 are filtered from their advertised `api` operations; models that advertise no

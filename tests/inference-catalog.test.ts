@@ -486,22 +486,23 @@ it.each([
   },
 );
 
-it.each(['native:anthropic', 'native:google-ai-studio'])(
-  'rejects a chat model in a %s source',
-  (providerSlug) => {
-    expect(() =>
-      Schema.decodeUnknownSync(RelayCatalogSources)([
-        {
-          discovery: 'gateway',
-          prefix: 'models/',
-          providerSlug,
-          credentialAlias: 'review',
-          models: { 'models/unsupported': { profile: 'chat' } },
-        },
-      ]),
-    ).toThrow();
-  },
-);
+it.each([
+  ['native:anthropic', { models: { 'models/unsupported': { profile: 'chat' } } }],
+  ['native:google-ai-studio', { profile: 'chat' }],
+  ['native:anthropic', { profiles: ['messages', 'chat'] }],
+] as const)('rejects incompatible Chat configuration for %s', (providerSlug, settings) => {
+  expect(() =>
+    Schema.decodeUnknownSync(RelayCatalogSources)([
+      {
+        discovery: 'gateway',
+        prefix: 'models/',
+        providerSlug,
+        credentialAlias: 'review',
+        ...settings,
+      },
+    ]),
+  ).toThrow();
+});
 
 it('rejects a default protocol excluded by the source profile list', () => {
   expect(() =>
