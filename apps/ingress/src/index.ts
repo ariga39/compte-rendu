@@ -1,5 +1,6 @@
 import { Effect, Option, Schema } from 'effect';
 import {
+  createCloudflareOperationalLog,
   readBoundedRequestBytes,
   RETRY_REVIEW_ACTION,
   MetadataInvalidationEvent,
@@ -15,11 +16,8 @@ import {
   sanitizeOperationalLogIdentifier,
   sanitizeOperationalLogEvent,
 } from '@compte-rendu/contracts';
-import { createCloudflareOperationalLog } from './operational-log';
 
 export { MAX_WEBHOOK_BYTES };
-
-export { createCloudflareOperationalLog } from './operational-log';
 
 const supportedEvents = [
   'pull_request',
@@ -148,7 +146,6 @@ export interface IngressDependencies {
   readonly allowedInstallationIds: unknown;
   readonly allowedBotAuthorIds?: unknown;
   readonly core: CoreServiceBinding;
-  readonly assets?: CoreServiceBinding;
   readonly runnerCallbackToken?: string;
   readonly log?: OperationalLog;
 }
@@ -157,8 +154,6 @@ export interface IngressEnv {
   readonly WEBHOOK_SECRET: string;
   readonly ALLOWED_INSTALLATION_IDS: string;
   readonly ALLOWED_BOT_AUTHOR_IDS?: string;
-  readonly CORE: CoreServiceBinding;
-  readonly ASSETS?: CoreServiceBinding;
   readonly RUNNER_CALLBACK_TOKEN?: string;
 }
 
@@ -897,25 +892,6 @@ export function createIngressWorker(dependencies: IngressDependencies): WorkerEn
       }
       if (request.method === 'GET') {
         const path = new URL(request.url).pathname;
-        const isPage =
-          path === '/' || path === '/history' || path === '/help' || path.startsWith('/jobs/');
-        if (isPage || path.startsWith('/_app/')) {
-          try {
-            if (dependencies.assets === undefined) return new Response(null, { status: 503 });
-            const assetUrl = new URL(request.url);
-            if (isPage) {
-              assetUrl.pathname = '/index.html';
-              assetUrl.search = '';
-            }
-            const asset = await dependencies.assets.fetch(new Request(assetUrl, request));
-            if (!isPage) return asset;
-            const headers = new Headers(asset.headers);
-            headers.set('cache-control', 'no-store');
-            return new Response(asset.body, { status: asset.status, headers });
-          } catch {
-            return new Response(null, { status: 503 });
-          }
-        }
         if (isPublicReadPath(path)) {
           try {
             return await forwardPublicRead(request, dependencies);
@@ -1020,23 +996,3 @@ export function createIngressWorker(dependencies: IngressDependencies): WorkerEn
     },
   };
 }
-
-const ingress: WorkerEntrypoint<IngressEnv> = {
-  fetch: (request, env) => {
-    if (env === undefined) {
-      return new Response(null, { status: 501 });
-    }
-
-    return createIngressWorker({
-      secret: env.WEBHOOK_SECRET,
-      crypto: globalThis.crypto,
-      allowedInstallationIds: env.ALLOWED_INSTALLATION_IDS,
-      allowedBotAuthorIds: env.ALLOWED_BOT_AUTHOR_IDS,
-      core: env.CORE,
-      assets: env.ASSETS,
-      runnerCallbackToken: env.RUNNER_CALLBACK_TOKEN,
-    }).fetch(request);
-  },
-};
-
-export default ingress;

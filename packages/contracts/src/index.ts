@@ -638,6 +638,14 @@ export interface OperationalLog {
   readonly record: (event: OperationalLogEvent) => void | Promise<void>;
 }
 
+export const createCloudflareOperationalLog = (
+  sink: Pick<Console, 'log'> = console,
+): OperationalLog => ({
+  record: (event: OperationalLogEvent) => {
+    sink.log(sanitizeOperationalLogEvent(event));
+  },
+});
+
 export const PublicExecutionStage = Schema.Literals([
   'checkout',
   'sandbox',

@@ -1,6 +1,6 @@
+import { createCloudflareOperationalLog } from '@compte-rendu/contracts';
 import { authRoute, noStore, requireOperator, sessionViewer } from './auth';
 import { modelSettings, type LoginEnv } from './model-settings';
-import { createCloudflareOperationalLog } from '../../../../core/src/operational-log';
 import { handleRunnerLlmControl } from '../../../../core/src/runner-llm-control';
 import {
   createCoreWorker,
@@ -10,7 +10,7 @@ import {
 } from '../../../../core/src/core-worker';
 import { createIngressWorker, type IngressEnv } from '../../../../ingress/src/index';
 
-export type ApplicationEnv = LoginEnv & CoreWorkerEnv & Omit<IngressEnv, 'CORE' | 'ASSETS'>;
+export type ApplicationEnv = LoginEnv & CoreWorkerEnv & IngressEnv;
 
 export function createApplication(env: ApplicationEnv, dependencies: CoreWorkerDependencies = {}) {
   return {
