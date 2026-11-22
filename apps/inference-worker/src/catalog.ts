@@ -71,13 +71,18 @@ const readSource = async (
   const preferredProfile = sourceDefaultProfile(source);
   // A source with no profile configuration keeps the historical behaviour:
   // every discovered ID is published as a Chat Completions route.
-  const qualified = source.profiles !== undefined || source.profile !== undefined;
+  const qualified =
+    source.profiles !== undefined || source.profile !== undefined || preferredProfile !== 'chat';
   let rejected = 0;
   const visited = new Set([url]);
   const signal = AbortSignal.timeout(CATALOG_TIMEOUT_MS);
   for (let page = 0; page < MAX_CATALOG_PAGES; page += 1) {
     const response = await fetch(url, { headers, redirect: 'manual', signal });
-    const result = await readModelCatalogPage(response, url);
+    const result = await readModelCatalogPage(
+      response,
+      url,
+      'discovery' in source ? source.providerSlug : undefined,
+    );
     rejected += result.rejected;
     const overrides = 'models' in source ? source.models : undefined;
     for (const entry of result.models) {
