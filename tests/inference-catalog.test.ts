@@ -503,6 +503,21 @@ it.each(['native:anthropic', 'native:google-ai-studio'])(
   },
 );
 
+it('rejects a default protocol excluded by the source profile list', () => {
+  expect(() =>
+    Schema.decodeUnknownSync(RelayCatalogSources)([
+      {
+        discovery: 'gateway',
+        prefix: 'go/',
+        providerSlug: 'custom-go',
+        credentialAlias: 'review',
+        profile: 'chat',
+        profiles: ['responses'],
+      },
+    ]),
+  ).toThrow();
+});
+
 it('freezes the alias-only source provider and credential on a legacy grant', async () => {
   const db = database();
   try {
