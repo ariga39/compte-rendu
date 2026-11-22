@@ -43,6 +43,7 @@ const RunnerManifest = Schema.Struct({
     status: Schema.Literals(['destroyed', 'failed']),
   }),
   result: Schema.optional(StructuredReviewResult),
+  catalogIdentity: Schema.optional(Schema.String),
   runtime: Schema.optional(Schema.String),
   sandboxName: Schema.optional(Schema.String),
   hostCleanupConfirmed: Schema.optional(Schema.Boolean),
@@ -68,6 +69,7 @@ export class CallbackRecoveryError extends Schema.TaggedError<CallbackRecoveryEr
 ) {}
 
 export type RecoveredCallback = {
+  readonly catalogIdentity?: string | undefined;
   readonly body: string;
   readonly callback: typeof RunnerResultCallback.Type;
 };
@@ -97,7 +99,7 @@ const artifactBytes = (artifact: {
 export const recoverCallback = Effect.fn('recoverCallback')(function* (
   evidenceRoot: string,
   request: ReplayCallbackRequest,
-  purpose: 'replay' | 'cleanup' = 'replay',
+  purpose: 'replay' | { readonly cleanupRuntime: 'sbx' | 'microsandbox' } = 'replay',
 ): Effect.fn.Return<RecoveredCallback, CallbackRecoveryError> {
   const directory = join(evidenceRoot, request.evidenceId);
   const directoryInfo = yield* readStat(directory, 'missing-evidence');
@@ -189,9 +191,9 @@ export const recoverCallback = Effect.fn('recoverCallback')(function* (
   }
 
   if (
-    purpose === 'cleanup' &&
+    purpose !== 'replay' &&
     (callback.status !== 'failed' ||
-      manifest.runtime !== 'sbx' ||
+      manifest.runtime !== purpose.cleanupRuntime ||
       manifest.sandboxName !== `compte-rendu-${request.jobId}` ||
       manifest.hostCleanupConfirmed !== true ||
       manifest.cleanup.status !== 'failed' ||
@@ -227,5 +229,5 @@ export const recoverCallback = Effect.fn('recoverCallback')(function* (
     return yield* fail('result-mismatch');
   }
 
-  return { body: text, callback };
+  return { body: text, callback, catalogIdentity: manifest.catalogIdentity };
 });

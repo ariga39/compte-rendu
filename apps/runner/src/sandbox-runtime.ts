@@ -2,7 +2,12 @@ import type { ChildProcess } from 'node:child_process';
 import { Option, Schema } from 'effect';
 import type { RunnerProcessErrorCode } from '@compte-rendu/contracts';
 
-export const SandboxRuntimeKind = Schema.Literals(['sbx', 'openshell', 'opensandbox']);
+export const SandboxRuntimeKind = Schema.Literals([
+  'sbx',
+  'openshell',
+  'opensandbox',
+  'microsandbox',
+]);
 export type SandboxRuntimeKind = Schema.Schema.Type<typeof SandboxRuntimeKind>;
 
 export interface OpenShellRuntimeConfig {
@@ -24,12 +29,14 @@ export interface SandboxRuntimeConfig {
   readonly kind: SandboxRuntimeKind;
   readonly cliPath: string;
   readonly openshell?: OpenShellRuntimeConfig;
+  readonly microsandboxImage?: string;
   readonly opensandbox?: OpenSandboxRuntimeConfig;
 }
 
 export interface SandboxRuntimeConfigInput {
   readonly kind?: string | undefined;
   readonly cliPath?: string | undefined;
+  readonly microsandboxImage?: string | undefined;
   readonly opensandboxEndpoint?: string | undefined;
   readonly opensandboxApiKeyFile?: string | undefined;
   readonly opensandboxImage?: string | undefined;
@@ -57,10 +64,15 @@ export const resolveSandboxRuntimeConfig = (
   const decoded = Schema.decodeUnknownOption(SandboxRuntimeKind)(requested);
   if (Option.isNone(decoded)) {
     throw new Error(
-      `RUNNER_SANDBOX_RUNTIME must be one of 'sbx', 'openshell' or 'opensandbox', received '${requested}'`,
+      `RUNNER_SANDBOX_RUNTIME must be one of 'sbx', 'openshell', 'opensandbox' or 'microsandbox', received '${requested}'`,
     );
   }
   const kind = decoded.value;
+  if (kind === 'microsandbox') {
+    const image = nonEmpty(input.microsandboxImage);
+    if (!image) throw new Error('Microsandbox requires MICROSANDBOX_IMAGE');
+    return { kind, cliPath: nonEmpty(input.cliPath) ?? 'msb', microsandboxImage: image };
+  }
   const cliPath =
     nonEmpty(input.cliPath) ??
     (kind === 'openshell' ? 'openshell' : kind === 'opensandbox' ? 'docker' : 'sbx');
@@ -222,6 +234,7 @@ export interface SandboxJobSpec {
 export interface SandboxRuntimeMetadata {
   /** True as soon as the sandbox resource exists, even if later setup steps fail. */
   readonly created: boolean;
+  readonly catalogIdentity?: string | undefined;
   readonly hostCleanupConfirmed?: boolean;
   /** Backend sandbox identity (sbx uses the requested name; OpenShell the real id). */
   readonly id: string;

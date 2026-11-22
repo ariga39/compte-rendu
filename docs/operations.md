@@ -154,8 +154,8 @@ For a normal compatible release:
 ### Review deadline rollout
 
 Core sets a 90-minute deadline at claim time. Deploy the application Worker with
-`POST /runner-read-token` before upgrading the sbx Runner. A successful refresh
-replaces the active Sandbox's private GitHub token file. If renewal fails,
+`POST /runner-read-token` before upgrading a Runner that rotates tokens. A successful refresh
+replaces the sbx token file or updates the active microsandbox VM's GitHub secret. If renewal fails,
 the Runner uses the earlier of the claim deadline and the current token's expiry
 minus one minute. OpenShell and OpenSandbox use the initial token's expiry margin.
 The callback and evidence manifest identify the limiting clock for an exhausted
@@ -273,6 +273,8 @@ inspect; authentication or transport failures are not proof of absence. Do not
 remove other jobs' Sandboxes or use a bulk prune. The recovery endpoint does not
 perform this removal for you.
 
+For microsandbox, confirm absence in the original Runner catalog as described in the [backend guide](microsandbox.md).
+
 Then use the correct instance's authenticated Runner maintenance endpoint. Prepare `recovery-request.json` with the same six
 identity fields shown in the callback replay section below, taken from the
 retained manifest. Then run:
@@ -284,11 +286,11 @@ curl --fail-with-body --silent --show-error --config "$RUNNER_CURL_CONFIG" \
   "$RUNNER_ORIGIN/maintenance/recover-cleanup"
 ```
 
-This operation accepts retained failed sbx callbacks, including jobs cancelled
+This operation accepts retained failed sbx or microsandbox callbacks, including jobs cancelled
 after their Core run was superseded, with valid callback evidence and
 `hostCleanupConfirmed: true` in the manifest. It verifies the immutable identity
 and artifact hashes, requires the exact Sandbox to be absent, removes only its
-scoped network policies and secrets, and revokes its LLM grant when configured.
+scoped sbx network policies and secrets, and revokes its LLM grant when configured.
 An existing Sandbox is never deleted by this recovery operation. Authentication
 errors, truncated inventory or failed removal leave cleanup unresolved.
 

@@ -572,7 +572,7 @@ and every file it reads outside writable sandbox mounts.
 
 The Runner executes reviews through a per-job sandbox runtime adapter.
 `RUNNER_SANDBOX_RUNTIME` selects `sbx` (the default, unchanged production path)
-or `openshell` or `opensandbox`. For the Docker Engine backend, follow
+or one of `microsandbox`, `openshell` and `opensandbox`. For the local KVM backend, follow the [microsandbox installation guide](microsandbox.md). For the Docker Engine backend, follow
 [OpenSandbox installation](opensandbox.md), including its private standard-port
 inference endpoint. An unknown value, or incomplete runtime configuration,
 fails at startup before any claim or admission.
@@ -1033,7 +1033,7 @@ limits.
 ### Multi-model review configuration
 
 Deploy Core migration `0012_review_configuration.sql` and the multi-model-capable
-Runner before enabling a selection. This execution path requires sbx or OpenSandbox, OpenCode 2,
+Runner before enabling a selection. This execution path requires sbx, microsandbox or OpenSandbox, OpenCode 2,
 and the managed relay. A selection can contain one reviewer; it runs directly with the same prompt
 and output contract used for multiple reviewers. Jobs retain the selection
 frozen when admitted. OpenShell does not support this multi-model path yet.

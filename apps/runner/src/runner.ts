@@ -52,6 +52,11 @@ import {
   createCredentialObserver,
 } from './bounded-file-capture.js';
 import { confirmSbxCleanup } from './cleanup-recovery.js';
+import {
+  createMicrosandboxRuntimeFactory,
+  confirmMicrosandboxAbsent,
+  createMicrosandboxPreflight,
+} from './sandbox-runtime-microsandbox.js';
 import { createOpenSandboxRuntimeFactory } from './sandbox-runtime-opensandbox.js';
 import { createSbxRuntimeFactory } from './sandbox-runtime-sbx.js';
 import { createRelayLlmServiceClient, type LlmGrantIdentity } from './llm-service-client.js';
@@ -760,6 +765,7 @@ export interface RunnerOptions {
   /** Opt in to the remote relay control plane over the callback origin. */
   readonly llmRelay?: boolean;
   readonly llmRelayGeneration?: string;
+  readonly microsandboxImage?: string;
   readonly opensandbox?: {
     readonly endpoint?: string;
     readonly apiKeyFile?: string;
@@ -1029,6 +1035,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
   const sandboxRuntime = resolveSandboxRuntimeConfig({
     kind: options.sandboxRuntime ?? process.env.RUNNER_SANDBOX_RUNTIME,
     cliPath: options.sandboxCliPath ?? process.env.RUNNER_SANDBOX_CLI,
+    microsandboxImage: options.microsandboxImage ?? process.env.MICROSANDBOX_IMAGE,
     opensandboxEndpoint: options.opensandbox?.endpoint ?? process.env.OPENSANDBOX_ENDPOINT,
     opensandboxApiKeyFile: options.opensandbox?.apiKeyFile ?? process.env.OPENSANDBOX_API_KEY_FILE,
     opensandboxImage: options.opensandbox?.image ?? process.env.OPENSANDBOX_IMAGE,
@@ -1046,6 +1053,9 @@ export const createRunner = (options: RunnerOptions = {}) => {
   }
   const relayFlag = options.llmRelay ?? process.env.RUNNER_LLM_RELAY;
   const relayEnabled = isEnabled(relayFlag);
+  if (sandboxRuntime.kind === 'microsandbox' && !relayEnabled) {
+    throw new Error('Microsandbox requires the managed HTTPS LLM relay');
+  }
   if (relayEnabled && sandboxRuntime.kind === 'openshell') {
     throw new Error('LLM service mode does not support the OpenShell sandbox runtime yet');
   }
@@ -1105,13 +1115,19 @@ export const createRunner = (options: RunnerOptions = {}) => {
       lifetimeSeconds: OPENSANDBOX_RESOURCE_LIFETIME_SECONDS,
     };
   }
+  const executeProcess = options.process ?? runProcess;
   const sandboxRuntimeFactory =
     options.sandboxRuntimeFactory ??
-    (opensandboxOptions !== undefined
-      ? createOpenSandboxRuntimeFactory(opensandboxOptions)
-      : sandboxRuntime.kind === 'openshell'
-        ? createOpenShellRuntimeFactory(sandboxRuntime.openshell!)
-        : createSbxRuntimeFactory({ modelSecretCommand }));
+    (sandboxRuntime.microsandboxImage !== undefined
+      ? createMicrosandboxRuntimeFactory(
+          sandboxRuntime.microsandboxImage,
+          (args, _diagnostic, options) => executeProcess(sandboxPortPath, args, options),
+        )
+      : opensandboxOptions !== undefined
+        ? createOpenSandboxRuntimeFactory(opensandboxOptions)
+        : sandboxRuntime.kind === 'openshell'
+          ? createOpenShellRuntimeFactory(sandboxRuntime.openshell!)
+          : createSbxRuntimeFactory({ modelSecretCommand }));
   const modelResolverMissing =
     sandboxRuntime.kind === 'sbx' &&
     !relayEnabled &&
@@ -1233,7 +1249,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
     }
     return false;
   };
-  const executeProcess = options.process ?? runProcess;
+
   const log = options.log;
   const callbackUrl = options.callbackUrl ?? process.env.RUNNER_CALLBACK_URL;
   const callbackToken = options.callbackToken ?? process.env.RUNNER_CALLBACK_TOKEN;
@@ -1272,10 +1288,10 @@ export const createRunner = (options: RunnerOptions = {}) => {
           token: callbackToken,
           fetch: options.readTokenFetch ?? callbackFetch,
         });
-  // Only sbx exposes an atomic, same-destination credential file that its
-  // `--refresh on-demand` source rereads. Other backends and legacy claims
-  // keep the original credential hard cap.
-  const readTokenRotationSupported = readTokenClient !== undefined && sandboxRuntime.kind === 'sbx';
+  // sbx rereads the credential file on demand. microsandbox updates its live host-side secret.
+  const readTokenRotationSupported =
+    readTokenClient !== undefined &&
+    (sandboxRuntime.kind === 'sbx' || sandboxRuntime.kind === 'microsandbox');
   const readTokenSecretValues = (job: RunnerJob): string[] =>
     [...new Set([job.input.repositoryReadToken, ...job.readTokenSecrets])].filter(
       (value) => value.length > 0,
@@ -2312,7 +2328,10 @@ export const createRunner = (options: RunnerOptions = {}) => {
       try {
         result = await executeProcess(sandboxPortPath, args, {
           ...processOptions,
-          env: strippedSandboxEnvironment,
+          env:
+            sandboxRuntime.kind === 'microsandbox'
+              ? processOptions.env
+              : strippedSandboxEnvironment,
           captureStdout: processOptions.captureStdout ?? false,
           captureStderr: true,
           stderrRedactions: [
@@ -3402,8 +3421,9 @@ export const createRunner = (options: RunnerOptions = {}) => {
             jobId: job.id,
             sandboxName: job.sandboxName,
             sandboxId: job.sandboxRuntime?.metadata.id ?? job.sandboxName,
+            catalogIdentity: job.sandboxRuntime?.metadata.catalogIdentity,
             sandboxRuntimeName: job.sandboxRuntime?.metadata.name ?? job.sandboxName,
-            runtime: job.sandboxRuntime?.metadata.runtime ?? 'sbx',
+            runtime: job.sandboxRuntime?.metadata.runtime ?? sandboxRuntime.kind,
             evidenceId,
             runId: job.input.runId,
             attempt: job.input.attempt,
@@ -3692,16 +3712,18 @@ export const createRunner = (options: RunnerOptions = {}) => {
 
   const openshellConfiguration =
     sandboxRuntime.kind === 'openshell' ? sandboxRuntime.openshell : undefined;
-  const openshellPreflight =
-    openshellConfiguration === undefined
-      ? undefined
-      : createOpenShellPreflight(openshellConfiguration);
+  const runtimePreflight =
+    sandboxRuntime.microsandboxImage !== undefined
+      ? createMicrosandboxPreflight(sandboxRuntime.microsandboxImage)
+      : openshellConfiguration === undefined
+        ? undefined
+        : createOpenShellPreflight(openshellConfiguration);
   let preflightPromise: Promise<boolean> | undefined;
   const ensurePreflight = async (): Promise<boolean> => {
-    if (openshellPreflight === undefined) return true;
-    preflightPromise ??= openshellPreflight((args, _diagnostic, options) =>
+    if (runtimePreflight === undefined) return true;
+    preflightPromise ??= runtimePreflight((args, _diagnostic, options) =>
       executeProcess(sandboxPortPath, args, {
-        env: strippedSandboxEnvironment,
+        env: options?.env ?? strippedSandboxEnvironment,
         captureStdout: options?.captureStdout ?? false,
         captureStderr: true,
         timeoutMs: 30 * 1000,
@@ -3749,24 +3771,31 @@ export const createRunner = (options: RunnerOptions = {}) => {
       }
       recoveringCleanup.add(input.jobId);
       try {
+        const kind = sandboxRuntime.kind;
+        if (kind !== 'sbx' && kind !== 'microsandbox')
+          return jsonResponse(409, { error: 'cleanup recovery rejected' });
         const recovered = await Effect.runPromise(
-          recoverCallback(evidenceRoot, input, 'cleanup').pipe(Effect.option),
+          recoverCallback(evidenceRoot, input, { cleanupRuntime: kind }).pipe(Effect.option),
         );
-        if (Option.isNone(recovered) || sandboxRuntime.kind !== 'sbx')
+        if (Option.isNone(recovered))
           return jsonResponse(409, { error: 'cleanup recovery rejected' });
         const sandboxName = `compte-rendu-${input.jobId}`;
-        await Effect.runPromise(
-          confirmSbxCleanup(sandboxName, input.jobId, (args, _diagnostic, processOptions) =>
-            executeProcess(sandboxPortPath, args, {
-              ...processOptions,
-              env: strippedSandboxEnvironment,
-              captureStdout: true,
-              captureStderr: true,
-              maxBytes: 256 * 1024,
-              timeoutMs: CLEANUP_COMMAND_TIMEOUT_MS,
-            }),
-          ),
-        );
+        const recoveryCommand: SandboxCommand = (args, _diagnostic, options) =>
+          executeProcess(sandboxPortPath, args, {
+            ...options,
+            env: options?.env ?? strippedSandboxEnvironment,
+            captureStdout: true,
+            captureStderr: true,
+            maxBytes: 256 * 1024,
+            timeoutMs: CLEANUP_COMMAND_TIMEOUT_MS,
+          });
+        if (kind === 'microsandbox')
+          await confirmMicrosandboxAbsent(
+            recoveryCommand,
+            sandboxName,
+            recovered.value.catalogIdentity,
+          );
+        else await Effect.runPromise(confirmSbxCleanup(sandboxName, input.jobId, recoveryCommand));
         const marker = await readGrantMarker(grantMarkerPath(input.jobId));
         if (marker.kind === 'invalid') throw new Error('grant recovery marker invalid');
         if (marker.kind === 'present' || llmServiceClient !== undefined) {
