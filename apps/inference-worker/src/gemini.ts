@@ -238,7 +238,6 @@ const observeGeminiFrame = (frame: SseFrame): StreamObservationDetails => {
 };
 
 export const geminiAdapter: ProtocolStreamAdapter = {
-  name: 'gemini',
   maxTerminalBytes: MAX_GEMINI_TERMINAL_BYTES,
   upstreamPath: (route) => geminiUpstreamPath(route),
   observe: observeGeminiFrame,

@@ -198,13 +198,11 @@ const observedTokens = (value: unknown): ObservedTokenFields => {
   return observed;
 };
 
-const incompleteStops = new Set(['max_tokens', 'pause_turn']);
 const completeStops = new Set(['end_turn', 'stop_sequence', 'tool_use', 'refusal']);
 
 const createMessagesAdapter = (): ProtocolStreamAdapter => {
   let stopReason: string | null | undefined;
   return {
-    name: 'messages',
     maxTerminalBytes: MAX_MESSAGES_TERMINAL_BYTES,
     upstreamPath: (): GatewayPath => '/messages',
     headers: () => messagesUpstreamHeaders,
@@ -229,9 +227,7 @@ const createMessagesAdapter = (): ProtocolStreamAdapter => {
         if (Option.isNone(decoded)) return { observation: 'failure' };
         const usage = observedTokens(decoded.value.usage);
         stopReason = decoded.value.delta?.stop_reason ?? null;
-        const failure =
-          stopReason !== null &&
-          (incompleteStops.has(stopReason) || !completeStops.has(stopReason));
+        const failure = stopReason !== null && !completeStops.has(stopReason);
         return {
           observation: failure ? 'failure' : 'event',
           ...(Object.keys(usage).length === 0 ? {} : { usage }),
