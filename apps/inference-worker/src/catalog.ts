@@ -52,6 +52,7 @@ const readSource = async (
     if (gateway === null) throw new Error('Gateway unavailable');
     url = gatewayUrl(gateway, source.providerSlug, '/models');
     Object.assign(headers, gatewayHeaders(gateway, source.credentialAlias));
+    if (source.providerSlug === 'native:anthropic') headers['anthropic-version'] = '2023-06-01';
   } else {
     const target = new URL(source.url);
     if (

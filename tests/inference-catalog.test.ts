@@ -448,8 +448,13 @@ it.each([
     const db = database();
     try {
       const urls: string[] = [];
-      vi.stubGlobal('fetch', async (url: string) => {
+      vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
         urls.push(url);
+        if (
+          providerSlug === 'native:anthropic' &&
+          new Headers(init.headers).get('anthropic-version') !== '2023-06-01'
+        )
+          return new Response(null, { status: 400 });
         return Response.json(pages[urls.length - 1]);
       });
       const sources = Schema.decodeUnknownSync(RelayCatalogSources)([
@@ -478,6 +483,23 @@ it.each([
     } finally {
       db.close();
     }
+  },
+);
+
+it.each(['native:anthropic', 'native:google-ai-studio'])(
+  'rejects a chat model in a %s source',
+  (providerSlug) => {
+    expect(() =>
+      Schema.decodeUnknownSync(RelayCatalogSources)([
+        {
+          discovery: 'gateway',
+          prefix: 'models/',
+          providerSlug,
+          credentialAlias: 'review',
+          models: { 'models/unsupported': { profile: 'chat' } },
+        },
+      ]),
+    ).toThrow();
   },
 );
 
