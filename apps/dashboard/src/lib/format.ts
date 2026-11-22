@@ -124,16 +124,6 @@ export function cleanupNote(task: TaskState): string {
   return 'This review has ended, but resource cleanup has not been confirmed.';
 }
 
-export function taskLabel(task: TaskState): string {
-  if (task.processing) return PROCESSING_LABEL[task.processing] ?? 'Processing result';
-  if (task.dispatch === 'claimed') {
-    return task.stage ? (STAGE_LABEL[task.stage] ?? 'Not recorded') : 'In progress';
-  }
-  if (task.dispatch === 'queued') return 'Queued';
-  if (isCancelling(task)) return 'Cancelling';
-  return STATUS_LABEL[task.status] ?? 'Not recorded';
-}
-
 export function progressText(task: TaskState): string {
   return task.lastProgressAt
     ? `Last progress update ${relativeTime(task.lastProgressAt)}`

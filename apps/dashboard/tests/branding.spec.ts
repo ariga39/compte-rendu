@@ -11,17 +11,11 @@ for (const name of ['Compte-rendu review', 'Ariga39 AI Review']) {
     await expect(project).toHaveAttribute('href', 'https://github.com/ariga39/compte-rendu');
     await expect(page.getByTestId('commit-link')).toBeVisible();
     await project.scrollIntoViewIfNeeded();
-    await page.screenshot({
-      path: `/tmp/cr-brand-footer-${name.startsWith('Ariga') ? 'custom' : 'default'}.png`,
-    });
     await page.setViewportSize({ width: 360, height: 800 });
     await page.evaluate(() => window.scrollTo(0, 0));
     await expect(page.locator('nav a[href="/help"]')).toBeInViewport();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
       true,
     );
-    await page.screenshot({
-      path: `/tmp/cr-brand-${name.startsWith('Ariga') ? 'custom' : 'default'}.png`,
-    });
   });
 }

@@ -256,8 +256,8 @@ claiming a complete review; it does not fetch or install a replacement.
 
 The standalone Runner embeds the skill's Markdown, license and attribution
 notice, and stages them under the job's isolated
-`XDG_CONFIG_HOME/opencode/skills/code-review/` before Sandbox setup. Both runtimes
-receive the same resources through their existing config mount/upload. No source
+`XDG_CONFIG_HOME/opencode/skills/code-review/` before Sandbox setup. Every runtime
+receives the same resources through its existing config mount/upload. No source
 checkout is required on the Runner host.
 
 `SKILL.md` credits the upstream authors, pins the source revisions and describes

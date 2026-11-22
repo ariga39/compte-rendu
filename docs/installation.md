@@ -280,7 +280,7 @@ Configure the GitHub App with only these repository permissions:
 | Issues                | Write | Make the `issue_comment` webhook available for PR comments, create command reactions, and publish one ordinary PR comment when a Review fails. The handler accepts only a created comment whose body is exactly `/ai-review`. |
 | Checks                | Write | Create one head-SHA-bound Check Run per review run and update its queued, in-progress, success, failure, or cancelled state.                                                                                                  |
 
-Before applying the D1 migration or deploying either Worker, approve the
+Before applying the D1 migration or deploying the application Worker, approve the
 GitHub App installation's **Checks: Write** permission. Existing installations
 must approve this permission change explicitly; an unapproved permission must
 block the rollout. After approval, verify one successful run transitions its

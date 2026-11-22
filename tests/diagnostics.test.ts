@@ -613,7 +613,7 @@ describe('diagnostics command', () => {
     const sources = createDefaultDiagnosticSources(command, {
       database: 'actual-review-state',
       bucket: 'actual-review-evidence',
-      wranglerConfig: 'apps/core/wrangler.actual.jsonc',
+      wranglerConfig: 'apps/dashboard/wrangler.actual.jsonc',
       workflowName: 'petit-chiba-review',
     });
 
