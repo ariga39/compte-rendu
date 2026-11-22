@@ -1,32 +1,5 @@
 import { publicTask } from './sample-task.ts';
-import type { PublicHistoryPage, PublicTaskDetail, PublicTaskState } from '@compte-rendu/contracts';
-import { expect, test, type ApiHandler, type ApiPayload } from './fixtures';
-
-const NOW = '2026-10-16T12:00:00.000Z';
-const ok = (json: unknown): ApiPayload => ({ status: 200, json });
-
-const historyPage = (
-  tasks: PublicTaskState[],
-  nextCursor: string | null = null,
-): PublicHistoryPage => ({ generatedAt: NOW, tasks, nextCursor });
-
-const detailData = (single: PublicTaskState): PublicTaskDetail => ({
-  generatedAt: NOW,
-  task: single,
-  milestones: [],
-  processingMilestones: [],
-});
-
-const listAndDetails =
-  (tasks: PublicTaskState[]): ApiHandler =>
-  (url) => {
-    if (url.pathname.startsWith('/api/jobs/')) {
-      const runId = url.pathname.slice('/api/jobs/'.length);
-      const task = tasks.find((entry) => entry.runId === runId);
-      return task === undefined ? { status: 404 } : ok(detailData(task));
-    }
-    return ok(historyPage(tasks));
-  };
+import { detailData, expect, listAndDetails, ok, test } from './fixtures';
 
 test('history table shows the exact decision labels and an em dash when unknown', async ({
   page,

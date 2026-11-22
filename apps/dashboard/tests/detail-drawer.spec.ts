@@ -1,21 +1,17 @@
-import type { PublicHistoryPage, PublicTaskDetail, PublicTaskState } from '@compte-rendu/contracts';
-import { expect, test, type ApiHandler, type ApiPayload } from './fixtures';
+import type { PublicTaskState } from '@compte-rendu/contracts';
+import {
+  detailData,
+  expect,
+  historyPage,
+  listAndDetails,
+  NOW,
+  ok,
+  test,
+  type ApiHandler,
+  type ApiPayload,
+} from './fixtures';
 
-const NOW = '2026-10-16T12:00:00.000Z';
 const SHA = (c: string) => c.repeat(40);
-const ok = (json: unknown): ApiPayload => ({ status: 200, json });
-
-const historyPage = (
-  tasks: PublicTaskState[],
-  nextCursor: string | null = null,
-): PublicHistoryPage => ({ generatedAt: NOW, tasks, nextCursor });
-
-const detailData = (single: PublicTaskState): PublicTaskDetail => ({
-  generatedAt: NOW,
-  task: single,
-  milestones: [],
-  processingMilestones: [],
-});
 
 const publicTask = (
   runId: string,
@@ -53,17 +49,6 @@ const publicTask = (
   cleanup: 'destroyed',
   failure: null,
 });
-
-const listAndDetails =
-  (tasks: PublicTaskState[]): ApiHandler =>
-  (url) => {
-    if (url.pathname.startsWith('/api/jobs/')) {
-      const runId = url.pathname.slice('/api/jobs/'.length);
-      const task = tasks.find((entry) => entry.runId === runId);
-      return task === undefined ? { status: 404 } : ok(detailData(task));
-    }
-    return ok(historyPage(tasks));
-  };
 
 test('table shows the source to target branches and the reviewed head SHA', async ({
   page,

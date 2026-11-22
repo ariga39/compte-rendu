@@ -1,15 +1,20 @@
 import type {
   PublicHistoryPage,
-  PublicMilestone,
   PublicOverview,
-  PublicTaskDetail,
   PublicTaskIdentity,
   PublicTaskState,
 } from '@compte-rendu/contracts';
 import type { Page } from '@playwright/test';
-import { expect, test, type ApiHandler, type ApiPayload } from './fixtures';
-
-const NOW = '2026-10-16T12:00:00.000Z';
+import {
+  detailData,
+  expect,
+  historyPage,
+  NOW,
+  ok,
+  test,
+  type ApiHandler,
+  type ApiPayload,
+} from './fixtures';
 
 test.describe('consistent absolute timestamps', () => {
   test.use({ locale: 'ja-JP', timezoneId: 'Asia/Tokyo' });
@@ -40,7 +45,6 @@ const setVisibility = (page: Page, state: 'hidden' | 'visible') =>
     Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => next });
     document.dispatchEvent(new Event('visibilitychange'));
   }, state);
-const ok = (json: unknown): ApiPayload => ({ status: 200, json });
 
 const overviewData = (
   counts: PublicOverview['counts'],
@@ -76,17 +80,6 @@ const task = (overrides: Partial<PublicTaskState> = {}): PublicTaskState => ({
   failure: null,
   ...overrides,
 });
-
-const historyPage = (
-  tasks: PublicTaskState[],
-  nextCursor: string | null = null,
-): PublicHistoryPage => ({ generatedAt: NOW, tasks, nextCursor });
-
-const detailData = (
-  single: PublicTaskState,
-  milestones: PublicMilestone[] = [],
-  processingMilestones: PublicTaskDetail['processingMilestones'] = [],
-): PublicTaskDetail => ({ generatedAt: NOW, task: single, milestones, processingMilestones });
 
 const publicIdentity: Extract<PublicTaskIdentity, { kind: 'public' }> = {
   kind: 'public',
