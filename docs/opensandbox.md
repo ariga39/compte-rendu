@@ -127,8 +127,8 @@ alone cannot establish cleanup because OpenSandbox may suppress sidecar removal
 errors. Uncertain cleanup remains failed and blocks replacement work; never
 manually mark it destroyed based only on HTTP 204 or 404.
 
-The existing `/maintenance/recover-cleanup` endpoint currently supports sbx
-only. OpenSandbox recovery after a failed cleanup requires operational resource
+The existing `/maintenance/recover-cleanup` endpoint supports sbx and
+microsandbox only. OpenSandbox recovery after a failed cleanup requires operational resource
 inspection; automatic recovery reporting is not implemented in this slice.
 [Issue #233](https://github.com/ariga39/compte-rendu/issues/233) tracks recovery
 and full Runner-to-Core acceptance required before production cutover.

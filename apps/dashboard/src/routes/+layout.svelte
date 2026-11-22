@@ -128,7 +128,6 @@
       {/if}
     </div>
   </div>
-  <div id="announce" class="sr-only" aria-live="polite"></div>
 </Header>
 
 <Content id="content" tabindex={-1}>
