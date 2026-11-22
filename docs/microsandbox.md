@@ -36,6 +36,13 @@ Keep the instance's existing HTTPS relay and callback settings. Runner checks
 host readiness and local image availability before taking work. VM creation
 uses the cached image and requires no Docker registry account.
 
+If a trusted transparent proxy returns Fake IP addresses, set
+`MICROSANDBOX_ALLOW_FAKE_IP=1` to use the single-tenant deployment profile
+and disable DNS rebinding protection. Use this only with trusted DNS and
+operator-controlled GitHub and relay destinations. The guest still uses
+restricted security, deny-by-default egress and the two host/443 rules. With
+the option unset, Runner uses multi-tenant and keeps rebinding protection.
+
 ## Isolation and operation
 
 Runner requests 4 CPUs, 8 GiB memory and a two-hour VM lifetime per review.

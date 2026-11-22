@@ -11922,6 +11922,40 @@ describe('Runner callback recovery', () => {
 });
 
 describe('Runner confirmed cleanup recovery', () => {
+  it.each([false, true])(
+    'creates a restricted microsandbox with Fake IP mode %s',
+    async (enabled) => {
+      const root = await mkdtemp(join(tmpdir(), 'cr-msb-profile-'));
+      vi.stubEnv('MSB_HOME', root);
+      vi.stubEnv('MICROSANDBOX_ALLOW_FAKE_IP', enabled ? '1' : undefined);
+      try {
+        await mkdir(join(root, 'db'));
+        await writeFile(join(root, 'db', 'msb.db'), '');
+        const run = await runAgentScenario({
+          microsandbox: true,
+          output: finalMarkdownJsonl(),
+          relayControl: createRelayControl(),
+          modelConfig: relayInferenceModelConfig(),
+          evidenceRoot: root,
+          runId: 'msb-profile',
+        });
+        const args = run.createArgs ?? [];
+        expect(args[args.indexOf('--deployment-profile') + 1]).toBe(
+          enabled ? 'single-tenant' : 'multi-tenant',
+        );
+        expect(args.includes('--no-dns-rebind-protection')).toBe(enabled);
+        expect(args[args.indexOf('--security') + 1]).toBe('restricted');
+        expect(args[args.indexOf('--net-default') + 1]).toBe('deny');
+        expect(args[args.indexOf('--net-rule') + 1]).toBe(
+          'allow@inference.example:tcp:443,allow@api.github.com:tcp:443',
+        );
+      } finally {
+        vi.unstubAllEnvs();
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('runs through microsandbox and reconciles failed teardown only against the original backend after restart', async () => {
     const root = await mkdtemp(join(tmpdir(), 'cr-msb-recovery-'));
     const relay = createRelayControl();

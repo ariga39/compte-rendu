@@ -83,7 +83,7 @@ export const confirmMicrosandboxAbsent = async (
 };
 
 export const createMicrosandboxRuntimeFactory =
-  (image: string, rotationCommand: SandboxCommand): SandboxRuntimeFactory =>
+  (image: string, rotationCommand: SandboxCommand, allowFakeIp = false): SandboxRuntimeFactory =>
   (spec) => {
     const { name } = spec;
     const owner = randomUUID();
@@ -125,7 +125,8 @@ export const createMicrosandboxRuntimeFactory =
           '--security',
           'restricted',
           '--deployment-profile',
-          'multi-tenant',
+          allowFakeIp ? 'single-tenant' : 'multi-tenant',
+          ...(allowFakeIp ? ['--no-dns-rebind-protection'] : []),
           '--max-duration',
           '2h',
           '--cpus',
