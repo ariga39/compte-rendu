@@ -112,7 +112,8 @@ const ResponsesInclude = Schema.Array(Schema.Literal('reasoning.encrypted_conten
   Schema.isMaxLength(1),
 );
 const ResponsesText = Schema.Struct({
-  format: Schema.Struct({ type: Schema.Literal('text') }),
+  format: Schema.optionalKey(Schema.Struct({ type: Schema.Literal('text') })),
+  verbosity: Schema.optionalKey(Schema.Literals(['low', 'medium', 'high'])),
 });
 const ResponsesReasoning = Schema.Struct({
   effort: Schema.Literals(['minimal', 'low', 'medium', 'high']),
