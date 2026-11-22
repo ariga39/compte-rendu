@@ -222,8 +222,9 @@ export interface SandboxJobSpec {
   /**
    * Absolute host path to a private mode-0600 file holding the job's model
    * grant token. When set, the sbx adapter resolves the model secret with
-   * `/usr/bin/cat <path>` instead of a host secret resolver. The token itself
-   * never appears in argv, environment, configuration or evidence.
+   * `/usr/bin/cat <path>` instead of a host secret resolver. microsandbox supplies this value
+   * to the host CLI environment for TLS injection. Keep it out of the guest,
+   * command line, configuration and evidence.
    */
   readonly modelTokenFile?: string;
   readonly githubResource: string;

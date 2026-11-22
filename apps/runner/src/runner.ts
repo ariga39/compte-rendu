@@ -2330,7 +2330,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
           ...processOptions,
           env:
             sandboxRuntime.kind === 'microsandbox'
-              ? processOptions.env
+              ? (processOptions.env ?? {})
               : strippedSandboxEnvironment,
           captureStdout: processOptions.captureStdout ?? false,
           captureStderr: true,

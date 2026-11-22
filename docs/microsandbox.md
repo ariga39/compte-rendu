@@ -42,8 +42,7 @@ Runner requests 4 CPUs, 8 GiB memory and a two-hour VM lifetime per review.
 Size aggregate concurrency across instances for the host's physical memory.
 Runner mounts checkout and configuration read-only and executes as UID 1000.
 The host injects the job grant and GitHub read token into authorization headers
-for their respective destinations. The VM can resolve DNS and use TCP port
-443 on the relay and api.github.com. GitHub token rotation updates the live
+for their respective destinations. The host CLI receives the values in its process environment, so its OS account must be trusted. The VM receives placeholders. Its DNS and TCP 443 allow rules are scoped to the relay and api.github.com. GitHub token rotation updates the live
 VM through the local CLI. Runner copies evidence out before teardown.
 
 Drain the instance and wait for confirmed cleanup before switching its backend.

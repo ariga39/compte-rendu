@@ -138,7 +138,7 @@ export const createMicrosandboxRuntimeFactory =
           '--net-default',
           'deny',
           '--net-rule',
-          `allow@dns,allow@${host}:tcp:443,allow@api.github.com:tcp:443`,
+          `allow@${host}:tcp:443,allow@api.github.com:tcp:443`,
           '--tls-intercept',
           '--secret',
           `OPENCODE_API_KEY:headers=authorization@${host}`,
