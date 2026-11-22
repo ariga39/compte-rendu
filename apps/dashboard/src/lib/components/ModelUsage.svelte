@@ -42,13 +42,35 @@
     const separator = model.lastIndexOf('/');
     return separator === -1 ? model : model.slice(separator + 1) || model;
   };
+  const collator = new Intl.Collator('en-US');
+  const compareText = (left: string, right: string) => {
+    const localized = collator.compare(left, right);
+    if (localized !== 0) return localized;
+    return left < right ? -1 : left > right ? 1 : 0;
+  };
+  type UsageRow = ModelUsageSummary['models'][number];
+  const compareUsageRows = (left: UsageRow, right: UsageRow) => {
+    if (left.model === null || right.model === null) {
+      if (left.model === null && right.model === null)
+        return compareText(left.route, right.route);
+      return left.model === null ? 1 : -1;
+    }
+    return (
+      compareText(displayModel(left.model), displayModel(right.model)) ||
+      compareText(left.model, right.model) ||
+      compareText(left.route, right.route)
+    );
+  };
+  // Usage is a read-only projection. Sort a copy so the incoming array keeps
+  // its service order, while public detail and Storybook render deterministically.
+  const orderedModels = $derived.by(() => [...(usage?.models ?? [])].sort(compareUsageRows));
 </script>
 
 <section aria-label="Models and tokens" class="model-usage">
   <h2>Models and tokens</h2>
   {#if usage == null}
     <p class="muted">Usage not recorded for this review.</p>
-  {:else if usage.models.length === 0}
+  {:else if orderedModels.length === 0}
     <p class="muted">No model requests recorded.</p>
   {:else}
     <p class="muted">Reported by the model service. Cache and reasoning breakdowns are included in the input and output totals.</p>
@@ -56,7 +78,7 @@
       <p class="muted">Only the first 32 model entries were recorded. These totals are incomplete.</p>
     {/if}
     <Accordion>
-      {#each usage.models as model (JSON.stringify([model.route, model.model]))}
+      {#each orderedModels as model (JSON.stringify([model.route, model.model]))}
         {@const cachePercent = cacheReadPercentage(model)}
         <AccordionItem title={displayModel(model.model)}>
           <div class="model-details">
