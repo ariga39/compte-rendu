@@ -52,9 +52,7 @@
                     "type": "string"
                   }
                 },
-                "required": [
-                  "path"
-                ]
+                "required": ["path"]
               }
             }
           ]
@@ -127,9 +125,7 @@
                     "type": "string"
                   }
                 },
-                "required": [
-                  "path"
-                ]
+                "required": ["path"]
               }
             }
           ]
