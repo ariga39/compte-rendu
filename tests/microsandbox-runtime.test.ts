@@ -42,8 +42,10 @@ it.skipIf(!process.env.CR_MICROSANDBOX_NATIVE_IMAGE)(
       modelTokenFile: token,
     });
     try {
-      await mkdir(checkoutRoot);
+      await mkdir(checkoutRoot, { mode: 0o700 });
+      await mkdir(configRoot, { mode: 0o700 });
       await mkdir(join(configRoot, 'opencode'), { recursive: true });
+      await writeFile(join(configRoot, 'opencode', 'skill'), 'method', { mode: 0o600 });
       await writeFile(join(checkoutRoot, 'input'), 'fixture');
       await writeFile(token, 'synthetic-grant');
       await runtime.setup(command);
@@ -51,7 +53,7 @@ it.skipIf(!process.env.CR_MICROSANDBOX_NATIVE_IMAGE)(
         [
           'sh',
           '-ec',
-          'test "$(cat input)" = fixture; test -n "$GH_TOKEN"; test "$GH_TOKEN" != synthetic-gh; test "$OPENCODE_API_KEY" != synthetic-grant; ! touch forbidden; opencode --version; gh --version; mkdir -p /tmp/probe/logs; printf evidence > /tmp/probe/logs/output',
+          'test "$(cat "$XDG_CONFIG_HOME/opencode/skill")" = method; test "$(cat input)" = fixture; test -n "$GH_TOKEN"; test "$GH_TOKEN" != synthetic-gh; test "$OPENCODE_API_KEY" != synthetic-grant; ! touch forbidden; opencode --version; gh --version; mkdir -p /tmp/probe/logs; printf evidence > /tmp/probe/logs/output',
         ],
         command,
       );
@@ -70,3 +72,70 @@ it.skipIf(!process.env.CR_MICROSANDBOX_NATIVE_IMAGE)(
   },
   120_000,
 );
+
+it('destroys the sandbox after a pending credential update settles', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cr-msb-rotation-'));
+  const previousHome = process.env.MSB_HOME;
+  process.env.MSB_HOME = root;
+  const name = 'compte-rendu-rotation';
+  const ok = { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+  let owner: string | undefined;
+  let rotating = false;
+  let markStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    markStarted = resolve;
+  });
+  const command: SandboxCommand = async (args) => {
+    if (args[0] === 'create') owner = args[args.indexOf('--label') + 1]!.split('=')[1];
+    if (args[0] === 'modify') {
+      rotating = true;
+      markStarted();
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      rotating = false;
+    }
+    if (args[0] === 'inspect')
+      return owner === undefined
+        ? { ...ok, exitCode: 1, stderr: 'error: sandbox not found: ' + name }
+        : {
+            ...ok,
+            stdout: JSON.stringify({ name, config: { labels: { 'cr-job-owner': owner } } }),
+          };
+    if (args[0] === 'rm') {
+      if (rotating) return { ...ok, exitCode: 1, stderr: 'credential update in progress' };
+      owner = undefined;
+    }
+    return ok;
+  };
+  try {
+    await mkdir(join(root, 'db'));
+    await writeFile(join(root, 'db', 'msb.db'), '');
+    const token = join(root, 'grant');
+    await writeFile(token, 'test-grant');
+    const runtime = createMicrosandboxRuntimeFactory(
+      'fixture',
+      command,
+    )({
+      id: 'rotation',
+      name,
+      checkoutRoot: root,
+      configRoot: root,
+      imageRef: 'fixture',
+      cpu: '1',
+      memoryGib: 2,
+      env: [],
+      modelResource: 'relay.example:443',
+      githubResource: 'api.github.com:443',
+      githubReadToken: 'initial',
+      modelTokenFile: token,
+    });
+    await runtime.setup(command);
+    const rotation = runtime.rotateGithubReadToken!('replacement');
+    await started;
+    await Promise.all([runtime.destroy(command), rotation]);
+    expect(owner).toBeUndefined();
+  } finally {
+    if (previousHome === undefined) delete process.env.MSB_HOME;
+    else process.env.MSB_HOME = previousHome;
+    await rm(root, { recursive: true, force: true });
+  }
+});

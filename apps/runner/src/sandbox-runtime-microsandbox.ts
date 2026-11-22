@@ -93,6 +93,7 @@ export const createMicrosandboxRuntimeFactory =
     let closed = false;
     let githubToken = spec.githubReadToken;
     let creating: Promise<void> | undefined;
+    let rotation: Promise<RunnerProcessResult> | undefined;
     const create = async (command: SandboxCommand) => {
       const host = spec.modelResource.split(':')[0]!;
       if (
@@ -132,9 +133,9 @@ export const createMicrosandboxRuntimeFactory =
           '--memory',
           `${spec.memoryGib}G`,
           '--mount-dir',
-          `${spec.checkoutRoot}:${spec.checkoutRoot}:ro`,
+          `${spec.checkoutRoot}:${spec.checkoutRoot}:ro,uid=1000,gid=1000`,
           '--mount-dir',
-          `${spec.configRoot}:${spec.configRoot}:ro`,
+          `${spec.configRoot}:${spec.configRoot}:ro,uid=1000,gid=1000`,
           '--net-default',
           'deny',
           '--net-rule',
@@ -201,16 +202,18 @@ export const createMicrosandboxRuntimeFactory =
         if (!creating) return;
         await creating;
         if (closed) throw new Error('Microsandbox is closing');
-        const result = await rotationCommand(
+        rotation = rotationCommand(
           ['modify', name, '--secret', 'GH_TOKEN@api.github.com'],
           undefined,
           { env: { ...localEnvironment(), GH_TOKEN: token }, timeoutMs: 30_000 },
         );
+        const result = await rotation;
         if (result.exitCode !== 0 || !complete(result))
           throw new Error('Microsandbox token update failed');
       },
       async destroy(command) {
         closed = true;
+        await rotation?.catch(() => undefined);
         if (!attempted) return;
         const existing = await inspect(command, name, catalog);
         if (!existing) return;
