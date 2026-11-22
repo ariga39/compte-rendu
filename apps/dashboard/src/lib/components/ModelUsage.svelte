@@ -42,12 +42,7 @@
     const separator = model.lastIndexOf('/');
     return separator === -1 ? model : model.slice(separator + 1) || model;
   };
-  const collator = new Intl.Collator('en-US');
-  const compareText = (left: string, right: string) => {
-    const localized = collator.compare(left, right);
-    if (localized !== 0) return localized;
-    return left < right ? -1 : left > right ? 1 : 0;
-  };
+  const compareText = (left: string, right: string) => (left < right ? -1 : left > right ? 1 : 0);
   type UsageRow = ModelUsageSummary['models'][number];
   const compareUsageRows = (left: UsageRow, right: UsageRow) => {
     if (left.model === null || right.model === null) {
@@ -61,9 +56,7 @@
       compareText(left.route, right.route)
     );
   };
-  // Usage is a read-only projection. Sort a copy so the incoming array keeps
-  // its service order, while public detail and Storybook render deterministically.
-  const orderedModels = $derived.by(() => [...(usage?.models ?? [])].sort(compareUsageRows));
+  const orderedModels = $derived([...(usage?.models ?? [])].sort(compareUsageRows));
 </script>
 
 <section aria-label="Models and tokens" class="model-usage">
