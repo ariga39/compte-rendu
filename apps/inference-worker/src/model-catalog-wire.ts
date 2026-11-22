@@ -12,12 +12,13 @@ export const CatalogModelId = Schema.String.check(
   Schema.isPattern(/^[A-Za-z0-9._:/-]+$/),
 );
 
+const apiEndpoint = Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown));
 const apiEndpoints = {
-  'chat-completions': Schema.optionalKey(Schema.Unknown),
-  responses: Schema.optionalKey(Schema.Unknown),
-  messages: Schema.optionalKey(Schema.Unknown),
-  'generate-content': Schema.optionalKey(Schema.Unknown),
-  interactions: Schema.optionalKey(Schema.Unknown),
+  'chat-completions': apiEndpoint,
+  responses: apiEndpoint,
+  messages: apiEndpoint,
+  'generate-content': apiEndpoint,
+  interactions: apiEndpoint,
 } as const;
 const ApiProfile = {
   'chat-completions': 'chat',
@@ -40,6 +41,7 @@ export interface CatalogModel {
   /** Null means an ID-only listing without protocol metadata. */
   readonly profiles: readonly ModelProfile[] | null;
   readonly recommended: ModelProfile | null;
+  readonly toolsSupported: boolean | null;
 }
 const optionalLink = Schema.optionalKey(Schema.NullOr(Schema.NonEmptyString));
 const noCursor = Schema.optionalKey(Schema.NullOr(Schema.Literal('')));
@@ -75,19 +77,20 @@ const linkHeader = (response: Response): string[] => {
 };
 
 const catalogModel = (entry: typeof CatalogEntry.Type): CatalogModel => {
+  const toolsSupported = entry.capabilities?.tools?.supported ?? null;
   const supported =
     entry.api === undefined
       ? null
-      : entry.capabilities?.tools?.supported === false
+      : toolsSupported === false
         ? []
         : (Object.keys(ApiProfile) as (keyof typeof ApiProfile)[])
-            .filter((name) => Object.hasOwn(entry.api!, name) && entry.api![name] !== null)
+            .filter((name) => Object.hasOwn(entry.api!, name))
             .map((name) => ApiProfile[name]);
   const recommended =
     entry.recommended_api === undefined
       ? null
       : (Object.entries(ApiProfile).find(([name]) => name === entry.recommended_api)?.[1] ?? null);
-  return { id: entry.id, profiles: supported, recommended };
+  return { id: entry.id, profiles: supported, recommended, toolsSupported };
 };
 
 export const readModelCatalogPage = async (response: Response, currentUrl: string) => {

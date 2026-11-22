@@ -203,6 +203,36 @@ describe('Inference Worker runtime boundaries', () => {
     });
   });
 
+  it('rejects a non-chat v2 grant on the chat-only inference endpoint', async () => {
+    await control('success');
+    await runtime.RELAY_DB.prepare(
+      `INSERT INTO catalog_routes
+        (route_id, upstream_model, provider_slug, credential_alias, profile)
+       VALUES (?, ?, ?, ?, ?)`,
+    )
+      .bind('responses-review', 'responses-native', 'review-provider', 'review-alias', 'responses')
+      .run();
+    const before = (await upstreamState()).requests.length;
+    const issued = await runtime.INFERENCE.issueV2({
+      jobId: 'runtime-profile-guard',
+      snapshot: { routes: ['responses-review'] },
+      latestIssueDeadline: (await d1Now()) + 60_000,
+    });
+    expect(issued).toMatchObject({
+      kind: 'issued',
+      descriptors: [{ routeId: 'responses-review', profile: 'responses' }],
+    });
+    if (issued.kind !== 'issued') throw new Error('expected an issued grant');
+    const response = await request(issued.token, {
+      model: 'responses-review',
+      messages: [],
+    });
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: { message: 'route forbidden' } });
+    expect((await upstreamState()).requests).toHaveLength(before);
+    await runtime.INFERENCE.revoke({ jobId: 'runtime-profile-guard' });
+  });
+
   it('rejects an expired issue deadline over RPC', async () => {
     const now = await d1Now();
     await expect(

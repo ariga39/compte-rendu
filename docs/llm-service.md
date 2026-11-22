@@ -105,6 +105,42 @@ Choose discovery according to how that provider exposes its model list.
   upstream model ID. A source with only aliases makes no discovery request.
   A discovery source can also declare aliases for the same upstream.
 
+Sources without profile configuration remain Chat Completions sources. Set
+`profile` to a default profile or `profiles` to the distinct profiles a rich
+catalog may publish (`chat`, `responses`, `messages`, `gemini`). Rich entries
+are filtered from their advertised `api` operations; models that advertise no
+configured protocol are omitted. `models` is an explicit allowlist keyed by
+review route ID. Use it for ID-only endpoints that list unrelated models: only
+named routes become visible, and each entry declares its trusted profile and
+optional `limit`:
+
+```json
+{
+  "discovery": "gateway",
+  "prefix": "openai-platform/",
+  "providerSlug": "native:openai",
+  "credentialAlias": "review",
+  "models": {
+    "openai-platform/gpt-6.2-sol": {
+      "profile": "responses"
+    }
+  }
+}
+```
+
+For an ID-only listing, a non-chat profile is never inferred from the source
+default. Responses, Messages and Gemini routes require an explicit `models`
+entry; a qualified source may still expose a chat default without one. An
+explicit `capabilities.tools.supported: false` always omits that model, even for
+a legacy unqualified source. Malformed rich capability metadata fails the source
+refresh and keeps the previous snapshot.
+
+The route mapping, profile and configured limit are immutable once published.
+Changing any of them for an existing route is a mapping conflict and keeps the
+previous snapshot; use a new route ID. Limit equality is semantic, so object key
+order does not create a conflict. Sources without `models` keep their existing
+unqualified discovery behaviour.
+
 For example, this configuration discovers models on one authenticated upstream
 and preserves a historical route served by another upstream.
 

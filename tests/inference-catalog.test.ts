@@ -868,6 +868,241 @@ it('keeps unqualified ID-only discovery unchanged', async () => {
   }
 });
 
+it('resolves each alias from its producing source and rejects conflicting descriptors', async () => {
+  const db = database();
+  const source = (
+    aliases: Record<string, string>,
+    models: Record<
+      string,
+      { profile: 'chat' | 'responses'; limit?: { context?: number; output?: number } }
+    >,
+  ) => ({
+    providerSlug: 'custom-legacy',
+    credentialAlias: 'default',
+    aliases,
+    models,
+  });
+  try {
+    const catalog = createRelayCatalog(db, [
+      source(
+        { 'route-a': 'model-a' },
+        { 'route-a': { profile: 'chat', limit: { context: 100, output: 50 } } },
+      ),
+      source(
+        { 'route-b': 'model-b' },
+        { 'route-b': { profile: 'responses', limit: { context: 200, output: 50 } } },
+      ),
+      // Same resolved descriptor, different object key order: not a conflict.
+      source(
+        { 'route-a': 'model-a' },
+        { 'route-a': { profile: 'chat', limit: { output: 50, context: 100 } } },
+      ),
+    ]);
+    await catalog.refresh(10);
+    expect(await catalog.get()).toMatchObject({
+      routes: ['route-a', 'route-b'],
+      lastRefreshError: null,
+    });
+    expect(
+      db.database
+        .prepare('SELECT route_id, profile, limit_json FROM catalog_routes ORDER BY route_id')
+        .all(),
+    ).toEqual([
+      { route_id: 'route-a', profile: 'chat', limit_json: '{"context":100,"output":50}' },
+      { route_id: 'route-b', profile: 'responses', limit_json: '{"context":200,"output":50}' },
+    ]);
+
+    const conflicting = createRelayCatalog(db, [
+      source(
+        { 'route-a': 'model-a' },
+        { 'route-a': { profile: 'chat', limit: { context: 100, output: 50 } } },
+      ),
+      source(
+        { 'route-b': 'model-b' },
+        { 'route-b': { profile: 'responses', limit: { context: 200, output: 50 } } },
+      ),
+      source(
+        { 'route-a': 'model-a' },
+        { 'route-a': { profile: 'responses', limit: { context: 100, output: 50 } } },
+      ),
+    ]);
+    await conflicting.refresh(20);
+    expect(await conflicting.get()).toMatchObject({
+      routes: ['route-a', 'route-b'],
+      lastSuccessAt: new Date(10).toISOString(),
+      lastRefreshError: 'refresh failed',
+    });
+    expect(
+      db.database
+        .prepare('SELECT route_id, profile, limit_json FROM catalog_routes ORDER BY route_id')
+        .all(),
+    ).toEqual([
+      { route_id: 'route-a', profile: 'chat', limit_json: '{"context":100,"output":50}' },
+      { route_id: 'route-b', profile: 'responses', limit_json: '{"context":200,"output":50}' },
+    ]);
+  } finally {
+    db.close();
+  }
+});
+
+it('keeps a differently limited alias visible beside its discovered route', async () => {
+  const db = database();
+  try {
+    vi.stubGlobal('fetch', async () => Response.json({ data: [{ id: 'model' }] }));
+    const catalog = createRelayCatalog(db, [
+      {
+        url: 'https://models.example/models',
+        prefix: 'p/',
+        providerSlug: 'custom-review',
+        credentialAlias: 'default',
+      },
+      {
+        providerSlug: 'custom-review',
+        credentialAlias: 'default',
+        aliases: { legacy: 'model' },
+        models: { legacy: { profile: 'chat', limit: { context: 100 } } },
+      },
+    ]);
+    await catalog.refresh(10);
+    expect(await catalog.get()).toMatchObject({
+      routes: ['legacy', 'p/model'],
+      lastRefreshError: null,
+    });
+  } finally {
+    db.close();
+  }
+});
+
+it('requires an explicit model override for non-chat profiles on ID-only discovery', async () => {
+  const db = database();
+  const base = {
+    url: 'https://api.example/v1/models',
+    prefix: 'openai-platform/',
+    providerSlug: 'custom-openai',
+    credentialAlias: 'sol',
+    profiles: ['responses'] as const,
+  };
+  try {
+    vi.stubGlobal('fetch', async () => Response.json({ data: [{ id: 'gpt-6.2-sol' }] }));
+    const unverified = createRelayCatalog(db, [base]);
+    await unverified.refresh(10);
+    expect(await unverified.get()).toMatchObject({
+      routes: [],
+      lastRefreshError: null,
+    });
+
+    const verified = createRelayCatalog(db, [
+      {
+        ...base,
+        models: {
+          'openai-platform/gpt-6.2-sol': {
+            profile: 'responses',
+            limit: { context: 1_050_000, output: 128_000 },
+          },
+        },
+      },
+    ]);
+    await verified.refresh(20);
+    expect(await verified.get()).toMatchObject({
+      routes: ['openai-platform/gpt-6.2-sol'],
+      lastRefreshError: null,
+    });
+  } finally {
+    db.close();
+  }
+});
+
+it('still exposes chat from a qualified ID-only list without a model override', async () => {
+  const db = database();
+  try {
+    vi.stubGlobal('fetch', async () => Response.json({ data: [{ id: 'chat-model' }] }));
+    const catalog = createRelayCatalog(db, [
+      {
+        url: 'https://models.example/models',
+        prefix: 'p/',
+        providerSlug: 'custom-review',
+        credentialAlias: 'default',
+        profiles: ['chat'],
+      },
+    ]);
+    await catalog.refresh(10);
+    expect((await catalog.get()).routes).toEqual(['p/chat-model']);
+    expect(
+      db.database
+        .prepare('SELECT profile FROM catalog_routes WHERE route_id = ?')
+        .get('p/chat-model'),
+    ).toEqual({ profile: 'chat' });
+  } finally {
+    db.close();
+  }
+});
+
+it('lets an explicit no-tools capability beat the legacy chat default', async () => {
+  const db = database();
+  try {
+    vi.stubGlobal('fetch', async () =>
+      Response.json({
+        data: [
+          {
+            id: 'no-tools',
+            api: { responses: {} },
+            capabilities: { tools: { supported: false } },
+          },
+          { id: 'ordinary', api: { responses: {} } },
+        ],
+      }),
+    );
+    const catalog = createRelayCatalog(db, [
+      {
+        url: 'https://models.example/models',
+        prefix: 'p/',
+        providerSlug: 'custom-review',
+        credentialAlias: 'default',
+      },
+    ]);
+    await catalog.refresh(10);
+    expect(await catalog.get()).toMatchObject({
+      routes: ['p/ordinary'],
+      lastRefreshError: null,
+    });
+  } finally {
+    db.close();
+  }
+});
+
+it('preserves the previous snapshot for malformed rich capabilities', async () => {
+  const db = database();
+  const source = {
+    url: 'https://models.example/models',
+    prefix: 'p/',
+    providerSlug: 'custom-review',
+    credentialAlias: 'default',
+  };
+  const catalog = createRelayCatalog(db, [source]);
+  try {
+    vi.stubGlobal('fetch', async () => Response.json({ data: [{ id: 'saved' }] }));
+    await catalog.refresh(10);
+    vi.stubGlobal('fetch', async () =>
+      Response.json({
+        data: [
+          {
+            id: 'malformed',
+            capabilities: { tools: { supported: 'no' } },
+          },
+        ],
+      }),
+    );
+    await catalog.refresh(20);
+    expect(await catalog.get()).toMatchObject({
+      routes: ['p/saved'],
+      lastSuccessAt: new Date(10).toISOString(),
+      lastRefreshError: 'refresh failed',
+    });
+  } finally {
+    db.close();
+  }
+});
+
 it('keeps an unqualified rich source on its historical chat-only semantics', async () => {
   const db = database();
   try {
