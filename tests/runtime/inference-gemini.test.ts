@@ -181,6 +181,24 @@ describe('Gemini public workerd route', () => {
     });
   });
 
+  it('rejects a multi-segment frozen Gemini upstream model before Gateway', async () => {
+    await control('gemini-success');
+    const invalid = {
+      ...geminiRoute,
+      routeId: 'review-provider/invalid-gemini',
+      upstreamModel: 'models/gemini-native',
+    };
+    const token = await issueGrant('gemini-invalid-model', [invalid]);
+    const response = await post(
+      token,
+      geminiPath(geminiRouteHandle(invalid.routeId)),
+      geminiBody(),
+    );
+    expect(response.status).toBe(403);
+    expect((await upstreamState()).requests).toHaveLength(0);
+    await runtime.INFERENCE.revoke({ jobId: 'gemini-invalid-model' });
+  });
+
   it('accepts only the v1beta streaming path and a granted Gemini profile', async () => {
     await control('gemini-success');
     const token = await issueGrant('gemini-denied', [geminiRoute, messagesRoute]);

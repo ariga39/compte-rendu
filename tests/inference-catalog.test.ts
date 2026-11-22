@@ -756,6 +756,70 @@ it('publishes only configured protocols from a rich catalog and freezes them in 
   }
 });
 
+it('rejects a Gemini alias whose upstream model is not one segment and keeps the healthy snapshot', async () => {
+  const db = database();
+  const configured = (model: string) =>
+    Schema.decodeUnknownSync(RelayCatalogSources)([
+      {
+        providerSlug: 'custom-review',
+        credentialAlias: 'default',
+        profile: 'chat',
+        aliases: { 'gemini-route': model },
+        models: { 'gemini-route': { profile: 'gemini' } },
+      },
+    ]);
+
+  try {
+    await createRelayCatalog(db, configured('gemini-pro')).refresh(100);
+    expect(await createRelayCatalog(db, configured('gemini-pro')).get()).toMatchObject({
+      routes: ['gemini-route'],
+      lastRefreshError: null,
+    });
+
+    await createRelayCatalog(db, configured('models/gemini-pro')).refresh(200);
+    expect(await createRelayCatalog(db, configured('gemini-pro')).get()).toMatchObject({
+      routes: ['gemini-route'],
+      lastRefreshError: 'refresh failed',
+      lastSuccessAt: new Date(100).toISOString(),
+    });
+
+    await createRelayCatalog(db, configured('gemini-pro')).refresh(300);
+    expect(await createRelayCatalog(db, configured('gemini-pro')).get()).toMatchObject({
+      routes: ['gemini-route'],
+      lastRefreshError: null,
+      lastSuccessAt: new Date(300).toISOString(),
+    });
+  } finally {
+    db.close();
+  }
+});
+
+it('rejects a discovered Gemini override whose model id is not one segment', async () => {
+  const db = database();
+  const source = Schema.decodeUnknownSync(RelayCatalogSources)([
+    {
+      url: 'https://models.example/v1/models',
+      prefix: 'go/',
+      providerSlug: 'custom-go',
+      credentialAlias: 'default',
+      profiles: ['gemini'],
+      models: { 'go/gemini/model': { profile: 'gemini' } },
+    },
+  ]);
+  try {
+    vi.stubGlobal('fetch', async () => Response.json({ data: [{ id: 'gemini/model' }] }));
+    await createRelayCatalog(db, source).refresh(50);
+    expect(await createRelayCatalog(db, source).get()).toMatchObject({
+      routes: [],
+      rejected: 1,
+      lastRefreshError: 'refresh failed',
+    });
+    expect(db.database.prepare('SELECT route_id FROM catalog_routes').all()).toEqual([]);
+  } finally {
+    db.close();
+  }
+});
+
 it('exposes only the explicit allowlist from an ID-only listing and freezes configured limits', async () => {
   const db = database();
   const source = {

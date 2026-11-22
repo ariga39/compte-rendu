@@ -9,7 +9,7 @@ import {
   type SseFrame,
   type StreamObservationDetails,
 } from './protocol-stream.ts';
-import type { FrozenRoute } from './routes.ts';
+import { isGeminiUpstreamModel, type FrozenRoute } from './routes.ts';
 
 const GEMINI_HANDLE_PREFIX = 'r-';
 const GEMINI_STREAM_SUFFIX = ':streamGenerateContent';
@@ -162,11 +162,16 @@ export const selectGeminiRoute = <Route extends FrozenRoute>(
   handle: string,
 ): Route | null =>
   routes.find(
-    (route) => route.profile === 'gemini' && geminiRouteHandle(route.routeId) === handle,
+    (route) =>
+      route.profile === 'gemini' &&
+      isGeminiUpstreamModel(route.upstreamModel) &&
+      geminiRouteHandle(route.routeId) === handle,
   ) ?? null;
 
-const geminiUpstreamPath = (route: FrozenRoute): GatewayPath =>
-  `${GEMINI_GATEWAY_PATH}/${route.upstreamModel}${GEMINI_STREAM_SUFFIX}?alt=sse`;
+const geminiUpstreamPath = (route: FrozenRoute): GatewayPath => {
+  if (!isGeminiUpstreamModel(route.upstreamModel)) throw new Error('invalid Gemini upstream model');
+  return `${GEMINI_GATEWAY_PATH}/${route.upstreamModel}${GEMINI_STREAM_SUFFIX}?alt=sse`;
+};
 
 const GeminiUsage = Schema.Struct({
   promptTokenCount: Schema.optionalKey(Schema.NullOr(TokenNumber)),
