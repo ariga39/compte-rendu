@@ -504,20 +504,45 @@ it.each([
   ).toThrow();
 });
 
-it('rejects a default protocol excluded by the source profile list', () => {
-  expect(() =>
-    Schema.decodeUnknownSync(RelayCatalogSources)([
-      {
-        discovery: 'gateway',
-        prefix: 'go/',
-        providerSlug: 'custom-go',
-        credentialAlias: 'review',
-        profile: 'chat',
-        profiles: ['responses'],
-      },
-    ]),
-  ).toThrow();
-});
+it.each(['custom-review', 'native:openai'])(
+  'preserves independent ID-only and rich profiles for %s',
+  async (providerSlug) => {
+    const db = database();
+    try {
+      const sources = Schema.decodeUnknownSync(RelayCatalogSources)([
+        {
+          url: 'https://models.example/models',
+          prefix: 'p/',
+          providerSlug,
+          credentialAlias: 'review',
+          profile: 'chat',
+          profiles: ['responses'],
+        },
+      ]);
+      vi.stubGlobal('fetch', async () =>
+        Response.json({
+          data: [{ id: 'bare' }, { id: 'rich', api: { 'chat-completions': {}, responses: {} } }],
+        }),
+      );
+      await createRelayCatalog(db, sources).refresh(50);
+      await expect(
+        createGrantControl(db).issueV2({
+          jobId: 'job-compat',
+          snapshot: { routes: ['p/bare', 'p/rich'] },
+          latestIssueDeadline: deadline(),
+        }),
+      ).resolves.toMatchObject({
+        kind: 'issued',
+        descriptors: [
+          { routeId: 'p/bare', profile: 'chat' },
+          { routeId: 'p/rich', profile: 'responses' },
+        ],
+      });
+    } finally {
+      db.close();
+    }
+  },
+);
 
 it('freezes the alias-only source provider and credential on a legacy grant', async () => {
   const db = database();

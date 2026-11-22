@@ -149,11 +149,8 @@ Choose discovery according to how that provider exposes its model list.
 Custom and OpenAI destinations default to Chat Completions. Anthropic and
 Google AI Studio default to their native protocols as described above. Set
 `profile` to a default profile or `profiles` to the distinct profiles a rich
-catalog may publish (`chat`, `responses`, `messages`, `gemini`). If both keys
-are present, `profiles` must include the default. Before upgrading an existing
-configuration that excludes its default, add the default to the allowed list
-if that protocol should be selectable, or change the default to an allowed
-profile. Rich entries
+catalog may publish (`chat`, `responses`, `messages`, `gemini`). For custom and OpenAI destinations, ID-only entries and aliases use the default.
+The list independently filters rich entries, which prefer the default when it is eligible. Rich entries
 are filtered from their advertised `api` operations; models that advertise no
 configured protocol are omitted. `models` is an explicit allowlist keyed by
 review route ID. Use it for ID-only endpoints that list unrelated models: only
