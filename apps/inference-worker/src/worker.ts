@@ -94,7 +94,7 @@ export class InferenceWorker extends WorkerEntrypoint<InferenceWorkerEnv> {
     const body = validateChatBody(raw);
     if (body === null) return error(400, 'invalid request');
     const route = selectedRoute(grant, body);
-    if (route === null) return error(403, 'route forbidden');
+    if (route === null || route.profile !== 'chat') return error(403, 'route forbidden');
 
     const requestId = crypto.randomUUID();
     const admitted = await admitRequest(this.env.RELAY_DB, requestId, grant, route);

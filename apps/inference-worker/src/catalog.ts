@@ -85,6 +85,9 @@ const readSource = async (
         rejected += 1;
         continue;
       }
+      // An explicit no-tools capability always wins, including over an
+      // operator default. Review profiles require local tools.
+      if (entry.toolsSupported === false) continue;
       // An ID-only listing establishes visibility only. When an explicit
       // allowlist is configured, it is the trusted review-capability source:
       // discovered IDs not named there stay invisible.
@@ -96,7 +99,13 @@ const readSource = async (
           : !qualified
             ? 'chat'
             : entry.profiles === null
-              ? preferredProfile
+              ? // An ID-only listing cannot verify a non-chat operation.
+                // Qualified sources may still expose a chat default, but
+                // Responses, Messages and Gemini require an explicit
+                // `models` override.
+                preferredProfile === 'chat'
+                ? 'chat'
+                : undefined
               : (() => {
                   const supported = allowedProfiles.filter((candidate) =>
                     entry.profiles!.includes(candidate),
@@ -128,39 +137,72 @@ interface CandidateSource {
   load(): Promise<CatalogRead>;
 }
 
+const sameLimit = (left: ModelRouteLimit | null, right: ModelRouteLimit | null): boolean =>
+  (left?.context ?? null) === (right?.context ?? null) &&
+  (left?.output ?? null) === (right?.output ?? null);
+
+const sameRouteModel = (left: RouteModel, right: RouteModel): boolean =>
+  left.model === right.model &&
+  left.profile === right.profile &&
+  sameLimit(left.limit, right.limit);
+
 function candidateSources(sources: readonly Source[], gateway: GatewayConfig | null) {
   const groups = new Map<string, CandidateSource>();
+  const aliases = new Map<
+    string,
+    {
+      readonly provider: string;
+      readonly credential: string;
+      readonly models: Record<string, string>;
+      readonly resolved: Record<string, RouteModel>;
+      conflict: boolean;
+    }
+  >();
   for (const source of sources) {
     const provider = source.providerSlug;
     const credential = source.credentialAlias;
     if (source.aliases && Object.keys(source.aliases).length) {
       const key = JSON.stringify(['aliases', provider, credential]);
-      const existing = groups.get(key)?.aliases;
-      const models = { ...existing, ...source.aliases };
-      // An ambiguous alias cannot match a stored model. Reject this group
-      // during refresh while other providers continue to publish.
-      for (const [id, model] of Object.entries(source.aliases))
-        if (existing && Object.hasOwn(existing, id) && existing[id] !== model) models[id] = '';
-      groups.set(key, {
-        key,
+      const group = aliases.get(key) ?? {
         provider,
         credential,
-        aliases: models,
-        load: async () => {
-          const overrides = 'models' in source ? source.models : undefined;
-          const loaded: Record<string, RouteModel> = {};
-          for (const [id, model] of Object.entries(models)) {
-            const override = overrides?.[id];
-            if (overrides !== undefined && override === undefined) continue;
-            loaded[id] = {
-              model,
-              profile: override?.profile ?? sourceDefaultProfile(source),
-              limit: override?.limit ?? null,
-            };
-          }
-          return { models: loaded, rejected: 0 };
-        },
-      });
+        models: {},
+        resolved: {},
+        conflict: false,
+      };
+      const overrides = 'models' in source ? source.models : undefined;
+      for (const [id, model] of Object.entries(source.aliases)) {
+        group.models[id] = model;
+        const override = overrides?.[id];
+        if (overrides !== undefined && override === undefined) continue;
+        const resolved: RouteModel = {
+          model,
+          profile: override?.profile ?? sourceDefaultProfile(source),
+          limit: override?.limit ?? null,
+        };
+        const existing = group.resolved[id];
+        if (existing !== undefined && !sameRouteModel(existing, resolved)) {
+          // Two producing sources disagree about the same route's model,
+          // profile or limit. Fail this source refresh rather than letting
+          // configuration order decide which descriptor wins.
+          group.conflict = true;
+          continue;
+        }
+        group.resolved[id] = resolved;
+      }
+      aliases.set(key, group);
+      if (!groups.has(key)) {
+        groups.set(key, {
+          key,
+          provider,
+          credential,
+          aliases: group.models,
+          load: async () => {
+            if (group.conflict) return { models: {}, rejected: 1 };
+            return { models: { ...group.resolved }, rejected: 0 };
+          },
+        });
+      }
     }
     if (!('prefix' in source)) continue;
     const key = JSON.stringify([
@@ -181,15 +223,22 @@ function candidateSources(sources: readonly Source[], gateway: GatewayConfig | n
   return [...groups.values()];
 }
 
+// Compare configured limits by their semantic fields, not JSON key order.
+const canonicalLimit = (json: string) =>
+  `(CASE WHEN ${json} IS NULL THEN '' ELSE coalesce(CAST(json_extract(${json}, '$.context') AS TEXT), '') || '|' || coalesce(CAST(json_extract(${json}, '$.output') AS TEXT), '') END)`;
+const storedLimit = `coalesce((SELECT ${canonicalLimit('l.value')} FROM json_each(s.route_limits) l WHERE l.key=m.key), '')`;
+
 // Both the picker and the budget count the same set, preferring discovered IDs
-// when an alias refers to exactly the same upstream model and credential.
+// when an alias refers to exactly the same upstream model, credential, profile
+// and configured limit.
 const active = `SELECT m.key AS id, m.value AS model, s.provider, s.credential,
   coalesce((SELECT p.value FROM json_each(s.route_profiles) p WHERE p.key=m.key), 'chat') AS profile,
+  ${storedLimit} AS limit_key,
   s.is_alias
   FROM catalog_sources s JOIN json_each(?) cfg ON cfg.key=s.source_key, json_each(s.models) m
   WHERE (s.is_alias=0 OR EXISTS (SELECT 1 FROM json_each(cfg.value) a WHERE a.key=m.key AND a.value=m.value))`;
 const visible = `SELECT DISTINCT id FROM (
-  SELECT id, is_alias, MIN(is_alias) OVER (PARTITION BY provider, credential, model, profile) AS preferred
+  SELECT id, is_alias, MIN(is_alias) OVER (PARTITION BY provider, credential, model, profile, limit_key) AS preferred
   FROM candidates
 ) WHERE is_alias = preferred`;
 
@@ -255,7 +304,9 @@ export function createRelayCatalog(
           db
             .prepare(`WITH candidates AS (
               ${active} AND s.source_key <> ?
-              UNION ALL SELECT m.key, m.value, ?, ?, coalesce(p.value,'chat'), ?
+              UNION ALL SELECT m.key, m.value, ?, ?, coalesce(p.value,'chat'),
+                coalesce((SELECT ${canonicalLimit('l.value')} FROM json_each(?) l WHERE l.key=m.key), ''),
+                ?
                 FROM json_each(?) m LEFT JOIN json_each(?) p ON p.key=m.key
             )
             INSERT INTO catalog_sources(source_key, provider, credential, is_alias, rejected, error)
@@ -268,8 +319,8 @@ export function createRelayCatalog(
                   OR r.provider_slug IS NOT ?
                   OR r.credential_alias IS NOT ?
                   OR r.profile IS NOT coalesce(p.value,'chat')
-                  OR r.limit_json IS NOT
-                    (SELECT l.value FROM json_each(?) l WHERE l.key=m.key))
+                  OR ${canonicalLimit('r.limit_json')} IS NOT
+                    coalesce((SELECT ${canonicalLimit('l.value')} FROM json_each(?) l WHERE l.key=m.key), ''))
                 THEN 'route mapping conflict'
               WHEN (SELECT COUNT(*) FROM (${visible})) > ? THEN 'catalog limit reached'
             END WHERE ${fresh}
@@ -279,6 +330,7 @@ export function createRelayCatalog(
               key,
               provider,
               credential,
+              proposedLimits,
               alias,
               proposedModels,
               proposedProfiles,
