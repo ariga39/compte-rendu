@@ -176,6 +176,7 @@ const GeminiUsage = Schema.Struct({
 });
 const decodeUsage = Schema.decodeUnknownOption(GeminiUsage);
 const GeminiFrame = Schema.Struct({
+  error: Schema.optionalKey(Schema.Unknown),
   candidates: Schema.optionalKey(
     Schema.Array(Schema.Struct({ finishReason: Schema.optionalKey(Schema.NullOr(Schema.String)) })),
   ),
@@ -238,7 +239,8 @@ const observeGeminiFrame = (frame: SseFrame): StreamObservationDetails => {
     ...(Object.keys(usage).length === 0 ? {} : { usage }),
     ...(model === null ? {} : { model }),
   };
-  if (value.promptFeedback?.blockReason != null) return { observation: 'failure', ...details };
+  if (value.error !== undefined || value.promptFeedback?.blockReason != null)
+    return { observation: 'failure', ...details };
   const candidates = value.candidates ?? [];
   if (candidates.length > 1) return { observation: 'failure', ...details };
   const finish = candidates[0]?.finishReason;
