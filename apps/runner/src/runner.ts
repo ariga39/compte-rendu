@@ -1,3 +1,4 @@
+import type { ModelRouteDescriptor } from '@compte-rendu/contracts';
 import type { ModelUsageSummary } from '@compte-rendu/contracts';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -764,6 +765,7 @@ export interface RunnerOptions {
   readonly sandboxRuntimeFactory?: SandboxRuntimeFactory;
   /** Opt in to the remote relay control plane over the callback origin. */
   readonly llmRelay?: boolean;
+  readonly llmGrantVersion?: 1 | 2;
   readonly llmRelayGeneration?: string;
   readonly microsandboxImage?: string;
   readonly opensandbox?: {
@@ -1155,9 +1157,13 @@ export const createRunner = (options: RunnerOptions = {}) => {
   ) {
     throw new Error('Remote LLM relay requires a dedicated inference hostname');
   }
+  const grantVersion = String(options.llmGrantVersion ?? process.env.RUNNER_LLM_GRANT_VERSION ?? 1);
+  if (relayEnabled && grantVersion !== '1' && grantVersion !== '2')
+    throw new Error('Invalid RUNNER_LLM_GRANT_VERSION');
   const llmServiceClient =
     relayEnabled && relayOrigin !== undefined && relayToken !== undefined
       ? createRelayLlmServiceClient({
+          grantVersion: grantVersion === '2' ? 2 : 1,
           origin: relayOrigin,
           token: relayToken,
           fetch: relayFetch,
@@ -2793,6 +2799,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         return;
       }
 
+      let descriptors: readonly ModelRouteDescriptor[] | undefined;
       if (llmServiceClient !== undefined && multiSelection !== undefined) {
         const grantRoutes = directExecution
           ? [multiSelection.reviewers[0]!]
@@ -2811,7 +2818,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
           jobId: job.id,
           attempt: job.input.attempt,
         };
-        let grant: { token: string; expiresAt: number };
+        let grant: Awaited<ReturnType<typeof llmServiceClient.issue>>;
         try {
           grant = await llmServiceClient.issue(grantIdentity, grantRoutes);
         } catch {
@@ -2822,6 +2829,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
           failure = { reason: 'agent' };
           return;
         }
+        descriptors = grant.descriptors;
         job.grantToken = grant.token;
         const grantRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-llm-grant-'));
         job.grantRoot = grantRoot;
@@ -2859,6 +2867,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       const activeOpenCodeConfig = multi
         ? multiReviewConfig({
             selection: multiSelection,
+            descriptors,
             serviceBaseUrl: serviceBaseUrl!.toString(),
             shellPermissionRules,
           })

@@ -76,6 +76,17 @@ expected. Provider input-cache reads are accounted for separately in the
 reported token usage. A zero Gateway cost can coexist with subscription
 allowance consumption. Consult the provider’s billing data for that amount.
 
+### Runner grant version
+
+`RUNNER_LLM_GRANT_VERSION` defaults to `1`. Enable `2` only after Core and the
+inference Worker serve versioned grants. In v2 the Runner requests
+`/runner-llm/issue-v2` and configures each selected model from the returned
+route descriptor. The descriptor selects a bundled adapter and can specify
+context and output limits. All models use the existing sandbox inference
+hostname and job credential. Issuance is attempted once. An unavailable v2
+endpoint or a descriptor set that differs from the frozen selection fails the
+job and triggers grant cleanup.
+
 ### Managed relay model catalog
 
 Set the inference Worker's `RELAY_CATALOG_SOURCES` variable to a JSON array.

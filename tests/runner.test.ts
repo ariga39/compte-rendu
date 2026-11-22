@@ -294,6 +294,7 @@ const createRelayControl = (
     readonly token?: string;
     readonly usage?: unknown;
     readonly rejectRevoke?: boolean;
+    readonly descriptors?: readonly unknown[];
   } = {},
 ) => {
   const issued: Array<{ jobId: string; routes: string[]; token: string }> = [];
@@ -320,7 +321,7 @@ const createRelayControl = (
       ...(authorization === undefined ? {} : { authorization }),
       body,
     });
-    if (path === '/runner-llm/issue') {
+    if (path === '/runner-llm/issue' || path === '/runner-llm/issue-v2') {
       if (options.issuance === 'malformed')
         return new Response('{', {
           status: 201,
@@ -333,6 +334,7 @@ const createRelayControl = (
       return Response.json(
         {
           token,
+          ...(path.endsWith('issue-v2') ? { descriptors: options.descriptors } : {}),
           expiresAt: new Date(
             Date.now() + (options.issuance === 'short' ? 1000 : 2 * 60 * 60 * 1000),
           ).toISOString(),
@@ -10059,6 +10061,7 @@ describe('Runner multi-model review', () => {
   ].join('\n');
 
   type MultiScenarioOverrides = {
+    readonly descriptors?: readonly unknown[];
     readonly children?: readonly (typeof defaultChildren)[number][];
     readonly pages?: readonly SessionPageResponse[];
     readonly exports?: Readonly<Record<string, string>>;
@@ -10089,7 +10092,7 @@ describe('Runner multi-model review', () => {
           : (overrides.rootExport ?? rootExport)
         : defaultExport(sessionId));
     const controlRoot = await mkdtemp(join(tmpdir(), 'cr-multi-control-'));
-    const relay = createRelayControl();
+    const relay = createRelayControl({ descriptors: overrides.descriptors });
 
     let createArgs: readonly string[] | undefined;
     let agentArgs: readonly string[] | undefined;
@@ -10100,6 +10103,7 @@ describe('Runner multi-model review', () => {
       authToken: 'runner-test-token',
       modelConfig: multiModelConfig,
       llmRelay: true,
+      llmGrantVersion: overrides.descriptors ? 2 : 1,
       llmRelayGeneration: 'generation-a',
       callbackUrl: 'https://ingress.test/runner-callback',
       callbackToken: 'callback-token',
@@ -10258,6 +10262,91 @@ describe('Runner multi-model review', () => {
       await rm(controlRoot, { recursive: true, force: true });
     }
   };
+
+  it('delivers the frozen adapter per route while keeping reviewer identities stable', async () => {
+    const result = await runScenario({
+      descriptors: [
+        {
+          routeId: 'step-5-preview',
+          profile: 'responses',
+          limit: { context: 120000, output: 15000 },
+        },
+        { routeId: 'deepseek-v4.1-flash', profile: 'chat' },
+      ],
+    });
+    expect(result.terminal.status).toBe('succeeded');
+    const config = JSON.parse(
+      result
+        .createArgs!.find((x) => x.startsWith('OPENCODE_CONFIG_CONTENT='))!
+        .slice('OPENCODE_CONFIG_CONTENT='.length),
+    );
+    expect(config.providers['compte-rendu'].models['step-5-preview'].package).toBe(
+      '@opencode/ai/providers/openai',
+    );
+    expect(config.providers['compte-rendu'].models['step-5-preview'].limit).toEqual({
+      context: 120000,
+      output: 15000,
+    });
+    expect(config.agents['reviewer-1'].model).toBe('compte-rendu/step-5-preview');
+  });
+
+  it('configures signed Messages and path-routed Gemini models on the same sandbox relay', async () => {
+    const result = await runScenario({
+      descriptors: [
+        { routeId: 'step-5-preview', profile: 'gemini' },
+        { routeId: 'deepseek-v4.1-flash', profile: 'messages' },
+      ],
+    });
+    const config = JSON.parse(
+      result
+        .createArgs!.find((x) => x.startsWith('OPENCODE_CONFIG_CONTENT='))!
+        .slice('OPENCODE_CONFIG_CONTENT='.length),
+    );
+    const provider = config.providers['compte-rendu'];
+    expect(provider.settings.apiKey).toBeUndefined();
+    expect(provider.models['step-5-preview']).toMatchObject({
+      package: '@opencode/ai/providers/google',
+      modelID: 'r-c3RlcC01LXByZXZpZXc',
+      settings: {
+        baseURL: 'https://inference.example/v1beta',
+        headers: { authorization: 'Bearer {env:OPENCODE_API_KEY}' },
+      },
+    });
+    expect(provider.models['deepseek-v4.1-flash']).toMatchObject({
+      package: '@opencode/ai/providers/anthropic',
+      settings: { authToken: '{env:OPENCODE_API_KEY}', baseURL: 'https://inference.example/v1' },
+    });
+  });
+
+  it.each([
+    ['missing', [{ routeId: 'step-5-preview', profile: 'responses' }]],
+    [
+      'duplicate',
+      [
+        { routeId: 'step-5-preview', profile: 'chat' },
+        { routeId: 'step-5-preview', profile: 'responses' },
+      ],
+    ],
+    [
+      'unexpected',
+      [
+        { routeId: 'other', profile: 'chat' },
+        { routeId: 'step-5-preview', profile: 'responses' },
+      ],
+    ],
+    [
+      'unknown adapter',
+      [
+        { routeId: 'deepseek-v4.1-flash', profile: 'chat' },
+        { routeId: 'step-5-preview', profile: 'custom-script' },
+      ],
+    ],
+  ])('revokes a grant with %s descriptors before VM creation', async (_label, descriptors) => {
+    const result = await runScenario({ descriptors });
+    expect(result.terminal.status).toBe('failed');
+    expect(result.createArgs).toBeUndefined();
+    expect(result.revoked).toEqual([runnerJobFields.id]);
+  });
 
   it('runs the frozen roster through native foreground subagents and publishes one synthesis', async () => {
     const result = await runScenario();

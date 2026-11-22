@@ -18,7 +18,25 @@ export const REVIEW_ATTEMPT_BUDGET_MS = 90 * 60 * 1000;
 export const RunnerDeadline = Schema.Literals(['claim', 'credential']);
 export type RunnerDeadline = typeof RunnerDeadline.Type;
 
-const ModelRouteId = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9._:/-]{1,128}$/));
+export const ModelRouteId = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9._:/-]{1,128}$/));
+export const ModelProfile = Schema.Literals(['chat', 'responses', 'messages', 'gemini']);
+export type ModelProfile = typeof ModelProfile.Type;
+export const ModelRouteLimit = Schema.Struct({
+  context: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThan(0))),
+  output: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThan(0))),
+}).check(
+  Schema.makeFilter((limit) => limit.context !== undefined || limit.output !== undefined, {
+    expected: 'at least one model limit',
+  }),
+);
+export type ModelRouteLimit = typeof ModelRouteLimit.Type;
+export const ModelRouteDescriptor = Schema.Struct({
+  routeId: ModelRouteId,
+  profile: ModelProfile,
+  limit: Schema.optionalKey(ModelRouteLimit),
+});
+export type ModelRouteDescriptor = typeof ModelRouteDescriptor.Type;
+
 export const ReviewModelSelection = Schema.Struct({
   reviewers: Schema.Array(ModelRouteId).check(
     Schema.isMinLength(1),
