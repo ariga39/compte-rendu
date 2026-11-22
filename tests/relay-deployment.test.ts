@@ -24,7 +24,7 @@ it('renders the instance relay with a separate D1, private service binding and H
         {
           discovery: 'gateway',
           prefix: 'p/',
-          providerSlug: 'custom-review',
+          providerSlug: 'native:openai',
           credentialAlias: 'default',
         },
         {
@@ -108,6 +108,10 @@ it('rejects provider slugs, credential aliases and route IDs outside the frozen 
     {
       ...base,
       catalogSources: [{ ...base.catalogSources[0], providerSlug: '-review' }],
+    },
+    {
+      ...base,
+      catalogSources: [{ ...base.catalogSources[0], providerSlug: 'native:../openai' }],
     },
     {
       ...base,

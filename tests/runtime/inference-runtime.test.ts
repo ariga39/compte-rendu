@@ -206,6 +206,20 @@ describe('Inference Worker runtime boundaries', () => {
 });
 
 describe('Inference Worker public streaming', () => {
+  it('routes a frozen native OpenAI grant to its BYOK destination', async () => {
+    await runtime.RELAY_DB.prepare(
+      "INSERT INTO catalog_routes (route_id, upstream_model, provider_slug, credential_alias) VALUES ('platform/chat', 'chat-model', 'native:openai', 'platform-key')",
+    ).run();
+    await control('success');
+    const token = await issue('native-platform-job', ['platform/chat']);
+    const response = await request(token, { model: 'platform/chat', messages: [], stream: true });
+    expect(await response.text()).toContain('[DONE]');
+    expect((await upstreamState()).requests[0]).toMatchObject({
+      url: 'https://gateway.ai.cloudflare.com/v1/test-account/test-gateway/openai/chat/completions',
+      headers: { 'cf-aig-byok-alias': 'platform-key' },
+    });
+  });
+
   it('streams a frozen catalog route through trusted Gateway headers and records complete usage', async () => {
     await control('success');
     const token = await issue('runtime-success', ['deepseek-review']);

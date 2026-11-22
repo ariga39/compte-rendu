@@ -33,5 +33,7 @@ export const parseFrozenMapping = (value: string | null): FrozenRouteMapping | n
   return Option.isNone(decoded) ? null : decoded.value;
 };
 
-export const gatewayProviderPath = (providerSlug: string): string =>
-  providerSlug.startsWith('custom-') ? providerSlug : `custom-${providerSlug}`;
+export const gatewayProviderPath = (providerSlug: string): string => {
+  if (providerSlug === 'native:openai') return 'openai';
+  return providerSlug.startsWith('custom-') ? providerSlug : `custom-${providerSlug}`;
+};
