@@ -1122,6 +1122,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       ? createMicrosandboxRuntimeFactory(
           sandboxRuntime.microsandboxImage,
           (args, _diagnostic, options) => executeProcess(sandboxPortPath, args, options),
+          process.env.MICROSANDBOX_ALLOW_FAKE_IP === '1',
         )
       : opensandboxOptions !== undefined
         ? createOpenSandboxRuntimeFactory(opensandboxOptions)
