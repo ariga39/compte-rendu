@@ -6,8 +6,6 @@ import {
   relayProtocolStream,
   type ProtocolStreamAdapter,
   type ProtocolStreamOptions,
-  type SseFrame,
-  type StreamObservationDetails,
 } from './protocol-stream.ts';
 import type { FrozenRoute } from './routes.ts';
 
