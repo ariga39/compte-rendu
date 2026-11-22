@@ -1,14 +1,17 @@
-import { Option, Schema } from 'effect';
-import { SafeModel } from '@compte-rendu/contracts';
+import { Effect, Option, Schema } from 'effect';
+import { ModelProfile, ModelRouteLimit, SafeModel } from '@compte-rendu/contracts';
 import { CredentialAlias, ProviderSlug, RouteId } from './route-schema.ts';
 
 export { RouteId } from './route-schema.ts';
+export { ModelProfile } from '@compte-rendu/contracts';
 
 export const FrozenRoute = Schema.Struct({
   routeId: RouteId,
   upstreamModel: SafeModel,
   providerSlug: ProviderSlug,
   credentialAlias: CredentialAlias,
+  profile: ModelProfile.pipe(Schema.withDecodingDefaultKey(Effect.succeed('chat'))),
+  limit: Schema.optionalKey(ModelRouteLimit),
 });
 export type FrozenRoute = typeof FrozenRoute.Type;
 
@@ -32,6 +35,13 @@ export const parseFrozenMapping = (value: string | null): FrozenRouteMapping | n
   const decoded = decodeFrozenMapping(value);
   return Option.isNone(decoded) ? null : decoded.value;
 };
+
+// v1 predates profiles. Keep its persisted mapping byte-for-byte compatible so
+// an older relay can still authenticate a grant issued during a rollout.
+export const legacyFrozenMapping = (
+  routes: FrozenRouteMapping,
+): ReadonlyArray<Omit<FrozenRoute, 'profile' | 'limit'>> =>
+  routes.map(({ profile: _profile, limit: _limit, ...route }) => route);
 
 export const gatewayProviderPath = (providerSlug: string): string => {
   if (providerSlug === 'native:openai') return 'openai';
