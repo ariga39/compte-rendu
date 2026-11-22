@@ -54,50 +54,60 @@ const waitFor = async (predicate: () => boolean, timeoutMs = 2_000) => {
   throw new Error('condition not reached');
 };
 
-it('cancels the upstream stream when the client abandons the response', async () => {
-  let cancelled = false;
-  const { database, updates } = fakeDatabase();
-  const response = await Effect.runPromise(
-    relayInference({
-      database,
-      requestId: 'request-cancel',
-      gateway: {
-        accountId: 'account',
-        gatewayId: 'gateway',
-        runToken: 'run-token',
-      },
-      grant,
-      route,
-      body: { model: 'review', messages: [] },
-      request: new Request('https://inference.internal/v1/chat/completions', {
-        method: 'POST',
+it.each(['disconnect', 'complete'] as const)(
+  'releases an open upstream body on %s',
+  async (ending) => {
+    let cancelled = false;
+    const { database, updates } = fakeDatabase();
+    const response = await Effect.runPromise(
+      relayInference({
+        database,
+        requestId: 'request-cancel',
+        gateway: {
+          accountId: 'account',
+          gatewayId: 'gateway',
+          runToken: 'run-token',
+        },
+        grant,
+        route,
+        body: { model: 'review', messages: [] },
+        request: new Request('https://inference.internal/v1/chat/completions', {
+          method: 'POST',
+        }),
+        waitUntil: () => undefined,
+        fetch: async () =>
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.enqueue(
+                  new TextEncoder().encode(
+                    'data: {"choices":[{"index":0,"delta":{"content":"First"}}]}\n\n' +
+                      (ending === 'complete'
+                        ? 'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
+                        : ''),
+                  ),
+                );
+              },
+              cancel() {
+                cancelled = true;
+              },
+            }),
+            { headers: { 'content-type': 'text/event-stream' } },
+          ),
       }),
-      waitUntil: () => undefined,
-      fetch: async () =>
-        new Response(
-          new ReadableStream<Uint8Array>({
-            start(controller) {
-              controller.enqueue(
-                new TextEncoder().encode(
-                  'data: {"choices":[{"index":0,"delta":{"content":"First"}}]}\n\n',
-                ),
-              );
-            },
-            cancel() {
-              cancelled = true;
-            },
-          }),
-          { headers: { 'content-type': 'text/event-stream' } },
-        ),
-    }),
-  );
+    );
 
-  const reader = response.body!.getReader();
-  await reader.read();
-  await reader.cancel();
-  await waitFor(() => cancelled);
-  await waitFor(() => updates.some((sql) => sql.includes('SET model =')));
-});
+    if (ending === 'complete') {
+      expect(await response.text()).toContain('[DONE]');
+    } else {
+      const reader = response.body!.getReader();
+      await reader.read();
+      await reader.cancel();
+      await waitFor(() => updates.some((sql) => sql.includes('SET model =')));
+    }
+    await waitFor(() => cancelled);
+  },
+);
 
 it('cancels the upstream stream when the local grant expires', async () => {
   let cancelled = false;
