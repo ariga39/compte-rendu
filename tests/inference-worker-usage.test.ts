@@ -3,10 +3,7 @@ import { readUsage } from '../apps/inference-worker/src/ledger';
 import { SqliteD1Database } from './support/d1-database';
 
 const setup = () => {
-  const database = new SqliteD1Database(
-    ['0001_grants.sql', '0002_requests.sql'],
-    '../../apps/inference-worker/migrations',
-  );
+  const database = new SqliteD1Database('inference-worker');
   return database;
 };
 

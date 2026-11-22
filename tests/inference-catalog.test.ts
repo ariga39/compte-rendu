@@ -5,15 +5,7 @@ import { createGrantControl } from '../apps/inference-worker/src/grants';
 import { Schema } from 'effect';
 import { SqliteD1Database } from './support/d1-database';
 
-const migrations = [
-  '0001_grants.sql',
-  '0002_requests.sql',
-  '0003_catalog.sql',
-  '0004_catalog_sources.sql',
-  '0005_route_profiles.sql',
-];
-const migrationsDirectory = '../../apps/inference-worker/migrations';
-const database = () => new SqliteD1Database(migrations, migrationsDirectory);
+const database = () => new SqliteD1Database('inference-worker');
 const deadline = () => Date.now() + 60_000;
 
 afterEach(() => vi.unstubAllGlobals());

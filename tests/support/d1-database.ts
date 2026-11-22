@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import type {
@@ -56,39 +56,23 @@ export class SqliteD1Database implements D1DatabaseLike {
   readonly database = new DatabaseSync(':memory:');
   private batchTail: Promise<void> = Promise.resolve();
 
-  constructor(
-    migrationNames: readonly string[] = [
-      '0001_review_state.sql',
-      '0002_allow_manual_retry.sql',
-      '0003_runner_evidence.sql',
-      '0004_runner_admission.sql',
-      '0005_publication_claim.sql',
-      '0006_review_check_runs.sql',
-      '0007_check_setup_lease.sql',
-      '0008_runner_cleanup.sql',
-      '0009_dashboard_lifecycle.sql',
-      '0010_review_branch_refs.sql',
-      '0011_review_decision.sql',
-      '0012_review_configuration.sql',
-      '0013_model_usage.sql',
-      '0014_failure_http_status.sql',
-      '0015_review_cancellation.sql',
-      '0016_runner_claim_handoff.sql',
-      '0017_review_check_delivery.sql',
-    ],
-    private readonly migrationsDirectory = '../../apps/core/migrations',
-  ) {
-    this.applyMigrations(migrationNames);
+  private readonly directory: URL;
+  private readonly pending: string[];
+
+  constructor(application: 'core' | 'inference-worker' = 'core', through?: string) {
+    this.directory = new URL(`../../apps/${application}/migrations/`, import.meta.url);
+    this.pending = readdirSync(fileURLToPath(this.directory))
+      .filter((name) => name.endsWith('.sql'))
+      .sort();
+    this.migrateThrough(through);
   }
 
-  applyMigrations(migrationNames: readonly string[]) {
-    for (const migrationName of migrationNames) {
-      this.database.exec(
-        readFileSync(
-          fileURLToPath(new URL(`${this.migrationsDirectory}/${migrationName}`, import.meta.url)),
-          'utf8',
-        ),
-      );
+  migrateThrough(last?: string) {
+    const end = last === undefined ? this.pending.length : this.pending.indexOf(last) + 1;
+    if (last !== undefined && end === 0) throw new Error(`Unknown pending migration: ${last}`);
+    for (const name of this.pending.slice(0, end)) {
+      this.database.exec(readFileSync(fileURLToPath(new URL(name, this.directory)), 'utf8'));
+      this.pending.shift();
     }
   }
 

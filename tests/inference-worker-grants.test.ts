@@ -10,16 +10,7 @@ const snapshot = { routes: ['deepseek-review', 'step-review'] };
 const sha256 = (value: string) => createHash('sha256').update(value).digest('hex');
 
 const setup = () => {
-  const database = new SqliteD1Database(
-    [
-      '0001_grants.sql',
-      '0002_requests.sql',
-      '0003_catalog.sql',
-      '0004_catalog_sources.sql',
-      '0005_route_profiles.sql',
-    ],
-    '../../apps/inference-worker/migrations',
-  );
+  const database = new SqliteD1Database('inference-worker');
   const insertCatalog = database.database.prepare(
     `INSERT INTO catalog_routes (route_id, upstream_model, provider_slug, credential_alias, profile)
     VALUES (?, ?, ?, ?, ?)`,

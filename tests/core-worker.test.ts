@@ -1438,13 +1438,7 @@ describe('Core Worker', () => {
   });
 
   it('keeps an existing scheduled run claimable after Check migration', async () => {
-    const database = new SqliteD1Database([
-      '0001_review_state.sql',
-      '0002_allow_manual_retry.sql',
-      '0003_runner_evidence.sql',
-      '0004_runner_admission.sql',
-      '0005_publication_claim.sql',
-    ]);
+    const database = new SqliteD1Database('core', '0005_publication_claim.sql');
     const legacyRunId = 'legacy-run-before-check-migration';
     database.database.exec(`
       INSERT INTO deliveries (
@@ -1471,16 +1465,7 @@ describe('Core Worker', () => {
     `);
 
     try {
-      database.applyMigrations([
-        '0006_review_check_runs.sql',
-        '0008_runner_cleanup.sql',
-        '0009_dashboard_lifecycle.sql',
-        '0010_review_branch_refs.sql',
-        '0012_review_configuration.sql',
-        '0013_model_usage.sql',
-        '0014_failure_http_status.sql',
-        '0016_runner_claim_handoff.sql',
-      ]);
+      database.migrateThrough();
       const migratedStore = createD1ReviewStateStore(database);
       if (migratedStore.claimNextJob === undefined) throw new Error('claim route is unavailable');
       await expect(
