@@ -1,4 +1,5 @@
 import type { PublicTaskState } from '@compte-rendu/contracts';
+import { publicIdentity, publicTask as samplePublicTask } from './sample-task.ts';
 import {
   detailData,
   expect,
@@ -11,44 +12,13 @@ import {
   type ApiPayload,
 } from './fixtures';
 
-const SHA = (c: string) => c.repeat(40);
+type PublicIdentity = Extract<PublicTaskState['identity'], { kind: 'public' }>;
 
-const publicTask = (
-  runId: string,
-  overrides: Partial<Extract<PublicTaskState['identity'], { kind: 'public' }>> = {},
-): PublicTaskState => ({
-  runId,
-  status: 'completed',
-  dispatch: null,
-  stage: null,
-  processing: null,
-  decision: null,
-  identity: {
-    kind: 'public',
-    repositoryFullName: 'acme/widgets',
-    pullRequestNumber: 7,
-    pullRequestUrl: 'https://github.com/acme/widgets/pull/7',
-    expiresAt: '2999-01-01T00:00:00.000Z',
-    baseRef: 'main',
-    headRef: 'feature/drawer',
-    baseSha: SHA('1'),
-    headSha: SHA('2'),
-    ...overrides,
-  },
-  receivedAt: NOW,
-  claimedAt: null,
-  terminalAt: null,
-  executionStartedAt: null,
-  submissionCompletedAt: null,
-  cleanupCompletedAt: null,
-  resultReceivedAt: null,
-  publicationStartedAt: null,
-  lastProgressAt: null,
-  queueWaitMs: null,
-  totalDurationMs: null,
-  cleanup: 'destroyed',
-  failure: null,
-});
+const publicTask = (runId: string, overrides: Partial<PublicIdentity> = {}): PublicTaskState =>
+  samplePublicTask(runId, {
+    identity: publicIdentity({ headRef: 'feature/drawer', ...overrides }),
+    receivedAt: NOW,
+  });
 
 test('table shows the source to target branches and the reviewed head SHA', async ({
   page,
