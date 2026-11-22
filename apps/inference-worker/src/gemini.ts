@@ -215,24 +215,6 @@ const observedTokens = (value: unknown): ObservedTokenFields => {
   return observed;
 };
 
-const completeFinishes = new Set(['STOP']);
-const failedFinishes = new Set([
-  'MAX_TOKENS',
-  'SAFETY',
-  'RECITATION',
-  'BLOCKLIST',
-  'PROHIBITED_CONTENT',
-  'SPII',
-  'MALFORMED_FUNCTION_CALL',
-  'UNEXPECTED_TOOL_CALL',
-  'TOO_MANY_TOOL_CALLS',
-  'MISSING_THOUGHT_SIGNATURE',
-  'MALFORMED_RESPONSE',
-  'LANGUAGE',
-  'OTHER',
-  'ERROR',
-]);
-
 const observeGeminiFrame = (frame: SseFrame): StreamObservationDetails => {
   if (frame.event === 'error') return { observation: 'failure' };
   const decoded = decodeGeminiFrame(frame.data);
@@ -251,8 +233,7 @@ const observeGeminiFrame = (frame: SseFrame): StreamObservationDetails => {
   const finish = candidates[0]?.finishReason;
   if (finish === null || finish === undefined || finish === '')
     return { observation: 'event', ...details };
-  if (completeFinishes.has(finish)) return { observation: 'terminal', ...details };
-  if (failedFinishes.has(finish)) return { observation: 'failure', ...details };
+  if (finish === 'STOP') return { observation: 'terminal', ...details };
   return { observation: 'failure', ...details };
 };
 

@@ -169,10 +169,6 @@ const MessageDelta = Schema.Struct({
   usage: Schema.optionalKey(Schema.Unknown),
 });
 const MessageStop = Schema.Struct({ type: Schema.Literal('message_stop') });
-const ErrorFrame = Schema.Struct({
-  type: Schema.optionalKey(Schema.String),
-  error: Schema.optionalKey(Schema.Unknown),
-});
 const decodeMessageStart = Schema.decodeUnknownOption(Schema.fromJsonString(MessageStart), {
   onExcessProperty: 'ignore',
 });
@@ -180,9 +176,6 @@ const decodeMessageDelta = Schema.decodeUnknownOption(Schema.fromJsonString(Mess
   onExcessProperty: 'ignore',
 });
 const decodeMessageStop = Schema.decodeUnknownOption(Schema.fromJsonString(MessageStop), {
-  onExcessProperty: 'ignore',
-});
-const decodeErrorFrame = Schema.decodeUnknownOption(Schema.fromJsonString(ErrorFrame), {
   onExcessProperty: 'ignore',
 });
 
@@ -256,12 +249,6 @@ const createMessagesAdapter = (): ProtocolStreamAdapter => {
           return { observation: 'failure' };
         return { observation: 'terminal' };
       }
-      const errorFrame = decodeErrorFrame(frame.data);
-      if (
-        Option.isSome(errorFrame) &&
-        (errorFrame.value.error != null || errorFrame.value.type === 'error')
-      )
-        return { observation: 'failure' };
       return { observation: 'failure' };
     },
   };
