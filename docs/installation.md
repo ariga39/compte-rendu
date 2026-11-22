@@ -1265,8 +1265,8 @@ settings forward.
    revoked, legacy null-snapshot jobs have finished, and recovery markers are
    clear. Configure the existing callback URL and bearer, the HTTPS inference
    model base on port 443 ending in `/v1`, and the relay issuer generation.
-   If any reviewer or synthesis route uses a protocol other than Chat Completions,
-   set `RUNNER_LLM_GRANT_VERSION=2`
+   If any reviewer or synthesis route uses a non-Chat protocol or declares
+   a context or output limit, set `RUNNER_LLM_GRANT_VERSION=2`
    in the Runner service environment after deploying both Workers. Restart the drained
    Runner to load the setting and check its maintenance status. The Runner uses each
    route's frozen profile to configure OpenCode. Before enabling another protocol,
@@ -1277,8 +1277,12 @@ settings forward.
    session exports, confirm that each selected reviewer completed its own review
    and returned a conclusion. Check the per-model usage alongside those results,
    verify grant reuse is denied after cleanup, and confirm the sandbox is gone.
-5. Before reverting to a v1 Runner, restore a Chat-only roster and allow jobs
-   already admitted with a non-Chat model to finish. Drain the Runner, resolve
+5. First restore a roster that the target Runner and Workers can serve,
+   including every route's protocol, Gateway destination, credential and required
+   limits. Keep the current Runner accepting jobs until all queued or running
+   jobs with incompatible frozen routes have finished. This includes Chat
+   routes whose destination the target Worker cannot resolve. When reverting
+   to a v1 Runner, drain it, resolve
    outstanding grants on their issuing backend, and remove `RUNNER_LLM_GRANT_VERSION`
    or set it to `1`. Restart the Runner with the matching binary and configuration
    before reverting the Workers. See the [upgrade procedure](llm-service.md#upgrading-an-installation-with-the-former-local-service).

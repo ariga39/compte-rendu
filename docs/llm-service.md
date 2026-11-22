@@ -22,7 +22,7 @@ The Runner calls `/runner-llm/issue` with the run ID, job ID, attempt and routes
 
 Use the previous Runner to finish any queued jobs without frozen selections, drain running work and resolve every pending grant against its original issuer. Check that the instance’s `llm-grant-pending` directory has no entries. Remove `RUNNER_LLM_SERVICE_SOCKET` from the effective Runner environment before starting the new binary. A legacy marker requires the previous software and its issuing service for recovery. Keep rollback binaries, configuration and credentials together; never rewrite markers to point at a different issuer.
 
-Managed grant v1 supports Chat Completions only. Use grant v2 for every roster containing a non-Chat route, including Responses and Messages. Check the [inference protocols](#inference-protocols) available in your deployed release. Installations using the former ChatGPT subscription backend need a provider credential supported by Gateway BYOK before migrating.
+Managed grant v1 supports Chat Completions only. Use grant v2 for every roster containing a non-Chat route, including Responses and Messages, or a route with configured context or output limits. Check the [inference protocols](#inference-protocols) available in your deployed release. Installations using the former ChatGPT subscription backend need a provider credential supported by Gateway BYOK before migrating.
 
 ### Change a review model without restarting
 
