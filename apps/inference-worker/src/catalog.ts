@@ -10,6 +10,7 @@ import {
 } from './model-catalog-wire';
 import type { D1DatabaseLike } from './grants';
 import { gatewayHeaders, gatewayUrl, type GatewayConfig } from './gateway';
+import { isGeminiUpstreamModel } from './routes';
 import {
   sourceDefaultProfile,
   sourceProfiles,
@@ -119,6 +120,10 @@ const readSource = async (
       // A well-formed model that offers none of the configured protocols is
       // omitted rather than failing the source snapshot.
       if (profile === undefined) continue;
+      if (profile === 'gemini' && !isGeminiUpstreamModel(entry.id)) {
+        rejected += 1;
+        continue;
+      }
       models[routeId] = { model: entry.id, profile, limit: override?.limit ?? null };
     }
     if (result.next === null) return { models, rejected };
@@ -156,6 +161,7 @@ function candidateSources(sources: readonly Source[], gateway: GatewayConfig | n
       readonly models: Record<string, string>;
       readonly resolved: Record<string, RouteModel>;
       conflict: boolean;
+      invalid: boolean;
     }
   >();
   for (const source of sources) {
@@ -169,6 +175,7 @@ function candidateSources(sources: readonly Source[], gateway: GatewayConfig | n
         models: {},
         resolved: {},
         conflict: false,
+        invalid: false,
       };
       const overrides = 'models' in source ? source.models : undefined;
       for (const [id, model] of Object.entries(source.aliases)) {
@@ -180,6 +187,10 @@ function candidateSources(sources: readonly Source[], gateway: GatewayConfig | n
           profile: override?.profile ?? sourceDefaultProfile(source),
           limit: override?.limit ?? null,
         };
+        if (resolved.profile === 'gemini' && !isGeminiUpstreamModel(model)) {
+          group.invalid = true;
+          continue;
+        }
         const existing = group.resolved[id];
         if (existing !== undefined && !sameRouteModel(existing, resolved)) {
           // Two producing sources disagree about the same route's model,
@@ -198,7 +209,7 @@ function candidateSources(sources: readonly Source[], gateway: GatewayConfig | n
           credential,
           aliases: group.models,
           load: async () => {
-            if (group.conflict) return { models: {}, rejected: 1 };
+            if (group.conflict || group.invalid) return { models: {}, rejected: 1 };
             return { models: { ...group.resolved }, rejected: 0 };
           },
         });
