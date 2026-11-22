@@ -236,12 +236,27 @@ describe('Responses route authentication and native streaming', () => {
     });
   });
 
+  it.each([
+    { verbosity: 'low' },
+    { format: { type: 'text' }, verbosity: 'medium' },
+    { verbosity: 'high' },
+  ])('forwards Responses text options %j unchanged', async (text) => {
+    await control('responses-success');
+    const token = await issueGrant('sol-verbosity-' + text.verbosity, [questions.responses]);
+    const response = await post(token, '/v1/responses', { ...responsesBody(), text });
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('event: response.completed');
+    const [upstream] = (await upstreamState()).requests;
+    expect(JSON.parse(upstream!.body).text).toEqual(text);
+  });
+
   it('rejects unsupported Responses state, hosted tools and transport shapes at admission', async () => {
     await control('responses-success');
     const token = await issueGrant('responses-rejections', [questions.responses]);
     const base = responsesBody();
     const invalid: readonly [string, Record<string, unknown>][] = [
       ['unknown field', { ...base, temperature: 0.2 }],
+      ['unknown verbosity', { ...base, text: { verbosity: 'verbose' } }],
       ['previous response lookup', { ...base, previous_response_id: 'resp_1' }],
       ['server conversation', { ...base, conversation: 'conv_1' }],
       ['background work', { ...base, background: true }],
