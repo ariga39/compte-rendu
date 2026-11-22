@@ -233,13 +233,15 @@ const CallbackSandbox = Schema.Struct({
   cleanup: Schema.Literals(['pending', 'destroyed', 'failed']),
 });
 
-export const RunnerProgressStage = Schema.Literals([
+export const REVIEW_PROGRESS_STAGES = [
   'checkout',
   'sandbox',
   'agent',
   'evidence',
   'cleanup',
-]);
+] as const;
+
+export const RunnerProgressStage = Schema.Literals(REVIEW_PROGRESS_STAGES);
 export type RunnerProgressStage = typeof RunnerProgressStage.Type;
 
 export const SandboxRuntimeKind = Schema.Literals([
@@ -646,13 +648,7 @@ export const createCloudflareOperationalLog = (
   },
 });
 
-export const PublicExecutionStage = Schema.Literals([
-  'checkout',
-  'sandbox',
-  'agent',
-  'evidence',
-  'cleanup',
-]);
+export const PublicExecutionStage = Schema.Literals(REVIEW_PROGRESS_STAGES);
 export type PublicExecutionStage = typeof PublicExecutionStage.Type;
 
 export const PublicCleanupStatus = Schema.Literals(['pending', 'destroyed', 'failed', 'unknown']);

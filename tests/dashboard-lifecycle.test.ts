@@ -225,8 +225,7 @@ it.each(['complete', 'publication', 'fail', 'supersede', 'replace'] as const)(
     const { store, identity, detail } = await fixture(path !== 'replace');
     const terminal = { runId: identity.runId, occurredAt: time(10) };
     if (path === 'complete') await store.markRunCompleted(terminal);
-    if (path === 'publication')
-      await store.completeRunPublication!({ ...terminal, fingerprints: [] });
+    if (path === 'publication') await store.completeRunPublication!({ ...terminal });
     if (path === 'fail') await store.markSchedulingFailed(terminal);
     if (path === 'supersede') await store.markRunSuperseded(terminal);
     if (path === 'replace')

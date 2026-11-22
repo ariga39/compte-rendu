@@ -1,4 +1,4 @@
-import type { RunnerProgressMilestone } from '@compte-rendu/contracts';
+import { REVIEW_PROGRESS_STAGES, type RunnerProgressMilestone } from '@compte-rendu/contracts';
 import type { ReviewDecision } from '@compte-rendu/contracts';
 import { ReviewConfiguration, ReviewModelSelection } from '@compte-rendu/contracts';
 import { Option, Schema } from 'effect';
@@ -266,10 +266,8 @@ interface PublicRunDbRow {
   failure_reason: string | null;
   failure_http_status: number | null;
   runner_job_id: string | null;
-  evidence_status: 'complete' | 'incomplete' | null;
   runner_cleanup_status: 'pending' | 'destroyed' | 'failed' | null;
   queue_block_reason: 'cleanup' | null;
-  publication_claimed_at: string | null;
   progress_stage: 'checkout' | 'sandbox' | 'agent' | 'evidence' | 'cleanup' | null;
   progress_received_at: string | null;
   progress_milestones: string | null;
@@ -305,10 +303,8 @@ const mapPublicRun = (row: PublicRunDbRow): PublicRunRow => ({
   failureReason: row.failure_reason,
   failureHttpStatus: row.failure_http_status,
   runnerJobId: row.runner_job_id,
-  evidenceStatus: row.evidence_status,
   runnerCleanupStatus: row.runner_cleanup_status,
   queueBlockReason: row.queue_block_reason,
-  publicationClaimedAt: row.publication_claimed_at,
   progressStage: row.progress_stage,
   lastProgressAt: row.progress_received_at,
   progressMilestones: row.progress_milestones,
@@ -368,7 +364,7 @@ const publicRunColumns = `
   r.run_id, r.status, r.installation_id, r.repository_id, r.pull_request_number,
   r.base_sha, r.head_sha, r.base_ref, r.head_ref, r.review_decision,
   r.created_at, r.claimed_at, r.terminal_at, r.result_received_at, r.publication_started_at, r.runner_job_id, r.failure_phase, r.failure_reason, r.failure_http_status,
-  r.evidence_status, r.runner_cleanup_status, ${queueBlockReasonColumn}, r.publication_claimed_at,
+  r.runner_cleanup_status, ${queueBlockReasonColumn},
   r.progress_stage, r.progress_received_at, r.progress_milestones,
   r.execution_started_at, r.submission_completed_at, r.cleanup_completed_at,
   r.repository_visibility_snapshot, r.legacy_public_verified_at,
@@ -385,8 +381,7 @@ const publicRunFrom = `
     ON m.installation_id = r.installation_id AND m.repository_id = r.repository_id
 `;
 
-const PROGRESS_STAGES = ['checkout', 'sandbox', 'agent', 'evidence', 'cleanup'] as const;
-type ProgressStage = (typeof PROGRESS_STAGES)[number];
+type ProgressStage = (typeof REVIEW_PROGRESS_STAGES)[number];
 type ProgressMilestone = RunnerProgressMilestone;
 
 const parseMilestones = (raw: string | null): ProgressMilestone[] => {
@@ -399,7 +394,9 @@ const parseMilestones = (raw: string | null): ProgressMilestone[] => {
         typeof entry === 'object' &&
         entry !== null &&
         typeof (entry as { stage?: unknown }).stage === 'string' &&
-        (PROGRESS_STAGES as readonly string[]).includes((entry as { stage: string }).stage) &&
+        (REVIEW_PROGRESS_STAGES as readonly string[]).includes(
+          (entry as { stage: string }).stage,
+        ) &&
         typeof (entry as { startedAt?: unknown }).startedAt === 'string',
     );
   } catch {
@@ -416,11 +413,11 @@ const mergeMilestones = (
   for (const milestone of incoming) {
     if (!byStage.has(milestone.stage)) byStage.set(milestone.stage, milestone);
   }
-  return JSON.stringify(PROGRESS_STAGES.flatMap((stage) => byStage.get(stage) ?? []));
+  return JSON.stringify(REVIEW_PROGRESS_STAGES.flatMap((stage) => byStage.get(stage) ?? []));
 };
 
 const progressStageIndex = (stage: string | null): number =>
-  stage === null ? -1 : (PROGRESS_STAGES as readonly string[]).indexOf(stage);
+  stage === null ? -1 : (REVIEW_PROGRESS_STAGES as readonly string[]).indexOf(stage);
 
 const statusFilterValue = (status: PublicRunFilter['status']): ReviewRunStatus | undefined => {
   switch (status) {
@@ -1573,18 +1570,8 @@ const createStore = (
     return result.meta.changes === 1;
   },
 
-  completeRunPublication: async ({ runId, occurredAt, fingerprints, decision }) => {
+  completeRunPublication: async ({ runId, occurredAt, decision }) => {
     const results = await database.batch([
-      ...fingerprints.map((fingerprint) =>
-        database
-          .prepare(
-            `INSERT OR IGNORE INTO finding_fingerprints
-              (repository_id, pull_request_number, head_sha, fingerprint, created_at)
-             SELECT repository_id, pull_request_number, head_sha, ?, ?
-             FROM review_runs WHERE run_id = ? AND status = 'scheduled'`,
-          )
-          .bind(fingerprint, occurredAt, runId),
-      ),
       database
         .prepare(
           `UPDATE review_runs SET status = 'completed', updated_at = ?, terminal_at = COALESCE(terminal_at, ?), review_decision = COALESCE(review_decision, ?)
@@ -1600,8 +1587,7 @@ const createStore = (
         )
         .bind(occurredAt, runId),
     ]);
-    const transitionResults = results.slice(-2);
-    return transitionResults.every((result) => result.meta.changes === 1);
+    return results.every((result) => result.meta.changes === 1);
   },
 
   getPublicOverview: async ({ since, limit }) => {

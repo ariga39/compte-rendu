@@ -205,7 +205,6 @@ it('renders persisted public review details and tokens while keeping private rev
     await store.completeRunPublication({
       runId: run.runId,
       occurredAt: now,
-      fingerprints: [],
       decision: 'request_changes',
     });
     const response = await SELF.fetch(`https://reviews.test/jobs/${run.runId}`);
