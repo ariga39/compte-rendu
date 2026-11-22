@@ -721,6 +721,36 @@ it('publishes only configured protocols from a rich catalog and freezes them in 
       { route_id: 'go/messages-model', profile: 'messages' },
       { route_id: 'go/responses-model', profile: 'responses' },
     ]);
+
+    const routes = profiles.map((row) => row.route_id);
+    const issued = await createGrantControl(db).issueV2({
+      jobId: 'job-rich',
+      snapshot: { routes },
+      latestIssueDeadline: deadline(),
+    });
+    expect(issued).toMatchObject({ kind: 'issued' });
+    if (issued.kind !== 'issued') throw new Error('expected an issued grant');
+    expect(issued.descriptors).toHaveLength(routes.length);
+    expect(issued.descriptors).toEqual(
+      expect.arrayContaining([
+        { routeId: 'go/both-model', profile: 'chat' },
+        { routeId: 'go/chat-model', profile: 'chat' },
+        { routeId: 'go/gemini-model', profile: 'gemini' },
+        { routeId: 'go/messages-model', profile: 'messages' },
+        { routeId: 'go/responses-model', profile: 'responses' },
+      ]),
+    );
+    expect(issued.descriptors.every((descriptor) => !('model' in descriptor))).toBe(true);
+    const stored = db.database
+      .prepare('SELECT route_mapping FROM grants WHERE job_id = ?')
+      .get('job-rich') as { readonly route_mapping: string };
+    expect(JSON.parse(stored.route_mapping)).toContainEqual({
+      routeId: 'go/responses-model',
+      upstreamModel: 'responses-model',
+      providerSlug: 'custom-go',
+      credentialAlias: 'default',
+      profile: 'responses',
+    });
   } finally {
     db.close();
   }
@@ -760,6 +790,29 @@ it('exposes only the explicit allowlist from an ID-only listing and freezes conf
       profile: 'responses',
       limit_json: '{"context":1050000,"output":128000}',
     });
+
+    const issued = await createGrantControl(db).issueV2({
+      jobId: 'job-sol',
+      snapshot: { routes: ['openai-platform/gpt-6.2-sol'] },
+      latestIssueDeadline: deadline(),
+    });
+    expect(issued).toMatchObject({
+      kind: 'issued',
+      descriptors: [
+        {
+          routeId: 'openai-platform/gpt-6.2-sol',
+          profile: 'responses',
+          limit: { context: 1_050_000, output: 128_000 },
+        },
+      ],
+    });
+    await expect(
+      createGrantControl(db).issue({
+        jobId: 'job-sol-v1',
+        snapshot: { routes: ['openai-platform/gpt-6.2-sol'] },
+        latestIssueDeadline: deadline(),
+      }),
+    ).resolves.toEqual({ kind: 'invalid' });
 
     const changed = createRelayCatalog(db, [
       {

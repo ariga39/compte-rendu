@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { createGrantControl } from '../apps/inference-worker/src/grants';
+import { authenticateGrant } from '../apps/inference-worker/src/ledger';
 import { REVIEW_ATTEMPT_BUDGET_MS } from '../packages/contracts/src';
 import { SqliteD1Database } from './support/d1-database';
 
@@ -10,15 +11,21 @@ const sha256 = (value: string) => createHash('sha256').update(value).digest('hex
 
 const setup = () => {
   const database = new SqliteD1Database(
-    ['0001_grants.sql', '0002_requests.sql'],
+    [
+      '0001_grants.sql',
+      '0002_requests.sql',
+      '0003_catalog.sql',
+      '0004_catalog_sources.sql',
+      '0005_route_profiles.sql',
+    ],
     '../../apps/inference-worker/migrations',
   );
   const insertCatalog = database.database.prepare(
-    `INSERT INTO catalog_routes (route_id, upstream_model, provider_slug, credential_alias)
-    VALUES (?, ?, ?, ?)`,
+    `INSERT INTO catalog_routes (route_id, upstream_model, provider_slug, credential_alias, profile)
+    VALUES (?, ?, ?, ?, ?)`,
   );
   for (const route of [...snapshot.routes, 'other-review']) {
-    insertCatalog.run(route, `${route}-native`, 'review-provider', 'default');
+    insertCatalog.run(route, `${route}-native`, 'review-provider', 'default', 'chat');
   }
   return { database, control: createGrantControl(database) };
 };
@@ -181,6 +188,131 @@ describe('Inference Worker grant issue', () => {
         } as never),
       ).resolves.toEqual({ kind: 'invalid' });
       expect(mutationCounts(database)).toEqual(before);
+    } finally {
+      database.close();
+    }
+  });
+
+  it('returns only route descriptors from freeze-v2 and persists their profile and limit', async () => {
+    const { database, control } = setup();
+    try {
+      database.database
+        .prepare(`UPDATE catalog_routes SET profile = ?, limit_json = ? WHERE route_id = ?`)
+        .run('responses', '{"context":100000,"output":8000}', 'deepseek-review');
+      const issued = await control.issueV2({
+        jobId: 'job-v2',
+        snapshot: { routes: ['deepseek-review'] },
+        latestIssueDeadline: (await d1Now(database)) + 60_000,
+      });
+      expect(issued).toMatchObject({
+        kind: 'issued',
+        descriptors: [
+          {
+            routeId: 'deepseek-review',
+            profile: 'responses',
+            limit: { context: 100000, output: 8000 },
+          },
+        ],
+      });
+      if (issued.kind !== 'issued') throw new Error('expected an issued grant');
+      expect(issued.descriptors).toHaveLength(1);
+      expect(issued.descriptors[0]).not.toHaveProperty('upstreamModel');
+      expect(issued.descriptors[0]).not.toHaveProperty('credentialAlias');
+
+      const grant = database.database
+        .prepare('SELECT route_mapping FROM grants WHERE job_id = ?')
+        .get('job-v2') as { readonly route_mapping: string };
+      expect(JSON.parse(grant.route_mapping)).toEqual([
+        {
+          routeId: 'deepseek-review',
+          upstreamModel: 'deepseek-review-native',
+          providerSlug: 'review-provider',
+          credentialAlias: 'default',
+          profile: 'responses',
+          limit: { context: 100000, output: 8000 },
+        },
+      ]);
+    } finally {
+      database.close();
+    }
+  });
+
+  it('keeps a v1 grant mapping compatible and rejects a non-chat profile', async () => {
+    const { database, control } = setup();
+    try {
+      const issued = await control.issue({
+        jobId: 'job-v1-chat',
+        snapshot,
+        latestIssueDeadline: (await d1Now(database)) + 60_000,
+      });
+      expect(issued.kind).toBe('issued');
+      const grant = database.database
+        .prepare('SELECT route_mapping FROM grants WHERE job_id = ?')
+        .get('job-v1-chat') as { readonly route_mapping: string };
+      expect(JSON.parse(grant.route_mapping)).toContainEqual({
+        routeId: 'deepseek-review',
+        upstreamModel: 'deepseek-review-native',
+        providerSlug: 'review-provider',
+        credentialAlias: 'default',
+      });
+      expect(JSON.parse(grant.route_mapping)[0]).not.toHaveProperty('profile');
+      expect(JSON.parse(grant.route_mapping)[0]).not.toHaveProperty('limit');
+
+      database.database
+        .prepare(`UPDATE catalog_routes SET profile = ? WHERE route_id = ?`)
+        .run('responses', 'other-review');
+      await expect(
+        control.issue({
+          jobId: 'job-v1-non-chat',
+          snapshot: { routes: ['other-review'] },
+          latestIssueDeadline: (await d1Now(database)) + 60_000,
+        }),
+      ).resolves.toEqual({ kind: 'invalid' });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('reads a legacy frozen grant mapping as chat', async () => {
+    const { database } = setup();
+    try {
+      const token = 'legacy-grant-token-1234567890';
+      const now = await d1Now(database);
+      database.database
+        .prepare(
+          `INSERT INTO grants (
+            job_id, token_hash, snapshot, route_mapping, issued_at, expires_at,
+            latest_issue_deadline, revoked_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`,
+        )
+        .run(
+          'job-legacy',
+          sha256(token),
+          JSON.stringify({ routes: ['deepseek-review'] }),
+          JSON.stringify([
+            {
+              routeId: 'deepseek-review',
+              upstreamModel: 'deepseek-review-native',
+              providerSlug: 'review-provider',
+              credentialAlias: 'default',
+            },
+          ]),
+          now,
+          now + 60_000,
+          now + 60_000,
+        );
+      await expect(authenticateGrant(database, `Bearer ${token}`)).resolves.toMatchObject({
+        jobId: 'job-legacy',
+        routes: [
+          {
+            routeId: 'deepseek-review',
+            upstreamModel: 'deepseek-review-native',
+            providerSlug: 'review-provider',
+            credentialAlias: 'default',
+            profile: 'chat',
+          },
+        ],
+      });
     } finally {
       database.close();
     }

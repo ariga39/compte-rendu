@@ -1,6 +1,10 @@
 import { Effect, Option, Schema } from 'effect';
-import { REVIEW_ATTEMPT_BUDGET_MS } from '@compte-rendu/contracts';
-import { FrozenRouteMapping, RouteId, type FrozenRoute } from './routes.ts';
+import {
+  REVIEW_ATTEMPT_BUDGET_MS,
+  ModelRouteLimit,
+  type ModelRouteDescriptor,
+} from '@compte-rendu/contracts';
+import { FrozenRouteMapping, RouteId, legacyFrozenMapping, type FrozenRoute } from './routes.ts';
 
 export const GRANT_TTL_MS = 4 * REVIEW_ATTEMPT_BUDGET_MS;
 
@@ -29,6 +33,17 @@ export type IssueGrantResult =
   | { readonly kind: 'deadline-exceeded' }
   | { readonly kind: 'invalid' };
 
+export type IssueGrantV2Result =
+  | {
+      readonly kind: 'issued';
+      readonly token: string;
+      readonly expiresAt: string;
+      readonly descriptors: readonly ModelRouteDescriptor[];
+    }
+  | { readonly kind: 'duplicate' }
+  | { readonly kind: 'deadline-exceeded' }
+  | { readonly kind: 'invalid' };
+
 export const RevokeGrantInput = Schema.Struct({ jobId: Schema.NonEmptyString });
 export type RevokeGrantInput = typeof RevokeGrantInput.Type;
 
@@ -36,6 +51,7 @@ export type RevokeGrantResult = { readonly kind: 'revoked' } | { readonly kind: 
 
 export interface InferenceGrantControl {
   issue(input: IssueGrantInput): Promise<IssueGrantResult>;
+  issueV2(input: IssueGrantInput): Promise<IssueGrantV2Result>;
   revoke(input: RevokeGrantInput): Promise<RevokeGrantResult>;
 }
 
@@ -74,8 +90,21 @@ export const sha256Hex = async (value: string): Promise<string> => {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
 };
 
-export const createGrantControl = (database: D1DatabaseLike): InferenceGrantControl => {
-  const issue = Effect.fn('InferenceGrantControl.issue')(function* (input: IssueGrantInput) {
+interface CatalogRouteRow {
+  readonly routeId: string;
+  readonly upstreamModel: string;
+  readonly providerSlug: string;
+  readonly credentialAlias: string;
+  readonly profile: FrozenRoute['profile'];
+  readonly limit_json: string | null;
+}
+
+const decodeStoredLimit = Schema.decodeUnknownOption(Schema.fromJsonString(ModelRouteLimit), {
+  onExcessProperty: 'error',
+});
+
+const issueFor = (database: D1DatabaseLike, version: 1 | 2) =>
+  Effect.fn('InferenceGrantControl.issue')(function* (input: IssueGrantInput) {
     const decoded = Schema.decodeUnknownOption(IssueGrantInput, {
       onExcessProperty: 'error',
     })(input);
@@ -85,18 +114,35 @@ export const createGrantControl = (database: D1DatabaseLike): InferenceGrantCont
       database
         .prepare(
           `SELECT route_id AS routeId, upstream_model AS upstreamModel,
-                 provider_slug AS providerSlug, credential_alias AS credentialAlias
+                 provider_slug AS providerSlug, credential_alias AS credentialAlias,
+                 profile, limit_json
           FROM catalog_routes
           WHERE route_id IN (SELECT value FROM json_each(?))`,
         )
         .bind(JSON.stringify(decoded.value.snapshot.routes))
-        .all<FrozenRoute>(),
+        .all<CatalogRouteRow>(),
     );
-    const catalog = new Map(rows.results.map((route) => [route.routeId, route]));
+    const routes: FrozenRoute[] = [];
+    for (const row of rows.results) {
+      const { limit_json: limitJson, ...route } = row;
+      if (limitJson === null) {
+        routes.push(route);
+        continue;
+      }
+      const limit = decodeStoredLimit(limitJson);
+      if (Option.isNone(limit)) return { kind: 'invalid' as const };
+      routes.push({ ...route, limit: limit.value });
+    }
+    const catalog = new Map(routes.map((route) => [route.routeId, route]));
     const frozen = Schema.decodeUnknownOption(FrozenRouteMapping)(
       decoded.value.snapshot.routes.map((id) => catalog.get(id)),
     );
     if (Option.isNone(frozen)) return { kind: 'invalid' as const };
+    // v1 is a Chat Completions-only contract. It must not hand a non-chat
+    // profile to a Runner that cannot route it, and its persisted mapping stays
+    // byte-compatible with the pre-profile relay.
+    if (version === 1 && frozen.value.some((route) => route.profile !== 'chat'))
+      return { kind: 'invalid' as const };
 
     const token = randomToken();
     const tokenHash = yield* Effect.promise(() => sha256Hex(token));
@@ -117,7 +163,7 @@ export const createGrantControl = (database: D1DatabaseLike): InferenceGrantCont
           decoded.value.jobId,
           tokenHash,
           JSON.stringify(decoded.value.snapshot),
-          JSON.stringify(frozen.value),
+          JSON.stringify(version === 1 ? legacyFrozenMapping(frozen.value) : frozen.value),
           GRANT_TTL_MS,
           decoded.value.latestIssueDeadline,
           decoded.value.latestIssueDeadline,
@@ -148,8 +194,13 @@ export const createGrantControl = (database: D1DatabaseLike): InferenceGrantCont
       kind: 'issued' as const,
       token,
       expiresAt: new Date(stored.expires_at).toISOString(),
+      frozen: frozen.value,
     };
   });
+
+export const createGrantControl = (database: D1DatabaseLike): InferenceGrantControl => {
+  const issue = issueFor(database, 1);
+  const issueV2 = issueFor(database, 2);
 
   const revoke = Effect.fn('InferenceGrantControl.revoke')(function* (input: RevokeGrantInput) {
     const decoded = Schema.decodeUnknownOption(RevokeGrantInput, {
@@ -187,6 +238,20 @@ export const createGrantControl = (database: D1DatabaseLike): InferenceGrantCont
 
   return {
     issue: (input) => Effect.runPromise(issue(input)),
+    issueV2: async (input) => {
+      const result = await Effect.runPromise(issueV2(input));
+      if (result.kind !== 'issued') return result;
+      return {
+        kind: 'issued',
+        token: result.token,
+        expiresAt: result.expiresAt,
+        descriptors: result.frozen.map(({ routeId, profile, limit }) => ({
+          routeId,
+          profile,
+          ...(limit === undefined ? {} : { limit }),
+        })),
+      };
+    },
     revoke: (input) => Effect.runPromise(revoke(input)),
   };
 };
