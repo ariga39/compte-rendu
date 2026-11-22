@@ -7,11 +7,9 @@ export { ModelProfile } from '@compte-rendu/contracts';
 
 // Gemini places the model identity in the URL path. A frozen upstream model is
 // therefore one plain model-name segment: no slash, dot segment or encoding.
-export const GeminiUpstreamModel = SafeModel.check(
-  Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/),
+export const isGeminiUpstreamModel = Schema.is(
+  SafeModel.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/)),
 );
-export const isGeminiUpstreamModel = (value: unknown): value is string =>
-  Schema.is(GeminiUpstreamModel)(value);
 
 export const FrozenRoute = Schema.Struct({
   routeId: RouteId,

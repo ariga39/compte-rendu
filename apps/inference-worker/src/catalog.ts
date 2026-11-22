@@ -160,7 +160,6 @@ function candidateSources(sources: readonly Source[], gateway: GatewayConfig | n
       readonly credential: string;
       readonly models: Record<string, string>;
       readonly resolved: Record<string, RouteModel>;
-      conflict: boolean;
       invalid: boolean;
     }
   >();
@@ -174,7 +173,6 @@ function candidateSources(sources: readonly Source[], gateway: GatewayConfig | n
         credential,
         models: {},
         resolved: {},
-        conflict: false,
         invalid: false,
       };
       const overrides = 'models' in source ? source.models : undefined;
@@ -196,7 +194,7 @@ function candidateSources(sources: readonly Source[], gateway: GatewayConfig | n
           // Two producing sources disagree about the same route's model,
           // profile or limit. Fail this source refresh rather than letting
           // configuration order decide which descriptor wins.
-          group.conflict = true;
+          group.invalid = true;
           continue;
         }
         group.resolved[id] = resolved;
@@ -209,7 +207,7 @@ function candidateSources(sources: readonly Source[], gateway: GatewayConfig | n
           credential,
           aliases: group.models,
           load: async () => {
-            if (group.conflict || group.invalid) return { models: {}, rejected: 1 };
+            if (group.invalid) return { models: {}, rejected: 1 };
             return { models: { ...group.resolved }, rejected: 0 };
           },
         });
