@@ -2,6 +2,7 @@ import { DateTime, Effect, Option, Schema } from 'effect';
 import {
   ModelUsageSummary,
   PublicTaskFailure,
+  PublicMilestone,
   type PublicTaskState,
 } from '@compte-rendu/contracts';
 import { GitHubRequestError } from './github-review-adapter';
@@ -53,15 +54,8 @@ export const IsoTimestamp = Schema.String.check(
   Schema.makeFilter((value) => Option.isSome(DateTime.make(value)), { expected: 'ISO timestamp' }),
 );
 
-const PublicExecutionStageValue = Schema.Literals([
-  'checkout',
-  'sandbox',
-  'agent',
-  'evidence',
-  'cleanup',
-]);
 const PublicMilestoneSchema = Schema.Struct({
-  stage: PublicExecutionStageValue,
+  ...PublicMilestone.fields,
   startedAt: IsoTimestamp,
 });
 const PublicMilestonesSchema = Schema.fromJsonString(Schema.Array(PublicMilestoneSchema));

@@ -1,3 +1,4 @@
+import type { RunnerProgressMilestone } from '@compte-rendu/contracts';
 import type { ReviewDecision } from '@compte-rendu/contracts';
 import { ReviewConfiguration, ReviewModelSelection } from '@compte-rendu/contracts';
 import { Option, Schema } from 'effect';
@@ -386,10 +387,7 @@ const publicRunFrom = `
 
 const PROGRESS_STAGES = ['checkout', 'sandbox', 'agent', 'evidence', 'cleanup'] as const;
 type ProgressStage = (typeof PROGRESS_STAGES)[number];
-interface ProgressMilestone {
-  stage: ProgressStage;
-  startedAt: string;
-}
+type ProgressMilestone = RunnerProgressMilestone;
 
 const parseMilestones = (raw: string | null): ProgressMilestone[] => {
   if (raw === null) return [];
@@ -413,18 +411,12 @@ const mergeMilestones = (
   existing: string | null,
   incoming: readonly ProgressMilestone[],
 ): string => {
-  const byStage = new Map<ProgressStage, string>();
-  for (const milestone of parseMilestones(existing))
-    byStage.set(milestone.stage, milestone.startedAt);
+  const byStage = new Map<ProgressStage, ProgressMilestone>();
+  for (const milestone of parseMilestones(existing)) byStage.set(milestone.stage, milestone);
   for (const milestone of incoming) {
-    if (!byStage.has(milestone.stage)) byStage.set(milestone.stage, milestone.startedAt);
+    if (!byStage.has(milestone.stage)) byStage.set(milestone.stage, milestone);
   }
-  return JSON.stringify(
-    PROGRESS_STAGES.filter((stage) => byStage.has(stage)).map((stage) => ({
-      stage,
-      startedAt: byStage.get(stage) as string,
-    })),
-  );
+  return JSON.stringify(PROGRESS_STAGES.flatMap((stage) => byStage.get(stage) ?? []));
 };
 
 const progressStageIndex = (stage: string | null): number =>

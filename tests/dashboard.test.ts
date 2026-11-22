@@ -471,17 +471,30 @@ describe('public dashboard reads are DB-only', () => {
       );
     const identity = { runId: review.runId, id: 'job-progress-1', attempt: 1 };
     const checkout = { stage: 'checkout', startedAt: '2026-01-01T00:00:11.000Z' };
+    const sandbox = { stage: 'sandbox', startedAt: checkout.startedAt, runtime: 'microsandbox' };
     const agent = { stage: 'agent', startedAt: '2026-01-01T00:00:12.000Z' };
     expect(
       (await post({ ...identity, sequence: 1, stage: 'checkout', milestones: [checkout] })).status,
     ).toBe(202);
     expect(
-      (await post({ ...identity, sequence: 2, stage: 'agent', milestones: [checkout, agent] }))
-        .status,
+      (
+        await post({
+          ...identity,
+          sequence: 2,
+          stage: 'agent',
+          milestones: [checkout, sandbox, agent],
+        })
+      ).status,
     ).toBe(202);
     expect(
-      (await post({ ...identity, sequence: 2, stage: 'agent', milestones: [checkout, agent] }))
-        .status,
+      (
+        await post({
+          ...identity,
+          sequence: 2,
+          stage: 'agent',
+          milestones: [checkout, sandbox, agent],
+        })
+      ).status,
     ).toBe(204);
     expect(
       (await post({ ...identity, sequence: 3, stage: 'checkout', milestones: [checkout] })).status,
@@ -506,7 +519,7 @@ describe('public dashboard reads are DB-only', () => {
     }>(await get(worker, `/api/jobs/${review.runId}`));
     expect(detail.task.stage).toBe('agent');
     expect(detail.task.lastProgressAt).not.toBeNull();
-    expect(detail.milestones.map((milestone) => milestone.stage)).toEqual(['checkout', 'agent']);
+    expect(detail.milestones).toEqual([checkout, sandbox, agent]);
   });
 
   it('forwards public dashboard reads through ingress without leaking private identity', async () => {

@@ -93,6 +93,8 @@
       ? `${identity.repositoryFullName} #${identity.pullRequestNumber}`
       : 'Anonymous review',
   );
+  const runtimeLabels = { sbx: 'Docker Sandbox (sbx)', microsandbox: 'microsandbox', opensandbox: 'OpenSandbox', openshell: 'OpenShell' };
+  const runtime = $derived(dash.data?.detail.milestones.find((entry) => entry.stage === 'sandbox')?.runtime);
   const timeline = $derived(dash.data ? mergeMilestones(dash.data.detail) : []);
   const currentStage = $derived(dash.data?.task.processing ?? dash.data?.task.stage);
   const currentIndex = $derived(dash.data?.task.status === 'scheduled'
@@ -581,6 +583,7 @@
       <AccordionItem title="Technical details">
         <h3>Execution details</h3>
         <StructuredList>
+          {@render textFact('Sandbox backend', runtime ? runtimeLabels[runtime] : 'Not recorded')}
           {@render timeFact('Runner execution started', view.executionStartedAt)}
           {@render timeFact('Result checks started', view.submissionCompletedAt)}
           {@render timeFact('Cleanup attempt finished', view.cleanupCompletedAt)}

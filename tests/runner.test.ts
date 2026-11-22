@@ -8617,7 +8617,7 @@ describe('Runner lifecycle recovery', () => {
       stage: 'cleanup',
       milestones: [
         { stage: 'checkout', startedAt: expect.any(String) },
-        { stage: 'sandbox', startedAt: expect.any(String) },
+        { stage: 'sandbox', startedAt: expect.any(String), runtime: 'sbx' },
         { stage: 'agent', startedAt: expect.any(String) },
         { stage: 'evidence', startedAt: expect.any(String) },
         { stage: 'cleanup', startedAt: expect.any(String) },
@@ -8675,7 +8675,7 @@ describe('Runner progress coalescing', () => {
       );
       expect(reports[1].milestones).toEqual([
         reports[0].milestones[0],
-        { stage: 'sandbox', startedAt: expect.any(String) },
+        { stage: 'sandbox', startedAt: expect.any(String), runtime: 'sbx' },
         { stage: 'agent', startedAt: expect.any(String) },
       ]);
       releaseAgent();

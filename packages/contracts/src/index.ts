@@ -224,8 +224,17 @@ export const RunnerProgressStage = Schema.Literals([
 ]);
 export type RunnerProgressStage = typeof RunnerProgressStage.Type;
 
+export const SandboxRuntimeKind = Schema.Literals([
+  'sbx',
+  'openshell',
+  'opensandbox',
+  'microsandbox',
+]);
+export type SandboxRuntimeKind = Schema.Schema.Type<typeof SandboxRuntimeKind>;
+
 export const RunnerProgressMilestone = Schema.Struct({
   stage: RunnerProgressStage,
+  runtime: Schema.optionalKey(SandboxRuntimeKind),
   startedAt: Schema.NonEmptyString,
 });
 export type RunnerProgressMilestone = typeof RunnerProgressMilestone.Type;
@@ -743,6 +752,7 @@ export type PublicDashboardSnapshot = typeof PublicDashboardSnapshot.Type;
 
 export const PublicMilestone = Schema.Struct({
   stage: PublicExecutionStage,
+  runtime: Schema.optionalKey(SandboxRuntimeKind),
   startedAt: Schema.NonEmptyString,
 });
 export type PublicMilestone = typeof PublicMilestone.Type;

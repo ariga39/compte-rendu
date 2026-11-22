@@ -1652,6 +1652,9 @@ export const createRunner = (options: RunnerOptions = {}) => {
         ...(job.lifecycle?.milestones ?? []),
         {
           stage,
+          ...(stage === 'sandbox'
+            ? { runtime: job.sandboxRuntime?.metadata.runtime ?? sandboxRuntime.kind }
+            : {}),
           startedAt: DateTime.formatIso(DateTime.nowUnsafe()),
         },
       ],
