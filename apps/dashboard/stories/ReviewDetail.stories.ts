@@ -23,6 +23,7 @@ const claimed = {
 };
 const records = [
   { stage: 'checkout', startedAt: at(6) },
+  { stage: 'sandbox', startedAt: at(8), runtime: 'microsandbox' },
   { stage: 'agent', startedAt: at(16) },
 ] as const;
 function scenario(

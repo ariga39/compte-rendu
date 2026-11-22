@@ -8,6 +8,7 @@ import {
   ReviewEvent,
   RunnerReviewResult,
   type ReviewDecision,
+  type RunnerProgressMilestone,
   GitHubSha,
   type PullRequestFacts as PullRequestFactsType,
   type OperationalLog,
@@ -541,10 +542,7 @@ export interface ReviewStateQueries {
     receivedAt: string;
     sequence: number;
     stage: 'checkout' | 'sandbox' | 'agent' | 'evidence' | 'cleanup';
-    milestones: readonly {
-      stage: 'checkout' | 'sandbox' | 'agent' | 'evidence' | 'cleanup';
-      startedAt: string;
-    }[];
+    milestones: readonly RunnerProgressMilestone[];
   }): Promise<boolean>;
   recordModelUsage?(input: {
     runId: string;
@@ -559,10 +557,7 @@ export interface ReviewStateQueries {
     receivedAt: string;
     sequence: number;
     stage: 'checkout' | 'sandbox' | 'agent' | 'evidence' | 'cleanup';
-    milestones: readonly {
-      stage: 'checkout' | 'sandbox' | 'agent' | 'evidence' | 'cleanup';
-      startedAt: string;
-    }[];
+    milestones: readonly RunnerProgressMilestone[];
   }): Promise<boolean>;
   listDueRepositoryMetadata?(input: {
     now: string;

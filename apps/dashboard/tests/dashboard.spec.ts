@@ -1002,6 +1002,19 @@ test('detail renders uncertain publication neutrally', async ({ page, harness, b
   expect(text.toLowerCase()).not.toContain('not published');
 });
 
+test('task details identify the recorded sandbox backend', async ({ page, harness, base }) => {
+  harness.setHandler(() =>
+    ok(
+      detailData(task({ runId: 'run-vm' }), [
+        { stage: 'sandbox', startedAt: NOW, runtime: 'microsandbox' },
+      ]),
+    ),
+  );
+  await page.goto(`${base}/jobs/run-vm`);
+  await page.getByText('Technical details', { exact: true }).click();
+  await expect(page.locator('.fact', { hasText: 'Sandbox backend' })).toContainText('microsandbox');
+});
+
 test('detail shows DB processing milestones and neutral legacy observations', async ({
   page,
   harness,
@@ -1040,6 +1053,7 @@ test('detail shows DB processing milestones and neutral legacy observations', as
   expect(text).toContain('Cleanup failed');
   expect(text).not.toContain('Cleaned up');
   expect(text).toContain('Result checks started');
+  await expect(page.locator('.fact', { hasText: 'Sandbox backend' })).toContainText('Not recorded');
   expect(text).not.toContain('Submission finished reported');
 });
 

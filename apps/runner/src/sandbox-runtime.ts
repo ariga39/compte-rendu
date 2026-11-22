@@ -1,14 +1,8 @@
 import type { ChildProcess } from 'node:child_process';
 import { Option, Schema } from 'effect';
-import type { RunnerProcessErrorCode } from '@compte-rendu/contracts';
+import { SandboxRuntimeKind, type RunnerProcessErrorCode } from '@compte-rendu/contracts';
 
-export const SandboxRuntimeKind = Schema.Literals([
-  'sbx',
-  'openshell',
-  'opensandbox',
-  'microsandbox',
-]);
-export type SandboxRuntimeKind = Schema.Schema.Type<typeof SandboxRuntimeKind>;
+export { SandboxRuntimeKind };
 
 export interface OpenShellRuntimeConfig {
   readonly gateway?: string;
