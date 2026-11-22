@@ -85,6 +85,21 @@ export const messagesToolWire = (model = 'claude-native') =>
   messagesTool() +
   messagesStop('tool_use');
 
+export const messagesWrongStopTypeWire = (model = 'claude-native') =>
+  messagesStart(model, {
+    input_tokens: 17,
+    cache_read_input_tokens: 2,
+    cache_creation_input_tokens: 0,
+    output_tokens: 1,
+  }) +
+  messagesText('Wrong terminal type') +
+  event('message_delta', {
+    type: 'message_delta',
+    delta: { stop_reason: 'end_turn', stop_sequence: null },
+    usage: { output_tokens: 2 },
+  }) +
+  event('message_stop', { type: 'message_delta' });
+
 export const messagesMissingStopWire = (model = 'claude-native') =>
   messagesStart(model, {
     input_tokens: 17,
@@ -116,6 +131,8 @@ export const messagesProtocolStream = (scenario, body) => {
       return messagesSuccessWire();
     case 'messages-tool':
       return hasToolResult(body) ? messagesSuccessWire() : messagesToolWire();
+    case 'messages-wrong-stop-type':
+      return messagesWrongStopTypeWire();
     case 'messages-missing-stop':
       return messagesMissingStopWire();
     case 'messages-max-tokens':
