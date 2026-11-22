@@ -1267,7 +1267,9 @@ settings forward.
    model base on port 443 ending in `/v1`, and the relay issuer generation.
    If any reviewer or synthesis route uses a non-Chat protocol or declares
    a context or output limit, set `RUNNER_LLM_GRANT_VERSION=2`
-   in the Runner service environment after deploying both Workers. Restart the drained
+   only after verifying that the installed Runner build can issue v2 grants and both
+   deployed Workers support v2. Upgrade any older component before enabling the roster.
+   Restart the drained
    Runner to load the setting and check its maintenance status. The Runner uses each
    route's frozen profile to configure OpenCode. Before enabling another protocol,
    verify the deployed inference Worker serves its endpoint and Gateway destination.
@@ -1281,8 +1283,7 @@ settings forward.
    including every route's protocol, Gateway destination, credential and required
    limits. Keep the current Runner accepting jobs until all queued or running
    jobs with incompatible frozen routes have finished. This includes Chat
-   routes whose destination the target Worker cannot resolve. When reverting
-   to a v1 Runner, drain it, resolve
-   outstanding grants on their issuing backend, and remove `RUNNER_LLM_GRANT_VERSION`
-   or set it to `1`. Restart the Runner with the matching binary and configuration
-   before reverting the Workers. See the [upgrade procedure](llm-service.md#upgrading-an-installation-with-the-former-local-service).
+   routes whose destination the target Worker cannot resolve. Drain and stop the Runner and resolve outstanding grants on their issuing backend.
+   If the target Runner or either target Worker lacks grant v2, remove
+   `RUNNER_LLM_GRANT_VERSION` or set it to `1`. Restore both Workers before
+   starting the Runner with its matching binary and configuration. See the [upgrade procedure](llm-service.md#upgrading-an-installation-with-the-former-local-service).
