@@ -311,16 +311,12 @@ test('detail sorts shuffled model usage deterministically and preserves labels a
       usage: {
         version: 1,
         models: [
-          row('null-z', null),
-          row('z-route', 'provider/zeta-model'),
-          row('tie-b', 'same/name'),
-          row('alpha-vendor', 'vendor/alpha-model'),
-          row('echo-z', 'z/echo-model'),
-          row('null-a', null),
-          row('alpha-openai', 'openai/alpha-model'),
-          row('echo-a', 'a/echo-model'),
-          row('tie-a', 'same/name'),
-          row('beta', 'vendor/beta-model'),
+          row('missing-z', null),
+          row('zeta', 'provider/zeta'),
+          row('tie-b', 'a/echo'),
+          row('other', 'z/echo'),
+          row('missing-a', null),
+          row('tie-a', 'a/echo'),
         ],
       },
     }),
@@ -328,49 +324,23 @@ test('detail sorts shuffled model usage deterministically and preserves labels a
   await page.goto(`${base}/jobs/shuffled-models`);
   const usage = page.getByRole('region', { name: 'Models and tokens' });
   const disclosures = usage.getByRole('button');
-  await expect(disclosures).toHaveCount(10);
-  const labels = (await disclosures.allTextContents()).map((label) => label.trim());
-  expect(labels).toEqual([
-    'alpha-model',
-    'alpha-model',
-    'beta-model',
-    'echo-model',
-    'echo-model',
-    'name',
-    'name',
-    'zeta-model',
-    'Model not reported',
-    'Model not reported',
-  ]);
-  const routes = await usage.locator('.bx--accordion__item').evaluateAll((items) =>
-    items.map((item) => {
-      const text = item.textContent ?? '';
-      const match = /Route: ([^·]+)/.exec(text);
-      return match?.[1]?.trim() ?? null;
-    }),
-  );
-  expect(routes).toEqual([
-    'alpha-openai',
-    'alpha-vendor',
-    'beta',
-    'echo-a',
-    'echo-z',
-    'tie-a',
-    'tie-b',
-    'z-route',
-    'null-a',
-    'null-z',
-  ]);
-  for (let index = 0; index < 10; index += 1)
-    await expect(disclosures.nth(index)).toHaveAttribute('aria-expanded', 'false');
-
-  const first = disclosures.first();
-  await first.click();
-  await expect(first).toHaveAttribute('aria-expanded', 'true');
-  await expect(usage.getByText('Route: alpha-openai')).toBeVisible();
-  await first.click();
-  await expect(first).toHaveAttribute('aria-expanded', 'false');
-  await expect(usage.getByText('Route: alpha-openai')).toBeHidden();
+  const expected = [
+    ['echo', 'tie-a'],
+    ['echo', 'tie-b'],
+    ['echo', 'other'],
+    ['zeta', 'zeta'],
+    ['Model not reported', 'missing-a'],
+    ['Model not reported', 'missing-z'],
+  ] as const;
+  await expect(disclosures).toHaveCount(expected.length);
+  for (const [index, [name, route]] of expected.entries()) {
+    const button = disclosures.nth(index);
+    await expect(button).toHaveAccessibleName(name);
+    await expect(button).toHaveAttribute('aria-expanded', 'false');
+    await button.click();
+    await expect(usage.getByText('Route: ' + route + ' ·', { exact: false })).toBeVisible();
+    await button.click();
+  }
 });
 
 test('detail shows cache-read percentage only for complete comparable totals', async ({
