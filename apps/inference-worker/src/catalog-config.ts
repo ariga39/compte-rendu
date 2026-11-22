@@ -62,10 +62,6 @@ export const RelayCatalogSource = Schema.Union([
   }),
 ]).check(
   Schema.makeFilter(
-    (source) => !source.profile || !source.profiles || source.profiles.includes(source.profile),
-    { expected: 'source profiles include the configured default' },
-  ),
-  Schema.makeFilter(
     (source) => {
       const required = nativeProfile(source.providerSlug);
       if (!required) return true;
