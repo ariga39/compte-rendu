@@ -4,7 +4,7 @@
   beyond its issue's primary behaviour.
 - Use behavior-based TDD through the seams accepted in `docs/design.md`: one
   failing behavior, minimal implementation, then the next slice.
-- Use Effect 4 RC for runtime code. Before implementation, read the applicable
+- Use stable Effect 4 for runtime code. Before implementation, read the applicable
   guidance in <https://github.com/Effect-TS/skills> and follow its Effect 4
   conventions.
 - Tests observe public behavior. Do not test private functions, internal call

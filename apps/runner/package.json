@@ -10,7 +10,7 @@
     "@alibaba-group/opensandbox": "1.2.1",
     "@compte-rendu/contracts": "workspace:*",
     "chokidar": "5.0.0",
-    "effect": "4.0.0-rc.111",
+    "effect": "4.1.5",
     "smol-toml": "1.9.1"
   }
 }

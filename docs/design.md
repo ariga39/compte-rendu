@@ -313,7 +313,7 @@ Tests observe public behavior through these established seams:
 | Built dashboard in browser        | Navigation, filters, privacy expiry, refresh and accessibility                                                  |
 
 Use behavior-based TDD with narrow external adapters, not private-helper or
-internal-call-order assertions. Runtime code follows the pinned Effect 4 RC and
+internal-call-order assertions. Runtime code follows the pinned stable Effect 4 and
 [Effect guidance](https://github.com/Effect-TS/skills). Vite+/pnpm supply the locked
 toolchain. See [local runtime tracer](local-runtime-tracer.md) for workerd coverage.
 
