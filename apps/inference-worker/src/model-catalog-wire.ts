@@ -81,9 +81,7 @@ const catalogModel = (entry: typeof CatalogEntry.Type): CatalogModel => {
       : entry.capabilities?.tools?.supported === false
         ? []
         : (Object.keys(ApiProfile) as (keyof typeof ApiProfile)[])
-            .filter(
-              (name) => Object.hasOwn(entry.api!, name) && entry.api![name] !== null,
-            )
+            .filter((name) => Object.hasOwn(entry.api!, name) && entry.api![name] !== null)
             .map((name) => ApiProfile[name]);
   const recommended =
     entry.recommended_api === undefined
