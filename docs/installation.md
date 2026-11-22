@@ -1224,8 +1224,8 @@ Gateway Run token per installation. Provision them in the same account as the
 application Worker. Give the relay only its own D1 binding. In AI Gateway, set
 the upstream API base (including its version path) when using a custom provider.
 For OpenAI Platform, select the built-in `native:openai` destination and
-provision its BYOK alias in this gateway. Store the
-upstream credential in that account's Secrets Store and select its BYOK alias.
+store the upstream credential in that account’s Secrets Store. Configure the
+matching BYOK alias in this gateway.
 The Run token belongs in the inference Worker's `AI_GATEWAY_RUN_TOKEN` secret.
 The Runner receives job grants through the existing authenticated callback origin.
 
