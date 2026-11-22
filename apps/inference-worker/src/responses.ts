@@ -53,13 +53,22 @@ const OutputTextPart = Schema.Struct({
 const ContentPart = Schema.Union([InputTextPart, OutputTextPart]);
 const MessageContent = Schema.Union([Schema.String, Schema.Array(ContentPart)]);
 
-const MessageItem = Schema.Struct({
+const MessageFields = {
   type: Schema.optionalKey(Schema.Literal('message')),
-  role: Schema.Literals(['user', 'assistant', 'system', 'developer']),
   content: MessageContent,
   id: Schema.optionalKey(ItemId),
   status: Schema.optionalKey(Schema.Literal('completed')),
+};
+const AssistantMessageItem = Schema.Struct({
+  ...MessageFields,
+  role: Schema.Literal('assistant'),
+  phase: Schema.optionalKey(Schema.Literals(['commentary', 'final_answer'])),
 });
+const OtherMessageItem = Schema.Struct({
+  ...MessageFields,
+  role: Schema.Literals(['user', 'system', 'developer']),
+});
+const MessageItem = Schema.Union([AssistantMessageItem, OtherMessageItem]);
 
 const FunctionCallItem = Schema.Struct({
   type: Schema.Literal('function_call'),
@@ -70,10 +79,14 @@ const FunctionCallItem = Schema.Struct({
   status: Schema.optionalKey(Schema.Literal('completed')),
 });
 
+const FunctionCallOutputPart = Schema.Struct({
+  type: Schema.Literal('input_text'),
+  text: Schema.String,
+});
 const FunctionCallOutputItem = Schema.Struct({
   type: Schema.Literal('function_call_output'),
   call_id: CallId,
-  output: Schema.String,
+  output: Schema.Union([Schema.String, Schema.Array(FunctionCallOutputPart)]),
 });
 
 const ReasoningSummaryPart = Schema.Struct({

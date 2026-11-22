@@ -14,6 +14,7 @@ import type { RelayCatalogSnapshot } from '../../apps/inference-worker/src/catal
 import type { D1DatabaseLike as ReviewDb } from '../../apps/core/src/review-state-store';
 import { MAX_RESPONSES_TERMINAL_BYTES } from '../../apps/inference-worker/src/responses';
 import { responsesSecondTurnFixture } from '../fixtures/responses-second-turn';
+import { responsesMultipartToolOutputFixture } from '../fixtures/responses-multipart';
 
 interface InferenceBinding {
   catalog(): Promise<RelayCatalogSnapshot>;
@@ -303,18 +304,70 @@ describe('Responses route authentication and native streaming', () => {
         },
       ],
       [
-        'structured tool result',
+        'media in tool output array',
         {
           ...base,
           input: [
             {
               type: 'function_call_output',
               call_id: 'call_1',
-              output: [{ type: 'input_text', text: 'contents' }],
+              output: [
+                {
+                  type: 'input_image',
+                  image_url: 'https://remote.example/image.png',
+                },
+              ],
             },
           ],
         },
       ],
+      [
+        'file in tool output array',
+        {
+          ...base,
+          input: [
+            {
+              type: 'function_call_output',
+              call_id: 'call_1',
+              output: [{ type: 'input_file', file_id: 'file_1' }],
+            },
+          ],
+        },
+      ],
+      [
+        'output text part in tool output array',
+        {
+          ...base,
+          input: [
+            {
+              type: 'function_call_output',
+              call_id: 'call_1',
+              output: [{ type: 'output_text', text: 'contents' }],
+            },
+          ],
+        },
+      ],
+      [
+        'phase on user message',
+        {
+          ...base,
+          input: [{ role: 'user', phase: 'commentary', content: 'Review this change' }],
+        },
+      ],
+      [
+        'unsupported assistant phase',
+        {
+          ...base,
+          input: [
+            {
+              role: 'assistant',
+              phase: 'thinking',
+              content: [{ type: 'output_text', text: 'Reviewing' }],
+            },
+          ],
+        },
+      ],
+
       [
         'reasoning replay without id',
         {
@@ -348,6 +401,22 @@ describe('Responses route authentication and native streaming', () => {
       expect(response.status, name).toBe(400);
     }
     expect((await upstreamState()).requests).toHaveLength(0);
+  });
+
+  it('forwards multipart shell output and assistant phases unchanged', async () => {
+    await control('responses-success');
+    const token = await issueGrant('responses-multipart', [questions.responses]);
+
+    const response = await post(token, '/v1/responses', {
+      ...responsesBody(),
+      input: responsesMultipartToolOutputFixture,
+    });
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('event: response.completed');
+    const upstream = (await upstreamState()).requests[0]!;
+    expect((JSON.parse(upstream.body) as { input: unknown }).input).toEqual(
+      responsesMultipartToolOutputFixture,
+    );
   });
 
   it('accepts inline output-message and reasoning replay shapes from a second tool turn', async () => {
