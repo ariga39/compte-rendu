@@ -134,6 +134,9 @@ declare module 'node:fs/promises' {
   export function readFile(path: string): Promise<Buffer>;
   export function rename(oldPath: string, newPath: string): Promise<void>;
   export interface Stats {
+    readonly dev: number;
+    readonly ino: number;
+    readonly birthtimeMs: number;
     readonly mode: number;
     readonly size: number;
     isDirectory(): boolean;

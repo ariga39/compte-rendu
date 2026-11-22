@@ -154,7 +154,7 @@ OpenCode starts. Checkout disables hooks, submodules and LFS smudge and removes
 the authenticated remote before agent execution.
 
 The shared review attempt budget is 90 minutes from Core's durable claim
-timestamp, including setup. Queue time is free. Runner receives the absolute deadline. The sbx backend refreshes the GitHub read token for the same claimed job and repository before expiry. A failed refresh limits execution to the existing credential expiry minus one minute. OpenSandbox and OpenShell use that credential cap throughout. It reports whether the claim deadline or the credential
+timestamp, including setup. Queue time is free. Runner receives the absolute deadline. The sbx and microsandbox backends refresh the GitHub read token for the same claimed job and repository before expiry. A failed refresh limits execution to the existing credential expiry minus one minute. OpenSandbox and OpenShell use that credential cap throughout. It reports whether the claim deadline or the credential
 ended a timeout. Setup consumes the same remaining budget; there is no
 agent-start reset. One same-session correction gets at most two minutes of its
 remainder; it is not another attempt. Evidence archival, revocation,
@@ -187,7 +187,7 @@ selection and `multi-review.json`, with one callback and one publication.
 The LLM grant permits the routes actually needed by the job. One-reviewer jobs do
 not grant an unused synthesis route. Cancellation revokes that grant and destroys
 the shared Sandbox: closing an OpenCode client does not stop its server sessions.
-This selection/service path supports sbx and OpenSandbox, not OpenShell.
+This selection/service path supports sbx, microsandbox and OpenSandbox, not OpenShell.
 
 ## Sandbox runtime modules
 
@@ -201,6 +201,7 @@ as resources are created so partial setup can still be archived and cleaned.
   Explicit per-job rules rely on the host's deny-all policy and absence of other
   global/organization allows. Direct-model mode uses host secret resolution;
   service mode injects a short-lived job grant instead of an upstream key.
+- **microsandbox:** a local KVM microVM with read-only staging, per-job TLS credential injection and HTTPS-only destination rules. Cleanup verifies ownership and absence in the original catalog. See the [microsandbox installation guide](microsandbox.md).
 - **OpenSandbox:** official SDK execution on local Docker Engine, read-only host
   checkout/configuration mounts, and sidecar Credential Vault for job grants and
   GitHub read tokens. Runner provides SDK operations with a bounded execution
@@ -331,9 +332,9 @@ reviewed; non-critical findings become follow-up issues.
 
 ### Failed-cleanup reconciliation
 
-An authenticated Runner maintenance operation can reconcile a failed sbx run
+An authenticated Runner maintenance operation can reconcile a failed sbx or microsandbox run
 whose original host-directory cleanup was confirmed and whose exact Sandbox is
-now absent. It rechecks scoped policies/secrets and revokes the job grant before
+now absent. It rechecks sbx policies/secrets or the microsandbox catalog identity and revokes the job grant before
 reporting recovery. Original terminal evidence remains immutable; separate local
 and R2 recovery records provide the audit trail. Core matches the failed, superseded or cancelled run,
 job, attempt and immutable SHAs before confirming cleanup. Destroyed cleanup is

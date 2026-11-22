@@ -428,6 +428,7 @@ const runAgentScenario = async (scenario: {
   progressFetch?: typeof fetch;
   agentGate?: Promise<void>;
   onAgentStart?: () => void | Promise<void>;
+  microsandbox?: boolean;
   onModelSecret?: (args: readonly string[]) => Promise<void>;
   callbackStatuses?: readonly number[];
   callbackHangs?: boolean;
@@ -451,7 +452,11 @@ const runAgentScenario = async (scenario: {
   let secretArgs: readonly string[] | undefined;
   const allowedResources: string[] = [];
   const removedRuleIds: string[] = [];
+  let msbOwner: string | undefined;
   const runner = createRunner({
+    ...(scenario.microsandbox
+      ? ({ sandboxRuntime: 'microsandbox', microsandboxImage: 'review:fixture' } as const)
+      : {}),
     evidenceRoot: scenario.evidenceRoot ?? sharedEvidenceRoot,
     authToken: 'runner-test-token',
     modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
@@ -506,6 +511,24 @@ const runAgentScenario = async (scenario: {
             },
           },
     process: async (_command, args, options = {}) => {
+      if (_command === 'msb') {
+        const ok = { exitCode: 0, stdout: '', truncated: false, timedOut: false };
+        if (args[0] === 'create') msbOwner = args[args.indexOf('--label') + 1]?.split('=')[1];
+        if (args[0] === 'rm') {
+          if (scenario.cleanupFailure) return { ...ok, exitCode: 1 };
+          msbOwner = undefined;
+          return ok;
+        }
+        if (args[0] === 'inspect') {
+          const name = args.at(-1)!;
+          return msbOwner === undefined
+            ? { ...ok, exitCode: 1, stderr: 'error: sandbox not found: ' + name }
+            : {
+                ...ok,
+                stdout: JSON.stringify({ name, config: { labels: { 'cr-job-owner': msbOwner } } }),
+              };
+        }
+      }
       const isAgent = args[0] === 'exec' && args.includes('--agent');
       if (isAgent && scenario.agentProcess !== undefined) {
         await scenario.onAgentStart?.();
@@ -7484,6 +7507,15 @@ describe('Runner sandbox runtime selection', () => {
     expect(() => createRunner(base)).not.toThrow();
   });
 
+  it('requires an explicit locally loaded image and the managed relay for microsandbox', () => {
+    expect(() => createRunner({ ...base, sandboxRuntime: 'microsandbox' })).toThrow(
+      /MICROSANDBOX_IMAGE/,
+    );
+    expect(() =>
+      createRunner({ ...base, sandboxRuntime: 'microsandbox', microsandboxImage: 'review:v1' }),
+    ).toThrow(/managed HTTPS/);
+  });
+
   it('rejects an unknown sandbox runtime before claiming or admitting work', () => {
     const previous = process.env.RUNNER_SANDBOX_RUNTIME;
     try {
@@ -9770,38 +9802,49 @@ describe('Runner transport diagnostics', () => {
     }
   });
 
-  it('records a one-time runtime preflight failure and halts claiming', async () => {
-    const events: LogEvent[] = [];
-    let claims = 0;
-    const runner = createRunner({
-      authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-      sandboxRuntime: 'openshell',
-      openshell: { gateway: 'review', modelProvider: 'review', image: 'review:test' },
-      claimUrl: 'https://ingress.test/runner-claim',
-      claimIntervalMs: 1,
-      claimFetch: async () => {
-        claims += 1;
-        return new Response(null, { status: 204 });
-      },
-      log: {
-        record: async (event) => {
-          events.push(event as LogEvent);
+  it.each(['openshell', 'microsandbox'] as const)(
+    'records a one-time %s runtime preflight failure and halts claiming',
+    async (sandboxRuntime) => {
+      const events: LogEvent[] = [];
+      let claims = 0;
+      const runner = createRunner({
+        authToken: 'runner-test-token',
+        modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+        sandboxRuntime,
+        ...(sandboxRuntime === 'microsandbox'
+          ? {
+              microsandboxImage: 'review:test',
+              llmRelay: true,
+              llmRelayGeneration: 'generation-a',
+              modelConfig: relayInferenceModelConfig('review'),
+            }
+          : {}),
+        openshell: { gateway: 'review', modelProvider: 'review', image: 'review:test' },
+        claimUrl: 'https://ingress.test/runner-claim',
+        claimIntervalMs: 1,
+        claimFetch: async () => {
+          claims += 1;
+          return new Response(null, { status: 204 });
         },
-      },
-      process: async () => ({ exitCode: 1, stdout: '', timedOut: false, truncated: false }),
-    });
-    try {
-      await new Promise((resolve) => setTimeout(resolve, 40));
+        log: {
+          record: async (event) => {
+            events.push(event as LogEvent);
+          },
+        },
+        process: async () => ({ exitCode: 1, stdout: '', timedOut: false, truncated: false }),
+      });
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 40));
 
-      expect(events.filter((event) => event.outcome === 'claim')).toEqual([
-        expect.objectContaining({ reason: 'runtime-preflight-failed', pollingHalted: true }),
-      ]);
-      expect(claims).toBe(0);
-    } finally {
-      await runner.close();
-    }
-  });
+        expect(events.filter((event) => event.outcome === 'claim')).toEqual([
+          expect.objectContaining({ reason: 'runtime-preflight-failed', pollingHalted: true }),
+        ]);
+        expect(claims).toBe(0);
+      } finally {
+        await runner.close();
+      }
+    },
+  );
 });
 
 describe('Runner multi-model review', () => {
@@ -11879,6 +11922,85 @@ describe('Runner callback recovery', () => {
 });
 
 describe('Runner confirmed cleanup recovery', () => {
+  it('runs through microsandbox and reconciles failed teardown only against the original backend after restart', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-msb-recovery-'));
+    const relay = createRelayControl();
+    const modelConfig = relayInferenceModelConfig('deepseek-review');
+    const previousHome = process.env.MSB_HOME;
+    process.env.MSB_HOME = root;
+    await mkdir(join(root, 'db'));
+    const catalog = join(root, 'db', 'msb.db');
+    await writeFile(catalog, '');
+    try {
+      const scenario = {
+        microsandbox: true,
+        output: finalMarkdownJsonl(),
+        relayControl: relay,
+        modelConfig,
+        evidenceRoot: root,
+      };
+      const success = await runAgentScenario({ ...scenario, runId: 'msb-success' });
+      expect(success.terminal).toMatchObject({
+        status: 'succeeded',
+        sandbox: { cleanup: 'destroyed' },
+      });
+      expect(success.manifest.runtime).toBe('microsandbox');
+      const failed = await runAgentScenario({
+        ...scenario,
+        runId: 'msb-cleanup',
+        cleanupFailure: true,
+      });
+      expect(failed.terminal).toMatchObject({ status: 'failed', sandbox: { cleanup: 'failed' } });
+      const { runId, jobId, evidenceId, attempt, baseSha, headSha } = failed.manifest;
+      const request = new Request('http://runner/maintenance/recover-cleanup', {
+        method: 'POST',
+        headers: { authorization: 'Bearer runner-test-token', 'content-type': 'application/json' },
+        body: JSON.stringify({ runId, jobId, evidenceId, attempt, baseSha, headSha }),
+      });
+      for (const kind of ['sbx', 'microsandbox'] as const) {
+        const reports: Request[] = [];
+        const runner = createProductionRunnerWithMergeBase({
+          authToken: 'runner-test-token',
+          evidenceRoot: root,
+          claimUrl: '',
+          sandboxRuntime: kind,
+          microsandboxImage: 'review:fixture',
+          modelConfig,
+          llmRelay: true,
+          llmRelayGeneration: 'generation-a',
+          callbackFetch: routeRelayControl(relay, async (input, init) => {
+            reports.push(new Request(input, init));
+            return new Response(null, { status: 202 });
+          }),
+          process: async (_cmd, args) => ({
+            exitCode: 1,
+            stdout: '',
+            stderr: 'error: sandbox not found: ' + args.at(-1),
+            truncated: false,
+            timedOut: false,
+          }),
+        });
+        try {
+          const response = await runner.handle(request.clone());
+          expect(response.status).toBe(kind === 'sbx' ? 409 : 202);
+          expect(reports).toHaveLength(kind === 'sbx' ? 0 : 1);
+          if (kind === 'microsandbox') {
+            await rename(catalog, catalog + '.previous');
+            await writeFile(catalog, '');
+            expect((await runner.handle(request.clone())).status).toBe(502);
+            expect(reports).toHaveLength(1);
+          }
+        } finally {
+          await runner.close();
+        }
+      }
+    } finally {
+      if (previousHome === undefined) delete process.env.MSB_HOME;
+      else process.env.MSB_HOME = previousHome;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it.each(['finished', 'cancelled'] as const)(
     'reconciles a retained %s cleanup after restart without changing its evidence',
     async (execution) => {
