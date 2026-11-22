@@ -30,7 +30,8 @@ import {
   selectMessagesRoute,
   validateMessagesBody,
 } from './messages.ts';
-import { protocolForPath } from './protocols.ts';
+import { relayGemini, selectGeminiRoute, validateGeminiBody } from './gemini.ts';
+import { protocolForRequest, type ProtocolRouteRequest } from './protocols.ts';
 import { relayResponses, responsesUpstreamBody, validateResponsesBody } from './responses.ts';
 import type { FrozenRoute } from './routes.ts';
 
@@ -85,6 +86,7 @@ const validateForProfile = (
 ): Record<string, unknown> | null => {
   if (profile === 'responses') return validateResponsesBody(raw);
   if (profile === 'messages') return validateMessagesBody(raw);
+  if (profile === 'gemini') return validateGeminiBody(raw);
   return validateChatBody(raw);
 };
 
@@ -92,13 +94,22 @@ const routeForProfile = (
   profile: ModelProfile,
   grant: AuthenticatedGrant,
   body: Record<string, unknown>,
+  handle: string | undefined,
 ): FrozenRoute | null => {
+  if (profile === 'gemini') {
+    if (handle === undefined) return null;
+    return selectGeminiRoute(grant.routes, handle);
+  }
   if (profile === 'messages') return selectMessagesRoute(grant.routes, body);
   return selectedRoute(grant, body);
 };
 
 export class InferenceWorker extends WorkerEntrypoint<InferenceWorkerEnv> {
-  private async handleInference(request: Request, profile: ModelProfile): Promise<Response> {
+  private async handleInference(
+    request: Request,
+    selected: ProtocolRouteRequest,
+  ): Promise<Response> {
+    const profile = selected.profile;
     const grant = await authenticateGrant(this.env.RELAY_DB, request.headers.get('authorization'));
     if (grant === null) return error(401, 'unauthorized');
     const gateway = gatewayConfig(this.env);
@@ -114,7 +125,7 @@ export class InferenceWorker extends WorkerEntrypoint<InferenceWorkerEnv> {
     }
     const body = validateForProfile(profile, raw);
     if (body === null) return error(400, 'invalid request');
-    const route = routeForProfile(profile, grant, body);
+    const route = routeForProfile(profile, grant, body, selected.handle);
     if (route?.profile !== profile) return error(403, 'route forbidden');
 
     const requestId = crypto.randomUUID();
@@ -151,6 +162,21 @@ export class InferenceWorker extends WorkerEntrypoint<InferenceWorkerEnv> {
       );
     }
 
+    if (profile === 'gemini') {
+      return Effect.runPromise(
+        relayGemini({
+          database: this.env.RELAY_DB,
+          requestId,
+          gateway,
+          grant,
+          route,
+          body,
+          request,
+          waitUntil: (task) => this.ctx.waitUntil(task),
+        }),
+      );
+    }
+
     return Effect.runPromise(
       relayInference({
         database: this.env.RELAY_DB,
@@ -167,14 +193,14 @@ export class InferenceWorker extends WorkerEntrypoint<InferenceWorkerEnv> {
 
   fetch(request: Request): Response | Promise<Response> {
     const url = new URL(request.url);
-    const profile = protocolForPath(url.pathname);
-    if (profile === null) {
+    const selected = protocolForRequest(url);
+    if (selected === null) {
       return new Response(null, { status: 404, headers: { 'cache-control': 'no-store' } });
     }
     if (request.method !== 'POST') {
       return new Response(null, { status: 405, headers: { 'cache-control': 'no-store' } });
     }
-    return this.handleInference(request, profile);
+    return this.handleInference(request, selected);
   }
 
   #modelCatalog() {

@@ -1,0 +1,143 @@
+{
+  "source": "OpenCode 2.0.32 pinned CLI loopback capture; sanitized, synthetic text, one representative tool schema",
+  "handle": "r-cmV2aWV3LXByb3ZpZGVyL2dlbWluaS14",
+  "requests": {
+    "title": {
+      "contents": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "text": "Review this change."
+            }
+          ]
+        }
+      ],
+      "systemInstruction": {
+        "parts": [
+          {
+            "text": "Generate a short title for this review."
+          }
+        ]
+      }
+    },
+    "main": {
+      "contents": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "text": "Review this change."
+            }
+          ]
+        }
+      ],
+      "systemInstruction": {
+        "parts": [
+          {
+            "text": "Review this change."
+          }
+        ]
+      },
+      "tools": [
+        {
+          "functionDeclarations": [
+            {
+              "name": "read",
+              "description": "Read a repository file",
+              "parametersJsonSchema": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "path"
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "generationConfig": {
+        "maxOutputTokens": 32000
+      }
+    },
+    "continuation": {
+      "contents": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "text": "Review this change."
+            }
+          ]
+        },
+        {
+          "role": "model",
+          "parts": [
+            {
+              "text": "Inspect the example file.",
+              "thought": true
+            },
+            {
+              "functionCall": {
+                "name": "read",
+                "args": {
+                  "path": "src/example.ts"
+                }
+              },
+              "thoughtSignature": "c3ludGhldGljLXNpZ25hdHVyZQ=="
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "parts": [
+            {
+              "functionResponse": {
+                "name": "read",
+                "response": {
+                  "name": "read",
+                  "content": "export const value = 1;"
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "systemInstruction": {
+        "parts": [
+          {
+            "text": "Review this change."
+          }
+        ]
+      },
+      "tools": [
+        {
+          "functionDeclarations": [
+            {
+              "name": "read",
+              "description": "Read a repository file",
+              "parametersJsonSchema": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "path"
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "generationConfig": {
+        "maxOutputTokens": 32000
+      }
+    }
+  }
+}
