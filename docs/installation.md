@@ -1272,8 +1272,10 @@ settings forward.
    verify the deployed inference Worker serves its endpoint and Gateway destination.
 4. Once the Runner accepts jobs, save the new roster in the dashboard. Keep the existing
    synthesis route if you are only adding an independent reviewer. Run a fresh PR review. Verify the published
-   review is for the claimed revision, the check terminates, D1 records usage
-   per model, grant reuse is denied after cleanup, and the sandbox is gone.
+   review is for the claimed revision and the Check terminates. In the archived
+   session exports, confirm that each selected reviewer completed its own review
+   and returned a conclusion. Check the per-model usage alongside those results,
+   verify grant reuse is denied after cleanup, and confirm the sandbox is gone.
 5. Before reverting to a v1 Runner, restore a Chat-only roster and allow jobs
    already admitted with a non-Chat model to finish. Drain the Runner, resolve
    outstanding grants on their issuing backend, and remove `RUNNER_LLM_GRANT_VERSION`
