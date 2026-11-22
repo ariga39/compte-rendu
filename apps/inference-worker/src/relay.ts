@@ -16,7 +16,6 @@ import type { FrozenRoute } from './routes.ts';
 import { gatewayHeaders, gatewayUrl, type GatewayConfig } from './gateway';
 export type { GatewayConfig } from './gateway';
 
-const CHAT_PATH = '/v1/chat/completions';
 const GATEWAY_PATH = '/chat/completions';
 const MAX_HELD_FRAMES = 32;
 const MAX_HELD_BYTES = 64 * 1024;
@@ -57,8 +56,6 @@ const headersFor = (gateway: GatewayConfig, grant: AuthenticatedGrant, route: Fr
   'x-opencode-session': grant.jobId,
   session_id: grant.jobId,
 });
-
-export const isChatCompletionPath = (pathname: string): boolean => pathname === CHAT_PATH;
 
 export const relayInference = (options: InferenceRelayOptions): Effect.Effect<Response> =>
   Effect.gen(function* () {

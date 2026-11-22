@@ -101,8 +101,8 @@ export const finalizeComplete = async (
   database: D1DatabaseLike,
   requestId: string,
   usage: UpstreamUsage,
-): Promise<void> => {
-  await database
+): Promise<boolean> => {
+  const result = await database
     .prepare(
       `UPDATE inference_requests
       SET status = 'complete', model = ?, input_tokens = ?, uncached_input_tokens = ?,
@@ -112,6 +112,7 @@ export const finalizeComplete = async (
     )
     .bind(...usageBindings(usage), requestId)
     .run();
+  return result.meta.changes === 1;
 };
 
 export const savePartial = async (

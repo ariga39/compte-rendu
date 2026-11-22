@@ -1,6 +1,6 @@
 # Managed inference relay
 
-The application Worker authorizes a Runner grant against the claimed job, attempt and frozen review selection. The inference Worker accepts that grant at `POST /v1/chat/completions`, forwards streaming requests to the configured Cloudflare AI Gateway BYOK provider, and records usage in the installation’s relay D1 database. Provision both Workers and the catalog using the [installation guide](installation.md#configure-the-managed-inference-relay).
+The application Worker authorizes a Runner grant against the claimed job, attempt and frozen review selection. The inference Worker accepts that grant at the endpoint selected by the frozen route profile, forwards streaming requests to the configured Cloudflare AI Gateway BYOK provider, and records usage in the installation’s relay D1 database. Provision both Workers and the catalog using the [installation guide](installation.md#configure-the-managed-inference-relay).
 
 ### Remote relay transport
 
@@ -86,6 +86,16 @@ context and output limits. All models use the existing sandbox inference
 hostname and job credential. Issuance is attempted once. An unavailable v2
 endpoint or a descriptor set that differs from the frozen selection fails the
 job and triggers grant cleanup.
+
+### Inference protocols
+
+Chat routes use `POST /v1/chat/completions`. Responses routes use
+`POST /v1/responses` with foreground streaming, local function tools and
+`store: false`. The relay accepts inline tool results and encrypted reasoning
+replay. It rejects hosted tools, remote references and cross-protocol calls.
+Only `response.completed` with a completed response and a durable usage update
+ends the stream successfully. Incomplete or failed turns keep partial usage.
+Responses terminal events are capped at 4 MiB; larger events fail the turn.
 
 ### Managed relay model catalog
 
