@@ -413,6 +413,18 @@ const safeProcessErrorCode = (error: unknown): RunnerProcessErrorCode | undefine
   return Option.isSome(decoded) ? decoded.value.code : undefined;
 };
 
+const processFailure = (error: unknown): RunnerProcessResult => {
+  const errorCode = safeProcessErrorCode(error);
+  return {
+    exitCode: 1,
+    stdout: '',
+    timedOut: false,
+    truncated: false,
+    processError: true,
+    ...(errorCode === undefined ? {} : { errorCode }),
+  };
+};
+
 const stop = (child: ChildProcess, signal: NodeJS.Signals = 'SIGTERM') => {
   try {
     child.kill(signal);
@@ -727,9 +739,7 @@ type RunnerJob = {
   hostCleanupConfirmed?: boolean;
   sessionIds: string[];
   multiReview?: RunnerMultiReviewEvidence;
-  diagnosticCheckoutToken: string;
   sandboxRuntime?: JobSandboxRuntime;
-  githubTokenRoot?: string;
   checkoutRoot?: string;
   configRoot?: string;
   grantIssuanceAttempted: boolean;
@@ -1849,15 +1859,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         },
       });
     } catch (error) {
-      const errorCode = safeProcessErrorCode(error);
-      result = {
-        exitCode: 1,
-        stdout: '',
-        timedOut: false,
-        truncated: false,
-        processError: true,
-        ...(errorCode === undefined ? {} : { errorCode }),
-      };
+      result = processFailure(error);
     }
     job.child = undefined;
     if (diagnostic !== undefined) await recordCommand(job, diagnostic, result);
@@ -1896,15 +1898,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         ),
       });
     } catch (error) {
-      const errorCode = safeProcessErrorCode(error);
-      result = {
-        exitCode: 1,
-        stdout: '',
-        timedOut: false,
-        truncated: false,
-        processError: true,
-        ...(errorCode === undefined ? {} : { errorCode }),
-      };
+      result = processFailure(error);
     }
     if (diagnostic !== undefined) await recordCommand(job, diagnostic, result);
     return result;
@@ -2285,50 +2279,23 @@ export const createRunner = (options: RunnerOptions = {}) => {
     return mergeBaseSha;
   };
 
+  const removeHostDirectories = async (job: RunnerJob): Promise<boolean> => {
+    let clean = true;
+    for (const directory of [job.checkoutRoot, job.configRoot, job.grantRoot]) {
+      if (directory === undefined) continue;
+      try {
+        await rm(directory, { recursive: true, force: true });
+      } catch {
+        clean = false;
+      }
+    }
+    return clean;
+  };
+
   const cleanup = async (job: RunnerJob) => {
     reportStage(job, 'cleanup');
-    let clean = true;
-    let hostClean = true;
-    if (!job.sandboxAttempted) {
-      if (job.checkoutRoot !== undefined) {
-        try {
-          await rm(job.checkoutRoot, { recursive: true, force: true });
-        } catch {
-          clean = false;
-          hostClean = false;
-        }
-      }
-      if (job.configRoot !== undefined) {
-        try {
-          await rm(job.configRoot, { recursive: true, force: true });
-        } catch {
-          clean = false;
-          hostClean = false;
-        }
-      }
-      if (job.githubTokenRoot !== undefined) {
-        try {
-          await rm(job.githubTokenRoot, { recursive: true, force: true });
-        } catch {
-          clean = false;
-          hostClean = false;
-        }
-      }
-      if (job.grantRoot !== undefined) {
-        try {
-          await rm(job.grantRoot, { recursive: true, force: true });
-        } catch {
-          clean = false;
-          hostClean = false;
-        }
-      }
-      job.hostCleanupConfirmed =
-        hostClean &&
-        (!job.sandboxAttempted || job.sandboxRuntime?.metadata.hostCleanupConfirmed === true);
-      update(job, { sandbox: { cleanup: clean ? 'destroyed' : 'failed' } });
-      return clean;
-    }
-    update(job, { stage: 'cleanup' });
+    let sandboxClean = true;
+    if (job.sandboxAttempted) update(job, { stage: 'cleanup' });
     const cleanupProcess = async (
       args: readonly string[],
       diagnostic?: RunnerDiagnostic,
@@ -2354,20 +2321,12 @@ export const createRunner = (options: RunnerOptions = {}) => {
           timeoutMs: CLEANUP_COMMAND_TIMEOUT_MS,
         });
       } catch (error) {
-        const errorCode = safeProcessErrorCode(error);
-        result = {
-          exitCode: 1,
-          stdout: '',
-          timedOut: false,
-          truncated: false,
-          processError: true,
-          ...(errorCode === undefined ? {} : { errorCode }),
-        };
+        result = processFailure(error);
       }
       if (diagnostic !== undefined) await recordCommand(job, diagnostic, result);
       return result;
     };
-    if (job.sandboxRuntime !== undefined) {
+    if (job.sandboxAttempted && job.sandboxRuntime !== undefined) {
       try {
         await job.sandboxRuntime.destroy(
           Object.assign(cleanupProcess, {
@@ -2387,41 +2346,11 @@ export const createRunner = (options: RunnerOptions = {}) => {
           }),
         );
       } catch {
-        clean = false;
+        sandboxClean = false;
       }
     }
-    if (job.checkoutRoot !== undefined) {
-      try {
-        await rm(job.checkoutRoot, { recursive: true, force: true });
-      } catch {
-        clean = false;
-        hostClean = false;
-      }
-    }
-    if (job.configRoot !== undefined) {
-      try {
-        await rm(job.configRoot, { recursive: true, force: true });
-      } catch {
-        clean = false;
-        hostClean = false;
-      }
-    }
-    if (job.githubTokenRoot !== undefined) {
-      try {
-        await rm(job.githubTokenRoot, { recursive: true, force: true });
-      } catch {
-        clean = false;
-        hostClean = false;
-      }
-    }
-    if (job.grantRoot !== undefined) {
-      try {
-        await rm(job.grantRoot, { recursive: true, force: true });
-      } catch {
-        clean = false;
-        hostClean = false;
-      }
-    }
+    const hostClean = await removeHostDirectories(job);
+    const clean = sandboxClean && hostClean;
     job.hostCleanupConfirmed =
       hostClean &&
       (!job.sandboxAttempted || job.sandboxRuntime?.metadata.hostCleanupConfirmed === true);
@@ -3595,7 +3524,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
           cleanup: job.state.sandbox.cleanup,
         });
       }
-      job.diagnosticCheckoutToken = '';
       job.grantToken = '';
       job.readTokenSecrets = [];
       job.sandboxRuntime = undefined;
@@ -3705,7 +3633,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
       grantIssuanceAttempted: false,
       grantRevoked: false,
       sessionIds: [],
-      diagnosticCheckoutToken: input.repositoryReadToken,
       claimDeadlineAt,
       deadlineAt: rotatingCredential
         ? claimDeadlineAt
