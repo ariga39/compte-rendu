@@ -1259,27 +1259,32 @@ settings forward.
 1. Apply the inference Worker's migrations against its relay D1 database.
    Deploy the inference Worker on the dedicated hostname with its Run secret.
 2. Deploy the application Worker with the private `INFERENCE_RELAY` binding
-   and `RELAY_DEFAULT_MODEL_ROUTE`. Confirm that the operator catalog endpoint
+   and keep `RELAY_DEFAULT_MODEL_ROUTE` on a route the current Runner can serve.
+   For a v1 Runner, use a Chat route without required model limits. Core can
+   freeze the default into new jobs as soon as the application is deployed.
+   Confirm that the operator catalog endpoint
    lists every selected reviewer and synthesis route after the scheduled refresh.
 3. Drain the Runner before changing its inference settings. Verify old grants have been
    revoked, legacy null-snapshot jobs have finished, and recovery markers are
    clear. Configure the existing callback URL and bearer, the HTTPS inference
    model base on port 443 ending in `/v1`, and the relay issuer generation.
-   If any reviewer or synthesis route uses a non-Chat protocol or declares
+   If the intended default, any reviewer, or the synthesis route uses a non-Chat protocol or declares
    a context or output limit, set `RUNNER_LLM_GRANT_VERSION=2`
    only after verifying that the installed Runner build can issue v2 grants and both
    deployed Workers support v2. Upgrade any older component before enabling the roster.
-   Restart the drained
-   Runner to load the setting and check its maintenance status. The Runner uses each
+   Restart the drained Runner to load the setting and check its maintenance status. The Runner uses each
    route's frozen profile to configure OpenCode. Before enabling another protocol,
    verify the deployed inference Worker serves its endpoint and Gateway destination.
-4. Once the Runner accepts jobs, save the new roster in the dashboard. Keep the existing
+4. Confirm the restarted Runner can obtain a grant on the existing roster using
+   the intended grant version. If changing the default, deploy the application
+   Worker with the new `RELAY_DEFAULT_MODEL_ROUTE` now. Save the new roster in
+   the dashboard. Keep the existing
    synthesis route if you are only adding an independent reviewer. Run a fresh PR review. Verify the published
    review is for the claimed revision and the Check terminates. In the archived
    session exports, confirm that each selected reviewer completed its own review
    and returned a conclusion. Check the per-model usage alongside those results,
    verify grant reuse is denied after cleanup, and confirm the sandbox is gone.
-5. First restore a roster that the target Runner and Workers can serve,
+5. First restore a default and a roster that the target Runner and Workers can serve,
    including every route's protocol, Gateway destination, credential and required
    limits. Keep the current Runner accepting jobs until all queued or running
    jobs with incompatible frozen routes have finished. This includes Chat
