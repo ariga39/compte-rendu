@@ -1,5 +1,5 @@
 import { Option, Schema } from 'effect';
-import { RunnerFailureCause } from '@compte-rendu/contracts';
+import { RunnerFailureCause, type ModelRouteDescriptor } from '@compte-rendu/contracts';
 import { parseReviewSubmission, type ReviewSubmission } from './review-submission-contract.js';
 
 export type { ReviewSubmission };
@@ -247,35 +247,69 @@ const supervisorPermissions = (
   })),
 ];
 
+const relayCredential = '{env:OPENCODE_API_KEY}';
+
+function modelConfig(descriptor: ModelRouteDescriptor, baseURL: string) {
+  switch (descriptor.profile) {
+    case 'messages':
+      return {
+        package: '@opencode/ai/providers/anthropic',
+        settings: { baseURL, authToken: relayCredential },
+      };
+    case 'gemini':
+      return {
+        package: '@opencode/ai/providers/google',
+        modelID: 'r-' + Buffer.from(descriptor.routeId).toString('base64url'),
+        settings: {
+          baseURL: new URL('/v1beta', baseURL).href,
+          // The Google SDK requires an API key. The relay authenticates only the job bearer.
+          apiKey: 'relay',
+          headers: { authorization: 'Bearer ' + relayCredential },
+        },
+      };
+    case 'responses':
+      return {
+        package: '@opencode/ai/providers/openai',
+        settings: { baseURL, apiKey: relayCredential },
+      };
+    case 'chat':
+      return { settings: { baseURL, apiKey: relayCredential } };
+  }
+}
+
 export const multiReviewConfig = (options: {
   readonly selection: MultiReviewSelection;
   readonly serviceBaseUrl: string;
+  readonly descriptors?: readonly ModelRouteDescriptor[] | undefined;
   readonly shellPermissionRules: ReadonlyArray<readonly [string, 'allow' | 'deny']>;
 }): string => {
   const roster = participants(options.selection);
   const reviewerPermissionsValue = reviewerPermissions(options.shellPermissionRules);
-  const models = Object.fromEntries(
-    dedupedRoutes(options.selection).map((route) => [
-      route,
-      { settings: { baseURL: options.serviceBaseUrl } },
-    ]),
-  );
+  const baseURL = options.serviceBaseUrl;
+  const models = options.descriptors
+    ? Object.fromEntries(
+        options.descriptors.map((d) => [
+          d.routeId,
+          { ...modelConfig(d, baseURL), ...(d.limit && { limit: d.limit }) },
+        ]),
+      )
+    : Object.fromEntries(
+        dedupedRoutes(options.selection).map((route) => [route, { settings: { baseURL } }]),
+      );
+  const providers = {
+    [MULTI_PROVIDER_ID]: {
+      name: 'Compte-rendu service',
+      canonical: 'opencode-go',
+      package: '@opencode/ai/providers/openai-compatible',
+      settings: options.descriptors ? { baseURL } : { baseURL, apiKey: relayCredential },
+      models,
+    },
+  };
   if (roster.length === 1) {
     const route = roster[0]!.route;
     return JSON.stringify({
       model: modelReference(route),
-      providers: {
-        [MULTI_PROVIDER_ID]: {
-          name: 'Compte-rendu service',
-          canonical: 'opencode-go',
-          package: '@opencode/ai/providers/openai-compatible',
-          settings: {
-            baseURL: options.serviceBaseUrl,
-            apiKey: '{env:OPENCODE_API_KEY}',
-          },
-          models,
-        },
-      },
+      providers,
       agents: {
         review: {
           description: 'Pull request reviewer',
@@ -288,18 +322,7 @@ export const multiReviewConfig = (options: {
   }
   return JSON.stringify({
     model: modelReference(options.selection.synthesis),
-    providers: {
-      [MULTI_PROVIDER_ID]: {
-        name: 'Compte-rendu service',
-        canonical: 'opencode-go',
-        package: '@opencode/ai/providers/openai-compatible',
-        settings: {
-          baseURL: options.serviceBaseUrl,
-          apiKey: '{env:OPENCODE_API_KEY}',
-        },
-        models,
-      },
-    },
+    providers,
     agents: {
       [SUPERVISOR_AGENT_ID]: {
         description: 'Multi-model review supervisor',

@@ -1,14 +1,20 @@
 import {
   readBoundedBody,
   ModelUsageSummary,
+  ModelRouteDescriptor,
   RUNNER_LLM_CONTROL_TIMEOUT_MS,
 } from '@compte-rendu/contracts';
 import { Effect, Schema } from 'effect';
 
-const Grant = Schema.fromJsonString(
+const grantFields = {
+  token: Schema.NonEmptyString.check(Schema.isPattern(/^[A-Za-z0-9_-]+$/)),
+  expiresAt: Schema.DateFromString,
+};
+const Grant = Schema.fromJsonString(Schema.Struct(grantFields));
+const ProfiledGrant = Schema.fromJsonString(
   Schema.Struct({
-    token: Schema.NonEmptyString.check(Schema.isPattern(/^[A-Za-z0-9_-]+$/)),
-    expiresAt: Schema.DateFromString,
+    ...grantFields,
+    descriptors: Schema.Array(ModelRouteDescriptor),
   }),
 );
 
@@ -22,6 +28,7 @@ export interface LlmGrantIdentity {
 }
 
 export interface RelayLlmServiceClientOptions {
+  readonly grantVersion?: 1 | 2;
   readonly origin: string | URL;
   readonly token: string;
   readonly fetch?: typeof fetch;
@@ -31,7 +38,11 @@ export interface LlmServiceClient {
   readonly issue: (
     job: LlmGrantIdentity,
     routes: readonly string[],
-  ) => Promise<{ token: string; expiresAt: number }>;
+  ) => Promise<{
+    token: string;
+    expiresAt: number;
+    descriptors?: readonly ModelRouteDescriptor[];
+  }>;
   readonly revoke: (jobId: string) => Promise<void>;
   readonly usage: (jobId: string) => Promise<ModelUsageSummary>;
 }
@@ -86,6 +97,24 @@ export const createRelayLlmServiceClient = (
         attempt: job.attempt,
         routes,
       };
+      if (options.grantVersion === 2) {
+        const body = yield* post('/runner-llm/issue-v2', payload, 201);
+        const grant = yield* Schema.decodeUnknownEffect(ProfiledGrant, {
+          onExcessProperty: 'error',
+        })(body);
+        const ids = new Set(grant.descriptors.map((d) => d.routeId));
+        if (
+          routes.length !== grant.descriptors.length ||
+          ids.size !== routes.length ||
+          routes.some((id) => !ids.has(id))
+        )
+          return yield* Effect.fail(new Error('frozen routes do not match'));
+        return {
+          token: grant.token,
+          expiresAt: grant.expiresAt.getTime(),
+          descriptors: grant.descriptors,
+        };
+      }
       const body = yield* post('/runner-llm/issue', payload, 201);
       const grant = yield* Schema.decodeUnknownEffect(Grant, { onExcessProperty: 'error' })(body);
       return { token: grant.token, expiresAt: grant.expiresAt.getTime() };
