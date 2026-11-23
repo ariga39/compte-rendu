@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -11,11 +11,11 @@ import {
   type RunnerProcessResult,
 } from '../apps/runner/src/runner';
 import { createSbxRuntimeFactory } from '../apps/runner/src/sandbox-runtime-sbx';
-import type { SandboxRuntimeFactory } from '../apps/runner/src/sandbox-runtime';
 import { createCoreWorker } from '../apps/core/src/core-worker';
 import type {
   JobSandboxRuntime,
   SandboxJobSpec,
+  SandboxRecoveryIdentity,
   SandboxRuntimeFactory,
 } from '../apps/runner/src/sandbox-runtime';
 import { createD1ReviewStateStore } from '../apps/core/src/index';
@@ -442,6 +442,8 @@ const runAgentScenario = async (scenario: {
   agentGate?: Promise<void>;
   onAgentStart?: () => void | Promise<void>;
   microsandbox?: boolean;
+  sandboxRuntime?: 'opensandbox';
+  opensandbox?: { endpoint: string; apiKeyFile: string; image: string };
   onModelSecret?: (args: readonly string[]) => Promise<void>;
   callbackStatuses?: readonly number[];
   callbackHangs?: boolean;
@@ -471,6 +473,10 @@ const runAgentScenario = async (scenario: {
     ...(scenario.microsandbox
       ? ({ sandboxRuntime: 'microsandbox', microsandboxImage: 'review:fixture' } as const)
       : {}),
+    ...(scenario.sandboxRuntime === undefined
+      ? {}
+      : ({ sandboxRuntime: scenario.sandboxRuntime } as const)),
+    ...(scenario.opensandbox === undefined ? {} : { opensandbox: scenario.opensandbox }),
     sandboxRuntimeFactory: scenario.sandboxRuntimeFactory,
     evidenceRoot: scenario.evidenceRoot ?? sharedEvidenceRoot,
     authToken: 'runner-test-token',
@@ -12847,6 +12853,112 @@ describe('SDK sandbox execution', () => {
       'OpenSandbox runtime requires endpoint, API key file and image',
     );
   });
+  it('writes the OpenSandbox identity and nonce to the manifest and recovers from it', async () => {
+    const evidenceRoot = await mkdtemp(join(tmpdir(), 'cr-os-manifest-'));
+    const ownershipNonce = randomUUID();
+    let runner: ReturnType<typeof createRunner> | undefined;
+    let recoveredIdentity: unknown;
+    const runtimeFactory: SandboxRuntimeFactory = Object.assign(
+      (spec: SandboxJobSpec): JobSandboxRuntime => {
+        const base = createSbxRuntimeFactory({
+          modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+        })(spec);
+        return {
+          metadata: {
+            get created() {
+              return base.metadata.created;
+            },
+            get hostCleanupConfirmed() {
+              return base.metadata.hostCleanupConfirmed;
+            },
+            id: 'sandbox-identity',
+            ownershipNonce,
+            name: spec.name,
+            runtime: 'opensandbox',
+            imageRef: spec.imageRef,
+            evidenceRoot: '/tmp/evidence',
+          },
+          setup: (command) => base.setup(command),
+          exec: (args, command, options, diagnostic) =>
+            base.exec(args, command, options, diagnostic),
+          copyOut: (sandboxPath, localPath, command, diagnostic, options) =>
+            base.copyOut(sandboxPath, localPath, command, diagnostic, options),
+          destroy: (command) => base.destroy(command),
+        };
+      },
+      {
+        confirmCleanupAbsent: async (identity: SandboxRecoveryIdentity) => {
+          recoveredIdentity = identity;
+        },
+      },
+    );
+    try {
+      const callbacks: Request[] = [];
+      const apiKeyFile = join(evidenceRoot, 'control-key');
+      await writeFile(apiKeyFile, 'test-control-key', { mode: 0o600 });
+      const result = await runAgentScenario({
+        runId: 'run-os-manifest',
+        output: finalMarkdownJsonl(),
+        evidenceRoot,
+        cleanupFailure: true,
+        callbackRequests: callbacks,
+        relayControl: createRelayControl(),
+        modelConfig: JSON.stringify({
+          id: 'opencode-go/review',
+          baseUrl: 'https://llm.internal.example/v1',
+          definition: { name: 'Review' },
+        }),
+        sandboxRuntime: 'opensandbox',
+        opensandbox: {
+          endpoint: 'http://127.0.0.1:8080',
+          apiKeyFile,
+          image: 'review-image',
+        },
+        sandboxRuntimeFactory: runtimeFactory,
+        onRunner: (value) => {
+          runner = value;
+        },
+      });
+      expect(result.terminal).toMatchObject({
+        status: 'failed',
+        failure: { reason: 'cleanup' },
+      });
+      expect(result.manifest).toMatchObject({
+        runtime: 'opensandbox',
+        sandboxId: 'sandbox-identity',
+        sandboxOwnerNonce: ownershipNonce,
+        hostFilesCleanupConfirmed: true,
+      });
+      const recovery = await runner!.handle(
+        new Request('http://runner/maintenance/recover-cleanup', {
+          method: 'POST',
+          headers: {
+            authorization: 'Bearer runner-test-token',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            evidenceId: result.terminal.evidenceId,
+            jobId: result.manifest.jobId,
+            runId: result.manifest.runId,
+            attempt: result.manifest.attempt,
+            baseSha: result.manifest.baseSha,
+            headSha: result.manifest.headSha,
+          }),
+        }),
+      );
+      expect(recovery.status).toBe(202);
+      expect(recoveredIdentity).toEqual({
+        sandboxId: 'sandbox-identity',
+        ownershipNonce,
+        sandboxName: result.manifest.sandboxName,
+      });
+      expect(new URL(callbacks.at(-1)!.url).pathname).toBe('/runner-cleanup-recovery');
+    } finally {
+      await runner?.close();
+      await rm(evidenceRoot, { recursive: true, force: true });
+    }
+  });
+
   it('aborts remote work and still gives cleanup a fresh execution context', async () => {
     const baseSha = '1'.repeat(40);
     const headSha = '2'.repeat(40);
