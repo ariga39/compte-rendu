@@ -1307,7 +1307,9 @@ export const createCoreWorker = (
       await Promise.allSettled(captures);
       if (incomplete) throw new Error('Publication reconciliation incomplete');
     },
-    ...createJobControl(stateStore, github, runner, log),
+    ...createJobControl(stateStore, github, runner, log, (context) =>
+      createPostHogLifecycleLog(env, context),
+    ),
     fetch: async (request, _env, context) => {
       if (new URL(request.url).pathname === '/review-configuration') {
         return handleReviewConfiguration(

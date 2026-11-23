@@ -137,6 +137,11 @@ export const CoreLifecycleEvent = Schema.Union([
   }),
   Schema.Struct({
     ...CoreLifecycleFinishedCommon,
+    outcome: Schema.Literal('cancelled'),
+    published: Schema.Literal(false),
+  }),
+  Schema.Struct({
+    ...CoreLifecycleFinishedCommon,
     outcome: Schema.Literal('failed'),
     published: Schema.Literal(false),
     failurePhase: CoreLifecycleFailurePhase,

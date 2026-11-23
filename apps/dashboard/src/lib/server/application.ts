@@ -40,7 +40,7 @@ export function createApplication(env: ApplicationEnv, dependencies: CoreWorkerD
         if (operator instanceof Response) return operator;
         const core = createCoreWorker(env, dependencies);
         try {
-          const response = await core.cancelReview(cancel[1], operator.id);
+          const response = await core.cancelReview(cancel[1], operator.id, context);
           if (response.ok && context)
             context.waitUntil(core.reconcileCancellations(Date.now(), cancel[1]));
           return response;
@@ -110,9 +110,25 @@ export async function runApplicationScheduled(
       // Operational logging is best-effort.
     }
   }
-  if (metadata.status === 'rejected') throw metadata.reason;
-  if (publications.status === 'rejected') throw new Error('Publication reconciliation failed');
-  if (checks.status === 'rejected') throw new Error('Check delivery reconciliation failed');
-  if (cancellations.status === 'rejected')
-    throw new Error('Review cancellation reconciliation failed');
+  const failures: unknown[] = [];
+  const labels: string[] = [];
+  if (metadata.status === 'rejected') {
+    failures.push(metadata.reason);
+    labels.push('metadata refresh');
+  }
+  if (cancellations.status === 'rejected') {
+    failures.push(new Error('Review cancellation reconciliation failed'));
+    labels.push('review cancellation');
+  }
+  if (publications.status === 'rejected') {
+    failures.push(new Error('Publication reconciliation failed'));
+    labels.push('publication');
+  }
+  if (checks.status === 'rejected') {
+    failures.push(new Error('Check delivery reconciliation failed'));
+    labels.push('check delivery');
+  }
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1)
+    throw new AggregateError(failures, `Scheduled reconciliation failed: ${labels.join(', ')}`);
 }
