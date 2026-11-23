@@ -569,6 +569,14 @@ export type OperationalLogEvent =
     }
   | {
       readonly phase: 'runner';
+      readonly outcome: 'cleanup-recovery';
+      readonly runId: string;
+      readonly jobId: string;
+      readonly attempt: number;
+      readonly status: number;
+    }
+  | {
+      readonly phase: 'runner';
       readonly outcome: 'claim';
       readonly reason:
         | 'http-error'
@@ -580,8 +588,10 @@ export type OperationalLogEvent =
         | 'admission-rejected'
         | 'grant-recovery-failed'
         | 'sandbox-recovery-failed'
-        | 'runtime-preflight-failed';
+        | 'runtime-preflight-failed'
+        | 'backend-outage';
       readonly status?: number;
+      readonly staged?: boolean;
       readonly pollingHalted: boolean;
     }
   | {

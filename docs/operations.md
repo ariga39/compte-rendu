@@ -294,7 +294,10 @@ name or exact workspace/config path does not match, inspection fails, native
 secret absence cannot be confirmed, or removal cannot be confirmed, the record is
 retained and admission/claiming stay gated. The `sandbox-recovery` log event names
 the Job, Sandbox, failing step, fixed command name and status flags, without
-stderr content that could carry a token or URL. After fixing access,
+stderr content that could carry a token or URL. A `step: record` failure means
+inspect the private instance ownership files directly; an ownership mismatch
+requires out-of-band proof before any action. Never remove a resource based only
+on its name or blindly delete ownership records. After fixing access,
 `POST /maintenance/resume` retries the scan without changing the normal
 drain/resume response; restoring runtime access alone does not poll continuously
 (#313).
@@ -335,6 +338,25 @@ immutable identity and artifact hashes, requires the exact Sandbox to be absent,
 and revokes its LLM grant when configured.
 An existing Sandbox is never deleted by this recovery operation. Authentication
 errors, truncated inventory or failed removal leave cleanup unresolved.
+
+Runner also pauses new claims when a failed sbx cleanup is followed by a failed
+authenticated inventory probe, confirming a host-wide access outage. Other
+healthy Runners can keep claiming. It retries the probe on its idle cadence and,
+when access returns, immediately makes the same retained-evidence and
+exact-absence recovery eligible for each affected in-memory job without holding
+unrelated claims. The bounded retry also runs while drained and for a direct
+POST-only Runner without a claim URL. After a transient report or verification
+failure, expensive cleanup work is retried at most once every 30 seconds per
+pending job; unrelated claim polling continues. A Core 409 on the cleanup report
+replays the retained verified terminal callback and retries the same report once
+in the same recovery invocation; a repeated 409 is permanent. Only 408/429/5xx or
+timeout/network failures remain retryable afterward. Other 4xx responses or a
+permanent callback rejection stop automatic delivery with a bounded
+job/run/status diagnostic. An accepted report reopens
+the same-PR queue. A single job cleanup failure that does not fail the inventory
+probe leaves unrelated work claimable. Recovering a claim staged across a Runner
+crash depends on the durable claim handoff in #385; this cleanup path implements
+no additional claim protocol.
 
 For OpenSandbox, use the retained server-returned `sandboxId` and
 `sandboxOwnerNonce` to inspect the exact owned workload, sidecar and runtime
