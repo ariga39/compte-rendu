@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 import {
   createRunner as createProductionRunner,
@@ -10,6 +10,8 @@ import {
   type RunnerProcessOptions,
   type RunnerProcessResult,
 } from '../apps/runner/src/runner';
+import { createSbxRuntimeFactory } from '../apps/runner/src/sandbox-runtime-sbx';
+import type { SandboxRuntimeFactory } from '../apps/runner/src/sandbox-runtime';
 import { createCoreWorker } from '../apps/core/src/core-worker';
 import { createD1ReviewStateStore } from '../apps/core/src/index';
 import { SqliteD1Database } from './support/d1-database';
@@ -443,6 +445,7 @@ const runAgentScenario = async (scenario: {
   evidenceRoot?: string;
   repositoryReadToken?: string;
   agentProcess?: (options: RunnerProcessOptions) => Promise<RunnerProcessResult>;
+  sandboxRuntimeFactory?: SandboxRuntimeFactory;
   logEvents?: unknown[];
   onRunner?: (runner: ReturnType<typeof createRunner>) => void;
   terminalAttempts?: number;
@@ -460,6 +463,7 @@ const runAgentScenario = async (scenario: {
     ...(scenario.microsandbox
       ? ({ sandboxRuntime: 'microsandbox', microsandboxImage: 'review:fixture' } as const)
       : {}),
+    sandboxRuntimeFactory: scenario.sandboxRuntimeFactory,
     evidenceRoot: scenario.evidenceRoot ?? sharedEvidenceRoot,
     authToken: 'runner-test-token',
     modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
@@ -1667,6 +1671,55 @@ describe('Runner Job HTTP interface', () => {
     const stderrEvidence = await readFile(join(archive, 'opencode.stderr'), 'utf8');
     expect(stderrEvidence).toBe('warning [redacted]\n');
     expect(stderrEvidence).not.toContain(credential);
+  });
+
+  it('scrubs an additional process credential from the final archived output', async () => {
+    const credential = 'synthetic-additional-process-credential';
+    const leak = JSON.stringify({
+      type: 'text',
+      sessionID: 'scenario-session',
+      part: { type: 'text', messageID: 'msg-leak', text: `leak ${credential}` },
+    });
+    const resultLine = finalMarkdownJsonl();
+    const { terminal, manifest } = await runAgentScenario({
+      runId: 'run-312-additional-credential',
+      output: `${leak}\n${resultLine}`,
+      agentProcess: (options) =>
+        runProcess('sh', ['-c', `printf '%s\\n' '${leak}' '${resultLine}'`], options),
+      sandboxRuntimeFactory: (spec) => {
+        const runtime = createSbxRuntimeFactory({
+          modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+        })(spec);
+        return {
+          ...runtime,
+          exec: (args, command, processOptions, diagnostic) =>
+            runtime.exec(
+              args,
+              command,
+              {
+                ...processOptions,
+                credentialValues: [...(processOptions?.credentialValues ?? []), credential],
+              },
+              diagnostic,
+            ),
+        };
+      },
+    });
+
+    expect(terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'evidence' },
+      evidence: { status: 'incomplete' },
+      sandbox: { cleanup: 'destroyed' },
+    });
+    expect(terminal).not.toHaveProperty('result');
+    expect(manifest).toMatchObject({
+      evidenceFailure: 'credential-in-output',
+      terminal: { status: 'failed', reason: 'evidence' },
+    });
+    const archived = await readTextTree(join(sharedEvidenceRoot, terminal.evidenceId as string));
+    expect(archived).not.toContain(credential);
+    expect(archived).toContain('[redacted]');
   });
 
   it('does not treat stderr capture truncation alone as invalid output', async () => {
@@ -10074,6 +10127,8 @@ describe('Runner multi-model review', () => {
     readonly runId?: string;
     readonly selection?: typeof selection;
     readonly agentExitCode?: number;
+    readonly agentCredentialObserved?: boolean;
+    readonly multiReviewWriteFailure?: boolean;
   };
 
   const runScenario = async (overrides: MultiScenarioOverrides = {}) => {
@@ -10122,6 +10177,12 @@ describe('Runner multi-model review', () => {
           agentRuns += 1;
           agentArgs ??= args;
           agentCommands.push([...args]);
+          if (overrides.multiReviewWriteFailure === true) {
+            await mkdir(join(dirname(options.stdoutFilePath!), 'multi-review.json'), {
+              recursive: true,
+              mode: 0o700,
+            });
+          }
           await writeFile(options.stdoutFilePath!, `${output}\n`, {
             ...(options.fileAppend === true ? { flag: 'a' } : {}),
             mode: 0o600,
@@ -10136,6 +10197,7 @@ describe('Runner multi-model review', () => {
             stdout: output,
             timedOut: false,
             truncated: false,
+            ...(overrides.agentCredentialObserved === true ? { credentialObserved: true } : {}),
           };
         }
         if (args[0] === 'exec' && args.includes('api') && args.includes('session.list')) {
@@ -10958,6 +11020,26 @@ describe('Runner multi-model review', () => {
     expect(result.manifest.files).toEqual(
       expect.arrayContaining(['multi-review.json', 'opencode-export-ses_multi_child_a.json']),
     );
+  });
+
+  it('preserves a credential-in-output cause when multi-review evidence cannot be written', async () => {
+    const result = await runScenario({
+      runId: 'run-multi-credential-write-failure',
+      agentCredentialObserved: true,
+      multiReviewWriteFailure: true,
+    });
+
+    expect(result.terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'evidence' },
+      evidence: { status: 'incomplete' },
+      sandbox: { cleanup: 'destroyed' },
+    });
+    expect(result.terminal).not.toHaveProperty('result');
+    expect(result.manifest).toMatchObject({
+      evidenceFailure: 'credential-in-output',
+      terminal: { status: 'failed', reason: 'evidence' },
+    });
   });
 
   it('accepts unrelated extra fields in the final submission and publishes only decision and markdown', async () => {
