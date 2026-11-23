@@ -552,6 +552,21 @@ describe('Inference Worker public streaming', () => {
     });
   });
 
+  it('bounds an oversized Chat frame before parsing', async () => {
+    await control('chat-oversized-frame');
+    const token = await issue('runtime-chat-oversized-frame', ['deepseek-review']);
+    const response = await request(token, { model: 'deepseek-review', messages: [] });
+    expect(response.status).toBe(200);
+    await expect(response.text()).rejects.toThrow();
+
+    await runtime.INFERENCE.revoke({ jobId: 'runtime-chat-oversized-frame' });
+    await expect(
+      runtime.INFERENCE.usage({ jobId: 'runtime-chat-oversized-frame' }),
+    ).resolves.toMatchObject({
+      models: [{ requests: 1, incompleteRequests: 1 }],
+    });
+  });
+
   it('keeps a sibling job isolated when another job is revoked midstream', async () => {
     await control('hold');
     const tokenA = await issue('runtime-sibling-a', ['deepseek-review']);
