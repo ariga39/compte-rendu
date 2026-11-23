@@ -131,6 +131,7 @@ const DEFAULT_CONCURRENCY = 1;
 const EMPTY_EVIDENCE_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 const HTTPS_FQDN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/i;
 const IPV4 = /^\d+(?:\.\d+){3}$/;
+const RUNNER_INSTANCE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
 const nonEmpty = (value: string | undefined): string | undefined => {
   const trimmed = value?.trim();
@@ -799,6 +800,8 @@ export interface RunnerOptions {
   readonly modelSecretCommand?: string;
   readonly modelConfig?: string;
   readonly evidenceRoot?: string;
+  /** Stable deployment identity for per-instance Sandbox ownership records. */
+  readonly instanceId?: string;
   readonly process?: RunnerProcess;
   readonly log?: OperationalLog;
   readonly callbackUrl?: string;
@@ -1139,7 +1142,10 @@ export const createRunner = (options: RunnerOptions = {}) => {
       'compte-rendu',
       'reviews',
     );
-  const sandboxOwnershipRoot = join(evidenceRoot, 'sandbox-owners');
+  const instanceId =
+    options.instanceId ?? process.env.RUNNER_INSTANCE_ID ?? `port-${process.env.PORT ?? 8080}`;
+  if (!RUNNER_INSTANCE_ID.test(instanceId)) throw new Error('invalid Runner instance identity');
+  const sandboxOwnershipRoot = join(evidenceRoot, 'sandbox-owners', instanceId);
   const executeProcess = options.process ?? runProcess;
   const sandboxRuntimeFactory =
     options.sandboxRuntimeFactory ??
@@ -1597,13 +1603,40 @@ export const createRunner = (options: RunnerOptions = {}) => {
         timeoutMs: CLEANUP_COMMAND_TIMEOUT_MS,
       });
     return reconcileSbxRestartResources(sandboxOwnershipRoot, command)
-      .catch(() => false)
-      .then((recovered) => {
-        sandboxRecovered = recovered;
-        return recovered;
+      .then((result) => {
+        sandboxRecovered = result.ok;
+        if (!result.ok) {
+          void recordLog({
+            phase: 'runner',
+            outcome: 'sandbox-recovery',
+            recovered: result.recovered,
+            blocked: result.failures.length,
+            failures: result.failures.slice(0, 10),
+          });
+        }
+        return result.ok;
+      })
+      .catch(() => {
+        sandboxRecovered = false;
+        void recordLog({
+          phase: 'runner',
+          outcome: 'sandbox-recovery',
+          recovered: 0,
+          blocked: 1,
+          failures: [{ jobId: 'redacted', sandboxName: 'redacted', step: 'record' }],
+        });
+        return false;
       });
   };
-  const sandboxRecovery = startSandboxRecovery();
+  let sandboxRecovery = startSandboxRecovery();
+  const retrySandboxRecovery = () => {
+    if (sandboxRecovered !== false) return;
+    claimGateFailureLogged = false;
+    sandboxRecovery = startSandboxRecovery();
+    void sandboxRecovery.then((recovered) => {
+      if (recovered) requestNextJob?.();
+    });
+  };
   const activeJobCount = () =>
     [...jobs.values()].filter(
       (candidate) => candidate.state.status === 'queued' || candidate.state.status === 'running',
@@ -3732,6 +3765,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         draining = false;
         requestNextJob?.();
       }
+      retrySandboxRecovery();
       return jsonResponse(200, maintenanceStatus());
     }
     if (request.method === 'POST' && path === '/maintenance/recover-cleanup') {
@@ -3831,6 +3865,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
               retireDestroyedJob(job);
           }
           requestNextJob?.();
+          retrySandboxRecovery();
           return jsonResponse(202, { accepted: true });
         } finally {
           if (timeout !== undefined) clearTimeout(timeout);

@@ -333,11 +333,14 @@ reviewed; non-critical findings become follow-up issues.
 ### Startup ownership reconciliation
 
 For sbx, the adapter retains a private ownership record under
-`<evidenceRoot>/sandbox-owners/` before creating each scoped resource. The record
-contains the Job identity, exact Sandbox name, the per-job host workspace/config
-paths and which setup steps were attempted; it contains no repository content,
-model output, sessions or credentials. On startup the Runner checks each recorded
-name with `sbx inspect --json`. A present Sandbox is removed only when the
+`<evidenceRoot>/sandbox-owners/<instanceId>/` before creating each scoped
+resource. `instanceId` comes from `RUNNER_INSTANCE_ID` or, by default, the
+configured listener port, so co-located Runners sharing an evidence root still
+have separate records. The record contains the Job identity, exact Sandbox name,
+the per-job host workspace/config paths and which setup steps were attempted; it
+contains no repository content, model output, sessions or credentials. On
+startup the Runner checks each recorded name with `sbx inspect --json`. A present
+Sandbox is removed only when the
 inspection's exact `name` matches and its `workspace` or an
 `additional_workspaces[].dir` equals the retained host path. Runner then removes
 only network policies whose `sandbox_id` and resources match the recorded
@@ -349,8 +352,14 @@ intent recorded before creation cannot authorize deleting a same-name Sandbox or
 its policies. A missing, foreign, malformed or unverifiable identity keeps the
 record, leaves resources untouched and keeps admission and claiming gated.
 Names, prefixes, unrelated inspect metadata and bulk inventory never establish
-ownership. This startup path is separate from the authenticated cleanup-recovery
-operation and from automatic outage retries.
+ownership. A failed scan is reported as a bounded `sandbox-recovery` operational
+event with the retained Job/Sandbox identity, failing step, fixed command name and
+status flags. It deliberately omits stderr content, which may contain an upstream
+token, URL or arbitrary secret. Operators can retry the scan with
+`POST /maintenance/resume` or after an
+authenticated cleanup recovery; the normal drain/resume response fields are
+unchanged. This startup path is separate from the authenticated cleanup-recovery
+operation and from the continuous outage retry tracked by #313.
 
 ### Failed-cleanup reconciliation
 

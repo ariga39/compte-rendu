@@ -88,11 +88,13 @@ Managed inference permits the configured HTTPS inference hostname. Grant control
 
 Normal completion, failure, timeout and cancellation attempt cleanup. Hard process
 or host failure can leave an owned Sandbox and a claimed run behind. For sbx,
-startup reconciliation uses a private retained ownership record plus an exact
-inspect name and workspace/config match; it never deletes from name, prefix or
-unrelated metadata, verifies native secret absence, and keeps admission gated
-when ownership or absence is uncertain. Never delete a same-name foreign resource
-or release same-PR serialization based on an ambiguous cleanup result.
+startup reconciliation uses a per-instance private ownership record plus an exact
+inspect name and workspace/config match; co-located Runners sharing an evidence
+root do not scan each other's records. It never deletes from name, prefix or
+unrelated metadata, verifies native secret absence, reports bounded Job/step
+diagnostics without stderr content on failure, and keeps admission gated when
+ownership or absence is uncertain. Never delete a same-name foreign resource or release same-PR
+serialization based on an ambiguous cleanup result.
 
 ## Evidence and observability
 

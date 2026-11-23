@@ -256,12 +256,18 @@ support before a Runner that emits a new result shape. Do not interrupt live job
 just to update documentation or the dashboard. Relay grants survive Worker restarts in D1. On startup the Runner resolves pending revocations before accepting work. Interrupted agent jobs cannot resume.
 
 A hard crash can leave owned sbx resources. On startup Runner checks its private
-`sandbox-owners/` records under the evidence root and removes only a provably
-owned Sandbox, its exact scoped network policies and its scoped secrets. If the
-returned name or exact workspace/config path does not match, inspection fails,
-native secret absence cannot be confirmed, or removal cannot be confirmed, the
-record is retained and admission/claiming stay gated; restore access and verify
-the exact resources before restarting again.
+`sandbox-owners/<instanceId>/` records under the evidence root and removes only a
+provably owned Sandbox, its exact scoped network policies and its scoped secrets.
+`instanceId` is `RUNNER_INSTANCE_ID` or `port-<PORT>`, so co-located Runners
+sharing an evidence root do not reconcile each other's live jobs. If the returned
+name or exact workspace/config path does not match, inspection fails, native
+secret absence cannot be confirmed, or removal cannot be confirmed, the record is
+retained and admission/claiming stay gated. The `sandbox-recovery` log event names
+the Job, Sandbox, failing step, fixed command name and status flags, without
+stderr content that could carry a token or URL. After fixing access,
+`POST /maintenance/resume` retries the scan without changing the normal
+drain/resume response; restoring runtime access alone does not poll continuously
+(#313).
 An exhausted terminal callback can leave Core showing a claimed run even after
 local cleanup. Use the explicit recovery operation below; never clear D1 ownership
 or rerun an old Sandbox merely to make the dashboard look settled.

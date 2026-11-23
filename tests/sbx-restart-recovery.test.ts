@@ -107,11 +107,17 @@ const inspectView = async (
   ) as Record<string, unknown>;
 };
 
+const DEFAULT_INSTANCE_ID = 'test-runner';
+const ownershipRoot = (root: string, instanceId = DEFAULT_INSTANCE_ID) =>
+  join(root, 'sandbox-owners', instanceId);
+
 const runnerOptions = (
   evidenceRoot: string,
   process: (args: readonly string[]) => Promise<RunnerProcessResult>,
+  instanceId = DEFAULT_INSTANCE_ID,
 ) => ({
   evidenceRoot,
+  instanceId,
   authToken: 'runner-test-token',
   modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
   modelConfig: JSON.stringify({
@@ -168,7 +174,7 @@ describe('Runner sbx startup reconciliation', () => {
     await mkdir(spec.configRoot, { recursive: true });
     const runtime = createSbxRuntimeFactory({
       modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-      ownershipRoot: join(root, 'sandbox-owners'),
+      ownershipRoot: ownershipRoot(root),
     })(spec);
 
     await expect(runtime.setup(setupCommand(spec, 'policy'))).rejects.toThrow();
@@ -272,7 +278,7 @@ describe('Runner sbx startup reconciliation', () => {
     await mkdir(spec.configRoot, { recursive: true });
     const runtime = createSbxRuntimeFactory({
       modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-      ownershipRoot: join(root, 'sandbox-owners'),
+      ownershipRoot: ownershipRoot(root),
     })(spec);
 
     await expect(runtime.setup(setupCommand(spec, 'create'))).rejects.toThrow();
@@ -322,7 +328,7 @@ describe('Runner sbx startup reconciliation', () => {
     await mkdir(spec.configRoot, { recursive: true });
     const runtime = createSbxRuntimeFactory({
       modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-      ownershipRoot: join(root, 'sandbox-owners'),
+      ownershipRoot: ownershipRoot(root),
     })(spec);
 
     await expect(runtime.setup(setupCommand(spec, 'create-timeout'))).rejects.toThrow();
@@ -367,7 +373,7 @@ describe('Runner sbx startup reconciliation', () => {
     await mkdir(spec.configRoot, { recursive: true });
     const runtime = createSbxRuntimeFactory({
       modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-      ownershipRoot: join(root, 'sandbox-owners'),
+      ownershipRoot: ownershipRoot(root),
     })(spec);
 
     await expect(runtime.setup(setupCommand(spec, 'github'))).rejects.toThrow();
@@ -416,7 +422,7 @@ describe('Runner sbx startup reconciliation', () => {
     await mkdir(spec.configRoot, { recursive: true });
     const runtime = createSbxRuntimeFactory({
       modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-      ownershipRoot: join(root, 'sandbox-owners'),
+      ownershipRoot: ownershipRoot(root),
     })(spec);
     await runtime.setup(setupCommand(spec, null));
 
@@ -467,7 +473,7 @@ describe('Runner sbx startup reconciliation', () => {
     await mkdir(spec.configRoot, { recursive: true });
     const runtime = createSbxRuntimeFactory({
       modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-      ownershipRoot: join(root, 'sandbox-owners'),
+      ownershipRoot: ownershipRoot(root),
     })(spec);
     await runtime.setup(setupCommand(spec, null));
 
@@ -527,7 +533,7 @@ describe('Runner sbx startup reconciliation', () => {
     await mkdir(spec.configRoot, { recursive: true });
     const runtime = createSbxRuntimeFactory({
       modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-      ownershipRoot: join(root, 'sandbox-owners'),
+      ownershipRoot: ownershipRoot(root),
     })(spec);
     await runtime.setup(setupCommand(spec, null));
 
@@ -578,7 +584,7 @@ describe('Runner sbx startup reconciliation', () => {
     await mkdir(spec.configRoot, { recursive: true });
     const runtime = createSbxRuntimeFactory({
       modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-      ownershipRoot: join(root, 'sandbox-owners'),
+      ownershipRoot: ownershipRoot(root),
     })(spec);
     await runtime.setup(setupCommand(spec, null));
 
@@ -622,6 +628,180 @@ describe('Runner sbx startup reconciliation', () => {
         });
       });
       expect((await admit(runner)).status).toBe(503);
+    } finally {
+      await runner.close();
+    }
+  });
+
+  it('does not reconcile ownership records belonging to a co-located Runner instance', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-sbx-restart-'));
+    roots.push(root);
+    vi.stubEnv('TMPDIR', root);
+    vi.stubEnv('XDG_STATE_HOME', root);
+    vi.stubEnv('PORT', '9101');
+    const defaultEvidenceRoot = join(root, 'compte-rendu', 'reviews');
+    const spec = jobSpec(root, 'job-colocated');
+    await mkdir(spec.checkoutRoot, { recursive: true });
+    await mkdir(spec.configRoot, { recursive: true });
+    const runtime = createSbxRuntimeFactory({
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      ownershipRoot: ownershipRoot(defaultEvidenceRoot, 'port-9101'),
+    })(spec);
+    await runtime.setup(setupCommand(spec, null));
+
+    vi.stubEnv('PORT', '9102');
+    const siblingCommands: string[][] = [];
+    const sibling = createRunner({
+      ...runnerOptions(
+        root,
+        async (args) => {
+          siblingCommands.push([...args]);
+          return ok;
+        },
+        'runner-b',
+      ),
+      evidenceRoot: undefined,
+      instanceId: undefined,
+    });
+    try {
+      expect((await admit(sibling)).status).toBe(400);
+      expect(siblingCommands).toEqual([]);
+    } finally {
+      await sibling.close();
+    }
+
+    let present = true;
+    const secrets = secretState();
+    vi.stubEnv('PORT', '9101');
+    const ownCommands: string[][] = [];
+    const own = createRunner({
+      ...runnerOptions(
+        root,
+        async (args) => {
+          ownCommands.push([...args]);
+          const secret = secretCommand(args, secrets, spec);
+          if (secret !== undefined) return secret;
+          if (args[0] === 'inspect') {
+            if (!present) return notFound(spec.name);
+            return {
+              ...ok,
+              stdout: JSON.stringify(
+                await inspectView(spec.name, spec.checkoutRoot, spec.configRoot),
+              ),
+            };
+          }
+          if (args[0] === 'policy' && args[1] === 'ls')
+            return { ...ok, stdout: JSON.stringify({ rules: [] }) };
+          if (args[0] === 'rm') present = false;
+          return ok;
+        },
+        'runner-a',
+      ),
+      evidenceRoot: undefined,
+      instanceId: undefined,
+    });
+    try {
+      await vi.waitFor(() => expect(ownCommands.some((args) => args[0] === 'rm')).toBe(true));
+      expect((await admit(own)).status).toBe(400);
+    } finally {
+      await own.close();
+    }
+  });
+
+  it('attributes a failed startup scan and retries it through maintenance resume', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-sbx-restart-'));
+    roots.push(root);
+    vi.stubEnv('TMPDIR', root);
+    const spec = jobSpec(root, 'job-resume-retry');
+    await mkdir(spec.checkoutRoot, { recursive: true });
+    await mkdir(spec.configRoot, { recursive: true });
+    const runtime = createSbxRuntimeFactory({
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      ownershipRoot: ownershipRoot(root),
+    })(spec);
+    await runtime.setup(setupCommand(spec, null));
+
+    let mode: 'failed' | 'owned' = 'failed';
+    let present = true;
+    const secrets = secretState();
+    const events: unknown[] = [];
+    const canary = 'ghp_CANARY_SECRET_MUST_NOT_APPEAR_IN_LOGS';
+    const canaryUrl = 'https://user:canary@example.test/path?token=ghp_CANARY';
+    const runner = createRunner({
+      ...runnerOptions(root, async (args) => {
+        const secret = secretCommand(args, secrets, spec);
+        if (secret !== undefined) return secret;
+        if (args[0] === 'inspect') {
+          if (mode === 'failed')
+            return {
+              ...ok,
+              exitCode: 1,
+              stderr: `not signed in to Docker; token=${canary}; ${canaryUrl}`,
+            };
+          if (!present) return notFound(spec.name);
+          return {
+            ...ok,
+            stdout: JSON.stringify(
+              await inspectView(spec.name, spec.checkoutRoot, spec.configRoot),
+            ),
+          };
+        }
+        if (args[0] === 'policy' && args[1] === 'ls')
+          return { ...ok, stdout: JSON.stringify({ rules: [] }) };
+        if (args[0] === 'rm') present = false;
+        return ok;
+      }),
+      log: { record: (event) => void events.push(event) },
+    });
+
+    try {
+      await vi.waitFor(() =>
+        expect(events).toContainEqual(
+          expect.objectContaining({
+            phase: 'runner',
+            outcome: 'sandbox-recovery',
+            recovered: 0,
+            blocked: 1,
+            failures: [
+              expect.objectContaining({
+                jobId: spec.id,
+                sandboxName: spec.name,
+                step: 'inspect',
+                command: 'inspect',
+                exitCode: 1,
+                timedOut: false,
+                truncated: false,
+                stderrTruncated: false,
+                streamError: false,
+                processError: false,
+              }),
+            ],
+          }),
+        ),
+      );
+      const recoveryEvent = events.find((event) =>
+        JSON.stringify(event).includes('"outcome":"sandbox-recovery"'),
+      );
+      expect(recoveryEvent).toBeDefined();
+      expect(JSON.stringify(recoveryEvent)).not.toContain(canary);
+      expect(JSON.stringify(recoveryEvent)).not.toContain('canary@example.test');
+      expect(
+        (recoveryEvent as { failures?: Array<Record<string, unknown>> }).failures?.[0],
+      ).not.toHaveProperty('stderr');
+      expect(await (await maintenance(runner, 'drain')).json()).toMatchObject({
+        drained: false,
+        claimPollingHalted: true,
+      });
+      expect((await admit(runner)).status).toBe(503);
+
+      mode = 'owned';
+      const resumed = await maintenance(runner, 'resume');
+      expect(resumed.status).toBe(200);
+      await vi.waitFor(async () => expect((await admit(runner)).status).toBe(400));
+      expect(await (await maintenance(runner, 'drain')).json()).toMatchObject({
+        drained: true,
+        claimPollingHalted: false,
+      });
     } finally {
       await runner.close();
     }
