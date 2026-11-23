@@ -9,7 +9,7 @@ import {
   streamFrameUsage,
   type UpstreamUsage,
 } from '@compte-rendu/contracts';
-import { EventSourceParserStream } from 'eventsource-parser/stream';
+import { createBoundedSseDecoder, type SseFrame } from './bounded-sse.ts';
 import { finalizeComplete, savePartial, type AuthenticatedGrant } from './ledger.ts';
 import type { D1DatabaseLike } from './grants.ts';
 import type { FrozenRoute } from './routes.ts';
@@ -17,6 +17,11 @@ import { gatewayHeaders, gatewayUrl, type GatewayConfig } from './gateway';
 export type { GatewayConfig } from './gateway';
 
 const GATEWAY_PATH = '/chat/completions';
+// A Chat event can carry a full text delta or one tool-call argument batch.
+// This is the raw whole-frame bound, including SSE event/data lines and
+// separators. It is separate from the 64 KiB terminal tail held after the finish
+// marker; the complete stream has no cumulative byte cap.
+const MAX_CHAT_FRAME_BYTES = 4 * 1024 * 1024;
 const MAX_HELD_FRAMES = 32;
 const MAX_HELD_BYTES = 64 * 1024;
 
@@ -71,7 +76,7 @@ export const relayInference = (options: InferenceRelayOptions): Effect.Effect<Re
       reasoningTokens: null,
       complete: false,
     };
-    let reader: ReadableStreamDefaultReader<{ event?: string; data: string }> | null = null;
+    let reader: ReadableStreamDefaultReader<SseFrame> | null = null;
     let downstream: ReadableStreamDefaultController<Uint8Array> | null = null;
     let finalized = false;
     let failureStarted = false;
@@ -173,20 +178,7 @@ export const relayInference = (options: InferenceRelayOptions): Effect.Effect<Re
       return failure(upstream.status >= 400 && upstream.status <= 599 ? upstream.status : 502);
     }
 
-    const decoder = new TextDecoder();
-    const measure = new TransformStream<Uint8Array, string>({
-      transform(chunk, output) {
-        output.enqueue(decoder.decode(chunk, { stream: true }));
-      },
-      flush(output) {
-        const tail = decoder.decode();
-        if (tail.length > 0) output.enqueue(tail);
-      },
-    });
-    reader = upstream.body
-      .pipeThrough(measure)
-      .pipeThrough(new EventSourceParserStream())
-      .getReader();
+    reader = upstream.body.pipeThrough(createBoundedSseDecoder(MAX_CHAT_FRAME_BYTES)).getReader();
 
     const reachedTerminal = () => finishMarker && doneMarker;
     const holdTerminal = (chunk: Uint8Array): boolean => {

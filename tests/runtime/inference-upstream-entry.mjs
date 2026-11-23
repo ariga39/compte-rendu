@@ -371,6 +371,17 @@ const floodedBytesResponse = (model) =>
       'data: [DONE]\n\n',
   );
 
+const oversizedChatFrameResponse = (model) =>
+  streamResponse(
+    `data: ${JSON.stringify({
+      model,
+      choices: [{ index: 0, delta: { content: 'x'.repeat(5 * 1024 * 1024) }, finish_reason: null }],
+    })}\n\n` +
+      usageFrame(model) +
+      finishFrame() +
+      'data: [DONE]\n\n',
+  );
+
 const silentResponse = () =>
   new Response(
     new ReadableStream({
@@ -468,6 +479,7 @@ export default {
     if (scenario === 'deferred-terminal') return deferredTerminalResponse('deepseek-native');
     if (scenario === 'flood-after-finish') return floodedTerminalResponse('deepseek-native');
     if (scenario === 'flood-bytes-after-finish') return floodedBytesResponse('deepseek-native');
+    if (scenario === 'chat-oversized-frame') return oversizedChatFrameResponse('deepseek-native');
     if (scenario === 'wait-headers') {
       waitingHeaders += 1;
       await releasePromise;

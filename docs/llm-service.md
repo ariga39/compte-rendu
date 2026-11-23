@@ -89,7 +89,13 @@ job and triggers grant cleanup.
 
 ### Inference protocols
 
-Chat routes use `POST /v1/chat/completions`. Responses routes use
+Chat routes use `POST /v1/chat/completions`. A single raw SSE frame, including
+its event/data lines and separators, is limited to 4 MiB before parsing; a
+larger frame fails the turn. After the finish marker, at most 32 frames and
+64 KiB of terminal tail are held until `[DONE]`; either excess fails the turn.
+The complete stream has no cumulative byte cap.
+
+Responses routes use
 `POST /v1/responses` with foreground streaming, local function tools and
 `store: false`. The relay accepts inline tool results and encrypted reasoning
 replay. It rejects hosted tools, remote references and cross-protocol calls.
