@@ -858,7 +858,7 @@ export const claimHeadStatus = Effect.fn('claimHeadStatus')(function* (
       return target.value.headSha === job.headSha ? ('current' as const) : ('stale' as const);
     },
     catch: () => 'unavailable' as const,
-  });
+  }).pipe(Effect.catch(() => Effect.succeed('unavailable' as const)));
 });
 
 type ReviewCompletionStateStore = ReviewStateStore & Partial<ReviewStateQueries>;
