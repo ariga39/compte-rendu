@@ -52,7 +52,7 @@ Reviews are listed newest first, and filters stay in the page address so a filte
 
 ## Review details
 
-- **Received** and **Assigned** show when the review entered the queue and when a runner took it. The end time is labelled **Finished**, or **Cancelled** for a cancelled review. Assigned means a runner took the review; it is not the start of execution.
+- **Received** and **Assigned** show when the review entered the queue and when a runner took it. The end time is labelled **Finished**, or **Cancellation requested** while a claimed cancellation still has unconfirmed cleanup; it becomes **Cancelled** once cleanup is confirmed. A queued cancellation with no Runner claim is already **Cancelled**. Cancellation and later cleanup confirmation stay separate recorded events. Assigned means a runner took the review; it is not the start of execution.
 - **Time in queue** and **Total time** are shown when both endpoints were recorded.
 - **Last progress update** is the most recent progress report, when there is one.
 - **Decision** is the review's conclusion: **Approve**, **Request changes**, or **Comment**, explained below.
@@ -68,7 +68,7 @@ Authorized operators see **Cancel review** on a queued or in-progress review unt
 
 After a cancellation is accepted, the review shows **Cancelling** while execution stops and resource cleanup is confirmed. It changes to **Cancelled** when no cleanup is outstanding. If cleanup fails, the review still shows **Cancelled** and **Cleanup failed** separately because an operator may need to intervene. A queued review that never reached a runner becomes **Cancelled** without a cleanup warning.
 
-For cancelled reviews, the timeline marks the operator cancellation, the cleanup outcome and the Runner callback at their recorded times. If a Sandbox was assigned, wait for cleanup confirmation before retrying. To start a fresh review, a repository maintainer can select **Run review again** on the cancelled GitHub Check. For older Checks without that action, comment `/ai-review` on the PR.
+For cancelled reviews, the timeline marks the operator cancellation, the cleanup outcome and the Runner callback at their recorded times. If a Sandbox was assigned, wait for cleanup confirmation before retrying. Selecting **Run review again** before then does not start a review; the Check explains that cleanup is still outstanding. After **Cleanup failed**, complete cleanup recovery first. Once cleanup is confirmed, **Run review again** or `/ai-review` starts a fresh review. A queued cancellation that never reached a runner can be retried immediately. These actions still require maintainer permission.
 
 Cancellation is durable: refreshing the page, closing the tab, or signing out does not restart the review. If publication has already started, or the review has already reached another final state, cancellation is refused and the latest details are shown instead. An existing GitHub review is never withdrawn.
 

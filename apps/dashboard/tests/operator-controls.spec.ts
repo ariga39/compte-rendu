@@ -33,6 +33,8 @@ test('a cancelled review is distinct from failure and supersession', async ({
   await expect(page.getByRole('list', { name: 'Timeline' }).locator('li strong')).toHaveText([
     'Cancelled by operator',
   ]);
+  await expect(page.locator('.fact', { hasText: 'Cancelled' })).toBeVisible();
+  await expect(page.locator('.fact', { hasText: 'Cancellation requested' })).toHaveCount(0);
   expect(text).not.toContain('Did not finish successfully.');
   expect(text).not.toContain('A newer revision replaced this review.');
   await expect(page.locator('[data-testid="cancel-review"]')).toHaveCount(0);
@@ -101,6 +103,7 @@ test('a claimed cancellation stays Cancelling until cleanup is confirmed', async
   await expect.poll(() => statusOf(page)).toBe('Cancelling');
   const pending = (await page.locator('#content').textContent())?.replace(/\s+/g, ' ') ?? '';
   expect(pending).toContain('Execution is stopping and cleanup is not yet confirmed.');
+  await expect(page.locator('.fact', { hasText: 'Cancellation requested' })).toBeVisible();
   await page.locator('.bx--accordion__heading').click();
   await expect(page.locator('.cleanup-block')).toContainText('Cleanup pending');
 
@@ -109,6 +112,8 @@ test('a claimed cancellation stays Cancelling until cleanup is confirmed', async
   await expect.poll(() => statusOf(page)).toBe('Cancelled');
   const done = (await page.locator('#content').textContent())?.replace(/\s+/g, ' ') ?? '';
   expect(done).toContain('Review cancelled; no review was published.');
+  await expect(page.locator('.fact', { hasText: 'Cancellation requested' })).toHaveCount(0);
+  await expect(page.locator('.fact', { hasText: 'Cancelled' })).toBeVisible();
   await expect(page.locator('.cleanup-block')).toContainText('Cleaned up');
   expect(done).toContain('Cleanup was confirmed.');
 });
@@ -184,17 +189,18 @@ test('cleanup failure is explained separately from cancellation', async ({
   harness,
   base,
 }) => {
-  harness.setHandler(
-    listAndDetails([
-      publicTask('cancelled-cleanup', {
-        status: 'cancelled',
-        dispatch: null,
-        claimedAt: NOW,
-        terminalAt: NOW,
-        cleanup: 'failed',
-        totalDurationMs: 5000,
-      }),
-    ]),
+  let cleanup: PublicTaskState['cleanup'] = 'failed';
+  const task = () =>
+    publicTask('cancelled-cleanup', {
+      status: 'cancelled',
+      dispatch: null,
+      claimedAt: NOW,
+      terminalAt: NOW,
+      cleanup,
+      totalDurationMs: 5000,
+    });
+  harness.setHandler((url) =>
+    url.pathname.startsWith('/api/jobs/') ? ok(detailData(task())) : ok(historyPage([task()])),
   );
 
   await page.goto(`${base}/history`);
@@ -208,6 +214,12 @@ test('cleanup failure is explained separately from cancellation', async ({
   expect(text).toContain('Review cancelled. Cleanup failed and needs an operator.');
   expect(text).toContain('Cleanup failed and needs an operator.');
   await expect(page.locator('.review-heading .bx--tag')).not.toHaveText('Failed');
+  await expect(page.locator('.fact', { hasText: 'Cancellation requested' })).toBeVisible();
+
+  cleanup = 'destroyed';
+  await page.click('.header-refresh [data-testid="refresh"]');
+  await expect(page.locator('.fact', { hasText: 'Cancellation requested' })).toHaveCount(0);
+  await expect(page.locator('.fact', { hasText: 'Cancelled' })).toBeVisible();
 });
 
 test('anonymous readers cannot open a cancellation confirmation', async ({
@@ -306,6 +318,8 @@ test('help explains cancellation, its states and its history filter', async ({
   expect(text).toContain('Cancelling a review');
   expect(text).toContain('publish no review');
   expect(text).toContain('Cancelled');
+  expect(text).toContain('Cancellation requested');
+  expect(text).toContain('Run review again');
   expect(text).toContain('published, failed, superseded, or cancelled');
   expect(text).toContain('Cleanup failed');
 });

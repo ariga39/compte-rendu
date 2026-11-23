@@ -166,6 +166,7 @@ export interface ReviewOutcome {
   runnerAttempt?: number;
   commentId?: number;
   checkRunId?: number;
+  cleanup?: RunnerCleanupStatus;
   evidence?: ReviewEvidenceMetadata;
 }
 
@@ -651,6 +652,7 @@ export interface GitHubAdapter {
     status: 'in_progress' | 'success' | 'failure' | 'cancelled';
     decision?: ReviewDecision;
     cancellationReason?: 'manual';
+    retryBlocked?: 'cleanup-pending' | 'cleanup-failed';
   }): Promise<void>;
   findCheckRunForSuite?(input: {
     repositoryId: number;
@@ -2045,13 +2047,33 @@ const createReviewEventHandler = (dependencies: AdmissionDependencies) => {
       return 'ignored' as const;
     }
 
-    return yield* handleManualIntent({
+    const disposition = yield* handleManualIntent({
       deliveryId: event.deliveryId,
       repositoryId: event.repositoryId,
       pullRequestNumber: outcome.pullRequestNumber,
       installationId: event.installationId,
       senderLogin: event.senderLogin,
     });
+    const cleanupBlocked =
+      outcome.cleanup === 'pending' ||
+      outcome.cleanup === 'failed' ||
+      (outcome.cleanup === undefined && outcome.runnerJobId !== undefined);
+    if (disposition === 'cancelled' && cleanupBlocked && github.updateCheckRun !== undefined) {
+      yield* Effect.tryPromise({
+        try: () =>
+          github.updateCheckRun!({
+            runId: externalRunId,
+            repositoryId: outcome.repositoryId,
+            installationId: outcome.installationId,
+            checkRunId,
+            status: 'cancelled',
+            cancellationReason: 'manual',
+            retryBlocked: outcome.cleanup === 'failed' ? 'cleanup-failed' : 'cleanup-pending',
+          }),
+        catch: () => new SchedulingFailed({ message: 'Check retry feedback failed' }),
+      }).pipe(Effect.catch(() => Effect.succeed(undefined)));
+    }
+    return disposition;
   });
 
   return Effect.fn('handleReviewEvent')(function* (event: unknown) {
