@@ -9489,24 +9489,57 @@ describe('Runner transport diagnostics', () => {
     }
   });
 
-  it.each(['openshell', 'microsandbox'] as const)(
-    'records a one-time %s runtime preflight failure and halts claiming',
-    async (sandboxRuntime) => {
+  it('records a one-time OpenShell runtime preflight failure and halts claiming', async () => {
+    const events: LogEvent[] = [];
+    let claims = 0;
+    const runner = createRunner({
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      sandboxRuntime: 'openshell',
+      openshell: { gateway: 'review', modelProvider: 'review', image: 'review:test' },
+      claimUrl: 'https://ingress.test/runner-claim',
+      claimIntervalMs: 1,
+      claimFetch: async () => {
+        claims += 1;
+        return new Response(null, { status: 204 });
+      },
+      log: {
+        record: async (event) => {
+          events.push(event as LogEvent);
+        },
+      },
+      process: async () => ({ exitCode: 1, stdout: '', timedOut: false, truncated: false }),
+    });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 40));
+
+      expect(events.filter((event) => event.outcome === 'claim')).toEqual([
+        expect.objectContaining({ reason: 'runtime-preflight-failed', pollingHalted: true }),
+      ]);
+      expect(claims).toBe(0);
+    } finally {
+      await runner.close();
+    }
+  });
+
+  it.each(['exit failure', 'rejection'] as const)(
+    'retries a transient microsandbox preflight (%s) and caches success',
+    async (failure) => {
       const events: LogEvent[] = [];
       let claims = 0;
+      let doctorCalls = 0;
+      let healthy = false;
+      const realNow = Date.now.bind(Date);
+      let offset = 0;
+      const clock = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + offset);
       const runner = createRunner({
         authToken: 'runner-test-token',
         modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-        sandboxRuntime,
-        ...(sandboxRuntime === 'microsandbox'
-          ? {
-              microsandboxImage: 'review:test',
-              llmRelay: true,
-              llmRelayGeneration: 'generation-a',
-              modelConfig: relayInferenceModelConfig('review'),
-            }
-          : {}),
-        openshell: { gateway: 'review', modelProvider: 'review', image: 'review:test' },
+        sandboxRuntime: 'microsandbox',
+        microsandboxImage: 'review:test',
+        llmRelay: true,
+        llmRelayGeneration: 'generation-a',
+        modelConfig: relayInferenceModelConfig('review'),
         claimUrl: 'https://ingress.test/runner-claim',
         claimIntervalMs: 1,
         claimFetch: async () => {
@@ -9518,16 +9551,43 @@ describe('Runner transport diagnostics', () => {
             events.push(event as LogEvent);
           },
         },
-        process: async () => ({ exitCode: 1, stdout: '', timedOut: false, truncated: false }),
+        process: async (_command, args) => {
+          if (args[0] === 'doctor') doctorCalls += 1;
+          if (!healthy && args[0] === 'doctor' && failure === 'rejection')
+            throw new Error('doctor unavailable');
+          return {
+            exitCode: healthy ? 0 : 1,
+            stdout: '',
+            timedOut: false,
+            truncated: false,
+          };
+        },
       });
       try {
-        await new Promise((resolve) => setTimeout(resolve, 40));
-
+        await vi.waitFor(() =>
+          expect(events.filter((event) => event.outcome === 'claim')).toHaveLength(1),
+        );
         expect(events.filter((event) => event.outcome === 'claim')).toEqual([
-          expect.objectContaining({ reason: 'runtime-preflight-failed', pollingHalted: true }),
+          expect.objectContaining({ reason: 'runtime-preflight-failed', pollingHalted: false }),
         ]);
         expect(claims).toBe(0);
+        expect(doctorCalls).toBe(1);
+        const status = (await (
+          await runner.handle(
+            new Request('http://runner/maintenance', {
+              headers: { authorization: 'Bearer runner-test-token' },
+            }),
+          )
+        ).json()) as { claimPollingHalted: boolean };
+        expect(status.claimPollingHalted).toBe(false);
+
+        healthy = true;
+        offset = 31_000;
+        await vi.waitFor(() => expect(claims).toBeGreaterThan(0));
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(doctorCalls).toBe(2);
       } finally {
+        clock.mockRestore();
         await runner.close();
       }
     },
