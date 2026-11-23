@@ -1,4 +1,5 @@
 import { createTestReviewStore } from './support/review-store';
+import { claimRunnerJob } from './support/runner-claim';
 import { describe, expect, it } from 'vitest';
 import {
   createD1ReviewStateStore,
@@ -33,6 +34,8 @@ const schedule = async (
   if (claim.kind !== 'claimed') throw new Error(`run was not claimed: ${claim.kind}`);
   return claim.runId;
 };
+
+const claimedAt = '2026-11-19T00:00:30.000Z';
 
 const evidence = (key: string) => ({
   key,
@@ -157,7 +160,12 @@ describe('D1 cancellation store', () => {
   it('retains runner identity and beats publication without losing the disposition to late callbacks', async () => {
     const store = createTestReviewStore();
     const runId = await schedule(store, 'cancel-claimed');
-    await store.recordRunnerJob({ runId, jobId: 'runner-job-1', attempt: 1 });
+    await claimRunnerJob(store, {
+      occurredAt: claimedAt,
+      runId,
+      jobId: 'runner-job-1',
+      job: job(),
+    });
 
     const first = await store.cancelRun({
       runId,
@@ -250,10 +258,11 @@ describe('D1 cancellation store', () => {
   it('reports a conflict for a publication claim or any other terminal state', async () => {
     const store = createTestReviewStore();
     const publishedRun = await schedule(store, 'cancel-published');
-    await store.recordRunnerJob({
+    await claimRunnerJob(store, {
+      occurredAt: claimedAt,
       runId: publishedRun,
       jobId: 'runner-job-published',
-      attempt: 1,
+      job: job(),
     });
     await expect(
       store.claimRunPublication?.({
@@ -310,7 +319,12 @@ describe('D1 cancellation store', () => {
   it('allows a fresh manual retry only after the cancelled runner claim is torn down', async () => {
     const store = createTestReviewStore();
     const runId = await schedule(store, 'cancel-before-retry');
-    await store.recordRunnerJob({ runId, jobId: 'runner-job-retry', attempt: 1 });
+    await claimRunnerJob(store, {
+      occurredAt: claimedAt,
+      runId,
+      jobId: 'runner-job-retry',
+      job: job(),
+    });
     await store.cancelRun({
       runId,
       requestedByUid: 1001,
@@ -350,10 +364,11 @@ describe('D1 cancellation store', () => {
   it('blocks a same-pull-request replacement until the cancelled claim cleanup is confirmed', async () => {
     const store = createTestReviewStore();
     const cancelledRun = await schedule(store, 'blocking-cancel');
-    await store.recordRunnerJob({
+    await claimRunnerJob(store, {
+      occurredAt: claimedAt,
       runId: cancelledRun,
       jobId: 'runner-job-blocking',
-      attempt: 1,
+      job: job(),
     });
     await store.cancelRun({
       runId: cancelledRun,
@@ -475,7 +490,7 @@ describe('D1 cancellation store', () => {
   it('retains the first confirmed teardown time when a later callback supplies it', async () => {
     const store = createTestReviewStore();
     const runId = await schedule(store, 'late-cleanup-time');
-    await store.recordRunnerJob({ runId, jobId: 'job', attempt: 1 });
+    await claimRunnerJob(store, { occurredAt: claimedAt, runId, jobId: 'job', job: job() });
     await store.cancelRun({ runId, requestedByUid: 1, occurredAt: '2026-11-19T00:01:00.000Z' });
     const key = 'reviews/' + runId;
     await store.recordEvidence({ runId, evidence: evidence(key), sandboxCleanup: 'destroyed' });
@@ -573,10 +588,11 @@ describe('D1 cancellation store', () => {
   it('recovers a failed cancelled-run cleanup and keeps destroyed teardown monotonic', async () => {
     const store = createTestReviewStore();
     const runId = await schedule(store, 'cancel-cleanup-recovery');
-    await store.recordRunnerJob({
+    const claimed = await claimRunnerJob(store, {
+      occurredAt: claimedAt,
       runId,
       jobId: 'runner-job-recovery',
-      attempt: 1,
+      job: job(),
     });
     await store.cancelRun({
       runId,
@@ -591,8 +607,8 @@ describe('D1 cancellation store', () => {
 
     const recovery = {
       runId,
-      jobId: 'runner-job-recovery',
-      attempt: 1,
+      jobId: claimed.jobId,
+      attempt: claimed.attempt,
       evidenceId: 'evidence-id',
       baseSha,
       headSha,
@@ -729,15 +745,27 @@ describe('D1 cancellation store', () => {
 
   it('limits cancellation work to an optional runId for an immediate targeted stop', async () => {
     const store = createTestReviewStore();
-    const firstRun = await schedule(store, 'targeted-first', job({ pullRequestNumber: 201 }));
-    await store.recordRunnerJob({ runId: firstRun, jobId: 'targeted-job-1', attempt: 1 });
+    const firstJob = job({ pullRequestNumber: 201 });
+    const firstRun = await schedule(store, 'targeted-first', firstJob);
+    await claimRunnerJob(store, {
+      occurredAt: claimedAt,
+      runId: firstRun,
+      jobId: 'targeted-job-1',
+      job: firstJob,
+    });
     await store.cancelRun({
       runId: firstRun,
       requestedByUid: 1001,
       occurredAt: '2026-11-19T00:01:00.000Z',
     });
-    const secondRun = await schedule(store, 'targeted-second', job({ pullRequestNumber: 202 }));
-    await store.recordRunnerJob({ runId: secondRun, jobId: 'targeted-job-2', attempt: 1 });
+    const secondJob = job({ pullRequestNumber: 202 });
+    const secondRun = await schedule(store, 'targeted-second', secondJob);
+    await claimRunnerJob(store, {
+      occurredAt: claimedAt,
+      runId: secondRun,
+      jobId: 'targeted-job-2',
+      job: secondJob,
+    });
     await store.cancelRun({
       runId: secondRun,
       requestedByUid: 1001,
@@ -772,7 +800,7 @@ describe('D1 cancellation store', () => {
   it('leases one stop and one Check dispatch per observed attempt snapshot', async () => {
     const store = createTestReviewStore();
     const runId = await schedule(store, 'cancellation-cas');
-    await store.recordRunnerJob({ runId, jobId: 'cas-job', attempt: 1 });
+    await claimRunnerJob(store, { occurredAt: claimedAt, runId, jobId: 'cas-job', job: job() });
     await store.recordCheckRun?.({ runId, checkRunId: 321 });
     await store.cancelRun({
       runId,
@@ -884,11 +912,13 @@ describe('D1 cancellation store', () => {
     const store = createTestReviewStore();
     const runIds: string[] = [];
     for (let index = 0; index < 3; index += 1) {
-      const runId = await schedule(store, `work-${index}`, job({ pullRequestNumber: 100 + index }));
-      await store.recordRunnerJob({
+      const expectedJob = job({ pullRequestNumber: 100 + index });
+      const runId = await schedule(store, `work-${index}`, expectedJob);
+      await claimRunnerJob(store, {
+        occurredAt: claimedAt,
         runId,
         jobId: `runner-job-${index}`,
-        attempt: 1,
+        job: expectedJob,
       });
       await store.cancelRun({
         runId,

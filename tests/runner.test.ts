@@ -13,6 +13,7 @@ import {
 import { createCoreWorker } from '../apps/core/src/core-worker';
 import { createD1ReviewStateStore } from '../apps/core/src/index';
 import { SqliteD1Database } from './support/d1-database';
+import { claimRunnerJob } from './support/runner-claim';
 
 delete process.env.REVIEW_MODEL_CONFIG;
 
@@ -10732,11 +10733,7 @@ describe('Runner multi-model review', () => {
         occurredAt: '2026-09-01T00:00:00.000Z',
       });
       if (claim.kind !== 'claimed') throw new Error('multi review run was not claimed');
-      await stateStore.recordRunnerJob({
-        runId: claim.runId,
-        jobId: runnerJobFields.id,
-        attempt: 1,
-      });
+      await claimRunnerJob(stateStore, { runId: claim.runId, jobId: runnerJobFields.id });
 
       const result = await runScenario({ runId: claim.runId });
       expect(result.terminal).toMatchObject({ status: 'succeeded' });
@@ -10804,11 +10801,7 @@ describe('Runner multi-model review', () => {
         occurredAt: '2026-09-01T00:00:00.000Z',
       });
       if (claim.kind !== 'claimed') throw new Error('upstream review run was not claimed');
-      await stateStore.recordRunnerJob({
-        runId: claim.runId,
-        jobId: runnerJobFields.id,
-        attempt: 1,
-      });
+      await claimRunnerJob(stateStore, { runId: claim.runId, jobId: runnerJobFields.id });
 
       const error = JSON.stringify({
         type: 'error',

@@ -10,6 +10,7 @@ import { createGitHubPublicationAdapter } from '../apps/core/src/github-review-a
 import type { ReviewEvent } from '../packages/contracts/src';
 import type { OperationalLogEvent } from '../packages/contracts/src';
 import { SqliteD1Database } from './support/d1-database';
+import { claimRunnerJob } from './support/runner-claim';
 
 const eligibleEvent: ReviewEvent = {
   deliveryId: 'delivery-core-worker-1',
@@ -851,7 +852,7 @@ describe('Core Worker', () => {
       occurredAt: '2026-09-01T00:00:00.000Z',
     });
     if (claimed.kind !== 'claimed') throw new Error('success lifecycle run was not claimed');
-    await stateStore.recordRunnerJob({ runId: claimed.runId, jobId: 'runner-job-1', attempt: 1 });
+    await claimRunnerJob(stateStore, { runId: claimed.runId, jobId: 'runner-job-1' });
     const { fetcher, requests, waitUntilTasks } = capturePostHogTransport();
     const env = {
       REVIEW_DB: database,
@@ -1342,7 +1343,7 @@ describe('Core Worker', () => {
       occurredAt: '2026-09-01T00:00:00.000Z',
     });
     if (claimed.kind !== 'claimed') throw new Error('superseded lifecycle run was not claimed');
-    await stateStore.recordRunnerJob({ runId: claimed.runId, jobId: 'runner-job-1', attempt: 1 });
+    await claimRunnerJob(stateStore, { runId: claimed.runId, jobId: 'runner-job-1' });
     await stateStore.markRunSuperseded({
       runId: claimed.runId,
       occurredAt: '2026-09-01T00:00:01.000Z',
@@ -2128,7 +2129,7 @@ describe('Core Worker', () => {
       occurredAt: '2026-09-01T00:00:00.000Z',
     });
     if (claimed.kind !== 'claimed') throw new Error('retry run was not claimed');
-    await stateStore.recordRunnerJob({ runId: claimed.runId, jobId: 'runner-job-1', attempt: 1 });
+    await claimRunnerJob(stateStore, { runId: claimed.runId, jobId: 'runner-job-1' });
     await stateStore.recordCheckRun?.({ runId: claimed.runId, checkRunId: 321 });
     const reviews: unknown[] = [];
     const createChecks: unknown[] = [];
@@ -2245,7 +2246,7 @@ describe('Core Worker', () => {
       occurredAt: '2026-09-01T00:00:00.000Z',
     });
     if (claimed.kind !== 'claimed') throw new Error('retry run was not claimed');
-    await stateStore.recordRunnerJob({ runId: claimed.runId, jobId: 'runner-job-1', attempt: 1 });
+    await claimRunnerJob(stateStore, { runId: claimed.runId, jobId: 'runner-job-1' });
     await stateStore.recordCheckRun?.({ runId: claimed.runId, checkRunId: 321 });
     const reviews: unknown[] = [];
     let checkAvailable = false;
@@ -2416,7 +2417,7 @@ describe('Core Worker', () => {
       occurredAt: '2026-09-01T00:00:00.000Z',
     });
     if (claimed.kind !== 'claimed') throw new Error('failure run was not claimed');
-    await stateStore.recordRunnerJob({ runId: claimed.runId, jobId: 'runner-job-1', attempt: 1 });
+    await claimRunnerJob(stateStore, { runId: claimed.runId, jobId: 'runner-job-1' });
     await stateStore.recordCheckRun?.({ runId: claimed.runId, checkRunId: 321 });
     const reviews: unknown[] = [];
     const firstUpdates: string[] = [];
@@ -3613,7 +3614,7 @@ describe('Core Worker', () => {
         occurredAt: '2026-09-01T00:00:00.000Z',
       });
       if (claim.kind !== 'claimed') throw new Error('not claimed');
-      await store.recordRunnerJob({ runId: claim.runId, jobId: 'runner-job-1', attempt: 1 });
+      await claimRunnerJob(store, { runId: claim.runId, jobId: 'runner-job-1' });
       const reviews: unknown[] = [];
       const worker = createCoreWorker(
         { ...coreEnv(database), EVIDENCE_BUCKET: { put: async () => undefined } },
@@ -3687,7 +3688,7 @@ describe('Core Worker', () => {
         occurredAt: '2026-09-01T00:00:00.000Z',
       });
       if (claim.kind !== 'claimed') throw new Error('not claimed');
-      await store.recordRunnerJob({ runId: claim.runId, jobId: 'runner-job-1', attempt: 1 });
+      await claimRunnerJob(store, { runId: claim.runId, jobId: 'runner-job-1' });
       if (scenario === 'failed')
         await store.markSchedulingFailed({
           runId: claim.runId,
@@ -3767,15 +3768,7 @@ describe('Core Worker', () => {
         occurredAt: '2026-09-01T00:00:00.000Z',
       });
       if (claimed.kind !== 'claimed') throw new Error('test run was not claimed');
-      if (
-        !(await stateStore.recordRunnerJob({
-          runId: claimed.runId,
-          jobId: 'runner-job-1',
-          attempt: 1,
-        }))
-      ) {
-        throw new Error('test runner job was not recorded');
-      }
+      await claimRunnerJob(stateStore, { runId: claimed.runId, jobId: 'runner-job-1' });
       await stateStore.recordCheckRun?.({ runId: claimed.runId, checkRunId: 321 });
 
       const stored: Array<{ key: string; value: ArrayBuffer | string }> = [];
@@ -3981,7 +3974,7 @@ describe('Core Worker', () => {
         occurredAt: '2026-09-01T00:00:00.000Z',
       });
       if (claimed.kind !== 'claimed') throw new Error('recovery run was not claimed');
-      await stateStore.recordRunnerJob({ runId: claimed.runId, jobId: 'runner-job-1', attempt: 1 });
+      await claimRunnerJob(stateStore, { runId: claimed.runId, jobId: 'runner-job-1' });
       // The Worker stopped after claiming publication. GitHub may have accepted the POST.
       if (stateStore.claimRunPublication === undefined)
         throw new Error('publication claim unavailable');
@@ -4133,7 +4126,7 @@ describe('Core Worker', () => {
       occurredAt: '2026-09-01T00:00:00.000Z',
     });
     if (claimed.kind !== 'claimed') throw new Error('duplicate callback run was not claimed');
-    await stateStore.recordRunnerJob({ runId: claimed.runId, jobId: 'runner-job-1', attempt: 1 });
+    await claimRunnerJob(stateStore, { runId: claimed.runId, jobId: 'runner-job-1' });
     await stateStore.recordCheckRun?.({ runId: claimed.runId, checkRunId: 321 });
     let signalPublicationStarted!: () => void;
     const publicationStarted = new Promise<void>((resolve) => {
@@ -4211,7 +4204,7 @@ describe('Core Worker', () => {
       occurredAt: '2026-09-01T00:00:00.000Z',
     });
     if (claimed.kind !== 'claimed') throw new Error('failure retry run was not claimed');
-    await stateStore.recordRunnerJob({ runId: claimed.runId, jobId: 'runner-job-1', attempt: 1 });
+    await claimRunnerJob(stateStore, { runId: claimed.runId, jobId: 'runner-job-1' });
     await stateStore.recordCheckRun?.({ runId: claimed.runId, checkRunId: 321 });
     const comments: string[] = [];
     const checkUpdates: string[] = [];
@@ -4284,7 +4277,7 @@ describe('Core Worker', () => {
       occurredAt: '2026-09-01T00:00:00.000Z',
     });
     if (failed.kind !== 'claimed') throw new Error('failed test run was not claimed');
-    await stateStore.recordRunnerJob({ runId: failed.runId, jobId: 'failed-job', attempt: 1 });
+    await claimRunnerJob(stateStore, { runId: failed.runId, jobId: 'failed-job' });
     await stateStore.markSchedulingFailed({
       runId: failed.runId,
       occurredAt: '2026-09-01T00:00:01.000Z',
@@ -4302,11 +4295,7 @@ describe('Core Worker', () => {
       occurredAt: '2026-09-01T00:00:00.000Z',
     });
     if (superseded.kind !== 'claimed') throw new Error('superseded test run was not claimed');
-    await stateStore.recordRunnerJob({
-      runId: superseded.runId,
-      jobId: 'superseded-job',
-      attempt: 1,
-    });
+    await claimRunnerJob(stateStore, { runId: superseded.runId, jobId: 'superseded-job' });
     const replacement = await stateStore.claimReview({
       deliveryId: 'delivery-callback-superseded-new',
       job: {
@@ -4386,7 +4375,7 @@ describe('Core Worker', () => {
       occurredAt: '2026-09-01T00:00:00.000Z',
     });
     if (claimed.kind !== 'claimed') throw new Error('concurrent run was not claimed');
-    await stateStore.recordRunnerJob({ runId: claimed.runId, jobId: 'runner-job-1', attempt: 1 });
+    await claimRunnerJob(stateStore, { runId: claimed.runId, jobId: 'runner-job-1' });
     const published: unknown[] = [];
     let releasePublication!: () => void;
     const publicationGate = new Promise<void>((resolve) => {
@@ -4459,7 +4448,7 @@ describe('Core Worker', () => {
       occurredAt: '2026-09-01T00:00:00.000Z',
     });
     if (claimed.kind !== 'claimed') throw new Error('manual test run was not claimed');
-    await stateStore.recordRunnerJob({ runId: claimed.runId, jobId: 'runner-job-1', attempt: 1 });
+    await claimRunnerJob(stateStore, { runId: claimed.runId, jobId: 'runner-job-1' });
     await stateStore.recordCheckRun?.({ runId: claimed.runId, checkRunId: 321 });
     const reactions: unknown[] = [];
     const comments: Array<{ body: string; [key: string]: unknown }> = [];
@@ -4546,7 +4535,7 @@ describe('Core Worker', () => {
       occurredAt: '2026-09-01T00:00:00.000Z',
     });
     if (claimed.kind !== 'claimed') throw new Error('manual superseded run was not claimed');
-    await stateStore.recordRunnerJob({ runId: claimed.runId, jobId: 'runner-job-1', attempt: 1 });
+    await claimRunnerJob(stateStore, { runId: claimed.runId, jobId: 'runner-job-1' });
     await stateStore.markRunSuperseded?.({
       runId: claimed.runId,
       occurredAt: '2026-09-01T00:00:01.000Z',
@@ -4607,7 +4596,7 @@ describe('Core Worker', () => {
       occurredAt: '2026-09-01T00:00:00.000Z',
     });
     if (claimed.kind !== 'claimed') throw new Error('reaction failure run was not claimed');
-    await stateStore.recordRunnerJob({ runId: claimed.runId, jobId: 'runner-job-1', attempt: 1 });
+    await claimRunnerJob(stateStore, { runId: claimed.runId, jobId: 'runner-job-1' });
     await stateStore.recordCheckRun?.({ runId: claimed.runId, checkRunId: 321 });
     const comments: string[] = [];
     const checkUpdates: string[] = [];
@@ -4675,7 +4664,7 @@ describe('Core Worker', () => {
       occurredAt: '2026-09-01T00:00:00.000Z',
     });
     if (claimed.kind !== 'claimed') throw new Error('failure retry run was not claimed');
-    await stateStore.recordRunnerJob({ runId: claimed.runId, jobId: 'runner-job-1', attempt: 1 });
+    await claimRunnerJob(stateStore, { runId: claimed.runId, jobId: 'runner-job-1' });
     const comments: string[] = [];
     let first = true;
     const worker = createCoreWorker(

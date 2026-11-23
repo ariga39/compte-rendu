@@ -431,7 +431,6 @@ export interface ReviewStateQueries {
     | { readonly kind: 'rejected' }
   >;
   recoverRunnerCleanup?(input: ReviewCleanupRecovery): Promise<ReviewCleanupRecoveryResult>;
-  recordRunnerJob(input: { runId: string; jobId: string; attempt: number }): Promise<boolean>;
   clearRunnerJob?(input: { runId: string; jobId: string }): Promise<boolean>;
   claimCheckSetup?(input: {
     runId: string;

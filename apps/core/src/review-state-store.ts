@@ -1188,19 +1188,6 @@ const createStore = (
     };
   },
 
-  recordRunnerJob: async ({ runId, jobId, attempt }) => {
-    const result = await database
-      .prepare(
-        `UPDATE review_runs SET runner_job_id = ?, runner_attempt = ?, runner_cleanup_status = 'pending'
-         WHERE run_id = ? AND status = 'scheduled'
-           AND (runner_job_id IS NULL OR runner_job_id = ?)
-           AND (runner_attempt IS NULL OR runner_attempt = ?)`,
-      )
-      .bind(jobId, attempt, runId, jobId, attempt)
-      .run();
-    return result.meta.changes === 1;
-  },
-
   clearRunnerJob: async ({ runId, jobId }) => {
     const result = await database
       .prepare(
