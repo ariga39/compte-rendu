@@ -96,6 +96,56 @@ describe('per-run dashboard Check links', () => {
   );
 });
 
+describe('dashboard origin configuration', () => {
+  const remote =
+    (checks: Array<Record<string, unknown>>): typeof fetch =>
+    async (input, init) => {
+      const request = new Request(input, init);
+      const path = new URL(request.url).pathname;
+      if (path === '/repositories/11') return Response.json({ full_name: 'example/repo' });
+      if (request.method === 'GET' && path.endsWith('/check-runs'))
+        return Response.json({ check_runs: [] });
+      if (request.method === 'POST') {
+        const check = await request.json();
+        checks.push(check as Record<string, unknown>);
+        return Response.json({ id: 1, ...(check as Record<string, unknown>) });
+      }
+      return new Response(null, { status: 404 });
+    };
+
+  it('canonicalizes surrounding whitespace and a trailing slash', async () => {
+    const checks: Array<Record<string, unknown>> = [];
+    const github = createGitHubPublicationAdapter({
+      token: 'test-token',
+      fetch: remote(checks),
+      dashboardOrigin: '  https://dashboard.example/  ',
+    });
+    await github.createCheckRun!({
+      repositoryId: 11,
+      installationId: 7,
+      headSha: '2'.repeat(40),
+      runId: 'run-one',
+    });
+    expect(checks[0].details_url).toBe('https://dashboard.example/jobs/run-one');
+    expect((checks[0].output as { summary: string }).summary).toContain(
+      'https://dashboard.example/jobs/run-one',
+    );
+  });
+
+  it.each([
+    'https://dashboard.example/path',
+    'https://dashboard.example/?query=1',
+    'https://dashboard.example/#fragment',
+    'http://dashboard.example',
+    'https://operator:secret@dashboard.example',
+    'not a url',
+  ])('rejects non-canonical dashboard origin %s', (dashboardOrigin) => {
+    expect(() => createGitHubPublicationAdapter({ token: 'test-token', dashboardOrigin })).toThrow(
+      'DASHBOARD_ORIGIN must be an HTTPS origin',
+    );
+  });
+});
+
 describe('pull request facts branch refs', () => {
   it('captures the source and target branch names from GitHub', async () => {
     const remote: typeof fetch = async (input, init) => {

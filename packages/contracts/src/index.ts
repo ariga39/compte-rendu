@@ -1,3 +1,4 @@
+export { canonicalDashboardOrigin } from './dashboard-origin.ts';
 export {
   readBoundedBody,
   readBoundedRequestBytes,
