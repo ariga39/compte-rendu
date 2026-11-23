@@ -461,6 +461,7 @@ export const createGitHubPublicationAdapter = (
       status,
       decision,
       cancellationReason,
+      retryBlocked,
     }) => {
       const payload =
         status === 'in_progress'
@@ -505,9 +506,13 @@ export const createGitHubPublicationAdapter = (
                   output: {
                     title: 'Review cancelled',
                     summary:
-                      cancellationReason === 'manual'
-                        ? 'An operator cancelled this review. If a Sandbox was assigned, wait for cleanup confirmation in the task details before retrying. Use Run review again or comment `/ai-review` on the pull request to start a new review.'
-                        : 'A newer pull request revision replaced this run.',
+                      cancellationReason !== 'manual'
+                        ? 'A newer pull request revision replaced this run.'
+                        : retryBlocked === 'cleanup-pending'
+                          ? 'An operator cancelled this review. Sandbox cleanup is not yet confirmed, so a new review cannot start. Wait for cleanup confirmation in the task details, then use Run review again or comment `/ai-review` on the pull request.'
+                          : retryBlocked === 'cleanup-failed'
+                            ? 'An operator cancelled this review. Sandbox cleanup failed and needs an operator. Retry after cleanup recovery confirms destruction, using Run review again or `/ai-review` on the pull request.'
+                            : 'An operator cancelled this review. If a Sandbox was assigned, wait for cleanup confirmation in the task details before retrying. Use Run review again or comment `/ai-review` on the pull request to start a new review.',
                   },
                 };
       await requestJson(

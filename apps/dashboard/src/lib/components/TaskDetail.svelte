@@ -16,6 +16,7 @@
   import { useOperator, useViewerRefresh } from '#lib/dashboard-operator.ts';
   import {
     absoluteTime,
+    cancellationRequestLabel,
     cleanupLabel,
     cleanupNote,
     cleanupTone,
@@ -564,7 +565,10 @@
         <StructuredList>
           {@render timeFact('Received', view.receivedAt)}
           {@render timeFact('Assigned', view.claimedAt)}
-          {@render timeFact(view.status === 'cancelled' ? 'Cancelled' : 'Finished', view.terminalAt)}
+          {@render timeFact(
+            view.status === 'cancelled' ? cancellationRequestLabel(view) : 'Finished',
+            view.terminalAt,
+          )}
           {@render textFact('Time in queue', formatDuration(view.queueWaitMs))}
           {@render textFact('Total time', formatDuration(view.totalDurationMs))}
           {@render textFact(

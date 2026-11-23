@@ -11,6 +11,7 @@ describe('per-run dashboard Check links', () => {
         external_id: string;
         details_url?: string;
         output?: { summary: string } | null;
+        actions?: Array<Record<string, unknown>>;
       }> = [];
       let loseCreate = true;
       const remote: typeof fetch = async (input, init) => {
@@ -92,6 +93,28 @@ describe('per-run dashboard Check links', () => {
       });
       expect(checks[0].output?.summary).toContain('An operator cancelled this review.');
       expect(checks[0].output?.summary).toContain('wait for cleanup confirmation');
+
+      await github.updateCheckRun!({
+        ...input,
+        checkRunId: 1,
+        status: 'cancelled',
+        cancellationReason: 'manual',
+        retryBlocked: 'cleanup-pending',
+      });
+      expect(checks[0].output?.summary).toContain('Sandbox cleanup is not yet confirmed');
+      expect(checks[0].actions).toEqual([
+        expect.objectContaining({ label: 'Run review again', identifier: 'retry_review' }),
+      ]);
+
+      await github.updateCheckRun!({
+        ...input,
+        checkRunId: 1,
+        status: 'cancelled',
+        cancellationReason: 'manual',
+        retryBlocked: 'cleanup-failed',
+      });
+      expect(checks[0].output?.summary).toContain('Sandbox cleanup failed and needs an operator');
+      expect(checks[0].output?.summary).toContain('cleanup recovery');
     },
   );
 });

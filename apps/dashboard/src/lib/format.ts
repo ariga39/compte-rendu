@@ -64,6 +64,12 @@ export function isCancelling(task: TaskState): boolean {
   );
 }
 
+export function cancellationRequestLabel(task: TaskState): string {
+  return task.status === 'cancelled' && task.claimedAt !== null && task.cleanup !== 'destroyed'
+    ? 'Cancellation requested'
+    : 'Cancelled';
+}
+
 export function milestoneLabel(stage: TimelineStage, status: TaskState['status']): string {
   if (stage === 'cancelled') return 'Cancelled by operator';
   if (stage === 'cleanup-confirmed') return 'Sandbox cleanup confirmed';
