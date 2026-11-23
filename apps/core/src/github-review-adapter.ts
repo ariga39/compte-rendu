@@ -1,5 +1,10 @@
 import { Schema } from 'effect';
-import { DEFAULT_REVIEW_NAME, GitHubSha, RETRY_REVIEW_ACTION } from '@compte-rendu/contracts';
+import {
+  canonicalDashboardOrigin,
+  DEFAULT_REVIEW_NAME,
+  GitHubSha,
+  RETRY_REVIEW_ACTION,
+} from '@compte-rendu/contracts';
 import { GitHubNotFoundError, GitHubRequestError, parseRetryAfterMs } from './github-http';
 import type { GitHubAdapter } from './index';
 import { formatReviewPublicationMarker } from './review-publication-format';
@@ -117,20 +122,10 @@ export const createGitHubPublicationAdapter = (
   const fetcher = options.fetch ?? globalThis.fetch;
   const apiBaseUrl = (options.apiBaseUrl ?? 'https://api.github.com').replace(/\/$/, '');
   const checkName = options.checkName?.trim() || DEFAULT_REVIEW_NAME;
-  const dashboardOrigin = options.dashboardOrigin?.trim();
-  if (dashboardOrigin) {
-    const parsed = new URL(dashboardOrigin);
-    if (
-      parsed.protocol !== 'https:' ||
-      parsed.username ||
-      parsed.password ||
-      parsed.pathname !== '/' ||
-      parsed.search ||
-      parsed.hash
-    ) {
-      throw new Error('DASHBOARD_ORIGIN must be an HTTPS origin');
-    }
-  }
+  const configuredDashboardOrigin = options.dashboardOrigin?.trim();
+  const dashboardOrigin = canonicalDashboardOrigin(configuredDashboardOrigin);
+  if (configuredDashboardOrigin && !dashboardOrigin)
+    throw new Error('DASHBOARD_ORIGIN must be an HTTPS origin');
   const checkLink = (runId: string, output: { title: string; summary: string }) => {
     if (!dashboardOrigin) return { output };
     const detailsUrl = new URL(`/jobs/${encodeURIComponent(runId)}`, dashboardOrigin).href;
@@ -466,6 +461,7 @@ export const createGitHubPublicationAdapter = (
       status,
       decision,
       cancellationReason,
+      retryBlocked,
     }) => {
       const payload =
         status === 'in_progress'
@@ -510,9 +506,13 @@ export const createGitHubPublicationAdapter = (
                   output: {
                     title: 'Review cancelled',
                     summary:
-                      cancellationReason === 'manual'
-                        ? 'An operator cancelled this review. If a Sandbox was assigned, wait for cleanup confirmation in the task details before retrying. Use Run review again or comment `/ai-review` on the pull request to start a new review.'
-                        : 'A newer pull request revision replaced this run.',
+                      cancellationReason !== 'manual'
+                        ? 'A newer pull request revision replaced this run.'
+                        : retryBlocked === 'cleanup-pending'
+                          ? 'An operator cancelled this review. Sandbox cleanup is not yet confirmed, so a new review cannot start. Wait for cleanup confirmation in the task details, then use Run review again or comment `/ai-review` on the pull request.'
+                          : retryBlocked === 'cleanup-failed'
+                            ? 'An operator cancelled this review. Sandbox cleanup failed and needs an operator. Retry after cleanup recovery confirms destruction, using Run review again or `/ai-review` on the pull request.'
+                            : 'An operator cancelled this review. If a Sandbox was assigned, wait for cleanup confirmation in the task details before retrying. Use Run review again or comment `/ai-review` on the pull request to start a new review.',
                   },
                 };
       await requestJson(

@@ -21,6 +21,30 @@ const ProfiledGrant = Schema.fromJsonString(
 const CONTROL_MAX_BYTES = 16 * 1024;
 const USAGE_MAX_BYTES = 64 * 1024;
 
+const ControlFailureReason = Schema.Literals([
+  'invalid-response',
+  'http-error',
+  'timeout',
+  'transport-error',
+]);
+
+class RelayControlError extends Schema.TaggedError<RelayControlError>()('RelayControlError', {
+  reason: ControlFailureReason,
+  status: Schema.optional(Schema.Int),
+}) {}
+
+export const LlmGrantIssueFailure = ControlFailureReason;
+export type LlmGrantIssueFailure = typeof LlmGrantIssueFailure.Type;
+
+export class LlmGrantIssueError extends Schema.TaggedError<LlmGrantIssueError>()(
+  'LlmGrantIssueError',
+  {
+    message: Schema.String,
+    reason: ControlFailureReason,
+    status: Schema.optional(Schema.Int),
+  },
+) {}
+
 export interface LlmGrantIdentity {
   readonly runId: string;
   readonly jobId: string;
@@ -69,18 +93,37 @@ const relayPost = (options: RelayLlmServiceClientOptions) =>
         });
         if (response.status !== expectedStatus) {
           await response.body?.cancel().catch(() => undefined);
-          throw new Error('control request rejected');
+          throw new RelayControlError({ reason: 'http-error', status: response.status });
         }
         const body = await readBoundedBody(response.body, maxBytes);
-        if (body.kind === 'too-large') throw new Error('control response too large');
+        if (body.kind === 'too-large') throw new RelayControlError({ reason: 'invalid-response' });
         return body.text;
       },
-      catch: (error) => error,
+      catch: (error) =>
+        error instanceof RelayControlError
+          ? error
+          : new RelayControlError({ reason: 'transport-error' }),
     }).pipe(
       Effect.timeout(RUNNER_LLM_CONTROL_TIMEOUT_MS),
-      Effect.mapError(() => new Error('LLM service control request failed')),
+      Effect.catchTag('TimeoutError', () =>
+        Effect.fail(new RelayControlError({ reason: 'timeout' })),
+      ),
     );
   });
+
+const grantUnavailable = (reason: LlmGrantIssueFailure, status?: number) =>
+  new LlmGrantIssueError({
+    message: 'LLM service grant unavailable',
+    reason,
+    ...(status === undefined ? {} : { status }),
+  });
+
+const issueFailure = (error: unknown): LlmGrantIssueError => {
+  if (error instanceof LlmGrantIssueError) return error;
+  return error instanceof RelayControlError
+    ? grantUnavailable(error.reason, error.status)
+    : grantUnavailable('transport-error');
+};
 
 export const createRelayLlmServiceClient = (
   options: RelayLlmServiceClientOptions,
@@ -98,14 +141,14 @@ export const createRelayLlmServiceClient = (
         const body = yield* post('/runner-llm/issue-v2', payload, 201);
         const grant = yield* Schema.decodeUnknownEffect(ProfiledGrant, {
           onExcessProperty: 'error',
-        })(body);
+        })(body).pipe(Effect.mapError(() => grantUnavailable('invalid-response')));
         const ids = new Set(grant.descriptors.map((d) => d.routeId));
         if (
           routes.length !== grant.descriptors.length ||
           ids.size !== routes.length ||
           routes.some((id) => !ids.has(id))
         )
-          return yield* Effect.fail(new Error('frozen routes do not match'));
+          return yield* Effect.fail(grantUnavailable('invalid-response'));
         return {
           token: grant.token,
           expiresAt: grant.expiresAt.getTime(),
@@ -113,10 +156,12 @@ export const createRelayLlmServiceClient = (
         };
       }
       const body = yield* post('/runner-llm/issue', payload, 201);
-      const grant = yield* Schema.decodeUnknownEffect(Grant, { onExcessProperty: 'error' })(body);
+      const grant = yield* Schema.decodeUnknownEffect(Grant, { onExcessProperty: 'error' })(
+        body,
+      ).pipe(Effect.mapError(() => grantUnavailable('invalid-response')));
       return { token: grant.token, expiresAt: grant.expiresAt.getTime() };
     },
-    Effect.catch(() => Effect.fail(new Error('LLM service grant unavailable'))),
+    Effect.catch((error) => Effect.fail(issueFailure(error))),
   );
   const usage = Effect.fn('RunnerLlmRelayControl.usage')(
     function* (jobId: string) {
@@ -132,7 +177,11 @@ export const createRelayLlmServiceClient = (
     issue: (job: LlmGrantIdentity, routes: readonly string[]) =>
       Effect.runPromise(issue(job, routes)),
     revoke: async (jobId: string): Promise<void> => {
-      await Effect.runPromise(post('/runner-llm/revoke', { jobId }, 204));
+      await Effect.runPromise(
+        post('/runner-llm/revoke', { jobId }, 204).pipe(
+          Effect.mapError(() => new Error('LLM service control request failed')),
+        ),
+      );
     },
   };
 };

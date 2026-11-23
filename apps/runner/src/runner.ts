@@ -66,8 +66,12 @@ import {
   createMicrosandboxPreflight,
 } from './sandbox-runtime-microsandbox.js';
 import { createOpenSandboxRuntimeFactory } from './sandbox-runtime-opensandbox.js';
-import { createSbxRuntimeFactory } from './sandbox-runtime-sbx.js';
-import { createRelayLlmServiceClient, type LlmGrantIdentity } from './llm-service-client.js';
+import { createSbxRuntimeFactory, reconcileSbxRestartResources } from './sandbox-runtime-sbx.js';
+import {
+  createRelayLlmServiceClient,
+  LlmGrantIssueError,
+  type LlmGrantIdentity,
+} from './llm-service-client.js';
 import { createReadTokenClient, type ReadTokenClient } from './read-token-client.js';
 import {
   MULTI_PROVIDER_ID,
@@ -134,6 +138,7 @@ const DEFAULT_CONCURRENCY = 1;
 const EMPTY_EVIDENCE_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 const HTTPS_FQDN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/i;
 const IPV4 = /^\d+(?:\.\d+){3}$/;
+const RUNNER_INSTANCE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
 const nonEmpty = (value: string | undefined): string | undefined => {
   const trimmed = value?.trim();
@@ -766,6 +771,7 @@ type RunnerJob = {
   readTokenRefreshStopped: boolean;
   readTokenRefreshFailed: boolean;
   readTokenSecrets: string[];
+  processCredentialValues: string[];
   executionStartedAt?: string;
   submissionCompletedAt?: string;
   cleanupCompletedAt?: string;
@@ -802,6 +808,8 @@ export interface RunnerOptions {
   readonly modelSecretCommand?: string;
   readonly modelConfig?: string;
   readonly evidenceRoot?: string;
+  /** Stable deployment identity for per-instance Sandbox ownership records. */
+  readonly instanceId?: string;
   readonly process?: RunnerProcess;
   readonly log?: OperationalLog;
   readonly callbackUrl?: string;
@@ -1136,6 +1144,18 @@ export const createRunner = (options: RunnerOptions = {}) => {
       lifetimeSeconds: OPENSANDBOX_RESOURCE_LIFETIME_SECONDS,
     };
   }
+  const evidenceRoot =
+    options.evidenceRoot ??
+    process.env.RUNNER_EVIDENCE_ROOT ??
+    join(
+      process.env.XDG_STATE_HOME ?? join(homedir(), '.local', 'state'),
+      'compte-rendu',
+      'reviews',
+    );
+  const instanceId =
+    options.instanceId ?? process.env.RUNNER_INSTANCE_ID ?? `port-${process.env.PORT ?? 8080}`;
+  if (!RUNNER_INSTANCE_ID.test(instanceId)) throw new Error('invalid Runner instance identity');
+  const sandboxOwnershipRoot = join(evidenceRoot, 'sandbox-owners', instanceId);
   const executeProcess = options.process ?? runProcess;
   const sandboxRuntimeFactory =
     options.sandboxRuntimeFactory ??
@@ -1149,7 +1169,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         ? createOpenSandboxRuntimeFactory(opensandboxOptions)
         : sandboxRuntime.kind === 'openshell'
           ? createOpenShellRuntimeFactory(sandboxRuntime.openshell!)
-          : createSbxRuntimeFactory({ modelSecretCommand }));
+          : createSbxRuntimeFactory({ modelSecretCommand, ownershipRoot: sandboxOwnershipRoot }));
   const modelResolverMissing =
     sandboxRuntime.kind === 'sbx' &&
     !relayEnabled &&
@@ -1196,14 +1216,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
   const serviceBaseUrl = modelConfig?.baseUrl;
   const modelResource = `${serviceBaseUrl?.hostname ?? MODEL_HOST}:${serviceBaseUrl?.port || MODEL_PORT}`;
   const openCodeConfig = modelConfig === undefined ? undefined : trustedOpenCodeConfig(modelConfig);
-  const evidenceRoot =
-    options.evidenceRoot ??
-    process.env.RUNNER_EVIDENCE_ROOT ??
-    join(
-      process.env.XDG_STATE_HOME ?? join(homedir(), '.local', 'state'),
-      'compte-rendu',
-      'reviews',
-    );
   // Issuer-bound durable markers. A marker is written before issuance and
   // removed only after confirmed revocation, so a crash leaves both the job
   // identity and the trusted transport/backend generation to revoke on the next
@@ -1322,6 +1334,18 @@ export const createRunner = (options: RunnerOptions = {}) => {
     [...new Set([job.input.repositoryReadToken, ...job.readTokenSecrets])].filter(
       (value) => value.length > 0,
     );
+  const trackProcessCredentialValues = (job: RunnerJob, values: readonly string[] | undefined) => {
+    for (const value of values ?? []) {
+      if (value.length > 0 && !job.processCredentialValues.includes(value))
+        job.processCredentialValues.push(value);
+    }
+  };
+  // One credential set feeds both raw-output observation and the final archive
+  // scrub so a caller-supplied process credential cannot survive in evidence.
+  const jobCredentialValues = (job: RunnerJob): string[] =>
+    [
+      ...new Set([...readTokenSecretValues(job), job.grantToken, ...job.processCredentialValues]),
+    ].filter((value): value is string => value !== undefined && value.length > 0);
   const clearReadTokenRefreshTimer = (job: RunnerJob) => {
     if (job.readTokenRefreshTimer !== undefined) clearTimeout(job.readTokenRefreshTimer);
     job.readTokenRefreshTimer = undefined;
@@ -1638,6 +1662,57 @@ export const createRunner = (options: RunnerOptions = {}) => {
       });
   };
   let grantRecovery = startGrantRecovery();
+  let sandboxRecovered: boolean | undefined;
+  const startSandboxRecovery = () => {
+    sandboxRecovered = undefined;
+    if (sandboxRuntime.kind !== 'sbx') {
+      sandboxRecovered = true;
+      return Promise.resolve(true);
+    }
+    const command: SandboxCommand = (args, _diagnostic, processOptions) =>
+      executeProcess(sandboxPortPath, args, {
+        ...processOptions,
+        env: strippedSandboxEnvironment,
+        captureStdout: true,
+        captureStderr: true,
+        maxBytes: 256 * 1024,
+        timeoutMs: CLEANUP_COMMAND_TIMEOUT_MS,
+      });
+    return reconcileSbxRestartResources(sandboxOwnershipRoot, command)
+      .then((result) => {
+        sandboxRecovered = result.ok;
+        if (!result.ok) {
+          void recordLog({
+            phase: 'runner',
+            outcome: 'sandbox-recovery',
+            recovered: result.recovered,
+            blocked: result.failures.length,
+            failures: result.failures.slice(0, 10),
+          });
+        }
+        return result.ok;
+      })
+      .catch(() => {
+        sandboxRecovered = false;
+        void recordLog({
+          phase: 'runner',
+          outcome: 'sandbox-recovery',
+          recovered: 0,
+          blocked: 1,
+          failures: [{ jobId: 'redacted', sandboxName: 'redacted', step: 'record' }],
+        });
+        return false;
+      });
+  };
+  let sandboxRecovery = startSandboxRecovery();
+  const retrySandboxRecovery = () => {
+    if (sandboxRecovered !== false) return;
+    claimGateFailureLogged = false;
+    sandboxRecovery = startSandboxRecovery();
+    void sandboxRecovery.then((recovered) => {
+      if (recovered) requestNextJob?.();
+    });
+  };
   const activeJobCount = () =>
     [...jobs.values()].filter(
       (candidate) => candidate.state.status === 'queued' || candidate.state.status === 'running',
@@ -1658,6 +1733,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       drained:
         draining &&
         grantsRecovered === true &&
+        sandboxRecovered === true &&
         activeJobs === 0 &&
         !claiming &&
         claimRequestId === undefined &&
@@ -1666,7 +1742,8 @@ export const createRunner = (options: RunnerOptions = {}) => {
         recoveringCleanup.size === 0,
       activeJobs,
       claimInFlight: claiming || (!claimPollingHalted && claimRequestId !== undefined),
-      claimPollingHalted: claimPollingHalted || grantsRecovered === false,
+      claimPollingHalted:
+        claimPollingHalted || grantsRecovered === false || sandboxRecovered === false,
       cleanupBlockedJobs,
     };
   };
@@ -1843,6 +1920,8 @@ export const createRunner = (options: RunnerOptions = {}) => {
       },
       Math.max(1, timeoutMs),
     );
+    trackProcessCredentialValues(job, processOptions.credentialValues);
+    const credentialValues = jobCredentialValues(job);
     let result: RunnerProcessResult;
     try {
       result = await Promise.race([
@@ -1855,15 +1934,10 @@ export const createRunner = (options: RunnerOptions = {}) => {
           timeoutMs,
           captureStderr: processOptions.captureStderr ?? diagnostic !== undefined,
           stderrRedactions: [
-            ...readTokenSecretValues(job),
-            job.grantToken,
+            ...credentialValues,
             ...(processOptions.stderrRedactions ?? []),
           ].filter((value): value is string => value !== undefined && value.length > 0),
-          credentialValues: [
-            ...readTokenSecretValues(job),
-            job.grantToken,
-            ...(processOptions.credentialValues ?? []),
-          ].filter((value): value is string => value !== undefined && value.length > 0),
+          credentialValues,
         }).catch(failed),
         stopped,
       ]);
@@ -1886,6 +1960,8 @@ export const createRunner = (options: RunnerOptions = {}) => {
   ) => {
     const requestedTimeout = processOptions.timeoutMs ?? SETUP_TIMEOUT_MS;
     const remaining = remainingExecutionMs(job);
+    trackProcessCredentialValues(job, processOptions.credentialValues);
+    const credentialValues = jobCredentialValues(job);
     let result: RunnerProcessResult;
     try {
       const sandboxEnvironment =
@@ -1896,20 +1972,12 @@ export const createRunner = (options: RunnerOptions = {}) => {
         ...processOptions,
         env: sandboxEnvironment,
         captureStderr: processOptions.captureStderr ?? diagnostic !== undefined,
-        stderrRedactions:
-          diagnostic === undefined
-            ? processOptions.stderrRedactions
-            : [
-                ...readTokenSecretValues(job),
-                modelSecretCommand,
-                job.grantToken,
-                job.input.repositoryUrl,
-              ].filter((value): value is string => value !== undefined && value.length > 0),
-        credentialValues: [
-          ...readTokenSecretValues(job),
-          job.grantToken,
-          ...(processOptions.credentialValues ?? []),
+        stderrRedactions: [
+          ...credentialValues,
+          ...(processOptions.stderrRedactions ?? []),
+          ...(diagnostic === undefined ? [] : [modelSecretCommand, job.input.repositoryUrl]),
         ].filter((value): value is string => value !== undefined && value.length > 0),
+        credentialValues,
         maxBytes:
           diagnostic === undefined
             ? processOptions.maxBytes
@@ -2813,7 +2881,20 @@ export const createRunner = (options: RunnerOptions = {}) => {
         let grant: Awaited<ReturnType<typeof llmServiceClient.issue>>;
         try {
           grant = await llmServiceClient.issue(grantIdentity, grantRoutes);
-        } catch {
+        } catch (error) {
+          // Keep issuance failures distinguishable without recording the
+          // response body, route descriptors or the would-be grant.
+          const reason = error instanceof LlmGrantIssueError ? error.reason : 'transport-error';
+          const status = error instanceof LlmGrantIssueError ? error.status : undefined;
+          await recordLog({
+            phase: 'runner',
+            outcome: 'grant',
+            runId: job.input.runId,
+            jobId: job.id,
+            attempt: job.input.attempt,
+            reason,
+            ...(status === undefined ? {} : { status }),
+          });
           failure = { reason: 'agent' };
           return;
         }
@@ -3178,10 +3259,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         evidenceFailure = 'sandbox-not-created';
       }
       if (evidenceReady) {
-        const evidenceSecrets = [
-          ...readTokenSecretValues(job),
-          ...(job.grantToken === undefined || job.grantToken.length === 0 ? [] : [job.grantToken]),
-        ];
+        const evidenceSecrets = jobCredentialValues(job);
         if (evidenceSecrets.length > 0) {
           try {
             if (await redactEvidenceTextFiles(evidencePath, evidenceSecrets, job.sessionIds)) {
@@ -3384,7 +3462,8 @@ export const createRunner = (options: RunnerOptions = {}) => {
           );
         } catch {
           evidenceComplete = false;
-          evidenceFailure = 'archive-incomplete';
+          // Preserve a security-relevant cause recorded before this write.
+          evidenceFailure ??= 'archive-incomplete';
         }
       }
       if (failure === undefined && result !== undefined && !evidenceComplete) {
@@ -3589,6 +3668,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       }
       job.grantToken = '';
       job.readTokenSecrets = [];
+      job.processCredentialValues = [];
       job.sandboxRuntime = undefined;
       job.multiReview = undefined;
       job.sessionIds = [];
@@ -3706,6 +3786,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       readTokenRefreshStopped: false,
       readTokenRefreshFailed: false,
       readTokenSecrets: [input.repositoryReadToken],
+      processCredentialValues: [],
     };
     jobs.set(id, job);
     jobsByRun.set(`${input.runId}:${input.attempt}`, job);
@@ -3752,6 +3833,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         draining = false;
         requestNextJob?.();
       }
+      retrySandboxRecovery();
       return jsonResponse(200, maintenanceStatus());
     }
     if (request.method === 'POST' && path === '/maintenance/recover-cleanup') {
@@ -3851,6 +3933,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
               retireDestroyedJob(job);
           }
           requestNextJob?.();
+          retrySandboxRecovery();
           return jsonResponse(202, { accepted: true });
         } finally {
           if (timeout !== undefined) clearTimeout(timeout);
@@ -4007,6 +4090,9 @@ export const createRunner = (options: RunnerOptions = {}) => {
       if (grantRecovery !== undefined && !(await grantRecovery)) {
         return jsonResponse(503, { error: 'runner unavailable' });
       }
+      if (!(await sandboxRecovery)) {
+        return jsonResponse(503, { error: 'runner unavailable' });
+      }
       if (!(await ensurePreflight())) {
         return jsonResponse(503, { error: 'runner unavailable' });
       }
@@ -4079,7 +4165,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
   // A startup gate that stops claiming is a real queue-stall reason. Record it
   // once, not on every poll, and keep the existing gate behavior unchanged.
   const recordClaimGateFailure = async (
-    reason: 'grant-recovery-failed' | 'runtime-preflight-failed',
+    reason: 'grant-recovery-failed' | 'sandbox-recovery-failed' | 'runtime-preflight-failed',
   ) => {
     if (claimGateFailureLogged) return;
     claimGateFailureLogged = true;
@@ -4089,6 +4175,10 @@ export const createRunner = (options: RunnerOptions = {}) => {
   const claimNextJob = async () => {
     if (grantRecovery !== undefined && !(await grantRecovery)) {
       await recordClaimGateFailure('grant-recovery-failed');
+      return;
+    }
+    if (!(await sandboxRecovery)) {
+      await recordClaimGateFailure('sandbox-recovery-failed');
       return;
     }
     if (draining) return;

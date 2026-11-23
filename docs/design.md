@@ -131,11 +131,23 @@ are not hot-reloaded. Claims are single-flight; ambiguous claim responses halt
 polling rather than risk duplicate ownership.
 
 Authenticated private maintenance endpoints pause new claims and direct admission
-without cancelling jobs or in-flight claim reservations. Drain status includes
-work through cleanup and callback delivery; unconfirmed cleanup or a halted claim
-loop prevents a drained report. Resume changes only the maintenance pause and
-preserves capacity and ownership guards. This pause is in-memory and resets on
-process restart. See [maintenance operations](operations.md#drain-before-maintenance).
+without cancelling jobs or in-flight claim reservations. At startup Runner scans
+its pending grant markers and revokes each recorded grant through the marker's
+original issuer/generation. The admission and claim gate stays closed, and drain
+cannot report complete, while that startup scan has any failed, invalid or
+foreign marker. Resume changes only the maintenance pause; it neither retries nor
+clears the startup scan. Exact cleanup recovery can resolve an eligible failed
+cleanup and retry the scan, but it rejects invalid and foreign markers and is
+limited to sbx/microsandbox jobs whose retained evidence and callback still show
+matching failed cleanup; see [maintenance operations](operations.md#drain-before-maintenance).
+A successful startup scan is not continuous. A terminal revocation failure after
+startup fails that job without a vote and leaves its marker without closing
+admission or claims in that process. The marker remains for the next startup scan
+or matching recovery. Grants have a fixed lifetime of four review budgets: the
+token stops authenticating at expiry, but expiry alone does not resolve the
+marker or the next startup gate. Drain status includes work through cleanup and
+callback delivery; unconfirmed Sandbox cleanup or a halted claim loop prevents a
+drained report. This pause is in-memory and resets on process restart.
 
 Runner retains the final callback body privately before bounded delivery when
 the evidence directory is available. An
@@ -329,6 +341,37 @@ A terminal state and eventual Sandbox destruction are the product objective,
 not proof of crash recovery. Keep missing behavior in issues rather than describing
 it as delivered. Merge bounded changes when their main behavior is correct and
 reviewed; non-critical findings become follow-up issues.
+
+### Startup ownership reconciliation
+
+For sbx, the adapter retains a private ownership record under
+`<evidenceRoot>/sandbox-owners/<instanceId>/` before creating each scoped
+resource. `instanceId` comes from `RUNNER_INSTANCE_ID` or, by default, the
+configured listener port, so co-located Runners sharing an evidence root still
+have separate records. The record contains the Job identity, exact Sandbox name,
+the per-job host workspace/config paths and which setup steps were attempted; it
+contains no repository content, model output, sessions or credentials. On
+startup the Runner checks each recorded name with `sbx inspect --json`. A present
+Sandbox is removed only when the
+inspection's exact `name` matches and its `workspace` or an
+`additional_workspaces[].dir` equals the retained host path. Runner then removes
+only network policies whose `sandbox_id` and resources match the recorded
+attempted rules, the exact Sandbox, and the recorded scoped secrets. It verifies
+Sandbox and policy absence plus the native `sbx secret ls --json` postcondition
+before clearing the record. An absent Sandbox is treated as interrupted setup:
+only steps recorded as attempted before the interruption are reconciled. An
+intent recorded before creation cannot authorize deleting a same-name Sandbox or
+its policies. A missing, foreign, malformed or unverifiable identity keeps the
+record, leaves resources untouched and keeps admission and claiming gated.
+Names, prefixes, unrelated inspect metadata and bulk inventory never establish
+ownership. A failed scan is reported as a bounded `sandbox-recovery` operational
+event with the retained Job/Sandbox identity, failing step, fixed command name and
+status flags. It deliberately omits stderr content, which may contain an upstream
+token, URL or arbitrary secret. Operators can retry the scan with
+`POST /maintenance/resume` or after an
+authenticated cleanup recovery; the normal drain/resume response fields are
+unchanged. This startup path is separate from the authenticated cleanup-recovery
+operation and from the continuous outage retry tracked by #313.
 
 ### Failed-cleanup reconciliation
 

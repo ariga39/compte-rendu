@@ -29,9 +29,11 @@ export const ModelUsageRow = Schema.Struct({
 });
 export type ModelUsageRow = typeof ModelUsageRow.Type;
 
+export const MODEL_USAGE_ROW_LIMIT = 32;
+
 export const ModelUsageSummary = Schema.Struct({
   version: Schema.Literal(1),
-  models: Schema.Array(ModelUsageRow).check(Schema.isMaxLength(32)),
+  models: Schema.Array(ModelUsageRow).check(Schema.isMaxLength(MODEL_USAGE_ROW_LIMIT)),
   truncated: Schema.optionalKey(Schema.Boolean),
 });
 export type ModelUsageSummary = typeof ModelUsageSummary.Type;

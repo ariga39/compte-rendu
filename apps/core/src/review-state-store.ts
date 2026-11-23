@@ -60,6 +60,7 @@ interface DeliveryRow {
   runner_attempt?: number | null;
   comment_id?: number | null;
   check_run_id?: number | null;
+  runner_cleanup_status?: RunnerCleanupStatus | null;
   check_setup_status: 'pending' | 'ready' | 'failed';
   evidence_key?: string | null;
   evidence_status?: 'complete' | 'incomplete' | null;
@@ -194,6 +195,7 @@ const outcomeFromRow = (row: DeliveryRow): ReviewOutcome => ({
   ...(row.runner_attempt == null ? {} : { runnerAttempt: row.runner_attempt }),
   ...(row.comment_id == null ? {} : { commentId: row.comment_id }),
   ...(row.check_run_id == null ? {} : { checkRunId: row.check_run_id }),
+  ...(row.runner_cleanup_status == null ? {} : { cleanup: row.runner_cleanup_status }),
   ...(row.evidence_key == null ||
   row.evidence_status == null ||
   row.evidence_size == null ||
@@ -231,7 +233,7 @@ const runOutcomeSelect = `
     d.base_sha, d.head_sha, d.trigger, r.status,
     r.created_at, r.updated_at, r.claimed_at, r.publication_claimed_at,
     r.runner_job_id, r.runner_attempt, r.comment_id,
-    r.check_run_id,
+    r.check_run_id, r.runner_cleanup_status,
     r.check_setup_status, r.review_decision,
     r.evidence_key, r.evidence_status,
     r.evidence_size, r.evidence_sha256, r.evidence_uploaded_at,

@@ -85,7 +85,11 @@ route descriptor. The descriptor selects a bundled adapter and can specify
 context and output limits. All models use the existing sandbox inference
 hostname and job credential. Issuance is attempted once. An unavailable v2
 endpoint or a descriptor set that differs from the frozen selection fails the
-job and triggers grant cleanup.
+job and triggers grant cleanup. A failed issuance records a fixed `grant`
+Runner diagnostic. An invalid body on a successful response, including a
+descriptor-set mismatch, is `invalid-response`; HTTP, timeout and transport
+failures keep their own reasons. The diagnostic never includes the response
+body, descriptors or grant token.
 
 ### Inference protocols
 

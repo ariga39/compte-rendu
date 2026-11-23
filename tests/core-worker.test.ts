@@ -179,13 +179,23 @@ const postHogTestDefaults = {
     POSTHOG_ENVIRONMENT: 'staging',
   },
   dependencies: {
-    github: { getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git' },
+    github: {
+      getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+      loadReviewTarget: async () => ({ headSha: eligibleEvent.headSha }),
+    },
     getReadInstallationToken: async () => ({
       token: 'read-token',
       expiresAt: '2026-09-01T01:00:00.000Z',
     }),
   },
 } as const;
+
+const claimGithub = (headSha: string | (() => string) = eligibleEvent.headSha) => ({
+  getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+  loadReviewTarget: async () => ({
+    headSha: typeof headSha === 'function' ? headSha() : headSha,
+  }),
+});
 
 const capturePostHogTransport = (status = 200) => {
   const requests: Request[] = [];
@@ -1004,13 +1014,12 @@ describe('Core Worker', () => {
       EVIDENCE_BUCKET: { put: async () => undefined },
       ...postHogTestDefaults.environment,
     };
+    let currentHead = eligibleEvent.headSha;
     const worker = createCoreWorker(env, {
       ...postHogTestDefaults.dependencies,
       github: {
         ...postHogTestDefaults.dependencies.github,
-        loadReviewTarget: async () => ({
-          headSha: '3333333333333333333333333333333333333333',
-        }),
+        loadReviewTarget: async () => ({ headSha: currentHead }),
         createReview: async ({ payload }) => ({ kind: 'created', review: payload }),
       },
     });
@@ -1041,6 +1050,7 @@ describe('Core Worker', () => {
       expect(claim.status).toBe(200);
       const claimed = (await claim.json()) as { id: string; runId: string; attempt: number };
       await Promise.all(waitUntilTasks.splice(0));
+      currentHead = '3333333333333333333333333333333333333333';
 
       const callback = await worker.fetch(
         new Request('https://core.internal/runner-results', {
@@ -1406,6 +1416,7 @@ describe('Core Worker', () => {
         getRepositoryUrl: async () => {
           throw new Error('repository lookup failed');
         },
+        loadReviewTarget: async () => ({ headSha: eligibleEvent.headSha }),
       },
     });
 
@@ -1529,6 +1540,7 @@ describe('Core Worker', () => {
           checkUpdates.push(input);
         },
         getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+        loadReviewTarget: async () => ({ headSha: eligibleEvent.headSha }),
       },
       getReadInstallationToken: async () => ({
         token: 'repository-read-token',
@@ -1778,6 +1790,7 @@ describe('Core Worker', () => {
           },
           createIssueComment: async (input) => ({ id: 123, body: input.body }),
           getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+          loadReviewTarget: async () => ({ headSha: eligibleEvent.headSha }),
         },
         getReadInstallationToken: async () => ({
           token: 'repository-read-token',
@@ -1950,6 +1963,7 @@ describe('Core Worker', () => {
           throw new Error('Checks API unavailable');
         },
         getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+        loadReviewTarget: async () => ({ headSha: eligibleEvent.headSha }),
       },
       getReadInstallationToken: async () => ({
         token: 'repository-read-token',
@@ -2554,6 +2568,7 @@ describe('Core Worker', () => {
           updates.push(input);
         },
         getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+        loadReviewTarget: async () => ({ headSha: eligibleEvent.headSha }),
       },
       getReadInstallationToken: async () => ({
         token: 'repository-read-token',
@@ -2660,7 +2675,7 @@ describe('Core Worker', () => {
         GITHUB_APP_PRIVATE_KEY: 'test-private-key',
       },
       {
-        github: { getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git' },
+        github: claimGithub(),
         getReadInstallationToken: async () => {
           tokenMints += 1;
           return { token: 'repository-read-token', expiresAt: '2026-09-01T01:00:00.000Z' };
@@ -2694,7 +2709,7 @@ describe('Core Worker', () => {
         GITHUB_APP_PRIVATE_KEY: 'test-private-key',
       },
       {
-        github: { getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git' },
+        github: claimGithub(),
         getReadInstallationToken: async () => {
           tokenMints += 1;
           return { token: 'repository-read-token', expiresAt: '2026-09-01T01:00:00.000Z' };
@@ -2742,7 +2757,7 @@ describe('Core Worker', () => {
     const worker = createCoreWorker(
       { REVIEW_DB: database, GITHUB_APP_ID: '1234567', GITHUB_APP_PRIVATE_KEY: 'test-private-key' },
       {
-        github: { getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git' },
+        github: claimGithub(),
         getReadInstallationToken: async () => ({
           token: 'repository-read-token',
           expiresAt: '2026-09-01T01:00:00.000Z',
@@ -2801,7 +2816,7 @@ describe('Core Worker', () => {
     const worker = createCoreWorker(
       { REVIEW_DB: database, GITHUB_APP_ID: '1234567', GITHUB_APP_PRIVATE_KEY: 'test-private-key' },
       {
-        github: { getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git' },
+        github: claimGithub(),
         getReadInstallationToken: async () => ({
           token: 'repository-read-token',
           expiresAt: '2026-09-01T01:00:00.000Z',
@@ -2853,6 +2868,7 @@ describe('Core Worker', () => {
     const checkUpdates: unknown[] = [];
     let nextCheckRunId = 321;
     let oldRunId = '';
+    let currentHead = eligibleEvent.headSha;
     let worker!: ReturnType<typeof createCoreWorker>;
     worker = createCoreWorker(
       {
@@ -2896,6 +2912,7 @@ describe('Core Worker', () => {
       {
         github: {
           getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+          loadReviewTarget: async () => ({ headSha: currentHead }),
           createCheckRun: async () => ({ id: nextCheckRunId++ }),
           updateCheckRun: async (input) => {
             checkUpdates.push(input);
@@ -2933,6 +2950,7 @@ describe('Core Worker', () => {
       );
       const oldJob = (await oldClaim.json()) as { id: string; runId: string };
       oldRunId = oldJob.runId;
+      currentHead = newEvent.headSha;
 
       expect(
         (
@@ -3035,9 +3053,11 @@ describe('Core Worker', () => {
       ...postHogTestDefaults.environment,
     };
     const context = { waitUntil: (task: Promise<unknown>) => waitUntilTasks.push(task) };
+    let currentHead = eligibleEvent.headSha;
     const worker = createCoreWorker(env, {
       github: {
         getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+        loadReviewTarget: async () => ({ headSha: currentHead }),
         createCheckRun: async ({ headSha }) => {
           checks.push({ headSha });
           return { id: 321 + checks.length - 1 };
@@ -3079,6 +3099,7 @@ describe('Core Worker', () => {
         deliveryId: 'delivery-cancel-fails-new',
         headSha: '3333333333333333333333333333333333333333',
       };
+      currentHead = newEvent.headSha;
       expect(
         (
           await worker.fetch(
@@ -3244,6 +3265,7 @@ describe('Core Worker', () => {
     const tokenMintGate = new Promise<void>((resolve) => {
       releaseTokenMint = resolve;
     });
+    let currentHead = eligibleEvent.headSha;
     const worker = createCoreWorker(
       {
         REVIEW_DB: database,
@@ -3264,7 +3286,7 @@ describe('Core Worker', () => {
         GITHUB_APP_PRIVATE_KEY: 'test-private-key',
       },
       {
-        github: { getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git' },
+        github: claimGithub(() => currentHead),
         getReadInstallationToken: async () => {
           tokenMintStarted();
           await tokenMintGate;
@@ -3293,6 +3315,7 @@ describe('Core Worker', () => {
       await mintStarted;
 
       const newHead = '3333333333333333333333333333333333333333';
+      currentHead = newHead;
       expect(
         (
           await worker.fetch(
@@ -3341,7 +3364,7 @@ describe('Core Worker', () => {
         GITHUB_APP_PRIVATE_KEY: 'test-private-key',
       },
       {
-        github: { getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git' },
+        github: claimGithub(),
         getReadInstallationToken: async () => ({
           token: 'repository-read-token',
           expiresAt: '2026-09-01T01:00:00.000Z',
@@ -3390,6 +3413,7 @@ describe('Core Worker', () => {
       });
       const checks: string[] = [];
       let lookupUnavailable = false;
+      let currentHead = eligibleEvent.headSha;
       const dependencies = {
         github: {
           createCheckRun: async () => ({ id: 333 }),
@@ -3402,6 +3426,7 @@ describe('Core Worker', () => {
             await gate;
             return 'https://github.com/acme/reviewed.git';
           },
+          loadReviewTarget: async () => ({ headSha: currentHead }),
         },
         getReadInstallationToken: async () => ({
           token: 'read-only',
@@ -3437,6 +3462,8 @@ describe('Core Worker', () => {
         unblock();
         const first = await firstResponse;
         expect(first.status).toBe(200);
+        // A prepared replay resends the same handoff even if the head moved.
+        currentHead = '3333333333333333333333333333333333333333';
         const replay = await createCoreWorker(env, dependencies).fetch(request());
         expect(replay.status).toBe(200);
         expect(replay.headers.get('cache-control')).toBe('no-store');
@@ -3457,7 +3484,7 @@ describe('Core Worker', () => {
   it('derives the deadline from the durable claim time and passes the read-token expiry', async () => {
     const database = new SqliteD1Database();
     const worker = createCoreWorker(coreEnv(database), {
-      github: { getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git' },
+      github: claimGithub(),
       getReadInstallationToken: async () => ({
         token: 'repository-read-token',
         expiresAt: '2026-09-01T01:20:00.000Z',
@@ -3504,7 +3531,7 @@ describe('Core Worker', () => {
   it('fails a claim closed when the read-token expiry is invalid', async () => {
     const database = new SqliteD1Database();
     const worker = createCoreWorker(coreEnv(database), {
-      github: { getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git' },
+      github: claimGithub(),
       getReadInstallationToken: async () => ({
         token: 'repository-read-token',
         expiresAt: 'not-a-date',
@@ -3567,7 +3594,7 @@ describe('Core Worker', () => {
         GITHUB_APP_PRIVATE_KEY: 'test-private-key',
       },
       {
-        github: { getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git' },
+        github: claimGithub(),
         getReadInstallationToken: async () => ({
           token: 'repository-read-token',
           expiresAt: '2026-09-01T01:00:00.000Z',
@@ -4954,7 +4981,7 @@ describe('Core Worker', () => {
         return runnerResponse(request);
       }),
       {
-        github: { getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git' },
+        github: claimGithub(),
         log: {
           record: () => {
             throw new Error('log sink unavailable');
@@ -4985,7 +5012,7 @@ describe('Core Worker', () => {
     const database = new SqliteD1Database();
     const events: OperationalLogEvent[] = [];
     const worker = createCoreWorker(coreEnv(database), {
-      github: { getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git' },
+      github: claimGithub(),
       getReadInstallationToken: async () => ({
         token: 'read-token',
         expiresAt: '2026-09-01T01:00:00.000Z',
@@ -5286,7 +5313,7 @@ describe('Core Worker', () => {
         throw new Error('runner admission failed');
       }),
       {
-        github: { getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git' },
+        github: claimGithub(),
         getReadInstallationToken: async () => ({
           token: 'read-token',
           expiresAt: '2026-09-01T01:00:00.000Z',
@@ -5398,6 +5425,9 @@ describe('Core Worker', () => {
         }),
         getCommenterPermission: async () => 'write',
         getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+        loadReviewTarget: async () => ({
+          headSha: '3333333333333333333333333333333333333333',
+        }),
         addReaction: async (input) => {
           reactions.push(input);
         },
@@ -5439,6 +5469,212 @@ describe('Core Worker', () => {
         headSha: '3333333333333333333333333333333333333333',
       });
       expect(reactions).toEqual([]);
+    } finally {
+      database.close();
+    }
+  });
+
+  it.each(['pending', 'failed'] as const)(
+    'explains a cancelled Check retry while cleanup is %s and retries after confirmation',
+    async (initialCleanup) => {
+      const database = new SqliteD1Database();
+      const stateStore = createD1ReviewStateStore(database);
+      try {
+        const initial = await stateStore.claimReview({
+          deliveryId: `delivery-cancel-retry-${initialCleanup}`,
+          job: {
+            repositoryId: 11,
+            installationId: 7,
+            pullRequestNumber: 44,
+            baseSha: eligibleEvent.baseSha,
+            headSha: eligibleEvent.headSha,
+            trigger: 'automatic',
+          },
+          occurredAt: '2026-09-12T00:00:00.000Z',
+        });
+        if (initial.kind !== 'claimed') throw new Error('cancelled run was not admitted');
+        const runId = initial.runId;
+        await stateStore.recordCheckRun?.({ runId, checkRunId: 321 });
+        await claimRunnerJob(stateStore, {
+          runId,
+          jobId: 'runner-job-cancel-retry',
+          occurredAt: '2026-09-12T00:00:10.000Z',
+        });
+        await stateStore.cancelRun({
+          runId,
+          requestedByUid: 1,
+          occurredAt: '2026-09-12T00:00:20.000Z',
+        });
+        const evidence = {
+          key: `reviews/${runId}`,
+          status: 'incomplete' as const,
+          size: 1,
+          sha256: 'a'.repeat(64),
+          uploadedAt: '2026-09-12T00:00:30.000Z',
+        };
+        if (initialCleanup === 'failed')
+          await stateStore.recordEvidence({ runId, evidence, sandboxCleanup: 'failed' });
+
+        let permission: 'read' | 'write' = 'read';
+        const updates: unknown[] = [];
+        const worker = createCoreWorker(coreEnv(database), {
+          stateStore,
+          github: {
+            getPullRequest: async () => ({
+              repositoryVisibility: 'public',
+              baseRepositoryId: 11,
+              headRepositoryId: 99,
+              draft: false,
+              baseSha: eligibleEvent.baseSha,
+              headSha: eligibleEvent.headSha,
+            }),
+            getCommenterPermission: async () => permission,
+            updateCheckRun: async (input) => {
+              updates.push(input);
+            },
+            getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+            loadReviewTarget: async () => ({ headSha: eligibleEvent.headSha }),
+          },
+          getReadInstallationToken: async () => ({
+            token: 'read-token',
+            expiresAt: '2026-09-01T01:00:00.000Z',
+          }),
+        });
+        const retry = (deliveryId: string) =>
+          worker.fetch(
+            new Request('https://core.internal/review-events', {
+              method: 'POST',
+              body: JSON.stringify({
+                deliveryId,
+                event: 'check_run',
+                action: 'rerequested',
+                repositoryId: 11,
+                installationId: 7,
+                checkRunId: 321,
+                externalRunId: runId,
+                senderLogin: 'maintainer',
+              }),
+            }),
+          );
+
+        expect((await retry(`retry-${initialCleanup}-unauthorized`)).status).toBe(202);
+        expect(updates).toEqual([]);
+
+        permission = 'write';
+        expect((await retry(`retry-${initialCleanup}-blocked`)).status).toBe(202);
+        expect(updates).toEqual([
+          expect.objectContaining({
+            checkRunId: 321,
+            status: 'cancelled',
+            cancellationReason: 'manual',
+            retryBlocked: initialCleanup === 'failed' ? 'cleanup-failed' : 'cleanup-pending',
+          }),
+        ]);
+        await expect(
+          stateStore.claimNextJob({
+            jobId: 'probe-blocked-retry',
+            attempt: 1,
+            occurredAt: '2026-09-12T00:01:00.000Z',
+          }),
+        ).resolves.toEqual({ kind: 'empty' });
+
+        await stateStore.recordEvidence({ runId, evidence, sandboxCleanup: 'destroyed' });
+        expect((await retry(`retry-${initialCleanup}-recovered`)).status).toBe(202);
+        expect(updates).toHaveLength(1);
+        const claim = await worker.fetch(
+          new Request('https://core.internal/runner-claims', {
+            method: 'POST',
+            headers: { 'x-compte-rendu-runner-claim': 'verified' },
+          }),
+        );
+        expect(claim.status).toBe(200);
+        expect(await claim.json()).toMatchObject({
+          pullRequestNumber: 44,
+          headSha: eligibleEvent.headSha,
+        });
+      } finally {
+        database.close();
+      }
+    },
+  );
+
+  it('retries a cancelled Check that never dispatched a Sandbox without cleanup feedback', async () => {
+    const database = new SqliteD1Database();
+    const stateStore = createD1ReviewStateStore(database);
+    try {
+      const initial = await stateStore.claimReview({
+        deliveryId: 'delivery-cancel-retry-never-dispatched',
+        job: {
+          repositoryId: 11,
+          installationId: 7,
+          pullRequestNumber: 45,
+          baseSha: eligibleEvent.baseSha,
+          headSha: eligibleEvent.headSha,
+          trigger: 'automatic',
+        },
+        occurredAt: '2026-09-12T00:00:00.000Z',
+      });
+      if (initial.kind !== 'claimed') throw new Error('cancelled run was not admitted');
+      const runId = initial.runId;
+      await stateStore.recordCheckRun?.({ runId, checkRunId: 322 });
+      await stateStore.cancelRun({
+        runId,
+        requestedByUid: 1,
+        occurredAt: '2026-09-12T00:00:20.000Z',
+      });
+      const updates: unknown[] = [];
+      const worker = createCoreWorker(coreEnv(database), {
+        stateStore,
+        github: {
+          getPullRequest: async () => ({
+            repositoryVisibility: 'public',
+            baseRepositoryId: 11,
+            headRepositoryId: 99,
+            draft: false,
+            baseSha: eligibleEvent.baseSha,
+            headSha: eligibleEvent.headSha,
+          }),
+          getCommenterPermission: async () => 'write',
+          updateCheckRun: async (input) => {
+            updates.push(input);
+          },
+          getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+          loadReviewTarget: async () => ({ headSha: eligibleEvent.headSha }),
+        },
+        getReadInstallationToken: async () => ({
+          token: 'read-token',
+          expiresAt: '2026-09-01T01:00:00.000Z',
+        }),
+      });
+
+      const response = await worker.fetch(
+        new Request('https://core.internal/review-events', {
+          method: 'POST',
+          body: JSON.stringify({
+            deliveryId: 'retry-never-dispatched',
+            event: 'check_run',
+            action: 'rerequested',
+            repositoryId: 11,
+            installationId: 7,
+            checkRunId: 322,
+            externalRunId: runId,
+            senderLogin: 'maintainer',
+          }),
+        }),
+      );
+      expect(response.status).toBe(202);
+      expect(updates).toEqual([]);
+      const claim = await worker.fetch(
+        new Request('https://core.internal/runner-claims', {
+          method: 'POST',
+          headers: { 'x-compte-rendu-runner-claim': 'verified' },
+        }),
+      );
+      expect(claim.status).toBe(200);
+      expect(await claim.json()).toMatchObject({
+        pullRequestNumber: 45,
+        headSha: eligibleEvent.headSha,
+      });
     } finally {
       database.close();
     }
@@ -5655,10 +5891,11 @@ describe('Runner claim serialization', () => {
     const database = new SqliteD1Database();
     const tokenMint = deferred<{ token: string; expiresAt: string }>();
     let tokenCalls = 0;
+    let currentHead = oldHead;
     const worker = createCoreWorker(
       { ...coreEnv(database), RUNNER: { fetch: async () => new Response(null, { status: 503 }) } },
       {
-        github: { getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git' },
+        github: claimGithub(() => currentHead),
         getReadInstallationToken: async () => {
           tokenCalls += 1;
           return tokenMint.promise;
@@ -5674,6 +5911,7 @@ describe('Runner claim serialization', () => {
       }
       expect(tokenCalls).toBe(1);
 
+      currentHead = newHead;
       expect((await scheduleReview(worker, newHead, 'delivery-unhanded-new')).status).toBe(202);
       tokenMint.resolve({
         token: 'repository-read-token',
@@ -5696,8 +5934,14 @@ describe('Runner claim serialization', () => {
   it('releases a pre-handoff failed claim so the same-pull-request rerun and unrelated work progress', async () => {
     const database = new SqliteD1Database();
     let mintAttempts = 0;
+    let currentHead = oldHead;
     const worker = createCoreWorker(coreEnv(database), {
-      github: { getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git' },
+      github: {
+        getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+        loadReviewTarget: async ({ pullRequestNumber }) => ({
+          headSha: pullRequestNumber === 42 ? currentHead : eligibleEvent.headSha,
+        }),
+      },
       getReadInstallationToken: async () => {
         mintAttempts += 1;
         if (mintAttempts === 1) throw new Error('token mint failed');
@@ -5709,6 +5953,7 @@ describe('Runner claim serialization', () => {
       expect((await scheduleReview(worker, oldHead, 'delivery-prehandoff-old')).status).toBe(202);
       expect((await worker.fetch(claimRequest())).status).toBe(503);
 
+      currentHead = newHead;
       expect((await scheduleReview(worker, newHead, 'delivery-prehandoff-new')).status).toBe(202);
       const rerunClaim = await worker.fetch(claimRequest());
       expect(rerunClaim.status).toBe(200);
@@ -5757,6 +6002,7 @@ describe('Runner claim serialization', () => {
         createIssueComment: async (input) => {
           issueComments.push(input);
         },
+        loadReviewTarget: async () => ({ headSha: oldHead }),
       },
       getReadInstallationToken: async () => ({
         token: 'repository-read-token',
@@ -5796,8 +6042,9 @@ describe('Runner claim serialization', () => {
       ...coreEnv(database),
       EVIDENCE_BUCKET: { put: async () => undefined },
     };
+    let currentHead = oldHead;
     const dependencies = {
-      github: { getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git' },
+      github: claimGithub(() => currentHead),
       getReadInstallationToken: async () => ({
         token: 'repository-read-token',
         expiresAt: '2026-09-01T01:00:00.000Z',
@@ -5828,6 +6075,7 @@ describe('Runner claim serialization', () => {
         ).status,
       ).toBe(202);
 
+      currentHead = newHead;
       expect((await scheduleReview(worker, newHead, 'delivery-cleanup-replacement')).status).toBe(
         202,
       );
@@ -5865,8 +6113,9 @@ describe('Runner claim serialization', () => {
           },
         },
       };
+      let currentHead = oldHead;
       const dependencies = {
-        github: { getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git' },
+        github: claimGithub(() => currentHead),
         getReadInstallationToken: async () => ({
           token: 'repository-read-token',
           expiresAt: '2026-09-01T01:00:00.000Z',
@@ -5899,6 +6148,7 @@ describe('Runner claim serialization', () => {
         const job = (await claim.json()) as { id: string; runId: string; attempt: number };
 
         if (terminalStatus === 'superseded') {
+          currentHead = newHead;
           expect(
             (await scheduleReview(worker, newHead, 'delivery-recovery-replacement')).status,
           ).toBe(202);
@@ -5913,6 +6163,7 @@ describe('Runner claim serialization', () => {
         ).toBe(202);
 
         if (terminalStatus === 'failed') {
+          currentHead = newHead;
           expect(
             (await scheduleReview(worker, newHead, 'delivery-recovery-replacement')).status,
           ).toBe(202);
@@ -6024,7 +6275,7 @@ describe('Runner claim serialization', () => {
   it('does not label ordinary same-pull-request serialization as a cleanup block', async () => {
     const database = new SqliteD1Database();
     const worker = createCoreWorker(coreEnv(database), {
-      github: { getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git' },
+      github: claimGithub(),
       getReadInstallationToken: async () => ({
         token: 'repository-read-token',
         expiresAt: '2026-09-01T01:00:00.000Z',
@@ -6059,8 +6310,9 @@ describe('Runner claim serialization', () => {
         },
       },
     };
+    let currentHead = oldHead;
     const dependencies = {
-      github: { getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git' },
+      github: claimGithub(() => currentHead),
       getReadInstallationToken: async () => ({
         token: 'repository-read-token',
         expiresAt: '2026-09-01T01:00:00.000Z',

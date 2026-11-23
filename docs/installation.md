@@ -656,6 +656,14 @@ required in production. `RUNNER_CALLBACK_TOKEN` authenticates both public
 Runner routes; keep it identical to the ingress secret and do not create a
 second claim bearer.
 
+`RUNNER_INSTANCE_ID` is an optional stable identity for sbx restart
+reconciliation. It defaults to `port-<PORT>`, which already distinguishes
+co-located instances that listen on different ports. Set it explicitly when the
+listener identity is not stable across deployment or when multiple processes
+share one default evidence root. Ownership records are stored under
+`sandbox-owners/<instanceId>/`; do not reuse an identity for two concurrently
+running Runners.
+
 `RUNNER_CONCURRENCY` is an optional positive integer that bounds how many
 independent review Jobs the Runner executes at once; it defaults to `1`, which
 preserves the previous serialized behavior. Set it to `2` or higher to overlap
@@ -1110,13 +1118,16 @@ head SHA, and the single installation ID in the generated config.
 
 ## Public dashboard
 
-The unified SvelteKit Worker serves `/`, `/history`, `/help`, and `/jobs/<RUN_ID>`. The Help
-page explains navigation, task states, cleanup, refresh, and privacy. Its source is
+Public task views are read-only. The unified SvelteKit Worker serves `/`, `/history`,
+`/help`, and `/jobs/<RUN_ID>`. The Help page explains navigation, task states, cleanup,
+refresh, and privacy. Its source is
 `apps/dashboard/src/lib/content/help.md`, compiled into the page by mdsvex at build time. Its public
-read APIs use only D1 through Core. Anonymous reads return recorded status and milestones. The header checks the current session separately. An authorized operator may cancel an eligible review from its detail view. A claimed row is a durable assignment, not proof of a live process.
+read APIs use only D1 through Core. Anonymous reads return recorded status and milestones. The header checks the current session separately. The authenticated editor at `/settings` lets allowlisted operators change models for future reviews; see [dashboard sign-in and model settings](review-configuration.md#dashboard-sign-in-and-model-settings). An authorized operator may also cancel an eligible review from its detail view. A claimed row is a durable assignment, not proof of a live process.
 
 Set the optional Worker variable `DASHBOARD_ORIGIN` to the canonical HTTPS origin
-of the deployed Worker, without a path, query, or fragment. Enable it only after
+of the deployed Worker, without a path, query, or fragment. Surrounding whitespace
+and a trailing slash are accepted; paths, queries, fragments, credentials, and
+non-HTTPS schemes are rejected. Enable it only after
 the page and API routes are available. New and recovered product Check Runs use
 this origin for their permanent `/jobs/<RUN_ID>` details link. An empty value
 omits the link. GitHub retains its own Check page; this does not change links

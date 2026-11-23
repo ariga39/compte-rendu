@@ -137,6 +137,11 @@ export const CoreLifecycleEvent = Schema.Union([
   }),
   Schema.Struct({
     ...CoreLifecycleFinishedCommon,
+    outcome: Schema.Literal('cancelled'),
+    published: Schema.Literal(false),
+  }),
+  Schema.Struct({
+    ...CoreLifecycleFinishedCommon,
     outcome: Schema.Literal('failed'),
     published: Schema.Literal(false),
     failurePhase: CoreLifecycleFailurePhase,
@@ -166,6 +171,7 @@ export interface ReviewOutcome {
   runnerAttempt?: number;
   commentId?: number;
   checkRunId?: number;
+  cleanup?: RunnerCleanupStatus;
   evidence?: ReviewEvidenceMetadata;
 }
 
@@ -651,6 +657,7 @@ export interface GitHubAdapter {
     status: 'in_progress' | 'success' | 'failure' | 'cancelled';
     decision?: ReviewDecision;
     cancellationReason?: 'manual';
+    retryBlocked?: 'cleanup-pending' | 'cleanup-failed';
   }): Promise<void>;
   findCheckRunForSuite?(input: {
     repositoryId: number;
@@ -836,6 +843,30 @@ const ReviewPublicationCreateResult = Schema.Union([
 ]);
 
 type ReviewPublicationTarget = typeof ReviewPublicationTarget.Type;
+
+export type ClaimHeadStatus = 'current' | 'stale' | 'unavailable';
+
+export const claimHeadStatus = Effect.fn('claimHeadStatus')(function* (
+  github: GitHubAdapter,
+  job: ReviewJob,
+) {
+  // Without the lookup the claim cannot establish freshness, so it must fail
+  // closed. The deployed adapter always provides it.
+  if (github.loadReviewTarget === undefined) return 'unavailable' as const;
+  return yield* Effect.tryPromise({
+    try: async () => {
+      const value = await github.loadReviewTarget!({
+        repositoryId: job.repositoryId,
+        pullRequestNumber: job.pullRequestNumber,
+        installationId: job.installationId,
+      });
+      const target = Schema.decodeUnknownOption(ReviewPublicationTarget)(value);
+      if (Option.isNone(target)) return 'unavailable' as const;
+      return target.value.headSha === job.headSha ? ('current' as const) : ('stale' as const);
+    },
+    catch: () => 'unavailable' as const,
+  }).pipe(Effect.catch(() => Effect.succeed('unavailable' as const)));
+});
 
 type ReviewCompletionStateStore = ReviewStateStore & Partial<ReviewStateQueries>;
 
@@ -2045,13 +2076,33 @@ const createReviewEventHandler = (dependencies: AdmissionDependencies) => {
       return 'ignored' as const;
     }
 
-    return yield* handleManualIntent({
+    const disposition = yield* handleManualIntent({
       deliveryId: event.deliveryId,
       repositoryId: event.repositoryId,
       pullRequestNumber: outcome.pullRequestNumber,
       installationId: event.installationId,
       senderLogin: event.senderLogin,
     });
+    const cleanupBlocked =
+      outcome.cleanup === 'pending' ||
+      outcome.cleanup === 'failed' ||
+      (outcome.cleanup === undefined && outcome.runnerJobId !== undefined);
+    if (disposition === 'cancelled' && cleanupBlocked && github.updateCheckRun !== undefined) {
+      yield* Effect.tryPromise({
+        try: () =>
+          github.updateCheckRun!({
+            runId: externalRunId,
+            repositoryId: outcome.repositoryId,
+            installationId: outcome.installationId,
+            checkRunId,
+            status: 'cancelled',
+            cancellationReason: 'manual',
+            retryBlocked: outcome.cleanup === 'failed' ? 'cleanup-failed' : 'cleanup-pending',
+          }),
+        catch: () => new SchedulingFailed({ message: 'Check retry feedback failed' }),
+      }).pipe(Effect.catch(() => Effect.succeed(undefined)));
+    }
+    return disposition;
   });
 
   return Effect.fn('handleReviewEvent')(function* (event: unknown) {

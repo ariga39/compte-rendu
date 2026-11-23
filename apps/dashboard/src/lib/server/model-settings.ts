@@ -1,3 +1,4 @@
+import { canonicalDashboardOrigin } from '@compte-rendu/contracts';
 import { applyReviewConfiguration } from '../../../../core/src/review-configuration';
 import type { ApplicationEnv } from './application';
 import { noStore, requireOperator } from './auth';
@@ -6,10 +7,10 @@ export type { LoginEnv } from './auth';
 
 export async function modelSettings(request: Request, env: ApplicationEnv): Promise<Response> {
   const url = new URL(request.url);
-  const origin = env.DASHBOARD_ORIGIN;
+  const origin = canonicalDashboardOrigin(env.DASHBOARD_ORIGIN);
   const id = env.DASHBOARD_GITHUB_CLIENT_ID;
   const secret = env.DASHBOARD_GITHUB_CLIENT_SECRET;
-  if (!origin || url.origin !== origin || url.protocol !== 'https:' || !id || !secret)
+  if (!origin || url.origin !== origin || !id || !secret)
     return noStore(503, { error: 'Login is unavailable.' });
   let unavailable = 'Model settings are temporarily unavailable.';
   const sameOrigin = request.headers.get('origin') === origin;
