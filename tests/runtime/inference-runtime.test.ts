@@ -729,7 +729,10 @@ it('serves a claimed model through application control, managed inference, and d
   };
   const app = () =>
     createApplication(environment, {
-      github: { getRepositoryUrl: async () => 'https://github.com/example/reviewed.git' },
+      github: {
+        getRepositoryUrl: async () => 'https://github.com/example/reviewed.git',
+        loadReviewTarget: async () => ({ headSha: 'b'.repeat(40) }),
+      },
       getReadInstallationToken: async () => ({
         token: 'read-only-test',
         expiresAt: '2099-01-01T00:00:00Z',

@@ -333,6 +333,7 @@ it('records pre-handoff failure at the failure time rather than the earlier clai
       { REVIEW_DB: database, GITHUB_APP_ID: '1', GITHUB_APP_PRIVATE_KEY: 'unused' },
       {
         github: {
+          loadReviewTarget: async () => ({ headSha: '2'.repeat(40) }),
           getRepositoryUrl: async () => {
             vi.setSystemTime(new Date(time(10)));
             throw new Error('lookup unavailable');
