@@ -3,14 +3,26 @@ import {
   sanitizeOperationalLogEvent,
   type OperationalLog,
 } from '@compte-rendu/contracts';
-import type { GitHubAdapter, ReviewCancellationWorkItem, ReviewStateQueries } from './index';
+import type {
+  CoreLifecycleLog,
+  GitHubAdapter,
+  ReviewCancellationState,
+  ReviewCancellationWorkItem,
+  ReviewOutcome,
+  ReviewStateQueries,
+} from './index';
 import type { RunnerJobSubmitter } from './runner-job-client';
+
+type LifecycleContext = {
+  readonly waitUntil: (task: Promise<unknown>) => void;
+};
 
 export function createJobControl(
   state: ReviewStateQueries,
   github: GitHubAdapter,
   runner?: RunnerJobSubmitter,
   log?: OperationalLog,
+  lifecycleLog?: (context?: LifecycleContext) => CoreLifecycleLog,
 ) {
   const response = (status: number, pendingCleanup?: boolean) =>
     Response.json(pendingCleanup === undefined ? {} : { status: 'cancelled', pendingCleanup }, {
@@ -96,8 +108,45 @@ export function createJobControl(
     await state.confirmCheckCancelled?.({ ...identity, occurredAt });
   }
 
+  const recordCancellation = async (
+    cancellation: ReviewCancellationState,
+    context?: LifecycleContext,
+  ) => {
+    try {
+      const outcome: ReviewOutcome | undefined = await state.getRunOutcome(cancellation.runId);
+      if (outcome === undefined) return;
+      const created = Date.parse(outcome.createdAt);
+      const requested = Date.parse(cancellation.requestedAt);
+      const claimed = outcome.claimedAt === undefined ? undefined : Date.parse(outcome.claimedAt);
+      const totalDurationMs =
+        Number.isFinite(created) && Number.isFinite(requested)
+          ? Math.max(0, requested - created)
+          : 0;
+      const queueWaitMs =
+        Number.isFinite(created) && claimed !== undefined && Number.isFinite(claimed)
+          ? Math.max(0, claimed - created)
+          : undefined;
+      lifecycleLog?.(context)?.record({
+        event: 'review finished',
+        runId: cancellation.runId,
+        trigger: outcome.trigger,
+        outcome: 'cancelled',
+        published: false,
+        totalDurationMs,
+        ...(queueWaitMs === undefined ? {} : { queueWaitMs }),
+        cleanupStatus:
+          cancellation.cleanup === 'destroyed' || cancellation.cleanup === 'failed'
+            ? cancellation.cleanup
+            : 'unknown',
+        evidenceStatus: outcome.evidence?.status ?? 'unknown',
+      });
+    } catch {
+      // Cancellation telemetry is best effort and cannot affect the transition.
+    }
+  };
+
   return {
-    async cancelReview(runId: string, requestedByUid: number) {
+    async cancelReview(runId: string, requestedByUid: number, context?: LifecycleContext) {
       const result = await state.cancelRun({
         runId,
         requestedByUid,
@@ -105,6 +154,7 @@ export function createJobControl(
       });
       if (result.kind === 'not_found') return response(404);
       if (result.kind === 'conflict') return response(409);
+      if (result.kind === 'cancelled') await recordCancellation(result.cancellation, context);
       const { runnerJobId, cleanup } = result.cancellation;
       const pending = runnerJobId !== null && cleanup !== 'destroyed';
       return response(pending ? 202 : 200, pending);

@@ -100,6 +100,72 @@ it('retries an unconfirmed operator stop, ends the Check, and acknowledges verif
   }
 });
 
+it('records one cancellation lifecycle event for a queued run', async () => {
+  const database = new SqliteD1Database();
+  const captures: Request[] = [];
+  const tasks: Promise<unknown>[] = [];
+  const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    captures.push(new Request(input, init));
+    return new Response('{}', { status: 200 });
+  });
+  try {
+    const state = createD1ReviewStateStore(database);
+    const queued = await state.claimReview({
+      deliveryId: 'queued-cancellation-lifecycle',
+      occurredAt: '2026-09-01T00:00:00.000Z',
+      job: {
+        repositoryId: 1,
+        installationId: 2,
+        pullRequestNumber: 3,
+        baseSha: '1'.repeat(40),
+        headSha: '2'.repeat(40),
+        trigger: 'automatic',
+      },
+    });
+    if (queued.kind !== 'claimed') throw new Error('expected queued run');
+    const env = {
+      REVIEW_DB: database,
+      GITHUB_APP_ID: '1',
+      GITHUB_APP_PRIVATE_KEY: 'test',
+      POSTHOG_ENABLED: 'true',
+      POSTHOG_PROJECT_API_KEY: 'phc_test_project_key',
+      POSTHOG_HOST: 'https://posthog.example.test',
+      POSTHOG_DEPLOYMENT: 'test',
+      POSTHOG_ENVIRONMENT: 'staging',
+    };
+    const core = createCoreWorker(env, { stateStore: state });
+    const context = { waitUntil: (task: Promise<unknown>) => tasks.push(task) };
+
+    expect((await core.cancelReview(queued.runId, 123, context)).status).toBe(200);
+    await Promise.all(tasks.splice(0));
+    const events = (
+      await Promise.all(
+        captures.map(async (request) => {
+          const body = (await request.json()) as { batch: readonly unknown[] };
+          return body.batch;
+        }),
+      )
+    ).flat();
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      event: 'review finished',
+      properties: {
+        outcome: 'cancelled',
+        published: false,
+        cleanup_status: 'unknown',
+        evidence_status: 'unknown',
+      },
+    });
+    expect(events[0]).not.toHaveProperty('properties.requestedByUid');
+    expect((await core.cancelReview(queued.runId, 123, context)).status).toBe(200);
+    await Promise.all(tasks.splice(0));
+    expect(captures).toHaveLength(1);
+  } finally {
+    fetcher.mockRestore();
+    database.close();
+  }
+});
+
 it.each([false, true])(
   'reopens Check reconciliation when a claim writes in_progress after cancellation (repair failure: %s)',
   async (repairFails) => {
