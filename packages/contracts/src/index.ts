@@ -471,6 +471,11 @@ export type OperationalLogEvent =
     }
   | {
       readonly phase: 'core';
+      readonly outcome: 'retry_feedback_failed';
+      readonly deliveryId: string;
+    }
+  | {
+      readonly phase: 'core';
       readonly outcome: 'metadata_refresh';
       readonly dueAtStart: number | null;
       readonly oldestDueAgeMs: number | null;
