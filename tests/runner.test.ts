@@ -2093,17 +2093,28 @@ describe('Runner Job HTTP interface', () => {
     expect(result.manifest.result).toEqual(structuredResult(markdown, 'request_changes'));
   });
 
-  it('accepts the decision header on a correction turn without JSON escaping', async () => {
+  it('corrects malformed JSON with a multiline request_changes decision header', async () => {
     const sessionId = 'session-decision-header-correction';
     const markdown =
       'TLDR: Request changes — the quoted "failure" needs a newline.\n\n' +
       '## Finding\n\nA raw Markdown body avoids escaping the quotes and newlines.';
+    const malformedJson =
+      '{"decision":"request_changes","markdown":"TLDR: Request changes — the "quoted" failure\nneeds a literal newline."}';
+    const malformedOutput = JSON.stringify({
+      type: 'text',
+      sessionID: sessionId,
+      part: {
+        type: 'text',
+        messageID: 'msg-malformed',
+        text: malformedJson,
+      },
+    });
     const finalText = decisionText('request_changes', markdown);
     const result = await runReminderScenario({
       runId: 'run-decision-header-correction',
       sessionId,
       rounds: [
-        { output: completedWithoutSubmitJsonl(sessionId), finalText: null },
+        { output: malformedOutput, finalText: malformedJson },
         {
           output: finalDecisionTextJsonl('request_changes', markdown, sessionId),
           finalText,
@@ -5299,7 +5310,7 @@ describe('Runner Job HTTP interface', () => {
     );
     expect(deliveredPrompt).toContain('TLDR:');
     expect(deliveredPrompt).toContain('Return your final answer in exactly this form');
-    expect(deliveredPrompt).toContain('DECISION: approve|request_changes|comment');
+    expect(deliveredPrompt).toContain('DECISION: approve');
     expect(deliveredPrompt).toContain('decision');
     expect(deliveredPrompt).toContain('Markdown');
     expect(deliveredPrompt).not.toContain('submit_review');
@@ -10707,7 +10718,7 @@ describe('Runner multi-model review', () => {
     );
     expect(supervisorPromptText).toContain('TLDR:');
     expect(supervisorPromptText).toContain('Return your final answer in exactly this form');
-    expect(supervisorPromptText).toContain('DECISION: approve|request_changes|comment');
+    expect(supervisorPromptText).toContain('DECISION: approve');
     expect(supervisorPromptText).not.toContain('submit_review');
 
     expect(result.manifest.multiReview).toMatchObject({
@@ -10920,7 +10931,7 @@ describe('Runner multi-model review', () => {
       expect(prompt).toContain('merge disposition');
       expect(prompt).toContain('TLDR:');
       expect(prompt).toContain('Return your final answer in exactly this form');
-      expect(prompt).toContain('DECISION: approve|request_changes|comment');
+      expect(prompt).toContain('DECISION: approve');
       expect(prompt).toContain('decision');
       expect(prompt).toContain('Markdown');
       expect(prompt).toContain('This is a static review');
