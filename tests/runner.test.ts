@@ -1437,8 +1437,10 @@ describe('Runner Job HTTP interface', () => {
         { id: 'message-1', parts: [{ type: 'text', text: 'x'.repeat(25 * 1024 * 1024) }] },
       ],
     });
+    let runner: ReturnType<typeof createRunner> | undefined;
+    let acceptedId: string | undefined;
     try {
-      const runner = createRunner({
+      runner = createRunner({
         authToken: 'runner-test-token',
         modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
         evidenceRoot,
@@ -1500,7 +1502,10 @@ describe('Runner Job HTTP interface', () => {
         }),
       );
       const { id } = (await submitted.json()) as { id: string };
-      const terminal = await waitForTerminal(runner, id);
+      acceptedId = id;
+      // This fixture hashes and retries a 25 MiB export. Keep the wait realistic
+      // for CI, and abort/close it in finally before removing its evidence.
+      const terminal = await waitForTerminal(runner, id, 400);
       for (let attempt = 0; attempt < 50 && callbackRequests.length === 0; attempt += 1) {
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
@@ -1538,6 +1543,7 @@ describe('Runner Job HTTP interface', () => {
         ),
       ).resolves.toBe(sessionExport);
       await runner.close();
+      runner = undefined;
       const restarted = createRunner({
         authToken: 'runner-test-token',
         evidenceRoot,
@@ -1580,6 +1586,19 @@ describe('Runner Job HTTP interface', () => {
         await restarted.close();
       }
     } finally {
+      if (runner !== undefined) {
+        if (acceptedId !== undefined) {
+          await runner
+            .handle(
+              new Request(`http://runner/jobs/${acceptedId}`, {
+                method: 'DELETE',
+                headers: { authorization: 'Bearer runner-test-token' },
+              }),
+            )
+            .catch(() => undefined);
+        }
+        await runner.close();
+      }
       await rm(evidenceRoot, { recursive: true, force: true });
     }
   });
