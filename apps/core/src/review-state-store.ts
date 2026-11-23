@@ -365,18 +365,18 @@ const samePullRequestBlockingClause = (candidate: string, current: string, expir
       OR (
         ${candidate}.status IN ('failed', 'superseded', 'cancelled')
         AND ${candidate}.runner_cleanup_status IN ('pending', 'failed')
-        AND (${candidate}.claimed_at IS NULL OR ${candidate}.claimed_at > '${expiredBefore}')
+        AND (COALESCE(${candidate}.claimed_at, ${candidate}.created_at) > '${expiredBefore}')
       )
     )`;
 
 const STALE_CLAIM_SWEEP_LIMIT = 64;
 const staleScheduledRunPage = `SELECT run_id, delivery_id, check_run_id FROM review_runs
   WHERE status = 'scheduled' AND runner_job_id IS NOT NULL
-    AND claimed_at IS NOT NULL AND claimed_at <= ?
+    AND COALESCE(claimed_at, created_at) <= ?
     AND (result_received_at IS NULL OR result_received_at <= ?)
     AND publication_started_at IS NULL
     AND (publication_claimed_at IS NULL OR publication_claimed_at <= ?)
-  ORDER BY claimed_at ASC, run_id ASC
+  ORDER BY COALESCE(claimed_at, created_at) ASC, run_id ASC
   LIMIT ?`;
 
 // Expire at most one bounded page per admission or claim attempt. The terminal
@@ -834,7 +834,10 @@ const createStore = (
                          AND (
                            runner_job_id IS NULL
                            OR runner_cleanup_status = 'destroyed'
-                           OR (claimed_at IS NOT NULL AND claimed_at <= ?)
+                           OR (
+                             runner_job_id IS NOT NULL
+                             AND COALESCE(claimed_at, created_at) <= ?
+                           )
                          ))
                      )
                  )

@@ -3828,6 +3828,143 @@ describe('Core Worker', () => {
     }
   });
 
+  it('expires a migrated owned claim whose claimed_at predates 0009', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-01T00:00:00Z'));
+    const database = new SqliteD1Database();
+    const stateStore = createD1ReviewStateStore(database);
+    const job = (headSha: string) => ({
+      repositoryId: 11,
+      pullRequestNumber: 81,
+      installationId: 7,
+      baseSha: eligibleEvent.baseSha,
+      headSha,
+      trigger: 'automatic' as const,
+    });
+    try {
+      const stale = await stateStore.claimReview({
+        deliveryId: 'delivery-migrated-old',
+        job: job(eligibleEvent.headSha),
+        occurredAt: '2026-09-01T00:00:00.000Z',
+      });
+      if (stale.kind !== 'claimed') throw new Error('migrated run was not scheduled');
+      await claimRunnerJob(stateStore, {
+        runId: stale.runId,
+        jobId: 'migrated-old-job',
+        occurredAt: '2026-09-01T00:00:01.000Z',
+      });
+      database.database
+        .prepare('UPDATE review_runs SET claimed_at = NULL WHERE run_id = ?')
+        .run(stale.runId);
+
+      const successor = await stateStore.claimReview({
+        deliveryId: 'delivery-migrated-successor',
+        job: job('3333333333333333333333333333333333333333'),
+        occurredAt: '2026-09-01T00:00:02.000Z',
+      });
+      if (successor.kind !== 'claimed') throw new Error('successor was not scheduled');
+
+      vi.setSystemTime(new Date('2026-09-01T01:31:00Z'));
+      await expect(
+        stateStore.claimNextJob({
+          jobId: 'migrated-successor-claim',
+          attempt: 1,
+          occurredAt: '2026-09-01T01:31:00.000Z',
+        }),
+      ).resolves.toMatchObject({
+        kind: 'claimed',
+        runId: successor.runId,
+        job: { pullRequestNumber: 81, headSha: '3333333333333333333333333333333333333333' },
+      });
+      await expect(stateStore.getRunOutcome(stale.runId)).resolves.toMatchObject({
+        status: 'failed',
+      });
+    } finally {
+      database.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    {
+      label: 'migrated old',
+      createdAt: '2026-09-01T00:00:00.000Z',
+      eligible: true,
+    },
+    {
+      label: 'recent',
+      createdAt: '2026-09-01T01:30:00.000Z',
+      eligible: false,
+    },
+  ] as const)(
+    'applies the created_at fallback to $label cancelled ownership',
+    async ({ createdAt, eligible }) => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-09-01T00:00:00Z'));
+      const database = new SqliteD1Database();
+      const stateStore = createD1ReviewStateStore(database);
+      const job = {
+        repositoryId: 11,
+        pullRequestNumber: 82,
+        installationId: 7,
+        baseSha: eligibleEvent.baseSha,
+        headSha: eligibleEvent.headSha,
+        trigger: 'automatic' as const,
+      };
+      try {
+        const stale = await stateStore.claimReview({
+          deliveryId: `delivery-migrated-cancelled-${eligible}`,
+          job,
+          occurredAt: '2026-09-01T00:00:00.000Z',
+        });
+        if (stale.kind !== 'claimed') throw new Error('cancelled run was not scheduled');
+        await claimRunnerJob(stateStore, {
+          runId: stale.runId,
+          jobId: 'migrated-cancelled-job',
+          occurredAt: '2026-09-01T00:00:01.000Z',
+        });
+        await stateStore.cancelRun({
+          runId: stale.runId,
+          requestedByUid: 1,
+          occurredAt: '2026-09-01T00:00:02.000Z',
+        });
+        database.database
+          .prepare('UPDATE review_runs SET claimed_at = NULL, created_at = ? WHERE run_id = ?')
+          .run(createdAt, stale.runId);
+
+        vi.setSystemTime(new Date('2026-09-01T01:31:00Z'));
+        const manual = await stateStore.claimReview({
+          deliveryId: `delivery-migrated-cancelled-retry-${eligible}`,
+          job: { ...job, trigger: 'manual' },
+          occurredAt: '2026-09-01T01:31:00.000Z',
+        });
+        if (eligible) {
+          expect(manual.kind).toBe('claimed');
+          if (manual.kind !== 'claimed') throw new Error('manual retry was not scheduled');
+          await expect(
+            stateStore.claimNextJob({
+              jobId: 'migrated-cancelled-successor',
+              attempt: 1,
+              occurredAt: '2026-09-01T01:31:00.000Z',
+            }),
+          ).resolves.toMatchObject({ kind: 'claimed', runId: manual.runId });
+        } else {
+          expect(manual.kind).not.toBe('claimed');
+          await expect(
+            stateStore.claimNextJob({
+              jobId: 'migrated-cancelled-blocked',
+              attempt: 1,
+              occurredAt: '2026-09-01T01:31:00.000Z',
+            }),
+          ).resolves.toEqual({ kind: 'empty' });
+        }
+      } finally {
+        database.close();
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it('expires abandoned failure publication locks without stealing fresh results or active publication', async () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(new Date('2026-09-01T00:00:00Z'));
