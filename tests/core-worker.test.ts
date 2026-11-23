@@ -261,7 +261,7 @@ describe('Core Worker', () => {
         occurredAt: '2026-10-19T00:00:00.000Z',
       });
       if (review.kind !== 'claimed') throw new Error('not admitted');
-      await store.claimNextJob!({
+      await store.claimNextJob({
         jobId: 'failure-job',
         attempt: 1,
         occurredAt: '2026-10-19T00:00:01.000Z',
@@ -317,7 +317,7 @@ describe('Core Worker', () => {
       occurredAt: '2026-10-19T00:00:00.000Z',
     });
     if (review.kind !== 'claimed') throw new Error('not admitted');
-    await store.claimNextJob!({
+    await store.claimNextJob({
       jobId: 'usage-job',
       attempt: 1,
       occurredAt: '2026-10-19T00:00:01.000Z',
@@ -1099,7 +1099,7 @@ describe('Core Worker', () => {
         if (queued.kind !== 'claimed') throw new Error('expected scheduled run');
         const { runId } = queued;
         const jobId = 'runner-job-1';
-        await state.claimNextJob!({ jobId, attempt: 1, occurredAt: '2026-09-01T00:01:00.000Z' });
+        await state.claimNextJob({ jobId, attempt: 1, occurredAt: '2026-09-01T00:01:00.000Z' });
         await state.cancelRun({ runId, requestedByUid: 1, occurredAt: '2026-09-01T00:02:00.000Z' });
         const env = {
           ...coreEnv(database),
@@ -1169,7 +1169,7 @@ describe('Core Worker', () => {
       });
       if (claimed.kind !== 'claimed') throw new Error('manual run was not claimed');
       const { runId } = claimed;
-      await state.claimNextJob!({
+      await state.claimNextJob({
         jobId: 'runner-job-1',
         attempt: 1,
         occurredAt: '2026-09-01T00:01:00.000Z',
@@ -1261,7 +1261,7 @@ describe('Core Worker', () => {
       });
       if (claimed.kind !== 'claimed') throw new Error('manual run was not claimed');
       const { runId } = claimed;
-      await state.claimNextJob!({
+      await state.claimNextJob({
         jobId: 'runner-job-1',
         attempt: 1,
         occurredAt: '2026-09-01T00:01:00.000Z',
@@ -1501,9 +1501,8 @@ describe('Core Worker', () => {
     try {
       database.migrateThrough();
       const migratedStore = createD1ReviewStateStore(database);
-      if (migratedStore.claimNextJob === undefined) throw new Error('claim route is unavailable');
       await expect(
-        migratedStore.claimNextJob!({
+        migratedStore.claimNextJob({
           jobId: 'legacy-runner-job',
           attempt: 1,
           occurredAt: '2026-09-01T00:00:01.000Z',
@@ -4881,7 +4880,7 @@ describe('Core Worker', () => {
       occurredAt: '2026-09-01T00:00:00.000Z',
     });
     if (claimed.kind !== 'claimed') throw new Error('invalid evidence run was not claimed');
-    await stateStore.claimNextJob!({
+    await stateStore.claimNextJob({
       jobId: 'runner-job-1',
       attempt: 1,
       occurredAt: '2026-09-01T00:01:00.000Z',
@@ -4931,7 +4930,7 @@ describe('Core Worker', () => {
       });
       if (replacement.kind !== 'claimed') throw new Error('replacement was not queued');
       await expect(
-        stateStore.claimNextJob!({
+        stateStore.claimNextJob({
           jobId: 'replacement-job',
           attempt: 1,
           occurredAt: '2026-09-01T01:01:00.000Z',
@@ -5482,7 +5481,6 @@ describe('Runner claim serialization', () => {
   });
 
   const exerciseSamePullRequestExclusion = async (store: ReviewPublicationStateStore) => {
-    if (store.claimNextJob === undefined) throw new Error('claim is unavailable');
     const initial = await store.claimReview({
       deliveryId: 'delivery-serial-old',
       job: claimJob(42, oldHead),
@@ -5561,9 +5559,6 @@ describe('Runner claim serialization', () => {
     store: ReviewPublicationStateStore,
     fresh: ReviewPublicationStateStore,
   ) => {
-    if (store.claimNextJob === undefined || fresh.claimNextJob === undefined) {
-      throw new Error('claim is unavailable');
-    }
     const failed = await store.claimReview({
       deliveryId: 'delivery-failed-cleanup',
       job: claimJob(42, oldHead),
@@ -6142,7 +6137,6 @@ describe('Runner claim serialization', () => {
         occurredAt: '2026-09-01T00:00:00.000Z',
       });
       if (claimed.kind !== 'claimed') throw new Error('run was not admitted');
-      if (store.claimNextJob === undefined) throw new Error('claim is unavailable');
       await store.claimNextJob({
         jobId: 'job-owner',
         attempt: 1,

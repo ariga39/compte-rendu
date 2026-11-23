@@ -11,11 +11,9 @@ export const claimRunnerJob = async (
     readonly job?: Partial<ReviewJob>;
   },
 ) => {
-  const { claimNextJob } = store;
-  if (claimNextJob === undefined) throw new Error('claimNextJob is unavailable');
   const attempt = input.attempt ?? 1;
   const occurredAt = input.occurredAt ?? '2026-09-01T00:00:00.500Z';
-  const claimed = await claimNextJob({
+  const claimed = await store.claimNextJob({
     jobId: input.jobId,
     attempt,
     occurredAt,

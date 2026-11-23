@@ -1028,7 +1028,7 @@ describe('Review coordinator', () => {
       deliveryId: eligiblePrivatePullRequest.deliveryId,
       status: 'scheduled',
     });
-    const claim = await stateStore.claimNextJob!({
+    const claim = await stateStore.claimNextJob({
       jobId: 'claim-job',
       attempt: 1,
       occurredAt: '2026-09-01T00:00:00.000Z',
@@ -1190,7 +1190,7 @@ describe('Review coordinator', () => {
     const disposition = await coordinator.handleReviewEvent(eligiblePrivatePullRequest);
 
     expect(disposition).toBe('scheduled');
-    const claim = await stateStore.claimNextJob!({
+    const claim = await stateStore.claimNextJob({
       jobId: 'claim-exact-pr',
       attempt: 1,
       occurredAt: '2026-09-01T00:00:00.000Z',
@@ -1243,7 +1243,7 @@ describe('Review coordinator', () => {
     });
 
     expect(disposition).toBe('scheduled');
-    const claim = await stateStore.claimNextJob!({
+    const claim = await stateStore.claimNextJob({
       jobId: 'claim-manual-pr',
       attempt: 1,
       occurredAt: '2026-09-01T00:00:00.000Z',
@@ -1384,7 +1384,7 @@ describe('Review coordinator', () => {
     });
 
     expect(disposition).toBe('scheduled');
-    const runnerClaim = await stateStore.claimNextJob!({
+    const runnerClaim = await stateStore.claimNextJob({
       jobId: 'claim-check-rerequest',
       attempt: 1,
       occurredAt: '2026-09-12T00:03:00.000Z',
@@ -1674,7 +1674,7 @@ describe('Review coordinator', () => {
 
     expect(disposition).toBe('scheduled');
     expect(suiteLookups).toEqual([{ repositoryId: 11, installationId: 7, checkSuiteId: 555 }]);
-    const claim = await stateStore.claimNextJob!({
+    const claim = await stateStore.claimNextJob({
       jobId: 'claim-suite-rerequest',
       attempt: 1,
       occurredAt: '2026-09-12T00:03:00.000Z',
@@ -1918,7 +1918,7 @@ describe('Review coordinator', () => {
     });
 
     expect(disposition).toBe('scheduled');
-    const claim = await stateStore.claimNextJob!({
+    const claim = await stateStore.claimNextJob({
       jobId: 'claim-manual-approval',
       attempt: 1,
       occurredAt: '2026-09-01T00:00:00.000Z',
@@ -2148,7 +2148,7 @@ it('retains superseded recovery identity while unblocking the next claim', async
   };
   const first = await store.claimReview({ deliveryId: 'recovery-old', job, occurredAt: at });
   if (first.kind !== 'claimed') throw new Error('not scheduled');
-  await store.claimNextJob!({ jobId: 'old-job', attempt: 1, occurredAt: at });
+  await store.claimNextJob({ jobId: 'old-job', attempt: 1, occurredAt: at });
   await store.recordEvidence({
     runId: first.runId,
     evidence: {
@@ -2167,7 +2167,7 @@ it('retains superseded recovery identity while unblocking the next claim', async
   });
   if (next.kind !== 'claimed') throw new Error('replacement not scheduled');
   await store.markRunSuperseded!({ runId: first.runId, occurredAt: at });
-  expect(await store.claimNextJob!({ jobId: 'next-job', attempt: 1, occurredAt: at })).toEqual({
+  expect(await store.claimNextJob({ jobId: 'next-job', attempt: 1, occurredAt: at })).toEqual({
     kind: 'empty',
   });
   const report = {
@@ -2191,7 +2191,7 @@ it('retains superseded recovery identity while unblocking the next claim', async
     runnerJobId: 'old-job',
     runnerAttempt: 1,
   });
-  expect(
-    await store.claimNextJob!({ jobId: 'next-job', attempt: 1, occurredAt: at }),
-  ).toMatchObject({ kind: 'claimed', runId: next.runId });
+  expect(await store.claimNextJob({ jobId: 'next-job', attempt: 1, occurredAt: at })).toMatchObject(
+    { kind: 'claimed', runId: next.runId },
+  );
 });
