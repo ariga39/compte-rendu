@@ -610,10 +610,7 @@ export interface ReviewStateQueries {
 
 export type ReviewPublicationStateStore = ReviewStateStore & ReviewStateQueries;
 
-export interface ReviewScheduler {
-  schedule(job: ReviewJob, runId: string): Promise<void>;
-  cancel?(jobId: string, claimedAt?: string): Promise<void | 'pending'>;
-}
+export type CancelRunnerJob = (jobId: string, claimedAt?: string) => Promise<void | 'pending'>;
 
 export type ReviewCheckSetupDefer = (task: Promise<void>) => void;
 
@@ -1327,17 +1324,6 @@ const completeReviewEffect = Effect.fn('completeReview')(function* (
   return 'completed' as const;
 });
 
-const schedule = (scheduler: ReviewScheduler, job: ReviewJob, runId: string) =>
-  Schema.decodeUnknownEffect(ReviewJob)(job).pipe(
-    Effect.mapError(() => new SchedulingFailed({ message: 'Scheduled review job is invalid' })),
-    Effect.flatMap((decodedJob) =>
-      Effect.tryPromise({
-        try: () => scheduler.schedule(decodedJob, runId),
-        catch: () => new SchedulingFailed({ message: 'Review scheduler failed' }),
-      }),
-    ),
-  );
-
 const checkStatusForOutcome = (
   outcome: ReviewOutcome | undefined,
 ): 'in_progress' | 'success' | 'failure' | 'cancelled' | undefined =>
@@ -1568,7 +1554,7 @@ const startCheckSetup = Effect.fn('startCheckSetup')(function* (
 interface AdmissionDependencies {
   readonly github: GitHubAdapter;
   readonly stateStore: ReviewCompletionStateStore;
-  readonly scheduler: ReviewScheduler;
+  readonly cancelRunnerJob?: CancelRunnerJob;
   readonly log?: OperationalLog;
   readonly deferCheckSetup?: ReviewCheckSetupDefer;
   readonly lifecycleLog?: CoreLifecycleLog;
@@ -1581,13 +1567,17 @@ const claimAndSchedule = (
   approval?: ReviewApproval,
 ) =>
   Effect.gen(function* () {
-    const { github, stateStore, scheduler, log, deferCheckSetup, lifecycleLog } = dependencies;
+    const { github, stateStore, cancelRunnerJob, log, deferCheckSetup, lifecycleLog } =
+      dependencies;
     const occurredAt = yield* currentIso;
+    const validatedJob = yield* Schema.decodeUnknownEffect(ReviewJob)(job).pipe(
+      Effect.mapError(() => new SchedulingFailed({ message: 'Review job is invalid' })),
+    );
     const claim = yield* Effect.tryPromise({
       try: () =>
         stateStore.claimReview({
           deliveryId,
-          job,
+          job: validatedJob,
           occurredAt,
           approval,
         }),
@@ -1665,7 +1655,7 @@ const claimAndSchedule = (
     );
 
     if (claim.activeRunnerJob !== undefined) {
-      if (scheduler.cancel === undefined || stateStore.markRunSuperseded === undefined) {
+      if (cancelRunnerJob === undefined || stateStore.markRunSuperseded === undefined) {
         return 'scheduled' as const;
       }
       const getRunOutcome = stateStore.getRunOutcome;
@@ -1695,8 +1685,7 @@ const claimAndSchedule = (
         }).pipe(Effect.catch(() => Effect.succeed(undefined)));
       }
       const canceled = yield* Effect.tryPromise({
-        try: () =>
-          scheduler.cancel!(claim.activeRunnerJob!.jobId, claim.activeRunnerJob!.claimedAt),
+        try: () => cancelRunnerJob(claim.activeRunnerJob!.jobId, claim.activeRunnerJob!.claimedAt),
         catch: () => undefined,
       }).pipe(
         Effect.map((ack) => ack !== 'pending'),
@@ -1725,26 +1714,6 @@ const claimAndSchedule = (
       }
     }
 
-    yield* schedule(scheduler, job, claim.runId).pipe(
-      Effect.catchTag('SchedulingFailed', (error) =>
-        Effect.gen(function* () {
-          yield* recordOperationalLog(log, {
-            phase: 'core',
-            outcome: 'retryable',
-            deliveryId,
-            reason: 'scheduling_failure',
-          });
-          return yield* Effect.tryPromise({
-            try: () =>
-              stateStore.markSchedulingFailed({
-                runId: claim.runId,
-                occurredAt,
-              }),
-            catch: () => error,
-          }).pipe(Effect.flatMap(() => Effect.fail(error)));
-        }),
-      ),
-    );
     yield* recordOperationalLog(log, {
       phase: 'core',
       outcome: 'scheduled',

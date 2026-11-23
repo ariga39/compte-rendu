@@ -277,12 +277,7 @@ export const createCoreWorker = (
   const coordinatorDependencies = {
     github,
     stateStore,
-    scheduler: {
-      // A webhook only places a durable item in review_runs. The idle Runner
-      // claims it through the pull route below.
-      schedule: async () => undefined,
-      ...(runner === undefined ? {} : { cancel: runner.cancelJob }),
-    },
+    ...(runner === undefined ? {} : { cancelRunnerJob: runner.cancelJob }),
     log,
   } as const;
   const createCoordinator = (

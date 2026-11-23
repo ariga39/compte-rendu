@@ -60,8 +60,6 @@ const eligiblePrivatePullRequest: ReviewEvent = {
   headSha: '2222222222222222222222222222222222222222',
 };
 
-const noopScheduler = { schedule: async () => undefined } as const;
-
 const runIdOf = async (
   stateStore: ReturnType<typeof createTestReviewStore>,
   deliveryId: string,
@@ -81,7 +79,6 @@ describe('Review coordinator', () => {
     const stateStore = createTestReviewStore();
     const coordinator = createReviewCoordinator({
       stateStore,
-      scheduler: noopScheduler,
       github: {
         loadReviewTarget: async () => ({ headSha: eligiblePrivatePullRequest.headSha }),
         createReview: async ({ payload }) => {
@@ -115,7 +112,6 @@ describe('Review coordinator', () => {
           },
         },
         stateStore,
-        scheduler: noopScheduler,
       });
       await coordinator.handleReviewEvent(eligiblePrivatePullRequest);
       const runId = await stateStore.runIdForDelivery(eligiblePrivatePullRequest.deliveryId);
@@ -146,7 +142,6 @@ describe('Review coordinator', () => {
     const reviews: ReviewPublicationPayload[] = [];
     const coordinator = createReviewCoordinator({
       stateStore,
-      scheduler: noopScheduler,
       github: {
         loadReviewTarget: async () => {
           if (runId === undefined) throw new Error('run was not persisted');
@@ -176,7 +171,6 @@ describe('Review coordinator', () => {
     const reviews: ReviewPublicationPayload[] = [];
     const finalMarkdown = '## Review:\n\nUse `{body}` exactly.\n';
     const coordinator = createReviewCoordinator({
-      scheduler: noopScheduler,
       github: {
         loadReviewTarget: async () => ({
           headSha: eligiblePrivatePullRequest.headSha,
@@ -217,7 +211,6 @@ describe('Review coordinator', () => {
         createReview: async ({ payload }) => ({ kind: 'created', review: payload }),
       },
       stateStore,
-      scheduler: noopScheduler,
       log: {
         record: async (event) => {
           events.push(event);
@@ -247,7 +240,6 @@ describe('Review coordinator', () => {
     const coordinator = createReviewCoordinator({
       github: {},
       stateStore,
-      scheduler: noopScheduler,
       log: {
         record: async (event) => {
           events.push(event);
@@ -306,7 +298,6 @@ describe('Review coordinator', () => {
         },
       },
       stateStore,
-      scheduler: noopScheduler,
     });
 
     expect(await coordinator.completeReview({ runId: claimed.runId, output: '' })).toBe('failed');
@@ -346,7 +337,6 @@ describe('Review coordinator', () => {
         },
       },
       stateStore,
-      scheduler: noopScheduler,
     });
 
     expect(await coordinator.completeReview({ runId: claimed.runId, output: '' })).toBe('failed');
@@ -384,7 +374,6 @@ describe('Review coordinator', () => {
         },
       },
       stateStore,
-      scheduler: noopScheduler,
     });
 
     expect(
@@ -429,7 +418,6 @@ describe('Review coordinator', () => {
         },
       },
       stateStore,
-      scheduler: noopScheduler,
       log: {
         record: async (event) => {
           events.push(event);
@@ -481,7 +469,6 @@ describe('Review coordinator', () => {
         },
       },
       stateStore,
-      scheduler: noopScheduler,
     });
     const newerEvent = {
       ...eligiblePrivatePullRequest,
@@ -540,7 +527,6 @@ describe('Review coordinator', () => {
     const coordinator = createReviewCoordinator({
       github: createGitHubPublicationAdapter({ token: 'installation-token', fetch: fetcher }),
       stateStore,
-      scheduler: noopScheduler,
     });
 
     expect(await coordinator.handleReviewEvent(eligiblePrivatePullRequest)).toBe('scheduled');
@@ -595,7 +581,6 @@ describe('Review coordinator', () => {
         },
       },
       stateStore,
-      scheduler: noopScheduler,
       log: {
         record: async (event) => {
           events.push(event);
@@ -705,7 +690,6 @@ describe('Review coordinator', () => {
           fetch: fetcher,
         }),
         stateStore,
-        scheduler: noopScheduler,
       });
 
       const secondEvent = {
@@ -744,7 +728,6 @@ describe('Review coordinator', () => {
         }),
       },
       stateStore,
-      scheduler: noopScheduler,
     });
 
     try {
@@ -978,7 +961,6 @@ describe('Review coordinator', () => {
         },
       },
       stateStore,
-      scheduler: noopScheduler,
     });
 
     expect(await coordinator.handleReviewEvent(eligiblePrivatePullRequest)).toBe('scheduled');
@@ -1018,7 +1000,6 @@ describe('Review coordinator', () => {
         },
       },
       stateStore,
-      scheduler: noopScheduler,
     });
 
     expect(await coordinator.handleReviewEvent(eligiblePrivatePullRequest)).toBe('scheduled');
@@ -1036,7 +1017,6 @@ describe('Review coordinator', () => {
     const coordinator = createReviewCoordinator({
       github: {},
       stateStore,
-      scheduler: noopScheduler,
     });
 
     const disposition = await coordinator.handleReviewEvent(eligiblePrivatePullRequest);
@@ -1074,7 +1054,6 @@ describe('Review coordinator', () => {
     const coordinator = createReviewCoordinator({
       github: {},
       stateStore,
-      scheduler: noopScheduler,
     });
 
     try {
@@ -1122,66 +1101,11 @@ describe('Review coordinator', () => {
     }
   });
 
-  it('keeps a superseded delivery terminal when its old scheduler fails after a newer claim', async () => {
-    const database = new SqliteD1Database();
-    const stateStore = createD1ReviewStateStore(database);
-    const newerEvent: ReviewEvent = {
-      ...eligiblePrivatePullRequest,
-      deliveryId: 'delivery-race-newer',
-      action: 'synchronize',
-      headSha: '3333333333333333333333333333333333333333',
-    };
-    let coordinator!: ReturnType<typeof createReviewCoordinator>;
-    let oldRunId = '';
-    let raced = false;
-
-    coordinator = createReviewCoordinator({
-      github: {},
-      stateStore,
-      scheduler: {
-        schedule: async (job, runId) => {
-          if (job.headSha === eligiblePrivatePullRequest.headSha && !raced) {
-            oldRunId = runId;
-            raced = true;
-            expect(await coordinator.handleReviewEvent(newerEvent)).toBe('scheduled');
-            throw new Error('old scheduler failed late');
-          }
-        },
-      },
-    });
-
-    try {
-      expect(await coordinator.handleReviewEvent(eligiblePrivatePullRequest)).toBe('failed');
-      expect(
-        await stateStore.getDeliveryOutcome(eligiblePrivatePullRequest.deliveryId),
-      ).toMatchObject({
-        status: 'superseded',
-      });
-
-      await stateStore.markRunCompleted({
-        runId: oldRunId,
-        occurredAt: '2026-01-01T00:00:00.000Z',
-      });
-
-      expect(
-        await stateStore.getDeliveryOutcome(eligiblePrivatePullRequest.deliveryId),
-      ).toMatchObject({
-        status: 'superseded',
-      });
-      expect(await stateStore.getDeliveryOutcome(newerEvent.deliveryId)).toMatchObject({
-        status: 'scheduled',
-      });
-    } finally {
-      database.close();
-    }
-  });
-
   it('does not schedule the same delivery twice when GitHub replays it', async () => {
     const stateStore = createTestReviewStore();
     const coordinator = createReviewCoordinator({
       github: {},
       stateStore,
-      scheduler: noopScheduler,
     });
 
     const first = await coordinator.handleReviewEvent(eligiblePrivatePullRequest);
@@ -1206,7 +1130,6 @@ describe('Review coordinator', () => {
     const coordinator = createReviewCoordinator({
       github: {},
       stateStore,
-      scheduler: noopScheduler,
     });
 
     const first = await coordinator.handleReviewEvent(eligiblePrivatePullRequest);
@@ -1229,36 +1152,11 @@ describe('Review coordinator', () => {
     });
   });
 
-  it('leaves a failed scheduling outcome that blocks another delivery for the same head', async () => {
-    const scheduled: ReviewJob[] = [];
-    const coordinator = createReviewCoordinator({
-      github: {},
-      stateStore: createTestReviewStore(),
-      scheduler: {
-        schedule: async (job) => {
-          scheduled.push(job);
-          throw new Error('queue unavailable');
-        },
-      },
-    });
-
-    const first = await coordinator.handleReviewEvent(eligiblePrivatePullRequest);
-    const retryDelivery = await coordinator.handleReviewEvent({
-      ...eligiblePrivatePullRequest,
-      deliveryId: 'delivery-private-failed-retry',
-    });
-
-    expect(first).toBe('failed');
-    expect(retryDelivery).toBe('failed');
-    expect(scheduled).toHaveLength(1);
-  });
-
   it('supersedes an active older head when a newer head is claimed', async () => {
     const stateStore = createTestReviewStore();
     const coordinator = createReviewCoordinator({
       github: {},
       stateStore,
-      scheduler: noopScheduler,
     });
 
     const first = await coordinator.handleReviewEvent(eligiblePrivatePullRequest);
@@ -1287,7 +1185,6 @@ describe('Review coordinator', () => {
     const coordinator = createReviewCoordinator({
       github: {},
       stateStore,
-      scheduler: noopScheduler,
     });
 
     const disposition = await coordinator.handleReviewEvent(eligiblePrivatePullRequest);
@@ -1331,7 +1228,6 @@ describe('Review coordinator', () => {
         },
       },
       stateStore,
-      scheduler: noopScheduler,
     });
 
     const disposition = await coordinator.handleReviewEvent({
@@ -1377,9 +1273,24 @@ describe('Review coordinator', () => {
 
   it('schedules a fresh manual delivery after its same-head run failed', async () => {
     const stateStore = createTestReviewStore();
-    const scheduled: Array<{ job: ReviewJob; runId: string }> = [];
-    let attempts = 0;
-    let failedRunId = '';
+    const failed = await stateStore.claimReview({
+      deliveryId: 'delivery-manual-failed',
+      job: {
+        repositoryId: 11,
+        installationId: 7,
+        pullRequestNumber: 42,
+        baseSha: '3333333333333333333333333333333333333333',
+        headSha: '4444444444444444444444444444444444444444',
+        trigger: 'manual',
+        commentId: 987654,
+      },
+      occurredAt: '2026-09-12T00:00:00.000Z',
+    });
+    if (failed.kind !== 'claimed') throw new Error('failed run was not claimed');
+    await stateStore.markSchedulingFailed({
+      runId: failed.runId,
+      occurredAt: '2026-09-12T00:01:00.000Z',
+    });
     const coordinator = createReviewCoordinator({
       github: {
         getPullRequest: async () => ({
@@ -1393,30 +1304,9 @@ describe('Review coordinator', () => {
         getCommenterPermission: async () => 'maintain',
       },
       stateStore,
-      scheduler: {
-        schedule: async (job, runId) => {
-          attempts += 1;
-          if (attempts === 1) {
-            failedRunId = runId;
-            throw new Error('runner unavailable');
-          }
-          scheduled.push({ job, runId });
-        },
-      },
     });
 
-    const first = await coordinator.handleReviewEvent({
-      deliveryId: 'delivery-manual-failed',
-      event: 'issue_comment',
-      action: 'created',
-      repositoryId: 11,
-      pullRequestNumber: 42,
-      installationId: 7,
-      commentId: 987654,
-      commenterLogin: 'maintainer',
-      command: '/ai-review',
-    });
-    const second = await coordinator.handleReviewEvent({
+    const retry = await coordinator.handleReviewEvent({
       deliveryId: 'delivery-manual-retry',
       event: 'issue_comment',
       action: 'created',
@@ -1428,9 +1318,7 @@ describe('Review coordinator', () => {
       command: '/ai-review',
     });
 
-    expect(first).toBe('failed');
-    expect(second).toBe('scheduled');
-    expect(scheduled).toHaveLength(1);
+    expect(retry).toBe('scheduled');
     expect(await stateStore.getDeliveryOutcome('delivery-manual-failed')).toMatchObject({
       status: 'failed',
       headSha: '4444444444444444444444444444444444444444',
@@ -1439,7 +1327,9 @@ describe('Review coordinator', () => {
       status: 'scheduled',
       headSha: '4444444444444444444444444444444444444444',
     });
-    expect(scheduled[0]?.runId).not.toBe(failedRunId);
+    const retryRunId = await stateStore.runIdForDelivery('delivery-manual-retry');
+    if (retryRunId === undefined) throw new Error('retry run was not persisted');
+    expect(retryRunId).not.toBe(failed.runId);
   });
 
   it('schedules a fresh manual run for a failed Check re-request without a comment reaction', async () => {
@@ -1480,7 +1370,6 @@ describe('Review coordinator', () => {
         },
       },
       stateStore,
-      scheduler: noopScheduler,
     });
 
     const disposition = await coordinator.handleReviewEvent({
@@ -1537,7 +1426,6 @@ describe('Review coordinator', () => {
         },
       },
       stateStore,
-      scheduler: noopScheduler,
     });
 
     const disposition = await coordinator.handleReviewEvent({
@@ -1564,7 +1452,6 @@ describe('Review coordinator', () => {
         getCommenterPermission: async () => 'write',
       },
       stateStore,
-      scheduler: noopScheduler,
     });
 
     const unknown = await coordinator.handleReviewEvent({
@@ -1627,7 +1514,6 @@ describe('Review coordinator', () => {
         },
       },
       stateStore,
-      scheduler: noopScheduler,
     });
 
     const disposition = await coordinator.handleReviewEvent({
@@ -1658,7 +1544,6 @@ describe('Review coordinator', () => {
     const coordinator = createReviewCoordinator({
       github: {},
       stateStore,
-      scheduler: noopScheduler,
       log: {
         record: async (event) => {
           events.push(event);
@@ -1697,7 +1582,6 @@ describe('Review coordinator', () => {
         getCommenterPermission: async () => 'write',
       },
       stateStore,
-      scheduler: noopScheduler,
     });
     const event = {
       deliveryId: 'delivery-check-replay',
@@ -1743,7 +1627,6 @@ describe('Review coordinator', () => {
         getCommenterPermission: async () => 'write',
       },
       stateStore,
-      scheduler: noopScheduler,
     });
 
     const disposition = await coordinator.handleReviewEvent({
@@ -1777,7 +1660,6 @@ describe('Review coordinator', () => {
         getCommenterPermission: async () => 'write',
       },
       stateStore,
-      scheduler: noopScheduler,
     });
 
     const disposition = await coordinator.handleReviewEvent({
@@ -1823,7 +1705,6 @@ describe('Review coordinator', () => {
           getCommenterPermission: async () => 'write',
         },
         stateStore,
-        scheduler: noopScheduler,
       });
       return coordinator.handleReviewEvent({
         deliveryId,
@@ -1859,7 +1740,6 @@ describe('Review coordinator', () => {
         },
       },
       stateStore,
-      scheduler: noopScheduler,
       log: {
         record: async (event) => {
           events.push(event);
@@ -1910,7 +1790,6 @@ describe('Review coordinator', () => {
         getCommenterPermission: async () => 'maintain',
       },
       stateStore,
-      scheduler: noopScheduler,
     });
 
     const disposition = await coordinator.handleReviewEvent({
@@ -1944,7 +1823,6 @@ describe('Review coordinator', () => {
         },
       },
       stateStore,
-      scheduler: noopScheduler,
     });
 
     const disposition = await coordinator.handleReviewEvent({
@@ -1989,7 +1867,6 @@ describe('Review coordinator', () => {
         },
       },
       stateStore,
-      scheduler: noopScheduler,
     });
 
     const disposition = await coordinator.handleReviewEvent({
@@ -2026,7 +1903,6 @@ describe('Review coordinator', () => {
         getCommenterPermission: async () => 'maintain',
       },
       stateStore,
-      scheduler: noopScheduler,
     });
 
     const disposition = await coordinator.handleReviewEvent({
@@ -2061,7 +1937,6 @@ describe('Review coordinator', () => {
     const coordinator = createReviewCoordinator({
       github: {},
       stateStore,
-      scheduler: noopScheduler,
     });
 
     const disposition = await coordinator.handleReviewEvent({
@@ -2087,7 +1962,6 @@ describe('Review coordinator', () => {
     const coordinator = createReviewCoordinator({
       github: {},
       stateStore,
-      scheduler: noopScheduler,
     });
 
     const disposition = await coordinator.handleReviewEvent({
@@ -2107,7 +1981,6 @@ describe('Review coordinator', () => {
     const coordinator = createReviewCoordinator({
       github: {},
       stateStore,
-      scheduler: noopScheduler,
     });
     const event = {
       ...eligiblePrivatePullRequest,
@@ -2141,7 +2014,6 @@ describe('Review coordinator', () => {
           getCommenterPermission: async () => permission,
         },
         stateStore,
-        scheduler: noopScheduler,
       });
 
       const disposition = await coordinator.handleReviewEvent({
@@ -2176,7 +2048,6 @@ describe('Review coordinator', () => {
         getCommenterPermission: async () => 'write',
       },
       stateStore,
-      scheduler: noopScheduler,
     });
 
     const approval = await coordinator.handleReviewEvent({
@@ -2215,7 +2086,6 @@ describe('Review coordinator', () => {
       const coordinator = createReviewCoordinator({
         github: {},
         stateStore,
-        scheduler: noopScheduler,
       });
 
       const disposition = await coordinator.handleReviewEvent({
@@ -2245,7 +2115,6 @@ describe('Review coordinator', () => {
           getCommenterPermission: async () => 'maintain',
         },
         stateStore,
-        scheduler: noopScheduler,
       });
 
       const disposition = await coordinator.handleReviewEvent({
