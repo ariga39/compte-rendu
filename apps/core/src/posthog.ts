@@ -1,5 +1,4 @@
 import { Option, Schema } from 'effect';
-import { PostHog } from 'posthog-node';
 import { CoreLifecycleEvent, type CoreLifecycleLog } from './index';
 
 interface PostHogEnvironment {
@@ -13,6 +12,8 @@ interface PostHogEnvironment {
 interface WaitUntilContext {
   readonly waitUntil: (task: Promise<unknown>) => void;
 }
+
+const CAPTURE_TIMEOUT_MS = 3000;
 
 const BoundedIdentifier = Schema.String.pipe(
   Schema.check(Schema.isPattern(/^[A-Za-z0-9._:-]{1,128}$/)),
@@ -69,6 +70,27 @@ const reportLocalFailure = (message: string) => {
   console.warn(`PostHog telemetry unavailable: ${message}`);
 };
 
+const captureUrl = (host: URL): URL => {
+  const url = new URL(host.href);
+  url.pathname = `${url.pathname.replace(/\/+$/, '')}/batch/`;
+  url.search = '';
+  url.hash = '';
+  return url;
+};
+
+const send = async (url: URL, body: string): Promise<void> => {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body,
+    credentials: 'omit',
+    redirect: 'error',
+    signal: AbortSignal.timeout(CAPTURE_TIMEOUT_MS),
+  });
+  await response.body?.cancel().catch(() => undefined);
+  if (!response.ok) throw new Error('PostHog capture failed');
+};
+
 export const createPostHogLifecycleLog = (
   environment: PostHogEnvironment,
   context: WaitUntilContext | undefined,
@@ -87,34 +109,7 @@ export const createPostHogLifecycleLog = (
     reportLocalFailure('configuration');
     return { record: () => undefined };
   }
-
-  let client: PostHog;
-  try {
-    client = new PostHog(configuration.projectApiKey, {
-      host: configuration.host.href,
-      flushAt: 1,
-      flushInterval: 0,
-      fetchRetryCount: 0,
-      requestTimeout: 3000,
-      enableExceptionAutocapture: false,
-      persistence: 'memory',
-      fetch: async (url, options) => {
-        try {
-          const response = await fetch(url, options);
-          if (response.status < 200 || response.status >= 300) {
-            reportLocalFailure('capture');
-          }
-          return response;
-        } catch {
-          reportLocalFailure('capture');
-          throw new Error('PostHog capture failed');
-        }
-      },
-    });
-  } catch {
-    reportLocalFailure('initialization');
-    return { record: () => undefined };
-  }
+  const url = captureUrl(configuration.host);
 
   return {
     record: (event) => {
@@ -125,13 +120,25 @@ export const createPostHogLifecycleLog = (
         reportLocalFailure('event validation');
         return;
       }
-      const task = client
-        .captureImmediate({
-          distinctId: decoded.runId,
-          event: decoded.event,
-          properties: propertiesFor(decoded, configuration.environment, configuration.deployment),
-        })
-        .catch(() => reportLocalFailure('capture'));
+      const now = new Date().toISOString();
+      const body = JSON.stringify({
+        api_key: configuration.projectApiKey,
+        sent_at: now,
+        batch: [
+          {
+            event: decoded.event,
+            distinct_id: decoded.runId,
+            timestamp: now,
+            uuid: crypto.randomUUID(),
+            properties: {
+              ...propertiesFor(decoded, configuration.environment, configuration.deployment),
+              $is_server: true,
+              $geoip_disable: true,
+            },
+          },
+        ],
+      });
+      const task = send(url, body).catch(() => reportLocalFailure('capture'));
       if (context === undefined) {
         void task;
       } else {
