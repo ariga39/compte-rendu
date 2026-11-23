@@ -274,12 +274,22 @@ export const executeOpenSandboxCommand = async (
     if (executionId !== undefined) await stop(executionId);
     else if (interrupt !== undefined) await interrupt;
     flushStderr('', true);
+    stdoutSink?.finish();
+    stderrSink?.finish();
+    if (stdoutSink?.truncated === true) truncated = true;
+    if (stderrSink?.truncated === true) stderrTruncated = true;
     await closeFiles();
     return {
       exitCode: 1,
-      stdout: '',
+      stdout: captureStdoutRequested ? Buffer.concat(stdoutChunks).toString('utf8') : '',
+      ...(captureStderrRequested
+        ? {
+            stderr: Buffer.concat(stderrChunks).toString('utf8'),
+            ...(stderrTruncated ? { stderrTruncated: true } : {}),
+          }
+        : {}),
       timedOut: false,
-      truncated: false,
+      truncated,
       streamError: true,
       ...(credentialObserver.observed ? { credentialObserved: true } : {}),
     };
