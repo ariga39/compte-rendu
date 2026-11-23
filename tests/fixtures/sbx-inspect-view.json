@@ -1,0 +1,22 @@
+{
+  "name": "__SANDBOX_NAME__",
+  "agent": "shell",
+  "kits": ["shell"],
+  "state": "running",
+  "image": "review-image",
+  "workspace": "__WORKSPACE__",
+  "additional_workspaces": [
+    {
+      "dir": "__CONFIG__",
+      "read_only": false
+    }
+  ],
+  "secrets": [
+    {
+      "name": "github",
+      "source": "sandbox"
+    }
+  ],
+  "ports": [],
+  "sessions": 0
+}

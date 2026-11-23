@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createRunner as createProductionRunner,
   runProcess,
@@ -277,6 +277,10 @@ const createRunner = (options: TestRunnerOptions = {}) => {
     },
   });
 };
+
+afterEach(async () => {
+  await rm(join(sharedEvidenceRoot, 'sandbox-owners'), { recursive: true, force: true });
+});
 
 afterAll(async () => {
   await rm(sharedEvidenceRoot, { recursive: true, force: true });
@@ -9075,6 +9079,9 @@ describe('Runner LLM lifecycle failures', () => {
         evidenceRoot,
         cleanupFailure: true,
       });
+      // Preserve this test's grant-recovery focus; startup sbx reconciliation
+      // is covered separately through retained ownership records.
+      await rm(join(evidenceRoot, 'sandbox-owners'), { recursive: true, force: true });
       let blocked = false;
       let claims = 0;
       restarted = createProductionRunnerWithMergeBase({
@@ -12263,6 +12270,9 @@ describe('Runner confirmed cleanup recovery', () => {
       cleanupFailure: true,
       evidenceRoot,
     });
+    // Exercise the explicit recovery contract; startup reconciliation only
+    // handles ownership records retained from an interrupted Runner.
+    await rm(join(evidenceRoot, 'sandbox-owners'), { recursive: true, force: true });
     const evidenceId = scenario.terminal.evidenceId as string;
     const callbackPath = join(evidenceRoot, evidenceId, 'callback.json');
     if (failure === 'legacy-host-cleanup') {

@@ -255,7 +255,13 @@ Back up artifacts/configuration before replacement. Deploy additive Core/contrac
 support before a Runner that emits a new result shape. Do not interrupt live jobs
 just to update documentation or the dashboard. Relay grants survive Worker restarts in D1. On startup the Runner resolves pending revocations before accepting work. Interrupted agent jobs cannot resume.
 
-A hard crash can leave owned Sandboxes ([#66](https://github.com/ariga39/compte-rendu/issues/66)).
+A hard crash can leave owned sbx resources. On startup Runner checks its private
+`sandbox-owners/` records under the evidence root and removes only a provably
+owned Sandbox, its exact scoped network policies and its scoped secrets. If the
+returned name or exact workspace/config path does not match, inspection fails,
+native secret absence cannot be confirmed, or removal cannot be confirmed, the
+record is retained and admission/claiming stay gated; restore access and verify
+the exact resources before restarting again.
 An exhausted terminal callback can leave Core showing a claimed run even after
 local cleanup. Use the explicit recovery operation below; never clear D1 ownership
 or rerun an old Sandbox merely to make the dashboard look settled.

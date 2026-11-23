@@ -573,6 +573,7 @@ export type OperationalLogEvent =
         | 'malformed-response'
         | 'admission-rejected'
         | 'grant-recovery-failed'
+        | 'sandbox-recovery-failed'
         | 'runtime-preflight-failed';
       readonly status?: number;
       readonly pollingHalted: boolean;

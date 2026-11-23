@@ -87,10 +87,12 @@ Managed inference permits the configured HTTPS inference hostname. Grant control
   Sandbox destruction and grant revocation end job capabilities.
 
 Normal completion, failure, timeout and cancellation attempt cleanup. Hard process
-or host failure can leave an owned Sandbox and a claimed run behind. Automatic
-orphan reconciliation is not implemented ([#66](https://github.com/ariga39/compte-rendu/issues/66)).
-Never delete a same-name foreign resource or release same-PR serialization based
-on an ambiguous cleanup result.
+or host failure can leave an owned Sandbox and a claimed run behind. For sbx,
+startup reconciliation uses a private retained ownership record plus an exact
+inspect name and workspace/config match; it never deletes from name, prefix or
+unrelated metadata, verifies native secret absence, and keeps admission gated
+when ownership or absence is uncertain. Never delete a same-name foreign resource
+or release same-PR serialization based on an ambiguous cleanup result.
 
 ## Evidence and observability
 
