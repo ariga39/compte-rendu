@@ -42,9 +42,10 @@ const reviewSkill =
   'Do not fetch or install skills. If the bundled skill cannot be loaded, report the limitation rather than claiming a complete review. ';
 
 const outputInstruction =
-  'Return your final answer in exactly this form, without a Markdown fence or surrounding prose: ' +
-  'DECISION: approve|request_changes|comment, then one blank line, then the complete publishable review as raw Markdown. ' +
-  'The DECISION line must be the first line and contain exactly one allowed decision. Do not wrap the review in JSON, quotes, or a code fence; write Markdown directly. ' +
+  'Return your final answer in exactly this form, without a Markdown fence or surrounding prose. ' +
+  'Start with one line in the form `DECISION: approve`. The only allowed values after `DECISION:` are `approve`, `request_changes`, and `comment`. ' +
+  'Then one blank line, then the complete publishable review as raw Markdown. ' +
+  'The `DECISION:` line must be the first line and contain exactly one allowed decision. Do not wrap the review in JSON, quotes, or a code fence; write Markdown directly. ' +
   'The raw Markdown is the complete publishable review, not a record of your reasoning or tool activity. ' +
   "The Markdown's first line should be TLDR: followed by your recommendation and the decisive reason. " +
   'Keep the review concise: after that line, include only actionable findings and necessary evidence. ' +
