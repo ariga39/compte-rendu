@@ -1432,10 +1432,10 @@ const createStore = (
     const result = await database
       .prepare(
         `UPDATE review_runs SET publication_claimed_at = ?, publication_started_at = CASE WHEN ? THEN COALESCE(publication_started_at, ?) ELSE publication_started_at END
-         WHERE run_id = ? AND status IN ('scheduled', 'failed')
-           AND publication_claimed_at IS NULL`,
+         WHERE run_id = ? AND publication_claimed_at IS NULL
+           AND (status = 'scheduled' OR (status = 'failed' AND ? = 0))`,
       )
-      .bind(occurredAt, publishing ? 1 : 0, occurredAt, runId)
+      .bind(occurredAt, publishing ? 1 : 0, occurredAt, runId, publishing ? 1 : 0)
       .run();
     return result.meta.changes === 1;
   },

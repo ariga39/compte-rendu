@@ -4760,6 +4760,81 @@ describe('Core Worker', () => {
     }
   });
 
+  it('does not publish a successful callback after a sweep wins the publication claim', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-01T00:00:00Z'));
+    const database = new SqliteD1Database();
+    const stateStore = createD1ReviewStateStore(database);
+    const claimed = await stateStore.claimReview({
+      deliveryId: 'delivery-publish-after-expiry',
+      job: {
+        repositoryId: 11,
+        pullRequestNumber: 42,
+        installationId: 7,
+        baseSha: eligibleEvent.baseSha,
+        headSha: eligibleEvent.headSha,
+        trigger: 'automatic',
+      },
+      occurredAt: '2026-09-01T00:00:00.000Z',
+    });
+    if (claimed.kind !== 'claimed') throw new Error('publish race run was not scheduled');
+    await claimRunnerJob(stateStore, { runId: claimed.runId, jobId: 'runner-job-1' });
+    const racingStore: typeof stateStore = {
+      ...stateStore,
+      claimRunPublication: async (input) => {
+        if (input.publishing === true) {
+          vi.setSystemTime(new Date('2026-09-01T03:10:00Z'));
+          await stateStore.claimNextJob({
+            jobId: 'sweep-before-publication',
+            attempt: 1,
+            occurredAt: '2026-09-01T03:10:00.000Z',
+          });
+        }
+        return stateStore.claimRunPublication!(input);
+      },
+    };
+    let reviews = 0;
+    const worker = createCoreWorker(
+      {
+        ...coreEnv(database),
+        EVIDENCE_BUCKET: { put: async () => undefined },
+      },
+      {
+        stateStore: racingStore,
+        github: {
+          loadReviewTarget: async () => ({ headSha: eligibleEvent.headSha }),
+          findReviewByMarker: async () => undefined,
+          createReview: async ({ payload }) => {
+            reviews += 1;
+            return { kind: 'created', review: payload };
+          },
+        },
+      },
+    );
+
+    try {
+      vi.setSystemTime(new Date('2026-09-01T01:31:00Z'));
+      const response = await worker.fetch(
+        new Request('https://core.internal/runner-results', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-compte-rendu-runner-callback': 'verified',
+          },
+          body: await successfulCallback(claimed.runId, 'runner-job-1'),
+        }),
+      );
+      expect(response.status).toBe(503);
+      expect(reviews).toBe(0);
+      await expect(stateStore.getRunOutcome(claimed.runId)).resolves.toMatchObject({
+        status: 'failed',
+      });
+    } finally {
+      database.close();
+      vi.useRealTimers();
+    }
+  });
+
   it('retries failure feedback for a succeeded callback after publication fails', async () => {
     const database = new SqliteD1Database();
     const stateStore = createD1ReviewStateStore(database);
