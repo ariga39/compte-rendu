@@ -60,7 +60,11 @@ import {
 } from './sandbox-runtime-microsandbox.js';
 import { createOpenSandboxRuntimeFactory } from './sandbox-runtime-opensandbox.js';
 import { createSbxRuntimeFactory } from './sandbox-runtime-sbx.js';
-import { createRelayLlmServiceClient, type LlmGrantIdentity } from './llm-service-client.js';
+import {
+  createRelayLlmServiceClient,
+  LlmGrantIssueError,
+  type LlmGrantIdentity,
+} from './llm-service-client.js';
 import { createReadTokenClient, type ReadTokenClient } from './read-token-client.js';
 import {
   MULTI_PROVIDER_ID,
@@ -759,6 +763,7 @@ type RunnerJob = {
   readTokenRefreshStopped: boolean;
   readTokenRefreshFailed: boolean;
   readTokenSecrets: string[];
+  processCredentialValues: string[];
   executionStartedAt?: string;
   submissionCompletedAt?: string;
   cleanupCompletedAt?: string;
@@ -1313,6 +1318,18 @@ export const createRunner = (options: RunnerOptions = {}) => {
     [...new Set([job.input.repositoryReadToken, ...job.readTokenSecrets])].filter(
       (value) => value.length > 0,
     );
+  const trackProcessCredentialValues = (job: RunnerJob, values: readonly string[] | undefined) => {
+    for (const value of values ?? []) {
+      if (value.length > 0 && !job.processCredentialValues.includes(value))
+        job.processCredentialValues.push(value);
+    }
+  };
+  // One credential set feeds both raw-output observation and the final archive
+  // scrub so a caller-supplied process credential cannot survive in evidence.
+  const jobCredentialValues = (job: RunnerJob): string[] =>
+    [
+      ...new Set([...readTokenSecretValues(job), job.grantToken, ...job.processCredentialValues]),
+    ].filter((value): value is string => value !== undefined && value.length > 0);
   const clearReadTokenRefreshTimer = (job: RunnerJob) => {
     if (job.readTokenRefreshTimer !== undefined) clearTimeout(job.readTokenRefreshTimer);
     job.readTokenRefreshTimer = undefined;
@@ -1780,6 +1797,8 @@ export const createRunner = (options: RunnerOptions = {}) => {
       },
       Math.max(1, timeoutMs),
     );
+    trackProcessCredentialValues(job, processOptions.credentialValues);
+    const credentialValues = jobCredentialValues(job);
     let result: RunnerProcessResult;
     try {
       result = await Promise.race([
@@ -1792,15 +1811,10 @@ export const createRunner = (options: RunnerOptions = {}) => {
           timeoutMs,
           captureStderr: processOptions.captureStderr ?? diagnostic !== undefined,
           stderrRedactions: [
-            ...readTokenSecretValues(job),
-            job.grantToken,
+            ...credentialValues,
             ...(processOptions.stderrRedactions ?? []),
           ].filter((value): value is string => value !== undefined && value.length > 0),
-          credentialValues: [
-            ...readTokenSecretValues(job),
-            job.grantToken,
-            ...(processOptions.credentialValues ?? []),
-          ].filter((value): value is string => value !== undefined && value.length > 0),
+          credentialValues,
         }).catch(failed),
         stopped,
       ]);
@@ -1823,6 +1837,8 @@ export const createRunner = (options: RunnerOptions = {}) => {
   ) => {
     const requestedTimeout = processOptions.timeoutMs ?? SETUP_TIMEOUT_MS;
     const remaining = remainingExecutionMs(job);
+    trackProcessCredentialValues(job, processOptions.credentialValues);
+    const credentialValues = jobCredentialValues(job);
     let result: RunnerProcessResult;
     try {
       const sandboxEnvironment =
@@ -1833,20 +1849,12 @@ export const createRunner = (options: RunnerOptions = {}) => {
         ...processOptions,
         env: sandboxEnvironment,
         captureStderr: processOptions.captureStderr ?? diagnostic !== undefined,
-        stderrRedactions:
-          diagnostic === undefined
-            ? processOptions.stderrRedactions
-            : [
-                ...readTokenSecretValues(job),
-                modelSecretCommand,
-                job.grantToken,
-                job.input.repositoryUrl,
-              ].filter((value): value is string => value !== undefined && value.length > 0),
-        credentialValues: [
-          ...readTokenSecretValues(job),
-          job.grantToken,
-          ...(processOptions.credentialValues ?? []),
+        stderrRedactions: [
+          ...credentialValues,
+          ...(processOptions.stderrRedactions ?? []),
+          ...(diagnostic === undefined ? [] : [modelSecretCommand, job.input.repositoryUrl]),
         ].filter((value): value is string => value !== undefined && value.length > 0),
+        credentialValues,
         maxBytes:
           diagnostic === undefined
             ? processOptions.maxBytes
@@ -2750,7 +2758,20 @@ export const createRunner = (options: RunnerOptions = {}) => {
         let grant: Awaited<ReturnType<typeof llmServiceClient.issue>>;
         try {
           grant = await llmServiceClient.issue(grantIdentity, grantRoutes);
-        } catch {
+        } catch (error) {
+          // Keep issuance failures distinguishable without recording the
+          // response body, route descriptors or the would-be grant.
+          const reason = error instanceof LlmGrantIssueError ? error.reason : 'transport-error';
+          const status = error instanceof LlmGrantIssueError ? error.status : undefined;
+          await recordLog({
+            phase: 'runner',
+            outcome: 'grant',
+            runId: job.input.runId,
+            jobId: job.id,
+            attempt: job.input.attempt,
+            reason,
+            ...(status === undefined ? {} : { status }),
+          });
           failure = { reason: 'agent' };
           return;
         }
@@ -3115,10 +3136,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         evidenceFailure = 'sandbox-not-created';
       }
       if (evidenceReady) {
-        const evidenceSecrets = [
-          ...readTokenSecretValues(job),
-          ...(job.grantToken === undefined || job.grantToken.length === 0 ? [] : [job.grantToken]),
-        ];
+        const evidenceSecrets = jobCredentialValues(job);
         if (evidenceSecrets.length > 0) {
           try {
             if (await redactEvidenceTextFiles(evidencePath, evidenceSecrets, job.sessionIds)) {
@@ -3321,7 +3339,8 @@ export const createRunner = (options: RunnerOptions = {}) => {
           );
         } catch {
           evidenceComplete = false;
-          evidenceFailure = 'archive-incomplete';
+          // Preserve a security-relevant cause recorded before this write.
+          evidenceFailure ??= 'archive-incomplete';
         }
       }
       if (failure === undefined && result !== undefined && !evidenceComplete) {
@@ -3526,6 +3545,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       }
       job.grantToken = '';
       job.readTokenSecrets = [];
+      job.processCredentialValues = [];
       job.sandboxRuntime = undefined;
       job.multiReview = undefined;
       job.sessionIds = [];
@@ -3642,6 +3662,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       readTokenRefreshStopped: false,
       readTokenRefreshFailed: false,
       readTokenSecrets: [input.repositoryReadToken],
+      processCredentialValues: [],
     };
     jobs.set(id, job);
     jobsByRun.set(`${input.runId}:${input.attempt}`, job);

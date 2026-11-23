@@ -37,7 +37,10 @@ it('freezes model selection at admission even when a queued job is claimed after
   const database = new SqliteD1Database();
   try {
     const dependencies = {
-      github: { getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git' },
+      github: {
+        getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+        loadReviewTarget: async () => ({ headSha: '2'.repeat(40) }),
+      },
       getReadInstallationToken: async () => ({
         token: 'read-token',
         expiresAt: '2099-01-01T00:00:00Z',

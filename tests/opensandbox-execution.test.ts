@@ -1,3 +1,6 @@
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { CommandsAdapter, createExecdClient } from '@alibaba-group/opensandbox/internal';
 import { executeOpenSandboxCommand } from '../apps/runner/src/opensandbox-execution';
@@ -32,6 +35,20 @@ const commandFixture = (stream: string) => {
     commands: commandsFor(fetch),
     request: () => request,
   };
+};
+
+const failingStreamCommands = (events: readonly unknown[]): CommandsAdapter => {
+  const fetch = async (): Promise<Response> =>
+    new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(streamOf(events)));
+          setTimeout(() => controller.error(new Error('stream aborted')), 0);
+        },
+      }),
+      { headers: { 'content-type': 'text/event-stream' } },
+    );
+  return commandsFor(fetch);
 };
 
 const cancellationFixture = (
@@ -366,6 +383,76 @@ describe('executeOpenSandboxCommand', () => {
     expect(result.streamError).toBe(true);
     expect(result.exitCode).not.toBe(0);
   }, 1000);
+
+  it('flushes buffered redaction suffixes when the SDK stream errors', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'cr-opensandbox-error-'));
+    try {
+      const stdoutFilePath = join(directory, 'stdout.log');
+      const stderrFilePath = join(directory, 'stderr.log');
+      const result = await executeOpenSandboxCommand(
+        {
+          commands: failingStreamCommands([
+            { type: 'init', text: 'cmd-error', timestamp: 1 },
+            { type: 'stdout', text: 'out SEC', timestamp: 2 },
+            { type: 'stderr', text: 'warn SEC', timestamp: 3 },
+          ]),
+        },
+        ['sh', '-c', 'capture-suffix'],
+        {
+          captureStdout: true,
+          captureStderr: true,
+          stderrRedactions: ['SECRETVALUE'],
+          credentialValues: ['SECRETVALUE'],
+          maxBytes: 64,
+          stdoutFilePath,
+          stderrFilePath,
+        },
+      );
+
+      expect(result.streamError).toBe(true);
+      expect(result.truncated).toBe(false);
+      expect(result.stderrTruncated).not.toBe(true);
+      expect(result.stdout).toBe('out SEC');
+      expect(result.stderr).toBe('warn SEC');
+      await expect(readFile(stdoutFilePath, 'utf8')).resolves.toBe('out SEC');
+      await expect(readFile(stderrFilePath, 'utf8')).resolves.toBe('warn SEC');
+      await expect(readFile(stderrFilePath, 'utf8')).resolves.not.toContain('SECRETVALUE');
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('reports truncation after flushing a redacted stream error', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'cr-opensandbox-error-'));
+    try {
+      const stderrFilePath = join(directory, 'stderr.log');
+      const result = await executeOpenSandboxCommand(
+        {
+          commands: failingStreamCommands([
+            { type: 'init', text: 'cmd-error', timestamp: 1 },
+            { type: 'stderr', text: 'warn SECRETVALUE', timestamp: 2 },
+          ]),
+        },
+        ['sh', '-c', 'capture-overflow'],
+        {
+          captureStderr: true,
+          stderrRedactions: ['SECRETVALUE'],
+          credentialValues: ['SECRETVALUE'],
+          maxBytes: 8,
+          stderrFilePath,
+        },
+      );
+
+      expect(result.streamError).toBe(true);
+      expect(result.truncated).toBe(false);
+      expect(result.stderrTruncated).toBe(true);
+      expect(result.stderr).toBe('warn [re');
+      await expect(readFile(stderrFilePath, 'utf8')).resolves.toBe('warn [re');
+      await expect(readFile(stderrFilePath, 'utf8')).resolves.not.toContain('SECRETVALUE');
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 
   it('does not start a command when the signal is already aborted', async () => {
     const fixture = commandFixture(

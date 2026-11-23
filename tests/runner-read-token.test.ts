@@ -48,7 +48,10 @@ const createClaimedReview = async (
       GITHUB_APP_PRIVATE_KEY: 'test-private-key',
     },
     {
-      github: { getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git' },
+      github: {
+        getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+        loadReviewTarget: async () => ({ headSha: event.headSha }),
+      },
       getReadInstallationToken: async (input) => {
         mintCalls.push(input);
         await mint?.(input);
@@ -269,7 +272,10 @@ describe('Runner read-token renewal', () => {
           GITHUB_APP_PRIVATE_KEY: 'test-private-key',
         },
         {
-          github: { getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git' },
+          github: {
+            getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+            loadReviewTarget: async () => ({ headSha: event.headSha }),
+          },
           getReadInstallationToken: async () => {
             mintCount += 1;
             return grant;
@@ -325,7 +331,10 @@ describe('Runner read-token renewal', () => {
           GITHUB_APP_PRIVATE_KEY: 'test-private-key',
         },
         {
-          github: { getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git' },
+          github: {
+            getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+            loadReviewTarget: async () => ({ headSha: event.headSha }),
+          },
           getReadInstallationToken: async () => {
             mintCount += 1;
             if (mintCount === 2) {
