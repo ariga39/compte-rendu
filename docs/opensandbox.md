@@ -111,7 +111,7 @@ OPENSANDBOX_IMAGE=<LOCAL_REVIEW_IMAGE>
 RUNNER_SANDBOX_CLI=/usr/bin/docker
 ```
 
-The host writes the job grant and read-only repository token to the sidecar Vault. The workload uses placeholders.
+The host writes the job grant and read-only repository token to the sidecar Vault. Commands in the workload receive placeholders for these credentials.
 
 Runner's systemd `ExecStart` must start only the Runner Node executable. Remove
 an sbx-daemon launcher prefix when switching this instance. Preserve its other
