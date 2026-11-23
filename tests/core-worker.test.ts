@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from 'vitest';
-import { gunzipSync } from 'node:zlib';
 import { createRunner } from '../apps/runner/src/runner';
 import { createCoreWorker } from '../apps/core/src/core-worker';
 import {
@@ -163,9 +162,9 @@ const abortedCallback = async (
 const postHogEvents = async (requests: readonly Request[]) =>
   Promise.all(
     requests.map(async (request) => {
-      const payload = JSON.parse(
-        gunzipSync(Buffer.from(await request.clone().arrayBuffer())).toString('utf8'),
-      ) as { batch: readonly unknown[] };
+      const payload = JSON.parse(await request.clone().text()) as {
+        batch: readonly unknown[];
+      };
       return payload.batch;
     }),
   ).then((batches) => batches.flat());
@@ -402,13 +401,14 @@ describe('Core Worker', () => {
       expect(waitUntilTasks).toHaveLength(2);
       await Promise.all(waitUntilTasks);
       expect(requests).toHaveLength(1);
-      const wirePayload = gunzipSync(Buffer.from(await requests[0].arrayBuffer())).toString('utf8');
+      const wirePayload = await requests[0].text();
       expect(wirePayload).not.toContain('must-not-reach-posthog-wire-payload');
       expect(wirePayload).not.toContain(eligibleEvent.deliveryId);
       expect(wirePayload).not.toContain(eligibleEvent.baseSha);
       expect(wirePayload).not.toContain(eligibleEvent.headSha);
       const requestPayload = JSON.parse(wirePayload) as {
         api_key: string;
+        sent_at: string;
         batch: Array<{
           event: string;
           distinct_id: string;
@@ -416,7 +416,10 @@ describe('Core Worker', () => {
         }>;
       };
       expect(requests[0].url).toBe('https://posthog.example.test/batch/');
+      expect(requests[0].headers.get('content-type')).toBe('application/json');
+      expect(requests[0].headers.get('authorization')).toBeNull();
       expect(requestPayload.api_key).toBe('phc_test_project_key');
+      expect(requestPayload.sent_at).toEqual(expect.any(String));
       const payload = requestPayload.batch[0];
       expect(payload).toEqual({
         event: 'review scheduled',
@@ -430,13 +433,44 @@ describe('Core Worker', () => {
           run_id: expect.any(String),
           trigger: 'automatic',
           $process_person_profile: false,
-          $lib: 'posthog-node',
-          $lib_version: '5.51.6',
           $is_server: true,
           $geoip_disable: true,
         },
       });
       expect(payload.properties.run_id).toBe(payload.distinct_id);
+    } finally {
+      fetcher.mockRestore();
+      database.close();
+    }
+  });
+
+  it('keeps a configured PostHog base path before /batch/', async () => {
+    const database = new SqliteD1Database();
+    const { fetcher, requests, waitUntilTasks } = capturePostHogTransport();
+    const env = {
+      ...coreEnv(database),
+      ...postHogTestDefaults.environment,
+      POSTHOG_HOST: 'https://posthog.example.test/ingest',
+    };
+    const worker = createCoreWorker(env, postHogTestDefaults.dependencies);
+
+    try {
+      const response = await worker.fetch(
+        new Request('https://core.internal/review-events', {
+          method: 'POST',
+          body: JSON.stringify({
+            ...eligibleEvent,
+            deliveryId: 'delivery-posthog-base-path',
+          }),
+        }),
+        env,
+        { waitUntil: (task) => waitUntilTasks.push(task) },
+      );
+
+      expect(response.status).toBe(202);
+      await Promise.all(waitUntilTasks);
+      expect(requests).toHaveLength(1);
+      expect(requests[0].url).toBe('https://posthog.example.test/ingest/batch/');
     } finally {
       fetcher.mockRestore();
       database.close();

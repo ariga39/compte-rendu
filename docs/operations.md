@@ -109,12 +109,14 @@ the existing opaque `run_id` as `distinct_id` and disables person profiles.
 The allowlisted properties contain only lifecycle state, bounded durations,
 deployment/environment, trigger, publication/evidence/cleanup status, and
 closed failure codes. `total_duration_ms` covers durable scheduling through the
-Core terminal/publication boundary. The SDK additionally supplies its standard
-timestamp/UUID and library/server/geolocation-disable metadata; it receives no
-repository, PR thread, review body, or session content. PostHog is a lossy
-secondary surface: its request, configuration, or transport failure is locally
-diagnosable and cannot change D1/GitHub/R2 outcomes. Core uses one immediate
-workerd capture per request and registers it with `waitUntil()`.
+Core terminal/publication boundary. The bounded sender adds only a timestamp, a
+random event UUID, a server marker, and a geolocation-disable flag. It POSTs one
+event to the configured host's `/batch/` endpoint with a three-second timeout,
+no retry, and redirects rejected; it receives no repository, PR thread, review
+body, or session content. PostHog is a lossy secondary surface: its
+request, configuration, or transport failure is locally diagnosable and cannot
+change D1/GitHub/R2 outcomes. Core uses one immediate workerd capture per
+validated lifecycle event and registers each with `waitUntil()`.
 
 | Symptom                            | Check first                                                                                                    | Safe action                                                                                                                                            |
 | ---------------------------------- | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
