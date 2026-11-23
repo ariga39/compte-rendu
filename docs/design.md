@@ -55,18 +55,23 @@ is not proof that no review was published.
 
 ### Review result
 
-OpenCode 2 returns final assistant JSON with `decision` (`approve`,
-`request_changes`, `comment`) and non-empty, bounded `markdown`. Runner extracts
-it from the completed session export, checking exact session/model/agent identity,
-successful outcome, final assistant `stop` and final successful `idle`. Intermediate
-analysis and tools are not results. There is no custom submission tool.
+OpenCode 2 returns one final assistant submission with a first line
+`DECISION: <decision>` (`approve`, `request_changes`, `comment`), one blank line,
+then the non-empty, bounded review as raw Markdown. The earlier
+`{decision, markdown}` JSON object remains accepted for compatibility. Runner
+extracts the submission from the completed session export, checking exact
+session/model/agent identity, successful outcome, final assistant `stop` and final
+successful `idle`. Intermediate analysis and tools are not results. There is no
+custom submission tool.
 
-A normally completed session with missing/invalid final JSON can receive one
-correction in the same live Sandbox, session, model and agent. Both calls share
-the original deadline. Abort, timeout, truncation, abnormal completion or ambiguous
-session identity do not authorize correction. After any live correction, Runner revokes the model grant,
-exports and redacts evidence, and validates the archived final result before destruction. Unresolved invalid output publishes no
-vote; Runner neither extracts JSON substrings from prose nor infers a decision.
+A normally completed session with a missing or invalid final submission can
+receive one correction in the same live Sandbox, session, model and agent. Both
+calls share the original deadline. Abort, timeout, truncation, abnormal completion
+or ambiguous session identity do not authorize correction. After any live
+correction, Runner revokes the model grant, exports and redacts evidence, and
+validates the archived final result before destruction. Unresolved invalid output
+publishes no vote; Runner does not repair malformed JSON or extract result
+substrings from prose, and never infers a decision.
 
 The shared prompt asks for concise, adversarial review of necessity, correctness
 and implementation cost, starting with `TLDR:`. These are instructions, not

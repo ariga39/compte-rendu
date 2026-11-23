@@ -40,7 +40,8 @@ builds/tests, edits and GitHub writes. Repository contents and PR discussion are
 untrusted evidence, not instructions. Model compliance is not the outer security
 boundary.
 
-The final response is JSON `decision` + `markdown`, verified from the completed
+The final response uses the `DECISION` header plus raw Markdown (the earlier
+JSON `decision` + `markdown` form is still accepted), verified from the completed
 V2 session export. A bounded same-session correction runs before revocation and
 cleanup. There is no submission plugin, child-report schema or coverage ledger.
 Prompt style and the TLDR template are not security or validity gates.

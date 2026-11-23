@@ -503,8 +503,9 @@ the upgrade only made it worth verifying.
 Use the pinned OpenCode 2 image. Runner uses standalone mode with fresh per-job
 state and proxy-only credentials; never copy personal OpenCode auth/state into
 the image or job. It translates `REVIEW_MODEL_CONFIG` to native V2 provider/model
-settings. Final output is JSON `decision` + `markdown`, with one same-session
-correction before cleanup; no submission plugin is installed. See
+settings. Final output is a `DECISION` header plus raw Markdown (the earlier JSON
+`decision` + `markdown` form remains accepted), with one same-session correction
+before cleanup; no submission plugin is installed. See
 [review decisions](review-decisions-design.md).
 
 The environment example below is **direct-provider mode**. For the recommended

@@ -42,9 +42,11 @@ const reviewSkill =
   'Do not fetch or install skills. If the bundled skill cannot be loaded, report the limitation rather than claiming a complete review. ';
 
 const outputInstruction =
-  'Return your final answer as one JSON object with decision and markdown, without a Markdown fence or surrounding prose. ' +
-  'decision is approve, request_changes, or comment. The markdown is the complete publishable review, not a record of your reasoning or tool activity. ' +
-  'Its first line should be TLDR: followed by your recommendation and the decisive reason. ' +
+  'Return your final answer in exactly this form, without a Markdown fence or surrounding prose: ' +
+  'DECISION: approve|request_changes|comment, then one blank line, then the complete publishable review as raw Markdown. ' +
+  'The DECISION line must be the first line and contain exactly one allowed decision. Do not wrap the review in JSON, quotes, or a code fence; write Markdown directly. ' +
+  'The raw Markdown is the complete publishable review, not a record of your reasoning or tool activity. ' +
+  "The Markdown's first line should be TLDR: followed by your recommendation and the decisive reason. " +
   'Keep the review concise: after that line, include only actionable findings and necessary evidence. ' +
   'Do not repeat the PR description, summarize every file, list checks performed, inventory changes, narrate your process, or pad a clean review. ' +
   'For a clean review, a short TLDR: Approve — no blocking issues found. is enough. ' +
@@ -77,5 +79,6 @@ export const reviewPrompt = (input: ReviewPromptInput): string => {
 };
 
 export const reviewCorrectionPrompt =
-  'Your final response did not contain a valid review JSON object. Use the analysis and conclusion already present in this session; do not repeat the review or call more tools. ' +
+  'Your final response did not contain a valid review submission. Use the analysis and conclusion already present in this session; do not repeat the review or call more tools. ' +
+  'Return the required DECISION header form; do not return JSON or escape Markdown as a JSON string. ' +
   outputInstruction;

@@ -28,11 +28,14 @@ result is invalid output, never approval.
 
 ## Final output and publication
 
-OpenCode returns one final assistant JSON object containing `decision` and
-`markdown`. No custom submission tool is required. Runner validates the shared
-structural contract: a known decision, non-empty Markdown and the size bound.
-It also verifies the exact session and authoritative normal completion. The
-final Markdown is preserved unchanged for Core publication.
+OpenCode returns one final assistant submission whose first line is
+`DECISION: <decision>`, followed by one blank line and the raw review Markdown.
+No custom submission tool is required. The earlier JSON object containing
+`decision` and `markdown` remains accepted for compatibility, but it is not the
+primary output form. Runner validates the shared structural contract: exactly
+one known decision on the header line, non-empty Markdown after the separator and
+the size bound. It also verifies the exact session and authoritative normal
+completion. The final Markdown is preserved unchanged for Core publication.
 
 One prompt serves every roster size, including a single configured model. It
 asks for concise adversarial review: challenge the PR's claimed need, verify its
@@ -42,7 +45,7 @@ prompt instructions only; style or heading differences do not fail a review.
 
 ### Correction belongs to the live Sandbox phase
 
-A normally completed session with missing or malformed final JSON can receive
+A normally completed session with a missing or malformed final submission can receive
 one correction using its existing analysis and the same session, model, agent
 and execution deadline. This applies to both one-model and multi-model jobs.
 Core and the callback never resume an agent. The lifecycle is: execute review →
