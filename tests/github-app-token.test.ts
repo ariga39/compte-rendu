@@ -138,7 +138,7 @@ describe('GitHub App token provider', () => {
       await globalThis.crypto.subtle.exportKey('pkcs8', keyPair.privateKey),
     );
     let requestUrl = '';
-    let requestHeaders: Headers | undefined;
+    let authorization = '';
     const provider = createGitHubAppTokenProvider({
       appId: '1234567',
       privateKey,
@@ -146,20 +146,26 @@ describe('GitHub App token provider', () => {
       fetch: async (input, init) => {
         requestUrl =
           typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-        requestHeaders = new Headers(init?.headers);
+        const headers = new Headers(init?.headers);
+        expect(headers.get('user-agent')).toBe('compte-rendu-core');
+        authorization = headers.get('authorization') ?? '';
         return new Response(JSON.stringify({ token: 'installation-token-from-github' }));
       },
     });
 
+    const before = Math.floor(Date.now() / 1000);
     await expect(provider.getInstallationToken(7)).resolves.toBe('installation-token-from-github');
+    const after = Math.floor(Date.now() / 1000);
 
     expect(requestUrl).toBe('https://api.github.com/app/installations/7/access_tokens');
-    expect(requestHeaders?.get('user-agent')).toBe('compte-rendu-core');
-    const authorization = requestHeaders?.get('authorization');
     expect(authorization).toMatch(/^Bearer [^.]+\.[^.]+\.[^.]+$/);
-    const claims = decodeBase64UrlJson(authorization?.split('.')[1] ?? '');
+    const claims = decodeBase64UrlJson(authorization.split('.')[1] ?? '');
     expect(claims.iss).toBe(1234567);
-    expect(claims.exp - claims.iat).toBe(660);
+    expect(claims.iat).toBeGreaterThanOrEqual(before - 60);
+    expect(claims.iat).toBeLessThanOrEqual(after - 60);
+    expect(claims.exp).toBeGreaterThanOrEqual(before + 300);
+    expect(claims.exp).toBeLessThanOrEqual(after + 300);
+    expect(claims.exp - claims.iat).toBe(360);
   });
 
   it('exchanges a signed app JWT when GitHub provides a PKCS#1 private key', async () => {

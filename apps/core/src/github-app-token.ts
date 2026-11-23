@@ -166,7 +166,9 @@ export const createGitHubAppTokenProvider = (
     const payload = encodedJson({
       iss: appId,
       iat: nowSeconds - 60,
-      exp: nowSeconds + 600,
+      // GitHub rejects assertions whose exp is more than ten minutes ahead.
+      // Five minutes leaves room for a small difference between the two clocks.
+      exp: nowSeconds + 300,
     });
     const signingInput = `${header}.${payload}`;
     let signature: ArrayBuffer;
