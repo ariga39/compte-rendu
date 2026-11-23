@@ -12480,6 +12480,38 @@ describe('Runner confirmed cleanup recovery', () => {
         expect(reports).toHaveLength(0);
         await writeFile(callbackPath, original);
 
+        const missingHostFiles = JSON.parse(original);
+        const missingHostFilesManifest = JSON.parse(
+          Buffer.from(missingHostFiles.evidence.manifest.content, 'base64').toString('utf8'),
+        );
+        delete missingHostFilesManifest.hostFilesCleanupConfirmed;
+        const missingHostFilesBytes = Buffer.from(JSON.stringify(missingHostFilesManifest));
+        missingHostFiles.evidence.manifest = {
+          content: missingHostFilesBytes.toString('base64'),
+          size: missingHostFilesBytes.length,
+          sha256: createHash('sha256').update(missingHostFilesBytes).digest('hex'),
+        };
+        await writeFile(callbackPath, JSON.stringify(missingHostFiles));
+        expect((await runner.handle(recoveryRequest())).status).toBe(409);
+        expect(reports).toHaveLength(0);
+        await writeFile(callbackPath, original);
+
+        const malformedId = JSON.parse(original);
+        const malformedIdManifest = JSON.parse(
+          Buffer.from(malformedId.evidence.manifest.content, 'base64').toString('utf8'),
+        );
+        malformedIdManifest.sandboxId = 'invalid sandbox id';
+        const malformedIdBytes = Buffer.from(JSON.stringify(malformedIdManifest));
+        malformedId.evidence.manifest = {
+          content: malformedIdBytes.toString('base64'),
+          size: malformedIdBytes.length,
+          sha256: createHash('sha256').update(malformedIdBytes).digest('hex'),
+        };
+        await writeFile(callbackPath, JSON.stringify(malformedId));
+        expect((await runner.handle(recoveryRequest())).status).toBe(409);
+        expect(reports).toHaveLength(0);
+        await writeFile(callbackPath, original);
+
         expect((await runner.handle(recoveryRequest('other-run'))).status).toBe(409);
         expect(reports).toHaveLength(0);
 
