@@ -9310,6 +9310,7 @@ describe('Runner transport diagnostics', () => {
   const runClaimLogScenario = async (options: {
     readonly respond: () => Response | Promise<Response>;
     readonly waitMs?: number;
+    readonly waitForJobId?: string;
   }) => {
     const events: LogEvent[] = [];
     let claims = 0;
@@ -9352,6 +9353,7 @@ describe('Runner transport diagnostics', () => {
       },
     });
     await new Promise((resolve) => setTimeout(resolve, options.waitMs ?? 40));
+    if (options.waitForJobId !== undefined) await waitForTerminal(runner, options.waitForJobId);
     await runner.close();
     return { events, claims: () => claims };
   };
@@ -9489,6 +9491,8 @@ describe('Runner transport diagnostics', () => {
         );
       },
       waitMs: 60,
+      // Let the admitted job finish before the shared evidence-root cleanup.
+      waitForJobId: 'runner-claim-first',
     });
 
     expect(claims()).toBe(2);
