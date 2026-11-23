@@ -1,6 +1,7 @@
 /// <reference types="@cloudflare/vitest-pool-workers/types" />
 import { expect, it } from 'vitest';
 import { SELF } from 'cloudflare:test';
+import { claimRunnerJob } from '../support/runner-claim';
 
 it('lets an invalid history link return to the first page without retrying the bad cursor', async () => {
   const response = await SELF.fetch('https://reviews.test/history?cursor=garbage');
@@ -157,7 +158,11 @@ it('renders persisted public review details and tokens while keeping private rev
       },
     });
     if (run.kind !== 'claimed') throw new Error('not admitted');
-    await store.recordRunnerJob({ runId: run.runId, jobId: `ssr-job-${visibility}`, attempt: 1 });
+    await claimRunnerJob(store, {
+      runId: run.runId,
+      jobId: `ssr-job-${visibility}`,
+      occurredAt: now,
+    });
     await store.recordModelUsage!({
       runId: run.runId,
       jobId: `ssr-job-${visibility}`,
