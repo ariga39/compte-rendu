@@ -131,11 +131,23 @@ are not hot-reloaded. Claims are single-flight; ambiguous claim responses halt
 polling rather than risk duplicate ownership.
 
 Authenticated private maintenance endpoints pause new claims and direct admission
-without cancelling jobs or in-flight claim reservations. Drain status includes
-work through cleanup and callback delivery; unconfirmed cleanup or a halted claim
-loop prevents a drained report. Resume changes only the maintenance pause and
-preserves capacity and ownership guards. This pause is in-memory and resets on
-process restart. See [maintenance operations](operations.md#drain-before-maintenance).
+without cancelling jobs or in-flight claim reservations. At startup Runner scans
+its pending grant markers and revokes each recorded grant through the marker's
+original issuer/generation. The admission and claim gate stays closed, and drain
+cannot report complete, while that startup scan has any failed, invalid or
+foreign marker. Resume changes only the maintenance pause; it neither retries nor
+clears the startup scan. Exact cleanup recovery can resolve an eligible failed
+cleanup and retry the scan, but it rejects invalid and foreign markers and is
+limited to sbx/microsandbox jobs whose retained evidence and callback still show
+matching failed cleanup; see [maintenance operations](operations.md#drain-before-maintenance).
+A successful startup scan is not continuous. A terminal revocation failure after
+startup fails that job without a vote and leaves its marker without closing
+admission or claims in that process. The marker remains for the next startup scan
+or matching recovery. Grants have a fixed lifetime of four review budgets: the
+token stops authenticating at expiry, but expiry alone does not resolve the
+marker or the next startup gate. Drain status includes work through cleanup and
+callback delivery; unconfirmed Sandbox cleanup or a halted claim loop prevents a
+drained report. This pause is in-memory and resets on process restart.
 
 Runner retains the final callback body privately before bounded delivery when
 the evidence directory is available. An
