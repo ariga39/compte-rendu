@@ -232,7 +232,7 @@ curl --fail --silent --show-error --config "$RUNNER_CURL_CONFIG" \
 ```
 
 Wait for `drained: true` before restarting. It requires maintenance mode, a
-successful startup grant-recovery scan, no active jobs or in-flight claim, no
+successful startup grant and Sandbox ownership scans, no active jobs or in-flight claim, no
 halted claim loop and no terminal job with unconfirmed cleanup. The startup scan
 keeps the claim gate closed when any pending marker is invalid, unreadable, or
 bound to another issuer/generation. Inspect failures rather than forcing a
@@ -302,8 +302,12 @@ secret absence cannot be confirmed, or removal cannot be confirmed, the record i
 retained for automatic retry. A single foreign or malformed record does not gate
 unrelated jobs. An authenticated `sbx ls` probe failure marks a backend-wide
 outage and pauses new claims until access returns. Microsandbox similarly checks
-the original catalog and VM owner label. Recovery logs identify the job, step and
-command status without including stderr.
+the original catalog and VM owner label. An unresolved ownership record keeps
+drain pending. Use the recovery event to inspect the record and the exact backend
+resource. Restore backend access for transient failures. For a foreign or malformed
+record, verify the actual owner and rule out any local cleanup obligation before
+moving the record aside. Leave foreign VMs untouched. The ownership scan retries
+automatically after 30 seconds; maintenance resume can trigger it immediately.
 
 ### Recover failed cleanup
 

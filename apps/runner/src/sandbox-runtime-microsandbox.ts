@@ -163,7 +163,6 @@ export const createMicrosandboxRuntimeFactory =
           createAttempted: false,
         });
       }
-      attempted = true;
       if (ownershipRoot !== undefined) {
         await saveMarker(ownershipRoot, {
           version: 1,
@@ -174,6 +173,7 @@ export const createMicrosandboxRuntimeFactory =
           createAttempted: true,
         });
       }
+      attempted = true;
       const result = await command(
         [
           'create',
@@ -280,12 +280,18 @@ export const createMicrosandboxRuntimeFactory =
       async destroy(command) {
         closed = true;
         await rotation?.catch(() => undefined);
-        if (!attempted) return;
         const existing = await inspect(command, name, catalog);
         if (!existing) {
           if (ownershipRoot !== undefined) await removeMarker(ownershipRoot, spec.id);
           return;
         }
+        const persisted =
+          ownershipRoot === undefined
+            ? undefined
+            : await readMarker(ownershipRoot, markerName(spec.id));
+        const createAttempted =
+          ownershipRoot === undefined ? attempted : persisted?.createAttempted;
+        if (createAttempted !== true) throw new Error('Microsandbox creation was not attempted');
         if (existing.config.labels['cr-job-owner'] !== owner)
           throw new Error('Microsandbox owner mismatch');
         const removed = await command(
@@ -341,6 +347,7 @@ export const reconcileMicrosandboxRestartResources = async (
     try {
       const existing = await inspect(command, record.sandboxName, record.catalog);
       if (existing !== undefined) {
+        if (!record.createAttempted) throw new Error('creation was not attempted');
         if (existing.config.labels['cr-job-owner'] !== record.owner)
           throw new Error('owner mismatch');
         const removed = await command(
