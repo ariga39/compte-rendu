@@ -56,7 +56,7 @@ export const terminalHistoryFailureReason = (error: unknown): TerminalHistoryFai
   return 'unavailable';
 };
 
-const compactState = (state: RunnerJobResponseValue): RunnerJobResponseValue => ({
+export const compactTerminalState = (state: RunnerJobResponseValue): RunnerJobResponseValue => ({
   id: state.id,
   runId: state.runId,
   attempt: state.attempt,
@@ -115,7 +115,7 @@ export function createTerminalJobHistory(options: TerminalJobHistoryOptions = {}
       state.attempt,
       admissionKey,
       fullState,
-      JSON.stringify(compactState(state)),
+      JSON.stringify(compactTerminalState(state)),
       now,
     );
   };

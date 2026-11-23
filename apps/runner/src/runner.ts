@@ -47,9 +47,11 @@ import {
   type SandboxRuntimeKind,
 } from './sandbox-runtime.js';
 import {
+  compactTerminalState,
   createTerminalJobHistory,
   terminalHistoryFailureReason,
   type TerminalHistoryFailureReason,
+  type TerminalJobHistoryMatch,
   type TerminalJobHistoryOptions,
 } from './terminal-job-history.js';
 import {
@@ -1531,30 +1533,52 @@ export const createRunner = (options: RunnerOptions = {}) => {
     history ??= createTerminalJobHistory(options.terminalHistory);
     return history;
   };
+  // Terminal identity is retained for the process lifetime by design. When both
+  // durable history writes fail, keep only the compact response and admission
+  // fingerprint here so duplicate protection stays exact without retaining the
+  // result body or a live job reference. This intentionally has no eviction or
+  // global admission halt.
+  const compactHistory = new Map<string, TerminalJobHistoryMatch>();
+  const compactHistoryByRun = new Map<string, TerminalJobHistoryMatch>();
+  const retainCompactIdentity = (job: RunnerJob) => {
+    const match: TerminalJobHistoryMatch = {
+      admissionKey: job.admissionKey,
+      state: { ...compactTerminalState(job.state), bodyExpired: true },
+      bodyExpired: true,
+    };
+    compactHistory.set(job.id, match);
+    compactHistoryByRun.set(`${job.input.runId}:${job.input.attempt}`, match);
+  };
   const retireDestroyedJob = (job: RunnerJob) => {
     if (job.state.sandbox.cleanup !== 'destroyed') return;
+    let stored = false;
     try {
       terminalHistory().save(job.state, job.admissionKey);
+      stored = true;
     } catch (error) {
       // The full body may not fit the page cap. A compact identity still
       // protects the id/run/attempt and preserves terminal status/failure.
       recordHistoryFailure(error);
-      if (history === undefined) {
-        // Retain the live job for duplicate protection if storage cannot be opened.
-        return;
-      }
-      try {
-        history.saveCompact(job.state, job.admissionKey);
-      } catch (compactError) {
-        recordHistoryFailure(compactError);
-        // Retain the live job for duplicate protection if temporary storage is unavailable.
-        return;
+      if (history !== undefined) {
+        try {
+          history.saveCompact(job.state, job.admissionKey);
+          stored = true;
+        } catch (compactError) {
+          recordHistoryFailure(compactError);
+        }
       }
     }
+    if (!stored) retainCompactIdentity(job);
     jobs.delete(job.id);
     jobsByRun.delete(`${job.input.runId}:${job.input.attempt}`);
   };
   const findRetired = (id: string, runId?: string, attempt?: number) => {
+    const compact =
+      compactHistory.get(id) ??
+      (runId !== undefined && attempt !== undefined
+        ? compactHistoryByRun.get(`${runId}:${attempt}`)
+        : undefined);
+    if (compact !== undefined) return { kind: 'found' as const, match: compact };
     if (history === undefined) return { kind: 'none' as const };
     try {
       return { kind: 'found' as const, match: history.find(id, runId, attempt) };

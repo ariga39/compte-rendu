@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 import {
   createRunner as createProductionRunner,
@@ -12,6 +13,7 @@ import {
 } from '../apps/runner/src/runner';
 import { createCoreWorker } from '../apps/core/src/core-worker';
 import { createD1ReviewStateStore } from '../apps/core/src/index';
+import { createTerminalJobHistory } from '../apps/runner/src/terminal-job-history';
 import { SqliteD1Database } from './support/d1-database';
 import { claimRunnerJob } from './support/runner-claim';
 
@@ -6226,7 +6228,7 @@ describe('Runner Job HTTP interface', () => {
       }),
       markdown: undefined,
       reason: 'unwritable',
-      compact: false,
+      compact: true,
     },
   ] as const)(
     'keeps duplicate safety and reports a bounded diagnostic when storage is $name',
@@ -6318,6 +6320,8 @@ describe('Runner Job HTTP interface', () => {
 
   it('keeps prior identities readable after a page-cap insert spills dirty pages', async () => {
     const root = await mkdtemp(join(tmpdir(), 'compte-rendu-terminal-pressure-'));
+    const pressurePageCap = 1024;
+    const pressureBodyBytes = 4.5 * 1024 * 1024;
     let pressureMarkdown: string | undefined;
     let creates = 0;
     const runner = createRunner({
@@ -6326,7 +6330,7 @@ describe('Runner Job HTTP interface', () => {
       modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       terminalHistory: {
         path: join(root, 'history.sqlite'),
-        maxPageCount: 100,
+        maxPageCount: pressurePageCap,
       },
       process: terminalReviewProcess({
         markdown: () => pressureMarkdown,
@@ -6352,8 +6356,23 @@ describe('Runner Job HTTP interface', () => {
       await waitForTerminal(runner, priorId);
       expect(await readState(priorId)).not.toHaveProperty('bodyExpired');
 
-      // Exceeds the 2 MiB default page cache and the 100-page (400 KiB) cap.
-      pressureMarkdown = 'x'.repeat(4 * 1024 * 1024);
+      // The cap is above SQLite's default page cache, and the body is larger
+      // than the cap, so the aborted insert must evict dirty pages before the
+      // page-limit failure and rely on the MEMORY rollback journal.
+      const probe = new DatabaseSync('');
+      try {
+        const pageSize = (probe.prepare('PRAGMA page_size').get() as { page_size: number })
+          .page_size;
+        const cacheSize = (probe.prepare('PRAGMA cache_size').get() as { cache_size: number })
+          .cache_size;
+        // A negative cache_size is KiB; a positive value is pages.
+        const cacheBytes = cacheSize < 0 ? -cacheSize * 1024 : cacheSize * pageSize;
+        expect(cacheBytes).toBeLessThan(pressurePageCap * pageSize);
+        expect(pressureBodyBytes).toBeGreaterThan(pressurePageCap * pageSize);
+      } finally {
+        probe.close();
+      }
+      pressureMarkdown = 'x'.repeat(pressureBodyBytes);
       const pressureBody = historyJobBody('history-pressure-body');
       const pressureAccepted = await postHistoryJob(runner, pressureBody);
       expect(pressureAccepted.status).toBe(202);
@@ -6389,6 +6408,104 @@ describe('Runner Job HTTP interface', () => {
       );
       expect(pressureConflict.status).toBe(409);
       expect(creates).toBe(2);
+    } finally {
+      await runner.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('retains only compact memory identity when full and compact writes both fail', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'compte-rendu-terminal-memory-'));
+    const historyPath = join(root, 'history.sqlite');
+    const seed = createTerminalJobHistory({ path: historyPath, maxPageCount: 8 });
+    try {
+      let seeded = 0;
+      for (let index = 0; index < 500; index += 1) {
+        const id = `history-memory-seed-${index}`;
+        try {
+          seed.saveCompact(
+            {
+              id,
+              runId: id,
+              attempt: 1,
+              evidence: { id: `evidence-${index}`, status: 'pending' },
+              status: 'failed',
+              stage: 'cleanup',
+              sandbox: { cleanup: 'destroyed' },
+              failure: { reason: 'agent' },
+            },
+            `admission-${index}`,
+          );
+          seeded += 1;
+        } catch {
+          break;
+        }
+      }
+      expect(seeded).toBeGreaterThan(0);
+    } finally {
+      seed.close();
+    }
+
+    const logEvents: Array<{ phase: string; outcome: string; reason?: string }> = [];
+    let creates = 0;
+    const runner = createRunner({
+      evidenceRoot: root,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      terminalHistory: { path: historyPath, maxPageCount: 8 },
+      log: {
+        record: async (event) => {
+          logEvents.push(event);
+        },
+      },
+      process: terminalReviewProcess({
+        markdown: 'x'.repeat(4.5 * 1024 * 1024),
+        onCommand: (_command, args) => {
+          if (args[0] === 'create') creates += 1;
+        },
+      }),
+    });
+    const readState = async (id: string) => {
+      const response = await runner.handle(
+        new Request(`http://runner/jobs/${id}`, {
+          headers: { authorization: 'Bearer runner-test-token' },
+        }),
+      );
+      expect(response.status).toBe(200);
+      return (await response.json()) as Record<string, unknown>;
+    };
+    try {
+      const body = historyJobBody('history-memory-pressure');
+      const accepted = await postHistoryJob(runner, body);
+      expect(accepted.status).toBe(202);
+      const { id } = (await accepted.json()) as { id: string };
+      await waitForTerminal(runner, id);
+      await vi.waitFor(async () => expect((await readState(id)).bodyExpired).toBe(true));
+
+      const state = await readState(id);
+      expect(state).toMatchObject({
+        id,
+        runId: id,
+        attempt: 1,
+        sandbox: { cleanup: 'destroyed' },
+        bodyExpired: true,
+      });
+      expect(state).not.toHaveProperty('result');
+
+      const identical = await postHistoryJob(runner, body);
+      expect(identical.status).toBe(202);
+      expect(await identical.json()).toMatchObject({ id, attempt: 1, bodyExpired: true });
+      const conflicting = await postHistoryJob(
+        runner,
+        historyJobBody('history-memory-pressure', {
+          repositoryReadToken: 'different-read-token',
+        }),
+      );
+      expect(conflicting.status).toBe(409);
+      expect(creates).toBe(1);
+      expect(
+        logEvents.filter((event) => event.phase === 'runner' && event.outcome === 'history'),
+      ).toEqual([{ phase: 'runner', outcome: 'history', reason: 'full' }]);
     } finally {
       await runner.close();
       await rm(root, { recursive: true, force: true });

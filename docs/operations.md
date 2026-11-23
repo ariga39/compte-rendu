@@ -249,13 +249,18 @@ status, cleanup, evidence and failure metadata with `bodyExpired: true`. The
 identity record keeps the original input fingerprint for the process lifetime.
 The temporary database is capped at 32 MiB (8192 4 KiB pages); expired bodies
 free pages for reuse. If a full body does not fit, Runner stores the compact
-identity and marks that response `bodyExpired: true`; if the database is
-unwritable or cannot hold even that record, the live
-job remains in memory for duplicate protection and Runner emits one fixed,
-credential-free `history` diagnostic per failure reason. This cap bounds the
-temporary database, not all Runner process memory. Unconfirmed cleanup remains a
-live drain blocker. Retained callback and evidence files support recovery across
-restarts; their durable retention policy is separate.
+identity and marks that response `bodyExpired: true`. If the database is
+unwritable or cannot hold even that compact record, Runner keeps only the compact
+identity and admission fingerprint in memory for the rest of the process, drops
+the result body and live job reference, and emits one fixed, credential-free
+`history` diagnostic per failure reason. That memory grows only with compact
+identities; it is deliberately process-lifetime state without eviction or a
+global admission halt. The database cap therefore does not bound all Runner
+process memory. A failure reading the history store returns 503 for admissions
+and for retired-id GET/DELETE until restart or recovery; it never guesses absence
+or permits duplicate work. Unconfirmed cleanup remains a live drain blocker.
+Retained callback and evidence files support recovery across restarts; their
+durable retention policy is separate.
 
 For the first upgrade from a Runner without these endpoints, arrange a quiet
 window and wait for queued and claimed work to finish. Disabling webhooks alone

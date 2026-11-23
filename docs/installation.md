@@ -385,8 +385,10 @@ path in this repository or in an issue/comment.
 Run the Runner on Node.js 24 LTS. Its process-local terminal response cache uses
 the built-in `node:sqlite` module and the host temporary directory. Full response
 bodies expire after 15 minutes; identity records persist for the process and the
-temporary database is capped at 32 MiB. Storage failures leave the live job in
-memory for duplicate protection and emit a bounded diagnostic without contents.
+temporary database is capped at 32 MiB. If storage cannot be opened or cannot
+hold the compact record, Runner retains only that compact identity and admission
+fingerprint in memory for duplicate protection; it drops the result body and live
+job reference and emits a bounded diagnostic without contents.
 
 Before starting, install Docker Sandboxes with `sbx` 0.48.0, complete Docker
 login, ensure the service environment exposes both the Sandboxes daemon and
