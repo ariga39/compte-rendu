@@ -135,11 +135,11 @@ the lifecycle API and Docker before reporting recovery to Core. It never deletes
 a workload. See [cleanup recovery](operations.md#recover-failed-cleanup) for
 requirements and the request procedure. Unknown create identity and incomplete
 host-file cleanup cannot be recovered through this endpoint.
-This change validates retained-evidence cleanup recovery for OpenSandbox,
-alongside the existing sbx and microsandbox paths. The complete live
-Runner-to-Core review acceptance tracked by
-[issue #233](https://github.com/ariga39/compte-rendu/issues/233) remains
-required before production cutover. A live control-plane restart was tested,
+A native OpenSandbox acceptance run reviewed a disposable pull request. Core
+archived the evidence and published the review at the admitted commit. The run
+also verified host-file cleanup and Docker resource absence. The recovery test
+uses retained evidence to release a subsequent claim on the same pull request.
+A live control-plane restart was tested,
 but that does not prove recovery from every intermediate create/delete crash
 point.
 
