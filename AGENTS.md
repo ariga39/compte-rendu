@@ -2,6 +2,7 @@
 
 - Keep this a small, delivery-focused product. Do not broaden an active PR
   beyond its issue's primary behaviour.
+- Manage dependent pull requests as a stack following [GitHub’s stacked PR guidance](https://docs.github.com/en/pull-requests/get-started/about-stacked-prs).
 - Use behavior-based TDD through the seams accepted in `docs/design.md`: one
   failing behavior, minimal implementation, then the next slice.
 - Use stable Effect 4 for runtime code. Before implementation, read the applicable
