@@ -354,9 +354,8 @@ timeout/network failures remain retryable afterward. Other 4xx responses or a
 permanent callback rejection stop automatic delivery with a bounded
 job/run/status diagnostic. An accepted report reopens
 the same-PR queue. A single job cleanup failure that does not fail the inventory
-probe leaves unrelated work claimable. Recovering a claim staged across a Runner
-crash depends on the durable claim handoff in #385; this cleanup path implements
-no additional claim protocol.
+probe leaves unrelated work claimable. A restart can lose a staged claim. Later reviews of that PR become eligible automatically
+once the original 90-minute claim budget expires.
 
 For OpenSandbox, use the retained server-returned `sandboxId` and
 `sandboxOwnerNonce` to inspect the exact owned workload, sidecar and runtime
