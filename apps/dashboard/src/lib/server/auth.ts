@@ -1,3 +1,4 @@
+import { canonicalDashboardOrigin } from '@compte-rendu/contracts';
 import { Option, Schema } from 'effect';
 import { EncryptJWT, jwtDecrypt } from 'jose';
 import * as oauth from 'oauth4webapi';
@@ -51,7 +52,7 @@ export async function sessionKey(secret: string): Promise<ArrayBuffer> {
 
 export async function readSessionToken(request: Request, env: LoginEnv): Promise<string | null> {
   const sealed = readCookie(request, SESSION_COOKIE);
-  const origin = env.DASHBOARD_ORIGIN;
+  const origin = canonicalDashboardOrigin(env.DASHBOARD_ORIGIN);
   const id = env.DASHBOARD_GITHUB_CLIENT_ID;
   const secret = env.DASHBOARD_GITHUB_CLIENT_SECRET;
   if (!sealed || !origin || !id || !secret) return null;
@@ -186,10 +187,10 @@ function parseFlowCookie(value: string | undefined) {
 
 export async function authRoute(request: Request, env: LoginEnv): Promise<Response> {
   const url = new URL(request.url);
-  const origin = env.DASHBOARD_ORIGIN;
+  const origin = canonicalDashboardOrigin(env.DASHBOARD_ORIGIN);
   const id = env.DASHBOARD_GITHUB_CLIENT_ID;
   const secret = env.DASHBOARD_GITHUB_CLIENT_SECRET;
-  if (!origin || url.origin !== origin || url.protocol !== 'https:' || !id || !secret)
+  if (!origin || url.origin !== origin || !id || !secret)
     return noStore(503, { error: 'Login is unavailable.' });
   const sameOrigin = request.headers.get('origin') === origin;
   try {
@@ -294,10 +295,10 @@ export async function requireOperator(
 
 export async function sessionViewer(request: Request, env: LoginEnv): Promise<Response> {
   const url = new URL(request.url);
-  const origin = env.DASHBOARD_ORIGIN;
+  const origin = canonicalDashboardOrigin(env.DASHBOARD_ORIGIN);
   const id = env.DASHBOARD_GITHUB_CLIENT_ID;
   const secret = env.DASHBOARD_GITHUB_CLIENT_SECRET;
-  if (!origin || url.origin !== origin || url.protocol !== 'https:' || !id || !secret)
+  if (!origin || url.origin !== origin || !id || !secret)
     return noStore(503, { error: 'Session is unavailable.' });
   if (request.method !== 'GET') return noStore(405);
   if (!readCookie(request, SESSION_COOKIE))
