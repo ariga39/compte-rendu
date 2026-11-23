@@ -228,24 +228,40 @@ curl --fail --silent --show-error --config "$RUNNER_CURL_CONFIG" \
 
 Wait for `drained: true` before restarting. It requires maintenance mode, a
 successful startup grant-recovery scan, no active jobs or in-flight claim, no
-halted claim loop and no terminal job with unconfirmed cleanup. Any unresolved
-grant marker, including an invalid file or a marker bound to another issuer or
-generation, keeps the scan failed and the claim gate closed. Inspect failures
-rather than forcing a restart to clear these conditions. Resume never retries or
-clears a failed startup grant scan, an ownership-related claim halt or failed
-cleanup. Resolve a failed startup scan with the explicit cleanup recovery below
-for the affected job; that revokes the recorded grant, removes its marker and
-retries the scan in the same process. A restart also retries the scan, but only
-when the original issuer is reachable. If maintenance is cancelled, send
-`POST /maintenance/resume` with the same curl configuration. Drain is in-memory:
-a restarted Runner begins normal claiming automatically after its startup scan.
+halted claim loop and no terminal job with unconfirmed cleanup. The startup scan
+keeps the claim gate closed when any pending marker is invalid, unreadable, or
+bound to another issuer/generation. Inspect failures rather than forcing a
+restart to clear these conditions. Resume only clears the maintenance pause; it
+never retries or clears the startup scan, an ownership-related claim halt or
+failed cleanup. If maintenance is cancelled, send `POST /maintenance/resume`
+with the same curl configuration. Drain is in-memory: a restarted Runner begins
+normal claiming automatically only after its startup scan succeeds.
+
+The explicit cleanup recovery is not a general repair for invalid or foreign
+markers. It accepts only a retained failed-cleanup job for the active
+sbx/microsandbox runtime where the request and evidence match the exact
+job/run/attempt/evidence/SHAs, host cleanup was confirmed, and both the retained
+manifest and callback still record failed cleanup. Any marker it uses must match
+the active issuer/generation; an invalid marker or any mismatch is rejected. On
+success it revokes the recorded grant, removes its marker and retries the startup
+scan in the same process.
+
+For a foreign issuer/generation marker, restore the original issuer origin,
+generation, catalog and credentials, then restart to retry the startup scan. Use
+the matching recovery only if that job also has eligible retained failed cleanup.
+Do not delete the marker or repoint it to another backend. For an invalid marker,
+first verify the associated grant has expired or has been revoked, and that no
+Sandbox or cleanup obligation remains. Remove that marker only after those
+obligations are confirmed; otherwise keep the claim gate closed and investigate
+instead of deleting it. A restart does not repair an invalid marker.
 
 A successful startup scan is not a continuous scan of all grants. A terminal
 revocation failure after startup fails that job without a vote and leaves its
-marker for the next startup or explicit cleanup recovery; confirmed Sandbox
-cleanup remains the current drain blocker. Grants have a fixed lifetime of four
-review budgets and stop authenticating at expiry even when revocation was never
-confirmed.
+marker. Admission and claims stay open in the running process. Drain remains
+blocked if Sandbox destruction is unconfirmed. Grants have a fixed lifetime
+of four review budgets: the token stops authenticating at expiry, but the marker
+is not resolved by expiry and a subsequent startup scan must still
+confirm revocation through the original issuer and clear the marker.
 
 Drained means local work and callback attempts finished, not that Core accepted
 every callback. Check terminal callback failures and the dashboard before

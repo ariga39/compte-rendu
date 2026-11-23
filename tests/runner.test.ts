@@ -9140,21 +9140,24 @@ describe('Runner LLM lifecycle failures', () => {
         drained: false,
         claimPollingHalted: true,
       });
-      // Resume only clears the pause. It must not retry or clear the failed
-      // startup grant scan, so the claim gate stays closed.
+      // Enable revocation before resume so a resume-triggered scan would
+      // succeed if it ran at all. Resume only clears the pause; the failed
+      // startup gate, its marker and the claim halt must remain.
+      const revokedBeforeResume = f.relay.revoked.length;
+      f.relay.setRejectRevoke(false);
       expect(await (await restarted.handle(maintenanceRequest('resume'))).json()).toMatchObject({
         draining: false,
         drained: false,
         claimPollingHalted: true,
       });
       expect(claims).toBe(0);
+      expect(f.relay.revoked).toHaveLength(revokedBeforeResume);
       expect(f.relay.activeTokens.size).toBe(1);
       expect(await (await restarted.handle(maintenanceRequest('drain'))).json()).toMatchObject({
         draining: true,
         drained: false,
         claimPollingHalted: true,
       });
-      f.relay.setRejectRevoke(false);
       const manifest = failed.manifest;
       const recovery = await restarted.handle(
         new Request('http://runner/maintenance/recover-cleanup', {
