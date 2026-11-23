@@ -198,7 +198,7 @@ it('claims the relay default frozen at admission after the configured default ch
       },
     });
     const restarted = createD1ReviewStateStore(database, 'provider/replacement');
-    const claimed = await restarted.claimNextJob?.({
+    const claimed = await restarted.claimNextJob({
       jobId: 'relay-job',
       attempt: 1,
       occurredAt: '2026-11-18T00:01:00Z',

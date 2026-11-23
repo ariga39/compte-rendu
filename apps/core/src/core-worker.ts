@@ -903,8 +903,6 @@ export const createCoreWorker = (
     if (request.headers.get('x-compte-rendu-runner-claim') !== 'verified') {
       return new Response(null, { status: 401 });
     }
-    if (stateStore.claimNextJob === undefined) return new Response(null, { status: 503 });
-
     const occurredAt = await Effect.runPromise(DateTime.now.pipe(Effect.map(DateTime.formatIso)));
     const body = await readBoundedRequestBody(request, 64 * 1024);
     if (body.kind !== 'ok') return new Response(null, { status: 413 });

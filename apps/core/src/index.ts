@@ -381,7 +381,7 @@ export interface ReviewStateStore {
         activeRunnerJob?: ActiveRunnerJob;
       }
   >;
-  claimNextJob?(input: {
+  claimNextJob(input: {
     jobId: string;
     requestId?: string;
     attempt: number;

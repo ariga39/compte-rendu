@@ -41,7 +41,7 @@ it('retries an unconfirmed operator stop, ends the Check, and acknowledges verif
     if (queued.kind !== 'claimed') throw new Error('expected queued run');
     const { runId } = queued;
     await state.recordCheckRun!({ runId, checkRunId: 42 });
-    await state.claimNextJob!({ jobId: 'job-one', attempt: 1, occurredAt: now.toISOString() });
+    await state.claimNextJob({ jobId: 'job-one', attempt: 1, occurredAt: now.toISOString() });
     const stops: Request[] = [];
     const updateCheckRun = vi.fn(async () => {});
     const events: OperationalLogEvent[] = [];
@@ -269,7 +269,7 @@ it.each(['lease', 'delivery'] as const)(
       if (queued.kind !== 'claimed') throw new Error('expected queued run');
       const { runId } = queued;
       await state.recordCheckRun!({ runId, checkRunId: 42 });
-      await state.claimNextJob!({ jobId: 'job-one', attempt: 1, occurredAt: now.toISOString() });
+      await state.claimNextJob({ jobId: 'job-one', attempt: 1, occurredAt: now.toISOString() });
       const failLease = async () => {
         throw new Error('state credential ghp_state_secret');
       };

@@ -123,7 +123,7 @@ describe('D1 cancellation store', () => {
     });
 
     await expect(
-      store.claimNextJob?.({
+      store.claimNextJob({
         jobId: 'racing-job',
         attempt: 1,
         occurredAt: '2026-11-19T00:01:01.000Z',
@@ -353,7 +353,7 @@ describe('D1 cancellation store', () => {
     if (retry.kind !== 'claimed') throw new Error('retry was not claimed');
     expect(retry.runId).not.toBe(runId);
     await expect(
-      store.claimNextJob?.({
+      store.claimNextJob({
         jobId: 'retry-job',
         attempt: 1,
         occurredAt: '2026-11-19T00:04:00.000Z',
@@ -382,7 +382,7 @@ describe('D1 cancellation store', () => {
       job({ headSha: '3'.repeat(40) }),
     );
     await expect(
-      store.claimNextJob?.({
+      store.claimNextJob({
         jobId: 'replacement-job',
         attempt: 1,
         occurredAt: '2026-11-19T00:02:00.000Z',
@@ -395,7 +395,7 @@ describe('D1 cancellation store', () => {
       sandboxCleanup: 'destroyed',
     });
     await expect(
-      store.claimNextJob?.({
+      store.claimNextJob({
         jobId: 'replacement-job',
         attempt: 1,
         occurredAt: '2026-11-19T00:03:00.000Z',
@@ -643,7 +643,7 @@ describe('D1 cancellation store', () => {
     const store = createTestReviewStore();
     const runId = await schedule(store, 'recovery-window');
     await expect(
-      store.claimNextJob?.({
+      store.claimNextJob({
         jobId: 'recovery-job',
         attempt: 1,
         occurredAt: '2026-11-19T00:00:30.000Z',

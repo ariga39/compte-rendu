@@ -265,7 +265,7 @@ describe('public dashboard reads are DB-only', () => {
     const claims = [];
     for (const jobId of ['branch-claim-1', 'branch-claim-2']) {
       claims.push(
-        await queue.claimNextJob!({ jobId, attempt: 1, occurredAt: new Date().toISOString() }),
+        await queue.claimNextJob({ jobId, attempt: 1, occurredAt: new Date().toISOString() }),
       );
     }
     const privateClaim = claims.find(
@@ -315,7 +315,7 @@ describe('public dashboard reads are DB-only', () => {
     });
     if (review.kind !== 'claimed') throw new Error('expected claimed');
     await verifyMetadata(store, 7, 13, 'public');
-    const claimed = await store.claimNextJob!({
+    const claimed = await store.claimNextJob({
       jobId: 'job-1',
       attempt: 1,
       occurredAt: '2026-01-01T00:00:30.000Z',
@@ -413,7 +413,7 @@ describe('public dashboard reads are DB-only', () => {
       ).status,
     ).toBe(400);
 
-    const claim = await store.claimNextJob!({
+    const claim = await store.claimNextJob({
       jobId: 'dispatch-job',
       attempt: 1,
       occurredAt: '2026-01-04T00:00:00.000Z',
@@ -448,7 +448,7 @@ describe('public dashboard reads are DB-only', () => {
       occurredAt: '2026-01-01T00:00:00.000Z',
     });
     if (review.kind !== 'claimed') throw new Error('expected claimed');
-    const claimed = await store.claimNextJob!({
+    const claimed = await store.claimNextJob({
       jobId: 'job-progress-1',
       attempt: 1,
       occurredAt: '2026-01-01T00:00:10.000Z',
@@ -617,7 +617,7 @@ describe('public dashboard reads are DB-only', () => {
       occurredAt: '2026-01-01T00:00:00.000Z',
     });
     if (review.kind !== 'claimed') throw new Error('expected claimed');
-    await store.claimNextJob!({
+    await store.claimNextJob({
       jobId: 'job-ingress-1',
       attempt: 1,
       occurredAt: '2026-01-01T00:00:10.000Z',
@@ -1194,7 +1194,7 @@ describe('public dashboard reads are DB-only', () => {
       occurredAt: '2026-01-01T00:00:00.000Z',
     });
     if (scheduled.kind !== 'claimed') throw new Error('expected claimed');
-    await store.claimNextJob!({
+    await store.claimNextJob({
       jobId: 'job-view-1',
       attempt: 1,
       occurredAt: '2026-01-01T00:00:10.000Z',

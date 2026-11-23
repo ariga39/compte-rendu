@@ -91,7 +91,7 @@ it('issues a relay grant only to the Runner owning the frozen review routes', as
         trigger: 'automatic',
       },
     });
-    const claim = await store.claimNextJob?.({
+    const claim = await store.claimNextJob({
       jobId: 'job',
       attempt: 1,
       occurredAt: '2026-11-18T00:01:00Z',
@@ -175,7 +175,7 @@ it('issues a versioned relay grant with only frozen client descriptors', async (
         trigger: 'automatic',
       },
     });
-    const claim = await store.claimNextJob?.({
+    const claim = await store.claimNextJob({
       jobId: 'job-v2',
       attempt: 1,
       occurredAt: '2026-11-18T00:01:00Z',
@@ -272,7 +272,7 @@ it('fails closed when the relay cannot issue version 2 grants', async () => {
         trigger: 'automatic',
       },
     });
-    const claim = await store.claimNextJob?.({
+    const claim = await store.claimNextJob({
       jobId: 'job-v2-unavailable',
       attempt: 1,
       occurredAt: '2026-11-18T00:01:00Z',

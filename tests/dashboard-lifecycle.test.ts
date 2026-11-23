@@ -20,7 +20,7 @@ const fixture = async (claim = true) => {
     },
   });
   if (review.kind !== 'claimed') throw new Error('not admitted');
-  if (claim) await store.claimNextJob!({ jobId: 'runner-job', attempt: 1, occurredAt: time(1) });
+  if (claim) await store.claimNextJob({ jobId: 'runner-job', attempt: 1, occurredAt: time(1) });
   const identity = { runId: review.runId, jobId: 'runner-job', attempt: 1 };
   const detail = async () => {
     const worker = createCoreWorker({
