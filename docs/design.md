@@ -403,8 +403,7 @@ retained verified callback and immediately retries the same report once. A
 repeated 409 is permanent. After that, only 408/429/5xx or timeout/network
 failures remain retryable; other 4xx responses or a permanent callback rejection
 stop automatic delivery with bounded job/run/status diagnostics. The terminal
-verdict is unchanged and completed work never restarts. Recovery of a claim staged across a Runner
-crash depends on the durable claim handoff in #385; this cleanup path adds no
-second claim protocol. Legacy evidence lacking host confirmation, unknown
+verdict is unchanged and completed work never restarts. Runner keeps a staged claim request ID in memory. If a restart loses it, Core expires
+the abandoned claim after its original 90-minute budget and admits a later review. Legacy evidence lacking host confirmation, unknown
 OpenSandbox create identity and OpenShell recovery remain outside this operation;
 see the operations guide.
