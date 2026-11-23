@@ -139,6 +139,9 @@ export const RunnerJobResponse = Schema.Struct({
   sandbox: Schema.Struct({
     cleanup: Schema.Literals(['pending', 'destroyed', 'failed']),
   }),
+  // True when the full terminal body is no longer retained (expired from the
+  // temporary cache or omitted by its compact storage fallback).
+  bodyExpired: Schema.optionalKey(Schema.Boolean),
   result: Schema.optional(RunnerReviewResult),
   failure: Schema.optional(
     Schema.Struct({
@@ -584,6 +587,11 @@ export type OperationalLogEvent =
       readonly jobId: string;
       readonly status: 'succeeded' | 'failed' | 'aborted';
       readonly cleanup: 'pending' | 'destroyed' | 'failed';
+    }
+  | {
+      readonly phase: 'runner';
+      readonly outcome: 'history';
+      readonly reason: 'full' | 'unwritable' | 'unavailable';
     };
 
 export const sanitizeOperationalLogIdentifier = (value: string | undefined) => {
@@ -623,7 +631,7 @@ export const sanitizeOperationalLogEvent = (event: OperationalLogEvent): Operati
   }
 
   if (event.phase === 'runner') {
-    if (event.outcome === 'claim') return event;
+    if (event.outcome === 'claim' || event.outcome === 'history') return event;
     return {
       ...event,
       runId: sanitizeOperationalLogIdentifier(event.runId) ?? 'redacted',

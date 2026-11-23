@@ -46,7 +46,12 @@ import {
   type SandboxRuntimeFactory,
   type SandboxRuntimeKind,
 } from './sandbox-runtime.js';
-import { createTerminalJobHistory } from './terminal-job-history.js';
+import {
+  createTerminalJobHistory,
+  terminalHistoryFailureReason,
+  type TerminalHistoryFailureReason,
+  type TerminalJobHistoryOptions,
+} from './terminal-job-history.js';
 import {
   appendFileBytes,
   createBoundedFileSink,
@@ -810,6 +815,8 @@ export interface RunnerOptions {
   readonly claimIntervalMs?: number;
   readonly concurrency?: number;
   readonly settingsFile?: string;
+  /** Test/operations override for the private terminal response cache. */
+  readonly terminalHistory?: TerminalJobHistoryOptions;
 }
 
 const authorized = (request: Request, token: string | undefined) => {
@@ -1512,17 +1519,49 @@ export const createRunner = (options: RunnerOptions = {}) => {
   const jobs = new Map<string, RunnerJob>();
   const jobsByRun = new Map<string, RunnerJob>();
   let history: ReturnType<typeof createTerminalJobHistory> | undefined;
+  const historyFailureLogged = new Set<TerminalHistoryFailureReason>();
+  const recordHistoryFailure = (error: unknown) => {
+    const reason = terminalHistoryFailureReason(error);
+    if (historyFailureLogged.has(reason)) return;
+    historyFailureLogged.add(reason);
+    // Fixed reason only: never include paths, SQL text, or job contents.
+    void recordLog({ phase: 'runner', outcome: 'history', reason });
+  };
+  const terminalHistory = () => {
+    history ??= createTerminalJobHistory(options.terminalHistory);
+    return history;
+  };
   const retireDestroyedJob = (job: RunnerJob) => {
     if (job.state.sandbox.cleanup !== 'destroyed') return;
     try {
-      history ??= createTerminalJobHistory();
-      history.save(job.state, job.admissionKey);
-    } catch {
-      // Retain lookup and duplicate protection if temporary storage is unavailable.
-      return;
+      terminalHistory().save(job.state, job.admissionKey);
+    } catch (error) {
+      // The full body may not fit the page cap. A compact identity still
+      // protects the id/run/attempt and preserves terminal status/failure.
+      recordHistoryFailure(error);
+      if (history === undefined) {
+        // Retain the live job for duplicate protection if storage cannot be opened.
+        return;
+      }
+      try {
+        history.saveCompact(job.state, job.admissionKey);
+      } catch (compactError) {
+        recordHistoryFailure(compactError);
+        // Retain the live job for duplicate protection if temporary storage is unavailable.
+        return;
+      }
     }
     jobs.delete(job.id);
     jobsByRun.delete(`${job.input.runId}:${job.input.attempt}`);
+  };
+  const findRetired = (id: string, runId?: string, attempt?: number) => {
+    if (history === undefined) return { kind: 'none' as const };
+    try {
+      return { kind: 'found' as const, match: history.find(id, runId, attempt) };
+    } catch (error) {
+      recordHistoryFailure(error);
+      return { kind: 'unavailable' as const };
+    }
   };
 
   let claiming = false;
@@ -3561,10 +3600,11 @@ export const createRunner = (options: RunnerOptions = {}) => {
       );
     const existing = jobsByRun.get(`${input.runId}:${input.attempt}`);
     if (existing !== undefined) return jsonResponse(409, publicState(existing));
-    const retired = history?.find(input.id, input.runId, input.attempt);
-    if (retired)
-      return new Response(retired.state, {
-        status: retired.admission_key === admissionKey ? 202 : 409,
+    const retired = findRetired(input.id, input.runId, input.attempt);
+    if (retired.kind === 'unavailable') return jsonResponse(503, { error: 'runner unavailable' });
+    if (retired.kind === 'found' && retired.match !== undefined)
+      return new Response(JSON.stringify(retired.match.state), {
+        status: retired.match.admissionKey === admissionKey ? 202 : 409,
         headers: { 'content-type': 'application/json; charset=utf-8' },
       });
     if (!claimed && draining) {
@@ -3957,9 +3997,11 @@ export const createRunner = (options: RunnerOptions = {}) => {
     const job = jobs.get(match[1]);
     if (job === undefined) {
       if (request.method === 'GET' || request.method === 'DELETE') {
-        const retired = history?.find(match[1]);
-        if (retired)
-          return new Response(retired.state, {
+        const retired = findRetired(match[1]);
+        if (retired.kind === 'unavailable')
+          return jsonResponse(503, { error: 'runner unavailable' });
+        if (retired.kind === 'found' && retired.match !== undefined)
+          return new Response(JSON.stringify(retired.match.state), {
             headers: { 'content-type': 'application/json; charset=utf-8' },
           });
       }

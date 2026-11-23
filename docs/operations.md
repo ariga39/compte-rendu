@@ -240,12 +240,22 @@ replacement; unresolved delivery uses the recovery guidance below. If multiple
 Runners share an sbx daemon/cgroup or inference service, drain each affected
 Runner and check Sandbox inventory before restarting shared services.
 
-The authenticated job endpoints keep terminal responses and detect duplicate
+The authenticated job endpoints keep terminal identity and detect duplicate
 admissions for the lifetime of the Runner process. Once destruction is confirmed,
 Runner releases the sandbox client and moves the response into a private temporary
-SQLite database. Its disk usage grows with completed jobs until process exit.
-Unconfirmed cleanup remains a live drain blocker. Retained callback and evidence
-files support recovery across restarts.
+SQLite database. Full terminal response bodies are a temporary response cache:
+they expire after 15 minutes and then GET or repost returns the compact identity,
+status, cleanup, evidence and failure metadata with `bodyExpired: true`. The
+identity record keeps the original input fingerprint for the process lifetime.
+The temporary database is capped at 32 MiB (8192 4 KiB pages); expired bodies
+free pages for reuse. If a full body does not fit, Runner stores the compact
+identity and marks that response `bodyExpired: true`; if the database is
+unwritable or cannot hold even that record, the live
+job remains in memory for duplicate protection and Runner emits one fixed,
+credential-free `history` diagnostic per failure reason. This cap bounds the
+temporary database, not all Runner process memory. Unconfirmed cleanup remains a
+live drain blocker. Retained callback and evidence files support recovery across
+restarts; their durable retention policy is separate.
 
 For the first upgrade from a Runner without these endpoints, arrange a quiet
 window and wait for queued and claimed work to finish. Disabling webhooks alone

@@ -134,6 +134,78 @@ const writeEvidenceFixture = async (
   }
 };
 
+const terminalReviewProcess = (
+  options: {
+    readonly markdown?: string;
+    readonly exitCode?: number;
+    readonly onCommand?: (command: string, args: readonly string[]) => void;
+  } = {},
+): RunnerProcess => {
+  const baseSha = '1'.repeat(40);
+  const headSha = '2'.repeat(40);
+  const result = finalMarkdownJsonl(options.markdown, 'terminal-history-session');
+  const exported = sessionExportJson('terminal-history-session', {
+    ...(options.markdown === undefined ? {} : { markdown: options.markdown }),
+  });
+  return async (command, args, processOptions = {}) => {
+    options.onCommand?.(command, args);
+    if (args[0] === 'rm' && args[1] === '--force') {
+      return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+    }
+    if (args[0] === 'exec' && args.includes('--agent')) {
+      await writeEvidenceFixture(args, processOptions, result);
+      return {
+        exitCode: options.exitCode ?? 0,
+        stdout: `${result}\n`,
+        timedOut: false,
+        truncated: false,
+      };
+    }
+    await writeEvidenceFixture(args, processOptions, result);
+    if (args[0] === 'cp' && /opencode-export-[A-Za-z0-9._:-]+\.json$/.test(args[1] ?? '')) {
+      await writeFile(args[2], exported, { mode: 0o600 });
+    }
+    return {
+      exitCode: 0,
+      stdout: args.includes('export')
+        ? exported
+        : args.includes('rev-parse')
+          ? `${baseSha}\n${headSha}\n`
+          : args.includes('session')
+            ? '[{"id":"terminal-history-session"}]\n'
+            : processOptions.captureStdout === true
+              ? `${result}\n`
+              : '',
+      timedOut: false,
+      truncated: false,
+    };
+  };
+};
+
+const historyJobBody = (id: string, overrides: Record<string, unknown> = {}) =>
+  JSON.stringify({
+    ...runnerJobFields,
+    id,
+    runId: id,
+    attempt: 1,
+    repositoryUrl: 'https://github.com/acme/reviewed.git',
+    baseSha: '1'.repeat(40),
+    headSha: '2'.repeat(40),
+    ...overrides,
+  });
+
+const postHistoryJob = (runner: ReturnType<typeof createRunner>, body: string) =>
+  runner.handle(
+    new Request('http://runner/jobs', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer runner-test-token',
+        'content-type': 'application/json',
+      },
+      body,
+    }),
+  );
+
 const readTextTree = async (root: string): Promise<string> => {
   const parts: string[] = [];
   for (const entry of await readdir(root, { withFileTypes: true })) {
@@ -399,6 +471,7 @@ const waitForTerminal = async (
     );
     const state = (await response.json()) as {
       status: string;
+      stage: string;
       evidenceId?: string;
       evidence?: { id: string; status: string };
     };
@@ -5999,6 +6072,226 @@ describe('Runner Job HTTP interface', () => {
     expect(retryState.attempt).toBe(2);
     expect(retryState.id).not.toBe(firstState.id);
   });
+
+  it('expires the full terminal body but keeps compact GET and duplicate identity', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'compte-rendu-terminal-history-'));
+    let creates = 0;
+    const runner = createRunner({
+      evidenceRoot: root,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      terminalHistory: {
+        path: join(root, 'history.sqlite'),
+        bodyRetentionMs: 20,
+      },
+      process: terminalReviewProcess({
+        onCommand: (_command, args) => {
+          if (args[0] === 'create') creates += 1;
+        },
+      }),
+    });
+    try {
+      const body = historyJobBody('history-expiry');
+      const accepted = await postHistoryJob(runner, body);
+      expect(accepted.status).toBe(202);
+      const { id } = (await accepted.json()) as { id: string };
+      const terminal = await waitForTerminal(runner, id);
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const get = await runner.handle(
+        new Request(`http://runner/jobs/${id}`, {
+          headers: { authorization: 'Bearer runner-test-token' },
+        }),
+      );
+      expect(get.status).toBe(200);
+      const compact = (await get.json()) as Record<string, unknown>;
+      expect(compact).toMatchObject({
+        id,
+        runId: id,
+        attempt: 1,
+        status: terminal.status,
+        stage: terminal.stage,
+        sandbox: { cleanup: 'destroyed' },
+        bodyExpired: true,
+      });
+      expect(compact).not.toHaveProperty('result');
+      expect(compact).not.toHaveProperty('failure');
+
+      const identical = await postHistoryJob(runner, body);
+      expect(identical.status).toBe(202);
+      expect(await identical.json()).toMatchObject({ id, attempt: 1, bodyExpired: true });
+
+      const conflicting = await postHistoryJob(
+        runner,
+        historyJobBody('history-expiry', { repositoryReadToken: 'different-read-token' }),
+      );
+      expect(conflicting.status).toBe(409);
+      expect(await conflicting.json()).toMatchObject({ id, attempt: 1, bodyExpired: true });
+      expect(creates).toBe(1);
+    } finally {
+      await runner.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps failure metadata in the compact response after the body expires', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'compte-rendu-terminal-failure-'));
+    const runner = createRunner({
+      evidenceRoot: root,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      terminalHistory: {
+        path: join(root, 'history.sqlite'),
+        bodyRetentionMs: 20,
+      },
+      process: terminalReviewProcess({ exitCode: 1 }),
+    });
+    try {
+      const body = historyJobBody('history-expiry-failure');
+      const accepted = await postHistoryJob(runner, body);
+      expect(accepted.status).toBe(202);
+      const { id } = (await accepted.json()) as { id: string };
+      const terminal = await waitForTerminal(runner, id);
+      expect(terminal).toMatchObject({
+        status: 'failed',
+        failure: { reason: 'invalid-output', cause: 'process-exit' },
+        sandbox: { cleanup: 'destroyed' },
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const get = await runner.handle(
+        new Request(`http://runner/jobs/${id}`, {
+          headers: { authorization: 'Bearer runner-test-token' },
+        }),
+      );
+      expect(get.status).toBe(200);
+      expect(await get.json()).toMatchObject({
+        id,
+        status: 'failed',
+        failure: { reason: 'invalid-output', cause: 'process-exit' },
+        sandbox: { cleanup: 'destroyed' },
+        bodyExpired: true,
+      });
+
+      const identical = await postHistoryJob(runner, body);
+      expect(identical.status).toBe(202);
+      expect(await identical.json()).toMatchObject({
+        failure: { reason: 'invalid-output', cause: 'process-exit' },
+        bodyExpired: true,
+      });
+    } finally {
+      await runner.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    {
+      name: 'full',
+      terminalHistory: (root: string) => ({
+        path: join(root, 'history.sqlite'),
+        maxPageCount: 100,
+      }),
+      markdown: 'x'.repeat(1_000_000),
+      reason: 'full',
+      compact: true,
+    },
+    {
+      name: 'unwritable',
+      terminalHistory: (root: string) => ({
+        path: join(root, 'missing', 'history.sqlite'),
+      }),
+      markdown: undefined,
+      reason: 'unwritable',
+      compact: false,
+    },
+  ] as const)(
+    'keeps duplicate safety and reports a bounded diagnostic when storage is $name',
+    async ({ name, terminalHistory, markdown, reason, compact }) => {
+      const root = await mkdtemp(join(tmpdir(), `compte-rendu-terminal-${name}-`));
+      const logEvents: Array<{ phase: string; outcome: string; reason?: string }> = [];
+      let creates = 0;
+      const runner = createRunner({
+        evidenceRoot: root,
+        authToken: 'runner-test-token',
+        modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+        terminalHistory: terminalHistory(root),
+        log: {
+          record: async (event) => {
+            logEvents.push(event);
+          },
+        },
+        process: terminalReviewProcess({
+          ...(markdown === undefined ? {} : { markdown }),
+          onCommand: (_command, args) => {
+            if (args[0] === 'create') creates += 1;
+          },
+        }),
+      });
+      try {
+        for (const suffix of ['a', 'b']) {
+          const jobId = `history-storage-${name}-${suffix}`;
+          const body = historyJobBody(jobId);
+          const accepted = await postHistoryJob(runner, body);
+          expect(accepted.status).toBe(202);
+          const { id } = (await accepted.json()) as { id: string };
+          await waitForTerminal(runner, id);
+          const readState = async () => {
+            const get = await runner.handle(
+              new Request(`http://runner/jobs/${id}`, {
+                headers: { authorization: 'Bearer runner-test-token' },
+              }),
+            );
+            expect(get.status).toBe(200);
+            return (await get.json()) as Record<string, unknown>;
+          };
+          if (compact) {
+            await vi.waitFor(async () => expect((await readState()).bodyExpired).toBe(true));
+          } else {
+            await vi.waitFor(() =>
+              expect(
+                logEvents.some((event) => event.phase === 'runner' && event.outcome === 'history'),
+              ).toBe(true),
+            );
+          }
+          const state = await readState();
+          expect(state).toMatchObject({
+            id,
+            attempt: 1,
+            sandbox: { cleanup: 'destroyed' },
+            ...(compact ? { bodyExpired: true } : {}),
+          });
+          if (compact) expect(state).not.toHaveProperty('result');
+          else expect(state).toHaveProperty('result');
+
+          const identical = await postHistoryJob(runner, body);
+          expect(identical.status).toBe(202);
+          expect(await identical.json()).toMatchObject({
+            id,
+            attempt: 1,
+            ...(compact ? { bodyExpired: true } : {}),
+          });
+
+          const conflicting = await postHistoryJob(
+            runner,
+            historyJobBody(jobId, { repositoryReadToken: 'different-read-token' }),
+          );
+          expect(conflicting.status).toBe(409);
+        }
+
+        expect(creates).toBe(2);
+        const diagnostics = logEvents.filter(
+          (event) => event.phase === 'runner' && event.outcome === 'history',
+        );
+        expect(diagnostics).toEqual([{ phase: 'runner', outcome: 'history', reason }]);
+        expect(JSON.stringify(diagnostics)).not.toContain('different-read-token');
+        expect(JSON.stringify(diagnostics)).not.toContain('xxxx');
+      } finally {
+        await runner.close();
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('fetches the exact admitted head SHA instead of a stale mutable pull request ref', async () => {
     const baseSha = '1111111111111111111111111111111111111111';

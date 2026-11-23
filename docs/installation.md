@@ -382,8 +382,11 @@ path in this repository or in an issue/comment.
 
 ## Sandbox host and Runner
 
-Run the Runner on Node.js 24 LTS. Its process-local job history uses the
-built-in `node:sqlite` module and the host temporary directory.
+Run the Runner on Node.js 24 LTS. Its process-local terminal response cache uses
+the built-in `node:sqlite` module and the host temporary directory. Full response
+bodies expire after 15 minutes; identity records persist for the process and the
+temporary database is capped at 32 MiB. Storage failures leave the live job in
+memory for duplicate protection and emit a bounded diagnostic without contents.
 
 Before starting, install Docker Sandboxes with `sbx` 0.48.0, complete Docker
 login, ensure the service environment exposes both the Sandboxes daemon and
