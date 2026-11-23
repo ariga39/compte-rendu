@@ -21,7 +21,7 @@ const eligiblePullRequest: ReviewEvent = {
 
 describe('GitHub publication shim', () => {
   it('delegates read behavior and captures the exact review publication without writing to GitHub', async () => {
-    let runId = '';
+    const stateStore = createTestReviewStore();
     const upstreamReviewCalls: unknown[] = [];
     const upstreamReactionCalls: unknown[] = [];
     const upstream: GitHubAdapter = {
@@ -38,16 +38,14 @@ describe('GitHub publication shim', () => {
     const shim = createGitHubPublicationShim(upstream);
     const coordinator = createReviewCoordinator({
       github: shim,
-      stateStore: createTestReviewStore(),
-      scheduler: {
-        schedule: async (_job, scheduledRunId) => {
-          runId = scheduledRunId;
-        },
-      },
+      stateStore,
+      scheduler: { schedule: async () => undefined },
     });
     const body = '## Review:\n\nThe exact probe body.\n';
 
     expect(await coordinator.handleReviewEvent(eligiblePullRequest)).toBe('scheduled');
+    const runId = await stateStore.runIdForDelivery(eligiblePullRequest.deliveryId);
+    if (runId === undefined) throw new Error('run was not persisted');
     expect(
       await coordinator.completeReview({
         runId,
