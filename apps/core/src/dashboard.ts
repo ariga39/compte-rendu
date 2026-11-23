@@ -30,26 +30,7 @@ const MAX_LIMIT = 100;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 const nowIso = () => Effect.runPromise(DateTime.now.pipe(Effect.map(DateTime.formatIso)));
-const isoFromMs = (ms: number) =>
-  Effect.runPromise(
-    DateTime.now.pipe(
-      Effect.map(() => DateTime.makeUnsafe(ms)),
-      Effect.map(DateTime.formatIso),
-    ),
-  );
-
-const withTimeout = <A>(promise: Promise<A>, ms: number, onTimeout: () => void): Promise<A> => {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => {
-      onTimeout();
-      reject(new Error('repository lookup timed out'));
-    }, ms);
-  });
-  return Promise.race([promise, timeout]).finally(() => {
-    if (timer !== undefined) clearTimeout(timer);
-  });
-};
+const isoFromMs = (ms: number): string => DateTime.formatIso(DateTime.makeUnsafe(ms));
 
 export const IsoTimestamp = Schema.String.check(
   Schema.makeFilter((value) => Option.isSome(DateTime.make(value)), { expected: 'ISO timestamp' }),
@@ -239,7 +220,7 @@ export const handleDashboardRequest = async (
 
   if (url.pathname === '/api/dashboard' || url.pathname === '/dashboard') {
     if (store.getPublicOverview === undefined) return unavailable();
-    const since = await isoFromMs(Date.parse(now) - DAY_MS);
+    const since = isoFromMs(Date.parse(now) - DAY_MS);
     const { counts, rows } = await store.getPublicOverview({ since, limit: DEFAULT_LIMIT });
     const last = rows.at(-1);
     return json({
@@ -417,8 +398,8 @@ export const refreshRepositoryMetadata = async (
   const batch = dependencies.batch ?? DEFAULT_BATCH;
   const concurrency = Math.max(1, dependencies.concurrency ?? DEFAULT_CONCURRENCY);
   const due = await store.listDueRepositoryMetadata({ now, limit: batch });
-  const staleBefore = await isoFromMs(Date.parse(now) - CLAIM_WINDOW_MS);
-  const nextRefreshAt = await isoFromMs(Date.parse(now) + REFRESH_INTERVAL_MS);
+  const staleBefore = isoFromMs(Date.parse(now) - CLAIM_WINDOW_MS);
+  const nextRefreshAt = isoFromMs(Date.parse(now) + REFRESH_INTERVAL_MS);
   let throttled = false;
   const processRow = async (row: RepositoryMetadataRow): Promise<void> => {
     if (throttled) return;
@@ -431,23 +412,22 @@ export const refreshRepositoryMetadata = async (
     });
     if (!claimed || !(await withinBudget())) return;
     if (dependencies.github.getRepositoryMetadata === undefined) return;
-    const controller = new AbortController();
     try {
       const metadata = await Schema.decodeUnknownPromise(RepositoryMetadata)(
-        await withTimeout(
-          dependencies.github.getRepositoryMetadata({
-            repositoryId: row.repositoryId,
-            installationId: row.installationId,
-            signal: controller.signal,
-          }),
-          timeoutMs,
-          () => controller.abort(),
+        await Effect.runPromise(
+          Effect.tryPromise({
+            try: (signal) =>
+              dependencies.github.getRepositoryMetadata!({
+                repositoryId: row.repositoryId,
+                installationId: row.installationId,
+                signal,
+              }),
+            catch: (error) => error,
+          }).pipe(Effect.timeout(timeoutMs)),
         ),
       );
       const identityExpiresAt =
-        metadata.visibility === 'public'
-          ? await isoFromMs(Date.parse(now) + IDENTITY_LIFETIME_MS)
-          : null;
+        metadata.visibility === 'public' ? isoFromMs(Date.parse(now) + IDENTITY_LIFETIME_MS) : null;
       await store.recordRepositoryRefresh!({
         installationId: row.installationId,
         repositoryId: row.repositoryId,
@@ -466,14 +446,12 @@ export const refreshRepositoryMetadata = async (
         throttled = true;
         failed += 1;
         await store.setRefreshCooldown?.({
-          nextAllowedAt: await isoFromMs(
-            Date.parse(now) + (error.retryAfterMs ?? THROTTLE_COOLDOWN_MS),
-          ),
+          nextAllowedAt: isoFromMs(Date.parse(now) + (error.retryAfterMs ?? THROTTLE_COOLDOWN_MS)),
         });
         return;
       }
       if (error instanceof GitHubRequestError && error.status === 404) {
-        const retryAt = await isoFromMs(Date.parse(now) + DAY_MS);
+        const retryAt = isoFromMs(Date.parse(now) + DAY_MS);
         const revoked = await store.invalidateRepositoryMetadata?.({
           installationId: row.installationId,
           repositoryId: row.repositoryId,
