@@ -76,12 +76,18 @@ export function createTerminalJobHistory(options: TerminalJobHistoryOptions = {}
   const db = new DatabaseSync(options.path ?? '');
   db.exec(`PRAGMA page_size = ${TERMINAL_HISTORY_PAGE_SIZE}`);
   db.exec(`PRAGMA max_page_count = ${options.maxPageCount ?? TERMINAL_HISTORY_MAX_PAGES}`);
-  db.exec('PRAGMA journal_mode = OFF');
-  db.exec(`CREATE TABLE terminal_jobs (
+  // Keep rollback available when a large body hits the page cap after dirty
+  // pages spill. MEMORY keeps the rollback journal off disk, so the page cap
+  // remains the database's disk bound.
+  db.exec('PRAGMA journal_mode = MEMORY');
+  db.exec(`CREATE TABLE IF NOT EXISTS terminal_jobs (
     id TEXT PRIMARY KEY, run_id TEXT NOT NULL, attempt INTEGER NOT NULL,
     admission_key TEXT NOT NULL, state TEXT, compact TEXT NOT NULL, saved_at INTEGER NOT NULL,
     UNIQUE(run_id, attempt)
   )`);
+  // The retention write only touches rows that still hold a full body.
+  db.exec(`CREATE INDEX IF NOT EXISTS terminal_jobs_live_bodies
+    ON terminal_jobs(saved_at) WHERE state IS NOT NULL`);
   const insert = db.prepare(`INSERT OR REPLACE INTO terminal_jobs
     (id, run_id, attempt, admission_key, state, compact, saved_at)
     VALUES (?, ?, ?, ?, ?, ?, ?)`);

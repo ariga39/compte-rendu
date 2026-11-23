@@ -136,18 +136,22 @@ const writeEvidenceFixture = async (
 
 const terminalReviewProcess = (
   options: {
-    readonly markdown?: string;
+    readonly markdown?: string | (() => string | undefined);
     readonly exitCode?: number;
     readonly onCommand?: (command: string, args: readonly string[]) => void;
   } = {},
 ): RunnerProcess => {
   const baseSha = '1'.repeat(40);
   const headSha = '2'.repeat(40);
-  const result = finalMarkdownJsonl(options.markdown, 'terminal-history-session');
-  const exported = sessionExportJson('terminal-history-session', {
-    ...(options.markdown === undefined ? {} : { markdown: options.markdown }),
-  });
+  const markdown = () =>
+    typeof options.markdown === 'function' ? options.markdown() : options.markdown;
   return async (command, args, processOptions = {}) => {
+    const currentMarkdown = markdown();
+    const result = finalMarkdownJsonl(currentMarkdown, 'terminal-history-session');
+    const exported = sessionExportJson(
+      'terminal-history-session',
+      currentMarkdown === undefined ? {} : { markdown: currentMarkdown },
+    );
     options.onCommand?.(command, args);
     if (args[0] === 'rm' && args[1] === '--force') {
       return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
@@ -6311,6 +6315,85 @@ describe('Runner Job HTTP interface', () => {
       }
     },
   );
+
+  it('keeps prior identities readable after a page-cap insert spills dirty pages', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'compte-rendu-terminal-pressure-'));
+    let pressureMarkdown: string | undefined;
+    let creates = 0;
+    const runner = createRunner({
+      evidenceRoot: root,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      terminalHistory: {
+        path: join(root, 'history.sqlite'),
+        maxPageCount: 100,
+      },
+      process: terminalReviewProcess({
+        markdown: () => pressureMarkdown,
+        onCommand: (_command, args) => {
+          if (args[0] === 'create') creates += 1;
+        },
+      }),
+    });
+    const readState = async (id: string) => {
+      const response = await runner.handle(
+        new Request(`http://runner/jobs/${id}`, {
+          headers: { authorization: 'Bearer runner-test-token' },
+        }),
+      );
+      expect(response.status).toBe(200);
+      return (await response.json()) as Record<string, unknown>;
+    };
+    try {
+      const priorBody = historyJobBody('history-pressure-prior');
+      const priorAccepted = await postHistoryJob(runner, priorBody);
+      expect(priorAccepted.status).toBe(202);
+      const priorId = ((await priorAccepted.json()) as { id: string }).id;
+      await waitForTerminal(runner, priorId);
+      expect(await readState(priorId)).not.toHaveProperty('bodyExpired');
+
+      // Exceeds the 2 MiB default page cache and the 100-page (400 KiB) cap.
+      pressureMarkdown = 'x'.repeat(4 * 1024 * 1024);
+      const pressureBody = historyJobBody('history-pressure-body');
+      const pressureAccepted = await postHistoryJob(runner, pressureBody);
+      expect(pressureAccepted.status).toBe(202);
+      const pressureId = ((await pressureAccepted.json()) as { id: string }).id;
+      await waitForTerminal(runner, pressureId);
+      await vi.waitFor(async () => expect((await readState(pressureId)).bodyExpired).toBe(true));
+
+      // The insert aborted cleanly: the previously retired identity still
+      // resolves with its original body, and both identities still block
+      // duplicate work.
+      const prior = await readState(priorId);
+      expect(prior).not.toHaveProperty('bodyExpired');
+      expect(prior).toHaveProperty('result');
+      const priorDuplicate = await postHistoryJob(runner, priorBody);
+      expect(priorDuplicate.status).toBe(202);
+      expect(await priorDuplicate.json()).not.toHaveProperty('bodyExpired');
+      const priorConflict = await postHistoryJob(
+        runner,
+        historyJobBody('history-pressure-prior', {
+          repositoryReadToken: 'different-read-token',
+        }),
+      );
+      expect(priorConflict.status).toBe(409);
+
+      const pressureDuplicate = await postHistoryJob(runner, pressureBody);
+      expect(pressureDuplicate.status).toBe(202);
+      expect(await pressureDuplicate.json()).toMatchObject({ bodyExpired: true });
+      const pressureConflict = await postHistoryJob(
+        runner,
+        historyJobBody('history-pressure-body', {
+          repositoryReadToken: 'different-read-token',
+        }),
+      );
+      expect(pressureConflict.status).toBe(409);
+      expect(creates).toBe(2);
+    } finally {
+      await runner.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 
   it('fetches the exact admitted head SHA instead of a stale mutable pull request ref', async () => {
     const baseSha = '1111111111111111111111111111111111111111';
