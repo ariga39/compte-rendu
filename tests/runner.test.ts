@@ -6680,6 +6680,13 @@ describe('Runner concurrency', () => {
       sandbox: { cleanup: 'destroyed' },
     });
     expect(started).toEqual([]);
+    const stopped = await runner.handle(
+      new Request(`http://runner/jobs/${id}`, {
+        method: 'DELETE',
+        headers: { authorization: 'Bearer runner-test-token' },
+      }),
+    );
+    expect(stopped.status).toBe(404);
   });
 
   it.each([false, true])(
@@ -9525,6 +9532,51 @@ describe('Runner transport diagnostics', () => {
       }
     },
   );
+
+  it('does not claim after close during a suspended runtime preflight', async () => {
+    let started!: () => void;
+    const preflightStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let release!: () => void;
+    const preflightGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const claims: Request[] = [];
+    const runner = createRunner({
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      sandboxRuntime: 'microsandbox',
+      microsandboxImage: 'review:test',
+      llmRelay: true,
+      llmRelayGeneration: 'generation-a',
+      modelConfig: relayInferenceModelConfig('review'),
+      claimUrl: 'https://ingress.test/runner-claim',
+      claimIntervalMs: 1,
+      claimFetch: async (input) => {
+        claims.push(new Request(input));
+        return new Response(null, { status: 204 });
+      },
+      process: async (_command, args) => {
+        if (args[0] === 'doctor') {
+          started();
+          await preflightGate;
+        }
+        return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+      },
+    });
+    try {
+      await preflightStarted;
+      const closing = runner.close();
+      release();
+      await closing;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(claims).toHaveLength(0);
+    } finally {
+      release();
+      await runner.close();
+    }
+  });
 });
 
 describe('Runner multi-model review', () => {

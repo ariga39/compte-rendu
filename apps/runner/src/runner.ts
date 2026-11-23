@@ -1939,7 +1939,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
     sandboxRecoveryTimer = setTimeout(() => {
       sandboxRecoveryTimer = undefined;
       retrySandboxRecovery();
-    }, claimIntervalMs);
+    }, CLEANUP_RECOVERY_RETRY_INTERVAL_MS);
     if (typeof sandboxRecoveryTimer === 'object' && sandboxRecoveryTimer !== null)
       sandboxRecoveryTimer.unref?.();
   };
@@ -4475,6 +4475,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       await recordClaimGateFailure('runtime-preflight-failed');
       return;
     }
+    if (closed) return;
     if (
       claiming ||
       claimPollingHalted ||
