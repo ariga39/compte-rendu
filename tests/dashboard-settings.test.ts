@@ -351,6 +351,97 @@ it('requires an allowlisted GitHub UID on every model change and preserves the p
   }
 });
 
+it('canonicalizes a dashboard origin with surrounding whitespace and a trailing slash', async () => {
+  const db = new SqliteD1Database();
+  const app = createApplication({
+    REVIEW_DB: db,
+    WEBHOOK_SECRET: 'test',
+    GITHUB_APP_ID: '1',
+    GITHUB_APP_PRIVATE_KEY: 'test',
+    ALLOWED_INSTALLATION_IDS: '[7]',
+    DASHBOARD_ORIGIN: '  https://reviews.test/  ',
+    DASHBOARD_GITHUB_CLIENT_ID: 'Iv23test',
+    DASHBOARD_GITHUB_CLIENT_SECRET: 'test-secret',
+    DASHBOARD_MODEL_EDITOR_IDS: '[42]',
+    INFERENCE_RELAY: relay,
+  });
+  stubGitHub(() => ({ id: 42, login: 'operator' }));
+  try {
+    const { cookie } = await signIn(app);
+    const viewer = await app.fetch(new Request(origin + '/api/session', { headers: { cookie } }));
+    expect(viewer.status).toBe(200);
+    expect(await viewer.json()).toEqual({
+      signedIn: true,
+      account: { login: 'operator' },
+      operator: true,
+    });
+    const settings = await app.fetch(
+      new Request(origin + '/api/model-settings', { headers: { cookie } }),
+    );
+    expect(settings.status).toBe(200);
+
+    const state = createD1ReviewStateStore(db);
+    const queued = await state.claimReview({
+      deliveryId: 'canonical-origin-cancel',
+      occurredAt: new Date().toISOString(),
+      job: {
+        repositoryId: 1,
+        installationId: 2,
+        pullRequestNumber: 3,
+        baseSha: '1'.repeat(40),
+        headSha: '2'.repeat(40),
+        trigger: 'automatic',
+      },
+    });
+    if (queued.kind !== 'claimed') throw new Error('expected queued review');
+    const cancelled = await app.fetch(
+      new Request(origin + '/api/jobs/' + queued.runId + '/cancel', {
+        method: 'POST',
+        headers: { cookie, origin },
+      }),
+    );
+    expect(cancelled.status).toBe(200);
+  } finally {
+    db.close();
+  }
+});
+
+it.each([
+  'https://reviews.test/path',
+  'https://reviews.test/?query=1',
+  'https://reviews.test/#fragment',
+  'http://reviews.test',
+  'https://operator:secret@reviews.test',
+  'not a url',
+])('rejects non-canonical dashboard origin %s', async (configured) => {
+  const db = new SqliteD1Database();
+  const app = createApplication({
+    REVIEW_DB: db,
+    WEBHOOK_SECRET: 'test',
+    GITHUB_APP_ID: '1',
+    GITHUB_APP_PRIVATE_KEY: 'test',
+    ALLOWED_INSTALLATION_IDS: '[7]',
+    DASHBOARD_ORIGIN: configured,
+    DASHBOARD_GITHUB_CLIENT_ID: 'Iv23test',
+    DASHBOARD_GITHUB_CLIENT_SECRET: 'test-secret',
+    DASHBOARD_MODEL_EDITOR_IDS: '[42]',
+    INFERENCE_RELAY: relay,
+  });
+  try {
+    for (const path of ['/api/session', '/auth/github', '/api/model-settings'])
+      expect((await app.fetch(new Request(origin + path))).status, path).toBe(503);
+    const cancelled = await app.fetch(
+      new Request(origin + '/api/jobs/run-1/cancel', {
+        method: 'POST',
+        headers: { origin },
+      }),
+    );
+    expect(cancelled.status).toBe(403);
+  } finally {
+    db.close();
+  }
+});
+
 it('requires the current operator and same origin to cancel a queued review by its public ID', async () => {
   const { app, db } = createApp();
   let uid = 42;

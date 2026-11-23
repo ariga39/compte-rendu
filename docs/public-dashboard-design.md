@@ -1,8 +1,11 @@
 # Public review dashboard
 
-Anyone can read review history and job details. The application Worker serves these
-reads from Core's D1 projection. Signed-in operators can also change review models
-and cancel eligible jobs. See the [Help Markdown](../apps/dashboard/src/lib/content/help.md).
+Public task views are read-only: anyone can read review history and job details.
+The application Worker serves these reads from Core's D1 projection. Signed-in,
+allowlisted operators can change review models through the authenticated `/settings`
+editor and can cancel eligible jobs. See
+[dashboard sign-in and model settings](review-configuration.md#dashboard-sign-in-and-model-settings)
+and the [Help Markdown](../apps/dashboard/src/lib/content/help.md).
 
 ## Pages and language
 
