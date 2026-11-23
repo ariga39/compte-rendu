@@ -166,8 +166,8 @@ export const createGitHubAppTokenProvider = (
     const payload = encodedJson({
       iss: appId,
       iat: nowSeconds - 60,
-      // GitHub rejects assertions whose exp is more than ten minutes ahead.
-      // Five minutes leaves room for a small difference between the two clocks.
+      // With the backdated iat, the signed window is six minutes. This leaves
+      // room for clock skew when GitHub checks the expiry at exchange.
       exp: nowSeconds + 300,
     });
     const signingInput = `${header}.${payload}`;
