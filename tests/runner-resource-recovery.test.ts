@@ -75,6 +75,63 @@ describe('microsandbox ownership recovery', () => {
     await expect(readdir(join(ownershipRoot, 'microsandbox'))).resolves.toEqual([]);
   });
 
+  it('leaves a present VM when the ownership marker is intent-only', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-msb-intent-'));
+    roots.push(root);
+    const msbHome = join(root, 'msb');
+    await mkdir(join(msbHome, 'db'), { recursive: true });
+    await writeFile(join(msbHome, 'db', 'msb.db'), 'catalog', { mode: 0o600 });
+    await writeFile(join(root, 'model-token'), 'grant', { mode: 0o600 });
+    vi.stubEnv('MSB_HOME', msbHome);
+    const ownershipRoot = join(root, 'sandbox-owners', 'msb-intent-instance');
+    const spec = jobSpec(root, 'msb-intent-job');
+    const runtime = createMicrosandboxRuntimeFactory(
+      'review-image',
+      async () => ok,
+      false,
+      ownershipRoot,
+    )(spec);
+    await runtime.setup(setupCommand());
+    const markerDir = join(ownershipRoot, 'microsandbox');
+    const [markerName] = await readdir(markerDir);
+    const markerPath = join(markerDir, markerName!);
+    const record = JSON.parse(await readFile(markerPath, 'utf8')) as {
+      readonly owner: string;
+    };
+    await writeFile(markerPath, `${JSON.stringify({ ...record, createAttempted: false })}\n`, {
+      mode: 0o600,
+    });
+
+    const removed: string[] = [];
+    const command: SandboxCommand = async (args) => {
+      if (args[0] === 'inspect')
+        return {
+          ...ok,
+          stdout: JSON.stringify({
+            name: spec.name,
+            config: { labels: { 'cr-job-owner': record.owner } },
+          }),
+        };
+      if (args[0] === 'rm') removed.push(args[2]!);
+      return ok;
+    };
+
+    await expect(reconcileMicrosandboxRestartResources(ownershipRoot, command)).resolves.toEqual({
+      ok: false,
+      recovered: 0,
+      recoveredJobIds: [],
+      failures: [{ jobId: spec.id, sandboxName: spec.name }],
+    });
+    expect(removed).toEqual([]);
+    expect(await readdir(markerDir)).toHaveLength(1);
+
+    await expect(runtime.destroy(command)).rejects.toThrow(
+      'Microsandbox creation was not attempted',
+    );
+    expect(removed).toEqual([]);
+    expect(await readdir(markerDir)).toHaveLength(1);
+  });
+
   it('does not reap a marker for a currently live job and still reaps a stale owned marker', async () => {
     const root = await mkdtemp(join(tmpdir(), 'cr-msb-live-'));
     roots.push(root);
@@ -162,6 +219,77 @@ describe('microsandbox ownership recovery', () => {
     expect(claims).toBe(1);
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(claims).toBe(1);
+  });
+
+  it('close awaits the tracked ownership scan and skips remaining records', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-close-scan-'));
+    roots.push(root);
+    const msbHome = join(root, 'msb');
+    await mkdir(join(msbHome, 'db'), { recursive: true });
+    await writeFile(join(msbHome, 'db', 'msb.db'), 'catalog', { mode: 0o600 });
+    await writeFile(join(root, 'model-token'), 'grant', { mode: 0o600 });
+    vi.stubEnv('MSB_HOME', msbHome);
+    const instanceId = 'close-scan-instance';
+    const ownershipRoot = join(root, 'sandbox-owners', instanceId);
+    for (const id of ['close-scan-a', 'close-scan-b']) {
+      const runtime = createMicrosandboxRuntimeFactory(
+        'review-image',
+        async () => ok,
+        false,
+        ownershipRoot,
+      )(jobSpec(root, id));
+      await runtime.setup(setupCommand());
+    }
+    let started!: () => void;
+    const scanStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let release!: () => void;
+    const scanGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const inspected: string[] = [];
+    const runner = createRunner({
+      evidenceRoot: root,
+      instanceId,
+      authToken: 'runner-test-token',
+      modelConfig,
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      sandboxRuntime: 'microsandbox',
+      microsandboxImage: 'review-image',
+      llmRelay: true,
+      llmRelayGeneration: 'generation-a',
+      callbackUrl: 'https://ingress.test/runner-callback',
+      callbackToken: 'callback-token',
+      claimUrl: '',
+      claimIntervalMs: 10,
+      process: async (_command, args) => {
+        if (args[0] === 'inspect') {
+          const name = args.at(-1)!;
+          inspected.push(name);
+          started();
+          await scanGate;
+          return { ...ok, exitCode: 1, stderr: `error: sandbox not found: ${name}` };
+        }
+        return ok;
+      },
+    });
+    try {
+      await scanStarted;
+      let closed = false;
+      const closing = runner.close().then(() => {
+        closed = true;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(closed).toBe(false);
+      release();
+      await closing;
+      expect(inspected).toHaveLength(1);
+      expect(await readdir(join(ownershipRoot, 'microsandbox'))).toHaveLength(1);
+    } finally {
+      release();
+      await runner.close();
+    }
   });
 
   it('automatically removes an owned VM after the 30-second recovery retry and leaves a foreign VM untouched', async () => {

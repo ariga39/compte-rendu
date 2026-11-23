@@ -1894,6 +1894,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
           (job.cleanupRecoveryRetryAt ?? 0) <= now,
       );
       for (const job of candidates) {
+        if (closed) break;
         const result = await recoverRetainedCleanup({
           evidenceId: job.state.evidence.id,
           jobId: job.id,
@@ -1910,7 +1911,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
           job.cleanupRecoveryPending = false;
           job.cleanupRecoveryRetryAt = undefined;
         } else {
-          if (result.verificationFailed === true) await removeOwnedSandboxForJob(job.id);
+          if (result.verificationFailed === true && !closed) await removeOwnedSandboxForJob(job.id);
           job.cleanupRecoveryRetryAt = Date.now() + CLEANUP_RECOVERY_RETRY_INTERVAL_MS;
         }
       }
@@ -1944,6 +1945,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       sandboxRecoveryTimer.unref?.();
   };
   const isLiveCleanupOwner = (jobId: string) => {
+    if (closed) return true;
     const job = jobs.get(jobId);
     return job !== undefined && (job.state.status === 'queued' || job.state.status === 'running');
   };
@@ -1985,17 +1987,14 @@ export const createRunner = (options: RunnerOptions = {}) => {
             baseSha: job.input.baseSha,
             headSha: job.input.headSha,
           });
-          if (recovered.retryable === true && !recovered.accepted) {
+          if (recovered.accepted || recovered.retryable !== true) {
+            job.cleanupRecoveryPending = false;
+            job.cleanupRecoveryRetryAt = undefined;
+          } else {
             job.cleanupRecoveryPending = true;
             job.cleanupRecoveryRetryAt = Date.now() + CLEANUP_RECOVERY_RETRY_INTERVAL_MS;
             scheduleDeferredCleanupRecovery();
-            continue;
           }
-          job.cleanupRecoveryPending = false;
-          job.cleanupRecoveryRetryAt = undefined;
-          Object.assign(job.state, { sandbox: { cleanup: 'destroyed' } });
-          jobs.delete(job.id);
-          jobsByRun.delete(`${job.input.runId}:${job.input.attempt}`);
         }
         if (!result.ok) {
           void recordRecoveryLog({
@@ -2042,7 +2041,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       sandboxRecoveryInFlight = undefined;
       if (sandboxRecoveryAgain) {
         sandboxRecoveryAgain = false;
-        void startSandboxRecovery();
+        if (!closed) void startSandboxRecovery();
       }
     });
     return run;
@@ -4561,6 +4560,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
           claimPollingHalted = false;
           return;
         }
+        if (closed) return;
         const admitted = await admitJob(input, true);
         if (admitted.status !== 202) {
           claimFailure ??= { reason: 'admission-rejected' };
@@ -4637,6 +4637,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       claimInFlightController?.abort();
       forgetStops();
       await claimInFlight?.catch(() => undefined);
+      await sandboxRecoveryInFlight?.catch(() => undefined);
       await settingsWatcher?.close();
     },
   };

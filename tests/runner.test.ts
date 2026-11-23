@@ -9577,6 +9577,70 @@ describe('Runner transport diagnostics', () => {
       await runner.close();
     }
   });
+
+  it('does not admit a late claim response after close', async () => {
+    const evidenceRoot = await mkdtemp(join(tmpdir(), 'cr-close-late-claim-'));
+    const job = {
+      ...runnerJobFields,
+      id: 'late-claim-after-close',
+      runId: 'run-late-claim-after-close',
+      attempt: 1,
+      pullRequestNumber: 79,
+      repositoryUrl: 'https://github.com/acme/reviewed.git',
+      baseSha: '1'.repeat(40),
+      headSha: '2'.repeat(40),
+    };
+    let started!: () => void;
+    const claimStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let release!: () => void;
+    const claimGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let commands = 0;
+    let callbacks = 0;
+    const runner = createRunner({
+      evidenceRoot,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      claimUrl: 'https://ingress.test/runner-claim',
+      claimIntervalMs: 10,
+      claimTimeoutMs: 1_000,
+      claimFetch: async () => {
+        started();
+        await claimGate;
+        return Response.json(job);
+      },
+      callbackFetch: async () => {
+        callbacks += 1;
+        return new Response(null, { status: 202 });
+      },
+      process: async () => {
+        commands += 1;
+        return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+      },
+    });
+    try {
+      await claimStarted;
+      const closing = runner.close();
+      release();
+      await closing;
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(commands).toBe(0);
+      expect(callbacks).toBe(0);
+      const unknown = await runner.handle(
+        new Request(`http://runner/jobs/${job.id}`, {
+          headers: { authorization: 'Bearer runner-test-token' },
+        }),
+      );
+      expect(unknown.status).toBe(404);
+    } finally {
+      release();
+      await runner.close();
+      await rm(evidenceRoot, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('Runner multi-model review', () => {
@@ -13273,6 +13337,114 @@ describe('Runner backend outage recovery', () => {
       await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 10 });
     }
   });
+
+  it('keeps a permanently rejected cleanup visible after an ownership rescan', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-permanent-rescan-'));
+    const previousTmp = process.env.TMPDIR;
+    process.env.TMPDIR = root;
+    const instanceId = 'permanent-rescan';
+    const ownershipRoot = join(root, 'sandbox-owners', instanceId);
+    await mkdir(ownershipRoot, { recursive: true });
+    await writeFile(join(ownershipRoot, 'foreign.json'), '{}');
+    const baseSha = '1'.repeat(40);
+    const headSha = '2'.repeat(40);
+    const jobId = 'permanent-rescan-job';
+    let backendUp = true;
+    let reports = 0;
+    const events: unknown[] = [];
+    const ok = { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+    const authFailure = { ...ok, exitCode: 1, stderr: 'not signed in' };
+    const runner = createProductionRunnerWithMergeBase({
+      evidenceRoot: root,
+      instanceId,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'fixture-resolver',
+      modelConfig: standardModelConfig,
+      claimIntervalMs: 2,
+      callbackUrl: 'https://ingress.test/runner-callback',
+      callbackToken: 'callback-token',
+      callbackFetch: async (input) => {
+        if (
+          new URL(input instanceof Request ? input.url : input).pathname ===
+          '/runner-cleanup-recovery'
+        )
+          reports += 1;
+        return new Response(null, { status: 403 });
+      },
+      log: { record: (event) => void events.push(event) },
+      process: async (_command, args) => {
+        if (args[0] === 'ls') return backendUp ? ok : authFailure;
+        if (args[0] === 'secret' && args[1] === 'set-custom') {
+          backendUp = false;
+          return authFailure;
+        }
+        if (!backendUp) return authFailure;
+        const proof = sbxNativeProof(args);
+        if (proof !== undefined) return proof;
+        if (args[0] === 'inspect')
+          return { ...ok, exitCode: 1, stderr: `error: sandbox '${args[1]}' not found` };
+        if (args[0] === 'policy' && args[1] === 'ls') return { ...ok, stdout: '{"rules":[]}' };
+        if (args.includes('rev-parse')) return { ...ok, stdout: `${baseSha}\n${headSha}\n` };
+        return ok;
+      },
+    });
+    const rejections = () =>
+      events.filter(
+        (event) =>
+          (event as { outcome?: string }).outcome === 'cleanup-recovery' &&
+          (event as { status?: number }).status === 403,
+      ).length;
+    try {
+      runner.enqueue({
+        ...runnerJobFields,
+        id: jobId,
+        runId: 'run-permanent-rescan',
+        attempt: 1,
+        pullRequestNumber: 50,
+        repositoryUrl: 'https://github.com/acme/reviewed.git',
+        baseSha,
+        headSha,
+      });
+      expect(await waitForTerminal(runner, jobId)).toMatchObject({
+        status: 'failed',
+        sandbox: { cleanup: 'failed' },
+      });
+      backendUp = true;
+      await vi.waitFor(() => expect(rejections()).toBeGreaterThanOrEqual(1));
+      const resumed = await runner.handle(
+        new Request('http://runner/maintenance/resume', {
+          method: 'POST',
+          headers: { authorization: 'Bearer runner-test-token' },
+        }),
+      );
+      expect(resumed.status).toBe(200);
+      await vi.waitFor(() => expect(rejections()).toBeGreaterThanOrEqual(2));
+      expect(reports).toBeGreaterThanOrEqual(2);
+      const status = (await (
+        await runner.handle(
+          new Request('http://runner/maintenance', {
+            headers: { authorization: 'Bearer runner-test-token' },
+          }),
+        )
+      ).json()) as { activeJobs: number; cleanupBlockedJobs: number };
+      expect(status).toMatchObject({ activeJobs: 0, cleanupBlockedJobs: 1 });
+      const retained = await runner.handle(
+        new Request(`http://runner/jobs/${jobId}`, {
+          headers: { authorization: 'Bearer runner-test-token' },
+        }),
+      );
+      expect(retained.status).toBe(200);
+      expect(await retained.json()).toMatchObject({
+        status: 'failed',
+        sandbox: { cleanup: 'failed' },
+      });
+    } finally {
+      await runner.close();
+      if (previousTmp === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = previousTmp;
+      await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 10 });
+    }
+  }, 20_000);
 
   it('keeps unrelated claims moving after a single job cleanup failure', async () => {
     const root = await mkdtemp(join(tmpdir(), 'cr-single-cleanup-failure-'));
