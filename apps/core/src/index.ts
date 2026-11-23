@@ -369,6 +369,7 @@ export interface ReviewStateStore {
     | {
         kind: 'claimed';
         runId: string;
+        blockingCleanupStatus?: 'pending' | 'failed';
         activeRunnerJob?: ActiveRunnerJob;
         supersededRunIds?: readonly string[];
       }
@@ -377,6 +378,7 @@ export interface ReviewStateStore {
         disposition: ReviewDisposition;
         runId?: string;
         checkSetupStatus?: ReviewCheckSetupStatus;
+        blockingCleanupStatus?: 'pending' | 'failed';
         activeRunnerJob?: ActiveRunnerJob;
       }
     | {
@@ -384,6 +386,7 @@ export interface ReviewStateStore {
         disposition: ReviewDisposition;
         runId?: string;
         checkSetupStatus?: ReviewCheckSetupStatus;
+        blockingCleanupStatus?: 'pending' | 'failed';
         activeRunnerJob?: ActiveRunnerJob;
       }
   >;
@@ -658,6 +661,7 @@ export interface GitHubAdapter {
     decision?: ReviewDecision;
     cancellationReason?: 'manual';
     retryBlocked?: 'cleanup-pending' | 'cleanup-failed';
+    retryQueued?: boolean;
   }): Promise<void>;
   findCheckRunForSuite?(input: {
     repositoryId: number;
@@ -1590,6 +1594,11 @@ interface AdmissionDependencies {
   readonly lifecycleLog?: CoreLifecycleLog;
 }
 
+interface ReviewAdmission {
+  readonly disposition: ReviewDisposition;
+  readonly blockingCleanupStatus?: 'pending' | 'failed';
+}
+
 const claimAndSchedule = (
   dependencies: AdmissionDependencies,
   deliveryId: string,
@@ -1630,8 +1639,18 @@ const claimAndSchedule = (
       if (claim.runId !== undefined && claim.checkSetupStatus === 'pending') {
         yield* startCheckSetup(github, stateStore, claim.runId, job, deferCheckSetup);
       }
-      return claim.disposition;
+      return {
+        disposition: claim.disposition,
+        ...(claim.blockingCleanupStatus === undefined
+          ? {}
+          : { blockingCleanupStatus: claim.blockingCleanupStatus }),
+      };
     }
+    const admission = {
+      ...(claim.blockingCleanupStatus === undefined
+        ? {}
+        : { blockingCleanupStatus: claim.blockingCleanupStatus }),
+    };
 
     yield* recordLifecycleLog(lifecycleLog, {
       event: 'review scheduled',
@@ -1686,7 +1705,7 @@ const claimAndSchedule = (
 
     if (claim.activeRunnerJob !== undefined) {
       if (cancelRunnerJob === undefined || stateStore.markRunSuperseded === undefined) {
-        return 'scheduled' as const;
+        return { disposition: 'scheduled' as const, ...admission };
       }
       const getRunOutcome = stateStore.getRunOutcome;
       const supersededOutcome =
@@ -1701,7 +1720,7 @@ const claimAndSchedule = (
           stateStore.markRunSuperseded!({ runId: claim.activeRunnerJob!.runId, occurredAt }),
         catch: () => false,
       }).pipe(Effect.catch(() => Effect.succeed(false)));
-      if (!superseded) return 'scheduled' as const;
+      if (!superseded) return { disposition: 'scheduled' as const, ...admission };
       if (supersededOutcome?.checkRunId !== undefined && github.updateCheckRun !== undefined) {
         yield* Effect.tryPromise({
           try: () =>
@@ -1721,7 +1740,7 @@ const claimAndSchedule = (
         Effect.map((ack) => ack !== 'pending'),
         Effect.catch(() => Effect.succeed(false)),
       );
-      if (!canceled) return 'scheduled' as const;
+      if (!canceled) return { disposition: 'scheduled' as const, ...admission };
       if (stateStore.clearRunnerJob !== undefined) {
         const cleared = yield* Effect.tryPromise({
           try: () =>
@@ -1731,7 +1750,7 @@ const claimAndSchedule = (
             }),
           catch: () => false,
         }).pipe(Effect.catch(() => Effect.succeed(false)));
-        if (!cleared) return 'scheduled' as const;
+        if (!cleared) return { disposition: 'scheduled' as const, ...admission };
       }
       if (supersededOutcome !== undefined) {
         yield* recordSupersededLifecycle(
@@ -1750,7 +1769,7 @@ const claimAndSchedule = (
       deliveryId,
       runId: claim.runId,
     });
-    return 'scheduled' as const;
+    return { disposition: 'scheduled' as const, ...admission };
   });
 
 const recordDelivery = (stateStore: ReviewStateStore, input: ReviewDeliveryRecord) => {
@@ -1926,7 +1945,12 @@ const createReviewEventHandler = (dependencies: AdmissionDependencies) => {
       return 'awaiting approval' as const;
     }
 
-    return yield* claimAndSchedule(dependencies, event.deliveryId, jobForEvent(event, 'automatic'));
+    const admission = yield* claimAndSchedule(
+      dependencies,
+      event.deliveryId,
+      jobForEvent(event, 'automatic'),
+    );
+    return admission.disposition;
   });
 
   const handleManualIntent = Effect.fn('handleManualIntent')(function* (intent: ManualIntent) {
@@ -1984,10 +2008,10 @@ const createReviewEventHandler = (dependencies: AdmissionDependencies) => {
         occurredAt,
       });
       yield* writeManualReaction(github, intent, 'confused');
-      return 'awaiting approval' as const;
+      return { disposition: 'awaiting approval' as const };
     }
 
-    const disposition = yield* claimAndSchedule(
+    const admission = yield* claimAndSchedule(
       dependencies,
       intent.deliveryId,
       jobForManualFacts(intent, facts),
@@ -2000,9 +2024,9 @@ const createReviewEventHandler = (dependencies: AdmissionDependencies) => {
       },
     );
 
-    if (disposition === 'scheduled') yield* writeManualReaction(github, intent, 'eyes');
+    if (admission.disposition === 'scheduled') yield* writeManualReaction(github, intent, 'eyes');
 
-    return disposition;
+    return admission;
   });
 
   const handleCheckEvent = Effect.fn('handleCheckRerequest')(function* (
@@ -2076,33 +2100,44 @@ const createReviewEventHandler = (dependencies: AdmissionDependencies) => {
       return 'ignored' as const;
     }
 
-    const disposition = yield* handleManualIntent({
+    const admission = yield* handleManualIntent({
       deliveryId: event.deliveryId,
       repositoryId: event.repositoryId,
       pullRequestNumber: outcome.pullRequestNumber,
       installationId: event.installationId,
       senderLogin: event.senderLogin,
     });
-    const cleanupBlocked =
-      outcome.cleanup === 'pending' ||
-      outcome.cleanup === 'failed' ||
-      (outcome.cleanup === undefined && outcome.runnerJobId !== undefined);
-    if (disposition === 'cancelled' && cleanupBlocked && github.updateCheckRun !== undefined) {
+    if (
+      outcome.status === 'cancelled' &&
+      admission.blockingCleanupStatus !== undefined &&
+      (admission.disposition === 'scheduled' || admission.disposition === 'cancelled') &&
+      github.updateCheckRun !== undefined
+    ) {
       yield* Effect.tryPromise({
         try: () =>
           github.updateCheckRun!({
             runId: externalRunId,
             repositoryId: outcome.repositoryId,
-            installationId: outcome.installationId,
+            installationId: event.installationId,
             checkRunId,
             status: 'cancelled',
             cancellationReason: 'manual',
-            retryBlocked: outcome.cleanup === 'failed' ? 'cleanup-failed' : 'cleanup-pending',
+            retryBlocked:
+              admission.blockingCleanupStatus === 'failed' ? 'cleanup-failed' : 'cleanup-pending',
+            retryQueued: admission.disposition === 'scheduled',
           }),
         catch: () => new SchedulingFailed({ message: 'Check retry feedback failed' }),
-      }).pipe(Effect.catch(() => Effect.succeed(undefined)));
+      }).pipe(
+        Effect.catch(() =>
+          recordOperationalLog(log, {
+            phase: 'core',
+            outcome: 'retry_feedback_failed',
+            deliveryId: event.deliveryId,
+          }),
+        ),
+      );
     }
-    return disposition;
+    return admission.disposition;
   });
 
   return Effect.fn('handleReviewEvent')(function* (event: unknown) {
@@ -2118,7 +2153,7 @@ const createReviewEventHandler = (dependencies: AdmissionDependencies) => {
       return yield* handleCheckEvent(decoded);
     }
 
-    return yield* handleManualIntent({
+    const admission = yield* handleManualIntent({
       deliveryId: decoded.deliveryId,
       repositoryId: decoded.repositoryId,
       pullRequestNumber: decoded.pullRequestNumber,
@@ -2126,6 +2161,7 @@ const createReviewEventHandler = (dependencies: AdmissionDependencies) => {
       senderLogin: decoded.commenterLogin,
       commentId: decoded.commentId,
     });
+    return admission.disposition;
   });
 };
 

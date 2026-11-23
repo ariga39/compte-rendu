@@ -865,7 +865,35 @@ const createStore = (
     if (delivery === null) {
       throw new Error('D1 did not retain the claimed delivery');
     }
-
+    // Admission feedback must use the state that actually blocks this retry,
+    // not the cleanup status of whichever Check or comment started it. Only a
+    // manual retry needs this additional lookup.
+    const blockingCleanup =
+      job.trigger === 'manual'
+        ? await database
+            .prepare(
+              `SELECT runner_cleanup_status FROM review_runs
+               WHERE installation_id = ? AND repository_id = ? AND pull_request_number = ?
+                 AND runner_job_id IS NOT NULL
+                 AND status IN ('failed', 'superseded', 'cancelled')
+                 AND (
+                   (status IN ('superseded', 'cancelled')
+                     AND runner_cleanup_status IS NOT 'destroyed')
+                   OR runner_cleanup_status IN ('pending', 'failed')
+                 )
+               ORDER BY CASE runner_cleanup_status WHEN 'failed' THEN 0 ELSE 1 END
+               LIMIT 1`,
+            )
+            .bind(job.installationId, job.repositoryId, job.pullRequestNumber)
+            .first<{ runner_cleanup_status: 'pending' | 'failed' | null }>()
+        : undefined;
+    const blockingCleanupStatus =
+      blockingCleanup === undefined || blockingCleanup === null
+        ? undefined
+        : (blockingCleanup.runner_cleanup_status ?? 'pending');
+    const admission = {
+      ...(blockingCleanupStatus === undefined ? {} : { blockingCleanupStatus }),
+    };
     const disposition = dispositionForStatus(delivery.status);
     if ((results[0]?.meta.changes ?? 0) === 0) {
       const replayRun = await database
@@ -878,6 +906,7 @@ const createStore = (
       return {
         kind: 'replay' as const,
         disposition,
+        ...admission,
         ...(replayRun?.check_setup_status !== 'pending'
           ? {}
           : {
@@ -899,6 +928,7 @@ const createStore = (
       return {
         kind: 'claimed' as const,
         runId: run.run_id,
+        ...admission,
         ...(activeRunnerJob ? { activeRunnerJob } : {}),
         ...(supersededRun === null ? {} : { supersededRunIds: [supersededRun.run_id] }),
       };
@@ -917,6 +947,7 @@ const createStore = (
     return {
       kind: 'existing' as const,
       disposition,
+      ...admission,
       ...(existingRun?.status !== 'scheduled' || existingRun.check_setup_status !== 'pending'
         ? {}
         : {

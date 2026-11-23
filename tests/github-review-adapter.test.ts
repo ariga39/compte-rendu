@@ -100,8 +100,13 @@ describe('per-run dashboard Check links', () => {
         status: 'cancelled',
         cancellationReason: 'manual',
         retryBlocked: 'cleanup-pending',
+        retryQueued: true,
       });
-      expect(checks[0].output?.summary).toContain('Sandbox cleanup is not yet confirmed');
+      expect(checks[0].output?.summary).toContain(
+        'At the last retry, sandbox cleanup for a review attempt on this pull request was not confirmed',
+      );
+      expect(checks[0].output?.summary).toContain('the new review was queued');
+      expect(checks[0].output?.summary).not.toContain('is not yet confirmed');
       expect(checks[0].actions).toEqual([
         expect.objectContaining({ label: 'Run review again', identifier: 'retry_review' }),
       ]);
@@ -112,9 +117,14 @@ describe('per-run dashboard Check links', () => {
         status: 'cancelled',
         cancellationReason: 'manual',
         retryBlocked: 'cleanup-failed',
+        retryQueued: false,
       });
-      expect(checks[0].output?.summary).toContain('Sandbox cleanup failed and needs an operator');
-      expect(checks[0].output?.summary).toContain('cleanup recovery');
+      expect(checks[0].output?.summary).toContain(
+        'At the last retry, sandbox cleanup for a review attempt on this pull request had failed',
+      );
+      expect(checks[0].output?.summary).toContain('the retry was declined');
+      expect(checks[0].output?.summary).not.toContain('the new review was queued');
+      expect(checks[0].output?.summary).not.toContain('needs an operator. Retry after');
     },
   );
 });
