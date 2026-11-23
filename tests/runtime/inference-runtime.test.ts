@@ -484,6 +484,47 @@ describe('Inference Worker public streaming', () => {
     });
   });
 
+  it('revokes only pending accounting while a completed request keeps its usage', async () => {
+    await control('success');
+    const token = await issue('runtime-revoke-mixed', ['deepseek-review']);
+    const completed = await request(token, { model: 'deepseek-review', messages: [] });
+    expect(completed.status).toBe(200);
+    await completed.text();
+
+    await control('hold');
+    const pending = await request(token, { model: 'deepseek-review', messages: [] });
+    const reader = pending.body!.getReader();
+    const first = await reader.read();
+    expect(first.done).toBe(false);
+
+    await runtime.INFERENCE.revoke({ jobId: 'runtime-revoke-mixed' });
+    const expectMixedRevoke = async () => {
+      const summary = await runtime.INFERENCE.usage({ jobId: 'runtime-revoke-mixed' });
+      expect(summary?.models).toHaveLength(2);
+      expect(summary?.models.find((row) => row.model === 'deepseek-native')).toMatchObject({
+        route: 'deepseek-review',
+        requests: 1,
+        incompleteRequests: 0,
+        inputTokens: { total: 10, reportedRequests: 1 },
+        outputTokens: { total: 3, reportedRequests: 1 },
+      });
+      expect(summary?.models.find((row) => row.model === null)).toMatchObject({
+        route: 'deepseek-review',
+        requests: 1,
+        incompleteRequests: 1,
+        inputTokens: null,
+      });
+    };
+    await expectMixedRevoke();
+
+    await release();
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+    }
+    await expectMixedRevoke();
+  });
+
   it('cancels the upstream fetch when the client disconnects', async () => {
     await control('silent');
     const token = await issue('runtime-disconnect', ['deepseek-review']);
@@ -691,6 +732,59 @@ describe('Inference Worker usage retention', () => {
       .bind('runtime-sweep')
       .first<{ readonly count: number }>();
     expect(rows?.count).toBe(0);
+  });
+
+  it('keeps active and recently expired grants while removing only beyond-retention state', async () => {
+    await control('success');
+    for (const jobId of [
+      'runtime-retain-active',
+      'runtime-retain-recent',
+      'runtime-retain-stale',
+    ]) {
+      const token = await issue(jobId, ['deepseek-review']);
+      const response = await request(token, { model: 'deepseek-review', messages: [] });
+      expect(response.status).toBe(200);
+      await response.text();
+    }
+
+    const now = await d1Now();
+    const retention = 24 * 60 * 60 * 1000;
+    const setExpiry = (jobId: string, expiresAt: number) =>
+      runtime.RELAY_DB.prepare('UPDATE grants SET expires_at = ? WHERE job_id = ?')
+        .bind(expiresAt, jobId)
+        .run();
+    await setExpiry('runtime-retain-active', now + 60_000);
+    await setExpiry('runtime-retain-recent', now - 60_000);
+    await setExpiry('runtime-retain-stale', now - retention - 60_000);
+
+    await expect(runtime.INFERENCE.sweep()).resolves.toBeGreaterThanOrEqual(1);
+
+    const expectSurvivor = async (jobId: string) => {
+      const summary = await runtime.INFERENCE.usage({ jobId });
+      expect(summary?.models).toHaveLength(1);
+      expect(summary?.models[0]).toMatchObject({
+        route: 'deepseek-review',
+        requests: 1,
+        incompleteRequests: 0,
+        inputTokens: { total: 10, reportedRequests: 1 },
+      });
+    };
+    await expectSurvivor('runtime-retain-active');
+    await expectSurvivor('runtime-retain-recent');
+    await expect(runtime.INFERENCE.usage({ jobId: 'runtime-retain-stale' })).resolves.toBeNull();
+
+    const staleRequests = await runtime.RELAY_DB.prepare(
+      'SELECT COUNT(*) AS count FROM inference_requests WHERE job_id = ?',
+    )
+      .bind('runtime-retain-stale')
+      .first<{ readonly count: number }>();
+    expect(staleRequests?.count).toBe(0);
+    const staleGrants = await runtime.RELAY_DB.prepare(
+      'SELECT COUNT(*) AS count FROM grants WHERE job_id = ?',
+    )
+      .bind('runtime-retain-stale')
+      .first<{ readonly count: number }>();
+    expect(staleGrants?.count).toBe(0);
   });
 
   it('runs the retention sweep through the scheduled handler', async () => {
