@@ -579,6 +579,15 @@ export type OperationalLogEvent =
     }
   | {
       readonly phase: 'runner';
+      readonly outcome: 'grant';
+      readonly runId: string;
+      readonly jobId: string;
+      readonly attempt: number;
+      readonly reason: 'invalid-response' | 'http-error' | 'timeout' | 'transport-error';
+      readonly status?: number;
+    }
+  | {
+      readonly phase: 'runner';
       readonly outcome: 'terminal';
       readonly runId: string;
       readonly jobId: string;

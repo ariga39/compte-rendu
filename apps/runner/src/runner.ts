@@ -60,7 +60,11 @@ import {
 } from './sandbox-runtime-microsandbox.js';
 import { createOpenSandboxRuntimeFactory } from './sandbox-runtime-opensandbox.js';
 import { createSbxRuntimeFactory } from './sandbox-runtime-sbx.js';
-import { createRelayLlmServiceClient, type LlmGrantIdentity } from './llm-service-client.js';
+import {
+  createRelayLlmServiceClient,
+  LlmGrantIssueError,
+  type LlmGrantIdentity,
+} from './llm-service-client.js';
 import { createReadTokenClient, type ReadTokenClient } from './read-token-client.js';
 import {
   MULTI_PROVIDER_ID,
@@ -2750,7 +2754,20 @@ export const createRunner = (options: RunnerOptions = {}) => {
         let grant: Awaited<ReturnType<typeof llmServiceClient.issue>>;
         try {
           grant = await llmServiceClient.issue(grantIdentity, grantRoutes);
-        } catch {
+        } catch (error) {
+          // Keep issuance failures distinguishable without recording the
+          // response body, route descriptors or the would-be grant.
+          const reason = error instanceof LlmGrantIssueError ? error.reason : 'transport-error';
+          const status = error instanceof LlmGrantIssueError ? error.status : undefined;
+          await recordLog({
+            phase: 'runner',
+            outcome: 'grant',
+            runId: job.input.runId,
+            jobId: job.id,
+            attempt: job.input.attempt,
+            reason,
+            ...(status === undefined ? {} : { status }),
+          });
           failure = { reason: 'agent' };
           return;
         }
