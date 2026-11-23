@@ -160,16 +160,6 @@ export const createMicrosandboxRuntimeFactory =
           sandboxName: name,
           catalog,
           owner,
-          createAttempted: false,
-        });
-      }
-      if (ownershipRoot !== undefined) {
-        await saveMarker(ownershipRoot, {
-          version: 1,
-          jobId: spec.id,
-          sandboxName: name,
-          catalog,
-          owner,
           createAttempted: true,
         });
       }
@@ -280,6 +270,7 @@ export const createMicrosandboxRuntimeFactory =
       async destroy(command) {
         closed = true;
         await rotation?.catch(() => undefined);
+        if (!attempted) return;
         const existing = await inspect(command, name, catalog);
         if (!existing) {
           if (ownershipRoot !== undefined) await removeMarker(ownershipRoot, spec.id);

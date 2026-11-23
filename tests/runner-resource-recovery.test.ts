@@ -124,12 +124,51 @@ describe('microsandbox ownership recovery', () => {
     });
     expect(removed).toEqual([]);
     expect(await readdir(markerDir)).toHaveLength(1);
+  });
 
-    await expect(runtime.destroy(command)).rejects.toThrow(
-      'Microsandbox creation was not attempted',
-    );
-    expect(removed).toEqual([]);
-    expect(await readdir(markerDir)).toHaveLength(1);
+  it.each([
+    [
+      'missing grant file',
+      (spec: SandboxJobSpec) => ({
+        ...spec,
+        modelTokenFile: join(spec.checkoutRoot, 'missing-token'),
+      }),
+    ],
+    ['invalid host', (spec: SandboxJobSpec) => ({ ...spec, modelResource: 'api.github.com:443' })],
+  ] as const)('does nothing on destroy after %s setup failure', async (failure, mutate) => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-msb-setup-failure-'));
+    roots.push(root);
+    const msbHome = join(root, 'msb');
+    await mkdir(join(msbHome, 'db'), { recursive: true });
+    await writeFile(join(msbHome, 'db', 'msb.db'), 'catalog', { mode: 0o600 });
+    vi.stubEnv('MSB_HOME', msbHome);
+    const ownershipRoot = join(root, 'sandbox-owners', failure);
+    const spec = mutate(jobSpec(root, 'msb-setup-failure-job'));
+    const runtime = createMicrosandboxRuntimeFactory(
+      'review-image',
+      async () => ok,
+      false,
+      ownershipRoot,
+    )(spec);
+    const commands: string[] = [];
+    const command: SandboxCommand = async (args) => {
+      commands.push(args[0]!);
+      return ok;
+    };
+
+    await expect(runtime.setup(command)).rejects.toThrow();
+    await runtime.destroy(command);
+
+    expect(commands).toEqual([]);
+    await expect(readdir(join(ownershipRoot, 'microsandbox'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    await expect(reconcileMicrosandboxRestartResources(ownershipRoot, command)).resolves.toEqual({
+      ok: true,
+      recovered: 0,
+      recoveredJobIds: [],
+      failures: [],
+    });
   });
 
   it('does not reap a marker for a currently live job and still reaps a stale owned marker', async () => {
