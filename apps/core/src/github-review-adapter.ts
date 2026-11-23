@@ -1,5 +1,10 @@
 import { Schema } from 'effect';
-import { DEFAULT_REVIEW_NAME, GitHubSha, RETRY_REVIEW_ACTION } from '@compte-rendu/contracts';
+import {
+  canonicalDashboardOrigin,
+  DEFAULT_REVIEW_NAME,
+  GitHubSha,
+  RETRY_REVIEW_ACTION,
+} from '@compte-rendu/contracts';
 import { GitHubNotFoundError, GitHubRequestError, parseRetryAfterMs } from './github-http';
 import type { GitHubAdapter } from './index';
 import { formatReviewPublicationMarker } from './review-publication-format';
@@ -117,20 +122,10 @@ export const createGitHubPublicationAdapter = (
   const fetcher = options.fetch ?? globalThis.fetch;
   const apiBaseUrl = (options.apiBaseUrl ?? 'https://api.github.com').replace(/\/$/, '');
   const checkName = options.checkName?.trim() || DEFAULT_REVIEW_NAME;
-  const dashboardOrigin = options.dashboardOrigin?.trim();
-  if (dashboardOrigin) {
-    const parsed = new URL(dashboardOrigin);
-    if (
-      parsed.protocol !== 'https:' ||
-      parsed.username ||
-      parsed.password ||
-      parsed.pathname !== '/' ||
-      parsed.search ||
-      parsed.hash
-    ) {
-      throw new Error('DASHBOARD_ORIGIN must be an HTTPS origin');
-    }
-  }
+  const configuredDashboardOrigin = options.dashboardOrigin?.trim();
+  const dashboardOrigin = canonicalDashboardOrigin(configuredDashboardOrigin);
+  if (configuredDashboardOrigin && !dashboardOrigin)
+    throw new Error('DASHBOARD_ORIGIN must be an HTTPS origin');
   const checkLink = (runId: string, output: { title: string; summary: string }) => {
     if (!dashboardOrigin) return { output };
     const detailsUrl = new URL(`/jobs/${encodeURIComponent(runId)}`, dashboardOrigin).href;

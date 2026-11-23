@@ -1,6 +1,6 @@
 # Help
 
-How to read this dashboard. Anyone may read it. Authorized operators can also cancel a review that has not started publishing. Nothing here edits a review result or starts a review.
+Public task views are read-only. Anyone may read them. Authorized operators can sign in to change the models for future reviews in Settings and can cancel a review that has not started publishing. Nothing here edits a review result or starts a review. See [review configuration](https://github.com/ariga39/compte-rendu/blob/main/docs/review-configuration.md) for the authenticated editor.
 
 ## On this page
 
@@ -10,6 +10,7 @@ How to read this dashboard. Anyone may read it. Authorized operators can also ca
 - [Finding and paging through history](#finding-and-paging-through-history)
 - [Review details](#review-details)
 - [Cancelling a review](#cancelling-a-review)
+- [Model settings](#model-settings)
 - [Review decisions](#review-decisions)
 - [Published, Failed, Superseded and Cancelled](#published-failed-superseded-and-cancelled)
 - [Timestamps and older records](#timestamps-and-older-records)
@@ -57,7 +58,7 @@ Reviews are listed newest first, and filters stay in the page address so a filte
 - **Decision** is the review's conclusion: **Approve**, **Request changes**, or **Comment**, explained below.
 - **Status** summarises the review. **Timeline** lists the stages that were recorded, in order: **Fetching code**, **Preparing environment**, **Reviewing**, **Saving run records**, and **Finishing up**, followed by **Result received** and **Publishing** for result processing.
 - **Revision** shows **Source branch** and **Target branch** (the reviewed head branch and its target base branch), then the **Reviewed commit** and **Base commit** SHAs. Branch names are shown only for a confirmed-public review, are captured when the review is admitted, and say **Not recorded** when they were not captured — they are never looked up or guessed later.
-- **Technical details** (collapsed by default) contains the runner observations — **Runner execution started**, **Result checks started**, and **Cleanup attempt finished** — and the cleanup result. A recorded observation does not guarantee a successful outcome.
+- **Technical details** (collapsed by default) shows the recorded **Sandbox backend** — Docker Sandbox (sbx), microsandbox, OpenSandbox, or OpenShell — the runner observations — **Runner execution started**, **Result checks started**, and **Cleanup attempt finished** — and the cleanup result. A recorded observation does not guarantee a successful outcome. Missing observations and a backend that was not recorded say **Not recorded**.
 
 Stages that never ran are skipped. Missing history is shown as not recorded and is not filled in later.
 
@@ -70,6 +71,10 @@ After a cancellation is accepted, the review shows **Cancelling** while executio
 For cancelled reviews, the timeline marks the operator cancellation, the cleanup outcome and the Runner callback at their recorded times. If a Sandbox was assigned, wait for cleanup confirmation before retrying. To start a fresh review, a repository maintainer can select **Run review again** on the cancelled GitHub Check. For older Checks without that action, comment `/ai-review` on the PR.
 
 Cancellation is durable: refreshing the page, closing the tab, or signing out does not restart the review. If publication has already started, or the review has already reached another final state, cancellation is refused and the latest details are shown instead. An existing GitHub review is never withdrawn.
+
+## Model settings
+
+Public task views stay read-only. Changing models requires signing in with GitHub and an account on this instance's editor allowlist. In **Settings**, an authorized operator chooses the reviewer models used by future reviews. Saving a selection does not change queued or running reviews, edit a past result, or start a review. See [review configuration](https://github.com/ariga39/compte-rendu/blob/main/docs/review-configuration.md) for catalog and admission details.
 
 ## Review decisions
 
