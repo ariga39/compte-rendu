@@ -137,6 +137,67 @@ describe('Runner relay control client', () => {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
+
+  it('sanitizes issue, revoke and usage transport failures', async () => {
+    const client = createRelayLlmServiceClient({
+      origin: 'https://relay.example',
+      token: 'relay-token',
+      fetch: async () => {
+        throw new Error('private relay diagnostic');
+      },
+    });
+    const issue = client
+      .issue({ runId: 'run-failure', jobId: 'job-failure', attempt: 1 }, ['reviewer-a'])
+      .catch((error: unknown) => error);
+    const usage = client.usage('job-failure').catch((error: unknown) => error);
+    const revoke = client.revoke('job-failure').catch((error: unknown) => error);
+
+    await expect(issue).resolves.toHaveProperty('message', 'LLM service grant unavailable');
+    await expect(usage).resolves.toHaveProperty('message', 'LLM usage unavailable');
+    await expect(revoke).resolves.toHaveProperty('message', 'LLM service control request failed');
+    for (const error of await Promise.all([issue, usage, revoke])) {
+      expect(String(error)).not.toContain('private relay diagnostic');
+    }
+  });
+
+  it('maps a timed-out body read to the sanitized error and aborts the signal', async () => {
+    vi.useFakeTimers();
+    let aborted = false;
+    let bodyStarted = false;
+    let signalSeen = false;
+    try {
+      const client = createRelayLlmServiceClient({
+        origin: 'https://relay.example',
+        token: 'relay-token',
+        fetch: async (_input, init) => {
+          signalSeen = init?.signal !== undefined;
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                bodyStarted = true;
+                controller.enqueue(new TextEncoder().encode('{"version":1,'));
+                init?.signal?.addEventListener('abort', () => {
+                  aborted = true;
+                  controller.error(new Error('aborted'));
+                });
+              },
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          );
+        },
+      });
+      const pending = client.usage('job-timeout').catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(5000);
+      const error = await pending;
+
+      expect(signalSeen).toBe(true);
+      expect(bodyStarted).toBe(true);
+      expect(aborted).toBe(true);
+      expect(error).toHaveProperty('message', 'LLM usage unavailable');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('Runner relay configuration', () => {

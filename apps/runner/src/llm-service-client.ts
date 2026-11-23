@@ -56,33 +56,30 @@ const relayPost = (options: RelayLlmServiceClientOptions) =>
   ) {
     const origin = options.origin.toString().replace(/\/+$/, '');
     return yield* Effect.tryPromise({
-      try: async () => {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), RUNNER_LLM_CONTROL_TIMEOUT_MS);
-        try {
-          const response = await (options.fetch ?? globalThis.fetch)(`${origin}${path}`, {
-            method: 'POST',
-            headers: {
-              authorization: `Bearer ${options.token}`,
-              'content-type': 'application/json',
-            },
-            body: JSON.stringify(payload),
-            redirect: 'error',
-            signal: controller.signal,
-          });
-          if (response.status !== expectedStatus) {
-            await response.body?.cancel().catch(() => undefined);
-            throw new Error('control request rejected');
-          }
-          const body = await readBoundedBody(response.body, maxBytes);
-          if (body.kind === 'too-large') throw new Error('control response too large');
-          return body.text;
-        } finally {
-          clearTimeout(timeout);
+      try: async (signal) => {
+        const response = await (options.fetch ?? globalThis.fetch)(`${origin}${path}`, {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${options.token}`,
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify(payload),
+          redirect: 'error',
+          signal,
+        });
+        if (response.status !== expectedStatus) {
+          await response.body?.cancel().catch(() => undefined);
+          throw new Error('control request rejected');
         }
+        const body = await readBoundedBody(response.body, maxBytes);
+        if (body.kind === 'too-large') throw new Error('control response too large');
+        return body.text;
       },
-      catch: () => new Error('LLM service control request failed'),
-    });
+      catch: (error) => error,
+    }).pipe(
+      Effect.timeout(RUNNER_LLM_CONTROL_TIMEOUT_MS),
+      Effect.mapError(() => new Error('LLM service control request failed')),
+    );
   });
 
 export const createRelayLlmServiceClient = (
