@@ -98,28 +98,34 @@ export const relayProtocolStream = (options: ProtocolStreamOptions): Effect.Effe
     };
     let reader: ReadableStreamDefaultReader<SseFrame> | null = null;
     let downstream: ReadableStreamDefaultController<Uint8Array> | null = null;
-    let finalized = false;
-    let failureStarted = false;
-    let completed = false;
+    let finalizeStarted = false;
+    let teardownStarted = false;
     let closed = false;
 
     const cleanup = () => {
       clearTimeout(expiryTimer);
       request.signal.removeEventListener('abort', onRequestAbort);
     };
-    const finishOnce = async (complete: boolean): Promise<boolean> => {
-      if (finalized) return false;
+    const persistPartial = async (): Promise<boolean> => {
       try {
-        if (complete) {
-          if (!(await finalizeComplete(database, requestId, usage))) return false;
-        } else {
-          await savePartial(database, requestId, usage);
-        }
-        finalized = true;
-        usage.complete = complete;
+        await savePartial(database, requestId, usage);
         return true;
       } catch {
         await Effect.runPromise(Effect.logWarning('relay.accounting.failed'));
+        return false;
+      }
+    };
+    const finishOnce = async (complete: boolean): Promise<boolean> => {
+      if (finalizeStarted) return false;
+      finalizeStarted = true;
+      if (!complete) return persistPartial();
+      try {
+        if (!(await finalizeComplete(database, requestId, usage))) return false;
+        usage.complete = true;
+        return true;
+      } catch {
+        await Effect.runPromise(Effect.logWarning('relay.accounting.failed'));
+        await persistPartial();
         return false;
       }
     };
@@ -136,8 +142,8 @@ export const relayProtocolStream = (options: ProtocolStreamOptions): Effect.Effe
       }
     };
     const failStream = async () => {
-      if (finalized || completed) return;
-      failureStarted = true;
+      if (closed || teardownStarted) return;
+      teardownStarted = true;
       await finishOnce(false);
       await teardown();
     };
@@ -175,7 +181,7 @@ export const relayProtocolStream = (options: ProtocolStreamOptions): Effect.Effe
       yield* Effect.promise(() => finishOnce(false));
       return failure();
     }
-    if (failureStarted) {
+    if (teardownStarted) {
       cleanup();
       yield* Effect.promise(
         () => upstream.body?.cancel().catch(() => undefined) ?? Promise.resolve(),
@@ -214,17 +220,20 @@ export const relayProtocolStream = (options: ProtocolStreamOptions): Effect.Effe
       output: ReadableStreamDefaultController<Uint8Array>,
       bytes: Uint8Array,
     ) => {
-      if (failureStarted) return;
+      if (closed || teardownStarted) return;
       if (!(await finishOnce(true))) {
         await failStream();
         return;
       }
-      completed = true;
+      if (closed || teardownStarted) return;
       cleanup();
-      output.enqueue(bytes);
       closed = true;
-      output.close();
-      await cancelUpstream();
+      try {
+        output.enqueue(bytes);
+        output.close();
+      } finally {
+        await cancelUpstream();
+      }
     };
 
     const responseBody = new ReadableStream<Uint8Array>(
@@ -233,7 +242,7 @@ export const relayProtocolStream = (options: ProtocolStreamOptions): Effect.Effe
           downstream = output;
         },
         async pull(output) {
-          if (completed) return;
+          if (closed) return;
           for (;;) {
             let next: Awaited<ReturnType<NonNullable<typeof reader>['read']>>;
             try {
@@ -243,7 +252,7 @@ export const relayProtocolStream = (options: ProtocolStreamOptions): Effect.Effe
               return;
             }
             if (next.done) {
-              if (completed) return;
+              if (closed) return;
               await failStream();
               return;
             }
@@ -268,8 +277,7 @@ export const relayProtocolStream = (options: ProtocolStreamOptions): Effect.Effe
           }
         },
         async cancel() {
-          if (closed || completed) return;
-          closed = true;
+          if (closed || teardownStarted) return;
           controller.abort(new Error('inference response cancelled'));
           await failStream();
         },
