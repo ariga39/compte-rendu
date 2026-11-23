@@ -12867,8 +12867,13 @@ describe('SDK sandbox execution', () => {
       'OpenSandbox runtime requires endpoint, API key file and image',
     );
   });
-  it('writes the OpenSandbox identity and nonce to the manifest and recovers from it', async () => {
+  it('recovers generated OpenSandbox evidence and releases the same-PR claim through Core', async () => {
     const evidenceRoot = await mkdtemp(join(tmpdir(), 'cr-os-manifest-'));
+    const database = new SqliteD1Database();
+    const stateStore = createD1ReviewStateStore(database);
+    const baseSha = '1'.repeat(40);
+    const headSha = '2'.repeat(40);
+    const newHead = '3'.repeat(40);
     const ownershipNonce = randomUUID();
     let runner: ReturnType<typeof createRunner> | undefined;
     let recoveredIdentity: unknown;
@@ -12906,12 +12911,50 @@ describe('SDK sandbox execution', () => {
         },
       },
     );
+    const original = await stateStore.claimReview({
+      deliveryId: 'os-recovery-original',
+      occurredAt: '2026-09-01T00:00:00.000Z',
+      job: {
+        repositoryId: 11,
+        installationId: 7,
+        pullRequestNumber: 42,
+        baseSha,
+        headSha,
+        trigger: 'automatic',
+      },
+    });
+    if (original.kind !== 'claimed') throw new Error('original run was not admitted');
+    await claimRunnerJob(stateStore, { runId: original.runId, jobId: runnerJobFields.id });
+    const env = {
+      REVIEW_DB: database,
+      GITHUB_APP_ID: '123',
+      GITHUB_APP_PRIVATE_KEY: 'test-key',
+      EVIDENCE_BUCKET: { put: async () => undefined },
+    };
+    const core = createCoreWorker(env, {
+      stateStore,
+      github: {
+        loadReviewTarget: async () => ({ headSha: newHead }),
+        getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+      },
+      getReadInstallationToken: async () => ({
+        token: 'repository-read-token',
+        expiresAt: '2099-01-01T00:00:00.000Z',
+      }),
+    });
+    const claim = () =>
+      core.fetch(
+        new Request('https://core.internal/runner-claims', {
+          method: 'POST',
+          headers: { 'x-compte-rendu-runner-claim': 'verified' },
+        }),
+      );
     try {
       const callbacks: Request[] = [];
       const apiKeyFile = join(evidenceRoot, 'control-key');
       await writeFile(apiKeyFile, 'test-control-key', { mode: 0o600 });
       const result = await runAgentScenario({
-        runId: 'run-os-manifest',
+        runId: original.runId,
         output: finalMarkdownJsonl(),
         evidenceRoot,
         cleanupFailure: true,
@@ -12943,6 +12986,39 @@ describe('SDK sandbox execution', () => {
         sandboxOwnerNonce: ownershipNonce,
         hostFilesCleanupConfirmed: true,
       });
+
+      const terminal = callbacks.find(
+        (request) => new URL(request.url).pathname === '/runner-callback',
+      );
+      if (terminal === undefined) throw new Error('terminal callback was not captured');
+      const delivered = await core.fetch(
+        new Request('https://core.internal/runner-results', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-compte-rendu-runner-callback': 'verified',
+          },
+          body: await terminal.clone().text(),
+        }),
+      );
+      expect(delivered.status).toBe(202);
+      expect(await stateStore.getRunOutcome(original.runId)).toMatchObject({ status: 'failed' });
+
+      const replacement = await stateStore.claimReview({
+        deliveryId: 'os-recovery-replacement',
+        occurredAt: '2026-09-01T00:01:00.000Z',
+        job: {
+          repositoryId: 11,
+          installationId: 7,
+          pullRequestNumber: 42,
+          baseSha,
+          headSha: newHead,
+          trigger: 'automatic',
+        },
+      });
+      expect(replacement.kind).toBe('claimed');
+      expect((await claim()).status).toBe(204);
+
       const recovery = await runner!.handle(
         new Request('http://runner/maintenance/recover-cleanup', {
           method: 'POST',
@@ -12966,9 +13042,32 @@ describe('SDK sandbox execution', () => {
         ownershipNonce,
         sandboxName: result.manifest.sandboxName,
       });
-      expect(new URL(callbacks.at(-1)!.url).pathname).toBe('/runner-cleanup-recovery');
+
+      const report = callbacks.find(
+        (request) => new URL(request.url).pathname === '/runner-cleanup-recovery',
+      );
+      if (report === undefined) throw new Error('recovery report was not captured');
+      const reconciled = await core.fetch(
+        new Request('https://core.internal/runner-cleanup-recovery', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-compte-rendu-runner-cleanup-recovery': 'verified',
+          },
+          body: await report.clone().text(),
+        }),
+      );
+      expect(reconciled.status).toBe(202);
+
+      const released = await claim();
+      expect(released.status).toBe(200);
+      expect(await released.json()).toMatchObject({
+        pullRequestNumber: 42,
+        headSha: newHead,
+      });
     } finally {
       await runner?.close();
+      database.close();
       await rm(evidenceRoot, { recursive: true, force: true });
     }
   });
