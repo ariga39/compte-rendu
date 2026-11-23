@@ -102,6 +102,23 @@ const finalMarkdownJsonl = (markdown = defaultReviewMarkdown, sessionID = 'scena
     },
   });
 
+const decisionText = (decision: string, markdown: string) => `DECISION: ${decision}\n\n${markdown}`;
+
+const finalDecisionTextJsonl = (
+  decision: string,
+  markdown: string,
+  sessionID = 'scenario-session',
+) =>
+  JSON.stringify({
+    type: 'text',
+    sessionID,
+    part: {
+      type: 'text',
+      messageID: 'msg-final',
+      text: decisionText(decision, markdown),
+    },
+  });
+
 const writeEvidenceFixture = async (
   args: readonly string[],
   options: {
@@ -1811,6 +1828,25 @@ describe('Runner Job HTTP interface', () => {
       'result-schema-failure',
     ],
     [
+      'an unknown decision header',
+      sessionExportJson('scenario-session', {
+        text: decisionText('maybe', '## Review:\n\nNo findings.'),
+      }),
+      'result-schema-failure',
+    ],
+    [
+      'a decision header without the blank separator',
+      sessionExportJson('scenario-session', {
+        text: 'DECISION: approve\n## Review:\n\nNo findings.',
+      }),
+      'result-schema-failure',
+    ],
+    [
+      'an empty decision-header body',
+      sessionExportJson('scenario-session', { text: 'DECISION: approve\n\n' }),
+      'result-schema-failure',
+    ],
+    [
       'missing terminal idle',
       sessionExportJson('scenario-session', { terminalIdle: false }),
       'missing-terminal-message',
@@ -2029,6 +2065,60 @@ describe('Runner Job HTTP interface', () => {
     expect(result.terminal).toMatchObject({
       status: 'succeeded',
       result: structuredResult(markdown, 'approve'),
+      evidence: { status: 'complete' },
+    });
+  });
+
+  it('accepts the decision header with raw Markdown instead of JSON', async () => {
+    const markdown =
+      'TLDR: Request changes — a "quoted" value, an unescaped apostrophe, and a literal \\ backslash.\n\n' +
+      '## Finding\n\n' +
+      'The payload `"decision": "approve"` is text, not JSON metadata.\n' +
+      '```ts\nconst value = "line\\nnot-a-separator";\n```\n\n' +
+      'A second paragraph stays intact.';
+    const result = await runAgentScenario({
+      runId: 'run-decision-header',
+      output: finalDecisionTextJsonl('request_changes', markdown),
+      sessionExport: sessionExportJson('scenario-session', {
+        text: decisionText('request_changes', markdown),
+      }),
+    });
+
+    expect(result.terminal).toMatchObject({
+      status: 'succeeded',
+      result: structuredResult(markdown, 'request_changes'),
+      evidence: { status: 'complete' },
+      sandbox: { cleanup: 'destroyed' },
+    });
+    expect(result.manifest.result).toEqual(structuredResult(markdown, 'request_changes'));
+  });
+
+  it('accepts the decision header on a correction turn without JSON escaping', async () => {
+    const sessionId = 'session-decision-header-correction';
+    const markdown =
+      'TLDR: Request changes — the quoted "failure" needs a newline.\n\n' +
+      '## Finding\n\nA raw Markdown body avoids escaping the quotes and newlines.';
+    const finalText = decisionText('request_changes', markdown);
+    const result = await runReminderScenario({
+      runId: 'run-decision-header-correction',
+      sessionId,
+      rounds: [
+        { output: completedWithoutSubmitJsonl(sessionId), finalText: null },
+        {
+          output: finalDecisionTextJsonl('request_changes', markdown, sessionId),
+          finalText,
+        },
+      ],
+    });
+
+    expect(result.agentRuns).toBe(2);
+    expect(result.agentCommands[1]?.join(' ')).toContain(
+      'Your final response did not contain a valid review submission',
+    );
+    expect(result.agentCommands[1]?.join(' ')).toContain('DECISION:');
+    expect(result.terminal).toMatchObject({
+      status: 'succeeded',
+      result: structuredResult(markdown, 'request_changes'),
       evidence: { status: 'complete' },
     });
   });
@@ -5123,7 +5213,7 @@ describe('Runner Job HTTP interface', () => {
     expect(deliveredSkills.get('code-review')?.body).toContain('Challenge the premise');
     expect(deliveredPrompt).toContain('TLDR:');
     expect(deliveredPrompt).toContain('decision');
-    expect(deliveredPrompt).toContain('markdown');
+    expect(deliveredPrompt).toContain('Markdown');
     expect(deliveredPrompt).not.toContain('submit_review');
     expect(deliveredPrompt).not.toContain('## Review:');
     expect(deliveredPrompt).toContain('as direct shell commands');
@@ -5208,9 +5298,10 @@ describe('Runner Job HTTP interface', () => {
       'Challenge avoidable complexity',
     );
     expect(deliveredPrompt).toContain('TLDR:');
-    expect(deliveredPrompt).toContain('Return your final answer as one JSON object');
+    expect(deliveredPrompt).toContain('Return your final answer in exactly this form');
+    expect(deliveredPrompt).toContain('DECISION: approve|request_changes|comment');
     expect(deliveredPrompt).toContain('decision');
-    expect(deliveredPrompt).toContain('markdown');
+    expect(deliveredPrompt).toContain('Markdown');
     expect(deliveredPrompt).not.toContain('submit_review');
     expect(deliveredPrompt).not.toContain('## Review:');
   });
@@ -10615,7 +10706,8 @@ describe('Runner multi-model review', () => {
       'do not inspect the repository again to verify their conclusions',
     );
     expect(supervisorPromptText).toContain('TLDR:');
-    expect(supervisorPromptText).toContain('Return your final answer as one JSON object');
+    expect(supervisorPromptText).toContain('Return your final answer in exactly this form');
+    expect(supervisorPromptText).toContain('DECISION: approve|request_changes|comment');
     expect(supervisorPromptText).not.toContain('submit_review');
 
     expect(result.manifest.multiReview).toMatchObject({
@@ -10768,6 +10860,44 @@ describe('Runner multi-model review', () => {
     });
   });
 
+  it('accepts the decision header from the multi supervisor without JSON escaping', async () => {
+    const markdown =
+      'TLDR: Request changes — the synthesized "quote" and newline stay raw.\n\n' +
+      '## Finding\n\nThe supervisor writes Markdown, not an escaped JSON string.';
+    const rootExportWithHeader = JSON.stringify({
+      info: {
+        id: rootSession,
+        agent: 'multi-review-supervisor',
+        model: { providerID: 'compte-rendu', id: 'deepseek-v4.1-flash' },
+        outcome: 'succeeded',
+      },
+      messages: [
+        {
+          id: 'msg-root-final',
+          type: 'assistant',
+          finish: 'stop',
+          agent: 'multi-review-supervisor',
+          model: { providerID: 'compte-rendu', id: 'deepseek-v4.1-flash' },
+          content: [{ type: 'text', text: decisionText('request_changes', markdown) }],
+        },
+        { type: 'idle', outcome: 'succeeded' },
+      ],
+    });
+    const result = await runScenario({
+      runId: 'run-multi-decision-header',
+      rootExport: rootExportWithHeader,
+    });
+
+    expect(result.terminal).toMatchObject({
+      status: 'succeeded',
+      result: structuredResult(markdown, 'request_changes'),
+      evidence: { status: 'complete' },
+    });
+    expect(result.manifest.multiReview).toMatchObject({
+      synthesis: { decision: 'request_changes', markdown },
+    });
+  });
+
   it('delivers one shared review contract to a single reviewer and a multi roster', async () => {
     const single = await runAgentScenario({
       runId: 'run-shared-prompt-single',
@@ -10789,9 +10919,10 @@ describe('Runner multi-model review', () => {
       expect(prompt).toContain('Consolidate observations sharing one root cause');
       expect(prompt).toContain('merge disposition');
       expect(prompt).toContain('TLDR:');
-      expect(prompt).toContain('Return your final answer as one JSON object');
+      expect(prompt).toContain('Return your final answer in exactly this form');
+      expect(prompt).toContain('DECISION: approve|request_changes|comment');
       expect(prompt).toContain('decision');
-      expect(prompt).toContain('markdown');
+      expect(prompt).toContain('Markdown');
       expect(prompt).toContain('This is a static review');
       expect(prompt).toContain('The token is a capability, never review evidence');
       expect(prompt).toContain('every review thread plus independently paginated reply');

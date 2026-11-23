@@ -38,10 +38,11 @@ Reported counters include input, uncached input, cache reads and writes, output 
 
 OpenCode 2 can recover a `provider.invalid-output` stream error while its CLI
 still exits with code 1. Runner accepts that observed case only when the exact
-session export proves successful completion and its final assistant JSON passes
-the shared decision/Markdown contract. Each recoverable error must have the
-observed HTTP 200 shape and belong to the same session. If final JSON needs a
-correction, recovery eligibility is checked for each invocation: an earlier
+session export proves successful completion and its final assistant submission
+passes the shared decision/Markdown contract. Each recoverable error must have
+the observed HTTP 200 shape and belong to the same session. If the final
+submission needs a correction, recovery eligibility is checked for each
+invocation: an earlier
 known error cannot excuse a generic failure in the correction round. Unknown
 errors, other nonzero exits, timeout, truncation, identity mismatch and incomplete
 required evidence fail without publication. See [final output](review-decisions-design.md#final-output-and-publication).
