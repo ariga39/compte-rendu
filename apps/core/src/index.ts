@@ -408,18 +408,16 @@ export interface ReviewStateStore {
     | { kind: 'empty' }
     | { kind: 'preparing'; runId: string; jobId: string; claimedAt: string }
   >;
-  expireClaimHandoff?(
-    runId: string,
-    jobId: string,
-    attempt: number,
-    occurredAt: string,
-  ): Promise<boolean>;
   markClaimPrepared?(runId: string, jobId: string, attempt: number): Promise<boolean>;
   markSchedulingFailed(input: {
     failure?: PublicTaskFailure;
     runId: string;
     occurredAt: string;
-    releaseRunnerClaim?: { jobId: string; attempt: number };
+    releaseRunnerClaim?: {
+      jobId: string;
+      attempt: number;
+      requireUnprepared?: boolean;
+    };
   }): Promise<boolean>;
   recordDelivery: (input: ReviewDeliveryRecord) => Promise<void>;
 }

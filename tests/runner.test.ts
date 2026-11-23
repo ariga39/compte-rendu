@@ -417,12 +417,19 @@ const routeRelayControl = (
   return routed;
 };
 
+// Match Vitest's default per-test deadline and return immediately on success.
+// A fixed attempt count turns CI scheduling variance into a false failure.
+const TERMINAL_WAIT_TIMEOUT_MS = 5_000;
+
 const waitForTerminal = async (
   runner: ReturnType<typeof createRunner>,
   jobId: string,
-  attempts = 50,
+  timeoutMs = TERMINAL_WAIT_TIMEOUT_MS,
 ) => {
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
+  // Use the monotonic clock: several scenarios advance a fake Date while the
+  // job is running, which must not consume this polling deadline.
+  const deadline = performance.now() + timeoutMs;
+  while (performance.now() < deadline) {
     const response = await runner.handle(
       new Request(`http://runner/jobs/${jobId}`, {
         headers: { authorization: 'Bearer runner-test-token' },
@@ -479,7 +486,6 @@ const runAgentScenario = async (scenario: {
   sandboxRuntimeFactory?: SandboxRuntimeFactory;
   logEvents?: unknown[];
   onRunner?: (runner: ReturnType<typeof createRunner>) => void;
-  terminalAttempts?: number;
 }) => {
   const baseSha = '1111111111111111111111111111111111111111';
   const headSha = '2222222222222222222222222222222222222222';
@@ -671,7 +677,7 @@ const runAgentScenario = async (scenario: {
   );
   const { id } = (await submitted.json()) as { id: string };
   const terminalStartedAt = performance.now();
-  const terminal = await waitForTerminal(runner, id, scenario.terminalAttempts);
+  const terminal = await waitForTerminal(runner, id);
   const terminalDurationMs = performance.now() - terminalStartedAt;
   const manifest = JSON.parse(
     await readFile(
@@ -723,7 +729,6 @@ const runReminderScenario = async (scenario: {
   readTokenFetch?: typeof fetch;
   cleanupStderr?: string;
   logEvents?: unknown[];
-  terminalAttempts?: number;
 }) => {
   const baseSha = '1111111111111111111111111111111111111111';
   const headSha = '2222222222222222222222222222222222222222';
@@ -898,7 +903,7 @@ const runReminderScenario = async (scenario: {
   );
   const { id } = (await submitted.json()) as { id: string };
   if (scenario.duringAgent) await agentClockRestored;
-  const terminal = await waitForTerminal(runner, id, scenario.terminalAttempts);
+  const terminal = await waitForTerminal(runner, id);
   const manifest = JSON.parse(
     await readFile(
       join(sharedEvidenceRoot, terminal.evidenceId as string, 'manifest.json'),
@@ -1403,8 +1408,10 @@ describe('Runner Job HTTP interface', () => {
         { id: 'message-1', parts: [{ type: 'text', text: 'x'.repeat(25 * 1024 * 1024) }] },
       ],
     });
+    let runner: ReturnType<typeof createRunner> | undefined;
+    let acceptedId: string | undefined;
     try {
-      const runner = createRunner({
+      runner = createRunner({
         authToken: 'runner-test-token',
         modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
         evidenceRoot,
@@ -1466,6 +1473,9 @@ describe('Runner Job HTTP interface', () => {
         }),
       );
       const { id } = (await submitted.json()) as { id: string };
+      acceptedId = id;
+      // This fixture hashes and retries a 25 MiB export. Keep the wait realistic
+      // for CI, and abort/close it in finally before removing its evidence.
       const terminal = await waitForTerminal(runner, id);
       for (let attempt = 0; attempt < 50 && callbackRequests.length === 0; attempt += 1) {
         await new Promise((resolve) => setTimeout(resolve, 10));
@@ -1504,6 +1514,7 @@ describe('Runner Job HTTP interface', () => {
         ),
       ).resolves.toBe(sessionExport);
       await runner.close();
+      runner = undefined;
       const restarted = createRunner({
         authToken: 'runner-test-token',
         evidenceRoot,
@@ -1546,6 +1557,19 @@ describe('Runner Job HTTP interface', () => {
         await restarted.close();
       }
     } finally {
+      if (runner !== undefined) {
+        if (acceptedId !== undefined) {
+          await runner
+            .handle(
+              new Request(`http://runner/jobs/${acceptedId}`, {
+                method: 'DELETE',
+                headers: { authorization: 'Bearer runner-test-token' },
+              }),
+            )
+            .catch(() => undefined);
+        }
+        await runner.close();
+      }
       await rm(evidenceRoot, { recursive: true, force: true });
     }
   });
@@ -2652,7 +2676,6 @@ describe('Runner Job HTTP interface', () => {
         claimDeadlineAt: start + 90 * 60 * 1000,
         repositoryReadTokenExpiresAt: start + 700,
         expectedRotatedToken: 'rotated-github-read-token',
-        terminalAttempts: 300,
         duringAgent: triggerAgentRefresh,
         readTokenFetch: async (_input, init) => {
           requestBodies.push(
@@ -2714,7 +2737,6 @@ describe('Runner Job HTTP interface', () => {
         claimDeadlineAt: start + 90 * 60 * 1000,
         repositoryReadTokenExpiresAt: start + 700,
         expectedRotatedToken: canary,
-        terminalAttempts: 300,
         cleanupStderr: `cleanup failed: ${canary}`,
         logEvents,
         duringAgent: triggerAgentRefresh,
@@ -2842,7 +2864,6 @@ describe('Runner Job HTTP interface', () => {
         runId: 'run-read-token-cleanup-race',
         claimDeadlineAt: start + 90 * 60 * 1000,
         repositoryReadTokenExpiresAt: start + 700,
-        terminalAttempts: 300,
         duringAgent: triggerAgentRefresh,
         readTokenFetch: async () => {
           refreshStarted = true;
@@ -9377,7 +9398,6 @@ describe('Runner LLM lifecycle failures', () => {
     let runner: ReturnType<typeof createRunner> | undefined;
     const scenario = runAgentScenario({
       runId: 'llm-cancel',
-      terminalAttempts: 400,
       output: finalMarkdownJsonl(),
       relayControl: f.relay,
       modelConfig,
@@ -9934,7 +9954,7 @@ describe('Runner transport diagnostics', () => {
         }),
       );
       const { id } = (await submitted.json()) as { id: string };
-      const terminal = await waitForTerminal(runner, id, 200);
+      const terminal = await waitForTerminal(runner, id);
 
       expect(terminal).toMatchObject({
         status: 'failed',
@@ -13055,7 +13075,7 @@ describe('SDK sandbox execution', () => {
     );
     const original = await stateStore.claimReview({
       deliveryId: 'os-recovery-original',
-      occurredAt: '2026-09-01T00:00:00.000Z',
+      occurredAt: new Date().toISOString(),
       job: {
         repositoryId: 11,
         installationId: 7,
@@ -13066,7 +13086,11 @@ describe('SDK sandbox execution', () => {
       },
     });
     if (original.kind !== 'claimed') throw new Error('original run was not admitted');
-    await claimRunnerJob(stateStore, { runId: original.runId, jobId: runnerJobFields.id });
+    await claimRunnerJob(stateStore, {
+      runId: original.runId,
+      jobId: runnerJobFields.id,
+      occurredAt: new Date().toISOString(),
+    });
     const env = {
       REVIEW_DB: database,
       GITHUB_APP_ID: '123',
@@ -13148,7 +13172,7 @@ describe('SDK sandbox execution', () => {
 
       const replacement = await stateStore.claimReview({
         deliveryId: 'os-recovery-replacement',
-        occurredAt: '2026-09-01T00:01:00.000Z',
+        occurredAt: new Date().toISOString(),
         job: {
           repositoryId: 11,
           installationId: 7,

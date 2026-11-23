@@ -373,7 +373,11 @@ export const createCoreWorker = (
     outcome: ReviewOutcome,
     runId: string,
     occurredAt: string,
-    releaseRunnerClaim?: { jobId: string; attempt: number },
+    releaseRunnerClaim?: {
+      jobId: string;
+      attempt: number;
+      requireUnprepared?: boolean;
+    },
     failure?: PublicTaskFailure,
   ): Promise<ReviewOutcome | undefined> => {
     const notificationClaimed =
@@ -924,10 +928,14 @@ export const createCoreWorker = (
       if (start !== undefined && Date.parse(occurredAt) >= start + REVIEW_ATTEMPT_BUDGET_MS) {
         const outcome = await stateStore.getRunOutcome(claim.runId);
         if (outcome?.status !== 'scheduled') return new Response(null, { status: 204 });
-        if (!(await stateStore.expireClaimHandoff?.(claim.runId, claim.jobId, 1, occurredAt)))
-          return new Response(null, { status: 503 });
         const failure = { phase: 'scheduling', reason: 'timeout' } as const;
-        const failed = await markRunFailed(outcome, claim.runId, occurredAt, undefined, failure);
+        // claim_prepared=0 proves no handoff was prepared. A replay of a
+        // prepared claim is not proof that it never reached a Runner.
+        const release =
+          claim.kind === 'preparing'
+            ? { jobId: claim.jobId, attempt: 1, requireUnprepared: true }
+            : undefined;
+        const failed = await markRunFailed(outcome, claim.runId, occurredAt, release, failure);
         if (failed?.status === 'failed')
           await recordFinishedLifecycle(
             lifecycleLog,
