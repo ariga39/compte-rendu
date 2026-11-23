@@ -4,7 +4,7 @@ Research update, 2026-11-22.
 
 ## Why replace Docker sbx?
 
-A review completed checkout, then failed to set its sandbox secret after Docker authentication expired. Runner kept polling, but could only release the next review of the same PR once it could verify cleanup. A replacement should be able to create, inspect and remove job resources without an interactive vendor login. Recovery after a runtime outage still requires proof that the job released its resources. [Cleanup recovery procedure](../operations.md#recover-cleanup-after-an-authentication-failure) · [Runtime outage recovery issue](https://github.com/ariga39/compte-rendu/issues/313)
+A review completed checkout, then failed to set its sandbox secret after Docker authentication expired. Runner kept polling, but could only release the next review of the same PR once it could verify cleanup. A replacement should be able to create, inspect and remove job resources without an interactive vendor login. Recovery after a runtime outage still requires proof that the job released its resources. [Cleanup recovery procedure](../operations.md#recover-failed-cleanup) · [Runtime outage recovery issue](https://github.com/ariga39/compte-rendu/issues/313)
 
 ## Comparing the options
 
