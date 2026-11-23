@@ -3,10 +3,11 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createRunner } from '../apps/runner/src/runner';
 import { createRelayLlmServiceClient } from '../apps/runner/src/llm-service-client';
 import type { SandboxJobSpec } from '../apps/runner/src/sandbox-runtime';
+import { createClaimExecution } from './support/runner-execution';
 
 const evidenceRoots: string[] = [];
 
@@ -16,8 +17,8 @@ const evidenceRoot = async () => {
   return root;
 };
 
-afterAll(async () => {
-  await Promise.all(evidenceRoots.map((root) => rm(root, { recursive: true, force: true })));
+afterEach(async () => {
+  for (const root of evidenceRoots.splice(0)) await rm(root, { recursive: true, force: true });
 });
 
 const relayModelConfig = (baseUrl = 'https://relay.example/v1') =>
@@ -37,24 +38,6 @@ const relayBaseOptions = (baseUrl = 'https://relay.example/v1') => ({
   llmRelayGeneration: 'generation-a',
   modelConfig: relayModelConfig(baseUrl),
 });
-
-const waitForTerminal = async (runner: ReturnType<typeof createRunner>, jobId: string) => {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    const response = await runner.handle(
-      new Request(`http://runner/jobs/${jobId}`, {
-        headers: { authorization: 'Bearer runner-test-token' },
-      }),
-    );
-    const state = (await response.json()) as {
-      status: string;
-      failure?: { reason?: string };
-    };
-    if (state.status === 'succeeded' || state.status === 'failed' || state.status === 'aborted')
-      return state;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error('Runner Job did not reach a terminal state');
-};
 
 describe('Runner relay control client', () => {
   it('uses the callback credential for issue, revoke and usage on the relay control paths', async () => {
@@ -368,38 +351,36 @@ describe('Runner relay configuration', () => {
 describe('Runner relay admission and recovery', () => {
   it('fails a relay claim without a frozen selection before checkout', async () => {
     const commands: string[] = [];
+    const execution = createClaimExecution();
     const runner = createRunner({
       ...relayBaseOptions(),
       evidenceRoot: await evidenceRoot(),
+      claimUrl: 'https://ingress.test/runner-claim',
+      claimIntervalMs: 1,
+      claimFetch: execution.claimFetch,
+      callbackFetch: execution.callbackFetch,
       process: async (_command, args) => {
         commands.push([...args].join(' '));
         return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
       },
     });
     try {
-      const submitted = await runner.handle(
-        new Request('http://runner/jobs', {
-          method: 'POST',
-          headers: {
-            authorization: 'Bearer runner-test-token',
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({
-            id: 'relay-no-selection',
-            runId: 'run-relay-no-selection',
-            attempt: 1,
-            repositoryName: 'acme/reviewed',
-            pullRequestNumber: 42,
-            repositoryUrl: 'https://github.com/acme/reviewed.git',
-            baseSha: '1111111111111111111111111111111111111111',
-            headSha: '2222222222222222222222222222222222222222',
-            repositoryReadToken: 'github-read-token',
-          }),
-        }),
-      );
-      expect(submitted.status).toBe(202);
-      const terminal = await waitForTerminal(runner, 'relay-no-selection');
-      expect(terminal).toMatchObject({ status: 'failed', failure: { reason: 'configuration' } });
+      execution.enqueue({
+        id: 'relay-no-selection',
+        runId: 'run-relay-no-selection',
+        attempt: 1,
+        repositoryName: 'acme/reviewed',
+        pullRequestNumber: 42,
+        repositoryUrl: 'https://github.com/acme/reviewed.git',
+        baseSha: '1111111111111111111111111111111111111111',
+        headSha: '2222222222222222222222222222222222222222',
+        repositoryReadToken: 'github-read-token',
+      });
+      const terminal = await execution.waitForTerminal('relay-no-selection');
+      expect(terminal.terminal).toMatchObject({
+        status: 'failed',
+        failure: { reason: 'configuration' },
+      });
       expect(commands).toEqual([]);
     } finally {
       await runner.close();
@@ -416,9 +397,13 @@ describe('Runner relay admission and recovery', () => {
     let injectedToken = '';
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
+    const execution = createClaimExecution();
     const runner = createRunner({
       ...relayBaseOptions('https://inference.example/v1'),
       evidenceRoot: root,
+      claimUrl: 'https://ingress.test/runner-claim',
+      claimIntervalMs: 1,
+      claimFetch: execution.claimFetch,
       sandboxRuntime: 'opensandbox',
       opensandbox: {
         endpoint: 'http://127.0.0.1:8080',
@@ -455,6 +440,7 @@ describe('Runner relay admission and recovery', () => {
         const inputUrl =
           input instanceof Request ? input.url : input instanceof URL ? input.href : input;
         const path = new URL(inputUrl).pathname;
+        if (!path.startsWith('/runner-llm/')) return execution.callbackFetch(input, init);
         const body = typeof init?.body === 'string' ? JSON.parse(init.body) : {};
         if (path === '/runner-llm/issue') {
           issued.push(body as Record<string, unknown>);
@@ -487,32 +473,22 @@ describe('Runner relay admission and recovery', () => {
       }),
     });
     try {
-      const submitted = await runner.handle(
-        new Request('http://runner/jobs', {
-          method: 'POST',
-          headers: {
-            authorization: 'Bearer runner-test-token',
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({
-            id: 'relay-opensandbox-job',
-            runId: 'run-relay-opensandbox',
-            attempt: 1,
-            repositoryName: 'acme/reviewed',
-            pullRequestNumber: 42,
-            repositoryUrl: 'https://github.com/acme/reviewed.git',
-            baseSha,
-            headSha,
-            repositoryReadToken: 'github-read-token',
-            reviewConfiguration: {
-              revision: 4,
-              selection: { reviewers: ['reviewer-a'], synthesis: 'reviewer-a' },
-            },
-          }),
-        }),
-      );
-      expect(submitted.status).toBe(202);
-      await waitForTerminal(runner, 'relay-opensandbox-job');
+      execution.enqueue({
+        id: 'relay-opensandbox-job',
+        runId: 'run-relay-opensandbox',
+        attempt: 1,
+        repositoryName: 'acme/reviewed',
+        pullRequestNumber: 42,
+        repositoryUrl: 'https://github.com/acme/reviewed.git',
+        baseSha,
+        headSha,
+        repositoryReadToken: 'github-read-token',
+        reviewConfiguration: {
+          revision: 4,
+          selection: { reviewers: ['reviewer-a'], synthesis: 'reviewer-a' },
+        },
+      });
+      await execution.waitForTerminal('relay-opensandbox-job');
       expect(specs).toHaveLength(1);
       expect(specs[0]).toMatchObject({
         modelResource: 'inference.example:443',
@@ -535,13 +511,18 @@ describe('Runner relay admission and recovery', () => {
     const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
+    const execution = createClaimExecution();
     const runner = createRunner({
       ...relayBaseOptions(),
       evidenceRoot: await evidenceRoot(),
+      claimUrl: 'https://ingress.test/runner-claim',
+      claimIntervalMs: 1,
+      claimFetch: execution.claimFetch,
       callbackFetch: async (input, init) => {
         const inputUrl =
           input instanceof Request ? input.url : input instanceof URL ? input.href : input;
         const path = new URL(inputUrl).pathname;
+        if (!path.startsWith('/runner-llm/')) return execution.callbackFetch(input, init);
         const bodyValue = typeof init?.body === 'string' ? JSON.parse(init.body) : {};
         requests.push({ path, body: bodyValue as Record<string, unknown> });
         if (path === '/runner-llm/issue') {
@@ -570,32 +551,22 @@ describe('Runner relay admission and recovery', () => {
       }),
     });
     try {
-      const submitted = await runner.handle(
-        new Request('http://runner/jobs', {
-          method: 'POST',
-          headers: {
-            authorization: 'Bearer runner-test-token',
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({
-            id: 'relay-issue-job',
-            runId: 'run-relay-issue',
-            attempt: 3,
-            repositoryName: 'acme/reviewed',
-            pullRequestNumber: 42,
-            repositoryUrl: 'https://github.com/acme/reviewed.git',
-            baseSha,
-            headSha,
-            repositoryReadToken: 'github-read-token',
-            reviewConfiguration: {
-              revision: 2,
-              selection: { reviewers: ['reviewer-a'], synthesis: 'reviewer-a' },
-            },
-          }),
-        }),
-      );
-      expect(submitted.status).toBe(202);
-      await waitForTerminal(runner, 'relay-issue-job');
+      execution.enqueue({
+        id: 'relay-issue-job',
+        runId: 'run-relay-issue',
+        attempt: 3,
+        repositoryName: 'acme/reviewed',
+        pullRequestNumber: 42,
+        repositoryUrl: 'https://github.com/acme/reviewed.git',
+        baseSha,
+        headSha,
+        repositoryReadToken: 'github-read-token',
+        reviewConfiguration: {
+          revision: 2,
+          selection: { reviewers: ['reviewer-a'], synthesis: 'reviewer-a' },
+        },
+      });
+      await execution.waitForTerminal('relay-issue-job');
       expect(requests).toContainEqual({
         path: '/runner-llm/issue',
         body: {
@@ -695,7 +666,7 @@ describe('Runner relay admission and recovery', () => {
     await mkdir(markerRoot, { recursive: true, mode: 0o700 });
     await writeFile(markerPath, jobId, { mode: 0o600 });
     const events: Array<Record<string, unknown>> = [];
-    let claims = 0;
+    const execution = createClaimExecution();
     const runner = createRunner({
       evidenceRoot: root,
       authToken: 'runner-test-token',
@@ -706,13 +677,10 @@ describe('Runner relay admission and recovery', () => {
       }),
       callbackUrl: 'https://ingress.test/runner-callback',
       callbackToken: 'callback-token',
-      callbackFetch: async () => new Response(null, { status: 202 }),
+      callbackFetch: execution.callbackFetch,
       claimUrl: 'https://ingress.test/runner-claim',
       claimIntervalMs: 10,
-      claimFetch: async () => {
-        claims += 1;
-        return new Response(null, { status: 204 });
-      },
+      claimFetch: execution.claimFetch,
       log: {
         record: async (event) => {
           events.push(event as Record<string, unknown>);
@@ -725,28 +693,7 @@ describe('Runner relay admission and recovery', () => {
           expect.objectContaining({ outcome: 'claim', reason: 'grant-recovery-failed' }),
         ),
       );
-      const admission = await runner.handle(
-        new Request('http://runner/jobs', {
-          method: 'POST',
-          headers: {
-            authorization: 'Bearer runner-test-token',
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({
-            id: 'direct-job',
-            runId: 'run-direct-job',
-            attempt: 1,
-            repositoryName: 'acme/reviewed',
-            pullRequestNumber: 42,
-            repositoryUrl: 'https://github.com/acme/reviewed.git',
-            baseSha: '1111111111111111111111111111111111111111',
-            headSha: '2222222222222222222222222222222222222222',
-            repositoryReadToken: 'github-read-token',
-          }),
-        }),
-      );
-      expect(admission.status).toBe(503);
-      expect(claims).toBe(0);
+      expect(execution.claimRequests).toHaveLength(0);
       expect(await readFile(markerPath, 'utf8')).toBe(jobId);
     } finally {
       await runner.close();

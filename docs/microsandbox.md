@@ -58,7 +58,8 @@ Start with one review and confirm its verdict, archived evidence and destroyed
 cleanup. To roll back, drain microsandbox work first, then restore the previous
 Runner runtime settings and restart the unit.
 
-For a failed cleanup, use the same account, local backend and original
+Runner automatically retries orphan cleanup using its ownership record. For
+manual inspection, use the same account, local backend and original
 `MSB_HOME`. Check the exact manifest name with `msb inspect --format json
 <sandboxName>`. If an operator has confirmed ownership and stopped the job,
 `msb rm -f <sandboxName>` removes that VM. The authenticated

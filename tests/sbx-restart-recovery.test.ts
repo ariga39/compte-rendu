@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createRunner } from '../apps/runner/src/runner';
+import { createClaimExecution } from './support/runner-execution';
 import { createSbxRuntimeFactory } from '../apps/runner/src/sandbox-runtime-sbx';
 import type {
   RunnerProcessResult,
@@ -36,17 +37,21 @@ const maintenance = (
     }),
   );
 
-const admit = (runner: ReturnType<typeof createRunner>): Promise<Response> =>
-  runner.handle(
-    new Request('http://runner/jobs', {
-      method: 'POST',
-      headers: {
-        authorization: 'Bearer runner-test-token',
-        'content-type': 'application/json',
-      },
-      body: '{}',
-    }),
-  );
+const expectDrained = async (runner: ReturnType<typeof createRunner>) => {
+  await maintenance(runner, 'drain');
+  await vi.waitFor(async () => {
+    const response = await runner.handle(
+      new Request('http://runner/maintenance', {
+        headers: { authorization: 'Bearer runner-test-token' },
+      }),
+    );
+    expect(await response.json()).toMatchObject({
+      draining: true,
+      drained: true,
+      claimPollingHalted: false,
+    });
+  });
+};
 
 const jobSpec = (root: string, id: string): SandboxJobSpec => ({
   id,
@@ -131,6 +136,31 @@ const runnerOptions = (
   process: async (_command: string, args: readonly string[]) => process(args),
 });
 
+const claimExecutions = new WeakMap<object, ReturnType<typeof createClaimExecution>>();
+
+const createSbxRunner = (options: Parameters<typeof createRunner>[0]) => {
+  const claim = createClaimExecution();
+  const runner = createRunner({
+    ...options,
+    claimUrl: 'https://ingress.test/runner-claim',
+    claimIntervalMs: 10,
+    claimFetch: claim.claimFetch,
+    callbackFetch: claim.callbackFetch,
+  });
+  claimExecutions.set(runner, claim);
+  return runner;
+};
+
+const claimGate = (runner: ReturnType<typeof createRunner>) => {
+  const claim = claimExecutions.get(runner);
+  if (claim === undefined) throw new Error('missing claim fixture');
+  return claim;
+};
+
+const claimGateOpen = async (runner: ReturnType<typeof createRunner>) => {
+  await vi.waitFor(() => expect(claimGate(runner).claimRequests.length).toBeGreaterThan(0));
+};
+
 const notFound = (name: string): RunnerProcessResult => ({
   ...ok,
   exitCode: 1,
@@ -194,7 +224,7 @@ describe('Runner sbx startup reconciliation', () => {
     let present = true;
     const secrets = secretState();
     const commands: string[][] = [];
-    const runner = createRunner(
+    const runner = createSbxRunner(
       runnerOptions(root, async (args) => {
         commands.push([...args]);
         const secret = secretCommand(args, secrets, spec);
@@ -258,12 +288,8 @@ describe('Runner sbx startup reconciliation', () => {
         '--force',
       ]);
       expect(commands).toContainEqual(['secret', 'ls', '--json', '--sandbox', spec.name]);
-      expect((await admit(runner)).status).toBe(400);
-      expect(await (await maintenance(runner, 'drain')).json()).toMatchObject({
-        draining: true,
-        drained: true,
-        claimPollingHalted: false,
-      });
+      await claimGateOpen(runner);
+      await expectDrained(runner);
     } finally {
       await runner.close();
     }
@@ -285,7 +311,7 @@ describe('Runner sbx startup reconciliation', () => {
 
     const secrets = secretState();
     const commands: string[][] = [];
-    const runner = createRunner(
+    const runner = createSbxRunner(
       runnerOptions(root, async (args) => {
         commands.push([...args]);
         const secret = secretCommand(args, secrets, spec);
@@ -313,7 +339,7 @@ describe('Runner sbx startup reconciliation', () => {
         spec.name,
         '--force',
       ]);
-      expect((await admit(runner)).status).toBe(400);
+      await claimGateOpen(runner);
     } finally {
       await runner.close();
     }
@@ -336,7 +362,7 @@ describe('Runner sbx startup reconciliation', () => {
     let present = true;
     const secrets = secretState();
     const commands: string[][] = [];
-    const runner = createRunner(
+    const runner = createSbxRunner(
       runnerOptions(root, async (args) => {
         commands.push([...args]);
         const secret = secretCommand(args, secrets, spec);
@@ -358,7 +384,7 @@ describe('Runner sbx startup reconciliation', () => {
     try {
       await vi.waitFor(() => expect(commands.some((args) => args[0] === 'rm')).toBe(true));
       expect(commands.some((args) => args[0] === 'policy')).toBe(false);
-      expect((await admit(runner)).status).toBe(400);
+      await claimGateOpen(runner);
     } finally {
       await runner.close();
     }
@@ -380,7 +406,7 @@ describe('Runner sbx startup reconciliation', () => {
 
     const secrets = secretState();
     const commands: string[][] = [];
-    const runner = createRunner(
+    const runner = createSbxRunner(
       runnerOptions(root, async (args) => {
         commands.push([...args]);
         const secret = secretCommand(args, secrets, spec);
@@ -401,13 +427,13 @@ describe('Runner sbx startup reconciliation', () => {
       await vi.waitFor(async () => {
         expect(await (await maintenance(runner, 'drain')).json()).toMatchObject({
           drained: false,
-          claimPollingHalted: true,
+          claimPollingHalted: false,
         });
       });
       expect(commands.some((args) => args[0] === 'rm')).toBe(false);
       expect(commands.some((args) => args[0] === 'policy' && args[1] === 'rm')).toBe(false);
       expect(commands.some((args) => args[0] === 'secret' && args[1] === 'rm')).toBe(false);
-      expect((await admit(runner)).status).toBe(503);
+      await claimGateOpen(runner);
     } finally {
       await runner.close();
     }
@@ -435,7 +461,7 @@ describe('Runner sbx startup reconciliation', () => {
     foreign.secrets = [{ name: `cr-${spec.id}` }];
     const secrets = secretState();
     const commands: string[][] = [];
-    const runner = createRunner(
+    const runner = createSbxRunner(
       runnerOptions(root, async (args) => {
         commands.push([...args]);
         const secret = secretCommand(args, secrets, spec);
@@ -452,13 +478,13 @@ describe('Runner sbx startup reconciliation', () => {
       await vi.waitFor(async () => {
         expect(await (await maintenance(runner, 'drain')).json()).toMatchObject({
           drained: false,
-          claimPollingHalted: true,
+          claimPollingHalted: false,
         });
       });
       expect(commands.some((args) => args[0] === 'rm')).toBe(false);
       expect(commands.some((args) => args[0] === 'policy' && args[1] === 'rm')).toBe(false);
       expect(commands.some((args) => args[0] === 'secret' && args[1] === 'rm')).toBe(false);
-      expect((await admit(runner)).status).toBe(503);
+      await claimGateOpen(runner);
     } finally {
       await runner.close();
     }
@@ -479,7 +505,7 @@ describe('Runner sbx startup reconciliation', () => {
 
     const secrets = secretState();
     const commands: string[][] = [];
-    const runner = createRunner(
+    const runner = createSbxRunner(
       runnerOptions(root, async (args) => {
         commands.push([...args]);
         const secret = secretCommand(args, secrets, spec);
@@ -499,13 +525,13 @@ describe('Runner sbx startup reconciliation', () => {
       await vi.waitFor(async () => {
         expect(await (await maintenance(runner, 'drain')).json()).toMatchObject({
           drained: false,
-          claimPollingHalted: true,
+          claimPollingHalted: false,
         });
       });
       expect(commands.some((args) => args[0] === 'rm')).toBe(false);
       expect(commands.some((args) => args[0] === 'policy' && args[1] === 'rm')).toBe(false);
       expect(commands.some((args) => args[0] === 'secret' && args[1] === 'rm')).toBe(false);
-      expect((await admit(runner)).status).toBe(503);
+      await claimGateOpen(runner);
     } finally {
       await runner.close();
     }
@@ -539,7 +565,7 @@ describe('Runner sbx startup reconciliation', () => {
 
     let present = true;
     const commands: string[][] = [];
-    const runner = createRunner(
+    const runner = createSbxRunner(
       runnerOptions(root, async (args) => {
         commands.push([...args]);
         if (args[0] === 'inspect') {
@@ -566,10 +592,10 @@ describe('Runner sbx startup reconciliation', () => {
       await vi.waitFor(async () => {
         expect(await (await maintenance(runner, 'drain')).json()).toMatchObject({
           drained: false,
-          claimPollingHalted: true,
+          claimPollingHalted: false,
         });
       });
-      expect((await admit(runner)).status).toBe(503);
+      await claimGateOpen(runner);
     } finally {
       await runner.close();
     }
@@ -590,7 +616,7 @@ describe('Runner sbx startup reconciliation', () => {
 
     let present = true;
     const commands: string[][] = [];
-    const runner = createRunner(
+    const runner = createSbxRunner(
       runnerOptions(root, async (args) => {
         commands.push([...args]);
         if (args[0] === 'inspect') {
@@ -624,10 +650,10 @@ describe('Runner sbx startup reconciliation', () => {
       await vi.waitFor(async () => {
         expect(await (await maintenance(runner, 'drain')).json()).toMatchObject({
           drained: false,
-          claimPollingHalted: true,
+          claimPollingHalted: false,
         });
       });
-      expect((await admit(runner)).status).toBe(503);
+      await claimGateOpen(runner);
     } finally {
       await runner.close();
     }
@@ -651,7 +677,7 @@ describe('Runner sbx startup reconciliation', () => {
 
     vi.stubEnv('PORT', '9102');
     const siblingCommands: string[][] = [];
-    const sibling = createRunner({
+    const sibling = createSbxRunner({
       ...runnerOptions(
         root,
         async (args) => {
@@ -664,7 +690,7 @@ describe('Runner sbx startup reconciliation', () => {
       instanceId: undefined,
     });
     try {
-      expect((await admit(sibling)).status).toBe(400);
+      await claimGateOpen(sibling);
       expect(siblingCommands).toEqual([]);
     } finally {
       await sibling.close();
@@ -674,7 +700,7 @@ describe('Runner sbx startup reconciliation', () => {
     const secrets = secretState();
     vi.stubEnv('PORT', '9101');
     const ownCommands: string[][] = [];
-    const own = createRunner({
+    const own = createSbxRunner({
       ...runnerOptions(
         root,
         async (args) => {
@@ -702,13 +728,13 @@ describe('Runner sbx startup reconciliation', () => {
     });
     try {
       await vi.waitFor(() => expect(ownCommands.some((args) => args[0] === 'rm')).toBe(true));
-      expect((await admit(own)).status).toBe(400);
+      await claimGateOpen(own);
     } finally {
       await own.close();
     }
   });
 
-  it('attributes a failed startup scan and retries it through maintenance resume', async () => {
+  it('attributes a failed startup scan and retries it automatically', async () => {
     const root = await mkdtemp(join(tmpdir(), 'cr-sbx-restart-'));
     roots.push(root);
     vi.stubEnv('TMPDIR', root);
@@ -727,7 +753,7 @@ describe('Runner sbx startup reconciliation', () => {
     const events: unknown[] = [];
     const canary = 'ghp_CANARY_SECRET_MUST_NOT_APPEAR_IN_LOGS';
     const canaryUrl = 'https://user:canary@example.test/path?token=ghp_CANARY';
-    const runner = createRunner({
+    const runner = createSbxRunner({
       ...runnerOptions(root, async (args) => {
         const secret = secretCommand(args, secrets, spec);
         if (secret !== undefined) return secret;
@@ -790,18 +816,10 @@ describe('Runner sbx startup reconciliation', () => {
       ).not.toHaveProperty('stderr');
       expect(await (await maintenance(runner, 'drain')).json()).toMatchObject({
         drained: false,
-        claimPollingHalted: true,
-      });
-      expect((await admit(runner)).status).toBe(503);
-
-      mode = 'owned';
-      const resumed = await maintenance(runner, 'resume');
-      expect(resumed.status).toBe(200);
-      await vi.waitFor(async () => expect((await admit(runner)).status).toBe(400));
-      expect(await (await maintenance(runner, 'drain')).json()).toMatchObject({
-        drained: true,
         claimPollingHalted: false,
       });
+      mode = 'owned';
+      await expectDrained(runner);
     } finally {
       await runner.close();
     }

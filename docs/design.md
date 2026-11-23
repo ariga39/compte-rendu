@@ -126,6 +126,14 @@ claims an eligible scheduled row, records job identity/attempt, then resolves th
 repository and mints a repository-scoped read token. Progress and callbacks must
 match that persisted owner. Core's VPC `DELETE /jobs/:id` cancels reachable jobs.
 
+Core/D1 owns review history, including the accepted outcome, evidence reference
+and cleanup status. Read completed reviews through the dashboard API by run ID.
+The Runner owns observations about local execution. A cancellation request in
+D1 can win while sandbox destruction or callback delivery is still outstanding.
+A missing job on a Runner gives Core no proof of destruction. A stop received while Runner still tracks the job can confirm destruction for
+the exact job ID, run ID and attempt. After retirement, a stop returns 404 and
+cleanup remains unconfirmed. Later reviews can proceed when the claim budget expires.
+
 Runner reserves capacity for in-flight claims and holds slots through archival,
 cleanup and callback delivery. It fills `RUNNER_CONCURRENCY` (positive integer,
 default 1); malformed startup configuration fails before admission. An optional
@@ -135,15 +143,16 @@ wake claims and decreases preserve admitted jobs/reserved claims. Other settings
 are not hot-reloaded. Claims are single-flight; ambiguous claim responses halt
 polling rather than risk duplicate ownership.
 
-Authenticated private maintenance endpoints pause new claims and direct admission
+Authenticated private maintenance endpoints pause new claims
 without cancelling jobs or in-flight claim reservations. At startup Runner scans
 its pending grant markers and revokes each recorded grant through the marker's
 original issuer/generation. The admission and claim gate stays closed, and drain
 cannot report complete, while that startup scan has any failed, invalid or
-foreign marker. Resume changes only the maintenance pause; it neither retries nor
-clears the startup scan. Exact cleanup recovery can resolve an eligible failed
-cleanup and retry the scan, but it rejects invalid and foreign markers and is
-limited to sbx, microsandbox or OpenSandbox jobs whose retained evidence and callback still show
+foreign marker. Resume changes only the maintenance pause. It may retry the
+Sandbox ownership scan but never retries or clears the startup grant scan. Exact
+cleanup recovery can resolve an eligible failed cleanup and retry the sandbox
+scan, but it rejects invalid and foreign markers and is limited to sbx,
+microsandbox or OpenSandbox jobs whose retained evidence and callback still show
 matching failed cleanup; see [maintenance operations](operations.md#drain-before-maintenance).
 A successful startup scan is not continuous. A terminal revocation failure after
 startup fails that job without a vote and leaves its marker without closing
@@ -181,9 +190,10 @@ bundle becomes a small terminal incomplete-evidence failure, not truncated
 successful evidence.
 
 Normal success, failure, timeout and cancellation finalize evidence and destroy
-the Sandbox before callback. A hard Runner crash can leave resources and claimed
-rows behind; terminal progress and automatic crash recovery are not guaranteed.
-Orphan reconciliation remains [#66](https://github.com/ariga39/compte-rendu/issues/66).
+the Sandbox before callback. A Runner crash can interrupt a review before it delivers a verdict.
+On a later admission or claim attempt, Core expires an abandoned claim after
+its original 90-minute budget. A fresh run for the same PR can then proceed.
+Runner reconciles owned sbx and microsandbox resources independently.
 
 ## Multi-model review jobs
 
@@ -367,16 +377,11 @@ before clearing the record. An absent Sandbox is treated as interrupted setup:
 only steps recorded as attempted before the interruption are reconciled. An
 intent recorded before creation cannot authorize deleting a same-name Sandbox or
 its policies. A missing, foreign, malformed or unverifiable identity keeps the
-record, leaves resources untouched and keeps admission and claiming gated.
-Names, prefixes, unrelated inspect metadata and bulk inventory never establish
-ownership. A failed scan is reported as a bounded `sandbox-recovery` operational
-event with the retained Job/Sandbox identity, failing step, fixed command name and
-status flags. It deliberately omits stderr content, which may contain an upstream
-token, URL or arbitrary secret. Operators can retry the scan with
-`POST /maintenance/resume` or after an
-authenticated cleanup recovery; the normal drain/resume response fields are
-unchanged. This startup path is separate from the authenticated cleanup-recovery
-operation and from the continuous outage retry tracked by #313.
+record and leaves resources untouched. Names, prefixes and unrelated inspect metadata never establish ownership.
+For microsandbox, Runner checks the original catalog, exact VM name and owner
+nonce. Both adapters retry unresolved ownership records automatically and skip
+live jobs. A backend outage can delay cleanup while other jobs proceed.
+Recovery diagnostics identify the job, step and command status and omit stderr.
 
 ### Failed-cleanup reconciliation
 
@@ -390,20 +395,27 @@ sidecar and runtime volumes. The configured runtime must match. It revokes the
 job grant before reporting recovery. Original terminal evidence remains immutable;
 separate local and R2 recovery records provide the audit trail. Core matches the
 failed, superseded or cancelled run, job, attempt and immutable SHAs before
-confirming cleanup. Destroyed cleanup is
-monotonic under delayed callbacks. The queued-task projection exposes an anonymous
-cleanup-block reason only when an unresolved terminal same-PR run blocks claiming.
-After an in-process sbx access outage, Runner pauses claims and automatically
+confirming cleanup. Destroyed cleanup is monotonic under delayed callbacks. The
+queued-task projection exposes an anonymous cleanup-block reason only when an
+unresolved terminal same-PR run blocks claiming.
+
+After an in-process sbx access outage, Runner pauses new claims and automatically
 repeats the same retained-evidence and exact-absence recovery without blocking
 unrelated claims. When access returns, affected jobs become immediately eligible.
 A transient report or verification failure retries the expensive check no more
 than once every 30 seconds per pending job. A Core 409 on the cleanup report
-means the original terminal callback is not visible yet: Runner replays the
+can indicate that the original terminal callback has not arrived. Runner replays the
 retained verified callback and immediately retries the same report once. A
 repeated 409 is permanent. After that, only 408/429/5xx or timeout/network
 failures remain retryable; other 4xx responses or a permanent callback rejection
-stop automatic delivery with bounded job/run/status diagnostics. The terminal
-verdict is unchanged and completed work never restarts. Runner keeps a staged claim request ID in memory. If a restart loses it, Core expires
-the abandoned claim after its original 90-minute budget and admits a later review. Legacy evidence lacking host confirmation, unknown
-OpenSandbox create identity and OpenShell recovery remain outside this operation;
-see the operations guide.
+stop automatic delivery with bounded job/run/status diagnostics. When exact absence fails because
+the owned Sandbox still exists, Runner runs the ownership reaper scoped to that
+job before the next attempt; other ownership records are skipped. Already-absent
+evidence keeps the normal verification and report path. The terminal verdict is
+unchanged and completed work never restarts. While the job is in memory, Runner can report verified cleanup using its retained
+manifest and callback. After a restart the ownership scan removes verified orphan
+resources. Core can still show unconfirmed cleanup until an exact callback arrives.
+Later reviews become eligible after the original 90-minute claim budget, including
+when a restart loses an in-memory staged claim request ID. Legacy evidence lacking host
+confirmation, unknown OpenSandbox create identity and OpenShell recovery remain
+outside this operation; see the operations guide.

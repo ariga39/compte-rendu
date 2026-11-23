@@ -84,7 +84,11 @@ Interpret the boundaries separately:
   authentication, DNS, TLS, disk, or network fault. Check cancellation, timeout,
   process errors, and output truncation before drawing a conclusion.
 - Look up `inference_requests` by the Runner's job ID in the installation's relay D1 database. Compare route, model, status and reported tokens with the job's persisted usage. Gateway Analytics can confirm upstream model traffic; a failed stream alone cannot identify which hop interrupted it. See [usage and Gateway analytics](llm-service.md#reading-ai-gateway-analytics).
-- Each Runner poll carries a request UUID. A transport retry within the same Runner process keeps that UUID so Core can redeliver the prepared assignment with the original deadline and a fresh read grant. While preparation is in flight, the retry waits; a retry after the attempt budget can retire an unfinished preparation. Apply application D1 migration `0016_runner_claim_handoff.sql` and deploy the Worker before updating the Runner. Older Runners can still poll without an ID. If maintenance drain begins while a response is missing, the Runner reports the claim in flight. Resume the same process to reconcile that request before restarting the host.
+- A Runner restart can interrupt a review and lose its result. A claim keeps
+  its original execution deadline. Once that deadline expires, later reviews of
+  the same PR are eligible even if cleanup of the old VM is still pending.
+  Request a fresh review through the usual GitHub trigger. The original run
+  keeps its own outcome and cleanup status in the dashboard.
 - Claim failures report whether polling continues or is halted. An ambiguous
   owned claim must remain halted; do not resume it by discarding the response
   or clearing database ownership without reconciling that exact job.
@@ -200,7 +204,7 @@ the public dashboard Worker.
 
 | Request                             | Effect                                                   |
 | ----------------------------------- | -------------------------------------------------------- |
-| `POST /maintenance/drain`           | Stop new claims and new direct job admissions.           |
+| `POST /maintenance/drain`           | Pause new claims while admitted jobs finish.             |
 | `GET /maintenance`                  | Inspect current drain status.                            |
 | `POST /maintenance/resume`          | Reopen admission and wake the claim loop.                |
 | `POST /maintenance/replay-callback` | Replay a retained terminal callback; see recovery below. |
@@ -232,15 +236,16 @@ successful startup grant-recovery scan, no active jobs or in-flight claim, no
 halted claim loop and no terminal job with unconfirmed cleanup. The startup scan
 keeps the claim gate closed when any pending marker is invalid, unreadable, or
 bound to another issuer/generation. Inspect failures rather than forcing a
-restart to clear these conditions. Resume only clears the maintenance pause; it
-never retries or clears the startup scan, an ownership-related claim halt or
-failed cleanup. If maintenance is cancelled, send `POST /maintenance/resume`
-with the same curl configuration. Drain is in-memory: a restarted Runner begins
-normal claiming automatically only after its startup scan succeeds.
+restart to clear these conditions. Resume only clears the maintenance pause. It
+may retry the Sandbox ownership scan, but it never retries or clears the startup
+grant scan, an ownership-related claim halt or failed cleanup. If maintenance is
+cancelled, send `POST /maintenance/resume` with the same curl configuration.
+Drain is in-memory: a restarted Runner begins normal claiming automatically only
+after its startup scan succeeds.
 
 The explicit cleanup recovery is not a general repair for invalid or foreign
-markers. It accepts only a retained failed-cleanup job for the active
-sbx, microsandbox or OpenSandbox runtime where the request and evidence match the exact
+markers. It accepts only a retained failed-cleanup job for the active sbx,
+microsandbox or OpenSandbox runtime where the request and evidence match the exact
 job/run/attempt/evidence/SHAs, host cleanup was confirmed, and both the retained
 manifest and callback still record failed cleanup. Any marker it uses must match
 the active issuer/generation; an invalid marker or any mismatch is rejected. On
@@ -270,12 +275,14 @@ replacement; unresolved delivery uses the recovery guidance below. If multiple
 Runners share an sbx daemon/cgroup or inference service, drain each affected
 Runner and check Sandbox inventory before restarting shared services.
 
-The authenticated job endpoints keep terminal responses and detect duplicate
-admissions for the lifetime of the Runner process. Once destruction is confirmed,
-Runner releases the sandbox client and moves the response into a private temporary
-SQLite database. Its disk usage grows with completed jobs until process exit.
-Unconfirmed cleanup remains a live drain blocker. Retained callback and evidence
-files support recovery across restarts.
+Look up a completed review by run ID on the dashboard or through
+`GET /api/jobs/:runId`. Core keeps the outcome and evidence reference in D1.
+Keep the Runner evidence directory and instance identity stable across restarts.
+The Runner uses local ownership records to find resources left by an interrupted
+job. When a backend becomes reachable again, cleanup retries against that
+backend and removes the local record after verifying absence. Historical review
+details remain available through Core even after the private Runner job endpoint
+returns 404. Archived evidence has its own retention policy.
 
 For the first upgrade from a Runner without these endpoints, arrange a quiet
 window and wait for queued and claimed work to finish. Disabling webhooks alone
@@ -292,32 +299,30 @@ provably owned Sandbox, its exact scoped network policies and its scoped secrets
 sharing an evidence root do not reconcile each other's live jobs. If the returned
 name or exact workspace/config path does not match, inspection fails, native
 secret absence cannot be confirmed, or removal cannot be confirmed, the record is
-retained and admission/claiming stay gated. The `sandbox-recovery` log event names
-the Job, Sandbox, failing step, fixed command name and status flags, without
-stderr content that could carry a token or URL. A `step: record` failure means
-inspect the private instance ownership files directly; an ownership mismatch
-requires out-of-band proof before any action. Never remove a resource based only
-on its name or blindly delete ownership records. After fixing access,
-`POST /maintenance/resume` retries the scan without changing the normal
-drain/resume response; restoring runtime access alone does not poll continuously
-(#313).
-An exhausted terminal callback can leave Core showing a claimed run even after
-local cleanup. Use the explicit recovery operation below; never clear D1 ownership
-or rerun an old Sandbox merely to make the dashboard look settled.
+retained for automatic retry. A single foreign or malformed record does not gate
+unrelated jobs. An authenticated `sbx ls` probe failure marks a backend-wide
+outage and pauses new claims until access returns. Microsandbox similarly checks
+the original catalog and VM owner label. Recovery logs identify the job, step and
+command status without including stderr.
 
 ### Recover failed cleanup
 
+Restoring backend access allows the Runner to retry orphan cleanup automatically. The probe resumes claims after a backend-wide sbx outage.
+
 A run with `cleanup=failed` is recovered through the verified maintenance procedure below. Expired `cleanup=pending` does not qualify for that procedure; only an exact late original callback can update it, and an actual orphan is identified and removed through backend ownership rather than this recovery endpoint. Cancelled, superseded, and expired scheduling-timeout pending cleanup remains visible in cleanup attention until confirmed. An expired failed scheduling timeout with only pending cleanup blocks later reviews only while its durable claim is inside the 90-minute execution budget; after that budget, later reviews proceed automatically while the retained `pending` status remains visible as an orphan-cleanup risk. Cleanup visibility and queue blocking are independent. Restarting Runner does not clear that database ownership. While a blocker is inside the budget, the queued task displays “Waiting for previous review cleanup”; an ordinary running review does not produce this warning.
 
-For sbx, after restoring Docker authentication, confirm the original job has stopped
-and identify its exact Sandbox from the retained manifest (`compte-rendu-<jobId>`).
+After restoring Docker authentication, confirm the original job has stopped and
+identify its exact Sandbox from the retained manifest (`compte-rendu-<jobId>`).
 Inspect it with `sbx inspect <sandboxName>` and, if it still exists, remove only
 that Sandbox with `sbx rm --force <sandboxName>`. Verify its absence with another
 inspect; authentication or transport failures are not proof of absence. Do not
 remove other jobs' Sandboxes or use a bulk prune. The recovery endpoint does not
 perform this removal for you.
 
-For microsandbox, confirm absence in the original Runner catalog as described in the [backend guide](microsandbox.md).
+For microsandbox, confirm absence in the original Runner catalog as described in
+the [backend guide](microsandbox.md). For OpenSandbox, use the retained
+`sandboxId` and `sandboxOwnerNonce` as described below; maintenance verifies
+absence but does not delete workloads.
 
 Then use the correct instance's authenticated Runner maintenance endpoint. Prepare `recovery-request.json` with the same six
 identity fields shown in the callback replay section below, taken from the
@@ -330,12 +335,13 @@ curl --fail-with-body --silent --show-error --config "$RUNNER_CURL_CONFIG" \
   "$RUNNER_ORIGIN/maintenance/recover-cleanup"
 ```
 
-This operation accepts retained failed sbx, microsandbox or OpenSandbox callbacks,
-including jobs cancelled after their Core run was superseded, with valid callback
-evidence and the backend-specific host-cleanup confirmation in the manifest. For
-sbx it also removes only its scoped network policies and secrets. It verifies the
-immutable identity and artifact hashes, requires the exact Sandbox to be absent,
-and revokes its LLM grant when configured.
+This operation accepts retained failed sbx, microsandbox or OpenSandbox
+callbacks, including jobs cancelled after their Core run was superseded, with
+valid callback evidence and the runtime's host-cleanup confirmation
+(`hostFilesCleanupConfirmed: true` for OpenSandbox, `hostCleanupConfirmed: true`
+for sbx and microsandbox). It verifies the immutable identity and artifact
+hashes, requires the exact Sandbox to be absent, removes only its scoped sbx
+network policies and secrets, and revokes its LLM grant when configured.
 An existing Sandbox is never deleted by this recovery operation. Authentication
 errors, truncated inventory or failed removal leave cleanup unresolved.
 
@@ -344,17 +350,18 @@ authenticated inventory probe, confirming a host-wide access outage. Other
 healthy Runners can keep claiming. It retries the probe on its idle cadence and,
 when access returns, immediately makes the same retained-evidence and
 exact-absence recovery eligible for each affected in-memory job without holding
-unrelated claims. The bounded retry also runs while drained and for a direct
-POST-only Runner without a claim URL. After a transient report or verification
+unrelated claims. The bounded retry also runs while drained. After a transient report or verification
 failure, expensive cleanup work is retried at most once every 30 seconds per
 pending job; unrelated claim polling continues. A Core 409 on the cleanup report
 replays the retained verified terminal callback and retries the same report once
 in the same recovery invocation; a repeated 409 is permanent. Only 408/429/5xx or
 timeout/network failures remain retryable afterward. Other 4xx responses or a
 permanent callback rejection stop automatic delivery with a bounded
-job/run/status diagnostic. An accepted report reopens
-the same-PR queue. A single job cleanup failure that does not fail the inventory
-probe leaves unrelated work claimable. A restart can lose a staged claim. Later reviews of that PR become eligible automatically
+job/run/status diagnostic. When exact absence fails
+because the owned Sandbox still exists, Runner runs the ownership reaper only for
+that job before the next attempt and skips every other ownership record. An
+accepted report reopens the same-PR queue. A single job cleanup failure that does
+not fail the inventory probe leaves unrelated work claimable. A restart can lose a staged claim. Later reviews of that PR become eligible automatically
 once the original 90-minute claim budget expires.
 
 For OpenSandbox, use the retained server-returned `sandboxId` and
@@ -372,7 +379,6 @@ verifies absence; it does not delete OpenSandbox workloads. Verification has a
 30-second deadline; a timeout interrupts verification, closes its SDK manager and
 transport, returns 502, keeps cleanup unresolved and releases the local recovery
 lock so the operator can retry.
-
 The original callback, manifest and terminal failure stay unchanged. Runner writes
 `cleanup-recovery.json` separately and sends an authenticated recovery report.
 Core retains a separate `cleanup-recoveries/` audit object and updates only the

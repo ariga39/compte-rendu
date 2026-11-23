@@ -110,6 +110,7 @@ export interface SbxRecoveryFailure {
 export interface SbxRestartRecoveryResult {
   readonly ok: boolean;
   readonly recovered: number;
+  readonly recoveredJobIds: readonly string[];
   readonly failures: readonly SbxRecoveryFailure[];
 }
 
@@ -376,20 +377,23 @@ const removeOwnedSbxResources = async (
 export const reconcileSbxRestartResources = async (
   root: string,
   command: SandboxCommand,
+  isLive: (jobId: string) => boolean = () => false,
 ): Promise<SbxRestartRecoveryResult> => {
   let names: string[];
   try {
     names = await readdir(root);
   } catch (error) {
     if (Schema.is(Schema.Struct({ code: Schema.Literal('ENOENT') }))(error))
-      return { ok: true, recovered: 0, failures: [] };
+      return { ok: true, recovered: 0, recoveredJobIds: [], failures: [] };
     return {
       ok: false,
       recovered: 0,
+      recoveredJobIds: [],
       failures: [{ jobId: 'redacted', sandboxName: 'redacted', step: 'record' }],
     };
   }
   let recovered = 0;
+  const recoveredJobIds: string[] = [];
   const failures: SbxRecoveryFailure[] = [];
   for (const name of names) {
     if (!name.endsWith('.json')) continue;
@@ -398,6 +402,7 @@ export const reconcileSbxRestartResources = async (
       failures.push({ jobId: 'redacted', sandboxName: 'redacted', step: 'record' });
       continue;
     }
+    if (isLive(record.jobId)) continue;
     const failure = await removeOwnedSbxResources(record, command);
     if (failure !== undefined) {
       failures.push({ jobId: record.jobId, sandboxName: record.sandboxName, ...failure });
@@ -406,6 +411,7 @@ export const reconcileSbxRestartResources = async (
     try {
       await removeOwnershipRecord(root, record.jobId);
       recovered += 1;
+      recoveredJobIds.push(record.jobId);
     } catch {
       failures.push({
         jobId: record.jobId,
@@ -414,7 +420,7 @@ export const reconcileSbxRestartResources = async (
       });
     }
   }
-  return { ok: failures.length === 0, recovered, failures };
+  return { ok: failures.length === 0, recovered, recoveredJobIds, failures };
 };
 
 const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;

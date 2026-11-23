@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { readFile, stat } from 'node:fs/promises';
+import { chmod, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { Schema } from 'effect';
 import {
   SandboxCreateError,
@@ -17,6 +17,42 @@ const inspectedSandbox = Schema.fromJsonString(
     config: Schema.Struct({ labels: Schema.Record(Schema.String, Schema.String) }),
   }),
 );
+const OwnershipRecord = Schema.Struct({
+  version: Schema.Literal(1),
+  jobId: Schema.NonEmptyString,
+  sandboxName: Schema.NonEmptyString,
+  catalog: Schema.NonEmptyString,
+  owner: Schema.NonEmptyString,
+  createAttempted: Schema.Boolean,
+});
+type OwnershipRecord = typeof OwnershipRecord.Type;
+const markerName = (jobId: string) => `${createHash('sha256').update(jobId).digest('hex')}.json`;
+const markerRoot = (root: string) => join(root, 'microsandbox');
+const saveMarker = async (root: string, record: OwnershipRecord) => {
+  const directory = markerRoot(root);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const path = join(directory, markerName(record.jobId));
+  const temporary = `${path}.tmp`;
+  await writeFile(temporary, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+  await chmod(temporary, 0o600);
+  await rename(temporary, path);
+};
+const removeMarker = async (root: string, jobId: string) => {
+  await rm(join(markerRoot(root), markerName(jobId)), { force: true });
+};
+const readMarker = async (root: string, name: string): Promise<OwnershipRecord | undefined> => {
+  try {
+    const record = Schema.decodeUnknownSync(Schema.fromJsonString(OwnershipRecord), {
+      onExcessProperty: 'error',
+    })(await readFile(join(markerRoot(root), name), 'utf8'));
+    return basename(name) === markerName(record.jobId) &&
+      record.sandboxName === `compte-rendu-${record.jobId}`
+      ? record
+      : undefined;
+  } catch {
+    return undefined;
+  }
+};
 
 // msb launches a local host process. Pass only local runtime settings, and
 // explicitly select local execution even on hosts with a saved cloud profile.
@@ -38,7 +74,7 @@ const complete = (result: RunnerProcessResult) =>
 
 // A fresh local catalog also reports "not found". Bind absence to the file
 // used at creation so an instance move or replacement cannot release a job.
-const catalogIdentity = async () => {
+export const microsandboxCatalogIdentity = async () => {
   const path = join(process.env.MSB_HOME || join(homedir(), '.microsandbox'), 'db', 'msb.db');
   const file = await stat(path);
   if (!file.isFile()) throw new Error('Microsandbox catalog missing');
@@ -56,14 +92,14 @@ export const createMicrosandboxPreflight = (image: string) => async (command: Sa
 };
 
 const inspect = async (command: SandboxCommand, name: string, catalog: string | undefined) => {
-  if (!catalog || catalog !== (await catalogIdentity()))
+  if (!catalog || catalog !== (await microsandboxCatalogIdentity()))
     throw new Error('Microsandbox catalog changed');
   const result = await command(
     ['inspect', '--format', 'json', name],
     { stage: 'cleanup', command: 'inspect-sandbox' },
     { env: localEnvironment(), captureStdout: true, captureStderr: true, maxBytes: 256 * 1024 },
   );
-  if (catalog !== (await catalogIdentity()) || !complete(result))
+  if (catalog !== (await microsandboxCatalogIdentity()) || !complete(result))
     throw new Error('Incomplete microsandbox inspection');
   if (result.exitCode === 1 && result.stderr?.trim() === `error: sandbox not found: ${name}`)
     return undefined;
@@ -83,7 +119,12 @@ export const confirmMicrosandboxAbsent = async (
 };
 
 export const createMicrosandboxRuntimeFactory =
-  (image: string, rotationCommand: SandboxCommand, allowFakeIp = false): SandboxRuntimeFactory =>
+  (
+    image: string,
+    rotationCommand: SandboxCommand,
+    allowFakeIp = false,
+    ownershipRoot?: string,
+  ): SandboxRuntimeFactory =>
   (spec) => {
     const { name } = spec;
     const owner = randomUUID();
@@ -111,8 +152,28 @@ export const createMicrosandboxRuntimeFactory =
         `XDG_DATA_HOME=${evidenceRoot}/data`,
         `XDG_STATE_HOME=${evidenceRoot}/state`,
       ];
-      catalog = await catalogIdentity();
+      catalog = await microsandboxCatalogIdentity();
+      if (ownershipRoot !== undefined) {
+        await saveMarker(ownershipRoot, {
+          version: 1,
+          jobId: spec.id,
+          sandboxName: name,
+          catalog,
+          owner,
+          createAttempted: false,
+        });
+      }
       attempted = true;
+      if (ownershipRoot !== undefined) {
+        await saveMarker(ownershipRoot, {
+          version: 1,
+          jobId: spec.id,
+          sandboxName: name,
+          catalog,
+          owner,
+          createAttempted: true,
+        });
+      }
       const result = await command(
         [
           'create',
@@ -221,7 +282,10 @@ export const createMicrosandboxRuntimeFactory =
         await rotation?.catch(() => undefined);
         if (!attempted) return;
         const existing = await inspect(command, name, catalog);
-        if (!existing) return;
+        if (!existing) {
+          if (ownershipRoot !== undefined) await removeMarker(ownershipRoot, spec.id);
+          return;
+        }
         if (existing.config.labels['cr-job-owner'] !== owner)
           throw new Error('Microsandbox owner mismatch');
         const removed = await command(
@@ -232,6 +296,67 @@ export const createMicrosandboxRuntimeFactory =
         if (removed.exitCode !== 0 || !complete(removed))
           throw new Error('Microsandbox removal failed');
         await confirmMicrosandboxAbsent(command, name, catalog);
+        if (ownershipRoot !== undefined) await removeMarker(ownershipRoot, spec.id);
       },
     };
   };
+
+export interface MicrosandboxRestartRecoveryResult {
+  readonly ok: boolean;
+  readonly recovered: number;
+  readonly recoveredJobIds: readonly string[];
+  readonly failures: ReadonlyArray<{ readonly jobId: string; readonly sandboxName: string }>;
+}
+
+export const reconcileMicrosandboxRestartResources = async (
+  root: string,
+  command: SandboxCommand,
+  isLive: (jobId: string) => boolean = () => false,
+): Promise<MicrosandboxRestartRecoveryResult> => {
+  const directory = markerRoot(root);
+  let names: string[];
+  try {
+    names = await readdir(directory);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT')
+      return { ok: true, recovered: 0, recoveredJobIds: [], failures: [] };
+    return {
+      ok: false,
+      recovered: 0,
+      recoveredJobIds: [],
+      failures: [{ jobId: 'redacted', sandboxName: 'redacted' }],
+    };
+  }
+  let recovered = 0;
+  const recoveredJobIds: string[] = [];
+  const failures: Array<{ jobId: string; sandboxName: string }> = [];
+  for (const name of names) {
+    if (!name.endsWith('.json')) continue;
+    const record = await readMarker(root, name);
+    if (record === undefined) {
+      failures.push({ jobId: 'redacted', sandboxName: 'redacted' });
+      continue;
+    }
+    if (isLive(record.jobId)) continue;
+    try {
+      const existing = await inspect(command, record.sandboxName, record.catalog);
+      if (existing !== undefined) {
+        if (existing.config.labels['cr-job-owner'] !== record.owner)
+          throw new Error('owner mismatch');
+        const removed = await command(
+          ['rm', '-f', record.sandboxName],
+          { stage: 'cleanup', command: 'remove-sandbox' },
+          { env: localEnvironment() },
+        );
+        if (removed.exitCode !== 0 || !complete(removed)) throw new Error('remove failed');
+        await confirmMicrosandboxAbsent(command, record.sandboxName, record.catalog);
+      }
+      await removeMarker(root, record.jobId);
+      recovered += 1;
+      recoveredJobIds.push(record.jobId);
+    } catch {
+      failures.push({ jobId: record.jobId, sandboxName: record.sandboxName });
+    }
+  }
+  return { ok: failures.length === 0, recovered, recoveredJobIds, failures };
+};
