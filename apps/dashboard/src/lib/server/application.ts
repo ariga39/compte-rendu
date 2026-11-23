@@ -1,4 +1,4 @@
-import { createCloudflareOperationalLog } from '@compte-rendu/contracts';
+import { canonicalDashboardOrigin, createCloudflareOperationalLog } from '@compte-rendu/contracts';
 import { authRoute, noStore, requireOperator, sessionViewer } from './auth';
 import { modelSettings, type LoginEnv } from './model-settings';
 import { handleRunnerLlmControl } from '../../../../core/src/runner-llm-control';
@@ -25,11 +25,10 @@ export function createApplication(env: ApplicationEnv, dependencies: CoreWorkerD
       const cancel = /^\/api\/jobs\/([A-Za-z0-9._~-]{1,128})\/cancel$/.exec(path);
       if (cancel) {
         if (request.method !== 'POST') return noStore(405);
-        const origin = new URL(request.url).origin;
+        const origin = canonicalDashboardOrigin(env.DASHBOARD_ORIGIN);
         if (
-          !env.DASHBOARD_ORIGIN ||
-          origin !== env.DASHBOARD_ORIGIN ||
-          !origin.startsWith('https://') ||
+          !origin ||
+          new URL(request.url).origin !== origin ||
           request.headers.get('origin') !== origin
         )
           return noStore(403);

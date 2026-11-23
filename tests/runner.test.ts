@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 import {
   createRunner as createProductionRunner,
@@ -10,6 +10,8 @@ import {
   type RunnerProcessOptions,
   type RunnerProcessResult,
 } from '../apps/runner/src/runner';
+import { createSbxRuntimeFactory } from '../apps/runner/src/sandbox-runtime-sbx';
+import type { SandboxRuntimeFactory } from '../apps/runner/src/sandbox-runtime';
 import { createCoreWorker } from '../apps/core/src/core-worker';
 import type {
   JobSandboxRuntime,
@@ -296,7 +298,7 @@ const relayInferenceModelConfig = (route = 'deepseek-review') =>
 
 const createRelayControl = (
   options: {
-    readonly issuance?: 'normal' | 'malformed' | 'short';
+    readonly issuance?: 'normal' | 'malformed' | 'short' | 'http' | 'transport';
     readonly token?: string;
     readonly usage?: unknown;
     readonly rejectRevoke?: boolean;
@@ -328,6 +330,9 @@ const createRelayControl = (
       body,
     });
     if (path === '/runner-llm/issue' || path === '/runner-llm/issue-v2') {
+      if (options.issuance === 'http')
+        return new Response('http-response-body-canary', { status: 503 });
+      if (options.issuance === 'transport') throw new Error('transport-response-canary');
       if (options.issuance === 'malformed')
         return new Response('{', {
           status: 201,
@@ -448,6 +453,7 @@ const runAgentScenario = async (scenario: {
   evidenceRoot?: string;
   repositoryReadToken?: string;
   agentProcess?: (options: RunnerProcessOptions) => Promise<RunnerProcessResult>;
+  sandboxRuntimeFactory?: SandboxRuntimeFactory;
   logEvents?: unknown[];
   onRunner?: (runner: ReturnType<typeof createRunner>) => void;
   terminalAttempts?: number;
@@ -465,6 +471,7 @@ const runAgentScenario = async (scenario: {
     ...(scenario.microsandbox
       ? ({ sandboxRuntime: 'microsandbox', microsandboxImage: 'review:fixture' } as const)
       : {}),
+    sandboxRuntimeFactory: scenario.sandboxRuntimeFactory,
     evidenceRoot: scenario.evidenceRoot ?? sharedEvidenceRoot,
     authToken: 'runner-test-token',
     modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
@@ -1672,6 +1679,55 @@ describe('Runner Job HTTP interface', () => {
     const stderrEvidence = await readFile(join(archive, 'opencode.stderr'), 'utf8');
     expect(stderrEvidence).toBe('warning [redacted]\n');
     expect(stderrEvidence).not.toContain(credential);
+  });
+
+  it('scrubs an additional process credential from the final archived output', async () => {
+    const credential = 'synthetic-additional-process-credential';
+    const leak = JSON.stringify({
+      type: 'text',
+      sessionID: 'scenario-session',
+      part: { type: 'text', messageID: 'msg-leak', text: `leak ${credential}` },
+    });
+    const resultLine = finalMarkdownJsonl();
+    const { terminal, manifest } = await runAgentScenario({
+      runId: 'run-312-additional-credential',
+      output: `${leak}\n${resultLine}`,
+      agentProcess: (options) =>
+        runProcess('sh', ['-c', `printf '%s\\n' '${leak}' '${resultLine}'`], options),
+      sandboxRuntimeFactory: (spec) => {
+        const runtime = createSbxRuntimeFactory({
+          modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+        })(spec);
+        return {
+          ...runtime,
+          exec: (args, command, processOptions, diagnostic) =>
+            runtime.exec(
+              args,
+              command,
+              {
+                ...processOptions,
+                credentialValues: [...(processOptions?.credentialValues ?? []), credential],
+              },
+              diagnostic,
+            ),
+        };
+      },
+    });
+
+    expect(terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'evidence' },
+      evidence: { status: 'incomplete' },
+      sandbox: { cleanup: 'destroyed' },
+    });
+    expect(terminal).not.toHaveProperty('result');
+    expect(manifest).toMatchObject({
+      evidenceFailure: 'credential-in-output',
+      terminal: { status: 'failed', reason: 'evidence' },
+    });
+    const archived = await readTextTree(join(sharedEvidenceRoot, terminal.evidenceId as string));
+    expect(archived).not.toContain(credential);
+    expect(archived).toContain('[redacted]');
   });
 
   it('does not treat stderr capture truncation alone as invalid output', async () => {
@@ -8973,6 +9029,7 @@ describe('Runner LLM lifecycle failures', () => {
     f.relay.setRejectRevoke(true);
     const evidenceRoot = join(f.root, 'evidence');
     const callbacks: Request[] = [];
+    let activeRunner: ReturnType<typeof createRunner> | undefined;
     let restarted: ReturnType<typeof createRunner> | undefined;
     try {
       const result = await runAgentScenario({
@@ -8982,6 +9039,9 @@ describe('Runner LLM lifecycle failures', () => {
         relayControl: f.relay,
         evidenceRoot,
         callbackRequests: callbacks,
+        onRunner: (runner) => {
+          activeRunner = runner;
+        },
       });
       expect(result.terminal).toMatchObject({
         status: 'failed',
@@ -8991,6 +9051,21 @@ describe('Runner LLM lifecycle failures', () => {
       expect((await callbacks[0].json()).result).toBeUndefined();
       expect(f.relay.revoked).toEqual([]);
       expect(f.relay.activeTokens.size).toBe(1);
+      // A failed terminal revocation leaves a startup marker, but confirmed
+      // Sandbox destruction still lets this process drain. The next startup
+      // resolves the marker before accepting work.
+      const drain = await activeRunner!.handle(
+        new Request('http://runner/maintenance/drain', {
+          method: 'POST',
+          headers: { authorization: 'Bearer runner-test-token' },
+        }),
+      );
+      expect(await drain.json()).toMatchObject({
+        draining: true,
+        drained: true,
+        cleanupBlockedJobs: 0,
+        claimPollingHalted: false,
+      });
       let unexpectedClaim = false;
       const blocked = createRunner({
         ...relayOptions(f.relay),
@@ -9126,7 +9201,24 @@ describe('Runner LLM lifecycle failures', () => {
         drained: false,
         claimPollingHalted: true,
       });
+      // Enable revocation before resume so a resume-triggered scan would
+      // succeed if it ran at all. Resume only clears the pause; the failed
+      // startup gate, its marker and the claim halt must remain.
+      const revokedBeforeResume = f.relay.revoked.length;
       f.relay.setRejectRevoke(false);
+      expect(await (await restarted.handle(maintenanceRequest('resume'))).json()).toMatchObject({
+        draining: false,
+        drained: false,
+        claimPollingHalted: true,
+      });
+      expect(claims).toBe(0);
+      expect(f.relay.revoked).toHaveLength(revokedBeforeResume);
+      expect(f.relay.activeTokens.size).toBe(1);
+      expect(await (await restarted.handle(maintenanceRequest('drain'))).json()).toMatchObject({
+        draining: true,
+        drained: false,
+        claimPollingHalted: true,
+      });
       const manifest = failed.manifest;
       const recovery = await restarted.handle(
         new Request('http://runner/maintenance/recover-cleanup', {
@@ -10079,6 +10171,10 @@ describe('Runner multi-model review', () => {
     readonly runId?: string;
     readonly selection?: typeof selection;
     readonly agentExitCode?: number;
+    readonly agentCredentialObserved?: boolean;
+    readonly multiReviewWriteFailure?: boolean;
+    readonly issuance?: 'http' | 'transport';
+    readonly token?: string;
   };
 
   const runScenario = async (overrides: MultiScenarioOverrides = {}) => {
@@ -10098,12 +10194,17 @@ describe('Runner multi-model review', () => {
           : (overrides.rootExport ?? rootExport)
         : defaultExport(sessionId));
     const controlRoot = await mkdtemp(join(tmpdir(), 'cr-multi-control-'));
-    const relay = createRelayControl({ descriptors: overrides.descriptors });
+    const relay = createRelayControl({
+      descriptors: overrides.descriptors,
+      ...(overrides.issuance === undefined ? {} : { issuance: overrides.issuance }),
+      ...(overrides.token === undefined ? {} : { token: overrides.token }),
+    });
 
     let createArgs: readonly string[] | undefined;
     let agentArgs: readonly string[] | undefined;
     const agentCommands: string[][] = [];
     const callbacks: Request[] = [];
+    const events: Array<Record<string, unknown>> = [];
     const runner = createRunner({
       evidenceRoot: join(controlRoot, 'evidence'),
       authToken: 'runner-test-token',
@@ -10113,6 +10214,11 @@ describe('Runner multi-model review', () => {
       llmRelayGeneration: 'generation-a',
       callbackUrl: 'https://ingress.test/runner-callback',
       callbackToken: 'callback-token',
+      log: {
+        record: async (event) => {
+          events.push(event as Record<string, unknown>);
+        },
+      },
       callbackFetch: routeRelayControl(relay, async (input, init) => {
         callbacks.push(new Request(input, init));
         return new Response(null, { status: 202 });
@@ -10127,6 +10233,12 @@ describe('Runner multi-model review', () => {
           agentRuns += 1;
           agentArgs ??= args;
           agentCommands.push([...args]);
+          if (overrides.multiReviewWriteFailure === true) {
+            await mkdir(join(dirname(options.stdoutFilePath!), 'multi-review.json'), {
+              recursive: true,
+              mode: 0o700,
+            });
+          }
           await writeFile(options.stdoutFilePath!, `${output}\n`, {
             ...(options.fileAppend === true ? { flag: 'a' } : {}),
             mode: 0o600,
@@ -10141,6 +10253,7 @@ describe('Runner multi-model review', () => {
             stdout: output,
             timedOut: false,
             truncated: false,
+            ...(overrides.agentCredentialObserved === true ? { credentialObserved: true } : {}),
           };
         }
         if (args[0] === 'exec' && args.includes('api') && args.includes('session.list')) {
@@ -10257,6 +10370,7 @@ describe('Runner multi-model review', () => {
         createArgs,
         agentArgs,
         agentCommands,
+        events,
         evidencePath,
         childExports,
         sessionPageContents,
@@ -10324,35 +10438,99 @@ describe('Runner multi-model review', () => {
     });
   });
 
+  const validGrantDescriptors = [
+    { routeId: 'deepseek-v4.1-flash', profile: 'chat' },
+    { routeId: 'step-5-preview', profile: 'responses' },
+  ];
+
+  // Reuse the multi-model public scenario: every issuance failure must revoke
+  // before the fixture records VM creation, and no body or grant may be logged.
   it.each([
-    ['missing', [{ routeId: 'step-5-preview', profile: 'responses' }]],
     [
-      'duplicate',
-      [
-        { routeId: 'step-5-preview', profile: 'chat' },
-        { routeId: 'step-5-preview', profile: 'responses' },
-      ],
+      'missing descriptor',
+      {
+        descriptors: [{ routeId: 'missing-route-body-canary', profile: 'responses' }],
+        token: 'grant-token-canary',
+      },
+      'invalid-response',
+      undefined,
     ],
     [
-      'unexpected',
-      [
-        { routeId: 'other', profile: 'chat' },
-        { routeId: 'step-5-preview', profile: 'responses' },
-      ],
+      'duplicate descriptor',
+      {
+        descriptors: [
+          { routeId: 'deepseek-v4.1-flash', profile: 'chat' },
+          { routeId: 'duplicate-route-body-canary', profile: 'responses' },
+        ],
+        token: 'grant-token-canary',
+      },
+      'invalid-response',
+      undefined,
     ],
     [
-      'unknown adapter',
-      [
-        { routeId: 'deepseek-v4.1-flash', profile: 'chat' },
-        { routeId: 'step-5-preview', profile: 'custom-script' },
-      ],
+      'unexpected descriptor',
+      {
+        descriptors: [
+          { routeId: 'other-route-body-canary', profile: 'chat' },
+          { routeId: 'step-5-preview', profile: 'responses' },
+        ],
+        token: 'grant-token-canary',
+      },
+      'invalid-response',
+      undefined,
     ],
-  ])('revokes a grant with %s descriptors before VM creation', async (_label, descriptors) => {
-    const result = await runScenario({ descriptors });
-    expect(result.terminal.status).toBe('failed');
-    expect(result.createArgs).toBeUndefined();
-    expect(result.revoked).toEqual([runnerJobFields.id]);
-  });
+    [
+      'unknown adapter descriptor',
+      {
+        descriptors: [
+          { routeId: 'deepseek-v4.1-flash', profile: 'chat' },
+          { routeId: 'schema-route-body-canary', profile: 'custom-script' },
+        ],
+        token: 'grant-token-canary',
+      },
+      'invalid-response',
+      undefined,
+    ],
+    [
+      'HTTP failure',
+      {
+        descriptors: validGrantDescriptors,
+        issuance: 'http' as const,
+      },
+      'http-error',
+      503,
+    ],
+    [
+      'transport failure',
+      {
+        descriptors: validGrantDescriptors,
+        issuance: 'transport' as const,
+      },
+      'transport-error',
+      undefined,
+    ],
+  ])(
+    'records a fixed %s grant diagnostic before VM creation and redacts credentials',
+    async (_label, overrides, reason, status) => {
+      const result = await runScenario(overrides);
+
+      expect(result.terminal.status).toBe('failed');
+      expect(result.createArgs).toBeUndefined();
+      expect(result.revoked).toEqual([runnerJobFields.id]);
+      expect(result.events).toContainEqual({
+        phase: 'runner',
+        outcome: 'grant',
+        runId: 'run-multi-success',
+        jobId: runnerJobFields.id,
+        attempt: 1,
+        reason,
+        ...(status === undefined ? {} : { status }),
+      });
+      const observed = JSON.stringify({ terminal: result.terminal, events: result.events });
+      expect(observed).not.toContain('canary');
+      for (const { token } of result.issued) expect(observed).not.toContain(token);
+    },
+  );
 
   it('runs the frozen roster through native foreground subagents and publishes one synthesis', async () => {
     const result = await runScenario();
@@ -10963,6 +11141,26 @@ describe('Runner multi-model review', () => {
     expect(result.manifest.files).toEqual(
       expect.arrayContaining(['multi-review.json', 'opencode-export-ses_multi_child_a.json']),
     );
+  });
+
+  it('preserves a credential-in-output cause when multi-review evidence cannot be written', async () => {
+    const result = await runScenario({
+      runId: 'run-multi-credential-write-failure',
+      agentCredentialObserved: true,
+      multiReviewWriteFailure: true,
+    });
+
+    expect(result.terminal).toMatchObject({
+      status: 'failed',
+      failure: { reason: 'evidence' },
+      evidence: { status: 'incomplete' },
+      sandbox: { cleanup: 'destroyed' },
+    });
+    expect(result.terminal).not.toHaveProperty('result');
+    expect(result.manifest).toMatchObject({
+      evidenceFailure: 'credential-in-output',
+      terminal: { status: 'failed', reason: 'evidence' },
+    });
   });
 
   it('accepts unrelated extra fields in the final submission and publishes only decision and markdown', async () => {
@@ -12062,12 +12260,26 @@ describe('Runner confirmed cleanup recovery', () => {
         modelConfig,
         evidenceRoot: root,
       };
-      const success = await runAgentScenario({ ...scenario, runId: 'msb-success' });
+      const callbacks: Request[] = [];
+      const success = await runAgentScenario({
+        ...scenario,
+        runId: 'msb-success',
+        callbackRequests: callbacks,
+      });
       expect(success.terminal).toMatchObject({
         status: 'succeeded',
         sandbox: { cleanup: 'destroyed' },
       });
       expect(success.manifest.runtime).toBe('microsandbox');
+      expect(callbacks).toHaveLength(1);
+      const lifecycle = (await callbacks[0].json()) as {
+        lifecycle: { milestones: Array<{ stage: string; runtime?: string }> };
+      };
+      expect(
+        lifecycle.lifecycle.milestones.find((milestone) => milestone.stage === 'sandbox'),
+      ).toMatchObject({
+        runtime: 'microsandbox',
+      });
       expect(success.createArgs).toContain(
         'allow@inference.example:tcp:443,allow@api.github.com:tcp:443',
       );

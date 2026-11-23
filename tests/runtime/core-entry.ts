@@ -12,9 +12,21 @@ interface RuntimeCoreEnv extends ApplicationEnv {
   readonly RUNNER: RunnerCaptureBinding;
 }
 
+let currentHead = '2222222222222222222222222222222222222222';
+
 export default {
   fetch: async (request: Request, env: RuntimeCoreEnv) => {
     const url = new URL(request.url);
+    if (url.pathname === '/webhooks/github') {
+      if (request.headers.get('x-github-event') === 'pull_request') {
+        const payload = (await request.clone().json()) as {
+          pull_request: { head: { sha: string } };
+        };
+        currentHead = payload.pull_request.head.sha;
+      } else {
+        currentHead = '3333333333333333333333333333333333333333';
+      }
+    }
 
     if (url.pathname === '/__test/capture') {
       return env.RUNNER.fetch(request);
@@ -72,6 +84,7 @@ export default {
       {
         github: {
           getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+          loadReviewTarget: async () => ({ headSha: currentHead }),
           getPullRequest: async () => ({
             repositoryVisibility: 'public',
             baseRepositoryId: 11,

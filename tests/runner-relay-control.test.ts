@@ -198,6 +198,88 @@ describe('Runner relay control client', () => {
       vi.useRealTimers();
     }
   });
+
+  it.each([
+    [
+      'a schema-invalid successful issue',
+      () =>
+        Response.json(
+          {
+            token: 'schema-token-canary',
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            descriptors: [{ routeId: 'reviewer-a', profile: 'custom-script' }],
+          },
+          { status: 201 },
+        ),
+      'invalid-response',
+    ],
+    [
+      'a route-set-mismatched successful issue',
+      () =>
+        Response.json(
+          {
+            token: 'route-set-token-canary',
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            descriptors: [{ routeId: 'other-route-body-canary', profile: 'chat' }],
+          },
+          { status: 201 },
+        ),
+      'invalid-response',
+    ],
+    [
+      'an HTTP-rejected issue',
+      () => new Response('http-body-canary', { status: 503 }),
+      'http-error',
+    ],
+    [
+      'a transport-failed issue',
+      () => {
+        throw new Error('transport-message-canary');
+      },
+      'transport-error',
+    ],
+  ])('classifies %s without exposing the body or credential', async (_label, respond, reason) => {
+    const client = createRelayLlmServiceClient({
+      grantVersion: 2,
+      origin: 'https://relay.example',
+      token: 'relay-token',
+      fetch: async () => respond(),
+    });
+    const error = await client
+      .issue({ runId: 'run-classify', jobId: 'job-classify', attempt: 1 }, ['reviewer-a'])
+      .catch((value: unknown) => value);
+
+    expect(error).toMatchObject({
+      name: 'LlmGrantIssueError',
+      message: 'LLM service grant unavailable',
+      reason,
+      ...(reason === 'http-error' ? { status: 503 } : {}),
+    });
+    expect(JSON.stringify(error)).not.toContain('canary');
+  });
+
+  it('classifies an issue timeout separately from transport and HTTP failures', async () => {
+    vi.useFakeTimers();
+    try {
+      const client = createRelayLlmServiceClient({
+        grantVersion: 2,
+        origin: 'https://relay.example',
+        token: 'relay-token',
+        fetch: async () => new Promise<Response>(() => undefined),
+      });
+      const pending = client
+        .issue({ runId: 'run-timeout', jobId: 'job-timeout', attempt: 1 }, ['reviewer-a'])
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(5000);
+
+      expect(await pending).toMatchObject({
+        name: 'LlmGrantIssueError',
+        reason: 'timeout',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('Runner relay configuration', () => {

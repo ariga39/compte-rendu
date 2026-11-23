@@ -149,6 +149,7 @@ it.each([false, true])(
         github: {
           updateCheckRun,
           getRepositoryUrl: async () => 'https://github.com/example/repo.git',
+          loadReviewTarget: async () => ({ headSha: '2'.repeat(40) }),
         },
         getReadInstallationToken: async () => ({
           token: 'test-read',
@@ -215,7 +216,10 @@ it('releases a cancelled claim when token preparation finishes before Runner rec
     const env = { REVIEW_DB: database, GITHUB_APP_ID: '1', GITHUB_APP_PRIVATE_KEY: 'test' };
     const core = createCoreWorker(env, {
       stateStore: state,
-      github: { getRepositoryUrl: async () => 'https://github.com/example/repo.git' },
+      github: {
+        getRepositoryUrl: async () => 'https://github.com/example/repo.git',
+        loadReviewTarget: async () => ({ headSha: '2'.repeat(40) }),
+      },
       getReadInstallationToken: async () => {
         await state.cancelRun({
           runId: queued.runId,

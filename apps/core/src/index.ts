@@ -837,6 +837,30 @@ const ReviewPublicationCreateResult = Schema.Union([
 
 type ReviewPublicationTarget = typeof ReviewPublicationTarget.Type;
 
+export type ClaimHeadStatus = 'current' | 'stale' | 'unavailable';
+
+export const claimHeadStatus = Effect.fn('claimHeadStatus')(function* (
+  github: GitHubAdapter,
+  job: ReviewJob,
+) {
+  // Without the lookup the claim cannot establish freshness, so it must fail
+  // closed. The deployed adapter always provides it.
+  if (github.loadReviewTarget === undefined) return 'unavailable' as const;
+  return yield* Effect.tryPromise({
+    try: async () => {
+      const value = await github.loadReviewTarget!({
+        repositoryId: job.repositoryId,
+        pullRequestNumber: job.pullRequestNumber,
+        installationId: job.installationId,
+      });
+      const target = Schema.decodeUnknownOption(ReviewPublicationTarget)(value);
+      if (Option.isNone(target)) return 'unavailable' as const;
+      return target.value.headSha === job.headSha ? ('current' as const) : ('stale' as const);
+    },
+    catch: () => 'unavailable' as const,
+  }).pipe(Effect.catch(() => Effect.succeed('unavailable' as const)));
+});
+
 type ReviewCompletionStateStore = ReviewStateStore & Partial<ReviewStateQueries>;
 
 type PublicationTerminal =

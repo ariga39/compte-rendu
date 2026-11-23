@@ -1,4 +1,8 @@
-import type { ModelUsageSummary, UpstreamUsage } from '@compte-rendu/contracts';
+import {
+  MODEL_USAGE_ROW_LIMIT,
+  type ModelUsageSummary,
+  type UpstreamUsage,
+} from '@compte-rendu/contracts';
 
 type UsageSummaryRow = ModelUsageSummary['models'][number];
 type TokenCounter = NonNullable<UsageSummaryRow['inputTokens']>;
@@ -150,8 +154,7 @@ interface UsageGroupRow {
   readonly reasoning_reported: number;
 }
 
-const USAGE_GROUP_LIMIT = 33;
-const USAGE_ROW_LIMIT = 32;
+const USAGE_GROUP_LIMIT = MODEL_USAGE_ROW_LIMIT + 1;
 
 const tokenCount = (total: number | null, reported: number): TokenCounter | null =>
   reported === 0 || total === null ? null : { total, reportedRequests: reported };
@@ -190,7 +193,7 @@ export const readUsage = async (
     )
     .bind(jobId, USAGE_GROUP_LIMIT)
     .all<UsageGroupRow>();
-  const models: UsageSummaryRow[] = rows.results.slice(0, USAGE_ROW_LIMIT).map((row) => ({
+  const models: UsageSummaryRow[] = rows.results.slice(0, MODEL_USAGE_ROW_LIMIT).map((row) => ({
     route: row.route,
     model: row.model,
     requests: row.requests,
@@ -205,7 +208,7 @@ export const readUsage = async (
   return {
     version: 1,
     models,
-    ...(rows.results.length > USAGE_ROW_LIMIT ? { truncated: true } : {}),
+    ...(rows.results.length > MODEL_USAGE_ROW_LIMIT ? { truncated: true } : {}),
   };
 };
 
