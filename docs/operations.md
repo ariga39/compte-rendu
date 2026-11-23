@@ -226,13 +226,26 @@ curl --fail --silent --show-error --config "$RUNNER_CURL_CONFIG" \
   "$RUNNER_ORIGIN/maintenance"
 ```
 
-Wait for `drained: true` before restarting. It requires maintenance mode, no
-active jobs or in-flight claim, no halted claim loop and no terminal job with
-unconfirmed cleanup. Inspect failures rather than forcing a restart to clear
-these conditions. Resume never clears an ownership-related claim halt or failed
-cleanup. If maintenance is cancelled, send `POST /maintenance/resume` with the
-same curl configuration. Drain is in-memory: a restarted Runner begins normal
-claiming automatically.
+Wait for `drained: true` before restarting. It requires maintenance mode, a
+successful startup grant-recovery scan, no active jobs or in-flight claim, no
+halted claim loop and no terminal job with unconfirmed cleanup. Any unresolved
+grant marker, including an invalid file or a marker bound to another issuer or
+generation, keeps the scan failed and the claim gate closed. Inspect failures
+rather than forcing a restart to clear these conditions. Resume never retries or
+clears a failed startup grant scan, an ownership-related claim halt or failed
+cleanup. Resolve a failed startup scan with the explicit cleanup recovery below
+for the affected job; that revokes the recorded grant, removes its marker and
+retries the scan in the same process. A restart also retries the scan, but only
+when the original issuer is reachable. If maintenance is cancelled, send
+`POST /maintenance/resume` with the same curl configuration. Drain is in-memory:
+a restarted Runner begins normal claiming automatically after its startup scan.
+
+A successful startup scan is not a continuous scan of all grants. A terminal
+revocation failure after startup fails that job without a vote and leaves its
+marker for the next startup or explicit cleanup recovery; confirmed Sandbox
+cleanup remains the current drain blocker. Grants have a fixed lifetime of four
+review budgets and stop authenticating at expiry even when revocation was never
+confirmed.
 
 Drained means local work and callback attempts finished, not that Core accepted
 every callback. Check terminal callback failures and the dashboard before

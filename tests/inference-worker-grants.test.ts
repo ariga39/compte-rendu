@@ -310,6 +310,30 @@ describe('Inference Worker grant issue', () => {
   });
 });
 
+describe('Inference Worker grant expiry', () => {
+  it('rejects an issued grant at its fixed lifetime without requiring revocation', async () => {
+    const { database, control } = setup();
+    try {
+      const issued = await control.issue({
+        jobId: 'job-expiry',
+        snapshot,
+        latestIssueDeadline: (await d1Now(database)) + 60_000,
+      });
+      if (issued.kind !== 'issued') throw new Error('expected an issued grant');
+      await expect(authenticateGrant(database, `Bearer ${issued.token}`)).resolves.toMatchObject({
+        jobId: 'job-expiry',
+      });
+
+      database.database
+        .prepare('UPDATE grants SET expires_at = ? WHERE job_id = ?')
+        .run((await d1Now(database)) - 1, 'job-expiry');
+      await expect(authenticateGrant(database, `Bearer ${issued.token}`)).resolves.toBeNull();
+    } finally {
+      database.close();
+    }
+  });
+});
+
 describe('Inference Worker grant revoke', () => {
   it('tombstones an unknown job and blocks its delayed issue', async () => {
     const { database, control } = setup();
