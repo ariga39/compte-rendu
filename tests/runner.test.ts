@@ -12990,6 +12990,1267 @@ describe('Runner confirmed cleanup recovery', () => {
   });
 });
 
+describe('Runner backend outage recovery', () => {
+  it('pauses claims during an sbx outage and reconciles the failed cleanup after access returns', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-backend-outage-'));
+    const previousTmp = process.env.TMPDIR;
+    process.env.TMPDIR = root;
+    const baseSha = '1'.repeat(40);
+    const oldHead = '2'.repeat(40);
+    const newHead = '3'.repeat(40);
+    const firstJobId = 'outage-first-job';
+    const replacementJobId = 'outage-replacement-job';
+    let backendUp = true;
+    let phase: 'first' | 'replacement' = 'first';
+    let recovered = false;
+    let replacementReturned = false;
+    let recoveryAttempts = 0;
+    let releaseRecoveryRetry!: () => void;
+    const recoveryRetryGate = new Promise<void>((resolve) => {
+      releaseRecoveryRetry = resolve;
+    });
+    const claims: Array<{ body: unknown; status: number }> = [];
+    const callbacks: Request[] = [];
+    const recoveryReports: Array<Record<string, unknown>> = [];
+    const commands: string[][] = [];
+    const authFailure = {
+      exitCode: 1,
+      stdout: '',
+      stderr: 'not signed in',
+      timedOut: false,
+      truncated: false,
+    };
+    const ok = { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+    const jobBody = (id: string, headSha: string) => ({
+      ...runnerJobFields,
+      id,
+      runId: `run-${id}`,
+      attempt: 1,
+      pullRequestNumber: 42,
+      repositoryUrl: 'https://github.com/acme/reviewed.git',
+      baseSha,
+      headSha,
+    });
+    const runner = createProductionRunnerWithMergeBase({
+      evidenceRoot: root,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'fixture-resolver',
+      modelConfig: standardModelConfig,
+      claimUrl: 'https://ingress.test/runner-claim',
+      claimIntervalMs: 2,
+      claimFetch: async (_input, init) => {
+        const body = typeof init?.body === 'string' ? JSON.parse(init.body) : {};
+        claims.push({ body, status: recovered && !replacementReturned ? 200 : 204 });
+        if (!recovered || replacementReturned) return new Response(null, { status: 204 });
+        replacementReturned = true;
+        phase = 'replacement';
+        return Response.json(jobBody(replacementJobId, newHead), { status: 200 });
+      },
+      callbackUrl: 'https://ingress.test/runner-callback',
+      callbackToken: 'callback-token',
+      callbackFetch: async (input, init) => {
+        const path = new URL(
+          input instanceof Request ? input.url : input instanceof URL ? input.href : input,
+        ).pathname;
+        if (path === '/runner-cleanup-recovery') {
+          recoveryAttempts += 1;
+          if (recoveryAttempts === 1) {
+            recoveryReports.push(
+              JSON.parse(typeof init?.body === 'string' ? init.body : '{}') as Record<
+                string,
+                unknown
+              >,
+            );
+            return new Response(null, { status: 409 });
+          }
+          await recoveryRetryGate;
+          recoveryReports.push(
+            JSON.parse(typeof init?.body === 'string' ? init.body : '{}') as Record<
+              string,
+              unknown
+            >,
+          );
+          recovered = true;
+          return new Response(null, { status: 202 });
+        }
+        callbacks.push(new Request(input, init));
+        return new Response(null, { status: 202 });
+      },
+      process: async (_command, args) => {
+        commands.push([...args]);
+        if (args[0] === 'ls') return backendUp ? ok : authFailure;
+        if (!backendUp) return authFailure;
+        if (args[0] === 'secret' && args[1] === 'set-custom' && phase === 'first') {
+          backendUp = false;
+          return authFailure;
+        }
+        if (args[0] === 'inspect')
+          return {
+            ...ok,
+            exitCode: 1,
+            stderr: `error: sandbox '${args[1]}' not found`,
+          };
+        if (args[0] === 'policy' && args[1] === 'ls') return { ...ok, stdout: '{"rules":[]}' };
+        if (args.includes('rev-parse'))
+          return {
+            ...ok,
+            stdout:
+              phase === 'first' ? `${baseSha}\n${oldHead}\n` : `${baseSha}\n${'4'.repeat(40)}\n`,
+          };
+        return ok;
+      },
+    });
+    try {
+      expect(
+        (
+          await runner.handle(
+            new Request('http://runner/jobs', {
+              method: 'POST',
+              headers: {
+                authorization: 'Bearer runner-test-token',
+                'content-type': 'application/json',
+              },
+              body: JSON.stringify(jobBody(firstJobId, oldHead)),
+            }),
+          )
+        ).status,
+      ).toBe(202);
+      const first = await waitForTerminal(runner, firstJobId);
+      expect(first).toMatchObject({
+        status: 'failed',
+        sandbox: { cleanup: 'failed' },
+      });
+      const evidenceId = first.evidenceId as string;
+      const callbackPath = join(root, evidenceId, 'callback.json');
+      const manifestPath = join(root, evidenceId, 'manifest.json');
+      const originalCallback = await readFile(callbackPath, 'utf8');
+      const originalManifest = await readFile(manifestPath, 'utf8');
+      const manifest = JSON.parse(originalManifest) as { sandboxName: string };
+
+      await vi.waitFor(async () => {
+        const status = (await (
+          await runner.handle(
+            new Request('http://runner/maintenance', {
+              headers: { authorization: 'Bearer runner-test-token' },
+            }),
+          )
+        ).json()) as { claimPollingHalted: boolean };
+        expect(status.claimPollingHalted).toBe(true);
+      });
+      const claimsWhileBlocked = claims.length;
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(claims).toHaveLength(claimsWhileBlocked);
+      expect(commands.filter((args) => args[0] === 'ls').length).toBeGreaterThan(0);
+
+      backendUp = true;
+      await vi.waitFor(() => expect(recoveryReports).toHaveLength(1));
+      expect(recoveryReports[0]).toMatchObject({
+        evidenceId,
+        jobId: firstJobId,
+        runId: `run-${firstJobId}`,
+        attempt: 1,
+        baseSha,
+        headSha: oldHead,
+        sandboxName: manifest.sandboxName,
+      });
+      const recoveryCommandsAfterFirst = commands.filter(
+        (args) => args[0] === 'inspect' || (args[0] === 'policy' && args[1] === 'ls'),
+      ).length;
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(recoveryReports).toHaveLength(1);
+      expect(
+        commands.filter(
+          (args) => args[0] === 'inspect' || (args[0] === 'policy' && args[1] === 'ls'),
+        ),
+      ).toHaveLength(recoveryCommandsAfterFirst);
+      const claimsAfterRejectedReport = claims.length;
+      // A transient report failure must retry, while unrelated claim polling
+      // continues on the same idle cadence.
+      await vi.waitFor(() => expect(claims.length).toBeGreaterThan(claimsAfterRejectedReport));
+      const advanceRetryClock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 31_000);
+      try {
+        releaseRecoveryRetry();
+        await vi.waitFor(() => expect(recoveryReports).toHaveLength(2), { timeout: 5_000 });
+      } finally {
+        advanceRetryClock.mockRestore();
+      }
+      expect(recoveryReports[1]).toMatchObject({
+        evidenceId,
+        jobId: firstJobId,
+        runId: `run-${firstJobId}`,
+        attempt: 1,
+        baseSha,
+        headSha: oldHead,
+        sandboxName: manifest.sandboxName,
+      });
+      await vi.waitFor(() => expect(claims.some((claim) => claim.status === 200)).toBe(true));
+      const replacement = await waitForTerminal(runner, replacementJobId);
+      expect(replacement).toMatchObject({
+        status: 'failed',
+        failure: { reason: 'checkout' },
+        sandbox: { cleanup: 'destroyed' },
+      });
+      expect(await readFile(callbackPath, 'utf8')).toBe(originalCallback);
+      expect(await readFile(manifestPath, 'utf8')).toBe(originalManifest);
+      expect(
+        JSON.parse(await readFile(join(root, evidenceId, 'cleanup-recovery.json'), 'utf8')),
+      ).toMatchObject({ jobId: firstJobId, sandboxName: manifest.sandboxName });
+    } finally {
+      releaseRecoveryRetry();
+      await runner.close();
+      if (previousTmp === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = previousTmp;
+      await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 10 });
+    }
+  });
+
+  it('stops automatic cleanup delivery after a permanent Core rejection', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-permanent-recovery-rejection-'));
+    const previousTmp = process.env.TMPDIR;
+    process.env.TMPDIR = root;
+    const baseSha = '1'.repeat(40);
+    const headSha = '2'.repeat(40);
+    const jobId = 'permanent-recovery-job';
+    let backendUp = true;
+    let reports = 0;
+    const commands: string[][] = [];
+    const events: unknown[] = [];
+    const ok = { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+    const authFailure = { ...ok, exitCode: 1, stderr: 'not signed in' };
+    const runner = createProductionRunnerWithMergeBase({
+      evidenceRoot: root,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'fixture-resolver',
+      modelConfig: standardModelConfig,
+      claimUrl: '',
+      claimIntervalMs: 2,
+      callbackUrl: 'https://ingress.test/runner-callback',
+      callbackToken: 'callback-token',
+      callbackFetch: async (input) => {
+        if (
+          new URL(input instanceof Request ? input.url : input).pathname ===
+          '/runner-cleanup-recovery'
+        )
+          reports += 1;
+        return new Response(null, { status: 403 });
+      },
+      log: { record: (event) => void events.push(event) },
+      process: async (_command, args) => {
+        commands.push([...args]);
+        if (args[0] === 'ls') return backendUp ? ok : authFailure;
+        if (args[0] === 'secret' && args[1] === 'set-custom') {
+          backendUp = false;
+          return authFailure;
+        }
+        if (!backendUp) return authFailure;
+        if (args[0] === 'inspect')
+          return { ...ok, exitCode: 1, stderr: `error: sandbox '${args[1]}' not found` };
+        if (args[0] === 'policy' && args[1] === 'ls') return { ...ok, stdout: '{"rules":[]}' };
+        if (args.includes('rev-parse')) return { ...ok, stdout: `${baseSha}\n${headSha}\n` };
+        return ok;
+      },
+    });
+    try {
+      expect(
+        (
+          await runner.handle(
+            new Request('http://runner/jobs', {
+              method: 'POST',
+              headers: {
+                authorization: 'Bearer runner-test-token',
+                'content-type': 'application/json',
+              },
+              body: JSON.stringify({
+                ...runnerJobFields,
+                id: jobId,
+                runId: 'run-permanent-recovery',
+                attempt: 1,
+                pullRequestNumber: 47,
+                repositoryUrl: 'https://github.com/acme/reviewed.git',
+                baseSha,
+                headSha,
+              }),
+            }),
+          )
+        ).status,
+      ).toBe(202);
+      expect(await waitForTerminal(runner, jobId)).toMatchObject({
+        status: 'failed',
+        sandbox: { cleanup: 'failed' },
+      });
+      backendUp = true;
+      await vi.waitFor(() => expect(reports).toBe(1));
+      await vi.waitFor(() =>
+        expect(events).toContainEqual(
+          expect.objectContaining({
+            phase: 'runner',
+            outcome: 'cleanup-recovery',
+            runId: 'run-permanent-recovery',
+            jobId,
+            attempt: 1,
+            status: 403,
+          }),
+        ),
+      );
+      const recoveryCommands = commands.filter(
+        (args) => args[0] === 'inspect' || (args[0] === 'policy' && args[1] === 'ls'),
+      ).length;
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(reports).toBe(1);
+      const advanceRetryClock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 31_000);
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        expect(reports).toBe(1);
+        expect(
+          commands.filter(
+            (args) => args[0] === 'inspect' || (args[0] === 'policy' && args[1] === 'ls'),
+          ),
+        ).toHaveLength(recoveryCommands);
+      } finally {
+        advanceRetryClock.mockRestore();
+      }
+    } finally {
+      await runner.close();
+      if (previousTmp === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = previousTmp;
+      await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 10 });
+    }
+  });
+
+  it('stops automatic delivery when the original callback is permanently rejected', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-permanent-callback-rejection-'));
+    const previousTmp = process.env.TMPDIR;
+    process.env.TMPDIR = root;
+    const baseSha = '1'.repeat(40);
+    const headSha = '2'.repeat(40);
+    const jobId = 'permanent-callback-job';
+    let backendUp = true;
+    let reports = 0;
+    let callbackAttempts = 0;
+    const events: unknown[] = [];
+    const ok = { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+    const authFailure = { ...ok, exitCode: 1, stderr: 'not signed in' };
+    const runner = createProductionRunnerWithMergeBase({
+      evidenceRoot: root,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'fixture-resolver',
+      modelConfig: standardModelConfig,
+      claimUrl: '',
+      claimIntervalMs: 2,
+      callbackUrl: 'https://ingress.test/runner-callback',
+      callbackToken: 'callback-token',
+      callbackFetch: async (input) => {
+        if (
+          new URL(input instanceof Request ? input.url : input).pathname ===
+          '/runner-cleanup-recovery'
+        ) {
+          reports += 1;
+          return new Response(null, { status: 409 });
+        }
+        callbackAttempts += 1;
+        return new Response(null, { status: 403 });
+      },
+      log: { record: (event) => void events.push(event) },
+      process: async (_command, args) => {
+        if (args[0] === 'ls') return backendUp ? ok : authFailure;
+        if (args[0] === 'secret' && args[1] === 'set-custom') {
+          backendUp = false;
+          return authFailure;
+        }
+        if (!backendUp) return authFailure;
+        if (args[0] === 'inspect')
+          return { ...ok, exitCode: 1, stderr: `error: sandbox '${args[1]}' not found` };
+        if (args[0] === 'policy' && args[1] === 'ls') return { ...ok, stdout: '{"rules":[]}' };
+        if (args.includes('rev-parse')) return { ...ok, stdout: `${baseSha}\n${headSha}\n` };
+        return ok;
+      },
+    });
+    try {
+      expect(
+        (
+          await runner.handle(
+            new Request('http://runner/jobs', {
+              method: 'POST',
+              headers: {
+                authorization: 'Bearer runner-test-token',
+                'content-type': 'application/json',
+              },
+              body: JSON.stringify({
+                ...runnerJobFields,
+                id: jobId,
+                runId: 'run-permanent-callback',
+                attempt: 1,
+                pullRequestNumber: 48,
+                repositoryUrl: 'https://github.com/acme/reviewed.git',
+                baseSha,
+                headSha,
+              }),
+            }),
+          )
+        ).status,
+      ).toBe(202);
+      expect(await waitForTerminal(runner, jobId)).toMatchObject({
+        status: 'failed',
+        sandbox: { cleanup: 'failed' },
+      });
+      backendUp = true;
+      await vi.waitFor(() => expect(reports).toBe(1));
+      await vi.waitFor(() => expect(callbackAttempts).toBe(3));
+      await vi.waitFor(() =>
+        expect(events).toContainEqual(
+          expect.objectContaining({
+            phase: 'runner',
+            outcome: 'callback',
+            runId: 'run-permanent-callback',
+            jobId,
+            result: 'http-error',
+            status: 403,
+          }),
+        ),
+      );
+      const advanceRetryClock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 31_000);
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        expect(reports).toBe(1);
+        expect(callbackAttempts).toBe(3);
+      } finally {
+        advanceRetryClock.mockRestore();
+      }
+    } finally {
+      await runner.close();
+      if (previousTmp === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = previousTmp;
+      await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 10 });
+    }
+  });
+
+  it('does not replay the callback after a repeated 409 recovery rejection', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-repeat-409-recovery-rejection-'));
+    const previousTmp = process.env.TMPDIR;
+    process.env.TMPDIR = root;
+    const baseSha = '1'.repeat(40);
+    const headSha = '2'.repeat(40);
+    const jobId = 'repeat-409-job';
+    let backendUp = true;
+    let reports = 0;
+    let callbackAttempts = 0;
+    const events: unknown[] = [];
+    const ok = { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+    const authFailure = { ...ok, exitCode: 1, stderr: 'not signed in' };
+    const runner = createProductionRunnerWithMergeBase({
+      evidenceRoot: root,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'fixture-resolver',
+      modelConfig: standardModelConfig,
+      claimUrl: '',
+      claimIntervalMs: 2,
+      callbackUrl: 'https://ingress.test/runner-callback',
+      callbackToken: 'callback-token',
+      callbackFetch: async (input) => {
+        if (
+          new URL(input instanceof Request ? input.url : input).pathname ===
+          '/runner-cleanup-recovery'
+        ) {
+          reports += 1;
+          return new Response(null, { status: 409 });
+        }
+        callbackAttempts += 1;
+        return new Response(null, { status: 202 });
+      },
+      log: { record: (event) => void events.push(event) },
+      process: async (_command, args) => {
+        if (args[0] === 'ls') return backendUp ? ok : authFailure;
+        if (args[0] === 'secret' && args[1] === 'set-custom') {
+          backendUp = false;
+          return authFailure;
+        }
+        if (!backendUp) return authFailure;
+        if (args[0] === 'inspect')
+          return { ...ok, exitCode: 1, stderr: `error: sandbox '${args[1]}' not found` };
+        if (args[0] === 'policy' && args[1] === 'ls') return { ...ok, stdout: '{"rules":[]}' };
+        if (args.includes('rev-parse')) return { ...ok, stdout: `${baseSha}\n${headSha}\n` };
+        return ok;
+      },
+    });
+    try {
+      expect(
+        (
+          await runner.handle(
+            new Request('http://runner/jobs', {
+              method: 'POST',
+              headers: {
+                authorization: 'Bearer runner-test-token',
+                'content-type': 'application/json',
+              },
+              body: JSON.stringify({
+                ...runnerJobFields,
+                id: jobId,
+                runId: 'run-repeat-409',
+                attempt: 1,
+                pullRequestNumber: 49,
+                repositoryUrl: 'https://github.com/acme/reviewed.git',
+                baseSha,
+                headSha,
+              }),
+            }),
+          )
+        ).status,
+      ).toBe(202);
+      expect(await waitForTerminal(runner, jobId)).toMatchObject({
+        status: 'failed',
+        sandbox: { cleanup: 'failed' },
+      });
+      backendUp = true;
+      await vi.waitFor(() => expect(reports).toBe(2));
+      await vi.waitFor(() => expect(callbackAttempts).toBe(2));
+      await vi.waitFor(() =>
+        expect(events).toContainEqual(
+          expect.objectContaining({
+            phase: 'runner',
+            outcome: 'cleanup-recovery',
+            runId: 'run-repeat-409',
+            jobId,
+            status: 409,
+          }),
+        ),
+      );
+      const advanceRetryClock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 31_000);
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        expect(reports).toBe(2);
+        expect(callbackAttempts).toBe(2);
+      } finally {
+        advanceRetryClock.mockRestore();
+      }
+    } finally {
+      await runner.close();
+      if (previousTmp === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = previousTmp;
+      await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 10 });
+    }
+  });
+
+  it('keeps unrelated claims moving after a single job cleanup failure', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-single-cleanup-failure-'));
+    const previousTmp = process.env.TMPDIR;
+    process.env.TMPDIR = root;
+    const baseSha = '1'.repeat(40);
+    const firstHead = '2'.repeat(40);
+    const unrelatedHead = '3'.repeat(40);
+    const firstJobId = 'single-cleanup-failed-job';
+    const unrelatedJobId = 'single-cleanup-unrelated-job';
+    let phase: 'first' | 'unrelated' = 'first';
+    let firstDone = false;
+    let unrelatedReturned = false;
+    let setupFailed = false;
+    const claims: number[] = [];
+    const ok = { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+    const authFailure = { ...ok, exitCode: 1, stderr: 'not signed in' };
+    const jobBody = (id: string, pullRequestNumber: number, headSha: string) => ({
+      ...runnerJobFields,
+      id,
+      runId: `run-${id}`,
+      attempt: 1,
+      pullRequestNumber,
+      repositoryUrl: 'https://github.com/acme/reviewed.git',
+      baseSha,
+      headSha,
+    });
+    const runner = createProductionRunnerWithMergeBase({
+      evidenceRoot: root,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'fixture-resolver',
+      modelConfig: standardModelConfig,
+      claimUrl: 'https://ingress.test/runner-claim',
+      claimIntervalMs: 2,
+      claimFetch: async () => {
+        if (!firstDone || unrelatedReturned) {
+          claims.push(204);
+          return new Response(null, { status: 204 });
+        }
+        unrelatedReturned = true;
+        phase = 'unrelated';
+        claims.push(200);
+        return Response.json(jobBody(unrelatedJobId, 43, unrelatedHead), { status: 200 });
+      },
+      callbackUrl: 'https://ingress.test/runner-callback',
+      callbackToken: 'callback-token',
+      callbackFetch: async () => new Response(null, { status: 202 }),
+      process: async (_command, args) => {
+        if (args[0] === 'ls') return ok;
+        if (args[0] === 'secret' && args[1] === 'set-custom' && phase === 'first') {
+          setupFailed = true;
+          return authFailure;
+        }
+        if (args[0] === 'policy' && args[1] === 'ls' && setupFailed && phase === 'first')
+          return authFailure;
+        if (args[0] === 'inspect') return ok;
+        if (args.includes('rev-parse'))
+          return {
+            ...ok,
+            stdout:
+              phase === 'first' ? `${baseSha}\n${firstHead}\n` : `${baseSha}\n${'4'.repeat(40)}\n`,
+          };
+        return ok;
+      },
+    });
+    try {
+      expect(
+        (
+          await runner.handle(
+            new Request('http://runner/jobs', {
+              method: 'POST',
+              headers: {
+                authorization: 'Bearer runner-test-token',
+                'content-type': 'application/json',
+              },
+              body: JSON.stringify(jobBody(firstJobId, 42, firstHead)),
+            }),
+          )
+        ).status,
+      ).toBe(202);
+      expect(await waitForTerminal(runner, firstJobId)).toMatchObject({
+        status: 'failed',
+        sandbox: { cleanup: 'failed' },
+      });
+      firstDone = true;
+
+      await vi.waitFor(() => expect(claims).toContain(200));
+      expect(await waitForTerminal(runner, unrelatedJobId)).toMatchObject({
+        status: 'failed',
+        failure: { reason: 'checkout' },
+      });
+      const status = (await (
+        await runner.handle(
+          new Request('http://runner/maintenance', {
+            headers: { authorization: 'Bearer runner-test-token' },
+          }),
+        )
+      ).json()) as { claimPollingHalted: boolean };
+      expect(status.claimPollingHalted).toBe(false);
+    } finally {
+      await runner.close();
+      if (previousTmp === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = previousTmp;
+      await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 10 });
+    }
+  });
+
+  it('recovers a failed cleanup while drained in direct POST-only mode', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-direct-drain-recovery-'));
+    const previousTmp = process.env.TMPDIR;
+    process.env.TMPDIR = root;
+    const baseSha = '1'.repeat(40);
+    const headSha = '2'.repeat(40);
+    const jobId = 'direct-drain-recovery-job';
+    let backendUp = true;
+    const reports: Array<Record<string, unknown>> = [];
+    const ok = { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+    const authFailure = { ...ok, exitCode: 1, stderr: 'not signed in' };
+    const runner = createProductionRunnerWithMergeBase({
+      evidenceRoot: root,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'fixture-resolver',
+      modelConfig: standardModelConfig,
+      claimUrl: '',
+      claimIntervalMs: 5,
+      callbackUrl: 'https://ingress.test/runner-callback',
+      callbackToken: 'callback-token',
+      callbackFetch: async (input, init) => {
+        const path = new URL(
+          input instanceof Request ? input.url : input instanceof URL ? input.href : input,
+        ).pathname;
+        if (path === '/runner-cleanup-recovery') {
+          reports.push(
+            JSON.parse(typeof init?.body === 'string' ? init.body : '{}') as Record<
+              string,
+              unknown
+            >,
+          );
+        }
+        return new Response(null, { status: 202 });
+      },
+      process: async (_command, args) => {
+        if (args[0] === 'ls') return backendUp ? ok : authFailure;
+        if (args[0] === 'secret' && args[1] === 'set-custom') {
+          backendUp = false;
+          return authFailure;
+        }
+        if (!backendUp) return authFailure;
+        if (args[0] === 'policy' && args[1] === 'ls') return { ...ok, stdout: '{"rules":[]}' };
+        if (args[0] === 'inspect')
+          return { ...ok, exitCode: 1, stderr: `error: sandbox '${args[1]}' not found` };
+        if (args.includes('rev-parse')) return { ...ok, stdout: `${baseSha}\n${headSha}\n` };
+        return ok;
+      },
+    });
+    try {
+      expect(
+        (
+          await runner.handle(
+            new Request('http://runner/jobs', {
+              method: 'POST',
+              headers: {
+                authorization: 'Bearer runner-test-token',
+                'content-type': 'application/json',
+              },
+              body: JSON.stringify({
+                ...runnerJobFields,
+                id: jobId,
+                runId: 'run-direct-drain-recovery',
+                attempt: 1,
+                pullRequestNumber: 46,
+                repositoryUrl: 'https://github.com/acme/reviewed.git',
+                baseSha,
+                headSha,
+              }),
+            }),
+          )
+        ).status,
+      ).toBe(202);
+      expect(await waitForTerminal(runner, jobId)).toMatchObject({
+        status: 'failed',
+        sandbox: { cleanup: 'failed' },
+      });
+      const drain = (await (
+        await runner.handle(
+          new Request('http://runner/maintenance/drain', {
+            method: 'POST',
+            headers: { authorization: 'Bearer runner-test-token' },
+          }),
+        )
+      ).json()) as { draining: boolean; drained: boolean };
+      expect(drain).toMatchObject({ draining: true, drained: false });
+
+      backendUp = true;
+      await vi.waitFor(() => expect(reports).toHaveLength(1), { timeout: 5_000 });
+      await vi.waitFor(async () => {
+        const status = (await (
+          await runner.handle(
+            new Request('http://runner/maintenance', {
+              headers: { authorization: 'Bearer runner-test-token' },
+            }),
+          )
+        ).json()) as { draining: boolean; drained: boolean; cleanupBlockedJobs: number };
+        expect(status).toMatchObject({
+          draining: true,
+          drained: true,
+          cleanupBlockedJobs: 0,
+        });
+      });
+      expect(reports[0]).toMatchObject({
+        jobId,
+        runId: 'run-direct-drain-recovery',
+        attempt: 1,
+        baseSha,
+        headSha,
+      });
+    } finally {
+      await runner.close();
+      if (previousTmp === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = previousTmp;
+      await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 10 });
+    }
+  });
+
+  it('stages an in-flight claim across a confirmed outage for replay after recovery', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-inflight-claim-outage-'));
+    const previousTmp = process.env.TMPDIR;
+    process.env.TMPDIR = root;
+    const baseSha = '1'.repeat(40);
+    const directHead = '2'.repeat(40);
+    const claimedHead = '3'.repeat(40);
+    const directJobId = 'inflight-outage-direct';
+    const claimedJobId = 'inflight-outage-claimed';
+    let backendUp = true;
+    let phase: 'direct' | 'claimed' = 'direct';
+    let releaseFirstClaim!: () => void;
+    let firstClaimServed!: () => void;
+    const firstClaimGate = new Promise<void>((resolve) => {
+      releaseFirstClaim = resolve;
+    });
+    const firstClaimObserved = new Promise<void>((resolve) => {
+      firstClaimServed = resolve;
+    });
+    const claimRequests: Array<{ requestId?: string }> = [];
+    const events: Array<Record<string, unknown>> = [];
+    const ok = { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+    const authFailure = { ...ok, exitCode: 1, stderr: 'not signed in' };
+    const jobBody = (id: string, pullRequestNumber: number, headSha: string) => ({
+      ...runnerJobFields,
+      id,
+      runId: `run-${id}`,
+      attempt: 1,
+      pullRequestNumber,
+      repositoryUrl: 'https://github.com/acme/reviewed.git',
+      baseSha,
+      headSha,
+    });
+    const runner = createProductionRunnerWithMergeBase({
+      evidenceRoot: root,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'fixture-resolver',
+      modelConfig: standardModelConfig,
+      concurrency: 2,
+      claimUrl: 'https://ingress.test/runner-claim',
+      claimIntervalMs: 2,
+      claimFetch: async (_input, init) => {
+        const body =
+          typeof init?.body === 'string' ? (JSON.parse(init.body) as { requestId?: string }) : {};
+        claimRequests.push(body);
+        if (claimRequests.length === 1) {
+          await firstClaimGate;
+          firstClaimServed();
+        }
+        return Response.json(jobBody(claimedJobId, 45, claimedHead), { status: 200 });
+      },
+      callbackUrl: 'https://ingress.test/runner-callback',
+      callbackToken: 'callback-token',
+      callbackFetch: async () => new Response(null, { status: 202 }),
+      log: {
+        record: async (event) => {
+          events.push(event as Record<string, unknown>);
+        },
+      },
+      process: async (_command, args) => {
+        if (args[0] === 'ls') return backendUp ? ok : authFailure;
+        if (args[0] === 'secret' && args[1] === 'set-custom' && phase === 'direct') {
+          backendUp = false;
+          return authFailure;
+        }
+        if (!backendUp) return authFailure;
+        if (args[0] === 'policy' && args[1] === 'ls') return { ...ok, stdout: '{"rules":[]}' };
+        if (args[0] === 'inspect')
+          return { ...ok, exitCode: 1, stderr: `error: sandbox '${args[1]}' not found` };
+        if (args.includes('rev-parse'))
+          return {
+            ...ok,
+            stdout:
+              phase === 'direct'
+                ? `${baseSha}\n${directHead}\n`
+                : `${baseSha}\n${'4'.repeat(40)}\n`,
+          };
+        return ok;
+      },
+    });
+    try {
+      await vi.waitFor(() => expect(claimRequests).toHaveLength(1));
+      expect(
+        (
+          await runner.handle(
+            new Request('http://runner/jobs', {
+              method: 'POST',
+              headers: {
+                authorization: 'Bearer runner-test-token',
+                'content-type': 'application/json',
+              },
+              body: JSON.stringify(jobBody(directJobId, 44, directHead)),
+            }),
+          )
+        ).status,
+      ).toBe(202);
+      expect(await waitForTerminal(runner, directJobId)).toMatchObject({
+        status: 'failed',
+        sandbox: { cleanup: 'failed' },
+      });
+      await vi.waitFor(async () => {
+        const status = (await (
+          await runner.handle(
+            new Request('http://runner/maintenance', {
+              headers: { authorization: 'Bearer runner-test-token' },
+            }),
+          )
+        ).json()) as { claimPollingHalted: boolean };
+        expect(status.claimPollingHalted).toBe(true);
+      });
+
+      releaseFirstClaim();
+      await firstClaimObserved;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(
+        (
+          await runner.handle(
+            new Request(`http://runner/jobs/${claimedJobId}`, {
+              headers: { authorization: 'Bearer runner-test-token' },
+            }),
+          )
+        ).status,
+      ).toBe(404);
+      const drain = (await (
+        await runner.handle(
+          new Request('http://runner/maintenance/drain', {
+            method: 'POST',
+            headers: { authorization: 'Bearer runner-test-token' },
+          }),
+        )
+      ).json()) as { draining: boolean; drained: boolean };
+      expect(drain).toMatchObject({ draining: true, drained: false });
+      const claimsAfterDrain = claimRequests.length;
+
+      phase = 'claimed';
+      backendUp = true;
+      await vi.waitFor(() => expect(claimRequests.length).toBe(2));
+      expect(claimRequests[1]?.requestId).toBe(claimRequests[0]?.requestId);
+      expect(await waitForTerminal(runner, claimedJobId)).toMatchObject({
+        status: 'failed',
+        failure: { reason: 'checkout' },
+        sandbox: { cleanup: 'destroyed' },
+      });
+      await vi.waitFor(async () => {
+        const status = (await (
+          await runner.handle(
+            new Request('http://runner/maintenance', {
+              headers: { authorization: 'Bearer runner-test-token' },
+            }),
+          )
+        ).json()) as { draining: boolean; drained: boolean };
+        expect(status).toMatchObject({ draining: true, drained: true });
+      });
+      expect(claimRequests).toHaveLength(claimsAfterDrain + 1);
+      expect(events.filter((event) => event.reason === 'backend-outage')).toEqual([
+        expect.objectContaining({
+          phase: 'runner',
+          outcome: 'claim',
+          reason: 'backend-outage',
+          staged: true,
+          pollingHalted: true,
+        }),
+      ]);
+    } finally {
+      releaseFirstClaim();
+      await runner.close();
+      if (previousTmp === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = previousTmp;
+      await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 10 });
+    }
+  });
+
+  it('keeps deferred cleanup recovery pending while polling races cleanup', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-cleanup-recovery-race-'));
+    const previousTmp = process.env.TMPDIR;
+    process.env.TMPDIR = root;
+    const baseSha = '1'.repeat(40);
+    const headSha = '2'.repeat(40);
+    const jobId = 'cleanup-recovery-race-job';
+    const ok = { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+    let cleanupFailedOnce = false;
+    const claims: number[] = [];
+    const reports: Array<Record<string, unknown>> = [];
+    let releaseProbe!: () => void;
+    let probeStarted!: () => void;
+    const probing = new Promise<void>((resolve) => {
+      probeStarted = resolve;
+    });
+    const probeGate = new Promise<void>((resolve) => {
+      releaseProbe = resolve;
+    });
+    const runner = createProductionRunnerWithMergeBase({
+      evidenceRoot: root,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'fixture-resolver',
+      modelConfig: standardModelConfig,
+      concurrency: 2,
+      claimUrl: 'https://ingress.test/runner-claim',
+      claimIntervalMs: 2,
+      claimFetch: async () => {
+        claims.push(204);
+        return new Response(null, { status: 204 });
+      },
+      callbackUrl: 'https://ingress.test/runner-callback',
+      callbackToken: 'callback-token',
+      callbackFetch: async (input, init) => {
+        const path = new URL(
+          input instanceof Request ? input.url : input instanceof URL ? input.href : input,
+        ).pathname;
+        if (path === '/runner-cleanup-recovery') {
+          reports.push(
+            JSON.parse(typeof init?.body === 'string' ? init.body : '{}') as Record<
+              string,
+              unknown
+            >,
+          );
+          return new Response(null, { status: 202 });
+        }
+        return new Response(null, { status: 202 });
+      },
+      process: async (_command, args) => {
+        if (args[0] === 'ls') {
+          probeStarted();
+          await probeGate;
+          return ok;
+        }
+        if (args[0] === 'secret' && args[1] === 'set-custom')
+          return { ...ok, exitCode: 1, stderr: 'setup failed' };
+        if (args[0] === 'policy' && args[1] === 'ls') {
+          if (!cleanupFailedOnce) {
+            cleanupFailedOnce = true;
+            return { ...ok, exitCode: 1, stderr: 'inventory failed' };
+          }
+          return { ...ok, stdout: '{"rules":[]}' };
+        }
+        if (args[0] === 'inspect')
+          return { ...ok, exitCode: 1, stderr: `error: sandbox '${args[1]}' not found` };
+        if (args.includes('rev-parse')) return { ...ok, stdout: `${baseSha}\n${headSha}\n` };
+        return ok;
+      },
+    });
+    try {
+      expect(
+        (
+          await runner.handle(
+            new Request('http://runner/jobs', {
+              method: 'POST',
+              headers: {
+                authorization: 'Bearer runner-test-token',
+                'content-type': 'application/json',
+              },
+              body: JSON.stringify({
+                ...runnerJobFields,
+                id: jobId,
+                runId: 'run-cleanup-recovery-race',
+                attempt: 1,
+                pullRequestNumber: 44,
+                repositoryUrl: 'https://github.com/acme/reviewed.git',
+                baseSha,
+                headSha,
+              }),
+            }),
+          )
+        ).status,
+      ).toBe(202);
+      await probing;
+      const claimsWhileCleaning = claims.length;
+      await vi.waitFor(() => expect(claims.length).toBeGreaterThan(claimsWhileCleaning));
+      releaseProbe();
+      expect(await waitForTerminal(runner, jobId)).toMatchObject({ status: 'failed' });
+      await vi.waitFor(() => expect(reports).toHaveLength(1));
+      expect(reports[0]).toMatchObject({
+        jobId,
+        runId: 'run-cleanup-recovery-race',
+        attempt: 1,
+        baseSha,
+        headSha,
+      });
+    } finally {
+      releaseProbe();
+      await runner.close();
+      if (previousTmp === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = previousTmp;
+      await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 10 });
+    }
+  });
+
+  it('releases the same-PR queue through real Core after automatic recovery', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-core-outage-recovery-'));
+    const previousTmp = process.env.TMPDIR;
+    process.env.TMPDIR = root;
+    const database = new SqliteD1Database();
+    const stateStore = createD1ReviewStateStore(database);
+    const baseSha = '1'.repeat(40);
+    const oldHead = '2'.repeat(40);
+    const newHead = '3'.repeat(40);
+    const firstJobId = 'core-outage-first-job';
+    let backendUp = true;
+    const ok = { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+    const authFailure = { ...ok, exitCode: 1, stderr: 'not signed in' };
+    const waitUntilTasks: Promise<unknown>[] = [];
+    const env = {
+      REVIEW_DB: database,
+      GITHUB_APP_ID: '1234567',
+      GITHUB_APP_PRIVATE_KEY: 'test-private-key',
+      EVIDENCE_BUCKET: { put: async () => undefined },
+    };
+    const dispatch = (request: Request) =>
+      createCoreWorker(env, {
+        github: {
+          getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+          loadReviewTarget: async () => ({ headSha: newHead }),
+        },
+        getReadInstallationToken: async () => ({
+          token: 'repository-read-token',
+          expiresAt: '2030-01-01T00:00:00.000Z',
+        }),
+      }).fetch(request, env, {
+        waitUntil: (task) => {
+          waitUntilTasks.push(task);
+        },
+      });
+    const coreClaim = async () => {
+      const response = await dispatch(
+        new Request('https://core.internal/runner-claims', {
+          method: 'POST',
+          headers: { 'x-compte-rendu-runner-claim': 'verified' },
+          body: '{}',
+        }),
+      );
+      await Promise.all(waitUntilTasks.splice(0));
+      return response;
+    };
+    let terminalAttempts = 0;
+    const callbackFetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(
+        input instanceof Request ? input.url : input instanceof URL ? input.href : input,
+      );
+      const recovery = url.pathname === '/runner-cleanup-recovery';
+      if (!recovery) {
+        terminalAttempts += 1;
+        if (terminalAttempts <= 2) return new Response(null, { status: 503 });
+      }
+      const response = await dispatch(
+        new Request(
+          recovery
+            ? 'https://core.internal/runner-cleanup-recovery'
+            : 'https://core.internal/runner-results',
+          {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              ...(recovery
+                ? { 'x-compte-rendu-runner-cleanup-recovery': 'verified' }
+                : { 'x-compte-rendu-runner-callback': 'verified' }),
+            },
+            body: typeof init?.body === 'string' ? init.body : '',
+          },
+        ),
+      );
+      await Promise.all(waitUntilTasks.splice(0));
+      return response;
+    };
+    let replacementRunId = '';
+    try {
+      const old = await stateStore.claimReview({
+        deliveryId: 'core-outage-old',
+        job: {
+          repositoryId: 11,
+          installationId: 7,
+          pullRequestNumber: 42,
+          baseSha,
+          headSha: oldHead,
+          trigger: 'automatic',
+        },
+        occurredAt: new Date().toISOString(),
+      });
+      if (old.kind !== 'claimed') throw new Error('old review was not claimed');
+      await claimRunnerJob(stateStore, {
+        runId: old.runId,
+        jobId: firstJobId,
+        occurredAt: new Date().toISOString(),
+      });
+      const runner = createProductionRunnerWithMergeBase({
+        evidenceRoot: root,
+        authToken: 'runner-test-token',
+        modelSecretCommand: 'fixture-resolver',
+        modelConfig: standardModelConfig,
+        claimUrl: 'https://ingress.test/runner-claim',
+        claimIntervalMs: 2,
+        claimFetch: async () => new Response(null, { status: 204 }),
+        callbackUrl: 'https://ingress.test/runner-callback',
+        callbackToken: 'callback-token',
+        callbackFetch,
+        process: async (_command, args) => {
+          if (args[0] === 'ls') return backendUp ? ok : authFailure;
+          if (!backendUp) return authFailure;
+          if (args[0] === 'secret' && args[1] === 'set-custom') {
+            backendUp = false;
+            return authFailure;
+          }
+          if (args[0] === 'inspect')
+            return { ...ok, exitCode: 1, stderr: `error: sandbox '${args[1]}' not found` };
+          if (args[0] === 'policy' && args[1] === 'ls') return { ...ok, stdout: '{"rules":[]}' };
+          if (args.includes('rev-parse')) return { ...ok, stdout: `${baseSha}\n${oldHead}\n` };
+          return ok;
+        },
+      });
+      try {
+        expect(
+          (
+            await runner.handle(
+              new Request('http://runner/jobs', {
+                method: 'POST',
+                headers: {
+                  authorization: 'Bearer runner-test-token',
+                  'content-type': 'application/json',
+                },
+                body: JSON.stringify({
+                  ...runnerJobFields,
+                  id: firstJobId,
+                  runId: old.runId,
+                  attempt: 1,
+                  pullRequestNumber: 42,
+                  repositoryUrl: 'https://github.com/acme/reviewed.git',
+                  baseSha,
+                  headSha: oldHead,
+                }),
+              }),
+            )
+          ).status,
+        ).toBe(202);
+        expect(await waitForTerminal(runner, firstJobId)).toMatchObject({
+          status: 'failed',
+          sandbox: { cleanup: 'failed' },
+        });
+        backendUp = true;
+        await vi.waitFor(
+          async () => {
+            expect(await stateStore.getPublicRun!(old.runId)).toMatchObject({
+              status: 'failed',
+              runnerCleanupStatus: 'destroyed',
+            });
+          },
+          { timeout: 5_000 },
+        );
+        expect(terminalAttempts).toBe(3);
+
+        const replacement = await stateStore.claimReview({
+          deliveryId: 'core-outage-new',
+          job: {
+            repositoryId: 11,
+            installationId: 7,
+            pullRequestNumber: 42,
+            baseSha,
+            headSha: newHead,
+            trigger: 'automatic',
+          },
+          occurredAt: new Date().toISOString(),
+        });
+        if (replacement.kind !== 'claimed') throw new Error('replacement was not scheduled');
+        replacementRunId = replacement.runId;
+        const released = await coreClaim();
+        expect(released.status).toBe(200);
+        expect(await released.json()).toMatchObject({
+          runId: replacementRunId,
+          pullRequestNumber: 42,
+          headSha: newHead,
+        });
+        const drain = await runner.handle(
+          new Request('http://runner/maintenance/drain', {
+            method: 'POST',
+            headers: { authorization: 'Bearer runner-test-token' },
+          }),
+        );
+        expect(drain.status).toBe(200);
+        await vi.waitFor(async () => {
+          const status = (await (
+            await runner.handle(
+              new Request('http://runner/maintenance', {
+                headers: { authorization: 'Bearer runner-test-token' },
+              }),
+            )
+          ).json()) as { draining: boolean; drained: boolean };
+          expect(status).toMatchObject({ draining: true, drained: true });
+        });
+      } finally {
+        await runner.close();
+      }
+    } finally {
+      database.close();
+      if (previousTmp === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = previousTmp;
+      await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 10 });
+    }
+  });
+});
+
 describe('SDK sandbox execution', () => {
   it.each([
     ['https://llm.internal.example/v1', true],

@@ -393,5 +393,18 @@ failed, superseded or cancelled run, job, attempt and immutable SHAs before
 confirming cleanup. Destroyed cleanup is
 monotonic under delayed callbacks. The queued-task projection exposes an anonymous
 cleanup-block reason only when an unresolved terminal same-PR run blocks claiming.
-Legacy evidence lacking host confirmation, unknown OpenSandbox create identity
-and OpenShell recovery remain outside this operation; see the operations guide.
+After an in-process sbx access outage, Runner pauses claims and automatically
+repeats the same retained-evidence and exact-absence recovery without blocking
+unrelated claims. When access returns, affected jobs become immediately eligible.
+A transient report or verification failure retries the expensive check no more
+than once every 30 seconds per pending job. A Core 409 on the cleanup report
+means the original terminal callback is not visible yet: Runner replays the
+retained verified callback and immediately retries the same report once. A
+repeated 409 is permanent. After that, only 408/429/5xx or timeout/network
+failures remain retryable; other 4xx responses or a permanent callback rejection
+stop automatic delivery with bounded job/run/status diagnostics. The terminal
+verdict is unchanged and completed work never restarts. Recovery of a claim staged across a Runner
+crash depends on the durable claim handoff in #385; this cleanup path adds no
+second claim protocol. Legacy evidence lacking host confirmation, unknown
+OpenSandbox create identity and OpenShell recovery remain outside this operation;
+see the operations guide.

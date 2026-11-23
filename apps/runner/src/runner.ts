@@ -119,6 +119,7 @@ const OPENSANDBOX_RESOURCE_LIFETIME_SECONDS = 2 * 60 * 60;
 const GRANT_REVOKE_ATTEMPTS = 2;
 const GRANT_REVOKE_BUDGET_MS = 15 * 1000;
 const CLEANUP_COMMAND_TIMEOUT_MS = 30 * 1000;
+const CLEANUP_RECOVERY_RETRY_INTERVAL_MS = 30_000;
 const ARCHIVE_COMMAND_TIMEOUT_MS = 30 * 1000;
 const ARCHIVE_PHASE_TIMEOUT_MS = 2 * 60 * 1000;
 const MAX_CHILD_SESSION_PAGES = 100;
@@ -750,6 +751,8 @@ type RunnerJob = {
   configRoot?: string;
   grantIssuanceAttempted: boolean;
   grantRevoked: boolean;
+  cleanupRecoveryPending: boolean;
+  cleanupRecoveryRetryAt?: number;
   grantToken?: string;
   grantTokenPath?: string;
   grantRoot?: string;
@@ -1533,7 +1536,29 @@ export const createRunner = (options: RunnerOptions = {}) => {
     GH_TOKEN: undefined,
     GITHUB_TOKEN: undefined,
   };
+  // An authenticated inventory probe distinguishes a host-wide sbx outage
+  // from one job's cleanup failure. It never removes or mutates a resource.
+  const probeSbxAccess = async (): Promise<boolean> => {
+    try {
+      const listed = await executeProcess(sandboxPortPath, ['ls'], {
+        env: strippedSandboxEnvironment,
+        captureStdout: false,
+        captureStderr: true,
+        timeoutMs: 30 * 1000,
+        maxBytes: MAX_DIAGNOSTIC_STDERR_BYTES * 64,
+      });
+      return (
+        listed.exitCode === 0 &&
+        !listed.timedOut &&
+        listed.streamError !== true &&
+        listed.processError !== true
+      );
+    } catch {
+      return false;
+    }
+  };
   const recoveringCleanup = new Set<string>();
+  let reconcilingCleanups = false;
   const jobs = new Map<string, RunnerJob>();
   const jobsByRun = new Map<string, RunnerJob>();
   let history: ReturnType<typeof createTerminalJobHistory> | undefined;
@@ -1561,6 +1586,8 @@ export const createRunner = (options: RunnerOptions = {}) => {
     stopsDuringClaim.clear();
   };
   let claimPollingHalted = false;
+  let backendOutage = false;
+  let stagedOutageLogged = false;
   let draining = false;
   let claimGateFailureLogged = false;
   let requestNextJob: (() => void) | undefined;
@@ -1600,6 +1627,265 @@ export const createRunner = (options: RunnerOptions = {}) => {
       });
   };
   let grantRecovery = startGrantRecovery();
+  type CleanupRecoveryResult = {
+    readonly accepted: boolean;
+    readonly status: 202 | 409 | 502;
+    readonly retryable?: boolean;
+    readonly error?: string;
+  };
+  type BoundedDelivery =
+    | { readonly ok: true; readonly status: 202 }
+    | {
+        readonly ok: false;
+        readonly reason: 'http-error' | 'timeout' | 'transport-error';
+        readonly status?: number;
+      };
+  const deliveryStatusRetryable = (status: number | undefined): boolean =>
+    status === 408 || status === 429 || (status !== undefined && status >= 500);
+  // Shared by manual callback replay, cleanup reports and automatic recovery.
+  const postBounded = async (url: string, body: string): Promise<BoundedDelivery> => {
+    if (callbackToken === undefined) return { ok: false, reason: 'transport-error' };
+    const controller = new AbortController();
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
+    try {
+      const response = await Promise.race([
+        callbackFetch(url, {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${callbackToken}`,
+            'content-type': 'application/json',
+          },
+          body,
+          signal: controller.signal,
+        }),
+        new Promise<Response>((_, reject) => {
+          timeout = setTimeout(() => {
+            timedOut = true;
+            controller.abort();
+            reject(new Error('runner delivery timed out'));
+          }, callbackTimeoutMs);
+        }),
+      ]);
+      await response.body?.cancel().catch(() => undefined);
+      return response.status === 202
+        ? { ok: true, status: 202 }
+        : { ok: false, reason: 'http-error', status: response.status };
+    } catch {
+      return { ok: false, reason: timedOut ? 'timeout' : 'transport-error' };
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+    }
+  };
+  // Shared by the operator endpoint and automatic post-outage reconciliation.
+  // The retained callback/manifest identity, exact backend absence and grant
+  // state must all be confirmed before Core receives a recovery report.
+  const recoverRetainedCleanup = async (
+    input: ReplayCallbackRequest,
+  ): Promise<CleanupRecoveryResult> => {
+    if (callbackUrl === undefined || callbackToken === undefined)
+      return {
+        accepted: false,
+        status: 502,
+        retryable: true,
+        error: 'cleanup recovery not confirmed',
+      };
+    if (
+      recoveringCleanup.has(input.jobId) ||
+      [...jobs.values()].some(
+        (job) =>
+          (job.state.status === 'queued' || job.state.status === 'running') &&
+          (job.id === input.jobId ||
+            job.input.runId === input.runId ||
+            job.state.evidenceId === input.evidenceId),
+      )
+    ) {
+      return { accepted: false, status: 409, retryable: true, error: 'job is active' };
+    }
+    recoveringCleanup.add(input.jobId);
+    try {
+      const kind = sandboxRuntime.kind;
+      if (kind !== 'sbx' && kind !== 'microsandbox' && kind !== 'opensandbox')
+        return { accepted: false, status: 409, error: 'cleanup recovery rejected' };
+      const recovered = await Effect.runPromise(
+        recoverCallback(evidenceRoot, input, { cleanupRuntime: kind }).pipe(Effect.option),
+      );
+      if (Option.isNone(recovered))
+        return { accepted: false, status: 409, error: 'cleanup recovery rejected' };
+      const manifest = recovered.value.manifest;
+      const sandboxName = manifest.sandboxName ?? `compte-rendu-${input.jobId}`;
+      const recoveryCommand: SandboxCommand = (args, _diagnostic, options) =>
+        executeProcess(sandboxPortPath, args, {
+          ...options,
+          env: options?.env ?? strippedSandboxEnvironment,
+          captureStdout: true,
+          captureStderr: true,
+          maxBytes: 256 * 1024,
+          timeoutMs: CLEANUP_COMMAND_TIMEOUT_MS,
+        });
+      if (kind === 'microsandbox') {
+        await confirmMicrosandboxAbsent(
+          recoveryCommand,
+          sandboxName,
+          recovered.value.catalogIdentity,
+        );
+      } else if (kind === 'sbx') {
+        await Effect.runPromise(confirmSbxCleanup(sandboxName, input.jobId, recoveryCommand));
+      } else {
+        const confirmCleanupAbsent = sandboxRuntimeFactory.confirmCleanupAbsent;
+        const sandboxId = manifest.sandboxId;
+        const ownershipNonce = manifest.sandboxOwnerNonce;
+        if (
+          confirmCleanupAbsent === undefined ||
+          sandboxId === undefined ||
+          ownershipNonce === undefined
+        ) {
+          return { accepted: false, status: 409, error: 'cleanup recovery rejected' };
+        }
+        await Effect.runPromise(
+          Effect.tryPromise({
+            try: (signal) =>
+              confirmCleanupAbsent(
+                { sandboxId, ownershipNonce, sandboxName },
+                recoveryCommand,
+                signal,
+              ),
+            catch: () => new Error('cleanup recovery not confirmed'),
+          }).pipe(Effect.timeout(CLEANUP_COMMAND_TIMEOUT_MS)),
+        );
+      }
+      const marker = await readGrantMarker(grantMarkerPath(input.jobId));
+      if (marker.kind === 'invalid') throw new Error('grant recovery marker invalid');
+      if (marker.kind === 'present' || llmServiceClient !== undefined) {
+        const recordedJobId = marker.kind === 'present' ? marker.jobId : input.jobId;
+        const issuer = marker.kind === 'present' ? marker.issuer : activeGrantIssuer;
+        if (!(await revokeRecordedGrant(recordedJobId, issuer)))
+          throw new Error('grant revocation not confirmed');
+        const previousRecovery = grantRecovery;
+        if (
+          previousRecovery !== undefined &&
+          !(await previousRecovery) &&
+          grantRecovery === previousRecovery
+        ) {
+          grantRecovery = startGrantRecovery();
+        }
+      }
+      const report = { ...input, sandboxName, confirmedAt: await currentIso() };
+      await writeManifestAtomically(
+        join(evidenceRoot, input.evidenceId, 'cleanup-recovery.json'),
+        report,
+      );
+      const reportUrl = new URL('/runner-cleanup-recovery', callbackUrl).href;
+      const reportBody = JSON.stringify(report);
+      let delivery = await postBounded(reportUrl, reportBody);
+      let deliveryKind: 'report' | 'callback' = 'report';
+      if (!delivery.ok && delivery.reason === 'http-error' && delivery.status === 409) {
+        deliveryKind = 'callback';
+        delivery = await postBounded(callbackUrl, recovered.value.body);
+        if (delivery.ok) {
+          // Core accepted the original callback. Retry the report already built
+          // above once; a repeated 409 is permanent.
+          deliveryKind = 'report';
+          delivery = await postBounded(reportUrl, reportBody);
+        }
+      }
+      if (delivery.ok) {
+        const job = jobs.get(input.jobId);
+        if (job !== undefined) {
+          update(job, { sandbox: { cleanup: 'destroyed' } });
+          if (job.state.status === 'failed' || job.state.status === 'aborted')
+            retireDestroyedJob(job);
+        }
+        return { accepted: true, status: 202 };
+      }
+      const retryable =
+        delivery.reason !== 'http-error' || deliveryStatusRetryable(delivery.status);
+      if (!retryable) {
+        if (deliveryKind === 'callback') {
+          await recordLog({
+            phase: 'runner',
+            outcome: 'callback',
+            runId: input.runId,
+            jobId: input.jobId,
+            attempt: input.attempt,
+            result: 'http-error',
+            status: delivery.status ?? 0,
+          });
+        } else {
+          await recordLog({
+            phase: 'runner',
+            outcome: 'cleanup-recovery',
+            runId: input.runId,
+            jobId: input.jobId,
+            attempt: input.attempt,
+            status: delivery.status ?? 0,
+          });
+        }
+        return {
+          accepted: false,
+          status: 502,
+          error: 'cleanup recovery delivery rejected',
+        };
+      }
+      return {
+        accepted: false,
+        status: 502,
+        retryable: true,
+        error: 'cleanup recovery delivery rejected',
+      };
+    } catch {
+      return {
+        accepted: false,
+        status: 502,
+        retryable: true,
+        error: 'cleanup recovery not confirmed',
+      };
+    } finally {
+      recoveringCleanup.delete(input.jobId);
+    }
+  };
+  const reconcileFailedCleanups = async (): Promise<boolean> => {
+    if (reconcilingCleanups) return false;
+    reconcilingCleanups = true;
+    let acceptedAny = false;
+    try {
+      // Snapshot because a confirmed recovery retires its job from the map. A
+      // job still cleaning up keeps its pending flag until its terminal evidence
+      // and retained callback exist; concurrent polling must not clear it.
+      const now = Date.now();
+      const candidates = [...jobs.values()].filter(
+        (job) =>
+          job.cleanupRecoveryPending &&
+          job.state.status !== 'queued' &&
+          job.state.status !== 'running' &&
+          job.state.sandbox.cleanup !== 'destroyed' &&
+          (job.cleanupRecoveryRetryAt ?? 0) <= now,
+      );
+      for (const job of candidates) {
+        const result = await recoverRetainedCleanup({
+          evidenceId: job.state.evidence.id,
+          jobId: job.id,
+          runId: job.input.runId,
+          attempt: job.input.attempt,
+          baseSha: job.input.baseSha,
+          headSha: job.input.headSha,
+        });
+        if (result.accepted) {
+          acceptedAny = true;
+          job.cleanupRecoveryPending = false;
+          job.cleanupRecoveryRetryAt = undefined;
+        } else if (result.retryable !== true) {
+          job.cleanupRecoveryPending = false;
+          job.cleanupRecoveryRetryAt = undefined;
+        } else {
+          job.cleanupRecoveryRetryAt = Date.now() + CLEANUP_RECOVERY_RETRY_INTERVAL_MS;
+        }
+      }
+      return acceptedAny;
+    } finally {
+      reconcilingCleanups = false;
+    }
+  };
   let sandboxRecovered: boolean | undefined;
   const startSandboxRecovery = () => {
     sandboxRecovered = undefined;
@@ -1651,6 +1937,48 @@ export const createRunner = (options: RunnerOptions = {}) => {
       if (recovered) requestNextJob?.();
     });
   };
+  let deferredCleanupRecoveryTimer: ReturnType<typeof setTimeout> | undefined;
+  let deferredRecoveryClosed = false;
+  const makePendingCleanupRecoveryEligible = () => {
+    const now = Date.now();
+    for (const job of jobs.values()) {
+      if (job.cleanupRecoveryPending) job.cleanupRecoveryRetryAt = now;
+    }
+  };
+  const scheduleDeferredCleanupRecovery = () => {
+    if (deferredRecoveryClosed || deferredCleanupRecoveryTimer !== undefined) return;
+    const timer = setTimeout(() => {
+      deferredCleanupRecoveryTimer = undefined;
+      void runDeferredCleanupRecovery();
+    }, claimIntervalMs);
+    if (typeof timer === 'object' && timer !== null && 'unref' in timer) {
+      (timer as { unref: () => void }).unref();
+    }
+    deferredCleanupRecoveryTimer = timer;
+  };
+  const runDeferredCleanupRecovery = async () => {
+    if (reconcilingCleanups) {
+      scheduleDeferredCleanupRecovery();
+      return;
+    }
+    let needsRecovery = [...jobs.values()].some((job) => job.cleanupRecoveryPending);
+    if (backendOutage) {
+      if (!(await probeSbxAccess())) {
+        scheduleDeferredCleanupRecovery();
+        return;
+      }
+      backendOutage = false;
+      stagedOutageLogged = false;
+      makePendingCleanupRecoveryEligible();
+      needsRecovery = true;
+    }
+    if (!needsRecovery) return;
+    const accepted = await reconcileFailedCleanups();
+    if (accepted) requestNextJob?.();
+    if (backendOutage || [...jobs.values()].some((job) => job.cleanupRecoveryPending)) {
+      scheduleDeferredCleanupRecovery();
+    }
+  };
   const activeJobCount = () =>
     [...jobs.values()].filter(
       (candidate) => candidate.state.status === 'queued' || candidate.state.status === 'running',
@@ -1676,12 +2004,17 @@ export const createRunner = (options: RunnerOptions = {}) => {
         !claiming &&
         claimRequestId === undefined &&
         !claimPollingHalted &&
+        !backendOutage &&
         cleanupBlockedJobs === 0 &&
         recoveringCleanup.size === 0,
       activeJobs,
-      claimInFlight: claiming || (!claimPollingHalted && claimRequestId !== undefined),
+      claimInFlight:
+        claiming || (!claimPollingHalted && !backendOutage && claimRequestId !== undefined),
       claimPollingHalted:
-        claimPollingHalted || grantsRecovered === false || sandboxRecovered === false,
+        claimPollingHalted ||
+        backendOutage ||
+        grantsRecovered === false ||
+        sandboxRecovered === false,
       cleanupBlockedJobs,
     };
   };
@@ -2421,6 +2754,11 @@ export const createRunner = (options: RunnerOptions = {}) => {
     const hostClean = await removeHostDirectories(job);
     const clean = sandboxClean && hostClean;
     job.hostFilesCleanupConfirmed = hostClean;
+    job.cleanupRecoveryPending = !sandboxClean;
+    if (job.cleanupRecoveryPending) job.cleanupRecoveryRetryAt = Date.now();
+    if (!sandboxClean && sandboxRuntime.kind === 'sbx' && !(await probeSbxAccess()))
+      backendOutage = true;
+    if (job.cleanupRecoveryPending) scheduleDeferredCleanupRecovery();
     job.hostCleanupConfirmed =
       hostClean &&
       (!job.sandboxAttempted || job.sandboxRuntime?.metadata.hostCleanupConfirmed === true);
@@ -3718,6 +4056,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       sandboxCreated: false,
       grantIssuanceAttempted: false,
       grantRevoked: false,
+      cleanupRecoveryPending: false,
       sessionIds: [],
       claimDeadlineAt,
       deadlineAt: rotatingCredential
@@ -3768,6 +4107,9 @@ export const createRunner = (options: RunnerOptions = {}) => {
     }
     if (request.method === 'POST' && path === '/maintenance/drain') {
       draining = true;
+      // A reservation staged before drain may still replay; fresh claims stay
+      // closed by claimNextJob's stagedClaim check.
+      if (claimRequestId !== undefined) requestNextJob?.();
       return jsonResponse(200, maintenanceStatus());
     }
     if (request.method === 'POST' && path === '/maintenance/resume') {
@@ -3785,131 +4127,11 @@ export const createRunner = (options: RunnerOptions = {}) => {
         await readJson(request),
       ).catch(() => undefined);
       if (input === undefined) return jsonResponse(400, { error: 'invalid recovery request' });
-      if (
-        recoveringCleanup.has(input.jobId) ||
-        [...jobs.values()].some(
-          (job) =>
-            (job.state.status === 'queued' || job.state.status === 'running') &&
-            (job.id === input.jobId ||
-              job.input.runId === input.runId ||
-              job.state.evidenceId === input.evidenceId),
-        )
-      ) {
-        return jsonResponse(409, { error: 'job is active' });
-      }
-      recoveringCleanup.add(input.jobId);
-      try {
-        const kind = sandboxRuntime.kind;
-        if (kind !== 'sbx' && kind !== 'microsandbox' && kind !== 'opensandbox')
-          return jsonResponse(409, { error: 'cleanup recovery rejected' });
-        const recovered = await Effect.runPromise(
-          recoverCallback(evidenceRoot, input, { cleanupRuntime: kind }).pipe(Effect.option),
-        );
-        if (Option.isNone(recovered))
-          return jsonResponse(409, { error: 'cleanup recovery rejected' });
-        const manifest = recovered.value.manifest;
-        const sandboxName = manifest.sandboxName ?? `compte-rendu-${input.jobId}`;
-        const recoveryCommand: SandboxCommand = (args, _diagnostic, options) =>
-          executeProcess(sandboxPortPath, args, {
-            ...options,
-            env: options?.env ?? strippedSandboxEnvironment,
-            captureStdout: true,
-            captureStderr: true,
-            maxBytes: 256 * 1024,
-            timeoutMs: CLEANUP_COMMAND_TIMEOUT_MS,
-          });
-        if (kind === 'microsandbox') {
-          await confirmMicrosandboxAbsent(
-            recoveryCommand,
-            sandboxName,
-            recovered.value.catalogIdentity,
-          );
-        } else if (kind === 'sbx') {
-          await Effect.runPromise(confirmSbxCleanup(sandboxName, input.jobId, recoveryCommand));
-        } else {
-          const confirmCleanupAbsent = sandboxRuntimeFactory.confirmCleanupAbsent;
-          const sandboxId = manifest.sandboxId;
-          const ownershipNonce = manifest.sandboxOwnerNonce;
-          if (
-            confirmCleanupAbsent === undefined ||
-            sandboxId === undefined ||
-            ownershipNonce === undefined
-          ) {
-            return jsonResponse(409, { error: 'cleanup recovery rejected' });
-          }
-          await Effect.runPromise(
-            Effect.tryPromise({
-              try: (signal) =>
-                confirmCleanupAbsent(
-                  { sandboxId, ownershipNonce, sandboxName },
-                  recoveryCommand,
-                  signal,
-                ),
-              catch: () => new Error('cleanup recovery not confirmed'),
-            }).pipe(Effect.timeout(CLEANUP_COMMAND_TIMEOUT_MS)),
-          );
-        }
-        const marker = await readGrantMarker(grantMarkerPath(input.jobId));
-        if (marker.kind === 'invalid') throw new Error('grant recovery marker invalid');
-        if (marker.kind === 'present' || llmServiceClient !== undefined) {
-          const recordedJobId = marker.kind === 'present' ? marker.jobId : input.jobId;
-          const issuer = marker.kind === 'present' ? marker.issuer : activeGrantIssuer;
-          if (!(await revokeRecordedGrant(recordedJobId, issuer)))
-            throw new Error('grant revocation not confirmed');
-          const previousRecovery = grantRecovery;
-          if (
-            previousRecovery !== undefined &&
-            !(await previousRecovery) &&
-            grantRecovery === previousRecovery
-          ) {
-            grantRecovery = startGrantRecovery();
-          }
-        }
-        const report = { ...input, sandboxName, confirmedAt: await currentIso() };
-        await writeManifestAtomically(
-          join(evidenceRoot, input.evidenceId, 'cleanup-recovery.json'),
-          report,
-        );
-        const controller = new AbortController();
-        let timeout: ReturnType<typeof setTimeout> | undefined;
-        try {
-          const response = await Promise.race([
-            callbackFetch(new URL('/runner-cleanup-recovery', callbackUrl).href, {
-              method: 'POST',
-              headers: {
-                authorization: `Bearer ${callbackToken}`,
-                'content-type': 'application/json',
-              },
-              body: JSON.stringify(report),
-              signal: controller.signal,
-            }),
-            new Promise<Response>((_, reject) => {
-              timeout = setTimeout(() => {
-                controller.abort();
-                reject(new Error('delivery timeout'));
-              }, callbackTimeoutMs);
-            }),
-          ]);
-          await response.body?.cancel().catch(() => undefined);
-          if (response.status !== 202)
-            return jsonResponse(502, { error: 'cleanup recovery delivery rejected' });
-          const job = jobs.get(input.jobId);
-          if (job !== undefined) {
-            update(job, { sandbox: { cleanup: 'destroyed' } });
-            if (job.state.status === 'failed' || job.state.status === 'aborted')
-              retireDestroyedJob(job);
-          }
-          requestNextJob?.();
-          retrySandboxRecovery();
-          return jsonResponse(202, { accepted: true });
-        } finally {
-          if (timeout !== undefined) clearTimeout(timeout);
-        }
-      } catch {
-        return jsonResponse(502, { error: 'cleanup recovery not confirmed' });
-      } finally {
-        recoveringCleanup.delete(input.jobId);
-      }
+      const recovered = await recoverRetainedCleanup(input);
+      if (!recovered.accepted) return jsonResponse(recovered.status, { error: recovered.error });
+      requestNextJob?.();
+      retrySandboxRecovery();
+      return jsonResponse(202, { accepted: true });
     }
     if (request.method === 'POST' && path === '/maintenance/replay-callback') {
       if (
@@ -3972,41 +4194,20 @@ export const createRunner = (options: RunnerOptions = {}) => {
         });
       }
 
-      const controller = new AbortController();
-      let timeout: ReturnType<typeof setTimeout> | undefined;
-      let timedOut = false;
-      try {
-        const response = await Promise.race([
-          callbackFetch(callbackUrl, {
-            method: 'POST',
-            headers: {
-              authorization: `Bearer ${callbackToken}`,
-              'content-type': 'application/json',
-            },
-            body: recovered.value.body,
-            signal: controller.signal,
-          }),
-          new Promise<Response>((_, reject) => {
-            timeout = setTimeout(() => {
-              timedOut = true;
-              controller.abort();
-              reject(new Error('runner callback replay timed out'));
-            }, callbackTimeoutMs);
-          }),
-        ]);
-        await response.body?.cancel().catch(() => undefined);
-        if (response.status === 202) {
-          await recordLog({
-            phase: 'runner',
-            outcome: 'callback',
-            runId: input.runId,
-            jobId: input.jobId,
-            attempt: 1,
-            result: 'accepted',
-            status: response.status,
-          });
-          return jsonResponse(202, { accepted: true });
-        }
+      const delivered = await postBounded(callbackUrl, recovered.value.body);
+      if (delivered.ok) {
+        await recordLog({
+          phase: 'runner',
+          outcome: 'callback',
+          runId: input.runId,
+          jobId: input.jobId,
+          attempt: 1,
+          result: 'accepted',
+          status: delivered.status,
+        });
+        return jsonResponse(202, { accepted: true });
+      }
+      if (delivered.reason === 'http-error') {
         await recordLog({
           phase: 'runner',
           outcome: 'callback',
@@ -4014,30 +4215,30 @@ export const createRunner = (options: RunnerOptions = {}) => {
           jobId: input.jobId,
           attempt: 1,
           result: 'http-error',
-          status: response.status,
+          status: delivered.status,
         });
         return jsonResponse(502, {
           accepted: false,
           error: 'callback delivery rejected',
           reason: 'http-error',
         });
-      } catch {
-        await recordLog({
-          phase: 'runner',
-          outcome: 'callback',
-          runId: input.runId,
-          jobId: input.jobId,
-          attempt: 1,
-          result: timedOut ? 'timeout' : 'transport-error',
-        });
-        return jsonResponse(timedOut ? 504 : 502, {
-          accepted: false,
-          error: timedOut ? 'callback delivery timed out' : 'callback delivery failed',
-          reason: timedOut ? 'timeout' : 'transport-error',
-        });
-      } finally {
-        if (timeout !== undefined) clearTimeout(timeout);
       }
+      await recordLog({
+        phase: 'runner',
+        outcome: 'callback',
+        runId: input.runId,
+        jobId: input.jobId,
+        attempt: 1,
+        result: delivered.reason,
+      });
+      return jsonResponse(delivered.reason === 'timeout' ? 504 : 502, {
+        accepted: false,
+        error:
+          delivered.reason === 'timeout'
+            ? 'callback delivery timed out'
+            : 'callback delivery failed',
+        reason: delivered.reason,
+      });
     }
     if (request.method === 'POST' && path === '/jobs') {
       if (
@@ -4146,7 +4347,10 @@ export const createRunner = (options: RunnerOptions = {}) => {
       await recordClaimGateFailure('sandbox-recovery-failed');
       return;
     }
-    if (draining) return;
+    // A claim staged by an outage already owns a Core reservation. It may
+    // replay through drain, but no fresh claim id may be created while draining.
+    const stagedClaim = claimRequestId !== undefined;
+    if (draining && !stagedClaim) return;
     if (
       claiming ||
       claimPollingHalted ||
@@ -4165,12 +4369,40 @@ export const createRunner = (options: RunnerOptions = {}) => {
       return;
     }
 
+    let needsCleanupRecovery = [...jobs.values()].some((job) => job.cleanupRecoveryPending);
+    if (backendOutage) {
+      if (!(await probeSbxAccess())) {
+        // Healthy Runners keep claiming while this backend stays unavailable.
+        scheduleClaim();
+        return;
+      }
+      backendOutage = false;
+      stagedOutageLogged = false;
+      makePendingCleanupRecoveryEligible();
+      needsCleanupRecovery = true;
+    }
+    if (needsCleanupRecovery) {
+      // Recovery runs alongside claim polling. A transient report failure must
+      // not hold unrelated healthy work, and a later success reopens claiming.
+      void reconcileFailedCleanups()
+        .then((accepted) => {
+          if (accepted) requestNextJob?.();
+        })
+        .catch(() => undefined);
+    }
+    if (draining && claimRequestId === undefined) return;
     if (!(await ensurePreflight())) {
       claimPollingHalted = true;
       await recordClaimGateFailure('runtime-preflight-failed');
       return;
     }
-    if (claiming || claimPollingHalted || draining || !hasCapacity()) return;
+    if (
+      claiming ||
+      claimPollingHalted ||
+      (draining && claimRequestId === undefined) ||
+      !hasCapacity()
+    )
+      return;
 
     claiming = true;
     claimRequestId ??= randomUUID();
@@ -4233,6 +4465,24 @@ export const createRunner = (options: RunnerOptions = {}) => {
           claimFailure ??= { reason: 'invalid-response' };
           throw new Error('Claimed Runner Job failed schema validation');
         }
+        if (backendOutage) {
+          // The probe confirmed the backend is unavailable while this claim
+          // response was in flight. Keep the prepared request id for replay
+          // after recovery instead of starting more work.
+          if (!stagedOutageLogged) {
+            stagedOutageLogged = true;
+            await recordLog({
+              phase: 'runner',
+              outcome: 'claim',
+              reason: 'backend-outage',
+              staged: true,
+              pollingHalted: true,
+            });
+          }
+          continuePolling = true;
+          claimPollingHalted = false;
+          return;
+        }
         const admitted = await admitJob(input, true);
         if (admitted.status !== 202) {
           claimFailure ??= { reason: 'admission-rejected' };
@@ -4293,6 +4543,11 @@ export const createRunner = (options: RunnerOptions = {}) => {
     handle,
     close: async () => {
       forgetStops();
+      deferredRecoveryClosed = true;
+      if (deferredCleanupRecoveryTimer !== undefined) {
+        clearTimeout(deferredCleanupRecoveryTimer);
+        deferredCleanupRecoveryTimer = undefined;
+      }
       history?.close();
       history = undefined;
       await settingsWatcher?.close();
