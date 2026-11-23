@@ -12057,12 +12057,26 @@ describe('Runner confirmed cleanup recovery', () => {
         modelConfig,
         evidenceRoot: root,
       };
-      const success = await runAgentScenario({ ...scenario, runId: 'msb-success' });
+      const callbacks: Request[] = [];
+      const success = await runAgentScenario({
+        ...scenario,
+        runId: 'msb-success',
+        callbackRequests: callbacks,
+      });
       expect(success.terminal).toMatchObject({
         status: 'succeeded',
         sandbox: { cleanup: 'destroyed' },
       });
       expect(success.manifest.runtime).toBe('microsandbox');
+      expect(callbacks).toHaveLength(1);
+      const lifecycle = (await callbacks[0].json()) as {
+        lifecycle: { milestones: Array<{ stage: string; runtime?: string }> };
+      };
+      expect(
+        lifecycle.lifecycle.milestones.find((milestone) => milestone.stage === 'sandbox'),
+      ).toMatchObject({
+        runtime: 'microsandbox',
+      });
       expect(success.createArgs).toContain(
         'allow@inference.example:tcp:443,allow@api.github.com:tcp:443',
       );
