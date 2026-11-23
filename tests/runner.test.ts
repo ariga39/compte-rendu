@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { mkdtempSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import {
   createRunner as createProductionRunner,
   runProcess,
@@ -21,6 +22,7 @@ import type {
 import { createD1ReviewStateStore } from '../apps/core/src/index';
 import { SqliteD1Database } from './support/d1-database';
 import { claimRunnerJob } from './support/runner-claim';
+import { createClaimExecution } from './support/runner-execution';
 
 delete process.env.REVIEW_MODEL_CONFIG;
 
@@ -198,42 +200,107 @@ const withMergeBaseFixture = (
   };
 };
 
-const createProductionRunnerWithMergeBase = (
-  options: Parameters<typeof createProductionRunner>[0] = {},
-) => {
-  const optionsWithCallback = {
-    ...options,
-    claimUrl: options.claimUrl ?? (options.claimFetch === undefined ? '' : undefined),
-    modelConfig: options.modelConfig ?? standardModelConfig,
-    callbackUrl: options.callbackUrl ?? 'https://ingress.test/runner-callback',
-    callbackToken: options.callbackToken ?? 'callback-token',
-    progressFetch: options.progressFetch ?? (async () => new Response(null, { status: 202 })),
-    callbackFetch: options.callbackFetch ?? (async () => new Response(null, { status: 202 })),
+type ClaimExecution = ReturnType<typeof createClaimExecution>;
+type RunnerOptions = NonNullable<Parameters<typeof createProductionRunner>[0]>;
+
+const withAutoClaim = (
+  options: RunnerOptions,
+): {
+  readonly options: RunnerOptions;
+  readonly execution: ClaimExecution | undefined;
+  readonly cleanupRoot: string | undefined;
+} => {
+  const autoClaim = options.claimUrl === undefined && options.claimFetch === undefined;
+  const execution = createClaimExecution({
+    callbackStatus: () => 202,
+    longPoll: false,
+  });
+  const cleanupRoot =
+    options.evidenceRoot === undefined
+      ? mkdtempSync(join(tmpdir(), 'compte-rendu-runner-evidence-'))
+      : undefined;
+  return {
+    execution,
+    cleanupRoot,
+    options: {
+      ...options,
+      evidenceRoot: options.evidenceRoot ?? cleanupRoot,
+      claimUrl: autoClaim ? 'https://ingress.test/runner-claim' : options.claimUrl,
+      ...(autoClaim ? { claimFetch: execution.claimFetch } : {}),
+      claimIntervalMs: options.claimIntervalMs ?? (autoClaim ? 1 : undefined),
+      modelConfig: options.modelConfig ?? standardModelConfig,
+      callbackUrl: options.callbackUrl ?? 'https://ingress.test/runner-callback',
+      callbackToken: options.callbackToken ?? 'callback-token',
+      progressFetch: options.progressFetch ?? (async () => new Response(null, { status: 202 })),
+      callbackFetch:
+        options.callbackFetch === undefined
+          ? execution.callbackFetch
+          : async (input, init) => {
+              execution.callbackRequests.push(new Request(input, init));
+              return options.callbackFetch!(input, init);
+            },
+    },
   };
-  return options.process === undefined
-    ? createProductionRunner(optionsWithCallback)
-    : createProductionRunner({
-        ...optionsWithCallback,
-        process: withMergeBaseFixture(options.process),
-      });
+};
+
+const createProductionRunnerWithMergeBase = (options: RunnerOptions = {}) => {
+  const { options: optionsWithCallback, execution, cleanupRoot } = withAutoClaim(options);
+  const runner =
+    options.process === undefined
+      ? createProductionRunner(optionsWithCallback)
+      : createProductionRunner({
+          ...optionsWithCallback,
+          process: withMergeBaseFixture(options.process),
+        });
+  return withClaimSubmission(runner, execution, cleanupRoot);
+};
+
+type ClaimRunner = ReturnType<typeof createProductionRunner> & {
+  readonly enqueue: ClaimExecution['enqueue'];
+  readonly waitForTerminal: ClaimExecution['waitForTerminal'];
+  readonly claimExecution: ClaimExecution | undefined;
+};
+
+const withClaimSubmission = (
+  runner: ReturnType<typeof createProductionRunner>,
+  execution: ClaimExecution | undefined,
+  cleanupRoot?: string,
+): ClaimRunner => {
+  let closed = false;
+  const closeRunner = runner.close.bind(runner);
+  const close = async () => {
+    if (closed) return;
+    closed = true;
+    execution?.stopClaims();
+    await closeRunner();
+    if (cleanupRoot !== undefined) await rm(cleanupRoot, { recursive: true, force: true });
+  };
+  onTestFinished(close);
+  return Object.assign(runner, {
+    claimExecution: execution,
+    enqueue:
+      execution === undefined
+        ? () => {
+            throw new Error('this Runner was configured with an explicit claim transport');
+          }
+        : (job: Parameters<ClaimExecution['enqueue']>[0]) => execution.enqueue(job),
+    waitForTerminal:
+      execution === undefined
+        ? async () => {
+            throw new Error('this Runner was configured with an explicit claim transport');
+          }
+        : (id?: string) => execution.waitForTerminal(id),
+    close,
+  });
 };
 
 const createRunner = (options: TestRunnerOptions = {}) => {
   const { mergeBase: mergeBaseOverride, ...productionOptions } = options;
-  const optionsWithCallback = {
-    ...productionOptions,
-    claimUrl:
-      productionOptions.claimUrl ?? (productionOptions.claimFetch === undefined ? '' : undefined),
-    modelConfig: productionOptions.modelConfig ?? standardModelConfig,
-    callbackUrl: productionOptions.callbackUrl ?? 'https://ingress.test/runner-callback',
-    callbackToken: productionOptions.callbackToken ?? 'callback-token',
-    progressFetch:
-      productionOptions.progressFetch ?? (async () => new Response(null, { status: 202 })),
-    callbackFetch:
-      productionOptions.callbackFetch ?? (async () => new Response(null, { status: 202 })),
-  };
+  const { options: optionsWithCallback, execution, cleanupRoot } = withAutoClaim(productionOptions);
   const originalProcess = productionOptions.process;
-  if (originalProcess === undefined) return createProductionRunner(optionsWithCallback);
+  if (originalProcess === undefined) {
+    return withClaimSubmission(createProductionRunner(optionsWithCallback), execution, cleanupRoot);
+  }
   const mergeBaseProcess = withMergeBaseFixture(originalProcess, mergeBaseOverride);
   const rules: Array<Record<string, unknown>> = [
     {
@@ -244,7 +311,7 @@ const createRunner = (options: TestRunnerOptions = {}) => {
       layer: 'local',
     },
   ];
-  return createProductionRunner({
+  const runner = createProductionRunner({
     ...optionsWithCallback,
     process: async (command, args, processOptions) => {
       if (args[0] === 'policy' && args[1] === 'ls') {
@@ -300,7 +367,17 @@ const createRunner = (options: TestRunnerOptions = {}) => {
       return result;
     },
   });
+  return withClaimSubmission(runner, execution, cleanupRoot);
 };
+
+beforeEach(async () => {
+  await rm(sharedEvidenceRoot, {
+    recursive: true,
+    force: true,
+    maxRetries: 10,
+    retryDelay: 20,
+  });
+});
 
 afterEach(async () => {
   await rm(join(sharedEvidenceRoot, 'sandbox-owners'), { recursive: true, force: true });
@@ -417,18 +494,11 @@ const routeRelayControl = (
   return routed;
 };
 
-// Match Vitest's default per-test deadline and return immediately on success.
-// A fixed attempt count turns CI scheduling variance into a false failure.
-const TERMINAL_WAIT_TIMEOUT_MS = 5_000;
-
-const waitForTerminal = async (
-  runner: ReturnType<typeof createRunner>,
-  jobId: string,
-  timeoutMs = TERMINAL_WAIT_TIMEOUT_MS,
-) => {
-  // Use the monotonic clock: several scenarios advance a fake Date while the
-  // job is running, which must not consume this polling deadline.
-  const deadline = performance.now() + timeoutMs;
+const waitForTerminal = async (runner: ReturnType<typeof createRunner>, jobId: string) => {
+  if (runner.claimExecution !== undefined) {
+    return (await runner.waitForTerminal(jobId)).terminal;
+  }
+  const deadline = performance.now() + 5_000;
   while (performance.now() < deadline) {
     const response = await runner.handle(
       new Request(`http://runner/jobs/${jobId}`, {
@@ -463,6 +533,7 @@ const runAgentScenario = async (scenario: {
   truncated?: boolean;
   stderrTruncated?: boolean;
   cleanupFailure?: boolean;
+  cleanupRemovalFailures?: number;
   create?: { readonly exitCode?: number; readonly timedOut?: boolean };
   sandboxRemovalFailure?: boolean;
   callbackRequests?: Request[];
@@ -496,6 +567,32 @@ const runAgentScenario = async (scenario: {
   const allowedResources: string[] = [];
   const removedRuleIds: string[] = [];
   let msbOwner: string | undefined;
+  let cleanupRemovalFailures = scenario.cleanupRemovalFailures ?? 0;
+  const reviewConfiguration =
+    scenario.reviewConfiguration ??
+    (scenario.relayControl === undefined
+      ? undefined
+      : {
+          revision: 1,
+          selection: { reviewers: ['deepseek-review'], synthesis: 'deepseek-review' },
+        });
+  const jobInput = {
+    ...runnerJobFields,
+    ...(reviewConfiguration === undefined ? {} : { reviewConfiguration }),
+    ...(scenario.repositoryReadToken === undefined
+      ? {}
+      : { repositoryReadToken: scenario.repositoryReadToken }),
+    runId: scenario.runId,
+    attempt: 1,
+    repositoryUrl: 'https://github.com/acme/reviewed.git',
+    baseSha,
+    headSha,
+  };
+  const execution = createClaimExecution({
+    callbackRequests: scenario.callbackRequests,
+    callbackStatus: (attempt) => scenario.callbackStatuses?.[attempt - 1] ?? 202,
+  });
+  execution.enqueue(jobInput);
   const runner = createRunner({
     ...(scenario.microsandbox
       ? ({ sandboxRuntime: 'microsandbox', microsandboxImage: 'review:fixture' } as const)
@@ -512,44 +609,31 @@ const runAgentScenario = async (scenario: {
     progressFetch: scenario.progressFetch,
     llmRelay: scenario.relayControl === undefined ? undefined : true,
     llmRelayGeneration: scenario.relayControl === undefined ? undefined : 'generation-a',
-    callbackUrl:
-      scenario.callbackRequests === undefined && scenario.relayControl === undefined
-        ? undefined
-        : 'https://ingress.test/runner-callback',
-    callbackToken:
-      scenario.callbackRequests === undefined && scenario.relayControl === undefined
-        ? undefined
-        : 'callback-token',
+    claimUrl: 'https://ingress.test/runner-claim',
+    claimFetch: execution.claimFetch,
+    callbackUrl: 'https://ingress.test/runner-callback',
+    callbackToken: 'callback-token',
     callbackTimeoutMs: scenario.callbackTimeoutMs,
-    callbackFetch:
-      scenario.callbackRequests === undefined && scenario.relayControl === undefined
-        ? undefined
-        : async (input: RequestInfo | URL, init?: RequestInit) => {
-            const inputUrl =
-              input instanceof Request
-                ? input.url
-                : input instanceof URL
-                  ? input.href
-                  : String(input);
-            if (
-              scenario.relayControl !== undefined &&
-              new URL(inputUrl).pathname.startsWith('/runner-llm/')
-            ) {
-              return scenario.relayControl.fetch(input, init);
-            }
-            if (scenario.callbackRequests === undefined) {
-              return new Response(null, { status: 202 });
-            }
-            scenario.callbackRequests.push(new Request(input, init));
-            if (scenario.callbackThrows !== undefined) {
-              throw new Error(scenario.callbackThrows);
-            }
-            if (scenario.callbackHangs === true) {
-              return new Promise<Response>(() => undefined);
-            }
-            const status = scenario.callbackStatuses?.[scenario.callbackRequests.length - 1] ?? 202;
-            return new Response(null, { status });
-          },
+    callbackFetch: async (input: RequestInfo | URL, init?: RequestInit) => {
+      const inputUrl =
+        input instanceof Request ? input.url : input instanceof URL ? input.href : String(input);
+      if (
+        scenario.relayControl !== undefined &&
+        new URL(inputUrl).pathname.startsWith('/runner-llm/')
+      ) {
+        return scenario.relayControl.fetch(input, init);
+      }
+      const request = new Request(input, init);
+      execution.callbackRequests.push(request);
+      if (scenario.callbackThrows !== undefined) {
+        throw new Error(scenario.callbackThrows);
+      }
+      if (scenario.callbackHangs === true) {
+        return new Promise<Response>(() => undefined);
+      }
+      const status = scenario.callbackStatuses?.[execution.callbackRequests.length - 1] ?? 202;
+      return new Response(null, { status });
+    },
     log:
       scenario.logEvents === undefined
         ? undefined
@@ -564,6 +648,10 @@ const runAgentScenario = async (scenario: {
         if (args[0] === 'create') msbOwner = args[args.indexOf('--label') + 1]?.split('=')[1];
         if (args[0] === 'rm') {
           if (scenario.cleanupFailure) return { ...ok, exitCode: 1 };
+          if (cleanupRemovalFailures > 0) {
+            cleanupRemovalFailures -= 1;
+            return { ...ok, exitCode: 1 };
+          }
           msbOwner = undefined;
           return ok;
         }
@@ -646,51 +734,34 @@ const runAgentScenario = async (scenario: {
     },
   });
   scenario.onRunner?.(runner);
-  const reviewConfiguration =
-    scenario.reviewConfiguration ??
-    (scenario.relayControl === undefined
-      ? undefined
-      : {
-          revision: 1,
-          selection: { reviewers: ['deepseek-review'], synthesis: 'deepseek-review' },
-        });
-  const submitted = await runner.handle(
-    new Request('http://runner/jobs', {
-      method: 'POST',
-      headers: {
-        authorization: 'Bearer runner-test-token',
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        ...runnerJobFields,
-        ...(reviewConfiguration === undefined ? {} : { reviewConfiguration }),
-        ...(scenario.repositoryReadToken === undefined
-          ? {}
-          : { repositoryReadToken: scenario.repositoryReadToken }),
-        runId: scenario.runId,
-        attempt: 1,
-        repositoryUrl: 'https://github.com/acme/reviewed.git',
-        baseSha,
-        headSha,
-      }),
-    }),
-  );
-  const { id } = (await submitted.json()) as { id: string };
   const terminalStartedAt = performance.now();
-  const terminal = await waitForTerminal(runner, id);
+  const terminal = await execution.waitForTerminal(jobInput.id);
   const terminalDurationMs = performance.now() - terminalStartedAt;
+  if (scenario.onRunner === undefined) {
+    await vi.waitFor(async () => {
+      const status = await runner.handle(
+        new Request('http://runner/maintenance', {
+          headers: { authorization: 'Bearer runner-test-token' },
+        }),
+      );
+      expect(await status.json()).toMatchObject({ activeJobs: 0 });
+    });
+    await runner.close();
+  }
+  const terminalState = terminal.terminal;
   const manifest = JSON.parse(
     await readFile(
       join(
         scenario.evidenceRoot ?? sharedEvidenceRoot,
-        terminal.evidenceId as string,
+        terminalState.evidenceId as string,
         'manifest.json',
       ),
       'utf8',
     ),
   );
   return {
-    terminal,
+    terminal: terminalState,
+    callback: terminal.callback,
     manifest,
     agentInvoked,
     terminalDurationMs,
@@ -752,6 +823,7 @@ const runReminderScenario = async (scenario: {
   let githubSecretArgs: readonly string[] | undefined;
   let agentRuns = 0;
   const runner = createRunner({
+    instanceId: crypto.randomUUID(),
     evidenceRoot: sharedEvidenceRoot,
     authToken: 'runner-test-token',
     modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
@@ -878,30 +950,22 @@ const runReminderScenario = async (scenario: {
       };
     },
   });
-  const submitted = await runner.handle(
-    new Request('http://runner/jobs', {
-      method: 'POST',
-      headers: {
-        authorization: 'Bearer runner-test-token',
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        ...runnerJobFields,
-        ...(scenario.claimDeadlineAt === undefined
-          ? {}
-          : { claimDeadlineAt: scenario.claimDeadlineAt }),
-        ...(scenario.repositoryReadTokenExpiresAt === undefined
-          ? {}
-          : { repositoryReadTokenExpiresAt: scenario.repositoryReadTokenExpiresAt }),
-        runId: scenario.runId,
-        attempt: 1,
-        repositoryUrl: 'https://github.com/acme/reviewed.git',
-        baseSha,
-        headSha,
-      }),
-    }),
-  );
-  const { id } = (await submitted.json()) as { id: string };
+  const submittedJob = {
+    ...runnerJobFields,
+    ...(scenario.claimDeadlineAt === undefined
+      ? {}
+      : { claimDeadlineAt: scenario.claimDeadlineAt }),
+    ...(scenario.repositoryReadTokenExpiresAt === undefined
+      ? {}
+      : { repositoryReadTokenExpiresAt: scenario.repositoryReadTokenExpiresAt }),
+    runId: scenario.runId,
+    attempt: 1,
+    repositoryUrl: 'https://github.com/acme/reviewed.git',
+    baseSha,
+    headSha,
+  };
+  runner.enqueue(submittedJob);
+  const id = submittedJob.id;
   if (scenario.duringAgent) await agentClockRestored;
   const terminal = await waitForTerminal(runner, id);
   const manifest = JSON.parse(
@@ -1054,6 +1118,10 @@ describe('Runner Job HTTP interface', () => {
     const firstClaimObserved = new Promise<void>((resolve) => {
       firstClaimed = resolve;
     });
+    const firstExecution = createClaimExecution({ onClaim: () => firstClaimed() });
+    firstExecution.enqueue(firstJob);
+    const secondExecution = createClaimExecution();
+    secondExecution.enqueue(secondJob);
     const process = async (
       _command: string,
       args: readonly string[],
@@ -1081,31 +1149,39 @@ describe('Runner Job HTTP interface', () => {
       modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       evidenceRoot: firstEvidenceRoot,
       claimUrl: 'https://ingress.test/runner-claim',
-      claimFetch: async () => {
-        firstClaimed();
-        return Response.json(firstJob);
-      },
+      claimFetch: firstExecution.claimFetch,
+      callbackUrl: 'https://ingress.test/runner-callback',
+      callbackToken: 'callback-token',
+      callbackFetch: firstExecution.callbackFetch,
       claimIntervalMs: 1,
       process,
     });
 
+    let secondRunner: ReturnType<typeof createRunner> | undefined;
     try {
       await firstClaimObserved;
-      const secondRunner = createRunner({
+      secondRunner = createRunner({
         authToken: 'runner-test-token',
         modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
         evidenceRoot: secondEvidenceRoot,
         claimUrl: 'https://ingress.test/runner-claim',
-        claimFetch: async () => Response.json(secondJob),
+        claimFetch: secondExecution.claimFetch,
+        callbackUrl: 'https://ingress.test/runner-callback',
+        callbackToken: 'callback-token',
+        callbackFetch: secondExecution.callbackFetch,
         claimIntervalMs: 1,
         process,
       });
 
-      const secondTerminal = await waitForTerminal(secondRunner, secondJob.id);
-      expect(secondTerminal.status).toBe('succeeded');
-      const firstTerminal = await waitForTerminal(firstRunner, firstJob.id);
-      expect(firstTerminal.status).toBe('succeeded');
+      const secondTerminal = await secondExecution.waitForTerminal();
+      expect(secondTerminal.terminal.status).toBe('succeeded');
+      const firstTerminal = await firstExecution.waitForTerminal();
+      expect(firstTerminal.terminal.status).toBe('succeeded');
+      expect(firstExecution.claimRequests.length).toBeGreaterThanOrEqual(1);
+      expect(secondExecution.claimRequests.length).toBeGreaterThanOrEqual(1);
     } finally {
+      await firstRunner.close();
+      await secondRunner?.close();
       await Promise.all([
         rm(firstEvidenceRoot, { recursive: true, force: true }),
         rm(secondEvidenceRoot, { recursive: true, force: true }),
@@ -1189,42 +1265,44 @@ describe('Runner Job HTTP interface', () => {
       expect(claims).toBeGreaterThanOrEqual(2);
       expect(maximumActiveAgents).toBe(1);
     } finally {
+      await runner.close();
       await rm(evidenceRoot, { recursive: true, force: true });
     }
   });
 
-  it('rejects admission when callback configuration is incomplete before starting a Job', async () => {
+  it('does not claim when callback configuration is incomplete', async () => {
+    let claims = 0;
     let processCalls = 0;
     const runner = createProductionRunner({
       modelConfig: standardModelConfig,
       authToken: 'runner-test-token',
       modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-      process: async () => {
-        processCalls += 1;
-        return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
-      },
-    });
-
-    const response = await runner.handle(
-      new Request('http://runner/jobs', {
-        method: 'POST',
-        headers: {
-          authorization: 'Bearer runner-test-token',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
+      claimUrl: 'https://ingress.test/runner-claim',
+      claimIntervalMs: 1,
+      claimFetch: async () => {
+        claims += 1;
+        return Response.json({
           ...runnerJobFields,
           runId: 'run-callback-config-missing',
           attempt: 1,
           repositoryUrl: 'https://github.com/acme/reviewed.git',
           baseSha: '1111111111111111111111111111111111111111',
           headSha: '2222222222222222222222222222222222222222',
-        }),
-      }),
-    );
+        });
+      },
+      process: async () => {
+        processCalls += 1;
+        return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+      },
+    });
 
-    expect(response.status).toBe(503);
-    expect(processCalls).toBe(0);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(claims).toBe(0);
+      expect(processCalls).toBe(0);
+    } finally {
+      await runner.close();
+    }
   });
 
   it('rejects malformed or unsupported deployment model config before claims or Sandbox work', async () => {
@@ -1258,10 +1336,10 @@ describe('Runner Job HTTP interface', () => {
       JSON.stringify({ id: 'opencode-go/test-model', definition: { name: 'Test' }, extra: true }),
       JSON.stringify({ id: 'opencode-go/test-model', definition: { name: 'Test', unsafe: true } }),
     ];
-    for (const [index, modelConfig] of invalidConfigs.entries()) {
+    for (const modelConfig of invalidConfigs) {
       let claims = 0;
       let processCalls = 0;
-      const runner = createProductionRunner({
+      const _runner = createProductionRunner({
         authToken: 'runner-test-token',
         modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
         ...(modelConfig === undefined ? {} : { modelConfig }),
@@ -1279,25 +1357,6 @@ describe('Runner Job HTTP interface', () => {
         },
       });
 
-      const response = await runner.handle(
-        new Request('http://runner/jobs', {
-          method: 'POST',
-          headers: {
-            authorization: 'Bearer runner-test-token',
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({
-            ...runnerJobFields,
-            runId: `run-model-config-${index}`,
-            attempt: 1,
-            repositoryUrl: 'https://github.com/acme/reviewed.git',
-            baseSha: '1111111111111111111111111111111111111111',
-            headSha: '2222222222222222222222222222222222222222',
-          }),
-        }),
-      );
-
-      expect(response.status).toBe(503);
       await new Promise((resolve) => setTimeout(resolve, 10));
       expect(claims).toBe(0);
       expect(processCalls).toBe(0);
@@ -1409,7 +1468,6 @@ describe('Runner Job HTTP interface', () => {
       ],
     });
     let runner: ReturnType<typeof createRunner> | undefined;
-    let acceptedId: string | undefined;
     try {
       runner = createRunner({
         authToken: 'runner-test-token',
@@ -1455,121 +1513,103 @@ describe('Runner Job HTTP interface', () => {
           };
         },
       });
-      const submitted = await runner.handle(
-        new Request('http://runner/jobs', {
-          method: 'POST',
-          headers: {
-            authorization: 'Bearer runner-test-token',
-            'content-type': 'application/json',
+      try {
+        const submittedJob = {
+          ...runnerJobFields,
+          runId: 'run-114-oversized-callback',
+          attempt: 1,
+          repositoryUrl: 'https://github.com/acme/reviewed.git',
+          baseSha,
+          headSha,
+        };
+        runner.enqueue(submittedJob);
+        const id = submittedJob.id;
+        const terminal = await waitForTerminal(runner, id);
+        expect(terminal.status).toBe('failed');
+        await vi.waitFor(() => expect(callbackRequests).toHaveLength(2));
+        const callback = (await callbackRequests[0]?.clone().json()) as {
+          status: string;
+          failure?: { reason: string };
+          evidence: Record<string, unknown>;
+        };
+        expect(callback).toMatchObject({
+          status: 'failed',
+          failure: { reason: 'evidence' },
+          evidence: {
+            id: terminal.evidenceId,
+            status: 'incomplete',
+            manifest: { content: '', size: 0, sha256: expect.any(String) },
+            opencodeJsonl: { content: '', size: 0, sha256: expect.any(String) },
+            opencodeStderr: { content: '', size: 0, sha256: expect.any(String) },
           },
-          body: JSON.stringify({
-            ...runnerJobFields,
-            runId: 'run-114-oversized-callback',
-            attempt: 1,
-            repositoryUrl: 'https://github.com/acme/reviewed.git',
-            baseSha,
-            headSha,
-          }),
-        }),
-      );
-      const { id } = (await submitted.json()) as { id: string };
-      acceptedId = id;
-      // This fixture hashes and retries a 25 MiB export. Keep the wait realistic
-      // for CI, and abort/close it in finally before removing its evidence.
-      const terminal = await waitForTerminal(runner, id);
-      for (let attempt = 0; attempt < 50 && callbackRequests.length === 0; attempt += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-
-      expect(terminal.status).toBe('failed');
-      expect(callbackRequests).toHaveLength(2);
-      const callback = (await callbackRequests[0]?.clone().json()) as {
-        status: string;
-        failure?: { reason: string };
-        evidence: Record<string, unknown>;
-      };
-      expect(callback).toMatchObject({
-        status: 'failed',
-        failure: { reason: 'evidence' },
-        evidence: {
-          id: terminal.evidenceId,
-          status: 'incomplete',
-          manifest: { content: '', size: 0, sha256: expect.any(String) },
-          opencodeJsonl: { content: '', size: 0, sha256: expect.any(String) },
-          opencodeStderr: { content: '', size: 0, sha256: expect.any(String) },
-        },
-      });
-      expect(callback.evidence).not.toHaveProperty('opencodeExport');
-      // The bounded lifecycle snapshot is retained even when evidence exceeds the callback limit.
-      expect(callback).toMatchObject({ lifecycle: { stage: 'cleanup', sequence: 5 } });
-      expect(new TextEncoder().encode(JSON.stringify(callback)).byteLength).toBeLessThan(2048);
-      await expect(
-        readFile(
-          join(
-            evidenceRoot,
-            terminal.evidenceId as string,
-            'opencode-export-oversized-session.json',
+        });
+        expect(callback.evidence).not.toHaveProperty('opencodeExport');
+        // The bounded lifecycle snapshot is retained even when evidence exceeds the callback limit.
+        expect(callback).toMatchObject({ lifecycle: { stage: 'cleanup', sequence: 5 } });
+        expect(new TextEncoder().encode(JSON.stringify(callback)).byteLength).toBeLessThan(2048);
+        await expect(
+          readFile(
+            join(
+              evidenceRoot,
+              terminal.evidenceId as string,
+              'opencode-export-oversized-session.json',
+            ),
+            'utf8',
           ),
-          'utf8',
-        ),
-      ).resolves.toBe(sessionExport);
-      await runner.close();
-      runner = undefined;
-      const restarted = createRunner({
-        authToken: 'runner-test-token',
-        evidenceRoot,
-        claimUrl: '',
-        callbackUrl: 'https://ingress.test/runner-callback',
-        callbackToken: 'callback-token',
-        callbackFetch: async (input, init) => {
-          callbackRequests.push(new Request(input, init));
-          return new Response(null, { status: 202 });
-        },
-      });
-      const replay = () =>
-        restarted.handle(
-          new Request('http://runner/maintenance/replay-callback', {
-            method: 'POST',
-            headers: {
-              authorization: 'Bearer runner-test-token',
-              'content-type': 'application/json',
-            },
-            body: JSON.stringify({
-              evidenceId: terminal.evidenceId,
-              jobId: id,
-              runId: 'run-114-oversized-callback',
-              attempt: 1,
-              baseSha,
-              headSha,
+        ).resolves.toBe(sessionExport);
+        await runner.close();
+        const restarted = createRunner({
+          authToken: 'runner-test-token',
+          evidenceRoot,
+          claimUrl: '',
+          callbackUrl: 'https://ingress.test/runner-callback',
+          callbackToken: 'callback-token',
+          callbackFetch: async (input, init) => {
+            callbackRequests.push(new Request(input, init));
+            return new Response(null, { status: 202 });
+          },
+        });
+        const replay = () =>
+          restarted.handle(
+            new Request('http://runner/maintenance/replay-callback', {
+              method: 'POST',
+              headers: {
+                authorization: 'Bearer runner-test-token',
+                'content-type': 'application/json',
+              },
+              body: JSON.stringify({
+                evidenceId: terminal.evidenceId,
+                jobId: id,
+                runId: 'run-114-oversized-callback',
+                attempt: 1,
+                baseSha,
+                headSha,
+              }),
             }),
+          );
+        try {
+          const recovered = await replay();
+          expect(recovered.status).toBe(202);
+          expect(await recovered.json()).toEqual({ accepted: true });
+          expect(callbackRequests).toHaveLength(3);
+          expect(await callbackRequests[2]!.text()).toBe(await callbackRequests[0]!.text());
+          await writeFile(join(evidenceRoot, terminal.evidenceId as string, 'manifest.json'), '{}');
+          expect((await replay()).status).toBe(409);
+          expect(callbackRequests).toHaveLength(3);
+        } finally {
+          await restarted.close();
+        }
+      } finally {
+        await runner.handle(
+          new Request(`http://runner/jobs/${runnerJobFields.id}`, {
+            method: 'DELETE',
+            headers: { authorization: 'Bearer runner-test-token' },
           }),
         );
-      try {
-        const recovered = await replay();
-        expect(recovered.status).toBe(202);
-        expect(await recovered.json()).toEqual({ accepted: true });
-        expect(callbackRequests).toHaveLength(3);
-        expect(await callbackRequests[2]!.text()).toBe(await callbackRequests[0]!.text());
-        await writeFile(join(evidenceRoot, terminal.evidenceId as string, 'manifest.json'), '{}');
-        expect((await replay()).status).toBe(409);
-        expect(callbackRequests).toHaveLength(3);
-      } finally {
-        await restarted.close();
-      }
-    } finally {
-      if (runner !== undefined) {
-        if (acceptedId !== undefined) {
-          await runner
-            .handle(
-              new Request(`http://runner/jobs/${acceptedId}`, {
-                method: 'DELETE',
-                headers: { authorization: 'Bearer runner-test-token' },
-              }),
-            )
-            .catch(() => undefined);
-        }
         await runner.close();
       }
+    } finally {
+      await runner?.close();
       await rm(evidenceRoot, { recursive: true, force: true });
     }
   });
@@ -1600,24 +1640,16 @@ describe('Runner Job HTTP interface', () => {
         };
       },
     });
-    const submitted = await runner.handle(
-      new Request('http://runner/jobs', {
-        method: 'POST',
-        headers: {
-          authorization: 'Bearer runner-test-token',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          ...runnerJobFields,
-          runId: 'run-90-process-exit',
-          attempt: 1,
-          repositoryUrl: 'https://github.com/acme/reviewed.git',
-          baseSha,
-          headSha,
-        }),
-      }),
-    );
-    const { id } = (await submitted.json()) as { id: string };
+    const submittedJob = {
+      ...runnerJobFields,
+      runId: 'run-90-process-exit',
+      attempt: 1,
+      repositoryUrl: 'https://github.com/acme/reviewed.git',
+      baseSha,
+      headSha,
+    };
+    runner.enqueue(submittedJob);
+    const id = submittedJob.id;
     const terminal = await waitForTerminal(runner, id);
 
     expect(terminal).toMatchObject({
@@ -2326,24 +2358,16 @@ describe('Runner Job HTTP interface', () => {
         };
       },
     });
-    const submitted = await runner.handle(
-      new Request('http://runner/jobs', {
-        method: 'POST',
-        headers: {
-          authorization: 'Bearer runner-test-token',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          ...runnerJobFields,
-          runId: 'run-reminder-abort',
-          attempt: 1,
-          repositoryUrl: 'https://github.com/acme/reviewed.git',
-          baseSha,
-          headSha,
-        }),
-      }),
-    );
-    const { id } = (await submitted.json()) as { id: string };
+    const submittedJob = {
+      ...runnerJobFields,
+      runId: 'run-reminder-abort',
+      attempt: 1,
+      repositoryUrl: 'https://github.com/acme/reviewed.git',
+      baseSha,
+      headSha,
+    };
+    runner.enqueue(submittedJob);
+    const id = submittedJob.id;
     await started;
     const aborted = runner.handle(
       new Request(`http://runner/jobs/${id}`, {
@@ -2354,12 +2378,7 @@ describe('Runner Job HTTP interface', () => {
     releaseAgent();
     expect((await aborted).status).toBe(200);
     expect(agentRuns).toBe(1);
-    const terminal = await runner.handle(
-      new Request(`http://runner/jobs/${id}`, {
-        headers: { authorization: 'Bearer runner-test-token' },
-      }),
-    );
-    expect((await terminal.json()) as { status: string }).toMatchObject({ status: 'aborted' });
+    await expect(waitForTerminal(runner, id)).resolves.toMatchObject({ status: 'aborted' });
   });
 
   it('does not remind when the shared agent budget is exhausted', async () => {
@@ -3571,24 +3590,16 @@ describe('Runner Job HTTP interface', () => {
     });
 
     const submit = async (runId: string) => {
-      const response = await runner.handle(
-        new Request('http://runner/jobs', {
-          method: 'POST',
-          headers: {
-            authorization: 'Bearer runner-test-token',
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({
-            ...runnerJobFields,
-            runId,
-            attempt: 1,
-            repositoryUrl: 'https://github.com/acme/reviewed.git',
-            baseSha,
-            headSha,
-          }),
-        }),
-      );
-      return (await response.json()) as { id: string };
+      const job = {
+        ...runnerJobFields,
+        runId,
+        attempt: 1,
+        repositoryUrl: 'https://github.com/acme/reviewed.git',
+        baseSha,
+        headSha,
+      };
+      runner.enqueue(job);
+      return job;
     };
 
     const first = await submit('run-93-policy-first');
@@ -3694,24 +3705,16 @@ describe('Runner Job HTTP interface', () => {
         };
       },
     });
-    const submitted = await runner.handle(
-      new Request('http://runner/jobs', {
-        method: 'POST',
-        headers: {
-          authorization: 'Bearer runner-test-token',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          ...runnerJobFields,
-          runId: 'run-93-policy-removal-failure',
-          attempt: 1,
-          repositoryUrl: 'https://github.com/acme/reviewed.git',
-          baseSha,
-          headSha,
-        }),
-      }),
-    );
-    const { id } = (await submitted.json()) as { id: string };
+    const submittedJob = {
+      ...runnerJobFields,
+      runId: 'run-93-policy-removal-failure',
+      attempt: 1,
+      repositoryUrl: 'https://github.com/acme/reviewed.git',
+      baseSha,
+      headSha,
+    };
+    runner.enqueue(submittedJob);
+    const id = submittedJob.id;
     await expect(waitForTerminal(runner, id)).resolves.toMatchObject({
       status: 'failed',
       failure: { reason: 'cleanup' },
@@ -3801,24 +3804,16 @@ describe('Runner Job HTTP interface', () => {
         };
       },
     });
-    const submitted = await runner.handle(
-      new Request('http://runner/jobs', {
-        method: 'POST',
-        headers: {
-          authorization: 'Bearer runner-test-token',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          ...runnerJobFields,
-          runId: 'run-93-policy-orphan',
-          attempt: 1,
-          repositoryUrl: 'https://github.com/acme/reviewed.git',
-          baseSha,
-          headSha,
-        }),
-      }),
-    );
-    const { id } = (await submitted.json()) as { id: string };
+    const submittedJob = {
+      ...runnerJobFields,
+      runId: 'run-93-policy-orphan',
+      attempt: 1,
+      repositoryUrl: 'https://github.com/acme/reviewed.git',
+      baseSha,
+      headSha,
+    };
+    runner.enqueue(submittedJob);
+    const id = submittedJob.id;
     const terminal = await waitForTerminal(runner, id);
     expect(terminal).toMatchObject({
       status: 'failed',
@@ -3905,24 +3900,16 @@ describe('Runner Job HTTP interface', () => {
         };
       },
     });
-    const submitted = await runner.handle(
-      new Request('http://runner/jobs', {
-        method: 'POST',
-        headers: {
-          authorization: 'Bearer runner-test-token',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          ...runnerJobFields,
-          runId: 'run-93-policy-lookup-failure',
-          attempt: 1,
-          repositoryUrl: 'https://github.com/acme/reviewed.git',
-          baseSha,
-          headSha,
-        }),
-      }),
-    );
-    const { id } = (await submitted.json()) as { id: string };
+    const submittedJob = {
+      ...runnerJobFields,
+      runId: 'run-93-policy-lookup-failure',
+      attempt: 1,
+      repositoryUrl: 'https://github.com/acme/reviewed.git',
+      baseSha,
+      headSha,
+    };
+    runner.enqueue(submittedJob);
+    const id = submittedJob.id;
     await expect(waitForTerminal(runner, id)).resolves.toMatchObject({
       status: 'failed',
       failure: { reason: 'agent' },
@@ -4013,24 +4000,16 @@ describe('Runner Job HTTP interface', () => {
         };
       },
     });
-    const submitted = await runner.handle(
-      new Request('http://runner/jobs', {
-        method: 'POST',
-        headers: {
-          authorization: 'Bearer runner-test-token',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          ...runnerJobFields,
-          runId: 'run-157-absent-scope',
-          attempt: 1,
-          repositoryUrl: 'https://github.com/acme/reviewed.git',
-          baseSha,
-          headSha,
-        }),
-      }),
-    );
-    const { id } = (await submitted.json()) as { id: string };
+    const submittedJob = {
+      ...runnerJobFields,
+      runId: 'run-157-absent-scope',
+      attempt: 1,
+      repositoryUrl: 'https://github.com/acme/reviewed.git',
+      baseSha,
+      headSha,
+    };
+    runner.enqueue(submittedJob);
+    const id = submittedJob.id;
     await expect(waitForTerminal(runner, id)).resolves.toMatchObject({
       status: 'succeeded',
       sandbox: { cleanup: 'destroyed' },
@@ -4108,24 +4087,16 @@ describe('Runner Job HTTP interface', () => {
         };
       },
     });
-    const submitted = await runner.handle(
-      new Request('http://runner/jobs', {
-        method: 'POST',
-        headers: {
-          authorization: 'Bearer runner-test-token',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          ...runnerJobFields,
-          runId: 'run-157-force-removal',
-          attempt: 1,
-          repositoryUrl: 'https://github.com/acme/reviewed.git',
-          baseSha,
-          headSha,
-        }),
-      }),
-    );
-    const { id } = (await submitted.json()) as { id: string };
+    const submittedJob = {
+      ...runnerJobFields,
+      runId: 'run-157-force-removal',
+      attempt: 1,
+      repositoryUrl: 'https://github.com/acme/reviewed.git',
+      baseSha,
+      headSha,
+    };
+    runner.enqueue(submittedJob);
+    const id = submittedJob.id;
     await expect(waitForTerminal(runner, id)).resolves.toMatchObject({
       status: 'succeeded',
       sandbox: { cleanup: 'destroyed' },
@@ -4225,24 +4196,16 @@ describe('Runner Job HTTP interface', () => {
         };
       },
     });
-    const submitted = await runner.handle(
-      new Request('http://runner/jobs', {
-        method: 'POST',
-        headers: {
-          authorization: 'Bearer runner-test-token',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          ...runnerJobFields,
-          runId: 'run-93-policy-replacement',
-          attempt: 1,
-          repositoryUrl: 'https://github.com/acme/reviewed.git',
-          baseSha,
-          headSha,
-        }),
-      }),
-    );
-    const { id } = (await submitted.json()) as { id: string };
+    const submittedJob = {
+      ...runnerJobFields,
+      runId: 'run-93-policy-replacement',
+      attempt: 1,
+      repositoryUrl: 'https://github.com/acme/reviewed.git',
+      baseSha,
+      headSha,
+    };
+    runner.enqueue(submittedJob);
+    const id = submittedJob.id;
     await expect(waitForTerminal(runner, id)).resolves.toMatchObject({
       status: 'failed',
       failure: { reason: 'cleanup' },
@@ -4262,8 +4225,9 @@ describe('Runner Job HTTP interface', () => {
     const headSha = '2222222222222222222222222222222222222222';
     const finalMarkdown = '## Review:\n\nNo findings.';
     const agentJsonl = finalMarkdownJsonl(finalMarkdown, 'session-89');
+    let runner: ReturnType<typeof createRunner> | undefined;
     try {
-      const runner = createRunner({
+      runner = createRunner({
         authToken: 'runner-test-token',
         evidenceRoot,
         modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
@@ -4309,24 +4273,16 @@ describe('Runner Job HTTP interface', () => {
           };
         },
       });
-      const submitted = await runner.handle(
-        new Request('http://runner/jobs', {
-          method: 'POST',
-          headers: {
-            authorization: 'Bearer runner-test-token',
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({
-            ...runnerJobFields,
-            runId: 'run-89-evidence',
-            attempt: 1,
-            repositoryUrl: 'https://github.com/acme/reviewed.git',
-            baseSha,
-            headSha,
-          }),
-        }),
-      );
-      const { id } = (await submitted.json()) as { id: string };
+      const submittedJob = {
+        ...runnerJobFields,
+        runId: 'run-89-evidence',
+        attempt: 1,
+        repositoryUrl: 'https://github.com/acme/reviewed.git',
+        baseSha,
+        headSha,
+      };
+      runner.enqueue(submittedJob);
+      const id = submittedJob.id;
       const terminal = await waitForTerminal(runner, id);
 
       expect(terminal.status).toBe('succeeded');
@@ -4385,6 +4341,7 @@ describe('Runner Job HTTP interface', () => {
         );
       }
     } finally {
+      await runner?.close();
       await rm(evidenceRoot, { recursive: true, force: true });
     }
   });
@@ -4424,8 +4381,9 @@ describe('Runner Job HTTP interface', () => {
     const sessionExportBytes = new TextEncoder().encode(sessionExport);
     expect(sessionExportBytes.byteLength).toBeGreaterThan(64 * 1024);
     const truncatedBySandbox = new TextDecoder().decode(sessionExportBytes.slice(0, 64 * 1024));
+    let runner: ReturnType<typeof createRunner> | undefined;
     try {
-      const runner = createRunner({
+      runner = createRunner({
         authToken: 'runner-test-token',
         evidenceRoot,
         modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
@@ -4468,24 +4426,16 @@ describe('Runner Job HTTP interface', () => {
           };
         },
       });
-      const submitted = await runner.handle(
-        new Request('http://runner/jobs', {
-          method: 'POST',
-          headers: {
-            authorization: 'Bearer runner-test-token',
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({
-            ...runnerJobFields,
-            runId: 'run-107-large-export',
-            attempt: 1,
-            repositoryUrl: 'https://github.com/acme/reviewed.git',
-            baseSha,
-            headSha,
-          }),
-        }),
-      );
-      const { id } = (await submitted.json()) as { id: string };
+      const submittedJob = {
+        ...runnerJobFields,
+        runId: 'run-107-large-export',
+        attempt: 1,
+        repositoryUrl: 'https://github.com/acme/reviewed.git',
+        baseSha,
+        headSha,
+      };
+      runner.enqueue(submittedJob);
+      const id = submittedJob.id;
       const terminal = await waitForTerminal(runner, id);
 
       expect(terminal).toMatchObject({
@@ -4507,6 +4457,7 @@ describe('Runner Job HTTP interface', () => {
         evidence: { status: 'complete' },
       });
     } finally {
+      await runner?.close();
       await rm(evidenceRoot, { recursive: true, force: true });
     }
   });
@@ -4517,8 +4468,9 @@ describe('Runner Job HTTP interface', () => {
     const headSha = '2222222222222222222222222222222222222222';
     const malformedExport =
       '{"info":{"id":"malformed-session"},"messages":[' + '"x",'.repeat(16 * 1024);
+    let runner: ReturnType<typeof createRunner> | undefined;
     try {
-      const runner = createRunner({
+      runner = createRunner({
         authToken: 'runner-test-token',
         evidenceRoot,
         modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
@@ -4561,24 +4513,16 @@ describe('Runner Job HTTP interface', () => {
           };
         },
       });
-      const submitted = await runner.handle(
-        new Request('http://runner/jobs', {
-          method: 'POST',
-          headers: {
-            authorization: 'Bearer runner-test-token',
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({
-            ...runnerJobFields,
-            runId: 'run-107-malformed-export',
-            attempt: 1,
-            repositoryUrl: 'https://github.com/acme/reviewed.git',
-            baseSha,
-            headSha,
-          }),
-        }),
-      );
-      const { id } = (await submitted.json()) as { id: string };
+      const submittedJob = {
+        ...runnerJobFields,
+        runId: 'run-107-malformed-export',
+        attempt: 1,
+        repositoryUrl: 'https://github.com/acme/reviewed.git',
+        baseSha,
+        headSha,
+      };
+      runner.enqueue(submittedJob);
+      const id = submittedJob.id;
       const terminal = await waitForTerminal(runner, id);
       const manifest = JSON.parse(
         await readFile(join(evidenceRoot, terminal.evidenceId as string, 'manifest.json'), 'utf8'),
@@ -4596,6 +4540,7 @@ describe('Runner Job HTTP interface', () => {
         terminal: { status: 'failed', reason: 'invalid-output', cause: 'missing-terminal-message' },
       });
     } finally {
+      await runner?.close();
       await rm(evidenceRoot, { recursive: true, force: true });
     }
   });
@@ -4626,24 +4571,16 @@ describe('Runner Job HTTP interface', () => {
         };
       },
     });
-    const submitted = await runner.handle(
-      new Request('http://runner/jobs', {
-        method: 'POST',
-        headers: {
-          authorization: 'Bearer runner-test-token',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          ...runnerJobFields,
-          runId: 'run-89-archive-failure',
-          attempt: 1,
-          repositoryUrl: 'https://github.com/acme/reviewed.git',
-          baseSha,
-          headSha,
-        }),
-      }),
-    );
-    const { id } = (await submitted.json()) as { id: string };
+    const submittedJob = {
+      ...runnerJobFields,
+      runId: 'run-89-archive-failure',
+      attempt: 1,
+      repositoryUrl: 'https://github.com/acme/reviewed.git',
+      baseSha,
+      headSha,
+    };
+    runner.enqueue(submittedJob);
+    const id = submittedJob.id;
 
     const terminal = await waitForTerminal(runner, id);
     expect(terminal).toMatchObject({
@@ -4677,22 +4614,17 @@ describe('Runner Job HTTP interface', () => {
         truncated: false,
       }),
     });
-    const response = await runner.handle(
-      new Request('http://runner/jobs', {
-        method: 'POST',
-        headers: { authorization: 'Bearer runner-test-token', 'content-type': 'application/json' },
-        body: JSON.stringify({
-          ...runnerJobFields,
-          runId: 'run-checkout-diagnostics',
-          attempt: 1,
-          repositoryUrl,
-          repositoryReadToken,
-          baseSha: '1111111111111111111111111111111111111111',
-          headSha: '2222222222222222222222222222222222222222',
-        }),
-      }),
-    );
-    const { id } = (await response.json()) as { id: string };
+    const submittedJob = {
+      ...runnerJobFields,
+      runId: 'run-checkout-diagnostics',
+      attempt: 1,
+      repositoryUrl,
+      repositoryReadToken,
+      baseSha: '1111111111111111111111111111111111111111',
+      headSha: '2222222222222222222222222222222222222222',
+    };
+    runner.enqueue(submittedJob);
+    const id = submittedJob.id;
     await expect(waitForTerminal(runner, id)).resolves.toMatchObject({
       status: 'failed',
       failure: { reason: 'checkout' },
@@ -4741,24 +4673,16 @@ describe('Runner Job HTTP interface', () => {
           };
         },
       });
-      const response = await runner.handle(
-        new Request('http://runner/jobs', {
-          method: 'POST',
-          headers: {
-            authorization: 'Bearer runner-test-token',
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({
-            ...runnerJobFields,
-            runId: `run-absent-cleanup-${inspection}`,
-            attempt: 1,
-            repositoryUrl: 'https://github.com/acme/reviewed.git',
-            baseSha,
-            headSha,
-          }),
-        }),
-      );
-      const { id } = (await response.json()) as { id: string };
+      const submittedJob = {
+        ...runnerJobFields,
+        runId: `run-absent-cleanup-${inspection}`,
+        attempt: 1,
+        repositoryUrl: 'https://github.com/acme/reviewed.git',
+        baseSha,
+        headSha,
+      };
+      runner.enqueue(submittedJob);
+      const id = submittedJob.id;
       await expect(waitForTerminal(runner, id)).resolves.toMatchObject({
         status: 'failed',
         sandbox: { cleanup: inspection === 'absent' ? 'destroyed' : 'failed' },
@@ -4809,25 +4733,17 @@ describe('Runner Job HTTP interface', () => {
       },
     });
 
-    const submitted = await runner.handle(
-      new Request('http://runner/jobs', {
-        method: 'POST',
-        headers: {
-          authorization: 'Bearer runner-test-token',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          ...runnerJobFields,
-          runId: 'run-72-setup-diagnostics',
-          attempt: 1,
-          repositoryUrl: 'https://github.com/acme/reviewed.git',
-          baseSha,
-          headSha,
-          repositoryReadToken,
-        }),
-      }),
-    );
-    const { id } = (await submitted.json()) as { id: string };
+    const submittedJob = {
+      ...runnerJobFields,
+      runId: 'run-72-setup-diagnostics',
+      attempt: 1,
+      repositoryUrl: 'https://github.com/acme/reviewed.git',
+      baseSha,
+      headSha,
+      repositoryReadToken,
+    };
+    runner.enqueue(submittedJob);
+    const id = submittedJob.id;
 
     await expect(waitForTerminal(runner, id)).resolves.toMatchObject({
       status: 'failed',
@@ -4866,13 +4782,15 @@ describe('Runner Job HTTP interface', () => {
     });
     // A terminal diagnostic after cleanup lets operators distinguish a local
     // failure from a Core delivery problem without reading raw evidence.
-    expect(events).toContainEqual({
-      phase: 'runner',
-      outcome: 'terminal',
-      runId: 'run-72-setup-diagnostics',
-      jobId: runnerJobFields.id,
-      status: 'failed',
-      cleanup: 'failed',
+    await vi.waitFor(() => {
+      expect(events).toContainEqual({
+        phase: 'runner',
+        outcome: 'terminal',
+        runId: 'run-72-setup-diagnostics',
+        jobId: runnerJobFields.id,
+        status: 'failed',
+        cleanup: 'failed',
+      });
     });
     expect(JSON.stringify(events)).not.toContain(repositoryReadToken);
     expect(JSON.stringify(events)).not.toContain(resolverCommand);
@@ -4882,8 +4800,9 @@ describe('Runner Job HTTP interface', () => {
     const evidenceRoot = await mkdtemp(`${tmpdir()}/compte-rendu-evidence-failure-`);
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
+    let runner: ReturnType<typeof createRunner> | undefined;
     try {
-      const runner = createRunner({
+      runner = createRunner({
         authToken: 'runner-test-token',
         evidenceRoot,
         modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
@@ -4894,24 +4813,16 @@ describe('Runner Job HTTP interface', () => {
           truncated: false,
         }),
       });
-      const submitted = await runner.handle(
-        new Request('http://runner/jobs', {
-          method: 'POST',
-          headers: {
-            authorization: 'Bearer runner-test-token',
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({
-            ...runnerJobFields,
-            runId: 'run-89-checkout-failure',
-            attempt: 1,
-            repositoryUrl: 'https://github.com/acme/reviewed.git',
-            baseSha,
-            headSha,
-          }),
-        }),
-      );
-      const { id } = (await submitted.json()) as { id: string };
+      const submittedJob = {
+        ...runnerJobFields,
+        runId: 'run-89-checkout-failure',
+        attempt: 1,
+        repositoryUrl: 'https://github.com/acme/reviewed.git',
+        baseSha,
+        headSha,
+      };
+      runner.enqueue(submittedJob);
+      const id = submittedJob.id;
       const terminal = await waitForTerminal(runner, id);
       expect(terminal).toMatchObject({
         status: 'failed',
@@ -4929,6 +4840,7 @@ describe('Runner Job HTTP interface', () => {
       expect(manifest.startedAt).toEqual(expect.any(String));
       expect(manifest.finishedAt).toEqual(expect.any(String));
     } finally {
+      await runner?.close();
       await rm(evidenceRoot, { recursive: true, force: true });
     }
   });
@@ -4957,24 +4869,16 @@ describe('Runner Job HTTP interface', () => {
         };
       },
     });
-    const submitted = await runner.handle(
-      new Request('http://runner/jobs', {
-        method: 'POST',
-        headers: {
-          authorization: 'Bearer runner-test-token',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          ...runnerJobFields,
-          runId: 'run-89-network-setup-failure',
-          attempt: 1,
-          repositoryUrl: 'https://github.com/acme/reviewed.git',
-          baseSha,
-          headSha,
-        }),
-      }),
-    );
-    const { id } = (await submitted.json()) as { id: string };
+    const submittedJob = {
+      ...runnerJobFields,
+      runId: 'run-89-network-setup-failure',
+      attempt: 1,
+      repositoryUrl: 'https://github.com/acme/reviewed.git',
+      baseSha,
+      headSha,
+    };
+    runner.enqueue(submittedJob);
+    const id = submittedJob.id;
 
     const terminal = await waitForTerminal(runner, id);
     expect(terminal).toMatchObject({
@@ -5036,25 +4940,17 @@ describe('Runner Job HTTP interface', () => {
       },
     });
 
-    const submitted = await runner.handle(
-      new Request('http://runner/jobs', {
-        method: 'POST',
-        headers: {
-          authorization: 'Bearer runner-test-token',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          ...runnerJobFields,
-          runId: 'run-72-redaction-bound',
-          attempt: 1,
-          repositoryUrl: 'https://github.com/acme/reviewed.git',
-          baseSha,
-          headSha,
-          repositoryReadToken,
-        }),
-      }),
-    );
-    const { id } = (await submitted.json()) as { id: string };
+    const submittedJob = {
+      ...runnerJobFields,
+      runId: 'run-72-redaction-bound',
+      attempt: 1,
+      repositoryUrl: 'https://github.com/acme/reviewed.git',
+      baseSha,
+      headSha,
+      repositoryReadToken,
+    };
+    runner.enqueue(submittedJob);
+    const id = submittedJob.id;
 
     await expect(waitForTerminal(runner, id)).resolves.toMatchObject({
       status: 'failed',
@@ -5137,25 +5033,17 @@ describe('Runner Job HTTP interface', () => {
       modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
     });
 
-    const submitted = await runner.handle(
-      new Request('http://runner/jobs', {
-        method: 'POST',
-        headers: {
-          authorization: 'Bearer runner-test-token',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          ...runnerJobFields,
-          runId: 'run-67-skill',
-          attempt: 1,
-          repositoryUrl: 'https://github.com/acme/reviewed.git',
-          baseSha,
-          headSha,
-          repositoryReadToken: 'checkout-token-for-test',
-        }),
-      }),
-    );
-    const { id } = (await submitted.json()) as { id: string };
+    const submittedJob = {
+      ...runnerJobFields,
+      runId: 'run-67-skill',
+      attempt: 1,
+      repositoryUrl: 'https://github.com/acme/reviewed.git',
+      baseSha,
+      headSha,
+      repositoryReadToken: 'checkout-token-for-test',
+    };
+    runner.enqueue(submittedJob);
+    const id = submittedJob.id;
 
     await expect(waitForTerminal(runner, id)).resolves.toMatchObject({
       status: 'succeeded',
@@ -5550,24 +5438,16 @@ describe('Runner Job HTTP interface', () => {
       },
     });
 
-    const submitted = await runner.handle(
-      new Request('http://runner/jobs', {
-        method: 'POST',
-        headers: {
-          authorization: 'Bearer runner-test-token',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          ...runnerJobFields,
-          runId: 'run-100-behind-target',
-          attempt: 1,
-          repositoryUrl: 'https://github.com/acme/reviewed.git',
-          baseSha,
-          headSha,
-        }),
-      }),
-    );
-    const { id } = (await submitted.json()) as { id: string };
+    const submittedJob = {
+      ...runnerJobFields,
+      runId: 'run-100-behind-target',
+      attempt: 1,
+      repositoryUrl: 'https://github.com/acme/reviewed.git',
+      baseSha,
+      headSha,
+    };
+    runner.enqueue(submittedJob);
+    const id = submittedJob.id;
 
     await expect(waitForTerminal(runner, id)).resolves.toMatchObject({
       status: 'succeeded',
@@ -5609,24 +5489,16 @@ describe('Runner Job HTTP interface', () => {
         };
       },
     });
-    const submitted = await runner.handle(
-      new Request('http://runner/jobs', {
-        method: 'POST',
-        headers: {
-          authorization: 'Bearer runner-test-token',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          ...runnerJobFields,
-          runId: 'run-100-equal-merge-base',
-          attempt: 1,
-          repositoryUrl: 'https://github.com/acme/reviewed.git',
-          baseSha,
-          headSha,
-        }),
-      }),
-    );
-    const { id } = (await submitted.json()) as { id: string };
+    const submittedJob = {
+      ...runnerJobFields,
+      runId: 'run-100-equal-merge-base',
+      attempt: 1,
+      repositoryUrl: 'https://github.com/acme/reviewed.git',
+      baseSha,
+      headSha,
+    };
+    runner.enqueue(submittedJob);
+    const id = submittedJob.id;
 
     await expect(waitForTerminal(runner, id)).resolves.toMatchObject({
       status: 'succeeded',
@@ -5677,24 +5549,16 @@ describe('Runner Job HTTP interface', () => {
           };
         },
       });
-      const submitted = await runner.handle(
-        new Request('http://runner/jobs', {
-          method: 'POST',
-          headers: {
-            authorization: 'Bearer runner-test-token',
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({
-            ...runnerJobFields,
-            runId: 'run-100-merge-base-failure',
-            attempt: 1,
-            repositoryUrl: 'https://github.com/acme/reviewed.git',
-            baseSha,
-            headSha,
-          }),
-        }),
-      );
-      const { id } = (await submitted.json()) as { id: string };
+      const submittedJob = {
+        ...runnerJobFields,
+        runId: 'run-100-merge-base-failure',
+        attempt: 1,
+        repositoryUrl: 'https://github.com/acme/reviewed.git',
+        baseSha,
+        headSha,
+      };
+      runner.enqueue(submittedJob);
+      const id = submittedJob.id;
 
       await expect(waitForTerminal(runner, id)).resolves.toMatchObject({
         status: 'failed',
@@ -5759,27 +5623,19 @@ describe('Runner Job HTTP interface', () => {
       },
     });
 
-    const submitted = await runner.handle(
-      new Request('http://runner/jobs', {
-        method: 'POST',
-        headers: {
-          authorization: 'Bearer runner-test-token',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          id: 'runner-job-github-read-secret',
-          repositoryName: 'acme/reviewed',
-          pullRequestNumber: 42,
-          runId: 'run-github-read-secret',
-          attempt: 1,
-          repositoryUrl: 'https://github.com/acme/reviewed.git',
-          baseSha,
-          headSha,
-          repositoryReadToken,
-        }),
-      }),
-    );
-    const { id } = (await submitted.json()) as { id: string };
+    const submittedJob = {
+      id: 'runner-job-github-read-secret',
+      repositoryName: 'acme/reviewed',
+      pullRequestNumber: 42,
+      runId: 'run-github-read-secret',
+      attempt: 1,
+      repositoryUrl: 'https://github.com/acme/reviewed.git',
+      baseSha,
+      headSha,
+      repositoryReadToken,
+    };
+    runner.enqueue(submittedJob);
+    const id = submittedJob.id;
 
     const terminal = await waitForTerminal(runner, id);
     expect(terminal).toMatchObject({
@@ -5849,24 +5705,16 @@ describe('Runner Job HTTP interface', () => {
       },
     });
 
-    const submitted = await runner.handle(
-      new Request('http://runner/jobs', {
-        method: 'POST',
-        headers: {
-          authorization: 'Bearer runner-test-token',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          ...runnerJobFields,
-          runId: 'run-github-preflight-failure',
-          attempt: 1,
-          repositoryUrl: 'https://github.com/acme/reviewed.git',
-          baseSha,
-          headSha,
-        }),
-      }),
-    );
-    const { id } = (await submitted.json()) as { id: string };
+    const submittedJob = {
+      ...runnerJobFields,
+      runId: 'run-github-preflight-failure',
+      attempt: 1,
+      repositoryUrl: 'https://github.com/acme/reviewed.git',
+      baseSha,
+      headSha,
+    };
+    runner.enqueue(submittedJob);
+    const id = submittedJob.id;
 
     await expect(waitForTerminal(runner, id)).resolves.toMatchObject({
       status: 'failed',
@@ -5913,26 +5761,17 @@ describe('Runner Job HTTP interface', () => {
         authToken: 'runner-test-token',
         modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       });
-      const submitted = await runner.handle(
-        new Request('http://runner/jobs', {
-          method: 'POST',
-          headers: {
-            authorization: 'Bearer runner-test-token',
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({
-            ...runnerJobFields,
-            runId: 'run-64-test',
-            attempt: 1,
-            repositoryUrl: 'https://github.com/acme/reviewed.git',
-            baseSha,
-            headSha,
-            repositoryReadToken: 'checkout-token-for-test',
-          }),
-        }),
-      );
-      expect(submitted.status).toBe(202);
-      const { id } = (await submitted.json()) as { id: string };
+      const submittedJob = {
+        ...runnerJobFields,
+        runId: 'run-64-test',
+        attempt: 1,
+        repositoryUrl: 'https://github.com/acme/reviewed.git',
+        baseSha,
+        headSha,
+        repositoryReadToken: 'checkout-token-for-test',
+      };
+      runner.enqueue(submittedJob);
+      const id = submittedJob.id;
 
       const terminal = await waitForTerminal(runner, id);
       expect(terminal).toMatchObject({
@@ -5946,24 +5785,40 @@ describe('Runner Job HTTP interface', () => {
     }
   });
 
-  it('rejects unauthenticated job requests without starting work', async () => {
-    const runner = createRunner({
-      evidenceRoot: sharedEvidenceRoot,
+  it('retires direct job submission without starting work', async () => {
+    let processCalls = 0;
+    const runner = createProductionRunner({
       authToken: 'runner-test-token',
       modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-      process: async () => ({
-        exitCode: 0,
-        stdout: '',
-        timedOut: false,
-        truncated: false,
-      }),
+      modelConfig: standardModelConfig,
+      evidenceRoot: sharedEvidenceRoot,
+      process: async () => {
+        processCalls += 1;
+        return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+      },
     });
 
-    const response = await runner.handle(
-      new Request('http://runner/jobs', { method: 'POST', body: '{}' }),
-    );
+    try {
+      const anonymous = await runner.handle(
+        new Request('http://runner/jobs', { method: 'POST', body: '{}' }),
+      );
+      const authenticated = await runner.handle(
+        new Request('http://runner/jobs', {
+          method: 'POST',
+          headers: {
+            authorization: 'Bearer runner-test-token',
+            'content-type': 'application/json',
+          },
+          body: '{}',
+        }),
+      );
 
-    expect(response.status).toBe(401);
+      expect(anonymous.status).toBe(401);
+      expect(authenticated.status).toBe(404);
+      expect(processCalls).toBe(0);
+    } finally {
+      await runner.close();
+    }
   });
 
   it('fails closed on malformed agent output and still destroys the Sandbox', async () => {
@@ -5989,25 +5844,17 @@ describe('Runner Job HTTP interface', () => {
         };
       },
     });
-    const submitted = await runner.handle(
-      new Request('http://runner/jobs', {
-        method: 'POST',
-        headers: {
-          authorization: 'Bearer runner-test-token',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          ...runnerJobFields,
-          runId: 'run-64-invalid-output',
-          attempt: 1,
-          repositoryUrl: 'https://github.com/acme/reviewed.git',
-          baseSha,
-          headSha,
-          repositoryReadToken: 'checkout-token-for-test',
-        }),
-      }),
-    );
-    const { id } = (await submitted.json()) as { id: string };
+    const submittedJob = {
+      ...runnerJobFields,
+      runId: 'run-64-invalid-output',
+      attempt: 1,
+      repositoryUrl: 'https://github.com/acme/reviewed.git',
+      baseSha,
+      headSha,
+      repositoryReadToken: 'checkout-token-for-test',
+    };
+    runner.enqueue(submittedJob);
+    const id = submittedJob.id;
 
     const terminal = await waitForTerminal(runner, id);
 
@@ -6059,25 +5906,17 @@ describe('Runner Job HTTP interface', () => {
         };
       },
     });
-    const submitted = await runner.handle(
-      new Request('http://runner/jobs', {
-        method: 'POST',
-        headers: {
-          authorization: 'Bearer runner-test-token',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          ...runnerJobFields,
-          runId: 'run-64-timeout',
-          attempt: 1,
-          repositoryUrl: 'https://github.com/acme/reviewed.git',
-          baseSha,
-          headSha,
-          repositoryReadToken: 'checkout-token-for-test',
-        }),
-      }),
-    );
-    const { id } = (await submitted.json()) as { id: string };
+    const submittedJob = {
+      ...runnerJobFields,
+      runId: 'run-64-timeout',
+      attempt: 1,
+      repositoryUrl: 'https://github.com/acme/reviewed.git',
+      baseSha,
+      headSha,
+      repositoryReadToken: 'checkout-token-for-test',
+    };
+    runner.enqueue(submittedJob);
+    const id = submittedJob.id;
 
     const terminal = await waitForTerminal(runner, id);
 
@@ -6114,25 +5953,17 @@ describe('Runner Job HTTP interface', () => {
         };
       },
     });
-    const submitted = await runner.handle(
-      new Request('http://runner/jobs', {
-        method: 'POST',
-        headers: {
-          authorization: 'Bearer runner-test-token',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          ...runnerJobFields,
-          runId: 'run-64-secret-cleanup-failure',
-          attempt: 1,
-          repositoryUrl: 'https://github.com/acme/reviewed.git',
-          baseSha,
-          headSha,
-          repositoryReadToken: 'checkout-token-for-test',
-        }),
-      }),
-    );
-    const { id } = (await submitted.json()) as { id: string };
+    const submittedJob = {
+      ...runnerJobFields,
+      runId: 'run-64-secret-cleanup-failure',
+      attempt: 1,
+      repositoryUrl: 'https://github.com/acme/reviewed.git',
+      baseSha,
+      headSha,
+      repositoryReadToken: 'checkout-token-for-test',
+    };
+    runner.enqueue(submittedJob);
+    const id = submittedJob.id;
 
     const terminal = await waitForTerminal(runner, id);
 
@@ -6141,57 +5972,6 @@ describe('Runner Job HTTP interface', () => {
       failure: { reason: 'cleanup' },
       sandbox: { cleanup: 'failed' },
     });
-  });
-
-  it('is idempotent for the same run and attempt but creates a fresh job for a new attempt', async () => {
-    const runner = createRunner({
-      evidenceRoot: sharedEvidenceRoot,
-      authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-      process: async () => ({
-        exitCode: 0,
-        stdout: '',
-        timedOut: false,
-        truncated: false,
-      }),
-    });
-    const request = (attempt: number, token = 'checkout-token-for-test') =>
-      new Request('http://runner/jobs', {
-        method: 'POST',
-        headers: {
-          authorization: 'Bearer runner-test-token',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          ...runnerJobFields,
-          runId: 'run-64-idempotency',
-          id: `runner-job-test-${attempt}`,
-          attempt,
-          repositoryUrl: 'https://github.com/acme/reviewed.git',
-          baseSha: '1111111111111111111111111111111111111111',
-          headSha: '2222222222222222222222222222222222222222',
-          repositoryReadToken: token,
-        }),
-      });
-
-    const first = await runner.handle(request(1));
-    const duplicate = await runner.handle(request(1));
-    const firstState = (await first.clone().json()) as { id: string; attempt: number };
-    const terminal = await waitForTerminal(runner, firstState.id);
-    const repeated = await runner.handle(request(1));
-    expect(repeated.status).toBe(202);
-    expect(await repeated.json()).toEqual(terminal);
-    expect((await runner.handle(request(1, 'different-token'))).status).toBe(409);
-    const retry = await runner.handle(request(2));
-    const duplicateState = (await duplicate.json()) as { id: string; attempt: number };
-    const retryState = (await retry.json()) as { id: string; attempt: number };
-
-    expect(first.status).toBe(202);
-    expect(duplicate.status).toBe(202);
-    expect(retry.status).toBe(202);
-    expect(duplicateState).toEqual(firstState);
-    expect(retryState.attempt).toBe(2);
-    expect(retryState.id).not.toBe(firstState.id);
   });
 
   it('fetches the exact admitted head SHA instead of a stale mutable pull request ref', async () => {
@@ -6235,25 +6015,17 @@ describe('Runner Job HTTP interface', () => {
       },
     });
 
-    const submitted = await runner.handle(
-      new Request('http://runner/jobs', {
-        method: 'POST',
-        headers: {
-          authorization: 'Bearer runner-test-token',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          ...runnerJobFields,
-          runId: 'run-checkout-stale-pull-ref',
-          attempt: 1,
-          repositoryUrl: 'https://github.com/acme/reviewed.git',
-          baseSha,
-          headSha,
-          repositoryReadToken: 'checkout-token-for-test',
-        }),
-      }),
-    );
-    const { id } = (await submitted.json()) as { id: string };
+    const submittedJob = {
+      ...runnerJobFields,
+      runId: 'run-checkout-stale-pull-ref',
+      attempt: 1,
+      repositoryUrl: 'https://github.com/acme/reviewed.git',
+      baseSha,
+      headSha,
+      repositoryReadToken: 'checkout-token-for-test',
+    };
+    runner.enqueue(submittedJob);
+    const id = submittedJob.id;
 
     const terminal = await waitForTerminal(runner, id);
     expect(terminal).toMatchObject({
@@ -6285,25 +6057,17 @@ describe('Runner Job HTTP interface', () => {
         truncated: false,
       }),
     });
-    const submitted = await runner.handle(
-      new Request('http://runner/jobs', {
-        method: 'POST',
-        headers: {
-          authorization: 'Bearer runner-test-token',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          ...runnerJobFields,
-          runId: 'run-64-sha-mismatch',
-          attempt: 1,
-          repositoryUrl: 'https://github.com/acme/reviewed.git',
-          baseSha: '1111111111111111111111111111111111111111',
-          headSha: '2222222222222222222222222222222222222222',
-          repositoryReadToken: 'checkout-token-for-test',
-        }),
-      }),
-    );
-    const { id } = (await submitted.json()) as { id: string };
+    const submittedJob = {
+      ...runnerJobFields,
+      runId: 'run-64-sha-mismatch',
+      attempt: 1,
+      repositoryUrl: 'https://github.com/acme/reviewed.git',
+      baseSha: '1111111111111111111111111111111111111111',
+      headSha: '2222222222222222222222222222222222222222',
+      repositoryReadToken: 'checkout-token-for-test',
+    };
+    runner.enqueue(submittedJob);
+    const id = submittedJob.id;
 
     const terminal = await waitForTerminal(runner, id);
     expect(terminal).toMatchObject({
@@ -6331,25 +6095,17 @@ describe('Runner Job HTTP interface', () => {
         };
       },
     });
-    const submitted = await runner.handle(
-      new Request('http://runner/jobs', {
-        method: 'POST',
-        headers: {
-          authorization: 'Bearer runner-test-token',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          ...runnerJobFields,
-          runId: 'run-64-credential-cleanup',
-          attempt: 1,
-          repositoryUrl: 'https://github.com/acme/reviewed.git',
-          baseSha: '1111111111111111111111111111111111111111',
-          headSha: '2222222222222222222222222222222222222222',
-          repositoryReadToken: 'checkout-token-for-test',
-        }),
-      }),
-    );
-    const { id } = (await submitted.json()) as { id: string };
+    const submittedJob = {
+      ...runnerJobFields,
+      runId: 'run-64-credential-cleanup',
+      attempt: 1,
+      repositoryUrl: 'https://github.com/acme/reviewed.git',
+      baseSha: '1111111111111111111111111111111111111111',
+      headSha: '2222222222222222222222222222222222222222',
+      repositoryReadToken: 'checkout-token-for-test',
+    };
+    runner.enqueue(submittedJob);
+    const id = submittedJob.id;
 
     await expect(waitForTerminal(runner, id)).resolves.toMatchObject({
       status: 'failed',
@@ -6411,25 +6167,17 @@ describe('Runner Job HTTP interface', () => {
         };
       },
     });
-    const submitted = await runner.handle(
-      new Request('http://runner/jobs', {
-        method: 'POST',
-        headers: {
-          authorization: 'Bearer runner-test-token',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          ...runnerJobFields,
-          runId: 'run-64-delete-cleanup',
-          attempt: 1,
-          repositoryUrl: 'https://github.com/acme/reviewed.git',
-          baseSha,
-          headSha,
-          repositoryReadToken: 'checkout-token-for-test',
-        }),
-      }),
-    );
-    const { id } = (await submitted.json()) as { id: string };
+    const submittedJob = {
+      ...runnerJobFields,
+      runId: 'run-64-delete-cleanup',
+      attempt: 1,
+      repositoryUrl: 'https://github.com/acme/reviewed.git',
+      baseSha,
+      headSha,
+      repositoryReadToken: 'checkout-token-for-test',
+    };
+    runner.enqueue(submittedJob);
+    const id = submittedJob.id;
     await agentReady;
 
     let deleteFinished = false;
@@ -6515,25 +6263,17 @@ describe('Runner Job HTTP interface', () => {
         };
       },
     });
-    const submitted = await runner.handle(
-      new Request('http://runner/jobs', {
-        method: 'POST',
-        headers: {
-          authorization: 'Bearer runner-test-token',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          ...runnerJobFields,
-          runId: 'run-64-delete-aborted',
-          attempt: 1,
-          repositoryUrl: 'https://github.com/acme/reviewed.git',
-          baseSha,
-          headSha,
-          repositoryReadToken: 'checkout-token-for-test',
-        }),
-      }),
-    );
-    const { id } = (await submitted.json()) as { id: string };
+    const submittedJob = {
+      ...runnerJobFields,
+      runId: 'run-64-delete-aborted',
+      attempt: 1,
+      repositoryUrl: 'https://github.com/acme/reviewed.git',
+      baseSha,
+      headSha,
+      repositoryReadToken: 'checkout-token-for-test',
+    };
+    runner.enqueue(submittedJob);
+    const id = submittedJob.id;
     await agentReady;
 
     const deleted = await runner.handle(
@@ -6593,25 +6333,17 @@ describe('Runner Job HTTP interface', () => {
           };
         },
       });
-      const submitted = await runner.handle(
-        new Request('http://runner/jobs', {
-          method: 'POST',
-          headers: {
-            authorization: 'Bearer runner-test-token',
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({
-            ...runnerJobFields,
-            runId: `run-64-invalid-agent-${index}`,
-            attempt: 1,
-            repositoryUrl: 'https://github.com/acme/reviewed.git',
-            baseSha,
-            headSha,
-            repositoryReadToken: 'checkout-token-for-test',
-          }),
-        }),
-      );
-      const { id } = (await submitted.json()) as { id: string };
+      const submittedJob = {
+        ...runnerJobFields,
+        runId: `run-64-invalid-agent-${index}`,
+        attempt: 1,
+        repositoryUrl: 'https://github.com/acme/reviewed.git',
+        baseSha,
+        headSha,
+        repositoryReadToken: 'checkout-token-for-test',
+      };
+      runner.enqueue(submittedJob);
+      const id = submittedJob.id;
 
       await expect(waitForTerminal(runner, id)).resolves.toMatchObject({
         status: 'failed',
@@ -6752,6 +6484,7 @@ describe('Runner concurrency', () => {
       expect(second.status).toBe('succeeded');
     } finally {
       releaseAgents?.();
+      await runner.close();
       await rm(evidenceRoot, { recursive: true, force: true });
     }
   });
@@ -6846,6 +6579,7 @@ describe('Runner concurrency', () => {
       expect(maximumActiveAgents).toBe(2);
     } finally {
       releaseFirstWave?.();
+      await runner.close();
       await rm(evidenceRoot, { recursive: true, force: true });
     }
   });
@@ -6920,6 +6654,7 @@ describe('Runner concurrency', () => {
       expect(second.status).toBe('succeeded');
     } finally {
       releaseCallback?.();
+      await runner.close();
       await rm(evidenceRoot, { recursive: true, force: true });
     }
   });
@@ -6936,14 +6671,9 @@ describe('Runner concurrency', () => {
         return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
       },
     });
-    const submitted = await runner.handle(
-      new Request('http://runner/jobs', {
-        method: 'POST',
-        headers: { authorization: 'Bearer runner-test-token', 'content-type': 'application/json' },
-        body: JSON.stringify({ ...job, claimDeadlineAt: Date.now() - 1 }),
-      }),
-    );
-    const { id } = (await submitted.json()) as { id: string };
+    const submittedJob = { ...job, claimDeadlineAt: Date.now() - 1 };
+    runner.enqueue(submittedJob);
+    const id = submittedJob.id;
     await expect(waitForTerminal(runner, id)).resolves.toMatchObject({
       status: 'failed',
       failure: { reason: 'timeout' },
@@ -7093,23 +6823,15 @@ describe('Runner concurrency', () => {
           setTimeout(() => reject(new Error('claim was not requested')), 2_000),
         ),
       ]);
-      const direct = await runner.handle(
-        new Request('http://runner/jobs', {
-          method: 'POST',
-          headers: {
-            authorization: 'Bearer runner-test-token',
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify(independentJob(99, 'run-reserve-direct')),
-        }),
-      );
-      expect(direct.status).toBe(409);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(claimCalls).toBe(1);
 
       resolveClaim?.(Response.json(claimedJob));
       const terminal = await waitForTerminal(runner, claimedJob.id);
       expect(terminal.status).toBe('succeeded');
     } finally {
       resolveClaim?.(new Response(null, { status: 204 }));
+      await runner.close();
       await rm(evidenceRoot, { recursive: true, force: true });
     }
   });
@@ -7171,222 +6893,7 @@ describe('Runner concurrency', () => {
       expect(terminals.map((terminal) => terminal.status)).toEqual(['succeeded', 'succeeded']);
       expect(maximumActiveAgents).toBe(1);
     } finally {
-      await rm(evidenceRoot, { recursive: true, force: true });
-    }
-  });
-
-  it('excludes a same-pull-request admission until the prior Sandbox is destroyed while unrelated work proceeds', async () => {
-    const evidenceRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-runner-same-pr-'));
-    let releaseAgents: (() => void) | undefined;
-    const gate = new Promise<void>((resolve) => {
-      releaseAgents = resolve;
-    });
-    const runner = createRunner({
-      concurrency: 2,
-      authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-      evidenceRoot,
-      process: async (_command, args, options = {}) => {
-        if (args[0] === 'exec' && args.includes('--agent')) {
-          await gate;
-          await writeEvidenceFixture(
-            args,
-            options,
-            finalMarkdownJsonl(undefined, 'concurrency-session'),
-          );
-          return {
-            exitCode: 0,
-            stdout: `${finalMarkdownJsonl(undefined, 'concurrency-session')}\n`,
-            timedOut: false,
-            truncated: false,
-          };
-        }
-        await writeEvidenceFixture(
-          args,
-          options,
-          finalMarkdownJsonl(undefined, 'concurrency-session'),
-        );
-        return {
-          exitCode: 0,
-          stdout: args.includes('rev-parse')
-            ? `${baseSha}\n${headSha}\n`
-            : args.includes('session')
-              ? '[{"id":"concurrency-session"}]\n'
-              : '',
-          timedOut: false,
-          truncated: false,
-        };
-      },
-    });
-    const post = (job: Record<string, unknown>) =>
-      runner.handle(
-        new Request('http://runner/jobs', {
-          method: 'POST',
-          headers: {
-            authorization: 'Bearer runner-test-token',
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify(job),
-        }),
-      );
-
-    try {
-      const first = independentJob(42, 'run-same-pr-first');
-      const replacement = independentJob(42, 'run-same-pr-replacement');
-      const unrelated = independentJob(43, 'run-same-pr-unrelated');
-
-      expect((await post(first)).status).toBe(202);
-      expect((await post(replacement)).status).toBe(409);
-      expect((await post(unrelated)).status).toBe(202);
-
-      releaseAgents?.();
-      expect((await waitForTerminal(runner, first.id)).status).toBe('succeeded');
-      expect((await waitForTerminal(runner, unrelated.id)).status).toBe('succeeded');
-
-      expect((await post(replacement)).status).toBe(202);
-      expect((await waitForTerminal(runner, replacement.id)).status).toBe('succeeded');
-    } finally {
-      releaseAgents?.();
-      await rm(evidenceRoot, { recursive: true, force: true });
-    }
-  });
-
-  it('admits a same-pull-request replacement in a spare slot once the old Sandbox is destroyed even while its callback is in flight', async () => {
-    const evidenceRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-runner-same-pr-callback-'));
-    let callbacks = 0;
-    let firstCallbackStarted!: () => void;
-    const firstCallbackObserved = new Promise<void>((resolve) => {
-      firstCallbackStarted = resolve;
-    });
-    let releaseCallback: (() => void) | undefined;
-    const callbackGate = new Promise<void>((resolve) => {
-      releaseCallback = resolve;
-    });
-    const runner = createRunner({
-      concurrency: 2,
-      authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-      evidenceRoot,
-      callbackUrl: 'https://ingress.test/runner-callback',
-      callbackToken: 'callback-token',
-      callbackFetch: async () => {
-        callbacks += 1;
-        if (callbacks === 1) {
-          firstCallbackStarted();
-          await callbackGate;
-        }
-        return new Response(null, { status: 202 });
-      },
-      process: async (_command, args, options = {}) => {
-        await writeEvidenceFixture(
-          args,
-          options,
-          finalMarkdownJsonl(undefined, 'concurrency-session'),
-        );
-        return {
-          exitCode: 0,
-          stdout: args.includes('rev-parse')
-            ? `${baseSha}\n${headSha}\n`
-            : args.includes('session')
-              ? '[{"id":"concurrency-session"}]\n'
-              : options.captureStdout === true
-                ? `${finalMarkdownJsonl(undefined, 'concurrency-session')}\n`
-                : '',
-          timedOut: false,
-          truncated: false,
-        };
-      },
-    });
-    const post = (job: Record<string, unknown>) =>
-      runner.handle(
-        new Request('http://runner/jobs', {
-          method: 'POST',
-          headers: {
-            authorization: 'Bearer runner-test-token',
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify(job),
-        }),
-      );
-
-    try {
-      const first = independentJob(42, 'run-same-pr-cleaned-first');
-      expect((await post(first)).status).toBe(202);
-      await Promise.race([
-        firstCallbackObserved,
-        new Promise((_resolve, reject) =>
-          setTimeout(() => reject(new Error('first callback was not reached')), 2_000),
-        ),
-      ]);
-
-      const replacement = independentJob(42, 'run-same-pr-cleaned-replacement');
-      expect((await post(replacement)).status).toBe(202);
-
-      releaseCallback?.();
-      expect((await waitForTerminal(runner, first.id)).status).toBe('succeeded');
-      expect((await waitForTerminal(runner, replacement.id)).status).toBe('succeeded');
-    } finally {
-      releaseCallback?.();
-      await rm(evidenceRoot, { recursive: true, force: true });
-    }
-  });
-
-  it('keeps blocking a same-pull-request admission after a terminal failed cleanup while unrelated work proceeds', async () => {
-    const evidenceRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-runner-terminal-cleanup-'));
-    const failing = independentJob(42, 'run-terminal-cleanup-failing');
-    const replacement = independentJob(42, 'run-terminal-cleanup-replacement');
-    const unrelated = independentJob(43, 'run-terminal-cleanup-unrelated');
-    const runner = createRunner({
-      concurrency: 2,
-      authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-      evidenceRoot,
-      process: async (_command, args, options = {}) => {
-        await writeEvidenceFixture(
-          args,
-          options,
-          finalMarkdownJsonl(undefined, 'concurrency-session'),
-        );
-        return {
-          exitCode:
-            args[0] === 'rm' && args[1] === '--force' && args[2] === `compte-rendu-${failing.id}`
-              ? 1
-              : 0,
-          stdout: args.includes('rev-parse')
-            ? `${baseSha}\n${headSha}\n`
-            : args.includes('session')
-              ? '[{"id":"concurrency-session"}]\n'
-              : options.captureStdout === true
-                ? `${finalMarkdownJsonl(undefined, 'concurrency-session')}\n`
-                : '',
-          timedOut: false,
-          truncated: false,
-        };
-      },
-    });
-    const post = (job: Record<string, unknown>) =>
-      runner.handle(
-        new Request('http://runner/jobs', {
-          method: 'POST',
-          headers: {
-            authorization: 'Bearer runner-test-token',
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify(job),
-        }),
-      );
-
-    try {
-      expect((await post(failing)).status).toBe(202);
-      expect(await waitForTerminal(runner, failing.id)).toMatchObject({
-        status: 'failed',
-        sandbox: { cleanup: 'failed' },
-      });
-
-      expect((await post(replacement)).status).toBe(409);
-      expect((await post(unrelated)).status).toBe(202);
-      expect((await waitForTerminal(runner, unrelated.id)).status).toBe('succeeded');
-    } finally {
+      await runner.close();
       await rm(evidenceRoot, { recursive: true, force: true });
     }
   });
@@ -7436,6 +6943,12 @@ describe('Runner concurrency', () => {
     const cAgentObserved = new Promise<void>((resolve) => {
       cAgentStarted = resolve;
     });
+    let dAgentStarted!: () => void;
+    const dAgentObserved = new Promise<void>((resolve) => {
+      dAgentStarted = resolve;
+    });
+    let cAgents = 0;
+    let dAgents = 0;
     const runner = createRunner({
       concurrency: 2,
       authToken: 'runner-test-token',
@@ -7459,8 +6972,12 @@ describe('Runner concurrency', () => {
             bAgentStarted();
             await gateB;
           } else if (sandbox === `compte-rendu-${jobC.id}`) {
+            cAgents += 1;
             cAgentStarted();
             await gateC;
+          } else if (sandbox === `compte-rendu-${jobD.id}`) {
+            dAgents += 1;
+            dAgentStarted();
           }
           await writeFile(
             options.stdoutFilePath!,
@@ -7499,20 +7016,8 @@ describe('Runner concurrency', () => {
         };
       },
     });
-    const post = (job: Record<string, unknown>) =>
-      runner.handle(
-        new Request('http://runner/jobs', {
-          method: 'POST',
-          headers: {
-            authorization: 'Bearer runner-test-token',
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify(job),
-        }),
-      );
-
     try {
-      expect((await post(jobA)).status).toBe(202);
+      runner.enqueue(jobA);
       await Promise.race([
         firstCallbackObserved,
         new Promise((_resolve, reject) =>
@@ -7520,20 +7025,23 @@ describe('Runner concurrency', () => {
         ),
       ]);
 
-      expect((await post(jobB)).status).toBe(202);
+      runner.enqueue(jobB);
       await bAgentObserved;
-      expect((await post(jobC)).status).toBe(409);
+      runner.enqueue(jobC);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(cAgents).toBe(0);
 
       releaseB?.();
       expect((await waitForTerminal(runner, jobB.id)).status).toBe('succeeded');
 
-      expect((await post(jobC)).status).toBe(202);
       await cAgentObserved;
-      expect((await post(jobD)).status).toBe(409);
+      runner.enqueue(jobD);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(dAgents).toBe(0);
 
       releaseA?.();
       expect((await waitForTerminal(runner, jobA.id)).status).toBe('failed');
-      expect((await post(jobD)).status).toBe(202);
+      await dAgentObserved;
 
       releaseC?.();
       expect((await waitForTerminal(runner, jobC.id)).status).toBe('succeeded');
@@ -7547,9 +7055,10 @@ describe('Runner concurrency', () => {
           waitForTerminal(runner, job.id).catch(() => undefined),
         ),
       );
+      await runner.close();
       await rm(evidenceRoot, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 
   it('aborts a contradictory same-pull-request claim with a terminal callback while unrelated work progresses', async () => {
     const evidenceRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-runner-abort-claim-'));
@@ -7557,6 +7066,7 @@ describe('Runner concurrency', () => {
     const contradictory = independentJob(42, 'run-abort-claim');
     const unrelated = independentJob(43, 'run-abort-unrelated');
     let allowClaims = false;
+    let existingClaimed = false;
     let claims = 0;
     let clones = 0;
     const createdSandboxes: string[] = [];
@@ -7584,6 +7094,10 @@ describe('Runner concurrency', () => {
       claimUrl: 'https://ingress.test/runner-claim',
       claimIntervalMs: 1,
       claimFetch: async () => {
+        if (!existingClaimed) {
+          existingClaimed = true;
+          return Response.json(existing);
+        }
         if (!allowClaims) return new Response(null, { status: 204 });
         claims += 1;
         if (claims === 1) return Response.json(contradictory);
@@ -7640,20 +7154,7 @@ describe('Runner concurrency', () => {
         };
       },
     });
-    const post = (job: Record<string, unknown>) =>
-      runner.handle(
-        new Request('http://runner/jobs', {
-          method: 'POST',
-          headers: {
-            authorization: 'Bearer runner-test-token',
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify(job),
-        }),
-      );
-
     try {
-      expect((await post(existing)).status).toBe(202);
       await Promise.race([
         firstAgentObserved,
         new Promise((_resolve, reject) =>
@@ -7682,6 +7183,7 @@ describe('Runner concurrency', () => {
     } finally {
       releaseAgents?.();
       await waitForTerminal(runner, existing.id).catch(() => undefined);
+      await runner.close();
       await rm(evidenceRoot, { recursive: true, force: true });
     }
   });
@@ -7869,7 +7371,10 @@ describe('Runner OpenShell runtime lifecycle', () => {
           return scenario.providerCreateFails === true
             ? {
                 ...ok,
-                stdout: JSON.stringify({ id: 'preexisting', name: 'cr-runner-job-test-github' }),
+                stdout: JSON.stringify({
+                  id: 'preexisting',
+                  name: `cr-${scenario.runId}-github`,
+                }),
               }
             : {
                 exitCode: 1,
@@ -8030,22 +7535,18 @@ describe('Runner OpenShell runtime lifecycle', () => {
         return ok;
       },
     });
-    const submitted = await runner.handle(
-      new Request('http://runner/jobs', {
-        method: 'POST',
-        headers: { authorization: 'Bearer runner-test-token', 'content-type': 'application/json' },
-        body: JSON.stringify({
-          ...runnerJobFields,
-          runId: scenario.runId,
-          attempt: 1,
-          repositoryUrl: 'https://github.com/acme/reviewed.git',
-          baseSha,
-          headSha,
-          repositoryReadToken: token,
-        }),
-      }),
-    );
-    const { id } = (await submitted.json()) as { id: string };
+    const submittedJob = {
+      ...runnerJobFields,
+      id: scenario.runId,
+      runId: scenario.runId,
+      attempt: 1,
+      repositoryUrl: 'https://github.com/acme/reviewed.git',
+      baseSha,
+      headSha,
+      repositoryReadToken: token,
+    };
+    runner.enqueue(submittedJob);
+    const id = submittedJob.id;
     const terminal = await waitForTerminal(runner, id);
     let manifest: Record<string, unknown> | undefined;
     if (terminal.evidenceId !== undefined) {
@@ -8053,7 +7554,7 @@ describe('Runner OpenShell runtime lifecycle', () => {
         await readFile(join(sharedEvidenceRoot, terminal.evidenceId, 'manifest.json'), 'utf8'),
       ) as Record<string, unknown>;
     }
-    return { terminal, manifest, commands, providerEnvs, token };
+    return { terminal, manifest, commands, providerEnvs, token, runId: scenario.runId };
   };
 
   it('runs a review through the OpenShell adapter with real identity and job-owned provider cleanup', async () => {
@@ -8085,7 +7586,7 @@ describe('Runner OpenShell runtime lifecycle', () => {
     expect(providerCreate).toEqual(
       expect.arrayContaining([
         '--name',
-        'cr-runner-job-test-github',
+        `cr-${run.runId}-github`,
         '--type',
         'cr-github',
         '--credential',
@@ -8095,7 +7596,7 @@ describe('Runner OpenShell runtime lifecycle', () => {
     const providerDelete = run.commands.find(
       (args) => args.includes('provider') && args.includes('delete'),
     );
-    expect(providerDelete).toEqual(expect.arrayContaining(['cr-runner-job-test-github']));
+    expect(providerDelete).toEqual(expect.arrayContaining([`cr-${run.runId}-github`]));
     expect(run.providerEnvs[0]?.GITHUB_TOKEN).toBe(run.token);
   });
 
@@ -8154,6 +7655,18 @@ describe('Runner OpenShell runtime lifecycle', () => {
     let peak = 0;
     const claimReleases: Array<() => void> = [];
     const callbackReleases: Array<() => void> = [];
+    const queued: Array<Record<string, unknown>> = [];
+    const queuedJob = (n: number) => ({
+      id: `claims-${n}`,
+      runId: `claims-${n}`,
+      attempt: 1,
+      repositoryName: 'acme/repo',
+      pullRequestNumber: n,
+      repositoryUrl: 'https://github.com/acme/repo.git',
+      repositoryReadToken: 'fixture-token',
+      baseSha: '1'.repeat(40),
+      headSha: '2'.repeat(40),
+    });
     const runner = createRunner({
       authToken: 'test-auth',
       modelSecretCommand: 'fixture-resolver',
@@ -8162,11 +7675,16 @@ describe('Runner OpenShell runtime lifecycle', () => {
       concurrency: 2,
       evidenceRoot: root,
       claimUrl: 'http://claim.test/runner-claim',
-      claimIntervalMs: 1_000_000_000,
+      claimIntervalMs: 1,
       claimTimeoutMs: 1_000,
       callbackUrl: 'http://callback.test/runner-callback',
       callbackToken: 'test-callback',
       claimFetch: async () => {
+        const next = queued.shift();
+        if (next !== undefined) {
+          startupDone = true;
+          return Response.json(next);
+        }
         if (!measure) {
           startupDone = true;
           return new Response(null, { status: 204 });
@@ -8193,26 +7711,7 @@ describe('Runner OpenShell runtime lifecycle', () => {
       for (let i = 0; i < 200 && !startupDone; i += 1)
         await new Promise((resolve) => setTimeout(resolve, 5));
       expect(startupDone).toBe(true);
-      const post = (n: number) =>
-        runner.handle(
-          new Request('http://runner/jobs', {
-            method: 'POST',
-            headers: { authorization: 'Bearer test-auth', 'content-type': 'application/json' },
-            body: JSON.stringify({
-              id: `claims-${n}`,
-              runId: `claims-${n}`,
-              attempt: 1,
-              repositoryName: 'acme/repo',
-              pullRequestNumber: n,
-              repositoryUrl: 'https://github.com/acme/repo.git',
-              repositoryReadToken: 'fixture-token',
-              baseSha: '1'.repeat(40),
-              headSha: '2'.repeat(40),
-            }),
-          }),
-        );
-      const admissions = await Promise.all([post(1), post(2)]);
-      expect(admissions.map((response) => response.status)).toEqual([202, 202]);
+      queued.push(queuedJob(1), queuedJob(2));
       releaseClones();
       for (let i = 0; i < 200 && callbackReleases.length < 2; i += 1) {
         await new Promise((resolve) => setTimeout(resolve, 5));
@@ -8220,12 +7719,11 @@ describe('Runner OpenShell runtime lifecycle', () => {
       expect(callbackReleases).toHaveLength(2);
       measure = true;
       for (const release of callbackReleases) release();
-      for (let i = 0; i < 200 && peak < 2; i += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 5));
-      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
       expect(peak).toBe(1);
     } finally {
       for (const release of claimReleases) release();
+      await runner.close();
       await rm(root, { recursive: true, force: true });
     }
   });
@@ -8275,7 +7773,7 @@ describe('Runner OpenShell runtime lifecycle', () => {
 
   it('does not admit when the provider list is malformed', async () => {
     let claims = 0;
-    const runner = createRunner({
+    const _runner = createRunner({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
       modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
@@ -8294,21 +7792,6 @@ describe('Runner OpenShell runtime lifecycle', () => {
         truncated: false,
       }),
     });
-    const response = await runner.handle(
-      new Request('http://runner/jobs', {
-        method: 'POST',
-        headers: { authorization: 'Bearer runner-test-token', 'content-type': 'application/json' },
-        body: JSON.stringify({
-          ...runnerJobFields,
-          runId: 'run-158-malformed-preflight',
-          attempt: 1,
-          repositoryUrl: 'https://github.com/acme/reviewed.git',
-          baseSha: '1111111111111111111111111111111111111111',
-          headSha: '2222222222222222222222222222222222222222',
-        }),
-      }),
-    );
-    expect(response.status).toBe(503);
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(claims).toBe(0);
   });
@@ -8316,7 +7799,7 @@ describe('Runner OpenShell runtime lifecycle', () => {
   it('does not claim or admit when the configured model provider is missing', async () => {
     let claims = 0;
     let admits = 0;
-    const runner = createRunner({
+    const _runner = createRunner({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
       modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
@@ -8345,21 +7828,6 @@ describe('Runner OpenShell runtime lifecycle', () => {
         return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
       },
     });
-    const response = await runner.handle(
-      new Request('http://runner/jobs', {
-        method: 'POST',
-        headers: { authorization: 'Bearer runner-test-token', 'content-type': 'application/json' },
-        body: JSON.stringify({
-          ...runnerJobFields,
-          runId: 'run-158-preflight',
-          attempt: 1,
-          repositoryUrl: 'https://github.com/acme/reviewed.git',
-          baseSha: '1111111111111111111111111111111111111111',
-          headSha: '2222222222222222222222222222222222222222',
-        }),
-      }),
-    );
-    expect(response.status).toBe(503);
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(claims).toBe(0);
     expect(admits).toBe(0);
@@ -8439,14 +7907,6 @@ describe('Runner settings reload', () => {
     ).json() as Promise<{
       status: string;
     }>;
-  const post = (runner: ReturnType<typeof createProductionRunner>, id: string) =>
-    runner.handle(
-      new Request('http://runner/jobs', {
-        method: 'POST',
-        headers: { ...auth, 'content-type': 'application/json' },
-        body: jobBody(id),
-      }),
-    );
   const writeRaw = async (dir: string, content: string) => {
     const tmp = join(dir, `settings.${crypto.randomUUID()}.tmp`);
     await writeFile(tmp, content);
@@ -8470,6 +7930,7 @@ describe('Runner settings reload', () => {
     const file = join(dir, 'settings.toml');
     await writeFile(file, `concurrency = ${initialCap}\n`);
     const callbackReleases = new Map<string, () => void>();
+    const callbackBodies = new Map<string, string>();
     let disposed = false;
     const runner = createRunner({
       authToken: 'runner-test-token',
@@ -8492,7 +7953,9 @@ describe('Runner settings reload', () => {
       }),
       callbackFetch: async (_url, init) => {
         if (disposed) return new Response(null, { status: 202 });
-        const id = (JSON.parse(init?.body as string) as { id: string }).id;
+        const body = init?.body as string;
+        const id = (JSON.parse(body) as { id: string }).id;
+        callbackBodies.set(id, body);
         return new Promise<Response>((resolve) =>
           callbackReleases.set(id, () => resolve(new Response(null, { status: 202 }))),
         );
@@ -8512,7 +7975,16 @@ describe('Runner settings reload', () => {
       await runner.close();
       await rm(dir, { recursive: true, force: true });
     };
-    return { dir, file, runner, callbackReleases, releaseCallback, releaseCallbacks, close };
+    return {
+      dir,
+      file,
+      runner,
+      callbackReleases,
+      callbackBodies,
+      releaseCallback,
+      releaseCallbacks,
+      close,
+    };
   };
 
   it('rejects an initial missing or invalid settings file at startup', async () => {
@@ -8570,76 +8042,87 @@ describe('Runner settings reload', () => {
   });
 
   it('admits a reserved claim held across a cap lowering, keeps it, and refuses new work', async () => {
+    const logs = captureLogs();
+    const queued: Array<Record<string, unknown>> = [];
+    const job = (id: string) => JSON.parse(jobBody(id)) as Record<string, unknown>;
     let claims = 0;
     let releaseHeldClaim: (() => void) | undefined;
     const h = await startFixture(3, {
       claimIntervalMs: 20,
       claimFetch: async () => {
+        const next = queued.shift();
+        if (next !== undefined) return Response.json(next);
         claims += 1;
-        if (claims === 1) return new Response(jobBody('settings-lower-a'), { status: 200 });
+        if (claims === 1) return Response.json(job('settings-lower-a'));
         if (claims === 2) {
           return new Promise<Response>((resolve) => {
-            releaseHeldClaim = () =>
-              resolve(new Response(jobBody('settings-lower-b'), { status: 200 }));
+            releaseHeldClaim = () => resolve(Response.json(job('settings-lower-b')));
           });
         }
         return new Response(null, { status: 204 });
       },
     });
-    const probeFresh = async () => {
-      const id = `settings-lower-probe-${crypto.randomUUID()}`;
-      const response = await post(h.runner, id);
-      if (response.status === 409) return true;
-      await vi.waitFor(() => expect(h.callbackReleases.has(id)).toBe(true));
-      h.releaseCallback(id);
-      await vi.waitFor(async () => {
-        expect((await get(h.runner, id)).status).not.toBe('running');
-      });
-      return false;
-    };
     try {
       await vi.waitFor(async () => {
         expect((await get(h.runner, 'settings-lower-a')).status).toBe('running');
       });
       await vi.waitFor(() => expect(claims).toBeGreaterThanOrEqual(2));
       await writeCap(h.dir, 1);
-      await vi.waitFor(async () => expect(await probeFresh()).toBe(true));
+      await vi.waitFor(() => expect(logs.reloadedTo(1)).toBe(true));
+      queued.push(job('settings-lower-probe'));
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      expect((await get(h.runner, 'settings-lower-probe')).status).not.toBe('running');
+      expect(claims).toBe(2);
       releaseHeldClaim?.();
       await vi.waitFor(async () => {
         expect((await get(h.runner, 'settings-lower-b')).status).toBe('running');
       });
       expect((await get(h.runner, 'settings-lower-a')).status).toBe('running');
-      expect((await post(h.runner, 'settings-lower-after')).status).toBe(409);
+      expect((await get(h.runner, 'settings-lower-probe')).status).not.toBe('running');
       await vi.waitFor(() => expect(h.callbackReleases.size).toBe(2));
       h.releaseCallbacks();
+      await vi.waitFor(() => expect(h.callbackBodies.has('settings-lower-b')).toBe(true));
+      const callback = JSON.parse(h.callbackBodies.get('settings-lower-b')!) as {
+        status: string;
+        sandbox: { cleanup: string };
+      };
+      expect(callback.status).toBe('failed');
+      expect(callback.sandbox.cleanup).toBe('destroyed');
       await vi.waitFor(async () => {
-        expect((await get(h.runner, 'settings-lower-b')).status).not.toBe('running');
+        expect((await get(h.runner, 'settings-lower-b')).status).toBeUndefined();
       });
-      expect((await get(h.runner, 'settings-lower-b')).status).not.toBe('aborted');
     } finally {
+      logs.restore();
       await h.close();
     }
   });
 
   it('keeps the last valid cap across invalid, deletion, and applies an atomic recreation', async () => {
     const logs = captureLogs();
+    const queued: Array<Record<string, unknown>> = [];
+    const job = (id: string) => JSON.parse(jobBody(id)) as Record<string, unknown>;
     const h = await startFixture(2, {
-      claimFetch: async () => new Response(null, { status: 204 }),
+      claimIntervalMs: 20,
+      claimFetch: async () => {
+        const next = queued.shift();
+        return next === undefined ? new Response(null, { status: 204 }) : Response.json(next);
+      },
     });
     try {
-      expect((await post(h.runner, 'settings-lastgood-a')).status).toBe(202);
-      expect((await post(h.runner, 'settings-lastgood-b')).status).toBe(202);
+      queued.push(job('settings-lastgood-a'), job('settings-lastgood-b'));
       await vi.waitFor(async () => {
         expect((await get(h.runner, 'settings-lastgood-a')).status).toBe('running');
         expect((await get(h.runner, 'settings-lastgood-b')).status).toBe('running');
       });
       await vi.waitFor(() => expect(h.callbackReleases.size).toBe(2));
-      expect((await post(h.runner, 'settings-lastgood-c')).status).toBe(409);
+      queued.push(job('settings-lastgood-c'));
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      expect((await get(h.runner, 'settings-lastgood-c')).status).not.toBe('running');
       await writeRaw(h.dir, 'concurrency = 0\n');
       await vi.waitFor(() => expect(logs.ignored()).toBeGreaterThanOrEqual(1));
       await writeRaw(h.dir, 'concurrency = "two"\nnot = toml =\n');
       await vi.waitFor(() => expect(logs.ignored()).toBeGreaterThanOrEqual(2));
-      expect((await post(h.runner, 'settings-lastgood-c')).status).toBe(409);
+      expect((await get(h.runner, 'settings-lastgood-c')).status).not.toBe('running');
       await rm(h.file, { force: true });
       await vi.waitFor(() => expect(logs.ignored()).toBeGreaterThanOrEqual(3));
       expect((await get(h.runner, 'settings-lastgood-a')).status).toBe('running');
@@ -8647,15 +8130,16 @@ describe('Runner settings reload', () => {
       await vi.waitFor(async () => {
         expect((await get(h.runner, 'settings-lastgood-a')).status).not.toBe('running');
       });
-      expect((await post(h.runner, 'settings-lastgood-d')).status).toBe(202);
       await vi.waitFor(async () => {
-        expect((await get(h.runner, 'settings-lastgood-d')).status).toBe('running');
+        expect((await get(h.runner, 'settings-lastgood-c')).status).toBe('running');
       });
-      expect((await post(h.runner, 'settings-lastgood-e')).status).toBe(409);
+      queued.push(job('settings-lastgood-d'));
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      expect((await get(h.runner, 'settings-lastgood-d')).status).not.toBe('running');
       await writeCap(h.dir, 3);
       await vi.waitFor(() => expect(logs.reloadedTo(3)).toBe(true));
       await vi.waitFor(async () => {
-        expect((await post(h.runner, 'settings-lastgood-f')).status).toBe(202);
+        expect((await get(h.runner, 'settings-lastgood-d')).status).toBe('running');
       });
     } finally {
       logs.restore();
@@ -8733,25 +8217,15 @@ describe('Runner persisted lifecycle reporting', () => {
       process: async () => ({ exitCode: 1, stdout: '', timedOut: false, truncated: false }),
     });
     try {
-      const response = await runner.handle(
-        new Request('http://runner/jobs', {
-          method: 'POST',
-          headers: {
-            authorization: 'Bearer runner-test-token',
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({
-            ...runnerJobFields,
-            id: 'progress-stalled',
-            runId: 'progress-stalled-run',
-            attempt: 1,
-            repositoryUrl: 'https://github.com/acme/reviewed.git',
-            baseSha: '1'.repeat(40),
-            headSha: '2'.repeat(40),
-          }),
-        }),
-      );
-      expect(response.status).toBe(202);
+      runner.enqueue({
+        ...runnerJobFields,
+        id: 'progress-stalled',
+        runId: 'progress-stalled-run',
+        attempt: 1,
+        repositoryUrl: 'https://github.com/acme/reviewed.git',
+        baseSha: '1'.repeat(40),
+        headSha: '2'.repeat(40),
+      });
       await expect(waitForTerminal(runner, 'progress-stalled')).resolves.toMatchObject({
         status: 'failed',
         sandbox: { cleanup: 'destroyed' },
@@ -9204,30 +8678,14 @@ describe('Runner LLM lifecycle failures', () => {
         ...relayOptions(f.relay),
         authToken: 'runner-test-token',
         evidenceRoot,
+        claimIntervalMs: 1,
         claimFetch: async () => {
           unexpectedClaim = true;
           return new Response(null, { status: 204 });
         },
       });
       try {
-        const admission = await blocked.handle(
-          new Request('http://runner/jobs', {
-            method: 'POST',
-            headers: {
-              authorization: 'Bearer runner-test-token',
-              'content-type': 'application/json',
-            },
-            body: JSON.stringify({
-              ...runnerJobFields,
-              runId: 'blocked-recovery',
-              attempt: 1,
-              repositoryUrl: 'https://github.com/acme/reviewed.git',
-              baseSha: '1111111111111111111111111111111111111111',
-              headSha: '2222222222222222222222222222222222222222',
-            }),
-          }),
-        );
-        expect(admission.status).toBe(503);
+        await new Promise((resolve) => setTimeout(resolve, 50));
         expect(unexpectedClaim).toBe(false);
         expect(f.relay.activeTokens.size).toBe(1);
       } finally {
@@ -9657,6 +9115,12 @@ describe('Runner transport diagnostics', () => {
       callbackTimeoutMs: options.callbackTimeoutMs,
       logEvents: events,
     });
+    if (options.callbackHangs === true || options.callbackThrows !== undefined) {
+      for (let attempt = 0; attempt < 200; attempt += 1) {
+        if (events.some((event) => event.outcome === 'callback-delivery-failed')) break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    }
     return { terminal: result.terminal, events };
   };
 
@@ -9802,24 +9266,16 @@ describe('Runner transport diagnostics', () => {
         };
       },
     });
-    const submitted = await runner.handle(
-      new Request('http://runner/jobs', {
-        method: 'POST',
-        headers: {
-          authorization: 'Bearer runner-test-token',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          ...runnerJobFields,
-          runId: 'run-abort-command-log',
-          attempt: 1,
-          repositoryUrl: 'https://github.com/acme/reviewed.git',
-          baseSha,
-          headSha,
-        }),
-      }),
-    );
-    const { id } = (await submitted.json()) as { id: string };
+    const submittedJob = {
+      ...runnerJobFields,
+      runId: 'run-abort-command-log',
+      attempt: 1,
+      repositoryUrl: 'https://github.com/acme/reviewed.git',
+      baseSha,
+      headSha,
+    };
+    runner.enqueue(submittedJob);
+    const id = submittedJob.id;
     await startedPromise;
     const aborted = runner.handle(
       new Request(`http://runner/jobs/${id}`, {
@@ -9868,24 +9324,16 @@ describe('Runner transport diagnostics', () => {
         };
       },
     });
-    const submitted = await runner.handle(
-      new Request('http://runner/jobs', {
-        method: 'POST',
-        headers: {
-          authorization: 'Bearer runner-test-token',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          ...runnerJobFields,
-          runId: 'run-process-throw-log',
-          attempt: 1,
-          repositoryUrl: 'https://github.com/acme/reviewed.git',
-          baseSha,
-          headSha,
-        }),
-      }),
-    );
-    const { id } = (await submitted.json()) as { id: string };
+    const submittedJob = {
+      ...runnerJobFields,
+      runId: 'run-process-throw-log',
+      attempt: 1,
+      repositoryUrl: 'https://github.com/acme/reviewed.git',
+      baseSha,
+      headSha,
+    };
+    runner.enqueue(submittedJob);
+    const id = submittedJob.id;
     await waitForTerminal(runner, id);
     return { events, canary };
   };
@@ -9936,24 +9384,16 @@ describe('Runner transport diagnostics', () => {
       // With no PATH the real `git` binary cannot be spawned, so the default
       // process runner observes a genuine ENOENT before any network or Sandbox.
       process.env.PATH = emptyPath;
-      const submitted = await runner.handle(
-        new Request('http://runner/jobs', {
-          method: 'POST',
-          headers: {
-            authorization: 'Bearer runner-test-token',
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({
-            ...runnerJobFields,
-            runId: 'run-enoent-log',
-            attempt: 1,
-            repositoryUrl: 'https://github.com/acme/reviewed.git',
-            baseSha,
-            headSha,
-          }),
-        }),
-      );
-      const { id } = (await submitted.json()) as { id: string };
+      const submittedJob = {
+        ...runnerJobFields,
+        runId: 'run-enoent-log',
+        attempt: 1,
+        repositoryUrl: 'https://github.com/acme/reviewed.git',
+        baseSha,
+        headSha,
+      };
+      runner.enqueue(submittedJob);
+      const id = submittedJob.id;
       const terminal = await waitForTerminal(runner, id);
 
       expect(terminal).toMatchObject({
@@ -9978,6 +9418,7 @@ describe('Runner transport diagnostics', () => {
     } finally {
       process.env.PATH = originalPath;
       await rm(emptyPath, { recursive: true, force: true });
+      await runner.close();
       await rm(evidenceRoot, { recursive: true, force: true });
     }
   });
@@ -10453,25 +9894,17 @@ describe('Runner multi-model review', () => {
     });
 
     try {
-      const submitted = await runner.handle(
-        new Request('http://runner/jobs', {
-          method: 'POST',
-          headers: {
-            authorization: 'Bearer runner-test-token',
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({
-            ...runnerJobFields,
-            reviewConfiguration: overrides.selection ?? selection,
-            runId: overrides.runId ?? 'run-multi-success',
-            attempt: 1,
-            repositoryUrl: 'https://github.com/acme/reviewed.git',
-            baseSha,
-            headSha,
-          }),
-        }),
-      );
-      const { id } = (await submitted.json()) as { id: string };
+      const submittedJob = {
+        ...runnerJobFields,
+        reviewConfiguration: overrides.selection ?? selection,
+        runId: overrides.runId ?? 'run-multi-success',
+        attempt: 1,
+        repositoryUrl: 'https://github.com/acme/reviewed.git',
+        baseSha,
+        headSha,
+      };
+      runner.enqueue(submittedJob);
+      const id = submittedJob.id;
       const terminal = await waitForTerminal(runner, id);
       const evidencePath = join(controlRoot, 'evidence', terminal.evidenceId as string);
       const manifest = JSON.parse(await readFile(join(evidencePath, 'manifest.json'), 'utf8'));
@@ -11435,15 +10868,6 @@ describe('Runner maintenance drain', () => {
       baseSha: '1'.repeat(40),
       headSha: '2'.repeat(40),
     });
-  const post = (runner: ReturnType<typeof createRunner>, body: string) =>
-    runner.handle(
-      new Request('http://runner/jobs', {
-        method: 'POST',
-        headers: { ...auth, 'content-type': 'application/json' },
-        body,
-      }),
-    );
-
   const reviewProcess = (options: {
     readonly onCleanup?: () => void | Promise<void>;
     readonly cleanupFails?: boolean;
@@ -11541,48 +10965,6 @@ describe('Runner maintenance drain', () => {
         cleanupBlockedJobs: 0,
       });
     } finally {
-      await runner.close();
-    }
-  });
-
-  it('rejects new direct admission while draining, preserves an existing repost, and resumes', async () => {
-    let releaseJobs: () => void = () => {};
-    const jobsGate = new Promise<void>((resolve) => {
-      releaseJobs = resolve;
-    });
-    const runner = createRunner({
-      authToken: 'runner-test-token',
-      modelSecretCommand: 'fixture-resolver',
-      claimUrl: '',
-      concurrency: 2,
-      process: async () => {
-        await jobsGate;
-        return { exitCode: 1, stdout: '', timedOut: false, truncated: false };
-      },
-    });
-    try {
-      const existing = jobBody('maintenance-direct-existing', 6101);
-      expect((await post(runner, existing)).status).toBe(202);
-
-      expect((await status(runner, 'POST', '/maintenance/drain')).draining).toBe(true);
-      expect((await post(runner, existing)).status).toBe(202);
-      expect((await post(runner, jobBody('maintenance-direct-paused', 6102))).status).toBe(503);
-
-      expect((await status(runner, 'POST', '/maintenance/resume')).draining).toBe(false);
-      expect((await post(runner, jobBody('maintenance-direct-after-resume', 6103))).status).toBe(
-        202,
-      );
-
-      const raced = post(runner, jobBody('maintenance-direct-read-race', 6104));
-      expect((await status(runner, 'POST', '/maintenance/drain')).draining).toBe(true);
-      expect((await raced).status).toBe(503);
-      expect((await status(runner)).activeJobs).toBe(2);
-
-      releaseJobs();
-      await waitForTerminal(runner, 'maintenance-direct-existing');
-      await waitForTerminal(runner, 'maintenance-direct-after-resume');
-    } finally {
-      releaseJobs();
       await runner.close();
     }
   });
@@ -11730,7 +11112,6 @@ describe('Runner maintenance drain', () => {
       authToken: 'runner-test-token',
       modelSecretCommand: 'fixture-resolver',
       evidenceRoot: sharedEvidenceRoot,
-      claimUrl: '',
       process: reviewProcess({
         onCleanup: async () => {
           cleanupStarted();
@@ -11744,7 +11125,8 @@ describe('Runner maintenance drain', () => {
       },
     });
     try {
-      expect((await post(runner, jobBody('maintenance-held-cleanup', 6112))).status).toBe(202);
+      runner.enqueue(JSON.parse(jobBody('maintenance-held-cleanup', 6112)));
+      await vi.waitFor(async () => expect((await status(runner)).activeJobs).toBe(1));
       expect((await status(runner, 'POST', '/maintenance/drain')).draining).toBe(true);
 
       await cleanupObserved;
@@ -11818,26 +11200,124 @@ describe('Runner maintenance drain', () => {
     }
   });
 
+  it('replays a prepared claim through drain without a new request ID', async () => {
+    const evidenceRoot = await mkdtemp(join(tmpdir(), 'cr-staged-drain-'));
+    const baseSha = '1'.repeat(40);
+    const headSha = '2'.repeat(40);
+    const job = {
+      ...runnerJobFields,
+      id: 'staged-drain-claim',
+      runId: 'run-staged-drain-claim',
+      attempt: 1,
+      pullRequestNumber: 78,
+      repositoryUrl: 'https://github.com/acme/reviewed.git',
+      baseSha,
+      headSha,
+    };
+    const result = finalMarkdownJsonl(undefined, 'staged-drain-session');
+    const ok = { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+    const requestIds: string[] = [];
+    let prepared!: () => void;
+    const preparedClaim = new Promise<void>((resolve) => {
+      prepared = resolve;
+    });
+    let releaseLost!: () => void;
+    const lostResponse = new Promise<void>((resolve) => {
+      releaseLost = resolve;
+    });
+    let lost = false;
+    const claimFetch: typeof fetch = async (input, init) => {
+      const body = (await new Request(input, init).json()) as { requestId: string };
+      requestIds.push(body.requestId);
+      if (!lost) {
+        lost = true;
+        prepared();
+        await lostResponse;
+        throw new Error('claim response lost after Core prepared the job');
+      }
+      return Response.json(job);
+    };
+    const runner = createRunner({
+      evidenceRoot,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'fixture-resolver',
+      claimUrl: 'https://ingress.test/runner-claim',
+      claimIntervalMs: 10,
+      claimFetch,
+      process: async (_command, args, options = {}) => {
+        if (args[0] === 'secret' && args[1] === 'ls')
+          return { ...ok, stdout: JSON.stringify({ secrets: [], custom_secrets: [] }) };
+        if (args[0] === 'inspect')
+          return { ...ok, exitCode: 1, stderr: `error: sandbox '${args[1]}' not found` };
+        if (args[0] === 'exec' && args.includes('--agent')) {
+          await writeEvidenceFixture(args, options, result);
+          return { ...ok, stdout: `${result}\n` };
+        }
+        await writeEvidenceFixture(args, options, result);
+        return {
+          ...ok,
+          stdout: args.includes('rev-parse')
+            ? `${baseSha}\n${headSha}\n`
+            : args.includes('session')
+              ? '[{"id":"staged-drain-session"}]\n'
+              : options.captureStdout === true
+                ? `${result}\n`
+                : '',
+        };
+      },
+    });
+    try {
+      await preparedClaim;
+      expect(await status(runner, 'POST', '/maintenance/drain')).toMatchObject({
+        draining: true,
+        drained: false,
+      });
+      releaseLost();
+      await vi.waitFor(() => expect(requestIds).toHaveLength(2), { timeout: 1_000 });
+      expect(requestIds[0]).toBe(requestIds[1]);
+      expect(await waitForTerminal(runner, job.id)).toMatchObject({
+        status: 'succeeded',
+        sandbox: { cleanup: 'destroyed' },
+      });
+      await vi.waitFor(async () => {
+        expect(await status(runner)).toMatchObject({
+          draining: true,
+          drained: true,
+          activeJobs: 0,
+          claimPollingHalted: false,
+          cleanupBlockedJobs: 0,
+        });
+      });
+    } finally {
+      releaseLost();
+      await runner.close();
+      await rm(evidenceRoot, { recursive: true, force: true });
+    }
+  }, 20_000);
+
   it('keeps failed cleanup blocking drain across resume without a halted claim', async () => {
     const runner = createRunner({
       authToken: 'runner-test-token',
       modelSecretCommand: 'fixture-resolver',
       evidenceRoot: sharedEvidenceRoot,
-      claimUrl: '',
       process: reviewProcess({ cleanupFails: true }),
     });
     try {
-      expect((await post(runner, jobBody('maintenance-blocked-cleanup', 6113))).status).toBe(202);
+      runner.enqueue(JSON.parse(jobBody('maintenance-blocked-cleanup', 6113)));
       await expect(waitForTerminal(runner, 'maintenance-blocked-cleanup')).resolves.toMatchObject({
         sandbox: { cleanup: 'failed' },
       });
-      expect(await status(runner, 'POST', '/maintenance/drain')).toEqual({
-        draining: true,
-        drained: false,
-        activeJobs: 0,
-        claimInFlight: false,
-        claimPollingHalted: false,
-        cleanupBlockedJobs: 1,
+      runner.claimExecution?.stopClaims();
+      await status(runner, 'POST', '/maintenance/drain');
+      await vi.waitFor(async () => {
+        expect(await status(runner, 'GET', '/maintenance')).toEqual({
+          draining: true,
+          drained: false,
+          activeJobs: 0,
+          claimInFlight: false,
+          claimPollingHalted: false,
+          cleanupBlockedJobs: 1,
+        });
       });
       expect(await status(runner, 'POST', '/maintenance/resume')).toMatchObject({
         draining: false,
@@ -11847,6 +11327,162 @@ describe('Runner maintenance drain', () => {
       });
     } finally {
       await runner.close();
+    }
+  });
+});
+
+describe('Runner same-PR admission', () => {
+  it('runs a fresh claim after the retained terminal claim budget expires', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-same-pr-expiry-'));
+    const baseSha = '1'.repeat(40);
+    const oldHead = '2'.repeat(40);
+    const newHead = '3'.repeat(40);
+    const oldId = 'same-pr-old';
+    const replacementId = 'same-pr-replacement';
+    const oldName = `compte-rendu-${oldId}`;
+    const replacementName = `compte-rendu-${replacementId}`;
+    const present = new Map<string, { workspace: string; config: string }>();
+    const created: string[] = [];
+    const agentSandboxes: string[] = [];
+    const removals: Array<{ name: string; exitCode: number }> = [];
+    const ok = { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+    let checkouts = 0;
+    const notFound = (name: string): RunnerProcessResult => ({
+      ...ok,
+      exitCode: 1,
+      stderr: `error: sandbox '${name}' not found`,
+    });
+    const inspectView = async (name: string, workspace: string, config: string) => {
+      const text = await readFile(
+        new URL('./fixtures/sbx-inspect-view.json', import.meta.url),
+        'utf8',
+      );
+      return JSON.parse(
+        text
+          .replaceAll('__SANDBOX_NAME__', name)
+          .replaceAll('__WORKSPACE__', workspace)
+          .replaceAll('__CONFIG__', config),
+      ) as Record<string, unknown>;
+    };
+    const process: RunnerProcess = async (_command, args, options = {}) => {
+      if (args[0] === 'secret' && args[1] === 'ls')
+        return {
+          ...ok,
+          stdout: JSON.stringify({ secrets: [], custom_secrets: [] }),
+        };
+      if (args[0] === 'create') {
+        const name = args[args.indexOf('--name') + 1]!;
+        present.set(name, { workspace: args.at(-2)!, config: args.at(-1)! });
+        created.push(name);
+        return ok;
+      }
+      if (args[0] === 'inspect') {
+        const name = args[1]!;
+        const entry = present.get(name);
+        if (entry === undefined) return notFound(name);
+        return {
+          ...ok,
+          stdout: JSON.stringify(await inspectView(name, entry.workspace, entry.config)),
+        };
+      }
+      if (args[0] === 'rm' && args[1] === '--force') {
+        const name = args[2]!;
+        const exitCode = name === oldName ? 1 : 0;
+        removals.push({ name, exitCode });
+        if (exitCode === 0) present.delete(name);
+        return { ...ok, exitCode };
+      }
+      if (args[0] === 'exec' && args.includes('--agent')) {
+        agentSandboxes.push(args[1]!);
+        const result = finalMarkdownJsonl(undefined, 'same-pr-session');
+        await writeEvidenceFixture(args, options, result);
+        return { ...ok, stdout: `${result}\n` };
+      }
+      const result = finalMarkdownJsonl(undefined, 'same-pr-session');
+      await writeEvidenceFixture(args, options, result);
+      return {
+        ...ok,
+        stdout: args.includes('rev-parse')
+          ? `${baseSha}\n${checkouts++ === 0 ? oldHead : newHead}\n`
+          : args.includes('session')
+            ? '[{"id":"same-pr-session"}]\n'
+            : options.captureStdout === true
+              ? `${result}\n`
+              : '',
+      };
+    };
+    const realNow = Date.now.bind(Date);
+    let offset = 0;
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + offset);
+    const runner = createRunner({
+      evidenceRoot: root,
+      authToken: 'runner-test-token',
+      modelSecretCommand: 'fixture-resolver',
+      claimIntervalMs: 10,
+      process,
+      callbackFetch: async (input) => {
+        const url = new URL(input instanceof Request ? input.url : input.toString());
+        return new Response(null, {
+          status: url.pathname === '/runner-cleanup-recovery' ? 409 : 202,
+        });
+      },
+    });
+    const maintenance = async () =>
+      (await (
+        await runner.handle(
+          new Request('http://runner/maintenance', {
+            headers: { authorization: 'Bearer runner-test-token' },
+          }),
+        )
+      ).json()) as { activeJobs: number; cleanupBlockedJobs: number };
+    try {
+      runner.enqueue({
+        ...runnerJobFields,
+        id: oldId,
+        runId: 'run-same-pr-old',
+        attempt: 1,
+        pullRequestNumber: 77,
+        repositoryUrl: 'https://github.com/acme/reviewed.git',
+        baseSha,
+        headSha: oldHead,
+        claimDeadlineAt: Date.now() + 90 * 60 * 1000,
+      });
+      expect(await waitForTerminal(runner, oldId)).toMatchObject({
+        status: 'failed',
+        sandbox: { cleanup: 'failed' },
+      });
+      expect(present.has(oldName)).toBe(true);
+      expect(await maintenance()).toMatchObject({ activeJobs: 0, cleanupBlockedJobs: 1 });
+
+      // Core admits the replacement only after the retained claim budget expires.
+      offset = 91 * 60 * 1000;
+      runner.enqueue({
+        ...runnerJobFields,
+        id: replacementId,
+        runId: 'run-same-pr-replacement',
+        attempt: 1,
+        pullRequestNumber: 77,
+        repositoryUrl: 'https://github.com/acme/reviewed.git',
+        baseSha,
+        headSha: newHead,
+        claimDeadlineAt: Date.now() + 90 * 60 * 1000,
+      });
+      expect(await waitForTerminal(runner, replacementId)).toMatchObject({
+        status: 'succeeded',
+        sandbox: { cleanup: 'destroyed' },
+      });
+      expect(created).toEqual([oldName, replacementName]);
+      expect(agentSandboxes).toEqual([oldName, replacementName]);
+      // The unresolved original VM is neither reused nor removed without proof.
+      expect(present.has(oldName)).toBe(true);
+      expect(present.has(replacementName)).toBe(false);
+      expect(removals).toContainEqual({ name: oldName, exitCode: 1 });
+      expect(removals).not.toContainEqual({ name: oldName, exitCode: 0 });
+      expect(await maintenance()).toMatchObject({ activeJobs: 0, cleanupBlockedJobs: 1 });
+    } finally {
+      clock.mockRestore();
+      await runner.close();
+      await rm(root, { recursive: true, force: true });
     }
   });
 });
@@ -12518,6 +12154,105 @@ describe('Runner confirmed cleanup recovery', () => {
     }
   });
 
+  it('keeps a failed job pending after a transient cleanup report and retires it on retry', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-msb-report-retry-'));
+    const relay = createRelayControl();
+    const modelConfig = relayInferenceModelConfig('deepseek-review');
+    const previousHome = process.env.MSB_HOME;
+    process.env.MSB_HOME = root;
+    await mkdir(join(root, 'db'));
+    await writeFile(join(root, 'db', 'msb.db'), '');
+    let runner: ReturnType<typeof createRunner> | undefined;
+    try {
+      const callbacks: Request[] = [];
+      const scenario = await runAgentScenario({
+        microsandbox: true,
+        output: finalMarkdownJsonl(),
+        relayControl: relay,
+        modelConfig,
+        evidenceRoot: root,
+        runId: 'msb-cleanup-report-retry',
+        cleanupRemovalFailures: 1,
+        callbackRequests: callbacks,
+        callbackStatuses: [202, 503, 202],
+        onRunner: (started) => {
+          runner = started;
+        },
+      });
+      expect(scenario.terminal).toMatchObject({
+        status: 'failed',
+        sandbox: { cleanup: 'failed' },
+      });
+      const reports = () =>
+        callbacks.filter((request) => new URL(request.url).pathname === '/runner-cleanup-recovery');
+      const maintenance = async () =>
+        (await (
+          await runner!.handle(
+            new Request('http://runner/maintenance', {
+              headers: { authorization: 'Bearer runner-test-token' },
+            }),
+          )
+        ).json()) as {
+          activeJobs: number;
+          cleanupBlockedJobs: number;
+        };
+      const markerFiles = async () => {
+        const owners = await readdir(join(root, 'sandbox-owners')).catch(() => []);
+        const files: string[] = [];
+        for (const owner of owners) {
+          files.push(
+            ...(await readdir(join(root, 'sandbox-owners', owner, 'microsandbox')).catch(() => [])),
+          );
+        }
+        return files;
+      };
+      // A verification failure schedules the scoped owned reaper. It removes
+      // the surviving VM and marker while the failed job stays mapped.
+      await vi.waitFor(
+        async () => {
+          expect(await markerFiles()).toEqual([]);
+          expect(await maintenance()).toMatchObject({ activeJobs: 0, cleanupBlockedJobs: 1 });
+        },
+        { timeout: 5_000 },
+      );
+      let now = Date.now();
+      const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+      try {
+        now += 31_000;
+        await vi.waitFor(() => expect(reports()).toHaveLength(1), { timeout: 5_000 });
+        expect(await maintenance()).toMatchObject({ activeJobs: 0, cleanupBlockedJobs: 1 });
+        now += 31_000;
+        await vi.waitFor(() => expect(reports()).toHaveLength(2), { timeout: 5_000 });
+      } finally {
+        clock.mockRestore();
+      }
+      expect(await reports()[1]!.json()).toMatchObject({
+        jobId: scenario.manifest.jobId,
+        evidenceId: scenario.manifest.evidenceId,
+        sandboxName: scenario.manifest.sandboxName,
+      });
+      await vi.waitFor(async () =>
+        expect(await maintenance()).toMatchObject({ activeJobs: 0, cleanupBlockedJobs: 0 }),
+      );
+      const drained = await runner!.handle(
+        new Request('http://runner/maintenance/drain', {
+          method: 'POST',
+          headers: { authorization: 'Bearer runner-test-token' },
+        }),
+      );
+      expect(await drained.json()).toMatchObject({
+        draining: true,
+        drained: true,
+        cleanupBlockedJobs: 0,
+      });
+    } finally {
+      await runner?.close();
+      if (previousHome === undefined) delete process.env.MSB_HOME;
+      else process.env.MSB_HOME = previousHome;
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 20_000);
+
   it('bounds a hanging OpenSandbox verifier and releases recovery', async () => {
     const evidenceRoot = await mkdtemp(join(tmpdir(), 'cr-os-cleanup-recovery-'));
     const socketRoot = await mkdtemp(join(tmpdir(), 'cr-os-recovery-llm-'));
@@ -12991,6 +12726,18 @@ describe('Runner confirmed cleanup recovery', () => {
 });
 
 describe('Runner backend outage recovery', () => {
+  // Genuine native sbx proof: an empty scoped secret inventory. Fixtures that
+  // model an outage must fail before this point.
+  const sbxNativeProof = (args: readonly string[]): RunnerProcessResult | undefined =>
+    args[0] === 'secret' && args[1] === 'ls'
+      ? {
+          exitCode: 0,
+          stdout: JSON.stringify({ secrets: [], custom_secrets: [] }),
+          timedOut: false,
+          truncated: false,
+        }
+      : undefined;
+
   it('pauses claims during an sbx outage and reconciles the failed cleanup after access returns', async () => {
     const root = await mkdtemp(join(tmpdir(), 'cr-backend-outage-'));
     const previousTmp = process.env.TMPDIR;
@@ -13002,14 +12749,11 @@ describe('Runner backend outage recovery', () => {
     const replacementJobId = 'outage-replacement-job';
     let backendUp = true;
     let phase: 'first' | 'replacement' = 'first';
-    let recovered = false;
-    let replacementReturned = false;
     let recoveryAttempts = 0;
     let releaseRecoveryRetry!: () => void;
     const recoveryRetryGate = new Promise<void>((resolve) => {
       releaseRecoveryRetry = resolve;
     });
-    const claims: Array<{ body: unknown; status: number }> = [];
     const callbacks: Request[] = [];
     const recoveryReports: Array<Record<string, unknown>> = [];
     const commands: string[][] = [];
@@ -13036,16 +12780,7 @@ describe('Runner backend outage recovery', () => {
       authToken: 'runner-test-token',
       modelSecretCommand: 'fixture-resolver',
       modelConfig: standardModelConfig,
-      claimUrl: 'https://ingress.test/runner-claim',
       claimIntervalMs: 2,
-      claimFetch: async (_input, init) => {
-        const body = typeof init?.body === 'string' ? JSON.parse(init.body) : {};
-        claims.push({ body, status: recovered && !replacementReturned ? 200 : 204 });
-        if (!recovered || replacementReturned) return new Response(null, { status: 204 });
-        replacementReturned = true;
-        phase = 'replacement';
-        return Response.json(jobBody(replacementJobId, newHead), { status: 200 });
-      },
       callbackUrl: 'https://ingress.test/runner-callback',
       callbackToken: 'callback-token',
       callbackFetch: async (input, init) => {
@@ -13070,7 +12805,6 @@ describe('Runner backend outage recovery', () => {
               unknown
             >,
           );
-          recovered = true;
           return new Response(null, { status: 202 });
         }
         callbacks.push(new Request(input, init));
@@ -13080,6 +12814,8 @@ describe('Runner backend outage recovery', () => {
         commands.push([...args]);
         if (args[0] === 'ls') return backendUp ? ok : authFailure;
         if (!backendUp) return authFailure;
+        const proof = sbxNativeProof(args);
+        if (proof !== undefined) return proof;
         if (args[0] === 'secret' && args[1] === 'set-custom' && phase === 'first') {
           backendUp = false;
           return authFailure;
@@ -13101,20 +12837,7 @@ describe('Runner backend outage recovery', () => {
       },
     });
     try {
-      expect(
-        (
-          await runner.handle(
-            new Request('http://runner/jobs', {
-              method: 'POST',
-              headers: {
-                authorization: 'Bearer runner-test-token',
-                'content-type': 'application/json',
-              },
-              body: JSON.stringify(jobBody(firstJobId, oldHead)),
-            }),
-          )
-        ).status,
-      ).toBe(202);
+      runner.enqueue(jobBody(firstJobId, oldHead));
       const first = await waitForTerminal(runner, firstJobId);
       expect(first).toMatchObject({
         status: 'failed',
@@ -13137,9 +12860,9 @@ describe('Runner backend outage recovery', () => {
         ).json()) as { claimPollingHalted: boolean };
         expect(status.claimPollingHalted).toBe(true);
       });
-      const claimsWhileBlocked = claims.length;
+      const claimsWhileBlocked = runner.claimExecution?.claimRequests.length ?? 0;
       await new Promise((resolve) => setTimeout(resolve, 30));
-      expect(claims).toHaveLength(claimsWhileBlocked);
+      expect(runner.claimExecution?.claimRequests.length ?? 0).toBe(claimsWhileBlocked);
       expect(commands.filter((args) => args[0] === 'ls').length).toBeGreaterThan(0);
 
       backendUp = true;
@@ -13163,10 +12886,14 @@ describe('Runner backend outage recovery', () => {
           (args) => args[0] === 'inspect' || (args[0] === 'policy' && args[1] === 'ls'),
         ),
       ).toHaveLength(recoveryCommandsAfterFirst);
-      const claimsAfterRejectedReport = claims.length;
+      const claimsAfterRejectedReport = runner.claimExecution?.claimRequests.length ?? 0;
       // A transient report failure must retry, while unrelated claim polling
       // continues on the same idle cadence.
-      await vi.waitFor(() => expect(claims.length).toBeGreaterThan(claimsAfterRejectedReport));
+      await vi.waitFor(() =>
+        expect(runner.claimExecution?.claimRequests.length ?? 0).toBeGreaterThan(
+          claimsAfterRejectedReport,
+        ),
+      );
       const advanceRetryClock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 31_000);
       try {
         releaseRecoveryRetry();
@@ -13183,7 +12910,8 @@ describe('Runner backend outage recovery', () => {
         headSha: oldHead,
         sandboxName: manifest.sandboxName,
       });
-      await vi.waitFor(() => expect(claims.some((claim) => claim.status === 200)).toBe(true));
+      phase = 'replacement';
+      runner.enqueue(jobBody(replacementJobId, newHead));
       const replacement = await waitForTerminal(runner, replacementJobId);
       expect(replacement).toMatchObject({
         status: 'failed',
@@ -13222,7 +12950,6 @@ describe('Runner backend outage recovery', () => {
       authToken: 'runner-test-token',
       modelSecretCommand: 'fixture-resolver',
       modelConfig: standardModelConfig,
-      claimUrl: '',
       claimIntervalMs: 2,
       callbackUrl: 'https://ingress.test/runner-callback',
       callbackToken: 'callback-token',
@@ -13243,6 +12970,8 @@ describe('Runner backend outage recovery', () => {
           return authFailure;
         }
         if (!backendUp) return authFailure;
+        const proof = sbxNativeProof(args);
+        if (proof !== undefined) return proof;
         if (args[0] === 'inspect')
           return { ...ok, exitCode: 1, stderr: `error: sandbox '${args[1]}' not found` };
         if (args[0] === 'policy' && args[1] === 'ls') return { ...ok, stdout: '{"rules":[]}' };
@@ -13251,29 +12980,16 @@ describe('Runner backend outage recovery', () => {
       },
     });
     try {
-      expect(
-        (
-          await runner.handle(
-            new Request('http://runner/jobs', {
-              method: 'POST',
-              headers: {
-                authorization: 'Bearer runner-test-token',
-                'content-type': 'application/json',
-              },
-              body: JSON.stringify({
-                ...runnerJobFields,
-                id: jobId,
-                runId: 'run-permanent-recovery',
-                attempt: 1,
-                pullRequestNumber: 47,
-                repositoryUrl: 'https://github.com/acme/reviewed.git',
-                baseSha,
-                headSha,
-              }),
-            }),
-          )
-        ).status,
-      ).toBe(202);
+      runner.enqueue({
+        ...runnerJobFields,
+        id: jobId,
+        runId: 'run-permanent-recovery',
+        attempt: 1,
+        pullRequestNumber: 47,
+        repositoryUrl: 'https://github.com/acme/reviewed.git',
+        baseSha,
+        headSha,
+      });
       expect(await waitForTerminal(runner, jobId)).toMatchObject({
         status: 'failed',
         sandbox: { cleanup: 'failed' },
@@ -13335,7 +13051,6 @@ describe('Runner backend outage recovery', () => {
       authToken: 'runner-test-token',
       modelSecretCommand: 'fixture-resolver',
       modelConfig: standardModelConfig,
-      claimUrl: '',
       claimIntervalMs: 2,
       callbackUrl: 'https://ingress.test/runner-callback',
       callbackToken: 'callback-token',
@@ -13358,6 +13073,8 @@ describe('Runner backend outage recovery', () => {
           return authFailure;
         }
         if (!backendUp) return authFailure;
+        const proof = sbxNativeProof(args);
+        if (proof !== undefined) return proof;
         if (args[0] === 'inspect')
           return { ...ok, exitCode: 1, stderr: `error: sandbox '${args[1]}' not found` };
         if (args[0] === 'policy' && args[1] === 'ls') return { ...ok, stdout: '{"rules":[]}' };
@@ -13366,29 +13083,16 @@ describe('Runner backend outage recovery', () => {
       },
     });
     try {
-      expect(
-        (
-          await runner.handle(
-            new Request('http://runner/jobs', {
-              method: 'POST',
-              headers: {
-                authorization: 'Bearer runner-test-token',
-                'content-type': 'application/json',
-              },
-              body: JSON.stringify({
-                ...runnerJobFields,
-                id: jobId,
-                runId: 'run-permanent-callback',
-                attempt: 1,
-                pullRequestNumber: 48,
-                repositoryUrl: 'https://github.com/acme/reviewed.git',
-                baseSha,
-                headSha,
-              }),
-            }),
-          )
-        ).status,
-      ).toBe(202);
+      runner.enqueue({
+        ...runnerJobFields,
+        id: jobId,
+        runId: 'run-permanent-callback',
+        attempt: 1,
+        pullRequestNumber: 48,
+        repositoryUrl: 'https://github.com/acme/reviewed.git',
+        baseSha,
+        headSha,
+      });
       expect(await waitForTerminal(runner, jobId)).toMatchObject({
         status: 'failed',
         sandbox: { cleanup: 'failed' },
@@ -13442,7 +13146,6 @@ describe('Runner backend outage recovery', () => {
       authToken: 'runner-test-token',
       modelSecretCommand: 'fixture-resolver',
       modelConfig: standardModelConfig,
-      claimUrl: '',
       claimIntervalMs: 2,
       callbackUrl: 'https://ingress.test/runner-callback',
       callbackToken: 'callback-token',
@@ -13465,6 +13168,8 @@ describe('Runner backend outage recovery', () => {
           return authFailure;
         }
         if (!backendUp) return authFailure;
+        const proof = sbxNativeProof(args);
+        if (proof !== undefined) return proof;
         if (args[0] === 'inspect')
           return { ...ok, exitCode: 1, stderr: `error: sandbox '${args[1]}' not found` };
         if (args[0] === 'policy' && args[1] === 'ls') return { ...ok, stdout: '{"rules":[]}' };
@@ -13473,29 +13178,16 @@ describe('Runner backend outage recovery', () => {
       },
     });
     try {
-      expect(
-        (
-          await runner.handle(
-            new Request('http://runner/jobs', {
-              method: 'POST',
-              headers: {
-                authorization: 'Bearer runner-test-token',
-                'content-type': 'application/json',
-              },
-              body: JSON.stringify({
-                ...runnerJobFields,
-                id: jobId,
-                runId: 'run-repeat-409',
-                attempt: 1,
-                pullRequestNumber: 49,
-                repositoryUrl: 'https://github.com/acme/reviewed.git',
-                baseSha,
-                headSha,
-              }),
-            }),
-          )
-        ).status,
-      ).toBe(202);
+      runner.enqueue({
+        ...runnerJobFields,
+        id: jobId,
+        runId: 'run-repeat-409',
+        attempt: 1,
+        pullRequestNumber: 49,
+        repositoryUrl: 'https://github.com/acme/reviewed.git',
+        baseSha,
+        headSha,
+      });
       expect(await waitForTerminal(runner, jobId)).toMatchObject({
         status: 'failed',
         sandbox: { cleanup: 'failed' },
@@ -13540,10 +13232,7 @@ describe('Runner backend outage recovery', () => {
     const firstJobId = 'single-cleanup-failed-job';
     const unrelatedJobId = 'single-cleanup-unrelated-job';
     let phase: 'first' | 'unrelated' = 'first';
-    let firstDone = false;
-    let unrelatedReturned = false;
     let setupFailed = false;
-    const claims: number[] = [];
     const ok = { exitCode: 0, stdout: '', timedOut: false, truncated: false };
     const authFailure = { ...ok, exitCode: 1, stderr: 'not signed in' };
     const jobBody = (id: string, pullRequestNumber: number, headSha: string) => ({
@@ -13561,18 +13250,7 @@ describe('Runner backend outage recovery', () => {
       authToken: 'runner-test-token',
       modelSecretCommand: 'fixture-resolver',
       modelConfig: standardModelConfig,
-      claimUrl: 'https://ingress.test/runner-claim',
       claimIntervalMs: 2,
-      claimFetch: async () => {
-        if (!firstDone || unrelatedReturned) {
-          claims.push(204);
-          return new Response(null, { status: 204 });
-        }
-        unrelatedReturned = true;
-        phase = 'unrelated';
-        claims.push(200);
-        return Response.json(jobBody(unrelatedJobId, 43, unrelatedHead), { status: 200 });
-      },
       callbackUrl: 'https://ingress.test/runner-callback',
       callbackToken: 'callback-token',
       callbackFetch: async () => new Response(null, { status: 202 }),
@@ -13595,27 +13273,14 @@ describe('Runner backend outage recovery', () => {
       },
     });
     try {
-      expect(
-        (
-          await runner.handle(
-            new Request('http://runner/jobs', {
-              method: 'POST',
-              headers: {
-                authorization: 'Bearer runner-test-token',
-                'content-type': 'application/json',
-              },
-              body: JSON.stringify(jobBody(firstJobId, 42, firstHead)),
-            }),
-          )
-        ).status,
-      ).toBe(202);
+      runner.enqueue(jobBody(firstJobId, 42, firstHead));
       expect(await waitForTerminal(runner, firstJobId)).toMatchObject({
         status: 'failed',
         sandbox: { cleanup: 'failed' },
       });
-      firstDone = true;
 
-      await vi.waitFor(() => expect(claims).toContain(200));
+      phase = 'unrelated';
+      runner.enqueue(jobBody(unrelatedJobId, 43, unrelatedHead));
       expect(await waitForTerminal(runner, unrelatedJobId)).toMatchObject({
         status: 'failed',
         failure: { reason: 'checkout' },
@@ -13636,7 +13301,7 @@ describe('Runner backend outage recovery', () => {
     }
   });
 
-  it('recovers a failed cleanup while drained in direct POST-only mode', async () => {
+  it('recovers a failed cleanup while drained', async () => {
     const root = await mkdtemp(join(tmpdir(), 'cr-direct-drain-recovery-'));
     const previousTmp = process.env.TMPDIR;
     process.env.TMPDIR = root;
@@ -13652,7 +13317,6 @@ describe('Runner backend outage recovery', () => {
       authToken: 'runner-test-token',
       modelSecretCommand: 'fixture-resolver',
       modelConfig: standardModelConfig,
-      claimUrl: '',
       claimIntervalMs: 5,
       callbackUrl: 'https://ingress.test/runner-callback',
       callbackToken: 'callback-token',
@@ -13677,6 +13341,8 @@ describe('Runner backend outage recovery', () => {
           return authFailure;
         }
         if (!backendUp) return authFailure;
+        const proof = sbxNativeProof(args);
+        if (proof !== undefined) return proof;
         if (args[0] === 'policy' && args[1] === 'ls') return { ...ok, stdout: '{"rules":[]}' };
         if (args[0] === 'inspect')
           return { ...ok, exitCode: 1, stderr: `error: sandbox '${args[1]}' not found` };
@@ -13685,29 +13351,16 @@ describe('Runner backend outage recovery', () => {
       },
     });
     try {
-      expect(
-        (
-          await runner.handle(
-            new Request('http://runner/jobs', {
-              method: 'POST',
-              headers: {
-                authorization: 'Bearer runner-test-token',
-                'content-type': 'application/json',
-              },
-              body: JSON.stringify({
-                ...runnerJobFields,
-                id: jobId,
-                runId: 'run-direct-drain-recovery',
-                attempt: 1,
-                pullRequestNumber: 46,
-                repositoryUrl: 'https://github.com/acme/reviewed.git',
-                baseSha,
-                headSha,
-              }),
-            }),
-          )
-        ).status,
-      ).toBe(202);
+      runner.enqueue({
+        ...runnerJobFields,
+        id: jobId,
+        runId: 'run-direct-drain-recovery',
+        attempt: 1,
+        pullRequestNumber: 46,
+        repositoryUrl: 'https://github.com/acme/reviewed.git',
+        baseSha,
+        headSha,
+      });
       expect(await waitForTerminal(runner, jobId)).toMatchObject({
         status: 'failed',
         sandbox: { cleanup: 'failed' },
@@ -13772,6 +13425,11 @@ describe('Runner backend outage recovery', () => {
     const firstClaimObserved = new Promise<void>((resolve) => {
       firstClaimServed = resolve;
     });
+    let secondClaimServed!: () => void;
+    const secondClaimObserved = new Promise<void>((resolve) => {
+      secondClaimServed = resolve;
+    });
+    let replayed = false;
     const claimRequests: Array<{ requestId?: string }> = [];
     const events: Array<Record<string, unknown>> = [];
     const ok = { exitCode: 0, stdout: '', timedOut: false, truncated: false };
@@ -13798,11 +13456,18 @@ describe('Runner backend outage recovery', () => {
         const body =
           typeof init?.body === 'string' ? (JSON.parse(init.body) as { requestId?: string }) : {};
         claimRequests.push(body);
-        if (claimRequests.length === 1) {
+        if (claimRequests.length === 1) return Response.json(jobBody(directJobId, 44, directHead));
+        if (claimRequests.length === 2) {
+          secondClaimServed();
           await firstClaimGate;
           firstClaimServed();
+          return Response.json(jobBody(claimedJobId, 45, claimedHead));
         }
-        return Response.json(jobBody(claimedJobId, 45, claimedHead), { status: 200 });
+        if (claimRequests.length === 3 && !replayed) {
+          replayed = true;
+          return Response.json(jobBody(claimedJobId, 45, claimedHead));
+        }
+        return new Response(null, { status: 204 });
       },
       callbackUrl: 'https://ingress.test/runner-callback',
       callbackToken: 'callback-token',
@@ -13815,10 +13480,13 @@ describe('Runner backend outage recovery', () => {
       process: async (_command, args) => {
         if (args[0] === 'ls') return backendUp ? ok : authFailure;
         if (args[0] === 'secret' && args[1] === 'set-custom' && phase === 'direct') {
+          await secondClaimObserved;
           backendUp = false;
           return authFailure;
         }
         if (!backendUp) return authFailure;
+        const proof = sbxNativeProof(args);
+        if (proof !== undefined) return proof;
         if (args[0] === 'policy' && args[1] === 'ls') return { ...ok, stdout: '{"rules":[]}' };
         if (args[0] === 'inspect')
           return { ...ok, exitCode: 1, stderr: `error: sandbox '${args[1]}' not found` };
@@ -13834,21 +13502,6 @@ describe('Runner backend outage recovery', () => {
       },
     });
     try {
-      await vi.waitFor(() => expect(claimRequests).toHaveLength(1));
-      expect(
-        (
-          await runner.handle(
-            new Request('http://runner/jobs', {
-              method: 'POST',
-              headers: {
-                authorization: 'Bearer runner-test-token',
-                'content-type': 'application/json',
-              },
-              body: JSON.stringify(jobBody(directJobId, 44, directHead)),
-            }),
-          )
-        ).status,
-      ).toBe(202);
       expect(await waitForTerminal(runner, directJobId)).toMatchObject({
         status: 'failed',
         sandbox: { cleanup: 'failed' },
@@ -13889,24 +13542,34 @@ describe('Runner backend outage recovery', () => {
 
       phase = 'claimed';
       backendUp = true;
-      await vi.waitFor(() => expect(claimRequests.length).toBe(2));
-      expect(claimRequests[1]?.requestId).toBe(claimRequests[0]?.requestId);
+      const resumed = await runner.handle(
+        new Request('http://runner/maintenance/resume', {
+          method: 'POST',
+          headers: { authorization: 'Bearer runner-test-token' },
+        }),
+      );
+      expect(resumed.status).toBe(200);
+      await vi.waitFor(() =>
+        expect(claimRequests.length).toBeGreaterThanOrEqual(claimsAfterDrain + 1),
+      );
+      expect(claimRequests[claimsAfterDrain]?.requestId).toBe(
+        claimRequests[claimsAfterDrain - 1]?.requestId,
+      );
       expect(await waitForTerminal(runner, claimedJobId)).toMatchObject({
         status: 'failed',
         failure: { reason: 'checkout' },
         sandbox: { cleanup: 'destroyed' },
       });
-      await vi.waitFor(async () => {
-        const status = (await (
-          await runner.handle(
-            new Request('http://runner/maintenance', {
-              headers: { authorization: 'Bearer runner-test-token' },
-            }),
-          )
-        ).json()) as { draining: boolean; drained: boolean };
-        expect(status).toMatchObject({ draining: true, drained: true });
-      });
-      expect(claimRequests).toHaveLength(claimsAfterDrain + 1);
+      const finalDrain = (await (
+        await runner.handle(
+          new Request('http://runner/maintenance/drain', {
+            method: 'POST',
+            headers: { authorization: 'Bearer runner-test-token' },
+          }),
+        )
+      ).json()) as { draining: boolean; drained: boolean };
+      expect(finalDrain).toMatchObject({ draining: true, drained: true });
+      expect(claimRequests.length).toBeGreaterThanOrEqual(claimsAfterDrain + 1);
       expect(events.filter((event) => event.reason === 'backend-outage')).toEqual([
         expect.objectContaining({
           phase: 'runner',
@@ -13934,7 +13597,6 @@ describe('Runner backend outage recovery', () => {
     const jobId = 'cleanup-recovery-race-job';
     const ok = { exitCode: 0, stdout: '', timedOut: false, truncated: false };
     let cleanupFailedOnce = false;
-    const claims: number[] = [];
     const reports: Array<Record<string, unknown>> = [];
     let releaseProbe!: () => void;
     let probeStarted!: () => void;
@@ -13950,12 +13612,7 @@ describe('Runner backend outage recovery', () => {
       modelSecretCommand: 'fixture-resolver',
       modelConfig: standardModelConfig,
       concurrency: 2,
-      claimUrl: 'https://ingress.test/runner-claim',
       claimIntervalMs: 2,
-      claimFetch: async () => {
-        claims.push(204);
-        return new Response(null, { status: 204 });
-      },
       callbackUrl: 'https://ingress.test/runner-callback',
       callbackToken: 'callback-token',
       callbackFetch: async (input, init) => {
@@ -13981,6 +13638,8 @@ describe('Runner backend outage recovery', () => {
         }
         if (args[0] === 'secret' && args[1] === 'set-custom')
           return { ...ok, exitCode: 1, stderr: 'setup failed' };
+        const proof = sbxNativeProof(args);
+        if (proof !== undefined) return proof;
         if (args[0] === 'policy' && args[1] === 'ls') {
           if (!cleanupFailedOnce) {
             cleanupFailedOnce = true;
@@ -13995,32 +13654,23 @@ describe('Runner backend outage recovery', () => {
       },
     });
     try {
-      expect(
-        (
-          await runner.handle(
-            new Request('http://runner/jobs', {
-              method: 'POST',
-              headers: {
-                authorization: 'Bearer runner-test-token',
-                'content-type': 'application/json',
-              },
-              body: JSON.stringify({
-                ...runnerJobFields,
-                id: jobId,
-                runId: 'run-cleanup-recovery-race',
-                attempt: 1,
-                pullRequestNumber: 44,
-                repositoryUrl: 'https://github.com/acme/reviewed.git',
-                baseSha,
-                headSha,
-              }),
-            }),
-          )
-        ).status,
-      ).toBe(202);
+      runner.enqueue({
+        ...runnerJobFields,
+        id: jobId,
+        runId: 'run-cleanup-recovery-race',
+        attempt: 1,
+        pullRequestNumber: 44,
+        repositoryUrl: 'https://github.com/acme/reviewed.git',
+        baseSha,
+        headSha,
+      });
       await probing;
-      const claimsWhileCleaning = claims.length;
-      await vi.waitFor(() => expect(claims.length).toBeGreaterThan(claimsWhileCleaning));
+      const claimsWhileCleaning = runner.claimExecution?.claimRequests.length ?? 0;
+      await vi.waitFor(() =>
+        expect(runner.claimExecution?.claimRequests.length ?? 0).toBeGreaterThan(
+          claimsWhileCleaning,
+        ),
+      );
       releaseProbe();
       expect(await waitForTerminal(runner, jobId)).toMatchObject({ status: 'failed' });
       await vi.waitFor(() => expect(reports).toHaveLength(1));
@@ -14049,7 +13699,8 @@ describe('Runner backend outage recovery', () => {
     const baseSha = '1'.repeat(40);
     const oldHead = '2'.repeat(40);
     const newHead = '3'.repeat(40);
-    const firstJobId = 'core-outage-first-job';
+    let pulledJobId = '';
+    let claimTargetHead = oldHead;
     let backendUp = true;
     const ok = { exitCode: 0, stdout: '', timedOut: false, truncated: false };
     const authFailure = { ...ok, exitCode: 1, stderr: 'not signed in' };
@@ -14064,7 +13715,7 @@ describe('Runner backend outage recovery', () => {
       createCoreWorker(env, {
         github: {
           getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
-          loadReviewTarget: async () => ({ headSha: newHead }),
+          loadReviewTarget: async () => ({ headSha: claimTargetHead }),
         },
         getReadInstallationToken: async () => ({
           token: 'repository-read-token',
@@ -14116,6 +13767,7 @@ describe('Runner backend outage recovery', () => {
       await Promise.all(waitUntilTasks.splice(0));
       return response;
     };
+    let firstPullTaken = false;
     let replacementRunId = '';
     try {
       const old = await stateStore.claimReview({
@@ -14131,11 +13783,6 @@ describe('Runner backend outage recovery', () => {
         occurredAt: new Date().toISOString(),
       });
       if (old.kind !== 'claimed') throw new Error('old review was not claimed');
-      await claimRunnerJob(stateStore, {
-        runId: old.runId,
-        jobId: firstJobId,
-        occurredAt: new Date().toISOString(),
-      });
       const runner = createProductionRunnerWithMergeBase({
         evidenceRoot: root,
         authToken: 'runner-test-token',
@@ -14143,13 +13790,24 @@ describe('Runner backend outage recovery', () => {
         modelConfig: standardModelConfig,
         claimUrl: 'https://ingress.test/runner-claim',
         claimIntervalMs: 2,
-        claimFetch: async () => new Response(null, { status: 204 }),
+        claimFetch: async () => {
+          if (firstPullTaken) return new Response(null, { status: 204 });
+          firstPullTaken = true;
+          const response = await coreClaim();
+          if (response.status === 200) {
+            const payload = (await response.clone().json()) as { id: string };
+            pulledJobId = payload.id;
+          }
+          return response;
+        },
         callbackUrl: 'https://ingress.test/runner-callback',
         callbackToken: 'callback-token',
         callbackFetch,
         process: async (_command, args) => {
           if (args[0] === 'ls') return backendUp ? ok : authFailure;
           if (!backendUp) return authFailure;
+          const proof = sbxNativeProof(args);
+          if (proof !== undefined) return proof;
           if (args[0] === 'secret' && args[1] === 'set-custom') {
             backendUp = false;
             return authFailure;
@@ -14162,30 +13820,8 @@ describe('Runner backend outage recovery', () => {
         },
       });
       try {
-        expect(
-          (
-            await runner.handle(
-              new Request('http://runner/jobs', {
-                method: 'POST',
-                headers: {
-                  authorization: 'Bearer runner-test-token',
-                  'content-type': 'application/json',
-                },
-                body: JSON.stringify({
-                  ...runnerJobFields,
-                  id: firstJobId,
-                  runId: old.runId,
-                  attempt: 1,
-                  pullRequestNumber: 42,
-                  repositoryUrl: 'https://github.com/acme/reviewed.git',
-                  baseSha,
-                  headSha: oldHead,
-                }),
-              }),
-            )
-          ).status,
-        ).toBe(202);
-        expect(await waitForTerminal(runner, firstJobId)).toMatchObject({
+        await vi.waitFor(() => expect(pulledJobId).not.toBe(''));
+        expect(await waitForTerminal(runner, pulledJobId)).toMatchObject({
           status: 'failed',
           sandbox: { cleanup: 'failed' },
         });
@@ -14201,6 +13837,7 @@ describe('Runner backend outage recovery', () => {
         );
         expect(terminalAttempts).toBe(3);
 
+        claimTargetHead = newHead;
         const replacement = await stateStore.claimReview({
           deliveryId: 'core-outage-new',
           job: {
@@ -14446,34 +14083,29 @@ describe('SDK sandbox execution', () => {
       expect(replacement.kind).toBe('claimed');
       expect((await claim()).status).toBe(204);
 
-      const recovery = await runner!.handle(
-        new Request('http://runner/maintenance/recover-cleanup', {
-          method: 'POST',
-          headers: {
-            authorization: 'Bearer runner-test-token',
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({
-            evidenceId: result.terminal.evidenceId,
-            jobId: result.manifest.jobId,
-            runId: result.manifest.runId,
-            attempt: result.manifest.attempt,
-            baseSha: result.manifest.baseSha,
-            headSha: result.manifest.headSha,
+      await vi.waitFor(async () => {
+        const status = await runner!.handle(
+          new Request('http://runner/maintenance', {
+            headers: { authorization: 'Bearer runner-test-token' },
           }),
-        }),
+        );
+        expect(await status.json()).toMatchObject({ activeJobs: 0 });
+      });
+      let report: Request | undefined;
+      await vi.waitFor(
+        () => {
+          report = callbacks.find(
+            (request) => new URL(request.url).pathname === '/runner-cleanup-recovery',
+          );
+          expect(report).toBeDefined();
+        },
+        { timeout: 3_000 },
       );
-      expect(recovery.status).toBe(202);
       expect(recoveredIdentity).toEqual({
         sandboxId: 'sandbox-identity',
         ownershipNonce,
         sandboxName: result.manifest.sandboxName,
       });
-
-      const report = callbacks.find(
-        (request) => new URL(request.url).pathname === '/runner-cleanup-recovery',
-      );
-      if (report === undefined) throw new Error('recovery report was not captured');
       const reconciled = await core.fetch(
         new Request('https://core.internal/runner-cleanup-recovery', {
           method: 'POST',
@@ -14481,7 +14113,7 @@ describe('SDK sandbox execution', () => {
             'content-type': 'application/json',
             'x-compte-rendu-runner-cleanup-recovery': 'verified',
           },
-          body: await report.clone().text(),
+          body: await report!.clone().text(),
         }),
       );
       expect(reconciled.status).toBe(202);
@@ -14555,29 +14187,18 @@ describe('SDK sandbox execution', () => {
       }),
     });
     try {
-      const admitted = await runner.handle(
-        new Request('http://runner/jobs', {
-          method: 'POST',
-          headers: {
-            authorization: 'Bearer runner-test-token',
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({
-            ...runnerJobFields,
-            id: 'sdk-cancel-job',
-            runId: 'sdk-cancel-run',
-            repositoryUrl: 'https://github.com/acme/reviewed.git',
-            baseSha,
-            headSha,
-            attempt: 1,
-          }),
-        }),
-      );
-      expect(admitted.status).toBe(202);
-      const accepted = (await admitted.json()) as { id: string };
+      runner.enqueue({
+        ...runnerJobFields,
+        id: 'sdk-cancel-job',
+        runId: 'sdk-cancel-run',
+        repositoryUrl: 'https://github.com/acme/reviewed.git',
+        baseSha,
+        headSha,
+        attempt: 1,
+      });
       await vi.waitFor(() => expect(started).toBe(true));
       const stopped = await runner.handle(
-        new Request(`http://runner/jobs/${accepted.id}`, {
+        new Request('http://runner/jobs/sdk-cancel-job', {
           method: 'DELETE',
           headers: { authorization: 'Bearer runner-test-token' },
         }),

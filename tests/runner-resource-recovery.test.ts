@@ -1,0 +1,297 @@
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { createRunner } from '../apps/runner/src/runner';
+import {
+  createMicrosandboxRuntimeFactory,
+  microsandboxCatalogIdentity,
+  reconcileMicrosandboxRestartResources,
+} from '../apps/runner/src/sandbox-runtime-microsandbox';
+import type {
+  RunnerProcessResult,
+  SandboxCommand,
+  SandboxJobSpec,
+} from '../apps/runner/src/sandbox-runtime';
+
+const ok: RunnerProcessResult = { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+const roots: string[] = [];
+
+afterEach(async () => {
+  vi.unstubAllEnvs();
+  for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
+});
+
+const modelConfig = JSON.stringify({
+  id: 'opencode-go/review',
+  baseUrl: 'https://inference.example/v1',
+  definition: { name: 'Review' },
+});
+
+const markerRoot = (root: string, instanceId: string) =>
+  join(root, 'sandbox-owners', instanceId, 'microsandbox');
+
+const jobSpec = (root: string, id: string): SandboxJobSpec => ({
+  id,
+  name: `compte-rendu-${id}`,
+  imageRef: 'review-image',
+  cpu: '1',
+  memoryGib: 2,
+  env: [],
+  checkoutRoot: join(root, 'checkout'),
+  configRoot: join(root, 'config'),
+  modelResource: 'llm.example.test:443',
+  modelTokenFile: join(root, 'model-token'),
+  githubResource: 'api.github.com:443',
+  githubReadToken: 'github-token',
+});
+
+const setupCommand = (): SandboxCommand => async () => ok;
+
+describe('microsandbox ownership recovery', () => {
+  it('removes the marker when destroy verifies the sandbox is already absent', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-msb-absent-'));
+    roots.push(root);
+    const msbHome = join(root, 'msb');
+    await mkdir(join(msbHome, 'db'), { recursive: true });
+    await writeFile(join(msbHome, 'db', 'msb.db'), 'catalog', { mode: 0o600 });
+    await writeFile(join(root, 'model-token'), 'grant', { mode: 0o600 });
+    vi.stubEnv('MSB_HOME', msbHome);
+    const ownershipRoot = join(root, 'sandbox-owners', 'msb-absent-instance');
+    const spec = jobSpec(root, 'msb-absent-job');
+    const runtime = createMicrosandboxRuntimeFactory(
+      'review-image',
+      async () => ok,
+      false,
+      ownershipRoot,
+    )(spec);
+    await runtime.setup(setupCommand());
+    const absent: SandboxCommand = async (_args) => ({
+      ...ok,
+      exitCode: 1,
+      stderr: `error: sandbox not found: ${spec.name}`,
+    });
+    await runtime.destroy(absent);
+    await expect(readdir(join(ownershipRoot, 'microsandbox'))).resolves.toEqual([]);
+  });
+
+  it('does not reap a marker for a currently live job and still reaps a stale owned marker', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-msb-live-'));
+    roots.push(root);
+    const msbHome = join(root, 'msb');
+    await mkdir(join(msbHome, 'db'), { recursive: true });
+    await writeFile(join(msbHome, 'db', 'msb.db'), 'catalog', { mode: 0o600 });
+    await writeFile(join(root, 'model-token'), 'grant', { mode: 0o600 });
+    vi.stubEnv('MSB_HOME', msbHome);
+    const ownershipRoot = join(root, 'sandbox-owners', 'msb-live-instance');
+    const live = jobSpec(root, 'live-job');
+    const stale = jobSpec(root, 'stale-job');
+    for (const spec of [live, stale]) {
+      const runtime = createMicrosandboxRuntimeFactory(
+        'review-image',
+        async () => ok,
+        false,
+        ownershipRoot,
+      )(spec);
+      await runtime.setup(setupCommand());
+    }
+    const command: SandboxCommand = async (_args, _diag, options) => {
+      const name = _args[_args.length - 1];
+      if (_args[0] === 'inspect') {
+        if (name === stale.name)
+          return { ...ok, exitCode: 1, stderr: `error: sandbox not found: ${name}` };
+        return {
+          ...ok,
+          stdout: JSON.stringify({
+            name,
+            config: { labels: { 'cr-job-owner': 'owner' } },
+          }),
+        };
+      }
+      return options?.captureStdout === true ? { ...ok, stdout: '' } : ok;
+    };
+    await expect(
+      reconcileMicrosandboxRestartResources(ownershipRoot, command, (id) => id === live.id),
+    ).resolves.toMatchObject({ recovered: 1, recoveredJobIds: [stale.id] });
+    expect(await readdir(join(ownershipRoot, 'microsandbox'))).toHaveLength(1);
+  });
+
+  it('close stops future polls and aborts a pending claim fetch', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-close-poll-'));
+    roots.push(root);
+    let claims = 0;
+    let aborted = false;
+    let started!: () => void;
+    const claimStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const runner = createRunner({
+      evidenceRoot: root,
+      instanceId: 'close-poll-instance',
+      authToken: 'runner-test-token',
+      modelConfig,
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      sandboxRuntime: 'microsandbox',
+      microsandboxImage: 'review-image',
+      llmRelay: true,
+      llmRelayGeneration: 'generation-a',
+      callbackUrl: 'https://ingress.test/runner-callback',
+      callbackToken: 'callback-token',
+      claimUrl: 'https://ingress.test/runner-claim',
+      claimIntervalMs: 10,
+      claimTimeoutMs: 100,
+      process: async () => ok,
+      claimFetch: async (_input, init) => {
+        claims += 1;
+        started();
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            'abort',
+            () => {
+              aborted = true;
+              reject(new Error('claim aborted'));
+            },
+            { once: true },
+          );
+        });
+      },
+    });
+    await claimStarted;
+    await runner.close();
+    expect(aborted).toBe(true);
+    expect(claims).toBe(1);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(claims).toBe(1);
+  });
+
+  it('automatically removes an owned VM after a transient failure and leaves a foreign VM untouched', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-msb-recovery-'));
+    roots.push(root);
+    const msbHome = join(root, 'msb');
+    await mkdir(join(msbHome, 'db'), { recursive: true });
+    await writeFile(join(msbHome, 'db', 'msb.db'), 'catalog', { mode: 0o600 });
+    await writeFile(join(root, 'model-token'), 'grant', { mode: 0o600 });
+    vi.stubEnv('MSB_HOME', msbHome);
+    const instanceId = 'msb-instance';
+    const ownershipRoot = join(root, 'sandbox-owners', instanceId);
+    const spec = jobSpec(root, 'msb-job');
+    const runtime = createMicrosandboxRuntimeFactory(
+      'review-image',
+      async () => ok,
+      false,
+      ownershipRoot,
+    )(spec);
+    await runtime.setup(setupCommand());
+    const markerDir = markerRoot(root, instanceId);
+    const [markerName] = await readdir(markerDir);
+    const marker = JSON.parse(await readFile(join(markerDir, markerName!), 'utf8')) as {
+      owner: string;
+    };
+    await expect(microsandboxCatalogIdentity()).resolves.toEqual(expect.any(String));
+
+    let mode: 'down' | 'foreign' | 'owned' = 'down';
+    let present = true;
+    let inspectCalls = 0;
+    let sawLocalBackend = false;
+    const removed: string[] = [];
+    const process = async (
+      _command: string,
+      args: readonly string[],
+      options?: { readonly env?: NodeJS.ProcessEnv },
+    ) => {
+      if (options?.env?.MSB_BACKEND === 'local') sawLocalBackend = true;
+      if (args[0] === 'inspect') {
+        inspectCalls += 1;
+        if (mode === 'down') return { ...ok, exitCode: 1, stderr: 'microsandbox unavailable' };
+        if (!present)
+          return {
+            ...ok,
+            exitCode: 1,
+            stderr: `error: sandbox not found: ${spec.name}`,
+          };
+        return {
+          ...ok,
+          stdout: JSON.stringify({
+            name: spec.name,
+            config: {
+              labels: { 'cr-job-owner': mode === 'foreign' ? 'foreign-owner' : marker.owner },
+            },
+          }),
+        };
+      }
+      if (args[0] === 'rm') {
+        removed.push(args[2]!);
+        present = false;
+      }
+      return ok;
+    };
+
+    const runner = createRunner({
+      evidenceRoot: root,
+      instanceId,
+      authToken: 'runner-test-token',
+      modelConfig,
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      sandboxRuntime: 'microsandbox',
+      microsandboxImage: 'review-image',
+      llmRelay: true,
+      llmRelayGeneration: 'generation-a',
+      callbackUrl: 'https://ingress.test/runner-callback',
+      callbackToken: 'callback-token',
+      claimUrl: '',
+      claimIntervalMs: 10,
+      process,
+    });
+    try {
+      await vi.waitFor(async () =>
+        expect(
+          await readdir(join(root, 'sandbox-owners', instanceId, 'microsandbox')),
+        ).toHaveLength(1),
+      );
+      await vi.waitFor(async () => expect(inspectCalls).toBeGreaterThan(0));
+      mode = 'foreign';
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(removed).toEqual([]);
+      expect(await readdir(markerDir)).toHaveLength(1);
+
+      mode = 'owned';
+      await vi.waitFor(
+        async () => expect(await readdir(markerDir).catch(() => [])).toHaveLength(0),
+        { timeout: 2_000 },
+      );
+      expect(removed).toEqual([spec.name]);
+      expect(present).toBe(false);
+      expect(sawLocalBackend).toBe(true);
+      expect(
+        await (
+          await runner.handle(
+            new Request('http://runner/maintenance/drain', {
+              method: 'POST',
+              headers: { authorization: 'Bearer runner-test-token' },
+            }),
+          )
+        ).json(),
+      ).toMatchObject({ draining: true, drained: true, cleanupBlockedJobs: 0 });
+    } finally {
+      await runner.close();
+    }
+  });
+
+  it('reports a non-ENOENT ownership root as a redacted record failure', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-msb-broken-root-'));
+    roots.push(root);
+    const ownershipRoot = join(root, 'sandbox-owners', 'broken-instance');
+    await mkdir(ownershipRoot, { recursive: true });
+    // A non-directory marker root makes readdir fail with ENOTDIR, not ENOENT.
+    await writeFile(join(ownershipRoot, 'microsandbox'), 'not a directory');
+
+    const result = await reconcileMicrosandboxRestartResources(ownershipRoot, async () => ok);
+
+    expect(result).toEqual({
+      ok: false,
+      recovered: 0,
+      recoveredJobIds: [],
+      failures: [{ jobId: 'redacted', sandboxName: 'redacted' }],
+    });
+  });
+});

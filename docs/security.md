@@ -93,9 +93,9 @@ startup reconciliation uses a per-instance private ownership record plus an exac
 inspect name and workspace/config match; co-located Runners sharing an evidence
 root do not scan each other's records. It never deletes from name, prefix or
 unrelated metadata, verifies native secret absence, reports bounded Job/step
-diagnostics without stderr content on failure, and keeps admission gated when
-ownership or absence is uncertain. Never delete a same-name foreign resource or release same-PR
-serialization based on an ambiguous cleanup result.
+diagnostics without stderr content on failure, and retains ambiguous records for retry. Microsandbox checks the original
+catalog, exact VM name and owner nonce. Cleanup skips live jobs. Expiration of
+a Core claim releases same-PR scheduling without attesting to VM destruction.
 
 ## Evidence and observability
 

@@ -46,7 +46,6 @@ import {
   type SandboxRuntimeFactory,
   type SandboxRuntimeKind,
 } from './sandbox-runtime.js';
-import { createTerminalJobHistory } from './terminal-job-history.js';
 import {
   appendFileBytes,
   createBoundedFileSink,
@@ -57,9 +56,14 @@ import {
   createMicrosandboxRuntimeFactory,
   confirmMicrosandboxAbsent,
   createMicrosandboxPreflight,
+  reconcileMicrosandboxRestartResources,
 } from './sandbox-runtime-microsandbox.js';
 import { createOpenSandboxRuntimeFactory } from './sandbox-runtime-opensandbox.js';
-import { createSbxRuntimeFactory, reconcileSbxRestartResources } from './sandbox-runtime-sbx.js';
+import {
+  createSbxRuntimeFactory,
+  reconcileSbxRestartResources,
+  type SbxRecoveryStep,
+} from './sandbox-runtime-sbx.js';
 import {
   createRelayLlmServiceClient,
   LlmGrantIssueError,
@@ -740,6 +744,7 @@ type RunnerJob = {
   child?: ChildProcess;
   sdkController?: AbortController;
   abortRequested: boolean;
+  cleanupRecoveryPending: boolean;
   sandboxAttempted: boolean;
   sandboxCreated: boolean;
   hostCleanupConfirmed?: boolean;
@@ -751,7 +756,6 @@ type RunnerJob = {
   configRoot?: string;
   grantIssuanceAttempted: boolean;
   grantRevoked: boolean;
-  cleanupRecoveryPending: boolean;
   cleanupRecoveryRetryAt?: number;
   grantToken?: string;
   grantTokenPath?: string;
@@ -1159,6 +1163,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
           sandboxRuntime.microsandboxImage,
           (args, _diagnostic, options) => executeProcess(sandboxPortPath, args, options),
           process.env.MICROSANDBOX_ALLOW_FAKE_IP === '1',
+          sandboxOwnershipRoot,
         )
       : opensandboxOptions !== undefined
         ? createOpenSandboxRuntimeFactory(opensandboxOptions)
@@ -1561,21 +1566,15 @@ export const createRunner = (options: RunnerOptions = {}) => {
   let reconcilingCleanups = false;
   const jobs = new Map<string, RunnerJob>();
   const jobsByRun = new Map<string, RunnerJob>();
-  let history: ReturnType<typeof createTerminalJobHistory> | undefined;
   const retireDestroyedJob = (job: RunnerJob) => {
     if (job.state.sandbox.cleanup !== 'destroyed') return;
-    try {
-      history ??= createTerminalJobHistory();
-      history.save(job.state, job.admissionKey);
-    } catch {
-      // Retain lookup and duplicate protection if temporary storage is unavailable.
-      return;
-    }
     jobs.delete(job.id);
     jobsByRun.delete(`${job.input.runId}:${job.input.attempt}`);
   };
 
   let claiming = false;
+  let backendOutage = false;
+  let stagedOutageLogged = false;
   let claimRequestId: string | undefined;
   const stopsDuringClaim = new Map<
     string,
@@ -1586,8 +1585,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
     stopsDuringClaim.clear();
   };
   let claimPollingHalted = false;
-  let backendOutage = false;
-  let stagedOutageLogged = false;
   let draining = false;
   let claimGateFailureLogged = false;
   let requestNextJob: (() => void) | undefined;
@@ -1631,6 +1628,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
     readonly accepted: boolean;
     readonly status: 202 | 409 | 502;
     readonly retryable?: boolean;
+    readonly verificationFailed?: boolean;
     readonly error?: string;
   };
   type BoundedDelivery =
@@ -1678,8 +1676,8 @@ export const createRunner = (options: RunnerOptions = {}) => {
     }
   };
   // Shared by the operator endpoint and automatic post-outage reconciliation.
-  // The retained callback/manifest identity, exact backend absence and grant
-  // state must all be confirmed before Core receives a recovery report.
+  // Retained callback/manifest identity, exact backend absence and grant state
+  // must all be confirmed before Core receives a recovery report.
   const recoverRetainedCleanup = async (
     input: ReplayCallbackRequest,
   ): Promise<CleanupRecoveryResult> => {
@@ -1703,6 +1701,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       return { accepted: false, status: 409, retryable: true, error: 'job is active' };
     }
     recoveringCleanup.add(input.jobId);
+    let verificationFailed = false;
     try {
       const kind = sandboxRuntime.kind;
       if (kind !== 'sbx' && kind !== 'microsandbox' && kind !== 'opensandbox')
@@ -1723,36 +1722,41 @@ export const createRunner = (options: RunnerOptions = {}) => {
           maxBytes: 256 * 1024,
           timeoutMs: CLEANUP_COMMAND_TIMEOUT_MS,
         });
-      if (kind === 'microsandbox') {
-        await confirmMicrosandboxAbsent(
-          recoveryCommand,
-          sandboxName,
-          recovered.value.catalogIdentity,
-        );
-      } else if (kind === 'sbx') {
-        await Effect.runPromise(confirmSbxCleanup(sandboxName, input.jobId, recoveryCommand));
-      } else {
-        const confirmCleanupAbsent = sandboxRuntimeFactory.confirmCleanupAbsent;
-        const sandboxId = manifest.sandboxId;
-        const ownershipNonce = manifest.sandboxOwnerNonce;
-        if (
-          confirmCleanupAbsent === undefined ||
-          sandboxId === undefined ||
-          ownershipNonce === undefined
-        ) {
-          return { accepted: false, status: 409, error: 'cleanup recovery rejected' };
+      try {
+        if (kind === 'microsandbox') {
+          await confirmMicrosandboxAbsent(
+            recoveryCommand,
+            sandboxName,
+            recovered.value.catalogIdentity,
+          );
+        } else if (kind === 'sbx') {
+          await Effect.runPromise(confirmSbxCleanup(sandboxName, input.jobId, recoveryCommand));
+        } else {
+          const confirmCleanupAbsent = sandboxRuntimeFactory.confirmCleanupAbsent;
+          const sandboxId = manifest.sandboxId;
+          const ownershipNonce = manifest.sandboxOwnerNonce;
+          if (
+            confirmCleanupAbsent === undefined ||
+            sandboxId === undefined ||
+            ownershipNonce === undefined
+          ) {
+            return { accepted: false, status: 409, error: 'cleanup recovery rejected' };
+          }
+          await Effect.runPromise(
+            Effect.tryPromise({
+              try: (signal) =>
+                confirmCleanupAbsent(
+                  { sandboxId, ownershipNonce, sandboxName },
+                  recoveryCommand,
+                  signal,
+                ),
+              catch: () => new Error('cleanup recovery not confirmed'),
+            }).pipe(Effect.timeout(CLEANUP_COMMAND_TIMEOUT_MS)),
+          );
         }
-        await Effect.runPromise(
-          Effect.tryPromise({
-            try: (signal) =>
-              confirmCleanupAbsent(
-                { sandboxId, ownershipNonce, sandboxName },
-                recoveryCommand,
-                signal,
-              ),
-            catch: () => new Error('cleanup recovery not confirmed'),
-          }).pipe(Effect.timeout(CLEANUP_COMMAND_TIMEOUT_MS)),
-        );
+      } catch (error) {
+        verificationFailed = true;
+        throw error;
       }
       const marker = await readGrantMarker(grantMarkerPath(input.jobId));
       if (marker.kind === 'invalid') throw new Error('grant recovery marker invalid');
@@ -1838,10 +1842,38 @@ export const createRunner = (options: RunnerOptions = {}) => {
         accepted: false,
         status: 502,
         retryable: true,
+        verificationFailed,
         error: 'cleanup recovery not confirmed',
       };
     } finally {
       recoveringCleanup.delete(input.jobId);
+    }
+  };
+  // Remove only this job's owned Sandbox record. Other records are skipped, so
+  // a foreign or unrelated marker is never touched by an automatic retry.
+  const removeOwnedSandboxForJob = async (jobId: string): Promise<boolean> => {
+    if (sandboxRuntime.kind !== 'sbx' && sandboxRuntime.kind !== 'microsandbox') return false;
+    const command: SandboxCommand = (args, _diagnostic, processOptions) =>
+      executeProcess(sandboxPortPath, args, {
+        ...processOptions,
+        env:
+          sandboxRuntime.kind === 'microsandbox'
+            ? (processOptions?.env ?? {})
+            : strippedSandboxEnvironment,
+        captureStdout: true,
+        captureStderr: true,
+        maxBytes: 256 * 1024,
+        timeoutMs: CLEANUP_COMMAND_TIMEOUT_MS,
+      });
+    const skipOther = (ownerJobId: string) => ownerJobId !== jobId;
+    try {
+      const result =
+        sandboxRuntime.kind === 'microsandbox'
+          ? await reconcileMicrosandboxRestartResources(sandboxOwnershipRoot, command, skipOther)
+          : await reconcileSbxRestartResources(sandboxOwnershipRoot, command, skipOther);
+      return result.ok;
+    } catch {
+      return false;
     }
   };
   const reconcileFailedCleanups = async (): Promise<boolean> => {
@@ -1878,6 +1910,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
           job.cleanupRecoveryPending = false;
           job.cleanupRecoveryRetryAt = undefined;
         } else {
+          if (result.verificationFailed === true) await removeOwnedSandboxForJob(job.id);
           job.cleanupRecoveryRetryAt = Date.now() + CLEANUP_RECOVERY_RETRY_INTERVAL_MS;
         }
       }
@@ -1886,51 +1919,137 @@ export const createRunner = (options: RunnerOptions = {}) => {
       reconcilingCleanups = false;
     }
   };
+  let closed = false;
+  let claimTimer: ReturnType<typeof setTimeout> | undefined;
+  let claimInFlight: Promise<void> | undefined;
+  let claimInFlightController: AbortController | undefined;
+  let sandboxRecoveryTimer: ReturnType<typeof setTimeout> | undefined;
+  let retrySandboxRecovery = () => {};
+  const recordRecoveryLog = async (event: OperationalLogEvent) => {
+    if (log === undefined) return;
+    try {
+      await log.record(sanitizeOperationalLogEvent(event));
+    } catch {
+      // Diagnostics must not change the recovery outcome.
+    }
+  };
   let sandboxRecovered: boolean | undefined;
-  const startSandboxRecovery = () => {
+  const scheduleSandboxRecoveryRetry = () => {
+    if (closed || sandboxRecoveryTimer !== undefined) return;
+    sandboxRecoveryTimer = setTimeout(() => {
+      sandboxRecoveryTimer = undefined;
+      retrySandboxRecovery();
+    }, claimIntervalMs);
+    if (typeof sandboxRecoveryTimer === 'object' && sandboxRecoveryTimer !== null)
+      sandboxRecoveryTimer.unref?.();
+  };
+  const isLiveCleanupOwner = (jobId: string) => {
+    const job = jobs.get(jobId);
+    return job !== undefined && (job.state.status === 'queued' || job.state.status === 'running');
+  };
+  const runSandboxRecovery = () => {
     sandboxRecovered = undefined;
-    if (sandboxRuntime.kind !== 'sbx') {
+    if (sandboxRuntime.kind !== 'sbx' && sandboxRuntime.kind !== 'microsandbox') {
       sandboxRecovered = true;
       return Promise.resolve(true);
     }
     const command: SandboxCommand = (args, _diagnostic, processOptions) =>
       executeProcess(sandboxPortPath, args, {
         ...processOptions,
-        env: strippedSandboxEnvironment,
+        env:
+          sandboxRuntime.kind === 'microsandbox'
+            ? (processOptions?.env ?? {})
+            : strippedSandboxEnvironment,
         captureStdout: true,
         captureStderr: true,
         maxBytes: 256 * 1024,
         timeoutMs: CLEANUP_COMMAND_TIMEOUT_MS,
       });
-    return reconcileSbxRestartResources(sandboxOwnershipRoot, command)
-      .then((result) => {
+    const recovery =
+      sandboxRuntime.kind === 'microsandbox'
+        ? reconcileMicrosandboxRestartResources(sandboxOwnershipRoot, command, isLiveCleanupOwner)
+        : reconcileSbxRestartResources(sandboxOwnershipRoot, command, isLiveCleanupOwner);
+    return recovery
+      .then(async (result) => {
         sandboxRecovered = result.ok;
+        if (sandboxRuntime.kind === 'sbx') backendOutage = !result.ok && !(await probeSbxAccess());
+        else if (result.ok) backendOutage = false;
+        for (const jobId of result.recoveredJobIds) {
+          const job = jobs.get(jobId);
+          if (job === undefined) continue;
+          const recovered = await recoverRetainedCleanup({
+            evidenceId: job.state.evidence.id,
+            jobId: job.id,
+            runId: job.input.runId,
+            attempt: job.input.attempt,
+            baseSha: job.input.baseSha,
+            headSha: job.input.headSha,
+          });
+          if (recovered.retryable === true && !recovered.accepted) {
+            job.cleanupRecoveryPending = true;
+            job.cleanupRecoveryRetryAt = Date.now() + CLEANUP_RECOVERY_RETRY_INTERVAL_MS;
+            scheduleDeferredCleanupRecovery();
+            continue;
+          }
+          job.cleanupRecoveryPending = false;
+          job.cleanupRecoveryRetryAt = undefined;
+          Object.assign(job.state, { sandbox: { cleanup: 'destroyed' } });
+          jobs.delete(job.id);
+          jobsByRun.delete(`${job.input.runId}:${job.input.attempt}`);
+        }
         if (!result.ok) {
-          void recordLog({
+          void recordRecoveryLog({
             phase: 'runner',
             outcome: 'sandbox-recovery',
             recovered: result.recovered,
             blocked: result.failures.length,
-            failures: result.failures.slice(0, 10),
+            failures: result.failures.slice(0, 10).map((failure) => ({
+              ...failure,
+              step: 'step' in failure ? (failure.step as SbxRecoveryStep) : 'record',
+            })),
           });
+          scheduleSandboxRecoveryRetry();
+        } else if (sandboxRecoveryTimer !== undefined) {
+          clearTimeout(sandboxRecoveryTimer);
+          sandboxRecoveryTimer = undefined;
         }
         return result.ok;
       })
       .catch(() => {
         sandboxRecovered = false;
-        void recordLog({
+        void recordRecoveryLog({
           phase: 'runner',
           outcome: 'sandbox-recovery',
           recovered: 0,
           blocked: 1,
           failures: [{ jobId: 'redacted', sandboxName: 'redacted', step: 'record' }],
         });
+        scheduleSandboxRecoveryRetry();
         return false;
       });
   };
+  let sandboxRecoveryInFlight: Promise<boolean> | undefined;
+  let sandboxRecoveryAgain = false;
+  const startSandboxRecovery = (): Promise<boolean> => {
+    if (sandboxRecoveryInFlight !== undefined) {
+      sandboxRecoveryAgain = true;
+      return sandboxRecoveryInFlight;
+    }
+    const run = runSandboxRecovery();
+    sandboxRecoveryInFlight = run;
+    void run.finally(() => {
+      if (sandboxRecoveryInFlight !== run) return;
+      sandboxRecoveryInFlight = undefined;
+      if (sandboxRecoveryAgain) {
+        sandboxRecoveryAgain = false;
+        void startSandboxRecovery();
+      }
+    });
+    return run;
+  };
   let sandboxRecovery = startSandboxRecovery();
-  const retrySandboxRecovery = () => {
-    if (sandboxRecovered !== false) return;
+  retrySandboxRecovery = () => {
+    if (closed || sandboxRecovered !== false) return;
     claimGateFailureLogged = false;
     sandboxRecovery = startSandboxRecovery();
     void sandboxRecovery.then((recovered) => {
@@ -1938,7 +2057,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
     });
   };
   let deferredCleanupRecoveryTimer: ReturnType<typeof setTimeout> | undefined;
-  let deferredRecoveryClosed = false;
   const makePendingCleanupRecoveryEligible = () => {
     const now = Date.now();
     for (const job of jobs.values()) {
@@ -1946,17 +2064,16 @@ export const createRunner = (options: RunnerOptions = {}) => {
     }
   };
   const scheduleDeferredCleanupRecovery = () => {
-    if (deferredRecoveryClosed || deferredCleanupRecoveryTimer !== undefined) return;
+    if (closed || deferredCleanupRecoveryTimer !== undefined) return;
     const timer = setTimeout(() => {
       deferredCleanupRecoveryTimer = undefined;
       void runDeferredCleanupRecovery();
     }, claimIntervalMs);
-    if (typeof timer === 'object' && timer !== null && 'unref' in timer) {
-      (timer as { unref: () => void }).unref();
-    }
+    if (typeof timer === 'object' && timer !== null) timer.unref?.();
     deferredCleanupRecoveryTimer = timer;
   };
   const runDeferredCleanupRecovery = async () => {
+    if (closed) return;
     if (reconcilingCleanups) {
       scheduleDeferredCleanupRecovery();
       return;
@@ -1975,9 +2092,8 @@ export const createRunner = (options: RunnerOptions = {}) => {
     if (!needsRecovery) return;
     const accepted = await reconcileFailedCleanups();
     if (accepted) requestNextJob?.();
-    if (backendOutage || [...jobs.values()].some((job) => job.cleanupRecoveryPending)) {
+    if (backendOutage || [...jobs.values()].some((job) => job.cleanupRecoveryPending))
       scheduleDeferredCleanupRecovery();
-    }
   };
   const activeJobCount = () =>
     [...jobs.values()].filter(
@@ -2010,22 +2126,26 @@ export const createRunner = (options: RunnerOptions = {}) => {
       activeJobs,
       claimInFlight:
         claiming || (!claimPollingHalted && !backendOutage && claimRequestId !== undefined),
-      claimPollingHalted:
-        claimPollingHalted ||
-        backendOutage ||
-        grantsRecovered === false ||
-        sandboxRecovered === false,
+      claimPollingHalted: claimPollingHalted || backendOutage || grantsRecovered === false,
       cleanupBlockedJobs,
     };
   };
   const hasCapacity = () => activeJobCount() + (claiming ? 1 : 0) < effectiveConcurrency;
-  const hasUnclearedSamePullRequest = (input: RunnerJobInputState) =>
-    [...jobs.values()].some(
-      (candidate) =>
-        candidate.state.sandbox.cleanup !== 'destroyed' &&
-        candidate.input.repositoryName === input.repositoryName &&
-        candidate.input.pullRequestNumber === input.pullRequestNumber,
-    );
+  const hasUnclearedSamePullRequest = (input: RunnerJobInputState) => {
+    const now = Date.now();
+    return [...jobs.values()].some((candidate) => {
+      if (candidate.state.sandbox.cleanup === 'destroyed') return false;
+      if (
+        candidate.input.repositoryName !== input.repositoryName ||
+        candidate.input.pullRequestNumber !== input.pullRequestNumber
+      )
+        return false;
+      // Live executions always serialize. A retained terminal execution only
+      // blocks until its durable claim budget expires, matching Core's fallback.
+      if (candidate.state.status === 'queued' || candidate.state.status === 'running') return true;
+      return candidate.claimDeadlineAt > now;
+    });
+  };
 
   const sendProgress = async (job: RunnerJob) => {
     if (
@@ -2756,13 +2876,13 @@ export const createRunner = (options: RunnerOptions = {}) => {
     job.hostFilesCleanupConfirmed = hostClean;
     job.cleanupRecoveryPending = !sandboxClean;
     if (job.cleanupRecoveryPending) job.cleanupRecoveryRetryAt = Date.now();
-    if (!sandboxClean && sandboxRuntime.kind === 'sbx' && !(await probeSbxAccess()))
-      backendOutage = true;
-    if (job.cleanupRecoveryPending) scheduleDeferredCleanupRecovery();
     job.hostCleanupConfirmed =
       hostClean &&
       (!job.sandboxAttempted || job.sandboxRuntime?.metadata.hostCleanupConfirmed === true);
     update(job, { sandbox: { cleanup: clean ? 'destroyed' : 'failed' } });
+    if (!sandboxClean && sandboxRuntime.kind === 'sbx' && !(await probeSbxAccess()))
+      backendOutage = true;
+    if (job.cleanupRecoveryPending) scheduleDeferredCleanupRecovery();
     return clean;
   };
 
@@ -3782,11 +3902,9 @@ export const createRunner = (options: RunnerOptions = {}) => {
             jobId: job.id,
             sandboxName: job.sandboxName,
             sandboxId: job.sandboxRuntime?.metadata.id ?? job.sandboxName,
+            sandboxOwnerNonce: job.sandboxRuntime?.metadata.ownershipNonce,
             catalogIdentity: job.sandboxRuntime?.metadata.catalogIdentity,
             sandboxRuntimeName: job.sandboxRuntime?.metadata.name ?? job.sandboxName,
-            ...(job.sandboxRuntime?.metadata.ownershipNonce === undefined
-              ? {}
-              : { sandboxOwnerNonce: job.sandboxRuntime.metadata.ownershipNonce }),
             runtime: job.sandboxRuntime?.metadata.runtime ?? sandboxRuntime.kind,
             evidenceId,
             runId: job.input.runId,
@@ -3985,12 +4103,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
       );
     const existing = jobsByRun.get(`${input.runId}:${input.attempt}`);
     if (existing !== undefined) return jsonResponse(409, publicState(existing));
-    const retired = history?.find(input.id, input.runId, input.attempt);
-    if (retired)
-      return new Response(retired.state, {
-        status: retired.admission_key === admissionKey ? 202 : 409,
-        headers: { 'content-type': 'application/json; charset=utf-8' },
-      });
     if (!claimed && draining) {
       return jsonResponse(503, { error: 'runner draining' });
     }
@@ -4052,11 +4164,11 @@ export const createRunner = (options: RunnerOptions = {}) => {
       abortRequested:
         contradictsSamePullRequest || (stop !== undefined && stop.deadline > Date.now()),
       progressStopped: false,
+      cleanupRecoveryPending: false,
       sandboxAttempted: false,
       sandboxCreated: false,
       grantIssuanceAttempted: false,
       grantRevoked: false,
-      cleanupRecoveryPending: false,
       sessionIds: [],
       claimDeadlineAt,
       deadlineAt: rotatingCredential
@@ -4108,7 +4220,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
     if (request.method === 'POST' && path === '/maintenance/drain') {
       draining = true;
       // A reservation staged before drain may still replay; fresh claims stay
-      // closed by claimNextJob's stagedClaim check.
+      // closed by claimNextJob's later request-id checks.
       if (claimRequestId !== undefined) requestNextJob?.();
       return jsonResponse(200, maintenanceStatus());
     }
@@ -4240,47 +4352,10 @@ export const createRunner = (options: RunnerOptions = {}) => {
         reason: delivered.reason,
       });
     }
-    if (request.method === 'POST' && path === '/jobs') {
-      if (
-        callbackUrl === undefined ||
-        callbackUrl.length === 0 ||
-        callbackToken === undefined ||
-        callbackToken.length === 0
-      ) {
-        return jsonResponse(503, { error: 'callback unavailable' });
-      }
-      if (modelResolverMissing) {
-        return jsonResponse(503, { error: 'runner unavailable' });
-      }
-      if (modelConfig === undefined) {
-        return jsonResponse(503, { error: 'runner unavailable' });
-      }
-      if (grantRecovery !== undefined && !(await grantRecovery)) {
-        return jsonResponse(503, { error: 'runner unavailable' });
-      }
-      if (!(await sandboxRecovery)) {
-        return jsonResponse(503, { error: 'runner unavailable' });
-      }
-      if (!(await ensurePreflight())) {
-        return jsonResponse(503, { error: 'runner unavailable' });
-      }
-      const input = await Schema.decodeUnknownPromise(RunnerJobInput)(
-        await readJson(request),
-      ).catch(() => undefined);
-      if (input === undefined) return jsonResponse(400, { error: 'invalid job' });
-      return admitJob(input, false);
-    }
     const match = /^\/jobs\/([^/]+)$/.exec(path);
     if (match === null) return jsonResponse(404, { error: 'not found' });
     const job = jobs.get(match[1]);
     if (job === undefined) {
-      if (request.method === 'GET' || request.method === 'DELETE') {
-        const retired = history?.find(match[1]);
-        if (retired)
-          return new Response(retired.state, {
-            headers: { 'content-type': 'application/json; charset=utf-8' },
-          });
-      }
       const deadline = Number(request.headers.get('x-compte-rendu-claim-deadline'));
       if (
         request.method === 'DELETE' &&
@@ -4321,11 +4396,25 @@ export const createRunner = (options: RunnerOptions = {}) => {
     return jsonResponse(404, { error: 'not found' });
   };
 
-  const scheduleClaim = () => {
-    const timer = setTimeout(() => void claimNextJob(), claimIntervalMs);
-    if (typeof timer === 'object' && timer !== null && 'unref' in timer) {
-      (timer as { unref: () => void }).unref();
+  const startClaim = () => {
+    if (closed || claimInFlight !== undefined) return;
+    if (claimTimer !== undefined) {
+      clearTimeout(claimTimer);
+      claimTimer = undefined;
     }
+    const run = claimNextJob();
+    claimInFlight = run;
+    void run.finally(() => {
+      if (claimInFlight === run) claimInFlight = undefined;
+    });
+  };
+  const scheduleClaim = () => {
+    if (closed) return;
+    claimTimer = setTimeout(() => {
+      claimTimer = undefined;
+      startClaim();
+    }, claimIntervalMs);
+    if (typeof claimTimer === 'object' && claimTimer !== null) claimTimer.unref?.();
   };
 
   // A startup gate that stops claiming is a real queue-stall reason. Record it
@@ -4339,18 +4428,30 @@ export const createRunner = (options: RunnerOptions = {}) => {
   };
 
   const claimNextJob = async () => {
+    if (closed) return;
     if (grantRecovery !== undefined && !(await grantRecovery)) {
       await recordClaimGateFailure('grant-recovery-failed');
       return;
     }
-    if (!(await sandboxRecovery)) {
-      await recordClaimGateFailure('sandbox-recovery-failed');
-      return;
+    let needsCleanupRecovery = [...jobs.values()].some((job) => job.cleanupRecoveryPending);
+    if (backendOutage) {
+      if (!(await probeSbxAccess())) {
+        scheduleClaim();
+        return;
+      }
+      backendOutage = false;
+      stagedOutageLogged = false;
+      makePendingCleanupRecoveryEligible();
+      needsCleanupRecovery = true;
     }
-    // A claim staged by an outage already owns a Core reservation. It may
-    // replay through drain, but no fresh claim id may be created while draining.
-    const stagedClaim = claimRequestId !== undefined;
-    if (draining && !stagedClaim) return;
+    if (needsCleanupRecovery) {
+      void reconcileFailedCleanups()
+        .then((accepted) => {
+          if (accepted) requestNextJob?.();
+        })
+        .catch(() => undefined);
+    }
+    if (draining && claimRequestId === undefined) return;
     if (
       claiming ||
       claimPollingHalted ||
@@ -4369,28 +4470,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
       return;
     }
 
-    let needsCleanupRecovery = [...jobs.values()].some((job) => job.cleanupRecoveryPending);
-    if (backendOutage) {
-      if (!(await probeSbxAccess())) {
-        // Healthy Runners keep claiming while this backend stays unavailable.
-        scheduleClaim();
-        return;
-      }
-      backendOutage = false;
-      stagedOutageLogged = false;
-      makePendingCleanupRecoveryEligible();
-      needsCleanupRecovery = true;
-    }
-    if (needsCleanupRecovery) {
-      // Recovery runs alongside claim polling. A transient report failure must
-      // not hold unrelated healthy work, and a later success reopens claiming.
-      void reconcileFailedCleanups()
-        .then((accepted) => {
-          if (accepted) requestNextJob?.();
-        })
-        .catch(() => undefined);
-    }
-    if (draining && claimRequestId === undefined) return;
     if (!(await ensurePreflight())) {
       claimPollingHalted = true;
       await recordClaimGateFailure('runtime-preflight-failed');
@@ -4422,6 +4501,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         }
       | undefined;
     const controller = new AbortController();
+    claimInFlightController = controller;
     let timeout: ReturnType<typeof setTimeout> | undefined;
     let timedOut = false;
     try {
@@ -4466,9 +4546,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
           throw new Error('Claimed Runner Job failed schema validation');
         }
         if (backendOutage) {
-          // The probe confirmed the backend is unavailable while this claim
-          // response was in flight. Keep the prepared request id for replay
-          // after recovery instead of starting more work.
           if (!stagedOutageLogged) {
             stagedOutageLogged = true;
             await recordLog({
@@ -4500,6 +4577,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       // The next idle poll is the bounded transport retry for claim availability.
       claimFailure ??= { reason: timedOut ? 'timeout' : 'transport-error' };
     } finally {
+      if (claimInFlightController === controller) claimInFlightController = undefined;
       if (timeout !== undefined) clearTimeout(timeout);
       claiming = false;
       if (claimRequestId === undefined) forgetStops();
@@ -4518,7 +4596,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
     }
   };
 
-  requestNextJob = () => void claimNextJob();
+  requestNextJob = () => startClaim();
   let settingsWatcher: RunnerSettingsWatcher | undefined;
   if (settingsFile !== undefined) {
     settingsWatcher = watchRunnerSettings(settingsFile, {
@@ -4537,19 +4615,27 @@ export const createRunner = (options: RunnerOptions = {}) => {
       },
     });
   }
-  if (claimUrl !== undefined && claimUrl.length > 0) void claimNextJob();
+  if (claimUrl !== undefined && claimUrl.length > 0) startClaim();
 
   return {
     handle,
     close: async () => {
-      forgetStops();
-      deferredRecoveryClosed = true;
+      closed = true;
+      if (claimTimer !== undefined) {
+        clearTimeout(claimTimer);
+        claimTimer = undefined;
+      }
+      if (sandboxRecoveryTimer !== undefined) {
+        clearTimeout(sandboxRecoveryTimer);
+        sandboxRecoveryTimer = undefined;
+      }
       if (deferredCleanupRecoveryTimer !== undefined) {
         clearTimeout(deferredCleanupRecoveryTimer);
         deferredCleanupRecoveryTimer = undefined;
       }
-      history?.close();
-      history = undefined;
+      claimInFlightController?.abort();
+      forgetStops();
+      await claimInFlight?.catch(() => undefined);
       await settingsWatcher?.close();
     },
   };
