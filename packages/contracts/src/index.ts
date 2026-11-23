@@ -574,6 +574,7 @@ export type OperationalLogEvent =
         | 'malformed-response'
         | 'admission-rejected'
         | 'grant-recovery-failed'
+        | 'sandbox-recovery-failed'
         | 'runtime-preflight-failed';
       readonly status?: number;
       readonly pollingHalted: boolean;
@@ -586,6 +587,36 @@ export type OperationalLogEvent =
       readonly attempt: number;
       readonly reason: 'invalid-response' | 'http-error' | 'timeout' | 'transport-error';
       readonly status?: number;
+    }
+  | {
+      readonly phase: 'runner';
+      readonly outcome: 'sandbox-recovery';
+      readonly recovered: number;
+      readonly blocked: number;
+      readonly failures: ReadonlyArray<{
+        readonly jobId: string;
+        readonly sandboxName: string;
+        readonly step:
+          | 'record'
+          | 'inspect'
+          | 'ownership'
+          | 'policy-list'
+          | 'policy-remove'
+          | 'policy-verify'
+          | 'sandbox-remove'
+          | 'sandbox-verify'
+          | 'secret-remove'
+          | 'secret-verify'
+          | 'record-remove';
+        readonly command?: string;
+        readonly exitCode?: number;
+        readonly timedOut?: boolean;
+        readonly truncated?: boolean;
+        readonly stderrTruncated?: boolean;
+        readonly streamError?: boolean;
+        readonly processError?: boolean;
+        readonly errorCode?: RunnerProcessErrorCode;
+      }>;
     }
   | {
       readonly phase: 'runner';
@@ -634,6 +665,16 @@ export const sanitizeOperationalLogEvent = (event: OperationalLogEvent): Operati
 
   if (event.phase === 'runner') {
     if (event.outcome === 'claim') return event;
+    if (event.outcome === 'sandbox-recovery') {
+      return {
+        ...event,
+        failures: event.failures.map((failure) => ({
+          ...failure,
+          jobId: sanitizeOperationalLogIdentifier(failure.jobId) ?? 'redacted',
+          sandboxName: sanitizeOperationalLogIdentifier(failure.sandboxName) ?? 'redacted',
+        })),
+      };
+    }
     return {
       ...event,
       runId: sanitizeOperationalLogIdentifier(event.runId) ?? 'redacted',
