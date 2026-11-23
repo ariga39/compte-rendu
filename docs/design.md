@@ -138,7 +138,7 @@ cannot report complete, while that startup scan has any failed, invalid or
 foreign marker. Resume changes only the maintenance pause; it neither retries nor
 clears the startup scan. Exact cleanup recovery can resolve an eligible failed
 cleanup and retry the scan, but it rejects invalid and foreign markers and is
-limited to sbx/microsandbox jobs whose retained evidence and callback still show
+limited to sbx, microsandbox or OpenSandbox jobs whose retained evidence and callback still show
 matching failed cleanup; see [maintenance operations](operations.md#drain-before-maintenance).
 A successful startup scan is not continuous. A terminal revocation failure after
 startup fails that job without a vote and leaves its marker without closing
@@ -375,13 +375,18 @@ operation and from the continuous outage retry tracked by #313.
 
 ### Failed-cleanup reconciliation
 
-An authenticated Runner maintenance operation can reconcile a failed sbx or microsandbox run
-whose original host-directory cleanup was confirmed and whose exact Sandbox is
-now absent. It rechecks sbx policies/secrets or the microsandbox catalog identity and revokes the job grant before
-reporting recovery. Original terminal evidence remains immutable; separate local
-and R2 recovery records provide the audit trail. Core matches the failed, superseded or cancelled run,
-job, attempt and immutable SHAs before confirming cleanup. Destroyed cleanup is
+An authenticated Runner maintenance operation can reconcile a failed sbx,
+microsandbox or OpenSandbox run whose original host-directory cleanup was
+confirmed and whose exact Sandbox is now absent. It rechecks sbx policies/secrets
+or the microsandbox catalog identity. For OpenSandbox it requires retained
+authoritative identity and ownership nonce, an empty complete ownership listing,
+a specific identity lookup returning 404, and absence of the Docker workload,
+sidecar and runtime volumes. The configured runtime must match. It revokes the
+job grant before reporting recovery. Original terminal evidence remains immutable;
+separate local and R2 recovery records provide the audit trail. Core matches the
+failed, superseded or cancelled run, job, attempt and immutable SHAs before
+confirming cleanup. Destroyed cleanup is
 monotonic under delayed callbacks. The queued-task projection exposes an anonymous
 cleanup-block reason only when an unresolved terminal same-PR run blocks claiming.
-Legacy evidence lacking host confirmation, OpenShell and OpenSandbox recovery remain outside
-this operation; see the operations guide.
+Legacy evidence lacking host confirmation, unknown OpenSandbox create identity
+and OpenShell recovery remain outside this operation; see the operations guide.

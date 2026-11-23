@@ -8,12 +8,13 @@ import {
   SandboxManager,
   type ReadBytesStream,
 } from '@alibaba-group/opensandbox';
-import { Option, Schema } from 'effect';
+import { Effect, Option, Schema } from 'effect';
 import { executeOpenSandboxCommand } from './opensandbox-execution.js';
 import {
   SandboxCreateError,
   type SandboxCommand,
   type SandboxOperation,
+  type SandboxRecoveryIdentity,
   type SandboxRuntimeFactory,
   type RunnerProcessResult,
 } from './sandbox-runtime.js';
@@ -44,6 +45,11 @@ const EvidenceEntry = Schema.Struct({
   path: Schema.NonEmptyString,
   type: Schema.Literals(['file', 'directory']),
 });
+class OpenSandboxRecoveryError extends Schema.TaggedError<OpenSandboxRecoveryError>()(
+  'OpenSandboxRecoveryError',
+  {},
+) {}
+
 const IdentityPage = Schema.Struct({
   items: Schema.Array(
     Schema.Struct({
@@ -54,9 +60,10 @@ const IdentityPage = Schema.Struct({
   pagination: Schema.Struct({ hasNextPage: Schema.Boolean }),
 });
 
-export const createOpenSandboxRuntimeFactory =
-  (options: OpenSandboxRuntimeOptions): SandboxRuntimeFactory =>
-  (spec) => {
+export const createOpenSandboxRuntimeFactory = (
+  options: OpenSandboxRuntimeOptions,
+): SandboxRuntimeFactory => {
+  const factory: SandboxRuntimeFactory = (spec) => {
     const owner = randomUUID();
     const connection = new ConnectionConfig({
       domain: options.endpoint,
@@ -77,6 +84,9 @@ export const createOpenSandboxRuntimeFactory =
       },
       get id() {
         return identity ?? spec.name;
+      },
+      get ownershipNonce() {
+        return identity === undefined ? undefined : owner;
       },
       name: spec.name,
       runtime: 'opensandbox' as const,
@@ -328,6 +338,9 @@ export const createOpenSandboxRuntimeFactory =
                 }
               }
               if (!complete || (createAttempted && identities.size === 0)) return failure();
+              if (identity === undefined && identities.size === 1) {
+                identity = identities.values().next().value;
+              }
               for (const id of identities) {
                 let current;
                 try {
@@ -375,3 +388,105 @@ export const createOpenSandboxRuntimeFactory =
       },
     };
   };
+  return Object.assign(factory, {
+    confirmCleanupAbsent: async (
+      recovery: SandboxRecoveryIdentity,
+      command: SandboxCommand,
+      signal?: AbortSignal,
+    ) => {
+      await Effect.runPromise(
+        confirmOpenSandboxCleanupAbsent(options, recovery, command),
+        signal === undefined ? undefined : { signal },
+      );
+    },
+  });
+};
+
+const complete = (result: RunnerProcessResult): boolean =>
+  !result.timedOut &&
+  !result.truncated &&
+  !result.streamError &&
+  !result.processError &&
+  result.exitCode === 0;
+
+const verifyOpenSandboxCleanupAbsent = Effect.fn('verifyOpenSandboxCleanupAbsent')(function* (
+  manager: ReturnType<typeof SandboxManager.create>,
+  recovery: SandboxRecoveryIdentity,
+  command: SandboxCommand,
+) {
+  let completeList = false;
+  for (let page = 1; page <= 20; page += 1) {
+    const raw = yield* Effect.tryPromise({
+      try: () =>
+        manager.listSandboxInfos({
+          metadata: { 'cr-job-owner': recovery.ownershipNonce },
+          page,
+          pageSize: 100,
+        }),
+      catch: () => new OpenSandboxRecoveryError(),
+    });
+    const decoded = Schema.decodeUnknownOption(IdentityPage)(raw);
+    if (Option.isNone(decoded)) return yield* new OpenSandboxRecoveryError();
+    if (decoded.value.items.length > 0) return yield* new OpenSandboxRecoveryError();
+    if (!decoded.value.pagination.hasNextPage) {
+      completeList = true;
+      break;
+    }
+  }
+  if (!completeList) return yield* new OpenSandboxRecoveryError();
+
+  const missing = yield* Effect.tryPromise({
+    try: async () => {
+      try {
+        await manager.getSandboxInfo(recovery.sandboxId);
+        return false;
+      } catch (error) {
+        if (isMissingSandbox(error)) return true;
+        throw error;
+      }
+    },
+    catch: () => new OpenSandboxRecoveryError(),
+  });
+  if (!missing) return yield* new OpenSandboxRecoveryError();
+
+  for (const args of [
+    ['ps', '-aq', '--filter', `label=opensandbox.io/id=${recovery.sandboxId}`],
+    ['ps', '-aq', '--filter', `label=opensandbox.io/egress-sidecar-for=${recovery.sandboxId}`],
+    ['volume', 'ls', '-q', '--filter', `name=opensandbox-runtime-${recovery.sandboxId}`],
+  ]) {
+    const observed = yield* Effect.tryPromise({
+      try: () =>
+        command(
+          args,
+          { stage: 'cleanup', command: 'confirm-sandbox-absent' },
+          { captureStdout: true, maxBytes: 65536 },
+        ),
+      catch: () => new OpenSandboxRecoveryError(),
+    });
+    if (!complete(observed) || observed.stdout.trim() !== '')
+      return yield* new OpenSandboxRecoveryError();
+  }
+});
+
+export const confirmOpenSandboxCleanupAbsent = Effect.fn('confirmOpenSandboxCleanupAbsent')(
+  function* (
+    options: OpenSandboxRuntimeOptions,
+    recovery: SandboxRecoveryIdentity,
+    command: SandboxCommand,
+  ) {
+    const connection = new ConnectionConfig({
+      domain: options.endpoint,
+      apiKey: options.apiKey,
+      disableMetrics: true,
+    });
+    return yield* Effect.acquireUseRelease(
+      Effect.sync(() => SandboxManager.create({ connectionConfig: connection })),
+      (manager) => verifyOpenSandboxCleanupAbsent(manager, recovery, command),
+      (manager) =>
+        Effect.tryPromise({
+          try: () => Promise.allSettled([manager.close(), connection.closeTransport()]),
+          catch: () => new OpenSandboxRecoveryError(),
+        }).pipe(Effect.orElseSucceed(() => undefined)),
+    );
+  },
+);

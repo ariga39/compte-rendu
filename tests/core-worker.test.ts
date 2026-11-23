@@ -5568,6 +5568,7 @@ describe('Core Worker', () => {
             status: 'cancelled',
             cancellationReason: 'manual',
             retryBlocked: initialCleanup === 'failed' ? 'cleanup-failed' : 'cleanup-pending',
+            retryQueued: false,
           }),
         ]);
         await expect(
@@ -5597,6 +5598,422 @@ describe('Core Worker', () => {
       }
     },
   );
+
+  it('reports the actual newer cleanup blocker when an older cancelled Check is retried', async () => {
+    const database = new SqliteD1Database();
+    const stateStore = createD1ReviewStateStore(database);
+    try {
+      const older = await stateStore.claimReview({
+        deliveryId: 'delivery-older-cancel',
+        job: {
+          repositoryId: 11,
+          installationId: 7,
+          pullRequestNumber: 46,
+          baseSha: eligibleEvent.baseSha,
+          headSha: eligibleEvent.headSha,
+          trigger: 'automatic',
+        },
+        occurredAt: '2026-09-12T00:00:00.000Z',
+      });
+      if (older.kind !== 'claimed') throw new Error('older run was not admitted');
+      await stateStore.recordCheckRun?.({ runId: older.runId, checkRunId: 331 });
+      const olderJob = await claimRunnerJob(stateStore, {
+        runId: older.runId,
+        jobId: 'runner-job-older-cancel',
+        occurredAt: '2026-09-12T00:00:10.000Z',
+      });
+      await stateStore.cancelRun({
+        runId: older.runId,
+        requestedByUid: 1,
+        occurredAt: '2026-09-12T00:00:20.000Z',
+      });
+      await stateStore.confirmRunnerDestroyed!({
+        runId: older.runId,
+        jobId: olderJob.jobId,
+        attempt: olderJob.attempt,
+        occurredAt: '2026-09-12T00:00:30.000Z',
+      });
+
+      const newer = await stateStore.claimReview({
+        deliveryId: 'delivery-newer-cancel',
+        job: {
+          repositoryId: 11,
+          installationId: 7,
+          pullRequestNumber: 46,
+          baseSha: eligibleEvent.baseSha,
+          headSha: eligibleEvent.headSha,
+          trigger: 'manual',
+        },
+        occurredAt: '2026-09-12T00:00:40.000Z',
+      });
+      if (newer.kind !== 'claimed') throw new Error('newer run was not admitted');
+      await stateStore.recordCheckRun?.({ runId: newer.runId, checkRunId: 332 });
+      const newerJob = await claimRunnerJob(stateStore, {
+        runId: newer.runId,
+        jobId: 'runner-job-newer-cancel',
+        occurredAt: '2026-09-12T00:00:50.000Z',
+      });
+      await stateStore.cancelRun({
+        runId: newer.runId,
+        requestedByUid: 1,
+        occurredAt: '2026-09-12T00:01:00.000Z',
+      });
+
+      const updates: unknown[] = [];
+      const worker = createCoreWorker(coreEnv(database), {
+        stateStore,
+        github: {
+          getPullRequest: async () => ({
+            repositoryVisibility: 'public',
+            baseRepositoryId: 11,
+            headRepositoryId: 99,
+            draft: false,
+            baseSha: eligibleEvent.baseSha,
+            headSha: eligibleEvent.headSha,
+          }),
+          getCommenterPermission: async () => 'write',
+          updateCheckRun: async (input) => {
+            updates.push(input);
+          },
+          getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+          loadReviewTarget: async () => ({ headSha: eligibleEvent.headSha }),
+        },
+        getReadInstallationToken: async () => ({
+          token: 'read-token',
+          expiresAt: '2026-09-01T01:00:00.000Z',
+        }),
+      });
+
+      const retry = await worker.fetch(
+        new Request('https://core.internal/review-events', {
+          method: 'POST',
+          body: JSON.stringify({
+            deliveryId: 'retry-older-check',
+            event: 'check_run',
+            action: 'rerequested',
+            repositoryId: 11,
+            installationId: 7,
+            checkRunId: 331,
+            externalRunId: older.runId,
+            senderLogin: 'maintainer',
+          }),
+        }),
+      );
+      expect(retry.status).toBe(202);
+      expect(updates).toEqual([
+        expect.objectContaining({
+          checkRunId: 331,
+          status: 'cancelled',
+          cancellationReason: 'manual',
+          retryBlocked: 'cleanup-pending',
+          retryQueued: true,
+        }),
+      ]);
+      expect(updates).not.toContainEqual(expect.objectContaining({ checkRunId: 332 }));
+      await expect(
+        stateStore.claimNextJob({
+          jobId: 'probe-older-blocked',
+          attempt: 1,
+          occurredAt: '2026-09-12T00:01:10.000Z',
+        }),
+      ).resolves.toEqual({ kind: 'empty' });
+
+      await stateStore.confirmRunnerDestroyed!({
+        runId: newer.runId,
+        jobId: newerJob.jobId,
+        attempt: newerJob.attempt,
+        occurredAt: '2026-09-12T00:02:00.000Z',
+      });
+      const claim = await worker.fetch(
+        new Request('https://core.internal/runner-claims', {
+          method: 'POST',
+          headers: { 'x-compte-rendu-runner-claim': 'verified' },
+        }),
+      );
+      expect(claim.status).toBe(200);
+      const claimed = (await claim.json()) as { runId?: string };
+      expect(claimed).toMatchObject({
+        pullRequestNumber: 46,
+        headSha: eligibleEvent.headSha,
+      });
+      expect(claimed.runId).not.toBe(older.runId);
+      expect(claimed.runId).not.toBe(newer.runId);
+    } finally {
+      database.close();
+    }
+  });
+
+  it('does not repaint a failed Check when retry feedback is blocked by cleanup', async () => {
+    const database = new SqliteD1Database();
+    const stateStore = createD1ReviewStateStore(database);
+    try {
+      const failed = await stateStore.claimReview({
+        deliveryId: 'delivery-failed-check-feedback',
+        job: {
+          repositoryId: 11,
+          installationId: 7,
+          pullRequestNumber: 49,
+          baseSha: eligibleEvent.baseSha,
+          headSha: eligibleEvent.headSha,
+          trigger: 'automatic',
+        },
+        occurredAt: '2026-09-12T00:00:00.000Z',
+      });
+      if (failed.kind !== 'claimed') throw new Error('failed run was not admitted');
+      await stateStore.recordCheckRun?.({ runId: failed.runId, checkRunId: 341 });
+      await stateStore.markSchedulingFailed({
+        runId: failed.runId,
+        occurredAt: '2026-09-12T00:00:10.000Z',
+      });
+
+      const newer = await stateStore.claimReview({
+        deliveryId: 'delivery-newer-cleanup-for-failed-check',
+        job: {
+          repositoryId: 11,
+          installationId: 7,
+          pullRequestNumber: 49,
+          baseSha: eligibleEvent.baseSha,
+          headSha: eligibleEvent.headSha,
+          trigger: 'manual',
+        },
+        occurredAt: '2026-09-12T00:00:20.000Z',
+      });
+      if (newer.kind !== 'claimed') throw new Error('newer run was not admitted');
+      await claimRunnerJob(stateStore, {
+        runId: newer.runId,
+        jobId: 'runner-job-newer-for-failed-check',
+        occurredAt: '2026-09-12T00:00:30.000Z',
+      });
+      await stateStore.cancelRun({
+        runId: newer.runId,
+        requestedByUid: 1,
+        occurredAt: '2026-09-12T00:00:40.000Z',
+      });
+
+      const updates: unknown[] = [];
+      const worker = createCoreWorker(coreEnv(database), {
+        stateStore,
+        github: {
+          getPullRequest: async () => ({
+            repositoryVisibility: 'public',
+            baseRepositoryId: 11,
+            headRepositoryId: 99,
+            draft: false,
+            baseSha: eligibleEvent.baseSha,
+            headSha: eligibleEvent.headSha,
+          }),
+          getCommenterPermission: async () => 'write',
+          updateCheckRun: async (input) => {
+            updates.push(input);
+          },
+          getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+          loadReviewTarget: async () => ({ headSha: eligibleEvent.headSha }),
+        },
+        getReadInstallationToken: async () => ({
+          token: 'read-token',
+          expiresAt: '2026-09-01T01:00:00.000Z',
+        }),
+      });
+
+      const response = await worker.fetch(
+        new Request('https://core.internal/review-events', {
+          method: 'POST',
+          body: JSON.stringify({
+            deliveryId: 'retry-failed-check',
+            event: 'check_run',
+            action: 'rerequested',
+            repositoryId: 11,
+            installationId: 7,
+            checkRunId: 341,
+            externalRunId: failed.runId,
+            senderLogin: 'maintainer',
+          }),
+        }),
+      );
+      expect(response.status).toBe(202);
+      expect(updates).toEqual([]);
+      await expect(stateStore.getRunOutcome(failed.runId)).resolves.toMatchObject({
+        status: 'failed',
+      });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('declines an authorized /ai-review comment while cancelled cleanup is pending', async () => {
+    const database = new SqliteD1Database();
+    const stateStore = createD1ReviewStateStore(database);
+    try {
+      const cancelled = await stateStore.claimReview({
+        deliveryId: 'delivery-comment-blocked',
+        job: {
+          repositoryId: 11,
+          installationId: 7,
+          pullRequestNumber: 47,
+          baseSha: eligibleEvent.baseSha,
+          headSha: eligibleEvent.headSha,
+          trigger: 'automatic',
+        },
+        occurredAt: '2026-09-12T00:00:00.000Z',
+      });
+      if (cancelled.kind !== 'claimed') throw new Error('cancelled run was not admitted');
+      await claimRunnerJob(stateStore, {
+        runId: cancelled.runId,
+        jobId: 'runner-job-comment-blocked',
+        occurredAt: '2026-09-12T00:00:10.000Z',
+      });
+      await stateStore.cancelRun({
+        runId: cancelled.runId,
+        requestedByUid: 1,
+        occurredAt: '2026-09-12T00:00:20.000Z',
+      });
+      const updates: unknown[] = [];
+      const reactions: unknown[] = [];
+      const worker = createCoreWorker(coreEnv(database), {
+        stateStore,
+        github: {
+          getPullRequest: async () => ({
+            repositoryVisibility: 'public',
+            baseRepositoryId: 11,
+            headRepositoryId: 99,
+            draft: false,
+            baseSha: eligibleEvent.baseSha,
+            headSha: eligibleEvent.headSha,
+          }),
+          getCommenterPermission: async () => 'write',
+          updateCheckRun: async (input) => {
+            updates.push(input);
+          },
+          addReaction: async (input) => {
+            reactions.push(input);
+          },
+          getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+          loadReviewTarget: async () => ({ headSha: eligibleEvent.headSha }),
+        },
+        getReadInstallationToken: async () => ({
+          token: 'read-token',
+          expiresAt: '2026-09-01T01:00:00.000Z',
+        }),
+      });
+
+      const response = await worker.fetch(
+        new Request('https://core.internal/review-events', {
+          method: 'POST',
+          body: JSON.stringify({
+            deliveryId: 'comment-during-cleanup',
+            event: 'issue_comment',
+            action: 'created',
+            repositoryId: 11,
+            pullRequestNumber: 47,
+            installationId: 7,
+            commentId: 987,
+            commenterLogin: 'maintainer',
+            command: '/ai-review',
+          }),
+        }),
+      );
+      expect(response.status).toBe(202);
+      expect(updates).toEqual([]);
+      expect(reactions).toEqual([]);
+      await expect(stateStore.getDeliveryOutcome('comment-during-cleanup')).resolves.toMatchObject({
+        status: 'cancelled',
+      });
+      await expect(
+        stateStore.claimNextJob({
+          jobId: 'probe-comment-blocked',
+          attempt: 1,
+          occurredAt: '2026-09-12T00:01:00.000Z',
+        }),
+      ).resolves.toEqual({ kind: 'empty' });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('logs a sanitized failure when cancelled Check retry feedback cannot be updated', async () => {
+    const database = new SqliteD1Database();
+    const stateStore = createD1ReviewStateStore(database);
+    try {
+      const cancelled = await stateStore.claimReview({
+        deliveryId: 'delivery-feedback-failed',
+        job: {
+          repositoryId: 11,
+          installationId: 7,
+          pullRequestNumber: 48,
+          baseSha: eligibleEvent.baseSha,
+          headSha: eligibleEvent.headSha,
+          trigger: 'automatic',
+        },
+        occurredAt: '2026-09-12T00:00:00.000Z',
+      });
+      if (cancelled.kind !== 'claimed') throw new Error('cancelled run was not admitted');
+      await stateStore.recordCheckRun?.({ runId: cancelled.runId, checkRunId: 333 });
+      await claimRunnerJob(stateStore, {
+        runId: cancelled.runId,
+        jobId: 'runner-job-feedback-failed',
+        occurredAt: '2026-09-12T00:00:10.000Z',
+      });
+      await stateStore.cancelRun({
+        runId: cancelled.runId,
+        requestedByUid: 1,
+        occurredAt: '2026-09-12T00:00:20.000Z',
+      });
+      const logs: unknown[] = [];
+      const worker = createCoreWorker(coreEnv(database), {
+        stateStore,
+        log: {
+          record: async (event) => {
+            logs.push(event);
+          },
+        },
+        github: {
+          getPullRequest: async () => ({
+            repositoryVisibility: 'public',
+            baseRepositoryId: 11,
+            headRepositoryId: 99,
+            draft: false,
+            baseSha: eligibleEvent.baseSha,
+            headSha: eligibleEvent.headSha,
+          }),
+          getCommenterPermission: async () => 'write',
+          updateCheckRun: async () => {
+            throw new Error('feedback transport exposed private details');
+          },
+          getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+          loadReviewTarget: async () => ({ headSha: eligibleEvent.headSha }),
+        },
+        getReadInstallationToken: async () => ({
+          token: 'read-token',
+          expiresAt: '2026-09-01T01:00:00.000Z',
+        }),
+      });
+
+      const response = await worker.fetch(
+        new Request('https://core.internal/review-events', {
+          method: 'POST',
+          body: JSON.stringify({
+            deliveryId: 'retry-feedback-failure',
+            event: 'check_run',
+            action: 'rerequested',
+            repositoryId: 11,
+            installationId: 7,
+            checkRunId: 333,
+            externalRunId: cancelled.runId,
+            senderLogin: 'maintainer',
+          }),
+        }),
+      );
+      expect(response.status).toBe(202);
+      expect(logs).toContainEqual({
+        phase: 'core',
+        outcome: 'retry_feedback_failed',
+        deliveryId: 'retry-feedback-failure',
+      });
+      expect(JSON.stringify(logs)).not.toContain('private details');
+    } finally {
+      database.close();
+    }
+  });
 
   it('retries a cancelled Check that never dispatched a Sandbox without cleanup feedback', async () => {
     const database = new SqliteD1Database();

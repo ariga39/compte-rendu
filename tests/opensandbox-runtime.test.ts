@@ -14,6 +14,7 @@ import {
 
 const backend = vi.hoisted(() => ({
   managerClosed: false,
+  transportClosed: false,
   directory: false,
   unsafeEntry: null as string | null,
   unsafeType: 'file',
@@ -25,6 +26,8 @@ const backend = vi.hoisted(() => ({
   provisionOnFailedCreate: false,
   listError: null as Error | null,
   listErrorStatus: null as number | null,
+  listStarted: null as (() => void) | null,
+  listGate: null as Promise<void> | null,
   infoError: null as Error | null,
   infoErrorStatus: null as number | null,
   downloadFactory: null as
@@ -51,7 +54,9 @@ vi.mock('@alibaba-group/opensandbox', () => {
   return {
     SandboxApiException,
     ConnectionConfig: class {
-      async closeTransport() {}
+      async closeTransport() {
+        backend.transportClosed = true;
+      }
     },
     Sandbox: {
       create: async (request: { metadata: Record<string, string> }) => {
@@ -130,6 +135,8 @@ vi.mock('@alibaba-group/opensandbox', () => {
           };
         },
         listSandboxInfos: async (filter: { metadata: Record<string, string> }) => {
+          backend.listStarted?.();
+          if (backend.listGate !== null) await backend.listGate;
           if (backend.listErrorStatus !== null) {
             throw new SandboxApiException({ statusCode: backend.listErrorStatus });
           }
@@ -161,6 +168,7 @@ afterEach(async () => {
   backend.created = false;
   backend.directory = false;
   backend.managerClosed = false;
+  backend.transportClosed = false;
   backend.unsafeEntry = null;
   backend.unsafeType = 'file';
   backend.vault = false;
@@ -169,6 +177,8 @@ afterEach(async () => {
   backend.provisionOnFailedCreate = false;
   backend.listError = null;
   backend.listErrorStatus = null;
+  backend.listStarted = null;
+  backend.listGate = null;
   backend.infoError = null;
   backend.infoErrorStatus = null;
   backend.downloadFactory = null;
@@ -658,6 +668,221 @@ describe('OpenSandbox runtime lifecycle', () => {
       expect(runtime.metadata.hostCleanupConfirmed).toBe(true);
     },
   );
+});
+
+describe('OpenSandbox cleanup recovery verification', () => {
+  const absentCommand = (): SandboxCommand =>
+    Object.assign(async () => ({ exitCode: 0, stdout: '', timedOut: false, truncated: false }), {
+      execute: async (operation: SandboxOperation, _diagnostic: unknown, options: {} = {}) =>
+        operation(options),
+    });
+
+  const recoveryFactory = () =>
+    createOpenSandboxRuntimeFactory({
+      endpoint: 'http://127.0.0.1:8080',
+      apiKey: 'control-key',
+      image: 'review-image',
+      lifetimeSeconds: 3600,
+    });
+
+  it('confirms absence only when the owner list is empty, the id is 404 and Docker is absent', async () => {
+    backend.created = false;
+    backend.infoErrorStatus = 404;
+
+    await expect(
+      recoveryFactory().confirmCleanupAbsent?.(
+        {
+          sandboxId: 'sandbox-identity',
+          ownershipNonce: 'test-owner',
+          sandboxName: 'compte-rendu-job-id',
+        },
+        absentCommand(),
+      ),
+    ).resolves.toBeUndefined();
+    expect(backend.managerClosed).toBe(true);
+    expect(backend.transportClosed).toBe(true);
+  });
+
+  it('closes the manager when verification rejects', async () => {
+    backend.listError = new Error('listing failed');
+
+    await expect(
+      recoveryFactory().confirmCleanupAbsent?.(
+        {
+          sandboxId: 'sandbox-identity',
+          ownershipNonce: 'test-owner',
+          sandboxName: 'compte-rendu-job-id',
+        },
+        absentCommand(),
+      ),
+    ).rejects.toThrow();
+    expect(backend.managerClosed).toBe(true);
+    expect(backend.transportClosed).toBe(true);
+  });
+
+  it('closes the manager when verification is interrupted while listing', async () => {
+    let releaseList!: () => void;
+    backend.listGate = new Promise<void>((resolve) => {
+      releaseList = resolve;
+    });
+    let listStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      listStarted = resolve;
+    });
+    backend.listStarted = listStarted;
+    const controller = new AbortController();
+
+    const pending = recoveryFactory().confirmCleanupAbsent?.(
+      {
+        sandboxId: 'sandbox-identity',
+        ownershipNonce: 'test-owner',
+        sandboxName: 'compte-rendu-job-id',
+      },
+      absentCommand(),
+      controller.signal,
+    );
+    await started;
+    controller.abort();
+
+    await expect(pending).rejects.toThrow();
+    expect(backend.managerClosed).toBe(true);
+    expect(backend.transportClosed).toBe(true);
+    releaseList();
+  });
+
+  it('rejects recovery when the ownership nonce listing still has a sandbox', async () => {
+    backend.created = true;
+    backend.owner = 'test-owner';
+    backend.infoErrorStatus = 404;
+
+    await expect(
+      recoveryFactory().confirmCleanupAbsent?.(
+        {
+          sandboxId: 'sandbox-identity',
+          ownershipNonce: 'test-owner',
+          sandboxName: 'compte-rendu-job-id',
+        },
+        absentCommand(),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it('rejects recovery on an arbitrary identity lookup error', async () => {
+    backend.created = false;
+    backend.infoError = new Error('lookup failed');
+
+    await expect(
+      recoveryFactory().confirmCleanupAbsent?.(
+        {
+          sandboxId: 'sandbox-identity',
+          ownershipNonce: 'test-owner',
+          sandboxName: 'compte-rendu-job-id',
+        },
+        absentCommand(),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it('rejects recovery when Docker still sees a workload', async () => {
+    backend.created = false;
+    backend.infoErrorStatus = 404;
+    const command = Object.assign(
+      async (_args: readonly string[]) => ({
+        exitCode: 0,
+        stdout: 'container',
+        timedOut: false,
+        truncated: false,
+      }),
+      {
+        execute: async (operation: SandboxOperation, _diagnostic: unknown, options: {} = {}) =>
+          operation(options),
+      },
+    );
+
+    await expect(
+      recoveryFactory().confirmCleanupAbsent?.(
+        {
+          sandboxId: 'sandbox-identity',
+          ownershipNonce: 'test-owner',
+          sandboxName: 'compte-rendu-job-id',
+        },
+        command,
+      ),
+    ).rejects.toThrow();
+  });
+});
+
+describe('OpenSandbox recovery metadata', () => {
+  it('adopts a single owned sandbox after an ambiguous create and retains its identity', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-os-runtime-'));
+    roots.push(root);
+    const spec = jobSpec(root);
+    await writeFile(spec.modelTokenFile!, 'host-only-grant', { mode: 0o600 });
+    const runtime = createOpenSandboxRuntimeFactory({
+      endpoint: 'http://127.0.0.1:8080',
+      apiKey: 'control-key',
+      image: 'review-image',
+      lifetimeSeconds: 3600,
+    })(spec);
+    backend.failCreate = new Error('ambiguous create');
+    backend.provisionOnFailedCreate = true;
+
+    await expect(runtime.setup(sandboxCommand())).rejects.toThrow();
+
+    expect(runtime.metadata.id).toBe(spec.name);
+    expect(runtime.metadata.ownershipNonce).toBeUndefined();
+
+    await runtime.destroy(sandboxCommand());
+
+    expect(runtime.metadata.id).toBe('sandbox-identity');
+    expect(runtime.metadata.ownershipNonce).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+    );
+  });
+
+  it('keeps an unknown identity when an ambiguous create leaves no owned sandbox', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-os-runtime-'));
+    roots.push(root);
+    const spec = jobSpec(root);
+    await writeFile(spec.modelTokenFile!, 'host-only-grant', { mode: 0o600 });
+    const runtime = createOpenSandboxRuntimeFactory({
+      endpoint: 'http://127.0.0.1:8080',
+      apiKey: 'control-key',
+      image: 'review-image',
+      lifetimeSeconds: 3600,
+    })(spec);
+    backend.failCreate = new Error('ambiguous create');
+
+    await expect(runtime.setup(sandboxCommand())).rejects.toThrow();
+
+    await expect(runtime.destroy(sandboxCommand())).rejects.toThrow();
+
+    expect(runtime.metadata.id).toBe(spec.name);
+    expect(runtime.metadata.ownershipNonce).toBeUndefined();
+    expect(backend.kill).not.toHaveBeenCalled();
+  });
+
+  it('retains the SDK sandbox id and ownership nonce', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-os-runtime-'));
+    roots.push(root);
+    const spec = jobSpec(root);
+    await writeFile(spec.modelTokenFile!, 'host-only-grant', { mode: 0o600 });
+    const runtime = createOpenSandboxRuntimeFactory({
+      endpoint: 'http://127.0.0.1:8080',
+      apiKey: 'control-key',
+      image: 'review-image',
+      lifetimeSeconds: 3600,
+    })(spec);
+
+    await runtime.setup(sandboxCommand());
+
+    expect(runtime.metadata).toMatchObject({
+      id: 'sandbox-identity',
+      ownershipNonce: expect.stringMatching(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+      ),
+    });
+  });
 });
 
 describe('OpenSandbox copyOut diagnostics', () => {

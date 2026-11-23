@@ -127,13 +127,21 @@ alone cannot establish cleanup because OpenSandbox may suppress sidecar removal
 errors. Uncertain cleanup remains failed and blocks replacement work; never
 manually mark it destroyed based only on HTTP 204 or 404.
 
-The existing `/maintenance/recover-cleanup` endpoint supports sbx and
-microsandbox only. OpenSandbox recovery after a failed cleanup requires operational resource
-inspection; automatic recovery reporting is not implemented in this slice.
-[Issue #233](https://github.com/ariga39/compte-rendu/issues/233) tracks recovery
-and full Runner-to-Core acceptance required before production cutover.
-A live control-plane restart was tested, but that does not prove recovery from
-every intermediate create/delete crash point.
+The authenticated `/maintenance/recover-cleanup` endpoint supports sbx,
+microsandbox and OpenSandbox. For OpenSandbox it can confirm recovery after an
+operator has removed the exact owned resources. It requires retained authoritative
+sandbox identity, ownership nonce and confirmed host-file cleanup; it checks both
+the lifecycle API and Docker before reporting recovery to Core. It never deletes
+a workload. See [cleanup recovery](operations.md#recover-failed-cleanup) for
+requirements and the request procedure. Unknown create identity and incomplete
+host-file cleanup cannot be recovered through this endpoint.
+A native OpenSandbox acceptance run reviewed a disposable pull request. Core
+archived the evidence and published the review at the admitted commit. The run
+also verified host-file cleanup and Docker resource absence. The recovery test
+uses retained evidence to release a subsequent claim on the same pull request.
+A live control-plane restart was tested,
+but that does not prove recovery from every intermediate create/delete crash
+point.
 
 See [native probe evidence](archive/opensandbox-native-probe.md) for the tested
 versions and the distinction between verified behavior and remaining checks.
