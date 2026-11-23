@@ -12,6 +12,12 @@ import {
 const EvidenceId = Schema.String.check(
   Schema.isPattern(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i),
 );
+const SandboxRuntimeId = Schema.String.check(
+  Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/),
+);
+const OwnershipNonce = Schema.String.check(
+  Schema.isPattern(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i),
+);
 
 export const ReplayCallbackRequest = Schema.Struct({
   evidenceId: EvidenceId,
@@ -46,8 +52,12 @@ const RunnerManifest = Schema.Struct({
   catalogIdentity: Schema.optional(Schema.String),
   runtime: Schema.optional(Schema.String),
   sandboxName: Schema.optional(Schema.String),
+  sandboxId: Schema.optional(Schema.String),
+  sandboxOwnerNonce: Schema.optional(Schema.String),
   hostCleanupConfirmed: Schema.optional(Schema.Boolean),
+  hostFilesCleanupConfirmed: Schema.optional(Schema.Boolean),
 });
+export type RecoveredManifest = typeof RunnerManifest.Type;
 
 export const CallbackRecoveryReason = Schema.Literals([
   'missing-evidence',
@@ -72,6 +82,7 @@ export type RecoveredCallback = {
   readonly catalogIdentity?: string | undefined;
   readonly body: string;
   readonly callback: typeof RunnerResultCallback.Type;
+  readonly manifest: RecoveredManifest;
 };
 
 const fail = (reason: CallbackRecoveryReason) => Effect.fail(new CallbackRecoveryError({ reason }));
@@ -99,7 +110,11 @@ const artifactBytes = (artifact: {
 export const recoverCallback = Effect.fn('recoverCallback')(function* (
   evidenceRoot: string,
   request: ReplayCallbackRequest,
-  purpose: 'replay' | { readonly cleanupRuntime: 'sbx' | 'microsandbox' } = 'replay',
+  purpose:
+    | 'replay'
+    | {
+        readonly cleanupRuntime: 'sbx' | 'microsandbox' | 'opensandbox';
+      } = 'replay',
 ): Effect.fn.Return<RecoveredCallback, CallbackRecoveryError> {
   const directory = join(evidenceRoot, request.evidenceId);
   const directoryInfo = yield* readStat(directory, 'missing-evidence');
@@ -190,16 +205,27 @@ export const recoverCallback = Effect.fn('recoverCallback')(function* (
     return yield* fail('identity-mismatch');
   }
 
-  if (
-    purpose !== 'replay' &&
-    (callback.status !== 'failed' ||
+  if (purpose !== 'replay') {
+    if (
+      callback.status !== 'failed' ||
       manifest.runtime !== purpose.cleanupRuntime ||
       manifest.sandboxName !== `compte-rendu-${request.jobId}` ||
-      manifest.hostCleanupConfirmed !== true ||
       manifest.cleanup.status !== 'failed' ||
-      callback.sandbox.cleanup !== 'failed')
-  ) {
-    return yield* fail('unsupported-recovery');
+      callback.sandbox.cleanup !== 'failed'
+    ) {
+      return yield* fail('unsupported-recovery');
+    }
+    if (purpose.cleanupRuntime === 'opensandbox') {
+      if (
+        manifest.hostFilesCleanupConfirmed !== true ||
+        Option.isNone(Schema.decodeUnknownOption(SandboxRuntimeId)(manifest.sandboxId)) ||
+        Option.isNone(Schema.decodeUnknownOption(OwnershipNonce)(manifest.sandboxOwnerNonce))
+      ) {
+        return yield* fail('unsupported-recovery');
+      }
+    } else if (manifest.hostCleanupConfirmed !== true) {
+      return yield* fail('unsupported-recovery');
+    }
   }
 
   if (
@@ -229,5 +255,5 @@ export const recoverCallback = Effect.fn('recoverCallback')(function* (
     return yield* fail('result-mismatch');
   }
 
-  return { body: text, callback, catalogIdentity: manifest.catalogIdentity };
+  return { body: text, callback, catalogIdentity: manifest.catalogIdentity, manifest };
 });

@@ -260,15 +260,15 @@ An exhausted terminal callback can leave Core showing a claimed run even after
 local cleanup. Use the explicit recovery operation below; never clear D1 ownership
 or rerun an old Sandbox merely to make the dashboard look settled.
 
-### Recover cleanup after an authentication failure
+### Recover failed cleanup
 
 A failed or superseded run whose cleanup remains unresolved blocks later reviews of the same
 pull request. Restarting Runner does not clear that database ownership. The
 queued task displays “Waiting for previous review cleanup” until the blocker is
 resolved; an ordinary running review does not produce this warning.
 
-After restoring Docker authentication, confirm the original job has stopped and
-identify its exact Sandbox from the retained manifest (`compte-rendu-<jobId>`).
+For sbx, after restoring Docker authentication, confirm the original job has stopped
+and identify its exact Sandbox from the retained manifest (`compte-rendu-<jobId>`).
 Inspect it with `sbx inspect <sandboxName>` and, if it still exists, remove only
 that Sandbox with `sbx rm --force <sandboxName>`. Verify its absence with another
 inspect; authentication or transport failures are not proof of absence. Do not
@@ -288,13 +288,30 @@ curl --fail-with-body --silent --show-error --config "$RUNNER_CURL_CONFIG" \
   "$RUNNER_ORIGIN/maintenance/recover-cleanup"
 ```
 
-This operation accepts retained failed sbx or microsandbox callbacks, including jobs cancelled
-after their Core run was superseded, with valid callback evidence and
-`hostCleanupConfirmed: true` in the manifest. It verifies the immutable identity
-and artifact hashes, requires the exact Sandbox to be absent, removes only its
-scoped sbx network policies and secrets, and revokes its LLM grant when configured.
+This operation accepts retained failed sbx, microsandbox or OpenSandbox callbacks,
+including jobs cancelled after their Core run was superseded, with valid callback
+evidence and the backend-specific host-cleanup confirmation in the manifest. For
+sbx it also removes only its scoped network policies and secrets. It verifies the
+immutable identity and artifact hashes, requires the exact Sandbox to be absent,
+and revokes its LLM grant when configured.
 An existing Sandbox is never deleted by this recovery operation. Authentication
 errors, truncated inventory or failed removal leave cleanup unresolved.
+
+For OpenSandbox, use the retained server-returned `sandboxId` and
+`sandboxOwnerNonce` to inspect the exact owned workload, sidecar and runtime
+volumes. Resolve any remaining owned resources through the configured server
+and Docker daemon before requesting recovery; never remove resources by a shared
+name prefix or use a bulk prune. The manifest must contain
+`hostFilesCleanupConfirmed: true`, which records host-directory removal
+independently of the failed sandbox cleanup. The currently configured runtime
+must match the retained runtime. Runner verifies an empty complete owner listing,
+a lookup of the exact sandbox ID returning 404, and absence of its Docker
+workload, sidecar and runtime volumes, then revokes the job grant. Neither an API
+404 alone nor an unknown create identity proves cleanup. The endpoint only
+verifies absence; it does not delete OpenSandbox workloads. Verification has a
+30-second deadline; a timeout interrupts verification, closes its SDK manager and
+transport, returns 502, keeps cleanup unresolved and releases the local recovery
+lock so the operator can retry.
 
 The original callback, manifest and terminal failure stay unchanged. Runner writes
 `cleanup-recovery.json` separately and sends an authenticated recovery report.

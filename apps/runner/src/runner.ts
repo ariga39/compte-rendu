@@ -737,6 +737,7 @@ type RunnerJob = {
   sandboxAttempted: boolean;
   sandboxCreated: boolean;
   hostCleanupConfirmed?: boolean;
+  hostFilesCleanupConfirmed?: boolean;
   sessionIds: string[];
   multiReview?: RunnerMultiReviewEvidence;
   sandboxRuntime?: JobSandboxRuntime;
@@ -2351,6 +2352,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
     }
     const hostClean = await removeHostDirectories(job);
     const clean = sandboxClean && hostClean;
+    job.hostFilesCleanupConfirmed = hostClean;
     job.hostCleanupConfirmed =
       hostClean &&
       (!job.sandboxAttempted || job.sandboxRuntime?.metadata.hostCleanupConfirmed === true);
@@ -3365,6 +3367,9 @@ export const createRunner = (options: RunnerOptions = {}) => {
             sandboxId: job.sandboxRuntime?.metadata.id ?? job.sandboxName,
             catalogIdentity: job.sandboxRuntime?.metadata.catalogIdentity,
             sandboxRuntimeName: job.sandboxRuntime?.metadata.name ?? job.sandboxName,
+            ...(job.sandboxRuntime?.metadata.ownershipNonce === undefined
+              ? {}
+              : { sandboxOwnerNonce: job.sandboxRuntime.metadata.ownershipNonce }),
             runtime: job.sandboxRuntime?.metadata.runtime ?? sandboxRuntime.kind,
             evidenceId,
             runId: job.input.runId,
@@ -3470,6 +3475,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
             evidenceFailure,
             cleanup: { status: cleaned ? 'destroyed' : 'failed' },
             hostCleanupConfirmed: job.hostCleanupConfirmed === true,
+            hostFilesCleanupConfirmed: job.hostFilesCleanupConfirmed === true,
             files: await evidenceFiles(evidencePath),
           });
           manifestFinalized = true;
@@ -3712,14 +3718,15 @@ export const createRunner = (options: RunnerOptions = {}) => {
       recoveringCleanup.add(input.jobId);
       try {
         const kind = sandboxRuntime.kind;
-        if (kind !== 'sbx' && kind !== 'microsandbox')
+        if (kind !== 'sbx' && kind !== 'microsandbox' && kind !== 'opensandbox')
           return jsonResponse(409, { error: 'cleanup recovery rejected' });
         const recovered = await Effect.runPromise(
           recoverCallback(evidenceRoot, input, { cleanupRuntime: kind }).pipe(Effect.option),
         );
         if (Option.isNone(recovered))
           return jsonResponse(409, { error: 'cleanup recovery rejected' });
-        const sandboxName = `compte-rendu-${input.jobId}`;
+        const manifest = recovered.value.manifest;
+        const sandboxName = manifest.sandboxName ?? `compte-rendu-${input.jobId}`;
         const recoveryCommand: SandboxCommand = (args, _diagnostic, options) =>
           executeProcess(sandboxPortPath, args, {
             ...options,
@@ -3729,13 +3736,37 @@ export const createRunner = (options: RunnerOptions = {}) => {
             maxBytes: 256 * 1024,
             timeoutMs: CLEANUP_COMMAND_TIMEOUT_MS,
           });
-        if (kind === 'microsandbox')
+        if (kind === 'microsandbox') {
           await confirmMicrosandboxAbsent(
             recoveryCommand,
             sandboxName,
             recovered.value.catalogIdentity,
           );
-        else await Effect.runPromise(confirmSbxCleanup(sandboxName, input.jobId, recoveryCommand));
+        } else if (kind === 'sbx') {
+          await Effect.runPromise(confirmSbxCleanup(sandboxName, input.jobId, recoveryCommand));
+        } else {
+          const confirmCleanupAbsent = sandboxRuntimeFactory.confirmCleanupAbsent;
+          const sandboxId = manifest.sandboxId;
+          const ownershipNonce = manifest.sandboxOwnerNonce;
+          if (
+            confirmCleanupAbsent === undefined ||
+            sandboxId === undefined ||
+            ownershipNonce === undefined
+          ) {
+            return jsonResponse(409, { error: 'cleanup recovery rejected' });
+          }
+          await Effect.runPromise(
+            Effect.tryPromise({
+              try: (signal) =>
+                confirmCleanupAbsent(
+                  { sandboxId, ownershipNonce, sandboxName },
+                  recoveryCommand,
+                  signal,
+                ),
+              catch: () => new Error('cleanup recovery not confirmed'),
+            }).pipe(Effect.timeout(CLEANUP_COMMAND_TIMEOUT_MS)),
+          );
+        }
         const marker = await readGrantMarker(grantMarkerPath(input.jobId));
         if (marker.kind === 'invalid') throw new Error('grant recovery marker invalid');
         if (marker.kind === 'present' || llmServiceClient !== undefined) {

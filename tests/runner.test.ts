@@ -11,6 +11,11 @@ import {
   type RunnerProcessResult,
 } from '../apps/runner/src/runner';
 import { createCoreWorker } from '../apps/core/src/core-worker';
+import type {
+  JobSandboxRuntime,
+  SandboxJobSpec,
+  SandboxRuntimeFactory,
+} from '../apps/runner/src/sandbox-runtime';
 import { createD1ReviewStateStore } from '../apps/core/src/index';
 import { SqliteD1Database } from './support/d1-database';
 import { claimRunnerJob } from './support/runner-claim';
@@ -12119,6 +12124,212 @@ describe('Runner confirmed cleanup recovery', () => {
       if (previousHome === undefined) delete process.env.MSB_HOME;
       else process.env.MSB_HOME = previousHome;
       await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('bounds a hanging OpenSandbox verifier and releases recovery', async () => {
+    const evidenceRoot = await mkdtemp(join(tmpdir(), 'cr-os-cleanup-recovery-'));
+    const socketRoot = await mkdtemp(join(tmpdir(), 'cr-os-recovery-llm-'));
+    try {
+      const result = await runAgentScenario({
+        runId: 'run-os-cleanup-recovery',
+        output: finalMarkdownJsonl(),
+        cleanupFailure: true,
+        evidenceRoot,
+      });
+      const evidenceId = result.terminal.evidenceId as string;
+      const callbackPath = join(evidenceRoot, evidenceId, 'callback.json');
+      const callback = JSON.parse(await readFile(callbackPath, 'utf8'));
+      const manifest = JSON.parse(
+        Buffer.from(callback.evidence.manifest.content, 'base64').toString('utf8'),
+      );
+      manifest.runtime = 'opensandbox';
+      manifest.sandboxId = 'sandbox-identity';
+      manifest.sandboxOwnerNonce = '11111111-1111-1111-1111-111111111111';
+      manifest.hostFilesCleanupConfirmed = true;
+      const manifestBytes = Buffer.from(JSON.stringify(manifest));
+      callback.evidence.manifest = {
+        content: manifestBytes.toString('base64'),
+        size: manifestBytes.length,
+        sha256: createHash('sha256').update(manifestBytes).digest('hex'),
+      };
+      await writeFile(callbackPath, JSON.stringify(callback));
+      const original = await readFile(callbackPath, 'utf8');
+
+      let mode: 'success' | 'remaining' | 'hang' = 'success';
+      let verifiedIdentity: unknown;
+      let verifierAborted = false;
+      let verifierStarted: (() => void) | undefined;
+      const started = new Promise<void>((resolve) => {
+        verifierStarted = resolve;
+      });
+      const confirmCleanupAbsent = async (
+        identity: unknown,
+        _command: unknown,
+        signal?: AbortSignal,
+      ) => {
+        verifiedIdentity = identity;
+        if (mode === 'remaining') throw new Error('sandbox remains');
+        if (mode === 'hang') {
+          verifierStarted?.();
+          return new Promise<void>((_resolve, reject) => {
+            signal?.addEventListener(
+              'abort',
+              () => {
+                verifierAborted = true;
+                reject(new Error('verifier aborted'));
+              },
+              { once: true },
+            );
+          });
+        }
+      };
+      const runtimeFactory: SandboxRuntimeFactory = Object.assign(
+        (_spec: SandboxJobSpec): JobSandboxRuntime => {
+          throw new Error('runtime factory is not used during recovery');
+        },
+        { confirmCleanupAbsent },
+      );
+      const apiKeyFile = join(socketRoot, 'control-key');
+      await writeFile(apiKeyFile, 'control-key', { mode: 0o600 });
+      const reports: Request[] = [];
+      const runner = createProductionRunnerWithMergeBase({
+        authToken: 'runner-test-token',
+        evidenceRoot,
+        claimUrl: '',
+        llmRelay: true,
+        llmRelayGeneration: 'generation-a',
+        sandboxRuntime: 'opensandbox',
+        opensandbox: {
+          endpoint: 'http://127.0.0.1:8080',
+          apiKeyFile,
+          image: 'review-image',
+        },
+        modelConfig: JSON.stringify({
+          id: 'opencode-go/review',
+          baseUrl: 'https://llm.internal.example/v1',
+          definition: { name: 'Review' },
+        }),
+        callbackFetch: async (input, init) => {
+          const url = new URL(input instanceof Request ? input.url : input.toString());
+          if (url.pathname.startsWith('/runner-llm/')) {
+            return new Response(null, {
+              status: url.pathname.endsWith('/revoke') ? 204 : 200,
+            });
+          }
+          reports.push(new Request(input, init));
+          return new Response(null, { status: 202 });
+        },
+        process: async () => ({ exitCode: 0, stdout: '', timedOut: false, truncated: false }),
+        sandboxRuntimeFactory: runtimeFactory,
+      });
+      const recoveryRequest = (runId = manifest.runId) =>
+        new Request('http://runner/maintenance/recover-cleanup', {
+          method: 'POST',
+          headers: {
+            authorization: 'Bearer runner-test-token',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            evidenceId,
+            jobId: manifest.jobId,
+            runId,
+            attempt: manifest.attempt,
+            baseSha: manifest.baseSha,
+            headSha: manifest.headSha,
+          }),
+        });
+      try {
+        const missingIdentity = JSON.parse(original);
+        const missingManifest = JSON.parse(
+          Buffer.from(missingIdentity.evidence.manifest.content, 'base64').toString('utf8'),
+        );
+        missingManifest.sandboxId = missingManifest.sandboxName;
+        delete missingManifest.sandboxOwnerNonce;
+        const missingBytes = Buffer.from(JSON.stringify(missingManifest));
+        missingIdentity.evidence.manifest = {
+          content: missingBytes.toString('base64'),
+          size: missingBytes.length,
+          sha256: createHash('sha256').update(missingBytes).digest('hex'),
+        };
+        await writeFile(callbackPath, JSON.stringify(missingIdentity));
+        expect((await runner.handle(recoveryRequest())).status).toBe(409);
+        expect(reports).toHaveLength(0);
+        await writeFile(callbackPath, original);
+
+        expect((await runner.handle(recoveryRequest('other-run'))).status).toBe(409);
+        expect(reports).toHaveLength(0);
+
+        mode = 'remaining';
+        expect((await runner.handle(recoveryRequest())).status).toBe(502);
+        expect(reports).toHaveLength(0);
+
+        mode = 'hang';
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date', 'performance'] });
+        try {
+          let timedOut: Response | undefined;
+          const hanging = runner.handle(recoveryRequest()).then((response) => {
+            timedOut = response;
+          });
+          await started;
+          for (let elapsed = 0; elapsed < 31_000 && timedOut === undefined; elapsed += 1000) {
+            vi.advanceTimersByTime(1000);
+            await vi.advanceTimersByTimeAsync(0);
+          }
+          expect(timedOut?.status).toBe(502);
+          await hanging;
+          await vi.advanceTimersByTimeAsync(0);
+          expect(verifierAborted).toBe(true);
+          expect(reports).toHaveLength(0);
+          const drained = await runner.handle(
+            new Request('http://runner/maintenance/drain', {
+              method: 'POST',
+              headers: { authorization: 'Bearer runner-test-token' },
+            }),
+          );
+          expect(drained.status).toBe(200);
+          expect(await drained.json()).toMatchObject({ draining: true, drained: true });
+        } finally {
+          vi.useRealTimers();
+        }
+
+        mode = 'success';
+        const accepted = await runner.handle(recoveryRequest());
+        expect(accepted.status).toBe(202);
+        expect(verifiedIdentity).toEqual({
+          sandboxId: 'sandbox-identity',
+          ownershipNonce: '11111111-1111-1111-1111-111111111111',
+          sandboxName: manifest.sandboxName,
+        });
+        expect(reports).toHaveLength(1);
+        expect(new URL(reports[0]!.url).pathname).toBe('/runner-cleanup-recovery');
+        const report = await reports[0]!.json();
+        expect(report).toMatchObject({
+          runId: manifest.runId,
+          jobId: manifest.jobId,
+          attempt: manifest.attempt,
+          evidenceId,
+          baseSha: manifest.baseSha,
+          headSha: manifest.headSha,
+          sandboxName: manifest.sandboxName,
+        });
+        expect(report).not.toHaveProperty('sandboxId');
+        expect(report).not.toHaveProperty('sandboxOwnerNonce');
+        expect(await readFile(callbackPath, 'utf8')).toBe(original);
+        expect(
+          JSON.parse(
+            await readFile(join(evidenceRoot, evidenceId, 'cleanup-recovery.json'), 'utf8'),
+          ),
+        ).toMatchObject({ jobId: manifest.jobId, sandboxName: manifest.sandboxName });
+
+        expect((await runner.handle(recoveryRequest())).status).toBe(202);
+        expect(reports).toHaveLength(2);
+      } finally {
+        await runner.close();
+      }
+    } finally {
+      await rm(socketRoot, { recursive: true, force: true });
+      await rm(evidenceRoot, { recursive: true, force: true });
     }
   });
 
