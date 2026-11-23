@@ -2047,6 +2047,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
     return run;
   };
   let sandboxRecovery = startSandboxRecovery();
+  const startupSandboxRecovery = sandboxRecovery;
   retrySandboxRecovery = () => {
     if (closed || sandboxRecovered !== false) return;
     claimGateFailureLogged = false;
@@ -4189,6 +4190,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
 
   const openshellConfiguration =
     sandboxRuntime.kind === 'openshell' ? sandboxRuntime.openshell : undefined;
+  const microsandboxPreflight = sandboxRuntime.kind === 'microsandbox';
   const runtimePreflight =
     sandboxRuntime.microsandboxImage !== undefined
       ? createMicrosandboxPreflight(sandboxRuntime.microsandboxImage)
@@ -4196,8 +4198,10 @@ export const createRunner = (options: RunnerOptions = {}) => {
         ? undefined
         : createOpenShellPreflight(openshellConfiguration);
   let preflightPromise: Promise<boolean> | undefined;
+  let preflightRetryAt = 0;
   const ensurePreflight = async (): Promise<boolean> => {
     if (runtimePreflight === undefined) return true;
+    if (microsandboxPreflight && Date.now() < preflightRetryAt) return false;
     preflightPromise ??= runtimePreflight((args, _diagnostic, options) =>
       executeProcess(sandboxPortPath, args, {
         env: options?.env ?? strippedSandboxEnvironment,
@@ -4206,7 +4210,24 @@ export const createRunner = (options: RunnerOptions = {}) => {
         timeoutMs: 30 * 1000,
         maxBytes: MAX_DIAGNOSTIC_STDERR_BYTES * 64,
       }),
-    );
+    )
+      .then((ready) => {
+        if (ready) {
+          preflightRetryAt = 0;
+          return true;
+        }
+        if (microsandboxPreflight) {
+          preflightPromise = undefined;
+          preflightRetryAt = Date.now() + CLEANUP_RECOVERY_RETRY_INTERVAL_MS;
+        }
+        return false;
+      })
+      .catch((error) => {
+        if (!microsandboxPreflight) throw error;
+        preflightPromise = undefined;
+        preflightRetryAt = Date.now() + CLEANUP_RECOVERY_RETRY_INTERVAL_MS;
+        return false;
+      });
     return preflightPromise;
   };
 
@@ -4420,10 +4441,11 @@ export const createRunner = (options: RunnerOptions = {}) => {
   // once, not on every poll, and keep the existing gate behavior unchanged.
   const recordClaimGateFailure = async (
     reason: 'grant-recovery-failed' | 'sandbox-recovery-failed' | 'runtime-preflight-failed',
+    pollingHalted = true,
   ) => {
     if (claimGateFailureLogged) return;
     claimGateFailureLogged = true;
-    await recordLog({ phase: 'runner', outcome: 'claim', reason, pollingHalted: true });
+    await recordLog({ phase: 'runner', outcome: 'claim', reason, pollingHalted });
   };
 
   const claimNextJob = async () => {
@@ -4432,6 +4454,11 @@ export const createRunner = (options: RunnerOptions = {}) => {
       await recordClaimGateFailure('grant-recovery-failed');
       return;
     }
+    // The captured first scan settles once; later polls await an already
+    // settled promise. A false result from unrelated records does not gate;
+    // backendOutage below carries a real backend outage.
+    await startupSandboxRecovery.catch(() => undefined);
+    if (closed) return;
     let needsCleanupRecovery = [...jobs.values()].some((job) => job.cleanupRecoveryPending);
     if (backendOutage) {
       if (!(await probeSbxAccess())) {
@@ -4470,6 +4497,11 @@ export const createRunner = (options: RunnerOptions = {}) => {
     }
 
     if (!(await ensurePreflight())) {
+      if (microsandboxPreflight) {
+        await recordClaimGateFailure('runtime-preflight-failed', false);
+        scheduleClaim();
+        return;
+      }
       claimPollingHalted = true;
       await recordClaimGateFailure('runtime-preflight-failed');
       return;

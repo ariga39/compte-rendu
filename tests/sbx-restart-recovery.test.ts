@@ -295,6 +295,49 @@ describe('Runner sbx startup reconciliation', () => {
     }
   });
 
+  it('waits for the initial ownership scan before the first claim', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-sbx-startup-gate-'));
+    roots.push(root);
+    vi.stubEnv('TMPDIR', root);
+    const spec = jobSpec(root, 'job-startup-gate');
+    await mkdir(spec.checkoutRoot, { recursive: true });
+    await mkdir(spec.configRoot, { recursive: true });
+    const runtime = createSbxRuntimeFactory({
+      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
+      ownershipRoot: ownershipRoot(root),
+    })(spec);
+    await runtime.setup(setupCommand(spec, null));
+
+    let scanStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      scanStarted = resolve;
+    });
+    let releaseScan!: () => void;
+    const scanGate = new Promise<void>((resolve) => {
+      releaseScan = resolve;
+    });
+    const runner = createSbxRunner({
+      ...runnerOptions(root, async (args) => {
+        if (args[0] === 'inspect') {
+          scanStarted();
+          await scanGate;
+          return notFound(spec.name);
+        }
+        return ok;
+      }),
+    });
+    try {
+      await started;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(claimGate(runner).claimRequests).toHaveLength(0);
+      releaseScan();
+      await claimGateOpen(runner);
+    } finally {
+      releaseScan();
+      await runner.close();
+    }
+  });
+
   it('reconciles an interrupted setup that never created a Sandbox without touching policies', async () => {
     const root = await mkdtemp(join(tmpdir(), 'cr-sbx-restart-'));
     roots.push(root);
