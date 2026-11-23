@@ -239,7 +239,7 @@ normal claiming automatically only after its startup scan succeeds.
 
 The explicit cleanup recovery is not a general repair for invalid or foreign
 markers. It accepts only a retained failed-cleanup job for the active
-sbx/microsandbox runtime where the request and evidence match the exact
+sbx, microsandbox or OpenSandbox runtime where the request and evidence match the exact
 job/run/attempt/evidence/SHAs, host cleanup was confirmed, and both the retained
 manifest and callback still record failed cleanup. Any marker it uses must match
 the active issuer/generation; an invalid marker or any mismatch is rejected. On

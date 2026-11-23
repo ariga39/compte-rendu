@@ -813,7 +813,7 @@ describe('OpenSandbox cleanup recovery verification', () => {
 });
 
 describe('OpenSandbox recovery metadata', () => {
-  it('does not authorize recovery when an ambiguous create has no authoritative id', async () => {
+  it('adopts a single owned sandbox after an ambiguous create and retains its identity', async () => {
     const root = await mkdtemp(join(tmpdir(), 'cr-os-runtime-'));
     roots.push(root);
     const spec = jobSpec(root);
@@ -831,6 +831,35 @@ describe('OpenSandbox recovery metadata', () => {
 
     expect(runtime.metadata.id).toBe(spec.name);
     expect(runtime.metadata.ownershipNonce).toBeUndefined();
+
+    await runtime.destroy(sandboxCommand());
+
+    expect(runtime.metadata.id).toBe('sandbox-identity');
+    expect(runtime.metadata.ownershipNonce).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+    );
+  });
+
+  it('keeps an unknown identity when an ambiguous create leaves no owned sandbox', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-os-runtime-'));
+    roots.push(root);
+    const spec = jobSpec(root);
+    await writeFile(spec.modelTokenFile!, 'host-only-grant', { mode: 0o600 });
+    const runtime = createOpenSandboxRuntimeFactory({
+      endpoint: 'http://127.0.0.1:8080',
+      apiKey: 'control-key',
+      image: 'review-image',
+      lifetimeSeconds: 3600,
+    })(spec);
+    backend.failCreate = new Error('ambiguous create');
+
+    await expect(runtime.setup(sandboxCommand())).rejects.toThrow();
+
+    await expect(runtime.destroy(sandboxCommand())).rejects.toThrow();
+
+    expect(runtime.metadata.id).toBe(spec.name);
+    expect(runtime.metadata.ownershipNonce).toBeUndefined();
+    expect(backend.kill).not.toHaveBeenCalled();
   });
 
   it('retains the SDK sandbox id and ownership nonce', async () => {
