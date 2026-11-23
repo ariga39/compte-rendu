@@ -131,11 +131,19 @@ are not hot-reloaded. Claims are single-flight; ambiguous claim responses halt
 polling rather than risk duplicate ownership.
 
 Authenticated private maintenance endpoints pause new claims and direct admission
-without cancelling jobs or in-flight claim reservations. Drain status includes
-work through cleanup and callback delivery; unconfirmed cleanup or a halted claim
-loop prevents a drained report. Resume changes only the maintenance pause and
-preserves capacity and ownership guards. This pause is in-memory and resets on
-process restart. See [maintenance operations](operations.md#drain-before-maintenance).
+without cancelling jobs or in-flight claim reservations. Before claiming, Runner
+scans its pending grant markers and revokes each recorded grant through its
+original issuer. A failed, invalid or foreign marker keeps admission and claims
+closed, and drain cannot report complete until that startup scan succeeds. The
+scan runs at startup; explicit cleanup recovery retries it after resolving the
+job's grant, while resume changes only the maintenance pause. A successful scan is
+not continuous. A terminal revocation failure after startup fails the job without
+a vote and leaves its marker for the next startup or recovery. Drain status
+includes work through cleanup and callback delivery; unconfirmed cleanup or a
+halted claim loop prevents a drained report. An unconfirmed revocation does not
+outlive the grant's fixed lifetime. This pause is in-memory and resets on process
+restart. See
+[maintenance operations](operations.md#drain-before-maintenance).
 
 Runner retains the final callback body privately before bounded delivery when
 the evidence directory is available. An

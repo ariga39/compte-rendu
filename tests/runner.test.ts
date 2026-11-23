@@ -8968,6 +8968,7 @@ describe('Runner LLM lifecycle failures', () => {
     f.relay.setRejectRevoke(true);
     const evidenceRoot = join(f.root, 'evidence');
     const callbacks: Request[] = [];
+    let activeRunner: ReturnType<typeof createRunner> | undefined;
     let restarted: ReturnType<typeof createRunner> | undefined;
     try {
       const result = await runAgentScenario({
@@ -8977,6 +8978,9 @@ describe('Runner LLM lifecycle failures', () => {
         relayControl: f.relay,
         evidenceRoot,
         callbackRequests: callbacks,
+        onRunner: (runner) => {
+          activeRunner = runner;
+        },
       });
       expect(result.terminal).toMatchObject({
         status: 'failed',
@@ -8986,6 +8990,21 @@ describe('Runner LLM lifecycle failures', () => {
       expect((await callbacks[0].json()).result).toBeUndefined();
       expect(f.relay.revoked).toEqual([]);
       expect(f.relay.activeTokens.size).toBe(1);
+      // A failed terminal revocation leaves a startup marker, but confirmed
+      // Sandbox destruction still lets this process drain. The next startup
+      // resolves the marker before accepting work.
+      const drain = await activeRunner!.handle(
+        new Request('http://runner/maintenance/drain', {
+          method: 'POST',
+          headers: { authorization: 'Bearer runner-test-token' },
+        }),
+      );
+      expect(await drain.json()).toMatchObject({
+        draining: true,
+        drained: true,
+        cleanupBlockedJobs: 0,
+        claimPollingHalted: false,
+      });
       let unexpectedClaim = false;
       const blocked = createRunner({
         ...relayOptions(f.relay),
@@ -9118,6 +9137,20 @@ describe('Runner LLM lifecycle failures', () => {
           headers: { authorization: 'Bearer runner-test-token' },
         });
       expect(await (await restarted.handle(maintenanceRequest('drain'))).json()).toMatchObject({
+        drained: false,
+        claimPollingHalted: true,
+      });
+      // Resume only clears the pause. It must not retry or clear the failed
+      // startup grant scan, so the claim gate stays closed.
+      expect(await (await restarted.handle(maintenanceRequest('resume'))).json()).toMatchObject({
+        draining: false,
+        drained: false,
+        claimPollingHalted: true,
+      });
+      expect(claims).toBe(0);
+      expect(f.relay.activeTokens.size).toBe(1);
+      expect(await (await restarted.handle(maintenanceRequest('drain'))).json()).toMatchObject({
+        draining: true,
         drained: false,
         claimPollingHalted: true,
       });
