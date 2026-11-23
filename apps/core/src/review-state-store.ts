@@ -1,4 +1,8 @@
-import { REVIEW_PROGRESS_STAGES, type RunnerProgressMilestone } from '@compte-rendu/contracts';
+import {
+  REVIEW_ATTEMPT_BUDGET_MS,
+  REVIEW_PROGRESS_STAGES,
+  type RunnerProgressMilestone,
+} from '@compte-rendu/contracts';
 import type { ReviewDecision } from '@compte-rendu/contracts';
 import { ReviewConfiguration, ReviewModelSelection } from '@compte-rendu/contracts';
 import { Option, Schema } from 'effect';
@@ -341,32 +345,147 @@ const mapMetadataRow = (row: MetadataDbRow): RepositoryMetadataRow => ({
   updatedAt: row.updated_at,
 });
 
-const samePullRequestBlockingClause = (candidate: string, current: string) =>
+const claimExpiryCutoff = (occurredAt: string) => {
+  const occurredMillis = Date.parse(occurredAt);
+  return Number.isFinite(occurredMillis)
+    ? new Date(occurredMillis - REVIEW_ATTEMPT_BUDGET_MS).toISOString()
+    : '1970-01-01T00:00:00.000Z';
+};
+
+// A running claim blocks only for its execution budget. Terminal owners keep
+// their unresolved cleanup status and identity without serializing the PR
+// forever; a later verification can still correct them.
+const samePullRequestBlockingClause = (candidate: string, current: string, expiredBefore: string) =>
   `${candidate}.installation_id = ${current}.installation_id
     AND ${candidate}.repository_id = ${current}.repository_id
     AND ${candidate}.pull_request_number = ${current}.pull_request_number
     AND ${candidate}.runner_job_id IS NOT NULL
     AND (
-      (${candidate}.status = 'scheduled'
-        OR (${candidate}.status IN ('superseded', 'cancelled')
-          AND ${candidate}.runner_cleanup_status IS NOT 'destroyed'))
-      OR ${candidate}.runner_cleanup_status IN ('pending', 'failed')
+      ${candidate}.status = 'scheduled'
+      OR (
+        ${candidate}.status IN ('failed', 'superseded', 'cancelled')
+        AND ${candidate}.runner_cleanup_status IN ('pending', 'failed')
+        AND (${candidate}.claimed_at IS NULL OR ${candidate}.claimed_at > '${expiredBefore}')
+      )
     )`;
 
-const queueBlockReasonColumn = `CASE WHEN r.status = 'scheduled' AND r.runner_job_id IS NULL
+const STALE_CLAIM_SWEEP_LIMIT = 64;
+const staleScheduledRunPage = `SELECT run_id, delivery_id, check_run_id FROM review_runs
+  WHERE status = 'scheduled' AND runner_job_id IS NOT NULL
+    AND claimed_at IS NOT NULL AND claimed_at <= ?
+    AND (result_received_at IS NULL OR result_received_at <= ?)
+    AND publication_started_at IS NULL
+    AND (publication_claimed_at IS NULL OR publication_claimed_at <= ?)
+  ORDER BY claimed_at ASC, run_id ASC
+  LIMIT ?`;
+
+// Expire at most one bounded page per admission or claim attempt. The terminal
+// Check delivery is enqueued from the same page before the run transitions; the
+// existing reconciliation publishes it even when the Runner never returns.
+const expireStaleScheduledClaims = async (database: D1DatabaseLike, occurredAt: string) => {
+  const expiredBefore = claimExpiryCutoff(occurredAt);
+  const expired = await database
+    .prepare(`SELECT run_id FROM (${staleScheduledRunPage}) LIMIT 1`)
+    .bind(expiredBefore, expiredBefore, expiredBefore, STALE_CLAIM_SWEEP_LIMIT)
+    .first<{ run_id: string }>();
+  if (expired === null) return;
+  await database.batch([
+    database
+      .prepare(
+        `INSERT INTO review_check_deliveries
+           (run_id, check_run_id, status, created_at, attempted_at)
+         SELECT run_id, check_run_id, 'pending', ?, ?
+         FROM (${staleScheduledRunPage})
+         WHERE check_run_id IS NOT NULL
+         ON CONFLICT(run_id) DO UPDATE SET status = 'pending',
+           attempted_at = excluded.attempted_at, confirmed_at = NULL
+         WHERE review_check_deliveries.check_run_id = excluded.check_run_id
+           AND review_check_deliveries.status = 'pending'`,
+      )
+      .bind(
+        occurredAt,
+        occurredAt,
+        expiredBefore,
+        expiredBefore,
+        expiredBefore,
+        STALE_CLAIM_SWEEP_LIMIT,
+      ),
+    database
+      .prepare(
+        `UPDATE deliveries SET status = 'failed', updated_at = ?
+         WHERE status = 'scheduled' AND delivery_id IN (
+           SELECT delivery_id FROM (${staleScheduledRunPage})
+         )`,
+      )
+      .bind(occurredAt, expiredBefore, expiredBefore, expiredBefore, STALE_CLAIM_SWEEP_LIMIT),
+    database
+      .prepare(
+        `UPDATE review_runs SET status = 'failed', updated_at = ?, terminal_at = COALESCE(terminal_at, ?),
+           runner_job_id = CASE WHEN claim_prepared = 0 AND runner_claim_request_id IS NOT NULL THEN NULL ELSE runner_job_id END,
+           runner_attempt = CASE WHEN claim_prepared = 0 AND runner_claim_request_id IS NOT NULL THEN NULL ELSE runner_attempt END,
+           runner_cleanup_status = CASE WHEN claim_prepared = 0 AND runner_claim_request_id IS NOT NULL THEN NULL ELSE runner_cleanup_status END,
+           failure_phase = 'scheduling', failure_reason = 'timeout'
+         WHERE run_id IN (
+           SELECT run_id FROM (${staleScheduledRunPage})
+         )`,
+      )
+      .bind(
+        occurredAt,
+        occurredAt,
+        expiredBefore,
+        expiredBefore,
+        expiredBefore,
+        STALE_CLAIM_SWEEP_LIMIT,
+      ),
+  ]);
+};
+
+const claimResultFromRow = (row: ClaimRow, replay: boolean, occurredAt: string) => ({
+  ...(replay ? { replay: true as const } : {}),
+  kind: 'claimed' as const,
+  runId: row.run_id,
+  jobId: row.runner_job_id,
+  attempt: row.runner_attempt,
+  claimedAt: row.claimed_at ?? occurredAt,
+  job: {
+    ...(row.review_configuration === null
+      ? {}
+      : {
+          reviewConfiguration: Schema.decodeUnknownSync(Schema.fromJsonString(ReviewConfiguration))(
+            row.review_configuration,
+          ),
+        }),
+    repositoryId: row.repository_id,
+    pullRequestNumber: row.pull_request_number,
+    installationId: row.installation_id,
+    baseSha: row.base_sha as ReviewJob['baseSha'],
+    headSha: row.head_sha as ReviewJob['headSha'],
+    trigger: row.trigger,
+    ...(row.comment_id == null ? {} : { commentId: row.comment_id }),
+    ...(row.repository_visibility_snapshot == null
+      ? {}
+      : { repositoryVisibility: row.repository_visibility_snapshot }),
+    ...(row.base_ref == null ? {} : { baseRef: row.base_ref }),
+    ...(row.head_ref == null ? {} : { headRef: row.head_ref }),
+  },
+});
+
+const queueBlockReasonColumn = (
+  expiredBefore: string,
+) => `CASE WHEN r.status = 'scheduled' AND r.runner_job_id IS NULL
   AND EXISTS (
     SELECT 1 FROM review_runs AS blocker
-    WHERE ${samePullRequestBlockingClause('blocker', 'r')}
+    WHERE ${samePullRequestBlockingClause('blocker', 'r', expiredBefore)}
       AND blocker.rowid <> r.rowid
       AND blocker.status IN ('failed', 'superseded', 'cancelled')
       AND blocker.runner_cleanup_status IN ('pending', 'failed')
   ) THEN 'cleanup' ELSE NULL END AS queue_block_reason`;
 
-const publicRunColumns = `
+const publicRunColumns = (expiredBefore: string) => `
   r.run_id, r.status, r.installation_id, r.repository_id, r.pull_request_number,
   r.base_sha, r.head_sha, r.base_ref, r.head_ref, r.review_decision,
   r.created_at, r.claimed_at, r.terminal_at, r.result_received_at, r.publication_started_at, r.runner_job_id, r.failure_phase, r.failure_reason, r.failure_http_status,
-  r.runner_cleanup_status, ${queueBlockReasonColumn},
+  r.runner_cleanup_status, ${queueBlockReasonColumn(expiredBefore)},
   r.progress_stage, r.progress_received_at, r.progress_milestones,
   r.execution_started_at, r.submission_completed_at, r.cleanup_completed_at,
   r.repository_visibility_snapshot, r.legacy_public_verified_at,
@@ -633,6 +752,8 @@ const createStore = (
   },
 
   claimReview: async ({ deliveryId, job, occurredAt, approval }) => {
+    const expiredBefore = claimExpiryCutoff(occurredAt);
+    await expireStaleScheduledClaims(database, occurredAt);
     const runId = crypto.randomUUID();
     const statements: D1PreparedStatementLike[] = [
       database
@@ -710,7 +831,11 @@ const createStore = (
                      AND (
                        status = 'failed'
                        OR (status = 'cancelled'
-                         AND (runner_job_id IS NULL OR runner_cleanup_status = 'destroyed'))
+                         AND (
+                           runner_job_id IS NULL
+                           OR runner_cleanup_status = 'destroyed'
+                           OR (claimed_at IS NOT NULL AND claimed_at <= ?)
+                         ))
                      )
                  )
                )
@@ -746,6 +871,7 @@ const createStore = (
           job.repositoryId,
           job.pullRequestNumber,
           job.headSha,
+          expiredBefore,
         ),
       database
         .prepare(
@@ -872,16 +998,14 @@ const createStore = (
       job.trigger === 'manual'
         ? await database
             .prepare(
-              `SELECT runner_cleanup_status FROM review_runs
-               WHERE installation_id = ? AND repository_id = ? AND pull_request_number = ?
-                 AND runner_job_id IS NOT NULL
-                 AND status IN ('failed', 'superseded', 'cancelled')
-                 AND (
-                   (status IN ('superseded', 'cancelled')
-                     AND runner_cleanup_status IS NOT 'destroyed')
-                   OR runner_cleanup_status IN ('pending', 'failed')
-                 )
-               ORDER BY CASE runner_cleanup_status WHEN 'failed' THEN 0 ELSE 1 END
+              `SELECT blocker.runner_cleanup_status
+               FROM review_runs AS blocker
+               CROSS JOIN (
+                 SELECT ? AS installation_id, ? AS repository_id, ? AS pull_request_number
+               ) AS retry
+               WHERE ${samePullRequestBlockingClause('blocker', 'retry', claimExpiryCutoff(occurredAt))}
+                 AND blocker.status IN ('failed', 'superseded', 'cancelled')
+               ORDER BY CASE blocker.runner_cleanup_status WHEN 'failed' THEN 0 ELSE 1 END
                LIMIT 1`,
             )
             .bind(job.installationId, job.repositoryId, job.pullRequestNumber)
@@ -959,39 +1083,42 @@ const createStore = (
   },
 
   claimNextJob: async ({ jobId, requestId, attempt, occurredAt }) => {
-    let row = await database
-      .prepare(
-        `UPDATE review_runs
-         SET runner_job_id = ?, runner_attempt = ?, runner_claim_request_id = ?, runner_cleanup_status = 'pending',
-           updated_at = ?, claimed_at = COALESCE(claimed_at, ?)
-         WHERE NOT EXISTS (SELECT 1 FROM review_runs WHERE runner_claim_request_id = ?) AND run_id = (
-           SELECT run_id FROM review_runs
-           WHERE status = 'scheduled' AND runner_job_id IS NULL
-             AND NOT EXISTS (
-               SELECT 1 FROM review_runs AS active
-               WHERE ${samePullRequestBlockingClause('active', 'review_runs')}
-             )
-           ORDER BY created_at ASC, rowid ASC
-           LIMIT 1
-         )
-         RETURNING run_id, installation_id, repository_id, pull_request_number,
-           base_sha, head_sha, trigger, comment_id, runner_job_id, runner_attempt,
-           repository_visibility_snapshot, base_ref, head_ref, review_configuration,
-           claimed_at`,
-      )
-      .bind(jobId, attempt, requestId ?? null, occurredAt, occurredAt, requestId ?? null)
-      .first<ClaimRow>();
+    const expiredBefore = claimExpiryCutoff(occurredAt);
+    const selectClaim = () =>
+      database
+        .prepare(
+          `UPDATE review_runs
+           SET runner_job_id = ?, runner_attempt = ?, runner_claim_request_id = ?, runner_cleanup_status = 'pending',
+             updated_at = ?, claimed_at = COALESCE(claimed_at, ?)
+           WHERE NOT EXISTS (SELECT 1 FROM review_runs WHERE runner_claim_request_id = ?) AND run_id = (
+             SELECT run_id FROM review_runs
+             WHERE status = 'scheduled' AND runner_job_id IS NULL
+               AND NOT EXISTS (
+                 SELECT 1 FROM review_runs AS active
+                 WHERE ${samePullRequestBlockingClause('active', 'review_runs', expiredBefore)}
+               )
+             ORDER BY created_at ASC, rowid ASC
+             LIMIT 1
+           )
+           RETURNING run_id, installation_id, repository_id, pull_request_number,
+             base_sha, head_sha, trigger, comment_id, runner_job_id, runner_attempt,
+             repository_visibility_snapshot, base_ref, head_ref, review_configuration,
+             claimed_at`,
+        )
+        .bind(jobId, attempt, requestId ?? null, occurredAt, occurredAt, requestId ?? null)
+        .first<ClaimRow>();
 
-    const replay = row === null && requestId !== undefined;
-    if (row === null && requestId !== undefined) {
-      const existing = await database
-        .prepare(`SELECT run_id, installation_id, repository_id, pull_request_number,
-           base_sha, head_sha, trigger, comment_id, runner_job_id, runner_attempt,
-           repository_visibility_snapshot, base_ref, head_ref, review_configuration,
-           claimed_at, claim_prepared FROM review_runs WHERE runner_claim_request_id = ? AND runner_job_id IS NOT NULL AND runner_attempt = ? AND status = 'scheduled'`)
-        .bind(requestId, attempt)
-        .first<ClaimRow & { claim_prepared: number }>();
-      if (!existing) return { kind: 'empty' as const };
+    const existing =
+      requestId === undefined
+        ? null
+        : await database
+            .prepare(`SELECT run_id, installation_id, repository_id, pull_request_number,
+               base_sha, head_sha, trigger, comment_id, runner_job_id, runner_attempt,
+               repository_visibility_snapshot, base_ref, head_ref, review_configuration,
+               claimed_at, claim_prepared FROM review_runs WHERE runner_claim_request_id = ? AND runner_job_id IS NOT NULL AND runner_attempt = ? AND status = 'scheduled'`)
+            .bind(requestId, attempt)
+            .first<ClaimRow & { claim_prepared: number }>();
+    if (existing !== null) {
       if (!existing.claim_prepared)
         return {
           kind: 'preparing' as const,
@@ -999,56 +1126,17 @@ const createStore = (
           runId: existing.run_id,
           claimedAt: existing.claimed_at!,
         };
-      row = existing;
+      return claimResultFromRow(existing, true, occurredAt);
     }
+
+    // Sweep before fresh selection: unrelated eligible work must not starve a
+    // pull request whose stale claim is past the execution budget.
+    await expireStaleScheduledClaims(database, occurredAt);
+    const row = await selectClaim();
     if (row === null) return { kind: 'empty' as const };
-    return {
-      ...(replay && { replay: true as const }),
-      kind: 'claimed' as const,
-      runId: row.run_id,
-      jobId: row.runner_job_id,
-      attempt: row.runner_attempt,
-      claimedAt: row.claimed_at ?? occurredAt,
-      job: {
-        ...(row.review_configuration === null
-          ? {}
-          : {
-              reviewConfiguration: Schema.decodeUnknownSync(
-                Schema.fromJsonString(ReviewConfiguration),
-              )(row.review_configuration),
-            }),
-        repositoryId: row.repository_id,
-        pullRequestNumber: row.pull_request_number,
-        installationId: row.installation_id,
-        baseSha: row.base_sha as ReviewJob['baseSha'],
-        headSha: row.head_sha as ReviewJob['headSha'],
-        trigger: row.trigger,
-        ...(row.comment_id == null ? {} : { commentId: row.comment_id }),
-        ...(row.repository_visibility_snapshot == null
-          ? {}
-          : { repositoryVisibility: row.repository_visibility_snapshot }),
-        ...(row.base_ref == null ? {} : { baseRef: row.base_ref }),
-        ...(row.head_ref == null ? {} : { headRef: row.head_ref }),
-      },
-    };
+    return claimResultFromRow(row, false, occurredAt);
   },
 
-  expireClaimHandoff: async (runId, jobId, attempt, occurredAt) => {
-    const [run] = await database.batch([
-      database
-        .prepare(`UPDATE review_runs SET status = 'failed', updated_at = ?, terminal_at = ?,
-        failure_phase = 'scheduling', failure_reason = 'timeout',
-        runner_job_id = NULL, runner_attempt = NULL, runner_cleanup_status = NULL
-        WHERE run_id = ? AND runner_job_id = ? AND runner_attempt = ? AND status = 'scheduled' AND publication_claimed_at IS NULL`)
-        .bind(occurredAt, occurredAt, runId, jobId, attempt),
-      database
-        .prepare(
-          `UPDATE deliveries SET status = 'failed', updated_at = ? WHERE status = 'scheduled' AND delivery_id = (SELECT delivery_id FROM review_runs WHERE run_id = ? AND status = 'failed')`,
-        )
-        .bind(occurredAt, runId),
-    ]);
-    return run?.meta.changes === 1;
-  },
   markClaimPrepared: async (runId, jobId, attempt) => {
     const result = await database
       .prepare(
@@ -1082,9 +1170,15 @@ const createStore = (
                 `UPDATE review_runs
                  SET runner_job_id = NULL, runner_attempt = NULL, runner_cleanup_status = NULL
                  WHERE run_id = ? AND runner_job_id = ? AND runner_attempt = ?
-                   AND status = 'failed'`,
+                   AND status = 'failed'
+                   AND (? = 0 OR (claim_prepared = 0 AND runner_claim_request_id IS NOT NULL))`,
               )
-              .bind(runId, releaseRunnerClaim.jobId, releaseRunnerClaim.attempt),
+              .bind(
+                runId,
+                releaseRunnerClaim.jobId,
+                releaseRunnerClaim.attempt,
+                releaseRunnerClaim.requireUnprepared === true ? 1 : 0,
+              ),
           ]),
       database
         .prepare(
@@ -1611,6 +1705,7 @@ const createStore = (
   },
 
   getPublicOverview: async ({ since, limit }) => {
+    const expiredBefore = claimExpiryCutoff(new Date().toISOString());
     const result = await database
       .prepare(`WITH totals AS (SELECT
         COUNT(CASE WHEN status = 'scheduled' AND runner_job_id IS NULL THEN 1 END) AS queued,
@@ -1620,7 +1715,7 @@ const createStore = (
         COUNT(CASE WHEN status = 'cancelled' AND created_at >= ? THEN 1 END) AS cancelledLast24h,
         COUNT(CASE WHEN ${cleanupAttentionClause} THEN 1 END) AS cleanupAttention
         FROM review_runs r),
-      current AS (SELECT ${publicRunColumns} ${publicRunFrom}
+      current AS (SELECT ${publicRunColumns(expiredBefore)} ${publicRunFrom}
         WHERE r.status = 'scheduled'
         ORDER BY ${dispatchPriority} ASC, r.created_at ASC, r.run_id ASC LIMIT ?)
       SELECT totals.*, current.* FROM totals LEFT JOIN current ON TRUE
@@ -1644,6 +1739,7 @@ const createStore = (
   },
 
   listPublicRuns: async ({ limit, cursor, filter, view }) => {
+    const expiredBefore = claimExpiryCutoff(new Date().toISOString());
     const { clauses, params } = buildPublicRunWhere(filter, view, cursor);
     const where = clauses.length === 0 ? '' : `WHERE ${clauses.join(' AND ')}`;
     const order =
@@ -1651,15 +1747,20 @@ const createStore = (
         ? `ORDER BY ${dispatchPriority} ASC, r.created_at ASC, r.run_id ASC`
         : `ORDER BY r.created_at DESC, r.run_id DESC`;
     const rows = await database
-      .prepare(`SELECT ${publicRunColumns} ${publicRunFrom} ${where} ${order} LIMIT ?`)
+      .prepare(
+        `SELECT ${publicRunColumns(expiredBefore)} ${publicRunFrom} ${where} ${order} LIMIT ?`,
+      )
       .bind(...params, limit)
       .all<PublicRunDbRow>();
     return rows.results.map(mapPublicRun);
   },
 
   getPublicRun: async (runId) => {
+    const expiredBefore = claimExpiryCutoff(new Date().toISOString());
     const row = await database
-      .prepare(`SELECT ${publicRunColumns}, r.model_usage ${publicRunFrom} WHERE r.run_id = ?`)
+      .prepare(
+        `SELECT ${publicRunColumns(expiredBefore)}, r.model_usage ${publicRunFrom} WHERE r.run_id = ?`,
+      )
       .bind(runId)
       .first<PublicRunDbRow>();
     return row === null ? undefined : mapPublicRun(row);

@@ -71,6 +71,8 @@ describe('cancellation migration', () => {
 
     try {
       database.migrateThrough('0015_review_cancellation.sql');
+      // The store reads current columns; apply later additive migrations too.
+      database.migrateThrough();
       const store = createD1ReviewStateStore(database);
       await expect(
         store.cancelRun({

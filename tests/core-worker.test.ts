@@ -190,6 +190,24 @@ const postHogTestDefaults = {
   },
 } as const;
 
+const runnerClaimRequest = () =>
+  new Request('https://core.internal/runner-claims', {
+    method: 'POST',
+    headers: { 'x-compte-rendu-runner-claim': 'verified' },
+  });
+
+const scheduleEligibleReview = (
+  worker: ReturnType<typeof createCoreWorker>,
+  headSha: string,
+  deliveryId: string,
+) =>
+  worker.fetch(
+    new Request('https://core.internal/review-events', {
+      method: 'POST',
+      body: JSON.stringify({ ...eligibleEvent, headSha, deliveryId }),
+    }),
+  );
+
 const claimGithub = (headSha: string | (() => string) = eligibleEvent.headSha) => ({
   getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
   loadReviewTarget: async () => ({
@@ -1564,7 +1582,7 @@ describe('Core Worker', () => {
     try {
       await checkStarted.promise;
       expect((await scheduling).status).toBe(202);
-      const claim = await worker.fetch(claimRequest());
+      const claim = await worker.fetch(runnerClaimRequest());
       expect(claim.status).toBe(200);
       expect(await claim.json()).toMatchObject({
         id: expect.stringMatching(/^[0-9a-f-]{36}$/),
@@ -3402,6 +3420,7 @@ describe('Core Worker', () => {
       vi.useFakeTimers({ toFake: ['Date'] });
       vi.setSystemTime(new Date('2026-09-01T00:00:00Z'));
       const database = new SqliteD1Database();
+      const stateStore = createD1ReviewStateStore(database);
       const env = coreEnv(database);
       let unblock!: () => void;
       let began!: () => void;
@@ -3457,11 +3476,19 @@ describe('Core Worker', () => {
           expect((await firstResponse).status).not.toBe(200);
           expect((await worker.fetch(request())).status).toBe(204);
           expect(checks).toContain('failure');
+          const unpreparedRun = database.database
+            .prepare('SELECT run_id FROM review_runs')
+            .get() as { run_id: string };
+          const unprepared = await stateStore.getRunOutcome(unpreparedRun.run_id);
+          expect(unprepared?.status).toBe('failed');
+          expect(unprepared?.runnerJobId).toBeUndefined();
+          expect(unprepared?.cleanup).toBeUndefined();
           return;
         }
         unblock();
         const first = await firstResponse;
         expect(first.status).toBe(200);
+        const assigned = (await first.clone().json()) as { id: string; runId: string };
         // A prepared replay resends the same handoff even if the head moved.
         currentHead = '3333333333333333333333333333333333333333';
         const replay = await createCoreWorker(env, dependencies).fetch(request());
@@ -3473,6 +3500,10 @@ describe('Core Worker', () => {
         vi.setSystemTime(new Date('2026-09-01T01:31:00Z'));
         expect((await worker.fetch(request())).status).toBe(204);
         expect(checks).toContain('failure');
+        const prepared = await stateStore.getRunOutcome(assigned.runId);
+        expect(prepared?.status).toBe('failed');
+        expect(prepared?.runnerJobId).toBe(assigned.id);
+        expect(prepared?.cleanup).toBe('pending');
       } finally {
         unblock();
         database.close();
@@ -3480,6 +3511,521 @@ describe('Core Worker', () => {
       }
     },
   );
+
+  it.each(['prepared', 'legacy'] as const)(
+    'reruns a same-pull-request review after a lost claim reaches the existing deadline (%s)',
+    async (mode) => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-09-01T00:00:00Z'));
+      const database = new SqliteD1Database();
+      const stateStore = createD1ReviewStateStore(database);
+      const env = {
+        ...coreEnv(database),
+        EVIDENCE_BUCKET: { put: async () => undefined },
+      };
+      let currentHead = eligibleEvent.headSha;
+      const checkUpdates: Array<{ runId: string; status: string }> = [];
+      const worker = createCoreWorker(env, {
+        stateStore,
+        github: {
+          ...claimGithub(() => currentHead),
+          createCheckRun: async () => ({ id: 321 }),
+          updateCheckRun: async ({ runId, status }: { runId: string; status: string }) => {
+            checkUpdates.push({ runId, status });
+          },
+        },
+        getReadInstallationToken: async () => ({
+          token: 'repository-read-token',
+          expiresAt: '2026-09-01T01:20:00.000Z',
+        }),
+      });
+      const preparedClaimRequest = () =>
+        new Request('https://core.internal/runner-claims', {
+          method: 'POST',
+          headers: { 'x-compte-rendu-runner-claim': 'verified' },
+          body: JSON.stringify({ requestId: '5b0f4f8e-6a1d-4f6e-9c2b-3d4e5f6a7b8c' }),
+        });
+      const callbackRequest = (body: string) =>
+        new Request('https://core.internal/runner-results', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-compte-rendu-runner-callback': 'verified',
+          },
+          body,
+        });
+      try {
+        expect(
+          (await scheduleEligibleReview(worker, eligibleEvent.headSha, 'delivery-liveness-old'))
+            .status,
+        ).toBe(202);
+        const claim = await worker.fetch(
+          mode === 'legacy' ? runnerClaimRequest() : preparedClaimRequest(),
+        );
+        expect(claim.status).toBe(200);
+        const old = (await claim.json()) as { id: string; runId: string; attempt: number };
+        await vi.waitFor(async () =>
+          expect((await stateStore.getRunOutcome(old.runId))?.checkRunId).toBe(321),
+        );
+
+        // The original Runner neither polls again nor delivers a result.
+        vi.setSystemTime(new Date('2026-09-01T01:31:00Z'));
+        currentHead = '3333333333333333333333333333333333333333';
+        expect(
+          (await scheduleEligibleReview(worker, currentHead, 'delivery-liveness-new')).status,
+        ).toBe(202);
+
+        const replacement = await worker.fetch(runnerClaimRequest());
+        expect(replacement.status).toBe(200);
+        const fresh = (await replacement.json()) as {
+          headSha: string;
+          id: string;
+          runId: string;
+          attempt: number;
+        };
+        expect(fresh.headSha).toBe(currentHead);
+        expect(fresh.id).not.toBe(old.id);
+
+        const expired = await stateStore.getRunOutcome(old.runId);
+        expect(expired).toMatchObject({
+          status: 'failed',
+          runnerJobId: old.id,
+          cleanup: 'pending',
+        });
+        expect((await stateStore.getRunOutcome(fresh.runId))?.status).toBe('scheduled');
+        expect(
+          (
+            await stateStore.getPublicOverview!({
+              since: '2026-09-01T00:00:00.000Z',
+              limit: 10,
+            })
+          ).counts.cleanupAttention,
+        ).toBe(1);
+
+        // The existing terminal Check delivery publishes the abandoned failure.
+        await worker.reconcileCheckDeliveries(Date.now());
+        expect(checkUpdates).toContainEqual({ runId: old.runId, status: 'failure' });
+
+        // A late original result still matches ownership, but its terminal row
+        // cannot complete over the replacement.
+        expect(
+          (
+            await worker.fetch(
+              callbackRequest(await successfulCallback(old.runId, old.id, old.attempt)),
+            )
+          ).status,
+        ).toBe(202);
+        const late = await stateStore.getRunOutcome(old.runId);
+        expect(late?.status).toBe('failed');
+        expect(late?.decision).toBeUndefined();
+        expect(late?.cleanup).toBe('destroyed');
+        expect((await stateStore.getRunOutcome(fresh.runId))?.status).toBe('scheduled');
+      } finally {
+        database.close();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it('releases an unprepared expired claim without retaining a cleanup obligation', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-01T00:00:00Z'));
+    const database = new SqliteD1Database();
+    const stateStore = createD1ReviewStateStore(database);
+    let currentHead = eligibleEvent.headSha;
+    const worker = createCoreWorker(coreEnv(database), {
+      stateStore,
+      github: claimGithub(() => currentHead),
+      getReadInstallationToken: async () => ({
+        token: 'repository-read-token',
+        expiresAt: '2026-09-01T01:20:00.000Z',
+      }),
+    });
+    try {
+      const scheduled = await stateStore.claimReview({
+        deliveryId: 'delivery-unprepared-expiry',
+        job: {
+          repositoryId: eligibleEvent.repositoryId,
+          pullRequestNumber: eligibleEvent.pullRequestNumber,
+          installationId: eligibleEvent.installationId,
+          baseSha: eligibleEvent.baseSha,
+          headSha: eligibleEvent.headSha,
+          trigger: 'automatic',
+        },
+        occurredAt: '2026-09-01T00:00:00.000Z',
+      });
+      if (scheduled.kind !== 'claimed') throw new Error('unprepared claim was not scheduled');
+      const claimed = await stateStore.claimNextJob({
+        jobId: 'unprepared-job',
+        requestId: '4c8a6e2f-0b1d-4e3a-8f5c-6d7e8f9a0b1c',
+        attempt: 1,
+        occurredAt: '2026-09-01T00:00:01.000Z',
+      });
+      if (claimed.kind !== 'claimed') throw new Error('unprepared claim was not assigned');
+
+      vi.setSystemTime(new Date('2026-09-01T01:31:00Z'));
+      currentHead = '3333333333333333333333333333333333333333';
+      expect(
+        (await scheduleEligibleReview(worker, currentHead, 'delivery-unprepared-successor')).status,
+      ).toBe(202);
+      const replacement = await worker.fetch(runnerClaimRequest());
+      expect(replacement.status).toBe(200);
+      expect(await replacement.json()).toMatchObject({ headSha: currentHead });
+
+      const expired = await stateStore.getRunOutcome(scheduled.runId);
+      expect(expired?.status).toBe('failed');
+      expect(expired?.runnerJobId).toBeUndefined();
+      expect(expired?.cleanup).toBeUndefined();
+      expect(
+        (
+          await stateStore.getPublicOverview!({
+            since: '2026-09-01T00:00:00.000Z',
+            limit: 10,
+          })
+        ).counts.cleanupAttention,
+      ).toBe(0);
+    } finally {
+      database.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it('sweeps a stale claim before selecting unrelated eligible work', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-01T00:00:00Z'));
+    const database = new SqliteD1Database();
+    const stateStore = createD1ReviewStateStore(database);
+    const job = (pullRequestNumber: number, headSha: string) => ({
+      repositoryId: 11,
+      pullRequestNumber,
+      installationId: 7,
+      baseSha: eligibleEvent.baseSha,
+      headSha,
+      trigger: 'automatic' as const,
+    });
+    try {
+      const stale = await stateStore.claimReview({
+        deliveryId: 'delivery-starvation-stale',
+        job: job(71, eligibleEvent.headSha),
+        occurredAt: '2026-09-01T00:00:00.000Z',
+      });
+      if (stale.kind !== 'claimed') throw new Error('stale run was not scheduled');
+      const staleJob = await stateStore.claimNextJob({
+        jobId: 'starvation-stale-job',
+        attempt: 1,
+        occurredAt: '2026-09-01T00:00:01.000Z',
+      });
+      if (staleJob.kind !== 'claimed') throw new Error('stale run was not claimed');
+
+      const successor = await stateStore.claimReview({
+        deliveryId: 'delivery-starvation-successor',
+        job: job(71, '3333333333333333333333333333333333333333'),
+        occurredAt: '2026-09-01T00:00:02.000Z',
+      });
+      if (successor.kind !== 'claimed') throw new Error('successor was not scheduled');
+      const unrelated = await stateStore.claimReview({
+        deliveryId: 'delivery-starvation-unrelated',
+        job: job(72, eligibleEvent.headSha),
+        occurredAt: '2026-09-01T00:00:03.000Z',
+      });
+      if (unrelated.kind !== 'claimed') throw new Error('unrelated work was not scheduled');
+
+      vi.setSystemTime(new Date('2026-09-01T01:31:00Z'));
+      await expect(
+        stateStore.claimNextJob({
+          jobId: 'starvation-after-deadline',
+          attempt: 1,
+          occurredAt: '2026-09-01T01:31:00.000Z',
+        }),
+      ).resolves.toMatchObject({
+        kind: 'claimed',
+        runId: successor.runId,
+        job: { pullRequestNumber: 71, headSha: '3333333333333333333333333333333333333333' },
+      });
+      await expect(stateStore.getRunOutcome(stale.runId)).resolves.toMatchObject({
+        status: 'failed',
+      });
+      await expect(
+        stateStore.claimNextJob({
+          jobId: 'starvation-unrelated-claim',
+          attempt: 1,
+          occurredAt: '2026-09-01T01:31:00.000Z',
+        }),
+      ).resolves.toMatchObject({
+        kind: 'claimed',
+        runId: unrelated.runId,
+        job: { pullRequestNumber: 72 },
+      });
+    } finally {
+      database.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it('checks unprepared expiry at the release write instead of trusting the earlier claim kind', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-01T00:00:00Z'));
+    const database = new SqliteD1Database();
+    const stateStore = createD1ReviewStateStore(database);
+    const requestId = '2a4b6c8d-1e3f-4a5b-9c0d-2e4f6a8b0c1d';
+    const racingStore: typeof stateStore = {
+      ...stateStore,
+      markSchedulingFailed: async (input) => {
+        // Preparation can finish after claimNextJob reported `preparing` but
+        // before the expiry transition reaches the store.
+        database.database
+          .prepare('UPDATE review_runs SET claim_prepared = 1 WHERE run_id = ?')
+          .run(input.runId);
+        return stateStore.markSchedulingFailed(input);
+      },
+    };
+    const worker = createCoreWorker(coreEnv(database), {
+      stateStore: racingStore,
+      github: claimGithub(),
+      getReadInstallationToken: async () => ({
+        token: 'repository-read-token',
+        expiresAt: '2026-09-01T01:20:00.000Z',
+      }),
+    });
+    try {
+      const scheduled = await stateStore.claimReview({
+        deliveryId: 'delivery-expiry-prepared-race',
+        job: {
+          repositoryId: eligibleEvent.repositoryId,
+          pullRequestNumber: eligibleEvent.pullRequestNumber,
+          installationId: eligibleEvent.installationId,
+          baseSha: eligibleEvent.baseSha,
+          headSha: eligibleEvent.headSha,
+          trigger: 'automatic',
+        },
+        occurredAt: '2026-09-01T00:00:00.000Z',
+      });
+      if (scheduled.kind !== 'claimed') throw new Error('race claim was not scheduled');
+      const claimed = await stateStore.claimNextJob({
+        jobId: 'race-job',
+        requestId,
+        attempt: 1,
+        occurredAt: '2026-09-01T00:00:01.000Z',
+      });
+      if (claimed.kind !== 'claimed') throw new Error('race claim was not assigned');
+
+      vi.setSystemTime(new Date('2026-09-01T01:31:00Z'));
+      const response = await worker.fetch(
+        new Request('https://core.internal/runner-claims', {
+          method: 'POST',
+          headers: { 'x-compte-rendu-runner-claim': 'verified' },
+          body: JSON.stringify({ requestId }),
+        }),
+      );
+      expect(response.status).toBe(204);
+      const expired = await stateStore.getRunOutcome(scheduled.runId);
+      expect(expired?.status).toBe('failed');
+      expect(expired?.runnerJobId).toBe('race-job');
+      expect(expired?.cleanup).toBe('pending');
+    } finally {
+      database.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it('expires abandoned failure publication locks without stealing fresh results or active publication', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-01T00:00:00Z'));
+    const database = new SqliteD1Database();
+    const stateStore = createD1ReviewStateStore(database);
+    const scheduleAndClaim = async (pullRequestNumber: number) => {
+      const scheduled = await stateStore.claimReview({
+        deliveryId: `delivery-expiry-selector-${pullRequestNumber}`,
+        job: {
+          repositoryId: 11,
+          pullRequestNumber,
+          installationId: 7,
+          baseSha: eligibleEvent.baseSha,
+          headSha: eligibleEvent.headSha,
+          trigger: 'automatic',
+        },
+        occurredAt: '2026-09-01T00:00:00.000Z',
+      });
+      if (scheduled.kind !== 'claimed') throw new Error('selector run was not scheduled');
+      const assigned = await stateStore.claimNextJob({
+        jobId: `selector-job-${pullRequestNumber}`,
+        attempt: 1,
+        occurredAt: '2026-09-01T00:00:01.000Z',
+      });
+      if (assigned.kind !== 'claimed') throw new Error('selector run was not assigned');
+      return { runId: scheduled.runId, jobId: assigned.jobId };
+    };
+    try {
+      const freshResult = await scheduleAndClaim(61);
+      const staleFailure = await scheduleAndClaim(62);
+      const activePublication = await scheduleAndClaim(63);
+
+      await stateStore.recordResultReceived!({
+        runId: freshResult.runId,
+        jobId: freshResult.jobId,
+        attempt: 1,
+        occurredAt: '2026-09-01T00:50:00.000Z',
+      });
+      await stateStore.claimRunPublication!({
+        runId: staleFailure.runId,
+        occurredAt: '2026-09-01T00:05:00.000Z',
+      });
+      await stateStore.claimRunPublication!({
+        runId: activePublication.runId,
+        occurredAt: '2026-09-01T00:05:00.000Z',
+        publishing: true,
+      });
+
+      vi.setSystemTime(new Date('2026-09-01T01:40:00Z'));
+      await expect(
+        stateStore.claimNextJob({
+          jobId: 'selector-sweep-probe',
+          attempt: 1,
+          occurredAt: '2026-09-01T01:40:00.000Z',
+        }),
+      ).resolves.toEqual({ kind: 'empty' });
+
+      expect((await stateStore.getRunOutcome(freshResult.runId))?.status).toBe('scheduled');
+      expect((await stateStore.getRunOutcome(staleFailure.runId))?.status).toBe('failed');
+      expect((await stateStore.getRunOutcome(activePublication.runId))?.status).toBe('scheduled');
+    } finally {
+      database.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['cancelled', 'superseded'] as const)(
+    'releases a stale %s owner with unresolved cleanup only after the claim deadline',
+    async (terminal) => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-09-01T00:00:00Z'));
+      const database = new SqliteD1Database();
+      const stateStore = createD1ReviewStateStore(database);
+      let currentHead = eligibleEvent.headSha;
+      const worker = createCoreWorker(coreEnv(database), {
+        stateStore,
+        github: claimGithub(() => currentHead),
+        getReadInstallationToken: async () => ({
+          token: 'repository-read-token',
+          expiresAt: '2026-09-01T01:20:00.000Z',
+        }),
+      });
+      try {
+        expect(
+          (
+            await scheduleEligibleReview(
+              worker,
+              eligibleEvent.headSha,
+              `delivery-stale-${terminal}`,
+            )
+          ).status,
+        ).toBe(202);
+        const claim = await worker.fetch(runnerClaimRequest());
+        expect(claim.status).toBe(200);
+        const old = (await claim.json()) as { id: string; runId: string; attempt: number };
+        if (terminal === 'cancelled') {
+          await stateStore.cancelRun({
+            runId: old.runId,
+            requestedByUid: 1,
+            occurredAt: '2026-09-01T00:00:01.000Z',
+          });
+        } else {
+          await stateStore.markRunSuperseded({
+            runId: old.runId,
+            occurredAt: '2026-09-01T00:00:01.000Z',
+          });
+        }
+
+        currentHead = '3333333333333333333333333333333333333333';
+        vi.setSystemTime(new Date('2026-09-01T00:05:00Z'));
+        expect(
+          (await scheduleEligibleReview(worker, currentHead, `delivery-stale-next-${terminal}`))
+            .status,
+        ).toBe(202);
+        expect((await worker.fetch(runnerClaimRequest())).status).toBe(204);
+
+        vi.setSystemTime(new Date('2026-09-01T01:31:00Z'));
+        const replacement = await worker.fetch(runnerClaimRequest());
+        expect(replacement.status).toBe(200);
+        expect(await replacement.json()).toMatchObject({ headSha: currentHead });
+        await expect(stateStore.getRunOutcome(old.runId)).resolves.toMatchObject({
+          status: terminal,
+          runnerJobId: old.id,
+          cleanup: 'pending',
+        });
+        expect(
+          (
+            await stateStore.getPublicOverview!({
+              since: '2026-09-01T00:00:00.000Z',
+              limit: 10,
+            })
+          ).counts.cleanupAttention,
+        ).toBe(1);
+      } finally {
+        database.close();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it('keeps automatic same-SHA eligibility while allowing a manual retry after the deadline', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-01T00:00:00Z'));
+    const database = new SqliteD1Database();
+    const stateStore = createD1ReviewStateStore(database);
+    const worker = createCoreWorker(coreEnv(database), {
+      stateStore,
+      github: claimGithub(),
+      getReadInstallationToken: async () => ({
+        token: 'repository-read-token',
+        expiresAt: '2026-09-01T01:20:00.000Z',
+      }),
+    });
+    const job = {
+      repositoryId: eligibleEvent.repositoryId,
+      pullRequestNumber: eligibleEvent.pullRequestNumber,
+      installationId: eligibleEvent.installationId,
+      baseSha: eligibleEvent.baseSha,
+      headSha: eligibleEvent.headSha,
+      trigger: 'automatic' as const,
+    };
+    try {
+      expect(
+        (await scheduleEligibleReview(worker, eligibleEvent.headSha, 'delivery-same-sha-old'))
+          .status,
+      ).toBe(202);
+      const claim = await worker.fetch(runnerClaimRequest());
+      expect(claim.status).toBe(200);
+      const old = (await claim.json()) as { id: string; runId: string; attempt: number };
+      vi.setSystemTime(new Date('2026-09-01T01:31:00Z'));
+
+      const automatic = await stateStore.claimReview({
+        deliveryId: 'delivery-same-sha-automatic',
+        job,
+        occurredAt: '2026-09-01T01:31:00.000Z',
+      });
+      expect(automatic.kind).not.toBe('claimed');
+      const expired = await stateStore.getRunOutcome(old.runId);
+      expect(expired?.status).toBe('failed');
+      expect(expired?.cleanup).toBe('pending');
+
+      const manual = await stateStore.claimReview({
+        deliveryId: 'delivery-same-sha-manual',
+        job: { ...job, trigger: 'manual' },
+        occurredAt: '2026-09-01T01:31:00.000Z',
+      });
+      expect(manual.kind).toBe('claimed');
+      if (manual.kind !== 'claimed') throw new Error('manual retry was not scheduled');
+
+      const rerun = await worker.fetch(runnerClaimRequest());
+      expect(rerun.status).toBe(200);
+      expect(await rerun.json()).toMatchObject({ headSha: eligibleEvent.headSha });
+      expect((await stateStore.getRunOutcome(manual.runId))?.status).toBe('scheduled');
+    } finally {
+      database.close();
+      vi.useRealTimers();
+    }
+  });
 
   it('derives the deadline from the durable claim time and passes the read-token expiry', async () => {
     const database = new SqliteD1Database();
@@ -5477,6 +6023,8 @@ describe('Core Worker', () => {
   it.each(['pending', 'failed'] as const)(
     'explains a cancelled Check retry while cleanup is %s and retries after confirmation',
     async (initialCleanup) => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-09-12T00:00:00Z'));
       const database = new SqliteD1Database();
       const stateStore = createD1ReviewStateStore(database);
       try {
@@ -5580,6 +6128,7 @@ describe('Core Worker', () => {
         ).resolves.toEqual({ kind: 'empty' });
 
         await stateStore.recordEvidence({ runId, evidence, sandboxCleanup: 'destroyed' });
+        vi.setSystemTime(new Date('2026-09-12T00:01:05Z'));
         expect((await retry(`retry-${initialCleanup}-recovered`)).status).toBe(202);
         expect(updates).toHaveLength(1);
         const claim = await worker.fetch(
@@ -5595,11 +6144,14 @@ describe('Core Worker', () => {
         });
       } finally {
         database.close();
+        vi.useRealTimers();
       }
     },
   );
 
   it('reports the actual newer cleanup blocker when an older cancelled Check is retried', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-12T00:01:05Z'));
     const database = new SqliteD1Database();
     const stateStore = createD1ReviewStateStore(database);
     try {
@@ -5740,6 +6292,101 @@ describe('Core Worker', () => {
       expect(claimed.runId).not.toBe(newer.runId);
     } finally {
       database.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not report a stale cleanup as a manual retry blocker', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-12T00:00:00Z'));
+    const database = new SqliteD1Database();
+    const stateStore = createD1ReviewStateStore(database);
+    try {
+      const initial = await stateStore.claimReview({
+        deliveryId: 'delivery-stale-clear-retry',
+        job: {
+          repositoryId: 11,
+          installationId: 7,
+          pullRequestNumber: 52,
+          baseSha: eligibleEvent.baseSha,
+          headSha: eligibleEvent.headSha,
+          trigger: 'automatic',
+        },
+        occurredAt: '2026-09-12T00:00:00.000Z',
+      });
+      if (initial.kind !== 'claimed') throw new Error('stale run was not admitted');
+      await stateStore.recordCheckRun?.({ runId: initial.runId, checkRunId: 351 });
+      await claimRunnerJob(stateStore, {
+        runId: initial.runId,
+        jobId: 'runner-job-stale-clear-retry',
+        occurredAt: '2026-09-12T00:00:10.000Z',
+      });
+      await stateStore.cancelRun({
+        runId: initial.runId,
+        requestedByUid: 1,
+        occurredAt: '2026-09-12T00:00:20.000Z',
+      });
+
+      vi.setSystemTime(new Date('2026-09-12T01:31:00Z'));
+      const updates: unknown[] = [];
+      const worker = createCoreWorker(coreEnv(database), {
+        stateStore,
+        github: {
+          getPullRequest: async () => ({
+            repositoryVisibility: 'public',
+            baseRepositoryId: 11,
+            headRepositoryId: 99,
+            draft: false,
+            baseSha: eligibleEvent.baseSha,
+            headSha: eligibleEvent.headSha,
+          }),
+          getCommenterPermission: async () => 'write',
+          updateCheckRun: async (input) => {
+            updates.push(input);
+          },
+          getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+          loadReviewTarget: async () => ({ headSha: eligibleEvent.headSha }),
+        },
+        getReadInstallationToken: async () => ({
+          token: 'read-token',
+          expiresAt: '2026-09-01T01:00:00.000Z',
+        }),
+      });
+
+      const retry = await worker.fetch(
+        new Request('https://core.internal/review-events', {
+          method: 'POST',
+          body: JSON.stringify({
+            deliveryId: 'retry-stale-clear',
+            event: 'check_run',
+            action: 'rerequested',
+            repositoryId: 11,
+            installationId: 7,
+            checkRunId: 351,
+            externalRunId: initial.runId,
+            senderLogin: 'maintainer',
+          }),
+        }),
+      );
+      expect(retry.status).toBe(202);
+      expect(updates).toEqual([]);
+      await expect(
+        stateStore.claimNextJob({
+          jobId: 'probe-stale-clear',
+          attempt: 1,
+          occurredAt: '2026-09-12T01:31:00.000Z',
+        }),
+      ).resolves.toMatchObject({
+        kind: 'claimed',
+        job: { pullRequestNumber: 52, headSha: eligibleEvent.headSha },
+      });
+      await expect(stateStore.getRunOutcome(initial.runId)).resolves.toMatchObject({
+        status: 'cancelled',
+        cleanup: 'pending',
+      });
+    } finally {
+      database.close();
+      vi.useRealTimers();
     }
   });
 
@@ -5840,97 +6487,135 @@ describe('Core Worker', () => {
     }
   });
 
-  it('declines an authorized /ai-review comment while cancelled cleanup is pending', async () => {
-    const database = new SqliteD1Database();
-    const stateStore = createD1ReviewStateStore(database);
-    try {
-      const cancelled = await stateStore.claimReview({
-        deliveryId: 'delivery-comment-blocked',
-        job: {
-          repositoryId: 11,
-          installationId: 7,
-          pullRequestNumber: 47,
-          baseSha: eligibleEvent.baseSha,
-          headSha: eligibleEvent.headSha,
-          trigger: 'automatic',
-        },
-        occurredAt: '2026-09-12T00:00:00.000Z',
-      });
-      if (cancelled.kind !== 'claimed') throw new Error('cancelled run was not admitted');
-      await claimRunnerJob(stateStore, {
-        runId: cancelled.runId,
-        jobId: 'runner-job-comment-blocked',
-        occurredAt: '2026-09-12T00:00:10.000Z',
-      });
-      await stateStore.cancelRun({
-        runId: cancelled.runId,
-        requestedByUid: 1,
-        occurredAt: '2026-09-12T00:00:20.000Z',
-      });
-      const updates: unknown[] = [];
-      const reactions: unknown[] = [];
-      const worker = createCoreWorker(coreEnv(database), {
-        stateStore,
-        github: {
-          getPullRequest: async () => ({
-            repositoryVisibility: 'public',
-            baseRepositoryId: 11,
-            headRepositoryId: 99,
-            draft: false,
+  it.each([
+    {
+      label: 'before the deadline',
+      occurredAt: '2026-09-12T00:01:00.000Z',
+      scheduled: false,
+    },
+    {
+      label: 'after the deadline',
+      occurredAt: '2026-09-12T01:31:00.000Z',
+      scheduled: true,
+    },
+  ] as const)(
+    'handles an authorized /ai-review comment with cancelled cleanup $label',
+    async ({ occurredAt, scheduled }) => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-09-12T00:00:00Z'));
+      const database = new SqliteD1Database();
+      const stateStore = createD1ReviewStateStore(database);
+      try {
+        const cancelled = await stateStore.claimReview({
+          deliveryId: 'delivery-comment-blocked',
+          job: {
+            repositoryId: 11,
+            installationId: 7,
+            pullRequestNumber: 47,
             baseSha: eligibleEvent.baseSha,
             headSha: eligibleEvent.headSha,
+            trigger: 'automatic',
+          },
+          occurredAt: '2026-09-12T00:00:00.000Z',
+        });
+        if (cancelled.kind !== 'claimed') throw new Error('cancelled run was not admitted');
+        await claimRunnerJob(stateStore, {
+          runId: cancelled.runId,
+          jobId: 'runner-job-comment-blocked',
+          occurredAt: '2026-09-12T00:00:10.000Z',
+        });
+        await stateStore.cancelRun({
+          runId: cancelled.runId,
+          requestedByUid: 1,
+          occurredAt: '2026-09-12T00:00:20.000Z',
+        });
+        const updates: unknown[] = [];
+        const reactions: unknown[] = [];
+        const worker = createCoreWorker(coreEnv(database), {
+          stateStore,
+          github: {
+            getPullRequest: async () => ({
+              repositoryVisibility: 'public',
+              baseRepositoryId: 11,
+              headRepositoryId: 99,
+              draft: false,
+              baseSha: eligibleEvent.baseSha,
+              headSha: eligibleEvent.headSha,
+            }),
+            getCommenterPermission: async () => 'write',
+            updateCheckRun: async (input) => {
+              updates.push(input);
+            },
+            addReaction: async (input) => {
+              reactions.push(input);
+            },
+            getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+            loadReviewTarget: async () => ({ headSha: eligibleEvent.headSha }),
+          },
+          getReadInstallationToken: async () => ({
+            token: 'read-token',
+            expiresAt: '2026-09-01T01:00:00.000Z',
           }),
-          getCommenterPermission: async () => 'write',
-          updateCheckRun: async (input) => {
-            updates.push(input);
-          },
-          addReaction: async (input) => {
-            reactions.push(input);
-          },
-          getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
-          loadReviewTarget: async () => ({ headSha: eligibleEvent.headSha }),
-        },
-        getReadInstallationToken: async () => ({
-          token: 'read-token',
-          expiresAt: '2026-09-01T01:00:00.000Z',
-        }),
-      });
+        });
 
-      const response = await worker.fetch(
-        new Request('https://core.internal/review-events', {
-          method: 'POST',
-          body: JSON.stringify({
-            deliveryId: 'comment-during-cleanup',
-            event: 'issue_comment',
-            action: 'created',
-            repositoryId: 11,
-            pullRequestNumber: 47,
-            installationId: 7,
-            commentId: 987,
-            commenterLogin: 'maintainer',
-            command: '/ai-review',
+        vi.setSystemTime(new Date(occurredAt));
+        const response = await worker.fetch(
+          new Request('https://core.internal/review-events', {
+            method: 'POST',
+            body: JSON.stringify({
+              deliveryId: 'comment-during-cleanup',
+              event: 'issue_comment',
+              action: 'created',
+              repositoryId: 11,
+              pullRequestNumber: 47,
+              installationId: 7,
+              commentId: 987,
+              commenterLogin: 'maintainer',
+              command: '/ai-review',
+            }),
           }),
-        }),
-      );
-      expect(response.status).toBe(202);
-      expect(updates).toEqual([]);
-      expect(reactions).toEqual([]);
-      await expect(stateStore.getDeliveryOutcome('comment-during-cleanup')).resolves.toMatchObject({
-        status: 'cancelled',
-      });
-      await expect(
-        stateStore.claimNextJob({
-          jobId: 'probe-comment-blocked',
-          attempt: 1,
-          occurredAt: '2026-09-12T00:01:00.000Z',
-        }),
-      ).resolves.toEqual({ kind: 'empty' });
-    } finally {
-      database.close();
-    }
-  });
+        );
+        expect(response.status).toBe(202);
+        expect(updates).toEqual([]);
+        expect(reactions).toEqual(
+          scheduled
+            ? [
+                {
+                  repositoryId: 11,
+                  installationId: 7,
+                  commentId: 987,
+                  content: 'eyes',
+                },
+              ]
+            : [],
+        );
+        await expect(
+          stateStore.getDeliveryOutcome('comment-during-cleanup'),
+        ).resolves.toMatchObject({ status: scheduled ? 'scheduled' : 'cancelled' });
+        await expect(
+          stateStore.claimNextJob({
+            jobId: 'probe-comment-cleanup',
+            attempt: 1,
+            occurredAt,
+          }),
+        ).resolves.toMatchObject(
+          scheduled
+            ? {
+                kind: 'claimed',
+                job: { pullRequestNumber: 47, headSha: eligibleEvent.headSha },
+              }
+            : { kind: 'empty' },
+        );
+      } finally {
+        database.close();
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it('logs a sanitized failure when cancelled Check retry feedback cannot be updated', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-12T00:00:00Z'));
     const database = new SqliteD1Database();
     const stateStore = createD1ReviewStateStore(database);
     try {
@@ -6012,6 +6697,7 @@ describe('Core Worker', () => {
       expect(JSON.stringify(logs)).not.toContain('private details');
     } finally {
       database.close();
+      vi.useRealTimers();
     }
   });
 

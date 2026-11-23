@@ -37,7 +37,7 @@ The per-instance numeric GitHub UID list in `DASHBOARD_MODEL_EDITOR_IDS` authori
 
 An authorized same-origin `POST /api/jobs/:runId/cancel` accepts a queued review immediately (200). A claimed review returns 202 until Runner confirms cleanup. Repeating the request retrieves its current cancellation state. A 409 means publication or another terminal outcome already won. Cancelling never withdraws a published GitHub review.
 
-The Worker ends the GitHub Check and requests a stop using the recorded Runner job and attempt. The minute cron retries pending deliveries if the Worker or Runner was unavailable. A Runner 404 leaves cleanup unconfirmed. When automatic stop attempts end, inspect the job and use the cleanup recovery procedure below. Keep later runs for the same pull request blocked until teardown is verified.
+The Worker ends the GitHub Check and requests a stop using the recorded Runner job and attempt. The minute cron retries pending deliveries if the Worker or Runner was unavailable. A Runner 404 leaves cleanup unconfirmed. A known failed cleanup uses the verified maintenance procedure below. Expired pending cleanup does not qualify for that procedure; only an exact late original callback can update it, and any actual orphan is identified and removed through backend ownership. A later run is blocked only while the cancelled claim is inside the 90-minute execution budget; after that budget later reviews proceed automatically. Cleanup visibility and queue blocking are independent: cancelled pending cleanup remains visible until confirmed.
 
 ## Operations and troubleshooting
 
@@ -96,7 +96,8 @@ Interpret the boundaries separately:
   confirmed exact-name absence; consult the final cleanup result, not an
   isolated exit code. Unknown or truncated inspection output does not prove
   destruction. A failed or unconfirmed cleanup can block the next job for the
-  same PR even when other PRs continue normally.
+  same PR until its 90-minute claim budget expires or destruction is confirmed;
+  other PRs continue normally.
 
 The dashboard remains a projection of Core's persisted state, not a live Runner
 probe. PostHog is lifecycle telemetry, not the diagnostic source for command or
@@ -303,10 +304,7 @@ or rerun an old Sandbox merely to make the dashboard look settled.
 
 ### Recover failed cleanup
 
-A failed or superseded run whose cleanup remains unresolved blocks later reviews of the same
-pull request. Restarting Runner does not clear that database ownership. The
-queued task displays “Waiting for previous review cleanup” until the blocker is
-resolved; an ordinary running review does not produce this warning.
+A run with `cleanup=failed` is recovered through the verified maintenance procedure below. Expired `cleanup=pending` does not qualify for that procedure; only an exact late original callback can update it, and an actual orphan is identified and removed through backend ownership rather than this recovery endpoint. Cancelled, superseded, and expired scheduling-timeout pending cleanup remains visible in cleanup attention until confirmed. An expired failed scheduling timeout with only pending cleanup blocks later reviews only while its durable claim is inside the 90-minute execution budget; after that budget, later reviews proceed automatically while the retained `pending` status remains visible as an orphan-cleanup risk. Cleanup visibility and queue blocking are independent. Restarting Runner does not clear that database ownership. While a blocker is inside the budget, the queued task displays “Waiting for previous review cleanup”; an ordinary running review does not produce this warning.
 
 For sbx, after restoring Docker authentication, confirm the original job has stopped
 and identify its exact Sandbox from the retained manifest (`compte-rendu-<jobId>`).
