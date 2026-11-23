@@ -164,7 +164,7 @@ describe('microsandbox ownership recovery', () => {
     expect(claims).toBe(1);
   });
 
-  it('automatically removes an owned VM after a transient failure and leaves a foreign VM untouched', async () => {
+  it('automatically removes an owned VM after the 30-second recovery retry and leaves a foreign VM untouched', async () => {
     const root = await mkdtemp(join(tmpdir(), 'cr-msb-recovery-'));
     roots.push(root);
     const msbHome = join(root, 'msb');
@@ -226,6 +226,19 @@ describe('microsandbox ownership recovery', () => {
       return ok;
     };
 
+    const realSetTimeout = globalThis.setTimeout;
+    let retryOwnership: (() => void) | undefined;
+    const timerSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+      handler: (...args: unknown[]) => void,
+      timeout?: number,
+      ...args: unknown[]
+    ) => {
+      if (timeout === 30_000) {
+        retryOwnership = handler;
+        return 0 as unknown as NodeJS.Timeout;
+      }
+      return realSetTimeout(handler, timeout, ...args);
+    }) as typeof globalThis.setTimeout);
     const runner = createRunner({
       evidenceRoot: root,
       instanceId,
@@ -255,6 +268,8 @@ describe('microsandbox ownership recovery', () => {
       expect(await readdir(markerDir)).toHaveLength(1);
 
       mode = 'owned';
+      await vi.waitFor(() => expect(retryOwnership).toBeDefined());
+      retryOwnership!();
       await vi.waitFor(
         async () => expect(await readdir(markerDir).catch(() => [])).toHaveLength(0),
         { timeout: 2_000 },
@@ -273,6 +288,7 @@ describe('microsandbox ownership recovery', () => {
         ).json(),
       ).toMatchObject({ draining: true, drained: true, cleanupBlockedJobs: 0 });
     } finally {
+      timerSpy.mockRestore();
       await runner.close();
     }
   });

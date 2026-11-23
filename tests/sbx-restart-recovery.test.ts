@@ -734,7 +734,7 @@ describe('Runner sbx startup reconciliation', () => {
     }
   });
 
-  it('attributes a failed startup scan and retries it automatically', async () => {
+  it('attributes a failed startup scan and recovers on demand', async () => {
     const root = await mkdtemp(join(tmpdir(), 'cr-sbx-restart-'));
     roots.push(root);
     vi.stubEnv('TMPDIR', root);
@@ -819,6 +819,7 @@ describe('Runner sbx startup reconciliation', () => {
         claimPollingHalted: false,
       });
       mode = 'owned';
+      await maintenance(runner, 'resume');
       await expectDrained(runner);
     } finally {
       await runner.close();
