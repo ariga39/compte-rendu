@@ -36,7 +36,10 @@ it('renews a claimed run through the public unified application path', async () 
       RUNNER_CALLBACK_TOKEN: 'callback-token',
     },
     {
-      github: { getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git' },
+      github: {
+        getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+        loadReviewTarget: async () => ({ headSha: '2'.repeat(40) }),
+      },
       getReadInstallationToken: async () => {
         mintCount += 1;
         return {

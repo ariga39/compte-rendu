@@ -137,33 +137,37 @@ const gate = () => {
   return { promise, resolve };
 };
 
-const resetFixture = async () => {
+const resetFixture = async (options: { firstRound?: boolean } = {}) => {
   const database = new SqliteD1Database();
   const store = createD1ReviewStateStore(database);
-  const previous = await store.claimReview({
-    deliveryId: 'previous',
-    occurredAt: '2026-10-01T00:00:00.000Z',
-    job: {
-      repositoryId: 11,
-      pullRequestNumber: 42,
-      installationId: 7,
-      baseSha,
-      headSha: '3'.repeat(40),
-      trigger: 'automatic',
-    },
-  });
-  if (previous.kind !== 'claimed') throw new Error('fixture admission failed');
-  await store.completeRunPublication({
-    runId: previous.runId,
-    occurredAt: '2026-10-01T00:01:00.000Z',
-    decision: 'approve',
-  });
-  const reviews = [review(1, previous.runId, 'APPROVED')];
+  let reviews: ReturnType<typeof review>[] = [];
+  if (options.firstRound !== true) {
+    const previous = await store.claimReview({
+      deliveryId: 'previous',
+      occurredAt: '2026-10-01T00:00:00.000Z',
+      job: {
+        repositoryId: 11,
+        pullRequestNumber: 42,
+        installationId: 7,
+        baseSha,
+        headSha: '3'.repeat(40),
+        trigger: 'automatic',
+      },
+    });
+    if (previous.kind !== 'claimed') throw new Error('fixture admission failed');
+    await store.completeRunPublication({
+      runId: previous.runId,
+      occurredAt: '2026-10-01T00:01:00.000Z',
+      decision: 'approve',
+    });
+    reviews = [review(1, previous.runId, 'APPROVED')];
+  }
   const checks: Array<{ id: number; external_id: string; status?: string; conclusion?: string }> =
     [];
   const controls = {
     deny: false,
     repositoryUnavailable: false,
+    headUnavailable: false,
     malformed: false,
     endless: false,
     loseDismissal: false,
@@ -181,8 +185,10 @@ const resetFixture = async () => {
         full_name: 'example/repo',
         clone_url: 'https://github.com/example/repo.git',
       });
-    if (url.pathname === '/repos/example/repo/pulls/42')
+    if (url.pathname === '/repos/example/repo/pulls/42') {
+      if (controls.headUnavailable) return new Response(null, { status: 503 });
       return Response.json({ head: { sha: controls.currentHead } });
+    }
     if (request.method === 'GET' && url.pathname.endsWith('/check-runs'))
       return Response.json({ check_runs: checks });
     if (request.method === 'POST' && url.pathname.endsWith('/check-runs')) {
@@ -512,6 +518,106 @@ it('supersedes a stale queued round without dismissing votes or reporting failur
   } finally {
     await f.settle();
     f.database.close();
+  }
+});
+
+it('supersedes a first-round queued run when the head changed before delivery', async () => {
+  const f = await resetFixture({ firstRound: true });
+  try {
+    expect((await f.send()).status).toBe(202);
+    await f.settle();
+    f.controls.currentHead = '4'.repeat(40);
+    expect((await f.claim()).status).toBe(204);
+    expect(f.reviews).toEqual([]);
+    expect(await f.store.getDeliveryOutcome(event.deliveryId)).toMatchObject({
+      status: 'superseded',
+    });
+    expect(f.checks[0]).toMatchObject({ status: 'completed', conclusion: 'cancelled' });
+    expect(f.logs).not.toContainEqual(expect.objectContaining({ reason: 'review_reset_failed' }));
+    const runId = f.checks[0]!.external_id;
+    expect((await f.store.getRunOutcome(runId))?.runnerJobId).toBeUndefined();
+    const detail = await f.worker.fetch(
+      new Request(`https://core.internal/api/jobs/${runId}`),
+      f.env,
+    );
+    expect(await detail.json()).toMatchObject({ task: { cleanup: 'unknown' } });
+    expect(
+      (await f.send({ ...event, deliveryId: 'first-round-next', headSha: f.controls.currentHead }))
+        .status,
+    ).toBe(202);
+    await f.settle();
+    expect((await f.claim()).status).toBe(200);
+  } finally {
+    await f.settle();
+    f.database.close();
+  }
+});
+
+it('fails a first-round claim when the current PR head cannot be read', async () => {
+  const f = await resetFixture({ firstRound: true });
+  try {
+    expect((await f.send()).status).toBe(202);
+    await f.settle();
+    f.controls.headUnavailable = true;
+    expect((await f.claim()).status).toBe(503);
+    expect(await f.store.getDeliveryOutcome(event.deliveryId)).toMatchObject({
+      status: 'failed',
+    });
+    expect(f.checks[0]).toMatchObject({ status: 'completed', conclusion: 'failure' });
+    expect(f.logs).not.toContainEqual(expect.objectContaining({ reason: 'review_reset_failed' }));
+    const runId = f.checks[0]!.external_id;
+    const detail = await f.worker.fetch(
+      new Request(`https://core.internal/api/jobs/${runId}`),
+      f.env,
+    );
+    expect(await detail.json()).toMatchObject({
+      task: { failure: { phase: 'scheduling', reason: 'unknown' } },
+    });
+  } finally {
+    await f.settle();
+    f.database.close();
+  }
+});
+
+it('fails a first-round claim closed when the adapter cannot read the head', async () => {
+  const database = new SqliteD1Database();
+  const store = createD1ReviewStateStore(database);
+  const worker = createCoreWorker(
+    { REVIEW_DB: database, GITHUB_APP_ID: '123', GITHUB_APP_PRIVATE_KEY: 'fixture' },
+    {
+      stateStore: store,
+      github: { getRepositoryUrl: async () => 'https://github.com/example/repo.git' },
+      getReadInstallationToken: async () => ({
+        token: 'read-only',
+        expiresAt: '2099-01-01T00:00:00Z',
+      }),
+    },
+  );
+  const deliveryId = 'first-round-no-head-lookup';
+  try {
+    expect(
+      (
+        await worker.fetch(
+          new Request('https://core.internal/review-events', {
+            method: 'POST',
+            body: JSON.stringify({ ...event, deliveryId }),
+          }),
+        )
+      ).status,
+    ).toBe(202);
+    expect(
+      (
+        await worker.fetch(
+          new Request('https://core.internal/runner-claims', {
+            method: 'POST',
+            headers: { 'x-compte-rendu-runner-claim': 'verified' },
+          }),
+        )
+      ).status,
+    ).toBe(503);
+    expect(await store.getDeliveryOutcome(deliveryId)).toMatchObject({ status: 'failed' });
+  } finally {
+    database.close();
   }
 });
 

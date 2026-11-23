@@ -21,6 +21,7 @@ import {
   createGitHubPublicationAdapter,
   createGitHubAppTokenProvider,
   createReviewCoordinator,
+  claimHeadStatus,
   publishTerminalCheck,
   resetPreviousReviewVerdicts,
   createRunnerJobClient,
@@ -968,8 +969,49 @@ export const createCoreWorker = (
       return new Response(null, { status: stopped ? 204 : 503 });
     };
 
+    const supersedeStaleClaim = async (): Promise<Response> => {
+      const released = await stateStore.markRunSuperseded({
+        runId: claim.runId,
+        occurredAt,
+        releaseRunnerClaim: { jobId: claim.jobId, attempt: claim.attempt },
+      });
+      if (!released) throw new Error('Supersession failed');
+      const superseded = await stateStore.getRunOutcome(claim.runId);
+      if (superseded?.status !== 'superseded' || superseded.runnerJobId !== undefined)
+        throw new Error('Supersession failed');
+      if (superseded.checkRunId !== undefined && github.updateCheckRun !== undefined) {
+        await publishTerminalCheck({
+          github,
+          stateStore,
+          runId: claim.runId,
+          occurredAt,
+        }).catch(() => undefined);
+      }
+      await recordFinishedLifecycle(
+        lifecycleLog,
+        superseded,
+        'superseded',
+        undefined,
+        undefined,
+        claim.runId,
+      );
+      return new Response(null, { status: 204 });
+    };
+
     let preparationFailure: PublicTaskFailure | undefined;
     try {
+      // A prepared replay is an idempotent resend of the same handoff, so it
+      // keeps the original decision instead of re-running freshness.
+      if (!claim.replay) {
+        const head = await Effect.runPromise(claimHeadStatus(github, claim.job));
+        if (head === 'stale') return await supersedeStaleClaim();
+        if (head === 'unavailable') {
+          // A failed head lookup is a claim-confirmation failure, not a
+          // review-reset failure; keep the existing generic preparation path.
+          preparationFailure = { phase: 'scheduling', reason: 'unknown' };
+          throw new Error('Current PR head unavailable');
+        }
+      }
       const reset = claim.replay
         ? { kind: 'reset' as const }
         : await Effect.runPromise(
@@ -984,34 +1026,7 @@ export const createCoreWorker = (
         preparationFailure = { phase: 'scheduling', reason: 'review_reset_failed' };
         throw new Error('Previous review reset failed');
       }
-      if (reset.kind === 'stale') {
-        const released = await stateStore.markRunSuperseded?.({
-          runId: claim.runId,
-          occurredAt,
-          releaseRunnerClaim: { jobId: claim.jobId, attempt: claim.attempt },
-        });
-        if (!released) throw new Error('Supersession failed');
-        const superseded = await stateStore.getRunOutcome(claim.runId);
-        if (superseded?.status !== 'superseded' || superseded.runnerJobId !== undefined)
-          throw new Error('Supersession failed');
-        if (superseded.checkRunId !== undefined && github.updateCheckRun !== undefined) {
-          await publishTerminalCheck({
-            github,
-            stateStore,
-            runId: claim.runId,
-            occurredAt,
-          }).catch(() => undefined);
-        }
-        await recordFinishedLifecycle(
-          lifecycleLog,
-          superseded,
-          'superseded',
-          undefined,
-          undefined,
-          claim.runId,
-        );
-        return new Response(null, { status: 204 });
-      }
+      if (reset.kind === 'stale') return await supersedeStaleClaim();
       if (github.getRepositoryUrl === undefined) throw new Error('Repository lookup unavailable');
       const repositoryUrl = await Schema.decodeUnknownPromise(Schema.NonEmptyString)(
         await github.getRepositoryUrl({
