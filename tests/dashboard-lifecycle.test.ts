@@ -266,7 +266,6 @@ it('records publication start and completion at their actual transitions', async
   try {
     const coordinator = createReviewCoordinator({
       stateStore: store,
-      scheduler: { schedule: async () => undefined },
       github: {
         loadReviewTarget: async () => {
           vi.setSystemTime(new Date(time(10)));

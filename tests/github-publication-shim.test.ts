@@ -39,7 +39,6 @@ describe('GitHub publication shim', () => {
     const coordinator = createReviewCoordinator({
       github: shim,
       stateStore,
-      scheduler: { schedule: async () => undefined },
     });
     const body = '## Review:\n\nThe exact probe body.\n';
 
@@ -95,7 +94,6 @@ describe('GitHub publication shim', () => {
     const coordinator = createReviewCoordinator({
       github: shim,
       stateStore: createTestReviewStore(),
-      scheduler: { schedule: async () => {} },
     });
 
     expect(

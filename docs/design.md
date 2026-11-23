@@ -109,7 +109,7 @@ flowchart LR
 | `packages/contracts`    | Shared Effect schemas and transport types                                                                                  |
 
 Core and ingress are internal modules of one public SvelteKit Worker; only the
-allowlisted HTTP endpoints are exposed. Runner is private. The inference hostname accepts job grants; relay control uses a private Worker binding. New work is pulled from D1, not submitted through the VPC binding.
+allowlisted HTTP endpoints are exposed. Runner is private. The inference hostname accepts job grants; relay control uses a private Worker binding. Core validates an admitted job, writes the durable delivery/run in one D1 claim, and leaves it for the idle Runner to claim through `/runner-claim`; work is not submitted through the VPC binding.
 There is no Cloudflare Workflow or message queue. See [installation](installation.md)
 and [LLM service](llm-service.md) for configuration, grants and deployment order.
 
