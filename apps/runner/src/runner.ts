@@ -109,7 +109,7 @@ export type {
 
 const MODEL_HOST = 'opencode.ai';
 const MODEL_PORT = '443';
-const OPENCODE_VERSION = '2.0.32';
+const OPENCODE_VERSION = '2.4.1';
 const SANDBOX_TEMPLATE = `ghcr.io/ariga39/petit-chiba-opencode:${OPENCODE_VERSION}-gh2.98.0`;
 const SETUP_TIMEOUT_MS = 2 * 60 * 1000;
 const SUBMIT_REMINDER_BUDGET_MS = 2 * 60 * 1000;

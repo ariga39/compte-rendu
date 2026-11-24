@@ -4319,8 +4319,8 @@ describe('Runner Job HTTP interface', () => {
         sandboxId: expect.any(String),
         sessionIds: ['session-89', 'session-child'],
         model: 'opencode-go/deepseek-flash',
-        image: 'ghcr.io/ariga39/petit-chiba-opencode:2.0.32-gh2.98.0',
-        openCodeVersion: '2.0.32',
+        image: 'ghcr.io/ariga39/petit-chiba-opencode:2.4.1-gh2.98.0',
+        openCodeVersion: '2.4.1',
         agent: {
           exitCode: 0,
           timedOut: false,
@@ -5051,7 +5051,7 @@ describe('Runner Job HTTP interface', () => {
       sandbox: { cleanup: 'destroyed' },
     });
     expect(createArgs).toEqual(expect.arrayContaining(['--clone', '--no-share-skills']));
-    const template = 'ghcr.io/ariga39/petit-chiba-opencode:2.0.32-gh2.98.0';
+    const template = 'ghcr.io/ariga39/petit-chiba-opencode:2.4.1-gh2.98.0';
     const templateIndex = createArgs?.indexOf(template) ?? -1;
     const launcherIndex = createArgs?.lastIndexOf('shell') ?? -1;
     expect(templateIndex).toBeGreaterThanOrEqual(0);

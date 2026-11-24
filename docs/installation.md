@@ -442,7 +442,7 @@ See [review skill boundaries](design.md) for their scope and source attribution.
 ### Offline Sandbox template deployment
 
 The Runner uses the versioned custom template
-`ghcr.io/ariga39/petit-chiba-opencode:2.0.32-gh2.98.0`. When the NUC should
+`ghcr.io/ariga39/petit-chiba-opencode:2.4.1-gh2.98.0`. When the NUC should
 not pull from a registry, build and transfer the ordinary OCI image from a
 trusted build host, then load it into the NUC's separate Sandbox image store.
 Do not run these commands inside a review Sandbox or as a Runner Job, and do
@@ -452,11 +452,11 @@ not put credentials in the image:
 docker buildx build \
   --platform linux/amd64 \
   --load \
-  --tag ghcr.io/ariga39/petit-chiba-opencode:2.0.32-gh2.98.0 \
+  --tag ghcr.io/ariga39/petit-chiba-opencode:2.4.1-gh2.98.0 \
   apps/runner/sandbox-template
 
 docker image save \
-  ghcr.io/ariga39/petit-chiba-opencode:2.0.32-gh2.98.0 \
+  ghcr.io/ariga39/petit-chiba-opencode:2.4.1-gh2.98.0 \
   -o petit-chiba-opencode.tar
 ```
 
@@ -469,7 +469,7 @@ sbx template load /path/to/petit-chiba-opencode.tar
 sbx create \
   --name petit-chiba-template-probe \
   --no-share-skills \
-  --template ghcr.io/ariga39/petit-chiba-opencode:2.0.32-gh2.98.0 \
+  --template ghcr.io/ariga39/petit-chiba-opencode:2.4.1-gh2.98.0 \
   --cpus 4 \
   --memory 8g \
   shell /path/to/non-sensitive-probe-workspace
@@ -479,7 +479,7 @@ sbx rm --force petit-chiba-template-probe
 rm /path/to/petit-chiba-opencode.tar
 ```
 
-The version probes must report OpenCode `opencode v2.0.32` and GitHub CLI `2.98.0`.
+The version probes must report OpenCode `opencode v2.4.1` and GitHub CLI `2.98.0`.
 Keep the loaded template for the Runner. A later registry deployment may
 replace the local tag with a fully qualified registry reference plus its
 recorded digest, but registry access and a digest are optional for this
@@ -830,7 +830,7 @@ daemon with plain `sbx` client calls, and confirm no scoped probe resource
 remains:
 
 ```sh
-sbx create --name compte-rendu-kvm-probe --no-share-skills --template ghcr.io/ariga39/petit-chiba-opencode:2.0.32-gh2.98.0 --cpus 4 --memory 8g shell /path/to/non-sensitive-probe-workspace
+sbx create --name compte-rendu-kvm-probe --no-share-skills --template ghcr.io/ariga39/petit-chiba-opencode:2.4.1-gh2.98.0 --cpus 4 --memory 8g shell /path/to/non-sensitive-probe-workspace
 sbx exec compte-rendu-kvm-probe opencode --version
 sbx rm --force compte-rendu-kvm-probe
 sbx ls

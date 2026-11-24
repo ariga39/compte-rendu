@@ -80,7 +80,7 @@ it.skipIf(process.env.CR_OPENSANDBOX_NATIVE_PROBE !== '1')(
           { captureStdout: true, captureStderr: true, maxBytes: 4096 },
         );
         expect(versions.exitCode, versions.stderr).toBe(0);
-        expect(versions.stdout).toContain('opencode v2.0.32');
+        expect(versions.stdout).toContain('opencode v2.4.1');
         expect(versions.stdout).toContain('gh version 2.98.0');
       }
       if (process.env.CR_OPENSANDBOX_GITHUB_TOKEN_FILE) {

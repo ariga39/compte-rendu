@@ -58,7 +58,7 @@ it.skipIf(!process.env.CR_MICROSANDBOX_NATIVE_IMAGE)(
         command,
       );
       expect(result.exitCode, result.stderr).toBe(0);
-      expect(result.stdout).toContain('opencode v2.0.32');
+      expect(result.stdout).toContain('opencode v2.4.1');
       await expect(readFile(join(checkoutRoot, 'forbidden'))).rejects.toThrow();
       await runtime.rotateGithubReadToken!('synthetic-rotated');
       const exported = await runtime.copyOut('/tmp/probe', join(root, 'output'), command);

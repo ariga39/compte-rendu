@@ -12,8 +12,8 @@ LABEL org.opencontainers.image.source="https://github.com/ariga39/compte-rendu"
 USER root
 
 # Install the pinned OpenCode 2 npm target package with its tarball digest.
-RUN curl -fL https://registry.npmjs.org/@opencode/cli-linux-x64/-/cli-linux-x64-2.0.32.tgz -o /tmp/opencode.tgz \
-    && echo "64a1f4b381c2d2efc18c8d76b2ce399141778b421b54c98b94be8e80803606dc  /tmp/opencode.tgz" | sha256sum -c - \
+RUN curl -fL https://registry.npmjs.org/@opencode/cli-linux-x64/-/cli-linux-x64-2.4.1.tgz -o /tmp/opencode.tgz \
+    && echo "9dbef68f231a311b56441c73c7bec01f6d87ebe44523ad14a7ba4716ff5c2031  /tmp/opencode.tgz" | sha256sum -c - \
     && tar -xzf /tmp/opencode.tgz -C /tmp \
     && install -m 0755 /tmp/package/bin/opencode /usr/local/bin/opencode \
     && rm -rf /tmp/opencode.tgz /tmp/package
@@ -25,7 +25,7 @@ RUN curl -fL https://github.com/cli/cli/releases/download/v2.98.0/gh_2.98.0_linu
     && install -m 0755 /tmp/gh_2.98.0_linux_amd64/bin/gh /usr/local/bin/gh \
     && rm -rf /tmp/gh.tar.gz /tmp/gh_2.98.0_linux_amd64
 
-RUN test "$(opencode --version)" = "opencode v2.0.32" \
+RUN test "$(opencode --version)" = "opencode v2.4.1" \
     && gh version | grep -F "gh version 2.98.0"
 
 RUN mkdir -p /workspace && chmod 0777 /workspace
