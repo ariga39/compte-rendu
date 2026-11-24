@@ -1,6 +1,9 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { createRelayCatalog } from '../apps/inference-worker/src/catalog';
-import { RelayCatalogSources } from '../apps/inference-worker/src/catalog-config';
+import {
+  RelayCatalogSources,
+  type RelayCatalogSource,
+} from '../apps/inference-worker/src/catalog-config';
 import { createGrantControl } from '../apps/inference-worker/src/grants';
 import { Schema } from 'effect';
 import { SqliteD1Database } from './support/d1-database';
@@ -204,6 +207,151 @@ it('rejects a source refresh when an effort route resolves to a non-Chat profile
     expect(await createRelayCatalog(db, [source]).get()).toMatchObject({
       routes: [],
       lastRefreshError: 'refresh failed',
+    });
+  } finally {
+    db.close();
+  }
+});
+
+it('updates a same-route effort menu only on successful publication and freezes old grants', async () => {
+  const db = database();
+  const source = (efforts: RelayCatalogSource['efforts']) => ({
+    url: 'https://models.example/v1/models',
+    prefix: 'p/',
+    providerSlug: 'custom-review',
+    credentialAlias: 'default',
+    efforts,
+  });
+  const routeId = 'p/route';
+  try {
+    vi.stubGlobal('fetch', async () => Response.json({ data: [{ id: 'route' }] }));
+    await createRelayCatalog(db, [
+      source({ [routeId]: [{ name: 'high', controls: { reasoning_effort: 'high' } }] }),
+    ]).refresh(100);
+    const control = createGrantControl(db);
+    const oldGrant = await control.issueV2({
+      jobId: 'menu-old',
+      snapshot: {
+        routes: [routeId],
+        efforts: [{ routeId, generation: 0, name: 'high', controls: { reasoning_effort: 'high' } }],
+      },
+      latestIssueDeadline: deadline(),
+    });
+    expect(oldGrant).toMatchObject({ kind: 'issued' });
+    const oldMapping = db.database
+      .prepare('SELECT route_mapping FROM grants WHERE job_id = ?')
+      .get('menu-old') as { route_mapping: string };
+    expect(JSON.parse(oldMapping.route_mapping)[0].effort).toEqual({
+      name: 'high',
+      controls: { reasoning_effort: 'high' },
+    });
+
+    await createRelayCatalog(db, [
+      source({ [routeId]: [{ name: 'high', controls: { reasoning_effort: 'max' } }] }),
+    ]).refresh(200);
+    expect(
+      await createRelayCatalog(db, [
+        source({ [routeId]: [{ name: 'high', controls: { reasoning_effort: 'max' } }] }),
+      ]).get(),
+    ).toMatchObject({
+      routes: [routeId],
+      efforts: { [routeId]: [{ name: 'high', controls: { reasoning_effort: 'max' } }] },
+    });
+    const newGrant = await control.issueV2({
+      jobId: 'menu-new',
+      snapshot: {
+        routes: [routeId],
+        efforts: [{ routeId, generation: 0, name: 'high', controls: { reasoning_effort: 'max' } }],
+      },
+      latestIssueDeadline: deadline(),
+    });
+    expect(newGrant).toMatchObject({ kind: 'issued' });
+    const newMapping = db.database
+      .prepare('SELECT route_mapping FROM grants WHERE job_id = ?')
+      .get('menu-new') as { route_mapping: string };
+    expect(JSON.parse(newMapping.route_mapping)[0].effort.controls).toEqual({
+      reasoning_effort: 'max',
+    });
+    expect(JSON.parse(oldMapping.route_mapping)[0].effort.controls).toEqual({
+      reasoning_effort: 'high',
+    });
+
+    // A failed refresh preserves the last published menu and routes.
+    vi.stubGlobal('fetch', async () => Response.json({ data: [{}, { id: 'route' }] }));
+    await createRelayCatalog(db, [
+      source({ [routeId]: [{ name: 'high', controls: { reasoning_effort: 'high' } }] }),
+    ]).refresh(300);
+    expect(
+      await createRelayCatalog(db, [
+        source({ [routeId]: [{ name: 'high', controls: { reasoning_effort: 'high' } }] }),
+      ]).get(),
+    ).toMatchObject({
+      routes: [routeId],
+      efforts: { [routeId]: [{ name: 'high', controls: { reasoning_effort: 'max' } }] },
+      lastRefreshError: 'refresh failed',
+    });
+
+    // Removing the menu publishes an empty menu for subsequent grants.
+    vi.stubGlobal('fetch', async () => Response.json({ data: [{ id: 'route' }] }));
+    await createRelayCatalog(db, [source({})]).refresh(400);
+    expect(await createRelayCatalog(db, [source({})]).get()).toMatchObject({
+      routes: [routeId],
+      efforts: {},
+    });
+
+    // A newly published route may carry a new menu too.
+    vi.stubGlobal('fetch', async () =>
+      Response.json({ data: [{ id: 'route' }, { id: 'second' }] }),
+    );
+    await createRelayCatalog(db, [
+      source({
+        [routeId]: [{ name: 'high', controls: { reasoning_effort: 'high' } }],
+        'p/second': [{ name: 'off', controls: { thinking: { type: 'disabled' } } }],
+      }),
+    ]).refresh(500);
+    expect(
+      await createRelayCatalog(db, [
+        source({
+          [routeId]: [{ name: 'high', controls: { reasoning_effort: 'high' } }],
+          'p/second': [{ name: 'off', controls: { thinking: { type: 'disabled' } } }],
+        }),
+      ]).get(),
+    ).toMatchObject({
+      routes: [routeId, 'p/second'],
+      efforts: {
+        [routeId]: [{ name: 'high', controls: { reasoning_effort: 'high' } }],
+        'p/second': [{ name: 'off', controls: { thinking: { type: 'disabled' } } }],
+      },
+    });
+  } finally {
+    db.close();
+  }
+});
+
+it('keeps alias visibility independent of the mutable effort menu', async () => {
+  const db = database();
+  const discovered = {
+    url: 'https://models.example/v1/models',
+    prefix: 'p/',
+    providerSlug: 'custom-review',
+    credentialAlias: 'default',
+    efforts: {
+      'p/model': [{ name: 'high', controls: { reasoning_effort: 'high' as const } }],
+    },
+  };
+  const alias = {
+    providerSlug: 'custom-review',
+    credentialAlias: 'default',
+    aliases: { legacy: 'model' },
+    efforts: {
+      legacy: [{ name: 'max', controls: { reasoning_effort: 'max' as const } }],
+    },
+  };
+  try {
+    vi.stubGlobal('fetch', async () => Response.json({ data: [{ id: 'model' }] }));
+    await createRelayCatalog(db, [discovered, alias]).refresh(100);
+    expect(await createRelayCatalog(db, [discovered, alias]).get()).toMatchObject({
+      routes: ['p/model'],
     });
   } finally {
     db.close();

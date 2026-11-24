@@ -265,20 +265,19 @@ function candidateSources(sources: readonly Source[], gateway: GatewayConfig | n
 const canonicalLimit = (json: string) =>
   `(CASE WHEN ${json} IS NULL THEN '' ELSE coalesce(CAST(json_extract(${json}, '$.context') AS TEXT), '') || '|' || coalesce(CAST(json_extract(${json}, '$.output') AS TEXT), '') END)`;
 const storedLimit = `coalesce((SELECT ${canonicalLimit('l.value')} FROM json_each(s.route_limits) l WHERE l.key=m.key), '')`;
-const storedEfforts = `coalesce((SELECT e.value FROM json_each(s.route_efforts) e WHERE e.key=m.key), '[]')`;
 
 // Both the picker and the budget count the same set, preferring discovered IDs
-// when an alias refers to exactly the same upstream model, credential, profile,
-// configured limit and effort menu.
+// when an alias refers to exactly the same upstream model, credential, profile
+// and configured limit. The mutable effort menu is deliberately excluded:
+// changing a menu must not change alias visibility.
 const active = `SELECT m.key AS id, m.value AS model, s.provider, s.credential,
   coalesce((SELECT p.value FROM json_each(s.route_profiles) p WHERE p.key=m.key), 'chat') AS profile,
   ${storedLimit} AS limit_key,
-  ${storedEfforts} AS efforts_key,
   s.is_alias
   FROM catalog_sources s JOIN json_each(?) cfg ON cfg.key=s.source_key, json_each(s.models) m
   WHERE (s.is_alias=0 OR EXISTS (SELECT 1 FROM json_each(cfg.value) a WHERE a.key=m.key AND a.value=m.value))`;
 const visible = `SELECT DISTINCT id FROM (
-  SELECT id, is_alias, MIN(is_alias) OVER (PARTITION BY provider, credential, model, profile, limit_key, efforts_key) AS preferred
+  SELECT id, is_alias, MIN(is_alias) OVER (PARTITION BY provider, credential, model, profile, limit_key) AS preferred
   FROM candidates
 ) WHERE is_alias = preferred`;
 
@@ -355,11 +354,10 @@ export function createRelayCatalog(
               ${active} AND s.source_key <> ?
               UNION ALL SELECT m.key, m.value, ?, ?, coalesce(p.value,'chat'),
                 coalesce((SELECT ${canonicalLimit('l.value')} FROM json_each(?) l WHERE l.key=m.key), ''),
-                coalesce((SELECT e.value FROM json_each(?) e WHERE e.key=m.key), '[]'),
                 ?
                 FROM json_each(?) m LEFT JOIN json_each(?) p ON p.key=m.key
             )
-            INSERT INTO catalog_sources(source_key, provider, credential, is_alias, rejected, error, route_efforts)
+            INSERT INTO catalog_sources(source_key, provider, credential, is_alias, rejected, error)
             SELECT ?, ?, ?, ?, ?, CASE
               WHEN ? IS NOT NULL THEN ?
               WHEN EXISTS (SELECT 1 FROM json_each(?) m
@@ -370,20 +368,17 @@ export function createRelayCatalog(
                   OR r.credential_alias IS NOT ?
                   OR r.profile IS NOT coalesce(p.value,'chat')
                   OR ${canonicalLimit('r.limit_json')} IS NOT
-                    coalesce((SELECT ${canonicalLimit('l.value')} FROM json_each(?) l WHERE l.key=m.key), '')
-                  OR r.efforts_json IS NOT
-                    coalesce((SELECT e.value FROM json_each(?) e WHERE e.key=m.key), '[]'))
+                    coalesce((SELECT ${canonicalLimit('l.value')} FROM json_each(?) l WHERE l.key=m.key), ''))
                 THEN 'route mapping conflict'
               WHEN (SELECT COUNT(*) FROM (${visible})) > ? THEN 'catalog limit reached'
-            END, ? WHERE ${fresh}
-            ON CONFLICT(source_key) DO UPDATE SET rejected=excluded.rejected,error=excluded.error,route_efforts=excluded.route_efforts`)
+            END WHERE ${fresh}
+            ON CONFLICT(source_key) DO UPDATE SET rejected=excluded.rejected,error=excluded.error`)
             .bind(
               configured,
               key,
               provider,
               credential,
               proposedLimits,
-              proposedEfforts,
               alias,
               proposedModels,
               proposedProfiles,
@@ -399,26 +394,36 @@ export function createRelayCatalog(
               provider,
               credential,
               proposedLimits,
-              proposedEfforts,
               MAX_CATALOG_MODELS,
-              proposedEfforts,
               at,
             ),
           db
             .prepare(
-              `UPDATE catalog_sources SET models=?, route_profiles=?, route_limits=?, route_efforts=? WHERE source_key=? AND error IS NULL AND ${fresh}`,
+              `UPDATE catalog_sources SET models=?, route_profiles=?, route_limits=? WHERE source_key=? AND error IS NULL AND ${fresh}`,
             )
-            .bind(proposedModels, proposedProfiles, proposedLimits, proposedEfforts, key, at),
+            .bind(proposedModels, proposedProfiles, proposedLimits, key, at),
           db
             .prepare(`INSERT INTO catalog_routes(route_id, upstream_model, provider_slug, credential_alias, profile, limit_json, efforts_json)
             SELECT m.key, m.value, s.provider, s.credential,
               coalesce((SELECT p.value FROM json_each(s.route_profiles) p WHERE p.key=m.key), 'chat'),
               (SELECT l.value FROM json_each(s.route_limits) l WHERE l.key=m.key),
-              coalesce((SELECT e.value FROM json_each(s.route_efforts) e WHERE e.key=m.key), '[]')
+              coalesce((SELECT e.value FROM json_each(?) e WHERE e.key=m.key), '[]')
             FROM catalog_sources s,json_each(s.models) m
             WHERE s.source_key=? AND s.error IS NULL AND ${fresh}
             ON CONFLICT(route_id) DO NOTHING`)
-            .bind(key, at),
+            .bind(proposedEfforts, key, at),
+          // The effort menu is intentionally mutable per successful publication.
+          // Immutable model/provider/profile/limit changes are still rejected above.
+          db
+            .prepare(`UPDATE catalog_routes
+              SET efforts_json = coalesce(
+                (SELECT e.value FROM json_each(?) e WHERE e.key=catalog_routes.route_id), '[]')
+              WHERE route_id IN (SELECT key FROM json_each(?))
+                AND EXISTS (
+                  SELECT 1 FROM catalog_sources s WHERE s.source_key=? AND s.error IS NULL
+                )
+                AND ${fresh}`)
+            .bind(proposedEfforts, proposedModels, key, at),
         );
       }
       statements.push(
