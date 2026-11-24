@@ -222,8 +222,17 @@ This selection/service path supports sbx and microsandbox.
 
 ## Sandbox runtime modules
 
-Each job has a runtime with `setup`, `exec`, `copyOut` and `destroy`. The runtime
-owns backend commands, credentials/egress and confirmed teardown; Runner retains
+Runner builds one instance-level sandbox backend once at startup. Each backend
+validates its own configuration, owns its executable/environment, readiness and
+outage state, ownership records, orphan reconciliation and any cleanup-absence
+proof. The Runner only asks for `health`, `checkReady`, `reconcileOrphans`,
+optional `confirmCleanupAbsent` and per-job sandboxes. Adding a backend means
+adding one implementation and one registration; Runner, Core and the public
+contract stay unchanged.
+
+Each job gets a `JobSandbox` with `setup`, `exec`, `copyOut`, optional
+`updateGithubReadToken` and `destroy`. It owns backend commands,
+credentials/egress, host resources and confirmed teardown; Runner retains
 budgets, aborts, redaction, diagnostics and product lifecycle. Metadata is updated
 as resources are created so partial setup can still be archived and cleaned.
 
@@ -385,8 +394,9 @@ Recovery diagnostics identify the job, step and command status and omit stderr.
 
 An authenticated Runner maintenance operation can reconcile a failed sbx or
 microsandbox run whose original host-directory cleanup was
-confirmed and whose exact Sandbox is now absent. It rechecks sbx policies/secrets
-or the microsandbox catalog identity. The configured runtime must match. It revokes the
+confirmed and whose exact Sandbox is now absent. The configured backend receives
+the recorded backend-owned recovery proof and rechecks its policies/secrets or
+its original catalog identity. It revokes the
 job grant before reporting recovery. Original terminal evidence remains immutable;
 separate local and R2 recovery records provide the audit trail. Core matches the
 failed, superseded or cancelled run, job, attempt and immutable SHAs before

@@ -35,33 +35,21 @@ import {
 } from '@compte-rendu/contracts';
 import {
   SandboxCreateError,
-  resolveSandboxRuntimeConfig,
-  type JobSandboxRuntime,
-  type ActiveSandboxRuntimeKind,
+  createSandboxBackend,
+  type HostRun,
+  type JobSandbox,
   type RunnerDiagnostic,
   type RunnerProcess,
   type RunnerProcessOptions,
   type RunnerProcessResult,
-  type SandboxCommand,
-  type SandboxRuntimeFactory,
+  type SandboxBackend,
+  type SandboxExecPort,
 } from './sandbox-runtime.js';
 import {
   appendFileBytes,
   createBoundedFileSink,
   createCredentialObserver,
 } from './bounded-file-capture.js';
-import { confirmSbxCleanup } from './cleanup-recovery.js';
-import {
-  createMicrosandboxRuntimeFactory,
-  confirmMicrosandboxAbsent,
-  createMicrosandboxPreflight,
-  reconcileMicrosandboxRestartResources,
-} from './sandbox-runtime-microsandbox.js';
-import {
-  createSbxRuntimeFactory,
-  reconcileSbxRestartResources,
-  type SbxRecoveryStep,
-} from './sandbox-runtime-sbx.js';
 import {
   createRelayLlmServiceClient,
   LlmGrantIssueError,
@@ -93,7 +81,6 @@ import {
 } from './runner-settings.js';
 
 export type {
-  ActiveSandboxRuntimeKind,
   RunnerDiagnostic,
   RunnerProcess,
   RunnerProcessOptions,
@@ -104,7 +91,6 @@ export type {
 const MODEL_HOST = 'opencode.ai';
 const MODEL_PORT = '443';
 const OPENCODE_VERSION = '2.4.1';
-const SANDBOX_TEMPLATE = `ghcr.io/ariga39/petit-chiba-opencode:${OPENCODE_VERSION}-gh2.98.0`;
 const SETUP_TIMEOUT_MS = 2 * 60 * 1000;
 const SUBMIT_REMINDER_BUDGET_MS = 2 * 60 * 1000;
 const FINALIZATION_BUDGET_MS = 60 * 1000;
@@ -742,7 +728,7 @@ type RunnerJob = {
   hostCleanupConfirmed?: boolean;
   sessionIds: string[];
   multiReview?: RunnerMultiReviewEvidence;
-  sandboxRuntime?: JobSandboxRuntime;
+  sandbox?: JobSandbox;
   checkoutRoot?: string;
   configRoot?: string;
   grantIssuanceAttempted: boolean;
@@ -774,17 +760,12 @@ type RunnerJob = {
 };
 
 export interface RunnerOptions {
-  readonly sbxPath?: string;
-  readonly sandboxRuntime?: ActiveSandboxRuntimeKind;
-  readonly sandboxCliPath?: string;
-  readonly sandboxRuntimeFactory?: SandboxRuntimeFactory;
+  readonly sandboxBackend?: SandboxBackend;
   /** Opt in to the remote relay control plane over the callback origin. */
   readonly llmRelay?: boolean;
   readonly llmGrantVersion?: 1 | 2;
   readonly llmRelayGeneration?: string;
-  readonly microsandboxImage?: string;
   readonly authToken?: string;
-  readonly modelSecretCommand?: string;
   readonly modelConfig?: string;
   readonly evidenceRoot?: string;
   /** Stable deployment identity for per-instance Sandbox ownership records. */
@@ -1038,16 +1019,8 @@ export const createRunner = (options: RunnerOptions = {}) => {
       'RUNNER_LLM_SERVICE_SOCKET is no longer supported; use RUNNER_LLM_RELAY with an HTTPS inference origin',
     );
   }
-  const sandboxRuntime = resolveSandboxRuntimeConfig({
-    kind: options.sandboxRuntime ?? process.env.RUNNER_SANDBOX_RUNTIME,
-    cliPath: options.sandboxCliPath ?? process.env.RUNNER_SANDBOX_CLI,
-    microsandboxImage: options.microsandboxImage ?? process.env.MICROSANDBOX_IMAGE,
-  });
   const relayFlag = options.llmRelay ?? process.env.RUNNER_LLM_RELAY;
   const relayEnabled = isEnabled(relayFlag);
-  if (sandboxRuntime.kind === 'microsandbox' && !relayEnabled) {
-    throw new Error('Microsandbox requires the managed HTTPS LLM relay');
-  }
   const relayCallbackUrl = nonEmpty(options.callbackUrl ?? process.env.RUNNER_CALLBACK_URL);
   const relayCallbackToken = nonEmpty(options.callbackToken ?? process.env.RUNNER_CALLBACK_TOKEN);
   const relayGeneration = nonEmpty(
@@ -1076,15 +1049,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
     relayToken = relayCallbackToken;
   }
   const relayFetch = options.callbackFetch ?? globalThis.fetch;
-  const sbxPath = options.sbxPath ?? process.env.SBX_BIN ?? 'sbx';
-  const sandboxPortPath =
-    options.sandboxCliPath ??
-    process.env.RUNNER_SANDBOX_CLI ??
-    (sandboxRuntime.kind === 'sbx' ? sbxPath : sandboxRuntime.cliPath);
   const authToken = options.authToken ?? process.env.RUNNER_AUTH_TOKEN;
-  const modelSecretCommand = relayEnabled
-    ? undefined
-    : (options.modelSecretCommand ?? process.env.MODEL_SECRET_COMMAND);
   const evidenceRoot =
     options.evidenceRoot ??
     process.env.RUNNER_EVIDENCE_ROOT ??
@@ -1098,20 +1063,18 @@ export const createRunner = (options: RunnerOptions = {}) => {
   if (!RUNNER_INSTANCE_ID.test(instanceId)) throw new Error('invalid Runner instance identity');
   const sandboxOwnershipRoot = join(evidenceRoot, 'sandbox-owners', instanceId);
   const executeProcess = options.process ?? runProcess;
-  const sandboxRuntimeFactory =
-    options.sandboxRuntimeFactory ??
-    (sandboxRuntime.microsandboxImage !== undefined
-      ? createMicrosandboxRuntimeFactory(
-          sandboxRuntime.microsandboxImage,
-          (args, _diagnostic, options) => executeProcess(sandboxPortPath, args, options),
-          process.env.MICROSANDBOX_ALLOW_FAKE_IP === '1',
-          sandboxOwnershipRoot,
-        )
-      : createSbxRuntimeFactory({ modelSecretCommand, ownershipRoot: sandboxOwnershipRoot }));
-  const modelResolverMissing =
-    sandboxRuntime.kind === 'sbx' &&
-    !relayEnabled &&
-    (modelSecretCommand === undefined || modelSecretCommand.length === 0);
+  const hostRun: HostRun = (program, args, processOptions) =>
+    executeProcess(program, args, processOptions);
+  const sandboxBackend =
+    options.sandboxBackend ??
+    createSandboxBackend(
+      { kind: process.env.RUNNER_SANDBOX_RUNTIME },
+      {
+        hostRun,
+        ownershipRoot: sandboxOwnershipRoot,
+        relayEnabled,
+      },
+    );
   const modelConfig = decodeReviewModelConfig(
     options.modelConfig ?? process.env.REVIEW_MODEL_CONFIG,
     relayEnabled ? 'relay' : 'direct',
@@ -1264,10 +1227,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
           token: callbackToken,
           fetch: options.readTokenFetch ?? callbackFetch,
         });
-  // sbx rereads the credential file on demand. microsandbox updates its live host-side secret.
-  const readTokenRotationSupported =
-    readTokenClient !== undefined &&
-    (sandboxRuntime.kind === 'sbx' || sandboxRuntime.kind === 'microsandbox');
+  const readTokenRotationSupported = readTokenClient !== undefined;
   const readTokenSecretValues = (job: RunnerJob): string[] =>
     [...new Set([job.input.repositoryReadToken, ...job.readTokenSecrets])].filter(
       (value) => value.length > 0,
@@ -1412,14 +1372,14 @@ export const createRunner = (options: RunnerOptions = {}) => {
         if (!job.readTokenSecrets.includes(refreshed.token)) {
           job.readTokenSecrets.push(refreshed.token);
         }
-        const runtime = job.sandboxRuntime;
-        if (runtime !== undefined) {
-          if (runtime.rotateGithubReadToken === undefined) {
+        const sandbox = job.sandbox;
+        if (sandbox !== undefined) {
+          if (sandbox.updateGithubReadToken === undefined) {
             applyCredentialFallback(job, expiresAt - CREDENTIAL_EXPIRY_SAFETY_MARGIN_MS);
             return;
           }
           try {
-            await runtime.rotateGithubReadToken(refreshed.token);
+            await sandbox.updateGithubReadToken(refreshed.token);
           } catch {
             if (!job.readTokenRefreshStopped) {
               applyCredentialFallback(job, expiresAt - CREDENTIAL_EXPIRY_SAFETY_MARGIN_MS);
@@ -1471,34 +1431,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
     clearReadTokenDeadlineTimer(job);
     job.readTokenRefreshController?.abort();
   };
-  const strippedSandboxEnvironment = {
-    ...process.env,
-    SSH_AUTH_SOCK: undefined,
-    SSH_AGENT_PID: undefined,
-    GH_TOKEN: undefined,
-    GITHUB_TOKEN: undefined,
-  };
-  // An authenticated inventory probe distinguishes a host-wide sbx outage
-  // from one job's cleanup failure. It never removes or mutates a resource.
-  const probeSbxAccess = async (): Promise<boolean> => {
-    try {
-      const listed = await executeProcess(sandboxPortPath, ['ls'], {
-        env: strippedSandboxEnvironment,
-        captureStdout: false,
-        captureStderr: true,
-        timeoutMs: 30 * 1000,
-        maxBytes: MAX_DIAGNOSTIC_STDERR_BYTES * 64,
-      });
-      return (
-        listed.exitCode === 0 &&
-        !listed.timedOut &&
-        listed.streamError !== true &&
-        listed.processError !== true
-      );
-    } catch {
-      return false;
-    }
-  };
   const recoveringCleanup = new Set<string>();
   let reconcilingCleanups = false;
   const jobs = new Map<string, RunnerJob>();
@@ -1510,7 +1442,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
   };
 
   let claiming = false;
-  let backendOutage = false;
   let stagedOutageLogged = false;
   let claimRequestId: string | undefined;
   const stopsDuringClaim = new Map<
@@ -1640,35 +1571,23 @@ export const createRunner = (options: RunnerOptions = {}) => {
     recoveringCleanup.add(input.jobId);
     let verificationFailed = false;
     try {
-      const kind = sandboxRuntime.kind;
-      if (kind !== 'sbx' && kind !== 'microsandbox')
-        return { accepted: false, status: 409, error: 'cleanup recovery rejected' };
       const recovered = await Effect.runPromise(
-        recoverCallback(evidenceRoot, input, { cleanupRuntime: kind }).pipe(Effect.option),
+        recoverCallback(evidenceRoot, input, { cleanupRuntime: sandboxBackend.kind }).pipe(
+          Effect.option,
+        ),
       );
       if (Option.isNone(recovered))
         return { accepted: false, status: 409, error: 'cleanup recovery rejected' };
       const manifest = recovered.value.manifest;
       const sandboxName = manifest.sandboxName ?? `compte-rendu-${input.jobId}`;
-      const recoveryCommand: SandboxCommand = (args, _diagnostic, options) =>
-        executeProcess(sandboxPortPath, args, {
-          ...options,
-          env: options?.env ?? strippedSandboxEnvironment,
-          captureStdout: true,
-          captureStderr: true,
-          maxBytes: 256 * 1024,
-          timeoutMs: CLEANUP_COMMAND_TIMEOUT_MS,
-        });
+      if (sandboxBackend.confirmCleanupAbsent === undefined)
+        return { accepted: false, status: 409, error: 'cleanup recovery rejected' };
       try {
-        if (kind === 'microsandbox') {
-          await confirmMicrosandboxAbsent(
-            recoveryCommand,
-            sandboxName,
-            recovered.value.catalogIdentity,
-          );
-        } else {
-          await Effect.runPromise(confirmSbxCleanup(sandboxName, input.jobId, recoveryCommand));
-        }
+        await sandboxBackend.confirmCleanupAbsent({
+          jobId: input.jobId,
+          sandboxName,
+          recoveryProof: recovered.value.recoveryProof,
+        });
       } catch (error) {
         verificationFailed = true;
         throw error;
@@ -1767,25 +1686,11 @@ export const createRunner = (options: RunnerOptions = {}) => {
   // Remove only this job's owned Sandbox record. Other records are skipped, so
   // a foreign or unrelated marker is never touched by an automatic retry.
   const removeOwnedSandboxForJob = async (jobId: string): Promise<boolean> => {
-    if (sandboxRuntime.kind !== 'sbx' && sandboxRuntime.kind !== 'microsandbox') return false;
-    const command: SandboxCommand = (args, _diagnostic, processOptions) =>
-      executeProcess(sandboxPortPath, args, {
-        ...processOptions,
-        env:
-          sandboxRuntime.kind === 'microsandbox'
-            ? (processOptions?.env ?? {})
-            : strippedSandboxEnvironment,
-        captureStdout: true,
-        captureStderr: true,
-        maxBytes: 256 * 1024,
-        timeoutMs: CLEANUP_COMMAND_TIMEOUT_MS,
-      });
-    const skipOther = (ownerJobId: string) => ownerJobId !== jobId;
     try {
-      const result =
-        sandboxRuntime.kind === 'microsandbox'
-          ? await reconcileMicrosandboxRestartResources(sandboxOwnershipRoot, command, skipOther)
-          : await reconcileSbxRestartResources(sandboxOwnershipRoot, command, skipOther);
+      const result = await sandboxBackend.reconcileOrphans({
+        isLiveJob: () => false,
+        onlyJobId: jobId,
+      });
       return result.ok;
     } catch {
       return false;
@@ -1866,31 +1771,10 @@ export const createRunner = (options: RunnerOptions = {}) => {
   };
   const runSandboxRecovery = () => {
     sandboxRecovered = undefined;
-    if (sandboxRuntime.kind !== 'sbx' && sandboxRuntime.kind !== 'microsandbox') {
-      sandboxRecovered = true;
-      return Promise.resolve(true);
-    }
-    const command: SandboxCommand = (args, _diagnostic, processOptions) =>
-      executeProcess(sandboxPortPath, args, {
-        ...processOptions,
-        env:
-          sandboxRuntime.kind === 'microsandbox'
-            ? (processOptions?.env ?? {})
-            : strippedSandboxEnvironment,
-        captureStdout: true,
-        captureStderr: true,
-        maxBytes: 256 * 1024,
-        timeoutMs: CLEANUP_COMMAND_TIMEOUT_MS,
-      });
-    const recovery =
-      sandboxRuntime.kind === 'microsandbox'
-        ? reconcileMicrosandboxRestartResources(sandboxOwnershipRoot, command, isLiveCleanupOwner)
-        : reconcileSbxRestartResources(sandboxOwnershipRoot, command, isLiveCleanupOwner);
+    const recovery = sandboxBackend.reconcileOrphans({ isLiveJob: isLiveCleanupOwner });
     return recovery
       .then(async (result) => {
         sandboxRecovered = result.ok;
-        if (sandboxRuntime.kind === 'sbx') backendOutage = !result.ok && !(await probeSbxAccess());
-        else if (result.ok) backendOutage = false;
         for (const jobId of result.recoveredJobIds) {
           const job = jobs.get(jobId);
           if (job === undefined) continue;
@@ -1917,10 +1801,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
             outcome: 'sandbox-recovery',
             recovered: result.recovered,
             blocked: result.failures.length,
-            failures: result.failures.slice(0, 10).map((failure) => ({
-              ...failure,
-              step: 'step' in failure ? (failure.step as SbxRecoveryStep) : 'record',
-            })),
+            failures: result.failures.slice(0, 10),
           });
           scheduleSandboxRecoveryRetry();
         } else if (sandboxRecoveryTimer !== undefined) {
@@ -1994,12 +1875,12 @@ export const createRunner = (options: RunnerOptions = {}) => {
       return;
     }
     let needsRecovery = [...jobs.values()].some((job) => job.cleanupRecoveryPending);
-    if (backendOutage) {
-      if (!(await probeSbxAccess())) {
+    if (sandboxBackend.health() === 'outage') {
+      const ready = await sandboxBackend.checkReady();
+      if (ready !== 'ready') {
         scheduleDeferredCleanupRecovery();
         return;
       }
-      backendOutage = false;
       stagedOutageLogged = false;
       makePendingCleanupRecoveryEligible();
       needsRecovery = true;
@@ -2007,7 +1888,10 @@ export const createRunner = (options: RunnerOptions = {}) => {
     if (!needsRecovery) return;
     const accepted = await reconcileFailedCleanups();
     if (accepted) requestNextJob?.();
-    if (backendOutage || [...jobs.values()].some((job) => job.cleanupRecoveryPending))
+    if (
+      sandboxBackend.health() === 'outage' ||
+      [...jobs.values()].some((job) => job.cleanupRecoveryPending)
+    )
       scheduleDeferredCleanupRecovery();
   };
   const activeJobCount = () =>
@@ -2025,6 +1909,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
   const maintenanceStatus = (): MaintenanceStatus => {
     const activeJobs = activeJobCount();
     const cleanupBlockedJobs = cleanupBlockedJobCount();
+    const outage = sandboxBackend.health() === 'outage';
     return {
       draining,
       drained:
@@ -2035,13 +1920,12 @@ export const createRunner = (options: RunnerOptions = {}) => {
         !claiming &&
         claimRequestId === undefined &&
         !claimPollingHalted &&
-        !backendOutage &&
+        !outage &&
         cleanupBlockedJobs === 0 &&
         recoveringCleanup.size === 0,
       activeJobs,
-      claimInFlight:
-        claiming || (!claimPollingHalted && !backendOutage && claimRequestId !== undefined),
-      claimPollingHalted: claimPollingHalted || backendOutage || grantsRecovered === false,
+      claimInFlight: claiming || (!claimPollingHalted && !outage && claimRequestId !== undefined),
+      claimPollingHalted: claimPollingHalted || outage || grantsRecovered === false,
       cleanupBlockedJobs,
     };
   };
@@ -2115,7 +1999,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         {
           stage,
           ...(stage === 'sandbox'
-            ? { runtime: job.sandboxRuntime?.metadata.runtime ?? sandboxRuntime.kind }
+            ? { runtime: job.sandbox?.metadata.runtime ?? sandboxBackend.kind }
             : {}),
           startedAt: DateTime.formatIso(DateTime.nowUnsafe()),
         },
@@ -2133,7 +2017,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
   const boundedDiagnostic = (job: RunnerJob, value: string | undefined) => {
     if (value === undefined || value.length === 0) return undefined;
     let sanitized = value;
-    for (const secret of [...readTokenSecretValues(job), modelSecretCommand, job.grantToken]) {
+    for (const secret of [...readTokenSecretValues(job), job.grantToken]) {
       if (secret !== undefined && secret.length > 0)
         sanitized = sanitized.replaceAll(secret, '[redacted]');
     }
@@ -2190,6 +2074,18 @@ export const createRunner = (options: RunnerOptions = {}) => {
     await recordLog(event);
   };
 
+  const redactProcessResult = (
+    result: RunnerProcessResult,
+    redactions: readonly string[] | undefined,
+  ): RunnerProcessResult => {
+    if (result.stderr === undefined || redactions === undefined) return result;
+    let stderr = result.stderr;
+    for (const value of redactions) {
+      if (value.length > 0) stderr = stderr.replaceAll(value, '[redacted]');
+    }
+    return stderr === result.stderr ? result : { ...result, stderr };
+  };
+
   const runTracked = async (
     job: RunnerJob,
     command: string,
@@ -2201,21 +2097,16 @@ export const createRunner = (options: RunnerOptions = {}) => {
     const remaining = remainingExecutionMs(job);
     trackProcessCredentialValues(job, processOptions.credentialValues);
     const credentialValues = jobCredentialValues(job);
+    const redactions = [...credentialValues, ...(processOptions.stderrRedactions ?? [])].filter(
+      (value): value is string => value !== undefined && value.length > 0,
+    );
     let result: RunnerProcessResult;
     try {
-      const sandboxEnvironment =
-        command === sandboxPortPath
-          ? (processOptions.env ?? strippedSandboxEnvironment)
-          : processOptions.env;
       result = await executeProcess(command, args, {
         ...processOptions,
-        env: sandboxEnvironment,
         captureStderr: processOptions.captureStderr ?? diagnostic !== undefined,
-        stderrRedactions: [
-          ...credentialValues,
-          ...(processOptions.stderrRedactions ?? []),
-          ...(diagnostic === undefined ? [] : [modelSecretCommand, job.input.repositoryUrl]),
-        ].filter((value): value is string => value !== undefined && value.length > 0),
+        stderrRedactions:
+          diagnostic === undefined ? redactions : [...redactions, job.input.repositoryUrl],
         credentialValues,
         maxBytes:
           diagnostic === undefined
@@ -2231,6 +2122,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
     } catch (error) {
       result = processFailure(error);
     }
+    result = redactProcessResult(result, redactions);
     job.child = undefined;
     if (diagnostic !== undefined) await recordCommand(job, diagnostic, result);
     return result;
@@ -2257,10 +2149,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
     try {
       result = await executeProcess(command, args, {
         ...processOptions,
-        env:
-          command === sandboxPortPath
-            ? (processOptions.env ?? strippedSandboxEnvironment)
-            : processOptions.env,
         captureStderr: processOptions.captureStderr ?? diagnostic !== undefined,
         timeoutMs: Math.max(
           1,
@@ -2318,19 +2206,18 @@ export const createRunner = (options: RunnerOptions = {}) => {
     if (!(await nonemptyFile(join(evidencePath, 'opencode.jsonl')))) complete = false;
     if (!(await fileExists(join(evidencePath, 'opencode.stderr')))) complete = false;
 
-    const runtime = job.sandboxRuntime;
-    const archiveCommand: SandboxCommand = (
-      args: readonly string[],
-      diagnostic?: RunnerDiagnostic,
-      processOptions?: RunnerProcessOptions,
-    ) => runArchive(job, sandboxPortPath, args, deadlineAt, processOptions, diagnostic);
-    if (runtime === undefined) {
+    const sandbox = job.sandbox;
+    const archivePort: SandboxExecPort = {
+      run: (program, args, processOptions, diagnostic) =>
+        runArchive(job, program, args, deadlineAt, processOptions, diagnostic),
+    };
+    if (sandbox === undefined) {
       complete = false;
     } else {
-      const evidenceRoot = runtime.metadata.evidenceRoot;
-      const sessions = await runtime.exec(
+      const evidenceRoot = sandbox.metadata.evidenceRoot;
+      const sessions = await sandbox.exec(
         ['opencode', 'session', 'list', '--standalone', '--format', 'json'],
-        archiveCommand,
+        archivePort,
         {
           captureStdout: true,
           maxBytes: MAX_AGENT_OUTPUT_BYTES,
@@ -2355,16 +2242,16 @@ export const createRunner = (options: RunnerOptions = {}) => {
           const exportSession = async (sessionId: string): Promise<boolean> => {
             const exportPath = join(evidencePath, `opencode-export-${sessionId}.json`);
             const sandboxExportPath = `${evidenceRoot}/opencode-export-${sessionId}.json`;
-            const exported = await runtime.exec(
+            const exported = await sandbox.exec(
               [
                 'sh',
                 '-c',
                 `opencode session export --standalone ${sessionId} > ${sandboxExportPath}`,
               ],
-              archiveCommand,
+              archivePort,
               {},
             );
-            const copied = await runtime.copyOut(sandboxExportPath, exportPath, archiveCommand);
+            const copied = await sandbox.copyOut(sandboxExportPath, exportPath, archivePort);
             const exportReadable =
               exported.exitCode === 0 &&
               !exported.timedOut &&
@@ -2412,7 +2299,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
                     `parentID=${rootSessionId}`,
                   ];
                   if (cursor !== null) args.push('--param', `cursor=${cursor}`);
-                  const listed = await runtime.exec(args, archiveCommand, {
+                  const listed = await sandbox.exec(args, archivePort, {
                     captureStdout: true,
                     maxBytes: MAX_AGENT_OUTPUT_BYTES,
                   });
@@ -2459,12 +2346,11 @@ export const createRunner = (options: RunnerOptions = {}) => {
       }
       for (const tree of ['data', 'state']) {
         const destination = join(evidencePath, `opencode-${tree}`);
-        const copied = await runtime.copyOut(
-          `${evidenceRoot}/${tree}`,
-          destination,
-          archiveCommand,
-          { stage: 'sandbox', command: `archive-opencode-${tree}`, includeStderr: true },
-        );
+        const copied = await sandbox.copyOut(`${evidenceRoot}/${tree}`, destination, archivePort, {
+          stage: 'sandbox',
+          command: `archive-opencode-${tree}`,
+          includeStderr: true,
+        });
         if (copied.exitCode !== 0 || copied.timedOut) complete = false;
       }
     }
@@ -2646,39 +2532,34 @@ export const createRunner = (options: RunnerOptions = {}) => {
     reportStage(job, 'cleanup');
     let sandboxClean = true;
     if (job.sandboxAttempted) update(job, { stage: 'cleanup' });
-    const cleanupProcess = async (
-      args: readonly string[],
-      diagnostic?: RunnerDiagnostic,
-      processOptions: RunnerProcessOptions = {},
-    ) => {
-      let result: RunnerProcessResult;
-      try {
-        result = await executeProcess(sandboxPortPath, args, {
-          ...processOptions,
-          env:
-            sandboxRuntime.kind === 'microsandbox'
-              ? (processOptions.env ?? {})
-              : strippedSandboxEnvironment,
-          captureStdout: processOptions.captureStdout ?? false,
-          captureStderr: true,
-          stderrRedactions: [
-            ...readTokenSecretValues(job),
-            modelSecretCommand,
-            job.grantToken,
-            job.input.repositoryUrl,
-          ].filter((value): value is string => value !== undefined && value.length > 0),
-          maxBytes: processOptions.maxBytes ?? MAX_DIAGNOSTIC_STDERR_BYTES,
-          timeoutMs: CLEANUP_COMMAND_TIMEOUT_MS,
-        });
-      } catch (error) {
-        result = processFailure(error);
-      }
-      if (diagnostic !== undefined) await recordCommand(job, diagnostic, result);
-      return result;
+    const cleanupPort: SandboxExecPort = {
+      run: async (program, args, processOptions = {}, diagnostic) => {
+        let result: RunnerProcessResult;
+        try {
+          result = await executeProcess(program, args, {
+            ...processOptions,
+            env: processOptions.env,
+            captureStdout: processOptions.captureStdout ?? false,
+            captureStderr: true,
+            stderrRedactions: [
+              ...readTokenSecretValues(job),
+              job.grantToken,
+              job.input.repositoryUrl,
+              ...(processOptions.stderrRedactions ?? []),
+            ].filter((value): value is string => value !== undefined && value.length > 0),
+            maxBytes: processOptions.maxBytes ?? MAX_DIAGNOSTIC_STDERR_BYTES,
+            timeoutMs: CLEANUP_COMMAND_TIMEOUT_MS,
+          });
+        } catch (error) {
+          result = processFailure(error);
+        }
+        if (diagnostic !== undefined) await recordCommand(job, diagnostic, result);
+        return result;
+      },
     };
-    if (job.sandboxAttempted && job.sandboxRuntime !== undefined) {
+    if (job.sandboxAttempted && job.sandbox !== undefined) {
       try {
-        await job.sandboxRuntime.destroy(cleanupProcess);
+        await job.sandbox.destroy(cleanupPort);
       } catch {
         sandboxClean = false;
       }
@@ -2688,11 +2569,8 @@ export const createRunner = (options: RunnerOptions = {}) => {
     job.cleanupRecoveryPending = !sandboxClean;
     if (job.cleanupRecoveryPending) job.cleanupRecoveryRetryAt = Date.now();
     job.hostCleanupConfirmed =
-      hostClean &&
-      (!job.sandboxAttempted || job.sandboxRuntime?.metadata.hostCleanupConfirmed === true);
+      hostClean && (!job.sandboxAttempted || job.sandbox?.metadata.hostCleanupConfirmed === true);
     update(job, { sandbox: { cleanup: clean ? 'destroyed' : 'failed' } });
-    if (!sandboxClean && sandboxRuntime.kind === 'sbx' && !(await probeSbxAccess()))
-      backendOutage = true;
     if (job.cleanupRecoveryPending) scheduleDeferredCleanupRecovery();
     return clean;
   };
@@ -3012,10 +2890,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
     try {
       evidenceStartedAt = await currentIso();
       job.executionStartedAt = evidenceStartedAt;
-      if (
-        !multi &&
-        (modelResolverMissing || modelId === undefined || openCodeConfig === undefined)
-      ) {
+      if (!multi && (modelId === undefined || openCodeConfig === undefined)) {
         failure = { reason: 'agent' };
         return;
       }
@@ -3181,10 +3056,9 @@ export const createRunner = (options: RunnerOptions = {}) => {
           })
         : openCodeConfig;
 
-      const runtime = sandboxRuntimeFactory({
+      const sandbox = sandboxBackend.createJob({
         id: job.id,
         name: job.sandboxName,
-        imageRef: SANDBOX_TEMPLATE,
         cpu: '4',
         memoryGib: 8,
         env: [
@@ -3198,18 +3072,17 @@ export const createRunner = (options: RunnerOptions = {}) => {
         githubResource: 'api.github.com:443',
         githubReadToken: job.input.repositoryReadToken,
       });
-      job.sandboxRuntime = runtime;
+      job.sandbox = sandbox;
       job.sandboxAttempted = true;
       reportStage(job, 'sandbox');
-      const setupCommand: SandboxCommand = (
-        args: readonly string[],
-        diagnostic?: RunnerDiagnostic,
-        processOptions?: RunnerProcessOptions,
-      ) => runTracked(job, sandboxPortPath, args, processOptions, diagnostic);
+      const setupPort: SandboxExecPort = {
+        run: (program, args, processOptions, diagnostic) =>
+          runTracked(job, program, args, processOptions, diagnostic),
+      };
       try {
-        await runtime.setup(setupCommand);
+        await sandbox.setup(setupPort);
       } catch (error) {
-        job.sandboxCreated = runtime.metadata.created;
+        job.sandboxCreated = sandbox.metadata.created;
         if (
           error instanceof SandboxCreateError &&
           error.timedOut &&
@@ -3232,11 +3105,11 @@ export const createRunner = (options: RunnerOptions = {}) => {
         };
         return;
       }
-      job.sandboxCreated = runtime.metadata.created;
+      job.sandboxCreated = sandbox.metadata.created;
       if (job.abortRequested) return;
-      const githubPreflight = await runtime.exec(
+      const githubPreflight = await sandbox.exec(
         ['gh', 'api', '--silent', 'installation/repositories'],
-        setupCommand,
+        setupPort,
         {},
         { stage: 'sandbox', command: 'github-preflight' },
       );
@@ -3285,7 +3158,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
               agent: agentName,
               model: { providerID: agentIdentity.providerID, id: agentIdentity.id },
             };
-      agent = await runtime.exec(
+      agent = await sandbox.exec(
         [
           'opencode',
           'run',
@@ -3298,7 +3171,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
           agentName,
           agentPrompt,
         ],
-        setupCommand,
+        setupPort,
         {
           captureStdout: true,
           captureStderr: true,
@@ -3330,9 +3203,9 @@ export const createRunner = (options: RunnerOptions = {}) => {
         let needsCorrection = false;
         const precheckRemaining = job.deadlineAt - (await currentEpochMillis());
         if (sessionId !== undefined && precheckRemaining > 0) {
-          const exported = await runtime.exec(
+          const exported = await sandbox.exec(
             ['opencode', 'session', 'export', '--standalone', sessionId],
-            setupCommand,
+            setupPort,
             {
               captureStdout: true,
               maxBytes: MAX_AGENT_OUTPUT_BYTES,
@@ -3362,7 +3235,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
           needsCorrection
         ) {
           agentEndedAt = undefined;
-          const reminder = await runtime.exec(
+          const reminder = await sandbox.exec(
             [
               'opencode',
               'run',
@@ -3377,7 +3250,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
               agentName,
               reviewCorrectionPrompt,
             ],
-            setupCommand,
+            setupPort,
             {
               captureStdout: true,
               captureStderr: true,
@@ -3708,10 +3581,10 @@ export const createRunner = (options: RunnerOptions = {}) => {
           await writeManifestAtomically(join(evidencePath, 'manifest.json'), {
             jobId: job.id,
             sandboxName: job.sandboxName,
-            sandboxId: job.sandboxRuntime?.metadata.id ?? job.sandboxName,
-            catalogIdentity: job.sandboxRuntime?.metadata.catalogIdentity,
-            sandboxRuntimeName: job.sandboxRuntime?.metadata.name ?? job.sandboxName,
-            runtime: job.sandboxRuntime?.metadata.runtime ?? sandboxRuntime.kind,
+            sandboxId: job.sandbox?.metadata.id ?? job.sandboxName,
+            sandboxRuntimeName: job.sandbox?.metadata.name ?? job.sandboxName,
+            runtime: job.sandbox?.metadata.runtime ?? sandboxBackend.kind,
+            recoveryProof: job.sandbox?.metadata.recoveryProof,
             evidenceId,
             runId: job.input.runId,
             attempt: job.input.attempt,
@@ -3723,7 +3596,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
             finishedAt: await currentIso(),
             model: executionModel,
             ...(job.usage === undefined ? {} : { usage: job.usage }),
-            image: job.sandboxRuntime?.metadata.imageRef ?? SANDBOX_TEMPLATE,
+            image: job.sandbox?.metadata.imageRef ?? sandboxBackend.kind,
             openCodeVersion: OPENCODE_VERSION,
             agent: {
               exitCode: agent?.exitCode ?? null,
@@ -3882,7 +3755,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       job.grantToken = '';
       job.readTokenSecrets = [];
       job.processCredentialValues = [];
-      job.sandboxRuntime = undefined;
+      job.sandbox = undefined;
       job.multiReview = undefined;
       job.sessionIds = [];
       retireDestroyedJob(job);
@@ -4000,44 +3873,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
     scheduleReadTokenRefresh(job);
     void execute(job);
     return jsonResponse(202, publicState(job));
-  };
-
-  const microsandboxPreflight = sandboxRuntime.microsandboxImage !== undefined;
-  const runtimePreflight = microsandboxPreflight
-    ? createMicrosandboxPreflight(sandboxRuntime.microsandboxImage!)
-    : undefined;
-  let preflightPromise: Promise<boolean> | undefined;
-  let preflightRetryAt = 0;
-  const ensurePreflight = async (): Promise<boolean> => {
-    if (runtimePreflight === undefined) return true;
-    if (microsandboxPreflight && Date.now() < preflightRetryAt) return false;
-    preflightPromise ??= runtimePreflight((args, _diagnostic, options) =>
-      executeProcess(sandboxPortPath, args, {
-        env: options?.env ?? strippedSandboxEnvironment,
-        captureStdout: options?.captureStdout ?? false,
-        captureStderr: true,
-        timeoutMs: 30 * 1000,
-        maxBytes: MAX_DIAGNOSTIC_STDERR_BYTES * 64,
-      }),
-    )
-      .then((ready) => {
-        if (ready) {
-          preflightRetryAt = 0;
-          return true;
-        }
-        if (microsandboxPreflight) {
-          preflightPromise = undefined;
-          preflightRetryAt = Date.now() + CLEANUP_RECOVERY_RETRY_INTERVAL_MS;
-        }
-        return false;
-      })
-      .catch((error) => {
-        if (!microsandboxPreflight) throw error;
-        preflightPromise = undefined;
-        preflightRetryAt = Date.now() + CLEANUP_RECOVERY_RETRY_INTERVAL_MS;
-        return false;
-      });
-    return preflightPromise;
   };
 
   const handle = async (request: Request): Promise<Response> => {
@@ -4264,16 +4099,16 @@ export const createRunner = (options: RunnerOptions = {}) => {
     }
     // The captured first scan settles once; later polls await an already
     // settled promise. A false result from unrelated records does not gate;
-    // backendOutage below carries a real backend outage.
+    // the backend's synchronous outage state does.
     await startupSandboxRecovery.catch(() => undefined);
     if (closed) return;
     let needsCleanupRecovery = [...jobs.values()].some((job) => job.cleanupRecoveryPending);
-    if (backendOutage) {
-      if (!(await probeSbxAccess())) {
+    if (sandboxBackend.health() === 'outage') {
+      const ready = await sandboxBackend.checkReady();
+      if (ready !== 'ready') {
         scheduleClaim();
         return;
       }
-      backendOutage = false;
       stagedOutageLogged = false;
       makePendingCleanupRecoveryEligible();
       needsCleanupRecovery = true;
@@ -4297,21 +4132,16 @@ export const createRunner = (options: RunnerOptions = {}) => {
       callbackUrl.length === 0 ||
       callbackToken === undefined ||
       callbackToken.length === 0 ||
-      modelResolverMissing ||
       modelConfig === undefined ||
       !hasCapacity()
     ) {
       return;
     }
 
-    if (!(await ensurePreflight())) {
-      if (microsandboxPreflight) {
-        await recordClaimGateFailure('runtime-preflight-failed', false);
-        scheduleClaim();
-        return;
-      }
-      claimPollingHalted = true;
-      await recordClaimGateFailure('runtime-preflight-failed');
+    const readiness = await sandboxBackend.checkReady();
+    if (readiness !== 'ready') {
+      await recordClaimGateFailure('runtime-preflight-failed', false);
+      scheduleClaim();
       return;
     }
     if (closed) return;
@@ -4385,7 +4215,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
           claimFailure ??= { reason: 'invalid-response' };
           throw new Error('Claimed Runner Job failed schema validation');
         }
-        if (backendOutage) {
+        if (sandboxBackend.health() === 'outage') {
           if (!stagedOutageLogged) {
             stagedOutageLogged = true;
             await recordLog({

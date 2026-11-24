@@ -1,48 +1,9 @@
 import type { ChildProcess } from 'node:child_process';
-import { Option, Schema } from 'effect';
 import { SandboxRuntimeKind, type RunnerProcessErrorCode } from '@compte-rendu/contracts';
+import { createMicrosandboxSandboxBackend } from './sandbox-runtime-microsandbox.js';
+import { createSbxSandboxBackend } from './sandbox-runtime-sbx.js';
 
 export { SandboxRuntimeKind };
-
-/** Backends this Runner build can construct. The public contract stays open. */
-export const ActiveSandboxRuntimeKind = Schema.Literals(['sbx', 'microsandbox']);
-export type ActiveSandboxRuntimeKind = Schema.Schema.Type<typeof ActiveSandboxRuntimeKind>;
-
-export interface SandboxRuntimeConfig {
-  readonly kind: ActiveSandboxRuntimeKind;
-  readonly cliPath: string;
-  readonly microsandboxImage?: string;
-}
-
-export interface SandboxRuntimeConfigInput {
-  readonly kind?: string | undefined;
-  readonly cliPath?: string | undefined;
-  readonly microsandboxImage?: string | undefined;
-}
-
-const nonEmpty = (value: string | undefined): string | undefined => {
-  const trimmed = value?.trim();
-  return trimmed === undefined || trimmed.length === 0 ? undefined : trimmed;
-};
-
-export const resolveSandboxRuntimeConfig = (
-  input: SandboxRuntimeConfigInput,
-): SandboxRuntimeConfig => {
-  const requested = nonEmpty(input.kind) ?? 'sbx';
-  const decoded = Schema.decodeUnknownOption(ActiveSandboxRuntimeKind)(requested);
-  if (Option.isNone(decoded)) {
-    throw new Error(
-      `RUNNER_SANDBOX_RUNTIME must be 'sbx' or 'microsandbox', received '${requested}'`,
-    );
-  }
-  const kind = decoded.value;
-  if (kind === 'microsandbox') {
-    const image = nonEmpty(input.microsandboxImage);
-    if (!image) throw new Error('Microsandbox requires MICROSANDBOX_IMAGE');
-    return { kind, cliPath: nonEmpty(input.cliPath) ?? 'msb', microsandboxImage: image };
-  }
-  return { kind, cliPath: nonEmpty(input.cliPath) ?? 'sbx' };
-};
 
 export type RunnerProcessResult = {
   readonly exitCode: number;
@@ -92,28 +53,36 @@ export type RunnerDiagnostic = {
 };
 
 /**
- * A runtime invocation, owned by the Runner so that deadlines, abort
- * wiring, environment stripping, redaction and diagnostics stay in one place.
- * CLI adapters build argv; the Runner owns the command port.
+ * Instance-level host process port supplied to a backend once at construction.
+ * Backends own their executable path and minimal environment; the Runner owns
+ * byte bounds, abort wiring, redaction and diagnostics.
  */
-export type SandboxCommand = (
+export type HostRun = (
+  program: string,
   args: readonly string[],
-  diagnostic?: RunnerDiagnostic,
   options?: RunnerProcessOptions,
+  diagnostic?: RunnerDiagnostic,
 ) => Promise<RunnerProcessResult>;
 
 /**
- * The identity and host paths a per-job runtime needs. Provider names, secret
- * placeholders, network-rule state and cleanup bookkeeping stay inside the
- * runtime's own closure; the Runner only knows this metadata.
+ * Per-stage sandbox command port. It carries the current phase's deadline,
+ * abort signal, credential observation and diagnostic logging.
+ */
+export interface SandboxExecPort {
+  run: HostRun;
+}
+
+/**
+ * The identity and host paths a per-job sandbox needs. Backend command paths,
+ * images, secret placeholders, network rules and cleanup bookkeeping stay
+ * inside each backend; the Runner only supplies job facts.
  */
 export interface SandboxJobSpec {
   /** Immutable Runner Job id/attempt identity used to derive unique resource names. */
   readonly id: string;
   readonly name: string;
-  readonly imageRef: string;
   readonly cpu: string;
-  /** Memory limit in GiB; each adapter formats the backend-required unit. */
+  /** Memory limit in GiB; each backend formats the required unit. */
   readonly memoryGib: number;
   /** Environment pairs (KEY=VALUE) applied to every process in the sandbox. */
   readonly env: readonly string[];
@@ -124,21 +93,21 @@ export interface SandboxJobSpec {
   readonly modelResource: string;
   /**
    * Absolute host path to a private mode-0600 file holding the job's model
-   * grant token. When set, the sbx adapter resolves the model secret with
-   * `/usr/bin/cat <path>` instead of a host secret resolver. microsandbox supplies this value
-   * to the host CLI environment for TLS injection. Keep it out of the guest,
-   * command line, configuration and evidence.
+   * grant token. Backends that proxy credentials on the host keep it out of the
+   * guest, command line, configuration and evidence.
    */
   readonly modelTokenFile?: string;
   readonly githubResource: string;
-  /** Per-job GitHub read token; adapters pass it via child env, never argv. */
+  /** Per-job GitHub read token; backends pass it via child env, never argv. */
   readonly githubReadToken: string;
 }
+
+/** Backend-private proof needed to confirm an already recorded cleanup. */
+export type SandboxRecoveryProof = Readonly<Record<string, string>>;
 
 export interface SandboxRuntimeMetadata {
   /** True as soon as the sandbox resource exists, even if later setup steps fail. */
   readonly created: boolean;
-  readonly catalogIdentity?: string | undefined;
   readonly hostCleanupConfirmed?: boolean;
   /** Backend sandbox identity (sbx uses the requested name). */
   readonly id: string;
@@ -147,27 +116,28 @@ export interface SandboxRuntimeMetadata {
   readonly imageRef: string;
   /** In-sandbox evidence path for this backend. */
   readonly evidenceRoot: string;
+  /** Opaque backend evidence used later by the same backend to prove absence. */
+  readonly recoveryProof?: SandboxRecoveryProof | undefined;
 }
 
 /**
- * A per-job runtime object. It is created before `setup` so a throw during
- * partial setup still has cleanup state, and it owns all runtime-specific
- * naming and resources. `command` is the Runner-owned CLI port that carries
- * deadlines, abort wiring, redaction and diagnostics.
+ * A per-job sandbox. It is created before `setup` so a throw during partial
+ * setup still has cleanup state, and it owns all backend-specific naming,
+ * credentials and host resources.
  */
-export interface JobSandboxRuntime {
+export interface JobSandbox {
   readonly metadata: SandboxRuntimeMetadata;
-  setup(command: SandboxCommand): Promise<void>;
+  setup(exec: SandboxExecPort): Promise<void>;
   exec(
     args: readonly string[],
-    command: SandboxCommand,
+    exec: SandboxExecPort,
     options?: RunnerProcessOptions,
     diagnostic?: RunnerDiagnostic,
   ): Promise<RunnerProcessResult>;
   copyOut(
     sandboxPath: string,
     localPath: string,
-    command: SandboxCommand,
+    exec: SandboxExecPort,
     diagnostic?: RunnerDiagnostic,
     options?: RunnerProcessOptions,
   ): Promise<RunnerProcessResult>;
@@ -176,12 +146,121 @@ export interface JobSandboxRuntime {
    * destination. Backends without an atomically updateable destination omit
    * this, and the Runner keeps the initial credential's hard expiry cap.
    */
-  rotateGithubReadToken?(token: string): Promise<void>;
+  updateGithubReadToken?(token: string): Promise<void>;
   /** Removes every owned resource and confirms the sandbox identity is gone; rejects otherwise. */
-  destroy(command: SandboxCommand): Promise<void>;
+  destroy(exec: SandboxExecPort): Promise<void>;
 }
 
-export type SandboxRuntimeFactory = (spec: SandboxJobSpec) => JobSandboxRuntime;
+export type SandboxHealth = 'ready' | 'unready' | 'outage';
+
+export type SandboxRecoveryStep =
+  | 'record'
+  | 'inspect'
+  | 'ownership'
+  | 'policy-list'
+  | 'policy-remove'
+  | 'policy-verify'
+  | 'sandbox-remove'
+  | 'sandbox-verify'
+  | 'secret-remove'
+  | 'secret-verify'
+  | 'record-remove';
+
+export interface SandboxRecoveryFailure {
+  readonly jobId: string;
+  readonly sandboxName: string;
+  readonly step: SandboxRecoveryStep;
+  readonly command?: string;
+  readonly exitCode?: number;
+  readonly timedOut?: boolean;
+  readonly truncated?: boolean;
+  readonly stderrTruncated?: boolean;
+  readonly streamError?: boolean;
+  readonly processError?: boolean;
+  readonly errorCode?: RunnerProcessResult['errorCode'];
+}
+
+export interface OrphanReconcileResult {
+  readonly ok: boolean;
+  readonly recovered: number;
+  readonly recoveredJobIds: readonly string[];
+  readonly failures: readonly SandboxRecoveryFailure[];
+}
+
+export interface OrphanReconcileInput {
+  readonly isLiveJob: (jobId: string) => boolean;
+  /** Restrict this scan to one retained job; other ownership records are skipped. */
+  readonly onlyJobId?: string;
+}
+
+export interface SandboxCleanupConfirmation {
+  readonly jobId: string;
+  readonly sandboxName: string;
+  readonly recoveryProof?: SandboxRecoveryProof | undefined;
+}
+
+/**
+ * A process-lifetime sandbox backend. It owns configuration validation,
+ * readiness/outage state, ownership records and orphan reconciliation. A new
+ * backend only implements this interface and adds one registry entry below.
+ */
+export interface SandboxBackend {
+  readonly kind: string;
+  /** Synchronous, no-I/O view used by maintenance and claim-race checks. */
+  health(): SandboxHealth;
+  /** Bounded readiness check used before claim and by cleanup retries. */
+  checkReady(): Promise<SandboxHealth>;
+  reconcileOrphans(input: OrphanReconcileInput): Promise<OrphanReconcileResult>;
+  /** Proves a recorded sandbox and its scoped host resources are absent. */
+  confirmCleanupAbsent?(input: SandboxCleanupConfirmation): Promise<void>;
+  createJob(spec: SandboxJobSpec): JobSandbox;
+}
+
+export interface SandboxBackendContext {
+  readonly hostRun: HostRun;
+  readonly ownershipRoot: string;
+  readonly relayEnabled: boolean;
+}
+
+export interface SandboxBackendRegistration {
+  readonly kind: string;
+  readonly create: (context: SandboxBackendContext) => SandboxBackend;
+}
+
+const SANDBOX_BACKEND_REGISTRATIONS: readonly SandboxBackendRegistration[] = [
+  { kind: 'sbx', create: createSbxSandboxBackend },
+  { kind: 'microsandbox', create: createMicrosandboxSandboxBackend },
+];
+
+export interface SandboxBackendSelection {
+  readonly kind?: string | undefined;
+}
+
+const nonEmpty = (value: string | undefined): string | undefined => {
+  const trimmed = value?.trim();
+  return trimmed === undefined || trimmed.length === 0 ? undefined : trimmed;
+};
+
+/**
+ * Plugin registration. Configuration and backend-specific requirements fail
+ * inside the selected backend before the Runner claims or admits work.
+ */
+export const createSandboxBackend = (
+  selection: SandboxBackendSelection,
+  context: SandboxBackendContext,
+): SandboxBackend => {
+  const requested = nonEmpty(selection.kind) ?? SANDBOX_BACKEND_REGISTRATIONS[0]!.kind;
+  const registration = SANDBOX_BACKEND_REGISTRATIONS.find(
+    (candidate) => candidate.kind === requested,
+  );
+  if (registration === undefined) {
+    const supported = SANDBOX_BACKEND_REGISTRATIONS.map((candidate) => `'${candidate.kind}'`).join(
+      ', ',
+    );
+    throw new Error(`RUNNER_SANDBOX_RUNTIME must be one of ${supported}, received '${requested}'`);
+  }
+  return registration.create(context);
+};
 
 /** Carries the create invocation's terminal cause so the Runner can report it. */
 export class SandboxCreateError extends Error {

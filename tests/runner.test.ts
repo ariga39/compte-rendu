@@ -11,10 +11,9 @@ import {
   type RunnerProcessOptions,
   type RunnerProcessResult,
 } from '../apps/runner/src/runner';
-import { createSbxRuntimeFactory } from '../apps/runner/src/sandbox-runtime-sbx';
 import { multiReviewConfig } from '../apps/runner/src/opencode-multi-review';
 import { createCoreWorker } from '../apps/core/src/core-worker';
-import type { SandboxRuntimeFactory } from '../apps/runner/src/sandbox-runtime';
+import type { SandboxBackend, SandboxHealth } from '../apps/runner/src/sandbox-runtime';
 import { createD1ReviewStateStore } from '../apps/core/src/index';
 import { SqliteD1Database } from './support/d1-database';
 import { claimRunnerJob } from './support/runner-claim';
@@ -367,6 +366,7 @@ const createRunner = (options: TestRunnerOptions = {}) => {
 };
 
 beforeEach(async () => {
+  vi.stubEnv('MODEL_SECRET_COMMAND', 'secret-resolver get MODEL_API_KEY');
   await rm(sharedEvidenceRoot, {
     recursive: true,
     force: true,
@@ -376,6 +376,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await rm(join(sharedEvidenceRoot, 'sandbox-owners'), { recursive: true, force: true });
 });
 
@@ -548,7 +549,7 @@ const runAgentScenario = async (scenario: {
   evidenceRoot?: string;
   repositoryReadToken?: string;
   agentProcess?: (options: RunnerProcessOptions) => Promise<RunnerProcessResult>;
-  sandboxRuntimeFactory?: SandboxRuntimeFactory;
+  sandboxBackend?: SandboxBackend;
   logEvents?: unknown[];
   onRunner?: (runner: ReturnType<typeof createRunner>) => void;
 }) => {
@@ -587,142 +588,155 @@ const runAgentScenario = async (scenario: {
     callbackStatus: (attempt) => scenario.callbackStatuses?.[attempt - 1] ?? 202,
   });
   execution.enqueue(jobInput);
-  const runner = createRunner({
-    ...(scenario.microsandbox
-      ? ({ sandboxRuntime: 'microsandbox', microsandboxImage: 'review:fixture' } as const)
-      : {}),
-    sandboxRuntimeFactory: scenario.sandboxRuntimeFactory,
-    evidenceRoot: scenario.evidenceRoot ?? sharedEvidenceRoot,
-    authToken: 'runner-test-token',
-    modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-    modelConfig: scenario.modelConfig,
-    progressFetch: scenario.progressFetch,
-    llmRelay: scenario.relayControl === undefined ? undefined : true,
-    llmRelayGeneration: scenario.relayControl === undefined ? undefined : 'generation-a',
-    claimUrl: 'https://ingress.test/runner-claim',
-    claimFetch: execution.claimFetch,
-    callbackUrl: 'https://ingress.test/runner-callback',
-    callbackToken: 'callback-token',
-    callbackTimeoutMs: scenario.callbackTimeoutMs,
-    callbackFetch: async (input: RequestInfo | URL, init?: RequestInit) => {
-      const inputUrl =
-        input instanceof Request ? input.url : input instanceof URL ? input.href : String(input);
-      if (
-        scenario.relayControl !== undefined &&
-        new URL(inputUrl).pathname.startsWith('/runner-llm/')
-      ) {
-        return scenario.relayControl.fetch(input, init);
-      }
-      const request = new Request(input, init);
-      execution.callbackRequests.push(request);
-      if (scenario.callbackThrows !== undefined) {
-        throw new Error(scenario.callbackThrows);
-      }
-      if (scenario.callbackHangs === true) {
-        return new Promise<Response>(() => undefined);
-      }
-      const status = scenario.callbackStatuses?.[execution.callbackRequests.length - 1] ?? 202;
-      return new Response(null, { status });
-    },
-    log:
-      scenario.logEvents === undefined
-        ? undefined
-        : {
-            record: async (event) => {
-              scenario.logEvents!.push(event);
+  const previousKind = process.env.RUNNER_SANDBOX_RUNTIME;
+  const previousImage = process.env.MICROSANDBOX_IMAGE;
+  if (scenario.microsandbox) {
+    process.env.RUNNER_SANDBOX_RUNTIME = 'microsandbox';
+    process.env.MICROSANDBOX_IMAGE = 'review:fixture';
+  }
+  let runner!: ReturnType<typeof createRunner>;
+  try {
+    runner = createRunner({
+      sandboxBackend: scenario.sandboxBackend,
+      evidenceRoot: scenario.evidenceRoot ?? sharedEvidenceRoot,
+      authToken: 'runner-test-token',
+      modelConfig: scenario.modelConfig,
+      progressFetch: scenario.progressFetch,
+      llmRelay: scenario.relayControl === undefined ? undefined : true,
+      llmRelayGeneration: scenario.relayControl === undefined ? undefined : 'generation-a',
+      claimUrl: 'https://ingress.test/runner-claim',
+      claimFetch: execution.claimFetch,
+      callbackUrl: 'https://ingress.test/runner-callback',
+      callbackToken: 'callback-token',
+      callbackTimeoutMs: scenario.callbackTimeoutMs,
+      callbackFetch: async (input: RequestInfo | URL, init?: RequestInit) => {
+        const inputUrl =
+          input instanceof Request ? input.url : input instanceof URL ? input.href : String(input);
+        if (
+          scenario.relayControl !== undefined &&
+          new URL(inputUrl).pathname.startsWith('/runner-llm/')
+        ) {
+          return scenario.relayControl.fetch(input, init);
+        }
+        const request = new Request(input, init);
+        execution.callbackRequests.push(request);
+        if (scenario.callbackThrows !== undefined) {
+          throw new Error(scenario.callbackThrows);
+        }
+        if (scenario.callbackHangs === true) {
+          return new Promise<Response>(() => undefined);
+        }
+        const status = scenario.callbackStatuses?.[execution.callbackRequests.length - 1] ?? 202;
+        return new Response(null, { status });
+      },
+      log:
+        scenario.logEvents === undefined
+          ? undefined
+          : {
+              record: async (event) => {
+                scenario.logEvents!.push(event);
+              },
             },
-          },
-    process: async (_command, args, options = {}) => {
-      if (_command === 'msb') {
-        const ok = { exitCode: 0, stdout: '', truncated: false, timedOut: false };
-        if (args[0] === 'create') msbOwner = args[args.indexOf('--label') + 1]?.split('=')[1];
-        if (args[0] === 'rm') {
-          if (scenario.cleanupFailure) return { ...ok, exitCode: 1 };
-          if (cleanupRemovalFailures > 0) {
-            cleanupRemovalFailures -= 1;
-            return { ...ok, exitCode: 1 };
+      process: async (_command, args, options = {}) => {
+        if (_command === 'msb') {
+          const ok = { exitCode: 0, stdout: '', truncated: false, timedOut: false };
+          if (args[0] === 'create') msbOwner = args[args.indexOf('--label') + 1]?.split('=')[1];
+          if (args[0] === 'rm') {
+            if (scenario.cleanupFailure) return { ...ok, exitCode: 1 };
+            if (cleanupRemovalFailures > 0) {
+              cleanupRemovalFailures -= 1;
+              return { ...ok, exitCode: 1 };
+            }
+            msbOwner = undefined;
+            return ok;
           }
-          msbOwner = undefined;
-          return ok;
+          if (args[0] === 'inspect') {
+            const name = args.at(-1)!;
+            return msbOwner === undefined
+              ? { ...ok, exitCode: 1, stderr: 'error: sandbox not found: ' + name }
+              : {
+                  ...ok,
+                  stdout: JSON.stringify({
+                    name,
+                    config: { labels: { 'cr-job-owner': msbOwner } },
+                  }),
+                };
+          }
         }
-        if (args[0] === 'inspect') {
-          const name = args.at(-1)!;
-          return msbOwner === undefined
-            ? { ...ok, exitCode: 1, stderr: 'error: sandbox not found: ' + name }
-            : {
-                ...ok,
-                stdout: JSON.stringify({ name, config: { labels: { 'cr-job-owner': msbOwner } } }),
-              };
+        const isAgent = args[0] === 'exec' && args.includes('--agent');
+        if (isAgent && scenario.agentProcess !== undefined) {
+          await scenario.onAgentStart?.();
+          await scenario.agentGate;
+          agentInvoked = true;
+          agentArgs = args;
+          return scenario.agentProcess(options);
         }
-      }
-      const isAgent = args[0] === 'exec' && args.includes('--agent');
-      if (isAgent && scenario.agentProcess !== undefined) {
-        await scenario.onAgentStart?.();
-        await scenario.agentGate;
-        agentInvoked = true;
-        agentArgs = args;
-        return scenario.agentProcess(options);
-      }
-      await writeEvidenceFixture(args, options, scenario.output);
-      if (args[0] === 'cp' && /opencode-export-[A-Za-z0-9._:-]+\.json$/.test(args[1])) {
-        const sessionExport =
-          scenario.sessionExport ??
-          (scenario.relayControl === undefined
-            ? undefined
-            : sessionExportJson('scenario-session', {
-                model: { providerID: 'compte-rendu', id: 'deepseek-review' },
-              }));
-        if (sessionExport !== undefined) await writeFile(args[2], sessionExport, { mode: 0o600 });
-      }
-      if (args[0] === 'create') {
-        createArgs = args;
-      }
-      if (args[0] === 'secret' && args[1] === 'set-custom') {
-        secretArgs = args;
-        await scenario.onModelSecret?.(args);
-      }
-      if (args[0] === 'policy' && args[1] === 'allow') {
-        allowedResources.push(args[args.length - 1]);
-      }
-      if (args[0] === 'policy' && args[1] === 'rm') {
-        removedRuleIds.push(args[args.indexOf('--id') + 1]);
-      }
-      if (isAgent) {
-        await scenario.onAgentStart?.();
-        await scenario.agentGate;
-        agentInvoked = true;
-        agentArgs = args;
-      }
-      const isCreate = args[0] === 'create';
-      const isSandboxRemoval = args[0] === 'rm' && args[1] === '--force';
-      return {
-        exitCode: isAgent
-          ? (scenario.exitCode ?? 0)
-          : isCreate && scenario.create !== undefined
-            ? (scenario.create.exitCode ?? 1)
-            : (scenario.cleanupFailure && args[0] === 'policy' && args[1] === 'rm') ||
-                (scenario.sandboxRemovalFailure === true && isSandboxRemoval)
-              ? 1
-              : 0,
-        stdout: args.includes('rev-parse')
-          ? `${baseSha}\n${headSha}\n`
-          : args.includes('export')
-            ? sessionExportJson('scenario-session')
-            : args.includes('session')
-              ? '[{"id":"scenario-session"}]\n'
-              : options.captureStdout === true
-                ? `${scenario.output}\n`
-                : '',
-        stderrTruncated: isAgent ? scenario.stderrTruncated : undefined,
-        timedOut: isAgent
-          ? (scenario.timedOut ?? false)
-          : isCreate && scenario.create !== undefined
-            ? (scenario.create.timedOut ?? false)
-            : false,
-        truncated: isAgent ? (scenario.truncated ?? false) : false,
-      };
-    },
-  });
+        await writeEvidenceFixture(args, options, scenario.output);
+        if (args[0] === 'cp' && /opencode-export-[A-Za-z0-9._:-]+\.json$/.test(args[1])) {
+          const sessionExport =
+            scenario.sessionExport ??
+            (scenario.relayControl === undefined
+              ? undefined
+              : sessionExportJson('scenario-session', {
+                  model: { providerID: 'compte-rendu', id: 'deepseek-review' },
+                }));
+          if (sessionExport !== undefined) await writeFile(args[2], sessionExport, { mode: 0o600 });
+        }
+        if (args[0] === 'create') {
+          createArgs = args;
+        }
+        if (args[0] === 'secret' && args[1] === 'set-custom') {
+          secretArgs = args;
+          await scenario.onModelSecret?.(args);
+        }
+        if (args[0] === 'policy' && args[1] === 'allow') {
+          allowedResources.push(args[args.length - 1]);
+        }
+        if (args[0] === 'policy' && args[1] === 'rm') {
+          removedRuleIds.push(args[args.indexOf('--id') + 1]);
+        }
+        if (isAgent) {
+          await scenario.onAgentStart?.();
+          await scenario.agentGate;
+          agentInvoked = true;
+          agentArgs = args;
+        }
+        const isCreate = args[0] === 'create';
+        const isSandboxRemoval = args[0] === 'rm' && args[1] === '--force';
+        return {
+          exitCode: isAgent
+            ? (scenario.exitCode ?? 0)
+            : isCreate && scenario.create !== undefined
+              ? (scenario.create.exitCode ?? 1)
+              : (scenario.cleanupFailure && args[0] === 'policy' && args[1] === 'rm') ||
+                  (scenario.sandboxRemovalFailure === true && isSandboxRemoval)
+                ? 1
+                : 0,
+          stdout: args.includes('rev-parse')
+            ? `${baseSha}\n${headSha}\n`
+            : args.includes('export')
+              ? sessionExportJson('scenario-session')
+              : args.includes('session')
+                ? '[{"id":"scenario-session"}]\n'
+                : options.captureStdout === true
+                  ? `${scenario.output}\n`
+                  : '',
+          stderrTruncated: isAgent ? scenario.stderrTruncated : undefined,
+          timedOut: isAgent
+            ? (scenario.timedOut ?? false)
+            : isCreate && scenario.create !== undefined
+              ? (scenario.create.timedOut ?? false)
+              : false,
+          truncated: isAgent ? (scenario.truncated ?? false) : false,
+        };
+      },
+    });
+  } finally {
+    if (previousKind === undefined) delete process.env.RUNNER_SANDBOX_RUNTIME;
+    else process.env.RUNNER_SANDBOX_RUNTIME = previousKind;
+    if (previousImage === undefined) delete process.env.MICROSANDBOX_IMAGE;
+    else process.env.MICROSANDBOX_IMAGE = previousImage;
+  }
   scenario.onRunner?.(runner);
   const terminalStartedAt = performance.now();
   const terminal = await execution.waitForTerminal(jobInput.id);
@@ -816,7 +830,6 @@ const runReminderScenario = async (scenario: {
     instanceId: crypto.randomUUID(),
     evidenceRoot: sharedEvidenceRoot,
     authToken: 'runner-test-token',
-    modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
     ...(scenario.logEvents === undefined
       ? {}
       : {
@@ -994,14 +1007,29 @@ const completedWithoutSubmitJsonl = (sessionId: string) =>
   });
 
 describe('Runner Job HTTP interface', () => {
+  it('fails sbx direct startup without a model credential resolver', () => {
+    const previous = process.env.MODEL_SECRET_COMMAND;
+    try {
+      delete process.env.MODEL_SECRET_COMMAND;
+      expect(() =>
+        createProductionRunner({
+          modelConfig: standardModelConfig,
+          callbackUrl: 'https://ingress.test/runner-callback',
+          callbackToken: 'callback-token',
+          claimUrl: 'https://ingress.test/runner-claim',
+        }),
+      ).toThrow(/MODEL_SECRET_COMMAND/);
+    } finally {
+      if (previous !== undefined) process.env.MODEL_SECRET_COMMAND = previous;
+    }
+  });
+
   it('does not claim durable work until local Job admission is fully configured', async () => {
     let claims = 0;
     for (const overrides of [
-      { authToken: undefined, modelSecretCommand: 'secret-resolver get MODEL_API_KEY' },
-      { authToken: 'runner-test-token', modelSecretCommand: undefined },
+      { authToken: undefined },
       {
         authToken: 'runner-test-token',
-        modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
         callbackUrl: undefined,
       },
     ]) {
@@ -1032,7 +1060,6 @@ describe('Runner Job HTTP interface', () => {
     });
     const runner = createRunner({
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       callbackUrl: 'https://ingress.test/runner-callback',
       claimUrl: 'https://ingress.test/runner-claim',
       claimTimeoutMs: 5,
@@ -1076,7 +1103,6 @@ describe('Runner Job HTTP interface', () => {
     });
     createRunner({
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       callbackUrl: 'https://ingress.test/runner-callback',
       claimFetch: async (input) => {
         claimedUrl =
@@ -1136,7 +1162,6 @@ describe('Runner Job HTTP interface', () => {
 
     const firstRunner = createRunner({
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       evidenceRoot: firstEvidenceRoot,
       claimUrl: 'https://ingress.test/runner-claim',
       claimFetch: firstExecution.claimFetch,
@@ -1152,7 +1177,6 @@ describe('Runner Job HTTP interface', () => {
       await firstClaimObserved;
       secondRunner = createRunner({
         authToken: 'runner-test-token',
-        modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
         evidenceRoot: secondEvidenceRoot,
         claimUrl: 'https://ingress.test/runner-claim',
         claimFetch: secondExecution.claimFetch,
@@ -1206,7 +1230,6 @@ describe('Runner Job HTTP interface', () => {
     let maximumActiveAgents = 0;
     const runner = createRunner({
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       evidenceRoot,
       callbackUrl: 'https://ingress.test/runner-callback',
       callbackToken: 'callback-token',
@@ -1266,7 +1289,6 @@ describe('Runner Job HTTP interface', () => {
     const runner = createProductionRunner({
       modelConfig: standardModelConfig,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       claimUrl: 'https://ingress.test/runner-claim',
       claimIntervalMs: 1,
       claimFetch: async () => {
@@ -1331,7 +1353,6 @@ describe('Runner Job HTTP interface', () => {
       let processCalls = 0;
       const _runner = createProductionRunner({
         authToken: 'runner-test-token',
-        modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
         ...(modelConfig === undefined ? {} : { modelConfig }),
         callbackUrl: 'https://ingress.test/runner-callback',
         callbackToken: 'callback-token',
@@ -1461,7 +1482,6 @@ describe('Runner Job HTTP interface', () => {
     try {
       runner = createRunner({
         authToken: 'runner-test-token',
-        modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
         evidenceRoot,
         callbackUrl: 'https://ingress.test/runner-callback',
         callbackToken: 'callback-token',
@@ -1611,7 +1631,6 @@ describe('Runner Job HTTP interface', () => {
     const runner = createRunner({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       process: async (_command, args, options = {}) => {
         await writeEvidenceFixture(args, options, resultLine);
         return {
@@ -1767,23 +1786,46 @@ describe('Runner Job HTTP interface', () => {
       output: `${leak}\n${resultLine}`,
       agentProcess: (options) =>
         runProcess('sh', ['-c', `printf '%s\\n' '${leak}' '${resultLine}'`], options),
-      sandboxRuntimeFactory: (spec) => {
-        const runtime = createSbxRuntimeFactory({
-          modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-        })(spec);
-        return {
-          ...runtime,
-          exec: (args, command, processOptions, diagnostic) =>
-            runtime.exec(
-              args,
-              command,
+      sandboxBackend: {
+        kind: 'sbx',
+        health: () => 'ready',
+        checkReady: async () => 'ready',
+        reconcileOrphans: async () => ({
+          ok: true,
+          recovered: 0,
+          recoveredJobIds: [],
+          failures: [],
+        }),
+        createJob: (spec) => ({
+          metadata: {
+            created: true,
+            hostCleanupConfirmed: true,
+            id: spec.name,
+            name: spec.name,
+            runtime: 'sbx',
+            imageRef: 'review-image',
+            evidenceRoot: '/tmp/evidence',
+          },
+          setup: async () => {},
+          exec: (args, exec, processOptions, diagnostic) =>
+            exec.run(
+              'sbx',
+              ['exec', spec.name, ...args],
               {
                 ...processOptions,
                 credentialValues: [...(processOptions?.credentialValues ?? []), credential],
               },
               diagnostic,
             ),
-        };
+          copyOut: (source, destination, exec, diagnostic, processOptions) =>
+            exec.run(
+              'sbx',
+              ['cp', `${spec.name}:${source}`, destination],
+              processOptions,
+              diagnostic,
+            ),
+          destroy: async () => {},
+        }),
       },
     });
 
@@ -2320,7 +2362,6 @@ describe('Runner Job HTTP interface', () => {
     const runner = createRunner({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       process: async (_command, args, options = {}) => {
         const isAgent = args[0] === 'exec' && args.includes('--agent');
         if (isAgent) {
@@ -3518,7 +3559,6 @@ describe('Runner Job HTTP interface', () => {
     const runner = createProductionRunnerWithMergeBase({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       process: async (_command, args, options = {}) => {
         if (args[0] === 'create') {
           return {
@@ -3642,7 +3682,6 @@ describe('Runner Job HTTP interface', () => {
     const runner = createProductionRunnerWithMergeBase({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       process: async (_command, args, options = {}) => {
         if (args[0] === 'create')
           return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
@@ -3730,7 +3769,6 @@ describe('Runner Job HTTP interface', () => {
     const runner = createProductionRunnerWithMergeBase({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       process: async (_command, args, options = {}) => {
         if (args[0] === 'create')
           return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
@@ -3837,7 +3875,6 @@ describe('Runner Job HTTP interface', () => {
     const runner = createProductionRunnerWithMergeBase({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       process: async (_command, args, options = {}) => {
         if (args[0] === 'policy' && args[1] === 'allow') {
           const sandbox = args[args.indexOf('--sandbox') + 1];
@@ -3933,7 +3970,6 @@ describe('Runner Job HTTP interface', () => {
     const runner = createProductionRunnerWithMergeBase({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       process: async (_command, args, options = {}) => {
         if (args[0] === 'policy' && args[1] === 'allow') {
           const sandbox = args[args.indexOf('--sandbox') + 1];
@@ -4022,7 +4058,6 @@ describe('Runner Job HTTP interface', () => {
     const runner = createProductionRunnerWithMergeBase({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       process: async (_command, args, options = {}) => {
         if (args[0] === 'policy' && args[1] === 'allow') {
           const sandbox = args[args.indexOf('--sandbox') + 1];
@@ -4113,7 +4148,6 @@ describe('Runner Job HTTP interface', () => {
     const runner = createProductionRunnerWithMergeBase({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       process: async (_command, args, options = {}) => {
         if (args[0] === 'create')
           return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
@@ -4220,7 +4254,6 @@ describe('Runner Job HTTP interface', () => {
       runner = createRunner({
         authToken: 'runner-test-token',
         evidenceRoot,
-        modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
         process: async (command, args, options = {}) => {
           if (args[0] === 'exec' && args.includes('--agent')) {
             await writeFile(options.stdoutFilePath!, `${agentJsonl}\n`, { mode: 0o600 });
@@ -4376,7 +4409,6 @@ describe('Runner Job HTTP interface', () => {
       runner = createRunner({
         authToken: 'runner-test-token',
         evidenceRoot,
-        modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
         process: async (command, args, options = {}) => {
           if (args[0] === 'exec' && args.includes('--agent')) {
             await writeFile(
@@ -4463,7 +4495,6 @@ describe('Runner Job HTTP interface', () => {
       runner = createRunner({
         authToken: 'runner-test-token',
         evidenceRoot,
-        modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
         process: async (_command, args, options = {}) => {
           if (args[0] === 'exec' && args.includes('--agent')) {
             await writeFile(
@@ -4542,7 +4573,6 @@ describe('Runner Job HTTP interface', () => {
     const runner = createRunner({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       process: async (_command, args, options = {}) => {
         await writeEvidenceFixture(args, options, resultLine);
         return {
@@ -4585,10 +4615,10 @@ describe('Runner Job HTTP interface', () => {
     const events: unknown[] = [];
     const repositoryUrl = 'https://github.com/acme/reviewed.git';
     const repositoryReadToken = 'checkout-diagnostic-secret';
+    vi.stubEnv('MODEL_SECRET_COMMAND', 'model-secret-resolver');
     const runner = createRunner({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'model-secret-resolver',
       log: {
         record: async (event) => {
           events.push(event);
@@ -4640,7 +4670,6 @@ describe('Runner Job HTTP interface', () => {
       const runner = createRunner({
         evidenceRoot: sharedEvidenceRoot,
         authToken: 'runner-test-token',
-        modelSecretCommand: 'model-secret-resolver',
         process: async (_command, args) => {
           if (args[0] === 'inspect')
             return {
@@ -4686,10 +4715,10 @@ describe('Runner Job HTTP interface', () => {
     const headSha = '2222222222222222222222222222222222222222';
     const repositoryReadToken = 'checkout-token-must-not-appear';
     const resolverCommand = 'secret-resolver --token resolver-secret';
+    vi.stubEnv('MODEL_SECRET_COMMAND', resolverCommand);
     const runner = createRunner({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
-      modelSecretCommand: resolverCommand,
       log: {
         record: async (event) => {
           events.push(event);
@@ -4795,7 +4824,6 @@ describe('Runner Job HTTP interface', () => {
       runner = createRunner({
         authToken: 'runner-test-token',
         evidenceRoot,
-        modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
         process: async (_command, args) => ({
           exitCode: args.includes('clone') ? 1 : 0,
           stdout: '',
@@ -4842,7 +4870,6 @@ describe('Runner Job HTTP interface', () => {
     const runner = createRunner({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       process: async (_command, args, options = {}) => {
         await writeEvidenceFixture(args, options, resultLine);
         return {
@@ -4904,7 +4931,6 @@ describe('Runner Job HTTP interface', () => {
     const runner = createRunner({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       log: {
         record: async (event) => {
           events.push(event as unknown as Record<string, unknown>);
@@ -5020,7 +5046,6 @@ describe('Runner Job HTTP interface', () => {
       evidenceRoot: sharedEvidenceRoot,
       process,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
     });
 
     const submittedJob = {
@@ -5404,7 +5429,6 @@ describe('Runner Job HTTP interface', () => {
     const runner = createRunner({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'model-secret-resolver',
       mergeBase: { stdout: `${mergeBaseSha}\n` },
       process: async (_command, args, options = {}) => {
         await writeEvidenceFixture(args, options, resultLine);
@@ -5457,7 +5481,6 @@ describe('Runner Job HTTP interface', () => {
     const runner = createRunner({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'model-secret-resolver',
       process: async (_command, args, options = {}) => {
         await writeEvidenceFixture(args, options, resultLine);
         if (args[0] === 'exec' && args.includes('--agent')) {
@@ -5522,7 +5545,6 @@ describe('Runner Job HTTP interface', () => {
       const runner = createRunner({
         evidenceRoot: sharedEvidenceRoot,
         authToken: 'runner-test-token',
-        modelSecretCommand: 'model-secret-resolver',
         mergeBase,
         process: async (_command, args, options = {}) => {
           await writeEvidenceFixture(args, options, resultLine);
@@ -5574,7 +5596,6 @@ describe('Runner Job HTTP interface', () => {
     const runner = createRunner({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'model-secret-resolver',
       log: {
         record: async (event) => {
           events.push(event);
@@ -5665,7 +5686,6 @@ describe('Runner Job HTTP interface', () => {
     const runner = createRunner({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'model-secret-resolver',
       process: async (_command, args, options = {}) => {
         await writeEvidenceFixture(args, options, resultLine);
         if (args[0] === 'exec' && args.includes('gh')) {
@@ -5749,7 +5769,6 @@ describe('Runner Job HTTP interface', () => {
         evidenceRoot: sharedEvidenceRoot,
         process: successfulProcess,
         authToken: 'runner-test-token',
-        modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       });
       const submittedJob = {
         ...runnerJobFields,
@@ -5779,7 +5798,6 @@ describe('Runner Job HTTP interface', () => {
     let processCalls = 0;
     const runner = createProductionRunner({
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       modelConfig: standardModelConfig,
       evidenceRoot: sharedEvidenceRoot,
       process: async () => {
@@ -5817,7 +5835,6 @@ describe('Runner Job HTTP interface', () => {
     const runner = createRunner({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       process: async (_command, args, options = {}) => {
         await writeEvidenceFixture(args, options, '{not-json}');
         return {
@@ -5875,7 +5892,6 @@ describe('Runner Job HTTP interface', () => {
     const runner = createRunner({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       process: async (_command, args, options = {}) => {
         await writeEvidenceFixture(
           args,
@@ -5924,7 +5940,6 @@ describe('Runner Job HTTP interface', () => {
     const runner = createRunner({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       process: async (_command, args, options = {}) => {
         await writeEvidenceFixture(args, options, resultLine);
         return {
@@ -5974,7 +5989,6 @@ describe('Runner Job HTTP interface', () => {
     const runner = createRunner({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'model-secret-resolver',
       process: async (_command, args, options = {}) => {
         await writeEvidenceFixture(args, options, resultLine);
         if (_command === 'git' && args.includes('clone')) {
@@ -6035,7 +6049,6 @@ describe('Runner Job HTTP interface', () => {
     const runner = createRunner({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       process: async (_command, args, options = {}) => ({
         exitCode: 0,
         stdout: args.includes('rev-parse')
@@ -6071,7 +6084,6 @@ describe('Runner Job HTTP interface', () => {
     const runner = createRunner({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       process: async (_command, args, options = {}) => {
         return {
           exitCode: args.includes('credential.helper') ? 1 : 0,
@@ -6119,7 +6131,6 @@ describe('Runner Job HTTP interface', () => {
     const runner = createRunner({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       process: async (_command, args, options = {}) => {
         if (args[0] === 'exec' && args.includes('--agent')) {
           agentStarted();
@@ -6210,7 +6221,6 @@ describe('Runner Job HTTP interface', () => {
     const runner = createRunner({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       process: async (_command, args, options = {}) => {
         if (args[0] === 'exec' && args.includes('--agent')) {
           agentStarted();
@@ -6304,7 +6314,6 @@ describe('Runner Job HTTP interface', () => {
       const runner = createRunner({
         evidenceRoot: sharedEvidenceRoot,
         authToken: 'runner-test-token',
-        modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
         process: async (_command, args, options = {}) => {
           await writeEvidenceFixture(args, options, agentOutput);
           return {
@@ -6363,7 +6372,6 @@ describe('Runner concurrency', () => {
     let processCalls = 0;
     const base = {
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       evidenceRoot: sharedEvidenceRoot,
       claimUrl: 'https://ingress.test/runner-claim',
       claimFetch: async () => {
@@ -6413,7 +6421,6 @@ describe('Runner concurrency', () => {
     const runner = createRunner({
       concurrency: 2,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       evidenceRoot,
       claimUrl: 'https://ingress.test/runner-claim',
       claimIntervalMs: 1,
@@ -6502,7 +6509,6 @@ describe('Runner concurrency', () => {
     const runner = createRunner({
       concurrency: 2,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       evidenceRoot,
       claimUrl: 'https://ingress.test/runner-claim',
       claimIntervalMs: 1,
@@ -6590,7 +6596,6 @@ describe('Runner concurrency', () => {
     const runner = createRunner({
       concurrency: 1,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       evidenceRoot,
       claimUrl: 'https://ingress.test/runner-claim',
       callbackUrl: 'https://ingress.test/runner-callback',
@@ -6654,7 +6659,6 @@ describe('Runner concurrency', () => {
     const started: string[] = [];
     const runner = createRunner({
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       evidenceRoot: sharedEvidenceRoot,
       process: async (_command, args) => {
         if (args.includes('clone') || args[0] === 'create') started.push(args[0]);
@@ -6703,7 +6707,6 @@ describe('Runner concurrency', () => {
       const deadline = Date.now() + 60_000;
       const runner = createRunner({
         authToken: 'runner-test-token',
-        modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
         evidenceRoot: sharedEvidenceRoot,
         claimUrl: 'https://ingress.test/runner-claim',
         claimIntervalMs: 10,
@@ -6780,7 +6783,6 @@ describe('Runner concurrency', () => {
     const runner = createRunner({
       concurrency: 1,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       evidenceRoot,
       claimUrl: 'https://ingress.test/runner-claim',
       claimIntervalMs: 1,
@@ -6841,7 +6843,6 @@ describe('Runner concurrency', () => {
     let maximumActiveAgents = 0;
     const runner = createRunner({
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       evidenceRoot,
       claimUrl: 'https://ingress.test/runner-claim',
       claimIntervalMs: 1,
@@ -6949,7 +6950,6 @@ describe('Runner concurrency', () => {
     const runner = createRunner({
       concurrency: 2,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       evidenceRoot,
       callbackUrl: 'https://ingress.test/runner-callback',
       callbackToken: 'callback-token',
@@ -7084,7 +7084,6 @@ describe('Runner concurrency', () => {
     const runner = createRunner({
       concurrency: 2,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       evidenceRoot,
       callbackUrl: 'https://ingress.test/runner-callback',
       callbackToken: 'callback-token',
@@ -7189,7 +7188,6 @@ describe('Runner concurrency', () => {
 describe('Runner sandbox runtime selection', () => {
   const base = {
     authToken: 'runner-test-token',
-    modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
     evidenceRoot: sharedEvidenceRoot,
     process: async (): Promise<RunnerProcessResult> => ({
       exitCode: 0,
@@ -7204,12 +7202,10 @@ describe('Runner sandbox runtime selection', () => {
   });
 
   it('requires an explicit locally loaded image and the managed relay for microsandbox', () => {
-    expect(() => createRunner({ ...base, sandboxRuntime: 'microsandbox' })).toThrow(
-      /MICROSANDBOX_IMAGE/,
-    );
-    expect(() =>
-      createRunner({ ...base, sandboxRuntime: 'microsandbox', microsandboxImage: 'review:v1' }),
-    ).toThrow(/managed HTTPS/);
+    vi.stubEnv('RUNNER_SANDBOX_RUNTIME', 'microsandbox');
+    expect(() => createRunner(base)).toThrow(/MICROSANDBOX_IMAGE/);
+    vi.stubEnv('MICROSANDBOX_IMAGE', 'review:v1');
+    expect(() => createRunner(base)).toThrow(/managed HTTPS/);
   });
 
   it('rejects an unknown sandbox runtime before claiming or admitting work', () => {
@@ -7236,6 +7232,49 @@ describe('Runner sandbox runtime selection', () => {
       }
     },
   );
+});
+
+describe('Runner claim scheduling', () => {
+  it('reclaims after an initial readiness outage clears', async () => {
+    let health: SandboxHealth = 'outage';
+    let readinessChecks = 0;
+    const backend: SandboxBackend = {
+      kind: 'fixture',
+      health: () => health,
+      checkReady: async () => {
+        readinessChecks += 1;
+        if (readinessChecks === 1) return 'outage';
+        health = 'ready';
+        return 'ready';
+      },
+      reconcileOrphans: async () => ({
+        ok: true,
+        recovered: 0,
+        recoveredJobIds: [],
+        failures: [],
+      }),
+      createJob: () => {
+        throw new Error('job creation is not used by this test');
+      },
+    };
+    const execution = createClaimExecution();
+    const runner = createRunner({
+      sandboxBackend: backend,
+      authToken: 'runner-test-token',
+      modelConfig: standardModelConfig,
+      claimUrl: 'https://ingress.test/runner-claim',
+      claimIntervalMs: 1,
+      claimFetch: execution.claimFetch,
+      callbackUrl: 'https://ingress.test/runner-callback',
+      callbackToken: 'callback-token',
+    });
+    try {
+      await vi.waitFor(() => expect(execution.claimRequests.length).toBeGreaterThan(0));
+      expect(readinessChecks).toBeGreaterThanOrEqual(2);
+    } finally {
+      await runner.close();
+    }
+  });
 });
 
 describe('Runner claim reservations', () => {
@@ -7265,9 +7304,7 @@ describe('Runner claim reservations', () => {
     });
     const runner = createRunner({
       authToken: 'test-auth',
-      modelSecretCommand: 'fixture-resolver',
       modelConfig: standardModelConfig,
-      sandboxRuntime: 'sbx',
       concurrency: 2,
       evidenceRoot: root,
       claimUrl: 'http://claim.test/runner-claim',
@@ -7382,9 +7419,7 @@ describe('Runner settings reload', () => {
     let disposed = false;
     const runner = createRunner({
       authToken: 'runner-test-token',
-      modelSecretCommand: 'fixture-resolver',
       modelConfig: standardModelConfig,
-      sandboxRuntime: 'sbx',
       evidenceRoot: sharedEvidenceRoot,
       settingsFile: file,
       claimUrl: 'https://ingress.test/runner-claim',
@@ -7444,7 +7479,6 @@ describe('Runner settings reload', () => {
     await writeFile(invalid, 'concurrency = 0\n');
     const base = (settingsFile: string) => ({
       authToken: 'runner-test-token',
-      modelSecretCommand: 'fixture-resolver',
       evidenceRoot: sharedEvidenceRoot,
       settingsFile,
       claimFetch: async () => new Response(null, { status: 204 }),
@@ -7647,7 +7681,6 @@ describe('Runner persisted lifecycle reporting', () => {
     let progressSignal: AbortSignal | null | undefined;
     const runner = createRunner({
       authToken: 'runner-test-token',
-      modelSecretCommand: '/usr/bin/false',
       evidenceRoot: sharedEvidenceRoot,
       progressFetch: async (url, init) => {
         progressSignal = init?.signal;
@@ -8344,7 +8377,6 @@ describe('Runner transport diagnostics', () => {
     const runner = createRunner({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       modelConfig: standardModelConfig,
       concurrency: 2,
       callbackUrl: 'https://ingress.test/runner-callback',
@@ -8679,7 +8711,6 @@ describe('Runner transport diagnostics', () => {
     const runner = createRunner({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       log: {
         record: async (event) => {
           events.push(event as LogEvent);
@@ -8740,7 +8771,6 @@ describe('Runner transport diagnostics', () => {
     const runner = createRunner({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       log: {
         record: async (event) => {
           events.push(event as LogEvent);
@@ -8808,7 +8838,6 @@ describe('Runner transport diagnostics', () => {
     const runner = createRunner({
       evidenceRoot,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       log: {
         record: async (event) => {
           events.push(event as LogEvent);
@@ -8928,11 +8957,10 @@ describe('Runner transport diagnostics', () => {
       const realNow = Date.now.bind(Date);
       let offset = 0;
       const clock = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + offset);
+      vi.stubEnv('RUNNER_SANDBOX_RUNTIME', 'microsandbox');
+      vi.stubEnv('MICROSANDBOX_IMAGE', 'review:test');
       const runner = createRunner({
         authToken: 'runner-test-token',
-        modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-        sandboxRuntime: 'microsandbox',
-        microsandboxImage: 'review:test',
         llmRelay: true,
         llmRelayGeneration: 'generation-a',
         modelConfig: relayInferenceModelConfig('review'),
@@ -8999,11 +9027,10 @@ describe('Runner transport diagnostics', () => {
       release = resolve;
     });
     const claims: Request[] = [];
+    vi.stubEnv('RUNNER_SANDBOX_RUNTIME', 'microsandbox');
+    vi.stubEnv('MICROSANDBOX_IMAGE', 'review:test');
     const runner = createRunner({
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-      sandboxRuntime: 'microsandbox',
-      microsandboxImage: 'review:test',
       llmRelay: true,
       llmRelayGeneration: 'generation-a',
       modelConfig: relayInferenceModelConfig('review'),
@@ -9059,7 +9086,6 @@ describe('Runner transport diagnostics', () => {
     const runner = createRunner({
       evidenceRoot,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       claimUrl: 'https://ingress.test/runner-claim',
       claimIntervalMs: 10,
       claimTimeoutMs: 1_000,
@@ -10793,7 +10819,6 @@ describe('Runner maintenance drain', () => {
     const heldClaims: Array<() => void> = [];
     const runner = createRunner({
       authToken: 'runner-test-token',
-      modelSecretCommand: 'fixture-resolver',
       settingsFile: file,
       claimUrl: 'https://ingress.test/runner-claim',
       claimIntervalMs: 1_000_000_000,
@@ -10859,7 +10884,6 @@ describe('Runner maintenance drain', () => {
     let claims = 0;
     const runner = createRunner({
       authToken: 'runner-test-token',
-      modelSecretCommand: 'fixture-resolver',
       evidenceRoot: sharedEvidenceRoot,
       claimUrl: 'https://ingress.test/runner-claim',
       claimIntervalMs: 1_000_000_000,
@@ -10920,7 +10944,6 @@ describe('Runner maintenance drain', () => {
     });
     const runner = createRunner({
       authToken: 'runner-test-token',
-      modelSecretCommand: 'fixture-resolver',
       evidenceRoot: sharedEvidenceRoot,
       process: reviewProcess({
         onCleanup: async () => {
@@ -10978,7 +11001,6 @@ describe('Runner maintenance drain', () => {
     let claims = 0;
     const runner = createRunner({
       authToken: 'runner-test-token',
-      modelSecretCommand: 'fixture-resolver',
       evidenceRoot: sharedEvidenceRoot,
       claimUrl: 'https://ingress.test/runner-claim',
       claimIntervalMs: 1_000_000_000,
@@ -11050,7 +11072,6 @@ describe('Runner maintenance drain', () => {
     const runner = createRunner({
       evidenceRoot,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'fixture-resolver',
       claimUrl: 'https://ingress.test/runner-claim',
       claimIntervalMs: 10,
       claimFetch,
@@ -11108,7 +11129,6 @@ describe('Runner maintenance drain', () => {
   it('keeps failed cleanup blocking drain across resume without a halted claim', async () => {
     const runner = createRunner({
       authToken: 'runner-test-token',
-      modelSecretCommand: 'fixture-resolver',
       evidenceRoot: sharedEvidenceRoot,
       process: reviewProcess({ cleanupFails: true }),
     });
@@ -11227,7 +11247,6 @@ describe('Runner same-PR admission', () => {
     const runner = createRunner({
       evidenceRoot: root,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'fixture-resolver',
       claimIntervalMs: 10,
       process,
       callbackFetch: async (input) => {
@@ -11922,12 +11941,12 @@ describe('Runner confirmed cleanup recovery', () => {
       });
       for (const kind of ['sbx', 'microsandbox'] as const) {
         const reports: Request[] = [];
+        vi.stubEnv('RUNNER_SANDBOX_RUNTIME', kind);
+        vi.stubEnv('MICROSANDBOX_IMAGE', 'review:fixture');
         const runner = createProductionRunnerWithMergeBase({
           authToken: 'runner-test-token',
           evidenceRoot: root,
           claimUrl: '',
-          sandboxRuntime: kind,
-          microsandboxImage: 'review:fixture',
           modelConfig,
           llmRelay: true,
           llmRelayGeneration: 'generation-a',
@@ -11956,6 +11975,88 @@ describe('Runner confirmed cleanup recovery', () => {
         } finally {
           await runner.close();
         }
+      }
+    } finally {
+      if (previousHome === undefined) delete process.env.MSB_HOME;
+      else process.env.MSB_HOME = previousHome;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('recovers a retained microsandbox failure with the legacy catalog identity field', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-msb-legacy-proof-'));
+    const relay = createRelayControl();
+    const modelConfig = relayInferenceModelConfig('deepseek-review');
+    const previousHome = process.env.MSB_HOME;
+    process.env.MSB_HOME = root;
+    await mkdir(join(root, 'db'));
+    await writeFile(join(root, 'db', 'msb.db'), '');
+    try {
+      const failed = await runAgentScenario({
+        microsandbox: true,
+        output: finalMarkdownJsonl(),
+        cleanupFailure: true,
+        relayControl: relay,
+        modelConfig,
+        evidenceRoot: root,
+        runId: 'msb-legacy-proof',
+      });
+      const evidenceId = failed.terminal.evidenceId as string;
+      const callbackPath = join(root, evidenceId, 'callback.json');
+      const callback = JSON.parse(await readFile(callbackPath, 'utf8'));
+      const manifest = JSON.parse(
+        Buffer.from(callback.evidence.manifest.content, 'base64').toString('utf8'),
+      );
+      const catalogIdentity = manifest.recoveryProof.catalogIdentity as string;
+      delete manifest.recoveryProof;
+      manifest.catalogIdentity = catalogIdentity;
+      const manifestBytes = Buffer.from(JSON.stringify(manifest));
+      callback.evidence.manifest = {
+        content: manifestBytes.toString('base64'),
+        size: manifestBytes.length,
+        sha256: createHash('sha256').update(manifestBytes).digest('hex'),
+      };
+      await writeFile(callbackPath, JSON.stringify(callback));
+
+      const reports: Request[] = [];
+      vi.stubEnv('RUNNER_SANDBOX_RUNTIME', 'microsandbox');
+      vi.stubEnv('MICROSANDBOX_IMAGE', 'review:fixture');
+      const runner = createProductionRunnerWithMergeBase({
+        authToken: 'runner-test-token',
+        evidenceRoot: root,
+        claimUrl: '',
+        modelConfig,
+        llmRelay: true,
+        llmRelayGeneration: 'generation-a',
+        callbackFetch: routeRelayControl(relay, async (input, init) => {
+          reports.push(new Request(input, init));
+          return new Response(null, { status: 202 });
+        }),
+        process: async (_cmd, args) => ({
+          exitCode: 1,
+          stdout: '',
+          stderr: 'error: sandbox not found: ' + args.at(-1),
+          truncated: false,
+          timedOut: false,
+        }),
+      });
+      try {
+        const { runId, jobId, attempt, baseSha, headSha } = failed.manifest;
+        const response = await runner.handle(
+          new Request('http://runner/maintenance/recover-cleanup', {
+            method: 'POST',
+            headers: {
+              authorization: 'Bearer runner-test-token',
+              'content-type': 'application/json',
+            },
+            body: JSON.stringify({ runId, jobId, evidenceId, attempt, baseSha, headSha }),
+          }),
+        );
+        expect(response.status).toBe(202);
+        expect(reports).toHaveLength(1);
+        expect(new URL(reports[0]!.url).pathname).toBe('/runner-cleanup-recovery');
+      } finally {
+        await runner.close();
       }
     } finally {
       if (previousHome === undefined) delete process.env.MSB_HOME;
@@ -12350,7 +12451,6 @@ describe('Runner backend outage recovery', () => {
     const runner = createProductionRunnerWithMergeBase({
       evidenceRoot: root,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'fixture-resolver',
       modelConfig: standardModelConfig,
       claimIntervalMs: 2,
       callbackUrl: 'https://ingress.test/runner-callback',
@@ -12520,7 +12620,6 @@ describe('Runner backend outage recovery', () => {
     const runner = createProductionRunnerWithMergeBase({
       evidenceRoot: root,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'fixture-resolver',
       modelConfig: standardModelConfig,
       claimIntervalMs: 2,
       callbackUrl: 'https://ingress.test/runner-callback',
@@ -12621,7 +12720,6 @@ describe('Runner backend outage recovery', () => {
     const runner = createProductionRunnerWithMergeBase({
       evidenceRoot: root,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'fixture-resolver',
       modelConfig: standardModelConfig,
       claimIntervalMs: 2,
       callbackUrl: 'https://ingress.test/runner-callback',
@@ -12716,7 +12814,6 @@ describe('Runner backend outage recovery', () => {
     const runner = createProductionRunnerWithMergeBase({
       evidenceRoot: root,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'fixture-resolver',
       modelConfig: standardModelConfig,
       claimIntervalMs: 2,
       callbackUrl: 'https://ingress.test/runner-callback',
@@ -12814,7 +12911,6 @@ describe('Runner backend outage recovery', () => {
       evidenceRoot: root,
       instanceId,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'fixture-resolver',
       modelConfig: standardModelConfig,
       claimIntervalMs: 2,
       callbackUrl: 'https://ingress.test/runner-callback',
@@ -12928,7 +13024,6 @@ describe('Runner backend outage recovery', () => {
     const runner = createProductionRunnerWithMergeBase({
       evidenceRoot: root,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'fixture-resolver',
       modelConfig: standardModelConfig,
       claimIntervalMs: 2,
       callbackUrl: 'https://ingress.test/runner-callback',
@@ -12995,7 +13090,6 @@ describe('Runner backend outage recovery', () => {
     const runner = createProductionRunnerWithMergeBase({
       evidenceRoot: root,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'fixture-resolver',
       modelConfig: standardModelConfig,
       claimIntervalMs: 5,
       callbackUrl: 'https://ingress.test/runner-callback',
@@ -13127,7 +13221,6 @@ describe('Runner backend outage recovery', () => {
     const runner = createProductionRunnerWithMergeBase({
       evidenceRoot: root,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'fixture-resolver',
       modelConfig: standardModelConfig,
       concurrency: 2,
       claimUrl: 'https://ingress.test/runner-claim',
@@ -13289,7 +13382,6 @@ describe('Runner backend outage recovery', () => {
     const runner = createProductionRunnerWithMergeBase({
       evidenceRoot: root,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'fixture-resolver',
       modelConfig: standardModelConfig,
       concurrency: 2,
       claimIntervalMs: 2,
@@ -13466,7 +13558,6 @@ describe('Runner backend outage recovery', () => {
       const runner = createProductionRunnerWithMergeBase({
         evidenceRoot: root,
         authToken: 'runner-test-token',
-        modelSecretCommand: 'fixture-resolver',
         modelConfig: standardModelConfig,
         claimUrl: 'https://ingress.test/runner-claim',
         claimIntervalMs: 2,
