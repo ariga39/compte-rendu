@@ -39,12 +39,10 @@ export interface RelayCatalogSnapshot {
   readonly lastRefreshError: string | null;
 }
 
-type LimitSource = 'explicit' | 'discovered';
 interface RouteModel {
   readonly model: string;
   readonly profile: ModelProfile;
   readonly limit: ModelRouteLimit | null;
-  readonly limitSource: LimitSource | null;
   readonly efforts: readonly RouteEffortOption[];
   /** Complete upstream entry, retained for the client-facing model boundary. */
   readonly metadata: Readonly<Record<string, unknown>> | null;
@@ -154,8 +152,6 @@ const readSource = async (
         model: entry.id,
         profile,
         limit,
-        limitSource:
-          limit === null ? null : override?.limit !== undefined ? 'explicit' : 'discovered',
         efforts,
         metadata: entry.metadata,
       };
@@ -176,15 +172,9 @@ interface CandidateSource {
   load(): Promise<CatalogRead>;
 }
 
-const sameLimit = (left: ModelRouteLimit | null, right: ModelRouteLimit | null): boolean =>
-  (left?.context ?? null) === (right?.context ?? null) &&
-  (left?.output ?? null) === (right?.output ?? null);
-
 const sameRouteModel = (left: RouteModel, right: RouteModel): boolean =>
   left.model === right.model &&
   left.profile === right.profile &&
-  sameLimit(left.limit, right.limit) &&
-  left.limitSource === right.limitSource &&
   JSON.stringify(left.efforts) === JSON.stringify(right.efforts);
 
 function candidateSources(sources: readonly Source[], gateway: GatewayConfig | null) {
@@ -220,7 +210,6 @@ function candidateSources(sources: readonly Source[], gateway: GatewayConfig | n
           model,
           profile: override?.profile ?? sourceDefaultProfile(source),
           limit: override?.limit ?? null,
-          limitSource: override?.limit === undefined ? null : 'explicit',
           efforts: source.efforts?.[id] ?? [],
           metadata: null,
         };
@@ -233,8 +222,8 @@ function candidateSources(sources: readonly Source[], gateway: GatewayConfig | n
         }
         const existing = group.resolved[id];
         if (existing !== undefined && !sameRouteModel(existing, resolved)) {
-          // Two producing sources disagree about the same route's model,
-          // profile or limit. Fail this source refresh rather than letting
+          // Two producing sources disagree about the same route's model or
+          // profile. Fail this source refresh rather than letting
           // configuration order decide which descriptor wins.
           group.invalid = true;
           continue;
@@ -274,23 +263,17 @@ function candidateSources(sources: readonly Source[], gateway: GatewayConfig | n
   return [...groups.values()];
 }
 
-// Compare configured limits by their semantic fields, not JSON key order.
-const canonicalLimit = (json: string) =>
-  `(CASE WHEN ${json} IS NULL THEN '' ELSE coalesce(CAST(json_extract(${json}, '$.context') AS TEXT), '') || '|' || coalesce(CAST(json_extract(${json}, '$.output') AS TEXT), '') END)`;
-const storedLimit = `coalesce((SELECT ${canonicalLimit('l.value')} FROM json_each(s.route_limits) l WHERE l.key=m.key), '')`;
-
 // Both the picker and the budget count the same set, preferring discovered IDs
-// when an alias refers to exactly the same upstream model, credential, profile
-// and configured limit. The mutable effort menu is deliberately excluded:
-// changing a menu must not change alias visibility.
+// when an alias refers to the same upstream model, credential and profile. The
+// mutable limit and effort menu are deliberately excluded: changing either must
+// not change alias visibility.
 const active = `SELECT m.key AS id, m.value AS model, s.provider, s.credential,
   coalesce((SELECT p.value FROM json_each(s.route_profiles) p WHERE p.key=m.key), 'chat') AS profile,
-  ${storedLimit} AS limit_key,
   s.is_alias
   FROM catalog_sources s JOIN json_each(?) cfg ON cfg.key=s.source_key, json_each(s.models) m
   WHERE (s.is_alias=0 OR EXISTS (SELECT 1 FROM json_each(cfg.value) a WHERE a.key=m.key AND a.value=m.value))`;
 const visible = `SELECT DISTINCT id FROM (
-  SELECT id, is_alias, MIN(is_alias) OVER (PARTITION BY provider, credential, model, profile, limit_key) AS preferred
+  SELECT id, is_alias, MIN(is_alias) OVER (PARTITION BY provider, credential, model, profile) AS preferred
   FROM candidates
 ) WHERE is_alias = preferred`;
 
@@ -350,15 +333,6 @@ export function createRelayCatalog(
                 ),
               ),
         );
-        const proposedLimitSources = JSON.stringify(
-          error
-            ? {}
-            : Object.fromEntries(
-                Object.entries(models).flatMap(([id, route]) =>
-                  route.limitSource === null ? [] : [[id, route.limitSource]],
-                ),
-              ),
-        );
         const proposedEfforts = JSON.stringify(
           error
             ? {}
@@ -383,9 +357,7 @@ export function createRelayCatalog(
           db
             .prepare(`WITH candidates AS (
               ${active} AND s.source_key <> ?
-              UNION ALL SELECT m.key, m.value, ?, ?, coalesce(p.value,'chat'),
-                coalesce((SELECT ${canonicalLimit('l.value')} FROM json_each(?) l WHERE l.key=m.key), ''),
-                ?
+              UNION ALL SELECT m.key, m.value, ?, ?, coalesce(p.value,'chat'), ?
                 FROM json_each(?) m LEFT JOIN json_each(?) p ON p.key=m.key
             )
             INSERT INTO catalog_sources(source_key, provider, credential, is_alias, rejected, error)
@@ -397,17 +369,7 @@ export function createRelayCatalog(
                 WHERE r.upstream_model IS NOT m.value
                   OR r.provider_slug IS NOT ?
                   OR r.credential_alias IS NOT ?
-                  OR r.profile IS NOT coalesce(p.value,'chat')
-                  OR (
-                    r.limit_json IS NOT NULL
-                    AND coalesce(r.limit_source, 'explicit') = 'explicit'
-                    AND (
-                      coalesce((SELECT src.value FROM json_each(?) src WHERE src.key=m.key), '')
-                        IS NOT 'explicit'
-                      OR ${canonicalLimit('r.limit_json')} IS NOT
-                        coalesce((SELECT ${canonicalLimit('l.value')} FROM json_each(?) l WHERE l.key=m.key), '')
-                    )
-                  ))
+                  OR r.profile IS NOT coalesce(p.value,'chat'))
                 THEN 'route mapping conflict'
               WHEN (SELECT COUNT(*) FROM (${visible})) > ? THEN 'catalog limit reached'
             END WHERE ${fresh}
@@ -417,7 +379,6 @@ export function createRelayCatalog(
               key,
               provider,
               credential,
-              proposedLimits,
               alias,
               proposedModels,
               proposedProfiles,
@@ -432,8 +393,6 @@ export function createRelayCatalog(
               proposedProfiles,
               provider,
               credential,
-              proposedLimitSources,
-              proposedLimits,
               MAX_CATALOG_MODELS,
               at,
             ),
@@ -442,46 +401,23 @@ export function createRelayCatalog(
               `UPDATE catalog_sources SET models=?, route_profiles=?, route_limits=? WHERE source_key=? AND error IS NULL AND ${fresh}`,
             )
             .bind(proposedModels, proposedProfiles, proposedLimits, key, at),
+          // Route identity stays immutable; the model description, limits and
+          // effort menu are ordinary refreshable metadata. The INSERT's own
+          // source/fresh guard covers both first insertion and refresh.
           db
-            .prepare(`INSERT INTO catalog_routes(route_id, upstream_model, provider_slug, credential_alias, profile, limit_json, limit_source, efforts_json, metadata_json)
+            .prepare(`INSERT INTO catalog_routes(route_id, upstream_model, provider_slug, credential_alias, profile, limit_json, efforts_json, metadata_json)
             SELECT m.key, m.value, s.provider, s.credential,
               coalesce((SELECT p.value FROM json_each(s.route_profiles) p WHERE p.key=m.key), 'chat'),
               (SELECT l.value FROM json_each(s.route_limits) l WHERE l.key=m.key),
-              (SELECT src.value FROM json_each(?) src WHERE src.key=m.key),
               coalesce((SELECT e.value FROM json_each(?) e WHERE e.key=m.key), '[]'),
               (SELECT x.value FROM json_each(?) x WHERE x.key=m.key)
             FROM catalog_sources s,json_each(s.models) m
             WHERE s.source_key=? AND s.error IS NULL AND ${fresh}
-            ON CONFLICT(route_id) DO NOTHING`)
-            .bind(proposedLimitSources, proposedEfforts, proposedMetadata, key, at),
-          // Route identity stays immutable. Provider-advertised metadata and a
-          // discovered limit are mutable descriptions; an explicit operator
-          // limit is protected by the conflict check above.
-          db
-            .prepare(`UPDATE catalog_routes
-              SET metadata_json = coalesce(
-                    (SELECT x.value FROM json_each(?) x WHERE x.key=catalog_routes.route_id),
-                    metadata_json),
-                  limit_json = (SELECT l.value FROM json_each(?) l WHERE l.key=catalog_routes.route_id),
-                  limit_source = (SELECT src.value FROM json_each(?) src WHERE src.key=catalog_routes.route_id)
-              WHERE route_id IN (SELECT key FROM json_each(?))
-                AND EXISTS (
-                  SELECT 1 FROM catalog_sources s WHERE s.source_key=? AND s.error IS NULL
-                )
-                AND ${fresh}`)
-            .bind(proposedMetadata, proposedLimits, proposedLimitSources, proposedModels, key, at),
-          // The effort menu is intentionally mutable per successful publication.
-          // Immutable model/provider/profile/limit changes are still rejected above.
-          db
-            .prepare(`UPDATE catalog_routes
-              SET efforts_json = coalesce(
-                (SELECT e.value FROM json_each(?) e WHERE e.key=catalog_routes.route_id), '[]')
-              WHERE route_id IN (SELECT key FROM json_each(?))
-                AND EXISTS (
-                  SELECT 1 FROM catalog_sources s WHERE s.source_key=? AND s.error IS NULL
-                )
-                AND ${fresh}`)
-            .bind(proposedEfforts, proposedModels, key, at),
+            ON CONFLICT(route_id) DO UPDATE SET
+              limit_json = excluded.limit_json,
+              metadata_json = coalesce(excluded.metadata_json, catalog_routes.metadata_json),
+              efforts_json = excluded.efforts_json`)
+            .bind(proposedEfforts, proposedMetadata, key, at),
         );
       }
       statements.push(

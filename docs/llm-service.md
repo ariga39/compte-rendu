@@ -277,13 +277,12 @@ explicit `capabilities.tools.supported: false` always omits that model, even for
 a legacy unqualified source. Malformed rich capability metadata fails the source
 refresh and keeps the previous snapshot.
 
-The route mapping and profile are immutable once published. An explicitly
-configured limit is also part of that trusted mapping: changing or removing it
-for an existing route is a mapping conflict and keeps the previous snapshot.
-A provider-advertised limit and the rest of the provider entry are mutable
-description. A normal refresh updates them, and the next grant uses the new
-value; an already-issued grant keeps its frozen route mapping. An upstream
-limit change therefore needs no new route ID or manual override.
+The route mapping and profile are immutable once published. The rest of the
+model description, including context and output limits, is ordinary refreshable
+metadata whether it came from an operator override or the provider. A normal
+refresh updates it, and the next grant uses the new value; an already-issued
+grant keeps its frozen route mapping. Changing only a limit needs no new route
+ID or manual override.
 
 Discovery retains each provider's complete model entry. The v2 grant maps only
 the OpenCode-supported model information at the client boundary: display name,
