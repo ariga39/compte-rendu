@@ -1025,9 +1025,7 @@ const createStore = (
       blockingCleanup === undefined || blockingCleanup === null
         ? undefined
         : (blockingCleanup.runner_cleanup_status ?? 'pending');
-    const admission = {
-      ...(blockingCleanupStatus === undefined ? {} : { blockingCleanupStatus }),
-    };
+    const admission = blockingCleanupStatus === undefined ? {} : { blockingCleanupStatus };
     const disposition = dispositionForStatus(delivery.status);
     if ((results[0]?.meta.changes ?? 0) === 0) {
       const replayRun = await database

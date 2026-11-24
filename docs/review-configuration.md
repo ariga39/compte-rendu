@@ -1,6 +1,6 @@
 # Review model configuration
 
-Multi-model execution is available through the sbx or OpenSandbox runtime with OpenCode and the managed
+Multi-model execution is available through the sbx or microsandbox runtime with OpenCode and the managed
 inference relay. Deploy migration `0012_review_configuration.sql` and the compatible
 Core and Runner before enabling a non-null selection. Missing grant routes or an
 invalid final result fail without a vote; no fallback reviewer is substituted.

@@ -299,12 +299,11 @@ export const REVIEW_PROGRESS_STAGES = [
 export const RunnerProgressStage = Schema.Literals(REVIEW_PROGRESS_STAGES);
 export type RunnerProgressStage = typeof RunnerProgressStage.Type;
 
-export const SandboxRuntimeKind = Schema.Literals([
-  'sbx',
-  'openshell',
-  'opensandbox',
-  'microsandbox',
-]);
+/**
+ * A backend identifier recorded with a job. New backends can appear without a
+ * contract change; Runner startup decides which identifiers it can execute.
+ */
+export const SandboxRuntimeKind = Schema.String.check(Schema.isPattern(/^[a-z][a-z0-9-]{0,31}$/));
 export type SandboxRuntimeKind = Schema.Schema.Type<typeof SandboxRuntimeKind>;
 
 export const RunnerProgressMilestone = Schema.Struct({

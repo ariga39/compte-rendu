@@ -387,10 +387,8 @@ describe('Runner relay admission and recovery', () => {
     }
   });
 
-  it('runs an OpenSandbox job over the authenticated HTTPS relay with a frozen selection', async () => {
+  it('runs a relay job over the authenticated HTTPS relay with a frozen selection', async () => {
     const root = await evidenceRoot();
-    const apiKeyFile = join(root, 'opensandbox-key');
-    await writeFile(apiKeyFile, 'opensandbox-control-key');
     const specs: SandboxJobSpec[] = [];
     const issued: Array<Record<string, unknown>> = [];
     const revoked: string[] = [];
@@ -404,12 +402,6 @@ describe('Runner relay admission and recovery', () => {
       claimUrl: 'https://ingress.test/runner-claim',
       claimIntervalMs: 1,
       claimFetch: execution.claimFetch,
-      sandboxRuntime: 'opensandbox',
-      opensandbox: {
-        endpoint: 'http://127.0.0.1:8080',
-        apiKeyFile,
-        image: 'review:test',
-      },
       sandboxRuntimeFactory: (spec) => {
         specs.push(spec);
         let hostCleanupConfirmed = false;
@@ -422,7 +414,7 @@ describe('Runner relay admission and recovery', () => {
             },
             id: spec.name,
             name: spec.name,
-            runtime: 'opensandbox',
+            runtime: 'sbx',
             imageRef: spec.imageRef,
             evidenceRoot: '/tmp/compte-rendu-evidence',
           },
@@ -446,7 +438,7 @@ describe('Runner relay admission and recovery', () => {
           issued.push(body as Record<string, unknown>);
           return Response.json(
             {
-              token: 'opensandbox-relay-token',
+              token: 'relay-job-token',
               expiresAt: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
             },
             { status: 201 },
@@ -474,8 +466,8 @@ describe('Runner relay admission and recovery', () => {
     });
     try {
       execution.enqueue({
-        id: 'relay-opensandbox-job',
-        runId: 'run-relay-opensandbox',
+        id: 'relay-job',
+        runId: 'run-relay-job',
         attempt: 1,
         repositoryName: 'acme/reviewed',
         pullRequestNumber: 42,
@@ -488,20 +480,20 @@ describe('Runner relay admission and recovery', () => {
           selection: { reviewers: ['reviewer-a'], synthesis: 'reviewer-a' },
         },
       });
-      await execution.waitForTerminal('relay-opensandbox-job');
+      await execution.waitForTerminal('relay-job');
       expect(specs).toHaveLength(1);
       expect(specs[0]).toMatchObject({
         modelResource: 'inference.example:443',
         modelTokenFile: expect.any(String),
       });
-      expect(injectedToken).toBe('opensandbox-relay-token');
+      expect(injectedToken).toBe('relay-job-token');
       expect(issued).toContainEqual({
-        runId: 'run-relay-opensandbox',
-        jobId: 'relay-opensandbox-job',
+        runId: 'run-relay-job',
+        jobId: 'relay-job',
         attempt: 1,
         routes: ['reviewer-a'],
       });
-      expect(revoked).toEqual(['relay-opensandbox-job']);
+      expect(revoked).toEqual(['relay-job']);
     } finally {
       await runner.close();
     }

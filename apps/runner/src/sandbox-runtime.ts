@@ -4,42 +4,20 @@ import { SandboxRuntimeKind, type RunnerProcessErrorCode } from '@compte-rendu/c
 
 export { SandboxRuntimeKind };
 
-export interface OpenShellRuntimeConfig {
-  readonly gateway?: string;
-  readonly gatewayEndpoint?: string;
-  readonly modelProvider: string;
-  readonly image: string;
-  readonly githubProfile: string;
-  readonly insecure: boolean;
-}
-
-export interface OpenSandboxRuntimeConfig {
-  readonly endpoint: string;
-  readonly apiKeyFile: string;
-  readonly image: string;
-}
+/** Backends this Runner build can construct. The public contract stays open. */
+export const ActiveSandboxRuntimeKind = Schema.Literals(['sbx', 'microsandbox']);
+export type ActiveSandboxRuntimeKind = Schema.Schema.Type<typeof ActiveSandboxRuntimeKind>;
 
 export interface SandboxRuntimeConfig {
-  readonly kind: SandboxRuntimeKind;
+  readonly kind: ActiveSandboxRuntimeKind;
   readonly cliPath: string;
-  readonly openshell?: OpenShellRuntimeConfig;
   readonly microsandboxImage?: string;
-  readonly opensandbox?: OpenSandboxRuntimeConfig;
 }
 
 export interface SandboxRuntimeConfigInput {
   readonly kind?: string | undefined;
   readonly cliPath?: string | undefined;
   readonly microsandboxImage?: string | undefined;
-  readonly opensandboxEndpoint?: string | undefined;
-  readonly opensandboxApiKeyFile?: string | undefined;
-  readonly opensandboxImage?: string | undefined;
-  readonly openshellGateway?: string | undefined;
-  readonly openshellEndpoint?: string | undefined;
-  readonly openshellModelProvider?: string | undefined;
-  readonly openshellImage?: string | undefined;
-  readonly openshellGithubProfile?: string | undefined;
-  readonly openshellInsecure?: string | boolean | undefined;
 }
 
 const nonEmpty = (value: string | undefined): string | undefined => {
@@ -47,18 +25,14 @@ const nonEmpty = (value: string | undefined): string | undefined => {
   return trimmed === undefined || trimmed.length === 0 ? undefined : trimmed;
 };
 
-const isEnabled = (value: string | boolean | undefined): boolean =>
-  value === true ||
-  (typeof value === 'string' && ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase()));
-
 export const resolveSandboxRuntimeConfig = (
   input: SandboxRuntimeConfigInput,
 ): SandboxRuntimeConfig => {
   const requested = nonEmpty(input.kind) ?? 'sbx';
-  const decoded = Schema.decodeUnknownOption(SandboxRuntimeKind)(requested);
+  const decoded = Schema.decodeUnknownOption(ActiveSandboxRuntimeKind)(requested);
   if (Option.isNone(decoded)) {
     throw new Error(
-      `RUNNER_SANDBOX_RUNTIME must be one of 'sbx', 'openshell', 'opensandbox' or 'microsandbox', received '${requested}'`,
+      `RUNNER_SANDBOX_RUNTIME must be 'sbx' or 'microsandbox', received '${requested}'`,
     );
   }
   const kind = decoded.value;
@@ -67,63 +41,7 @@ export const resolveSandboxRuntimeConfig = (
     if (!image) throw new Error('Microsandbox requires MICROSANDBOX_IMAGE');
     return { kind, cliPath: nonEmpty(input.cliPath) ?? 'msb', microsandboxImage: image };
   }
-  const cliPath =
-    nonEmpty(input.cliPath) ??
-    (kind === 'openshell' ? 'openshell' : kind === 'opensandbox' ? 'docker' : 'sbx');
-  if (kind === 'sbx') return { kind, cliPath };
-  if (kind === 'opensandbox') {
-    const endpoint = nonEmpty(input.opensandboxEndpoint);
-    const apiKeyFile = nonEmpty(input.opensandboxApiKeyFile);
-    const image = nonEmpty(input.opensandboxImage);
-    if (endpoint === undefined || apiKeyFile === undefined || image === undefined) {
-      throw new Error('OpenSandbox runtime requires endpoint, API key file and image');
-    }
-    const url = new URL(endpoint);
-    if (
-      !['http:', 'https:'].includes(url.protocol) ||
-      !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) ||
-      url.username ||
-      url.password ||
-      url.search ||
-      url.hash ||
-      url.pathname !== '/'
-    ) {
-      throw new Error('OpenSandbox requires a local control-plane endpoint');
-    }
-    return { kind, cliPath, opensandbox: { endpoint, apiKeyFile, image } };
-  }
-
-  const gateway = nonEmpty(input.openshellGateway);
-  const gatewayEndpoint = nonEmpty(input.openshellEndpoint);
-  if (gateway === undefined && gatewayEndpoint === undefined) {
-    throw new Error(
-      'OpenShell sandbox runtime requires a named gateway (OPENSHELL_GATEWAY) or an explicit endpoint (OPENSHELL_GATEWAY_ENDPOINT)',
-    );
-  }
-  const modelProvider = nonEmpty(input.openshellModelProvider);
-  if (modelProvider === undefined) {
-    throw new Error(
-      'OpenShell sandbox runtime requires OPENSHELL_MODEL_PROVIDER (or openshell.modelProvider)',
-    );
-  }
-  const image = nonEmpty(input.openshellImage);
-  if (image === undefined) {
-    throw new Error(
-      'OpenShell sandbox runtime requires OPENSHELL_IMAGE (or openshell.image); the sbx template reference is never reused',
-    );
-  }
-  return {
-    kind,
-    cliPath,
-    openshell: {
-      ...(gateway === undefined ? {} : { gateway }),
-      ...(gatewayEndpoint === undefined ? {} : { gatewayEndpoint }),
-      modelProvider,
-      image,
-      githubProfile: nonEmpty(input.openshellGithubProfile) ?? 'cr-github',
-      insecure: isEnabled(input.openshellInsecure),
-    },
-  };
+  return { kind, cliPath: nonEmpty(input.cliPath) ?? 'sbx' };
 };
 
 export type RunnerProcessResult = {
@@ -176,22 +94,13 @@ export type RunnerDiagnostic = {
 /**
  * A runtime invocation, owned by the Runner so that deadlines, abort
  * wiring, environment stripping, redaction and diagnostics stay in one place.
- * CLI adapters build argv; SDK adapters use execute with the same budget and
- * cancellation context. SDK availability does not imply a local child process.
+ * CLI adapters build argv; the Runner owns the command port.
  */
-export type SandboxOperation = (options: RunnerProcessOptions) => Promise<RunnerProcessResult>;
-
-export type SandboxCommand = ((
+export type SandboxCommand = (
   args: readonly string[],
   diagnostic?: RunnerDiagnostic,
   options?: RunnerProcessOptions,
-) => Promise<RunnerProcessResult>) & {
-  readonly execute?: (
-    operation: SandboxOperation,
-    diagnostic?: RunnerDiagnostic,
-    options?: RunnerProcessOptions,
-  ) => Promise<RunnerProcessResult>;
-};
+) => Promise<RunnerProcessResult>;
 
 /**
  * The identity and host paths a per-job runtime needs. Provider names, secret
@@ -231,10 +140,8 @@ export interface SandboxRuntimeMetadata {
   readonly created: boolean;
   readonly catalogIdentity?: string | undefined;
   readonly hostCleanupConfirmed?: boolean;
-  /** Backend sandbox identity (sbx uses the requested name; OpenShell the real id). */
+  /** Backend sandbox identity (sbx uses the requested name). */
   readonly id: string;
-  /** Backend ownership nonce retained for recovery of a recorded runtime. */
-  readonly ownershipNonce?: string;
   readonly name: string;
   readonly runtime: SandboxRuntimeKind;
   readonly imageRef: string;
@@ -274,24 +181,7 @@ export interface JobSandboxRuntime {
   destroy(command: SandboxCommand): Promise<void>;
 }
 
-export interface SandboxRecoveryIdentity {
-  readonly sandboxId: string;
-  readonly ownershipNonce: string;
-  readonly sandboxName: string;
-}
-
-export type SandboxRuntimeFactory = ((spec: SandboxJobSpec) => JobSandboxRuntime) & {
-  /**
-   * Proves a recorded owned sandbox and its host resources are absent without
-   * deleting anything. Aborting the signal interrupts verification so owned
-   * manager resources are released.
-   */
-  readonly confirmCleanupAbsent?: (
-    identity: SandboxRecoveryIdentity,
-    command: SandboxCommand,
-    signal?: AbortSignal,
-  ) => Promise<void>;
-};
+export type SandboxRuntimeFactory = (spec: SandboxJobSpec) => JobSandboxRuntime;
 
 /** Carries the create invocation's terminal cause so the Runner can report it. */
 export class SandboxCreateError extends Error {

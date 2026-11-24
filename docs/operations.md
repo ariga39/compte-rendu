@@ -164,7 +164,7 @@ Core sets a 90-minute deadline at claim time. Deploy the application Worker with
 `POST /runner-read-token` before upgrading a Runner that rotates tokens. A successful refresh
 replaces the sbx token file or updates the active microsandbox VM's GitHub secret. If renewal fails,
 the Runner uses the earlier of the claim deadline and the current token's expiry
-minus one minute. OpenShell and OpenSandbox use the initial token's expiry margin.
+minus one minute.
 The callback and evidence manifest identify the limiting clock for an exhausted
 attempt. The dashboard reports a timeout.
 
@@ -244,8 +244,8 @@ Drain is in-memory: a restarted Runner begins normal claiming automatically only
 after its startup scan succeeds.
 
 The explicit cleanup recovery is not a general repair for invalid or foreign
-markers. It accepts only a retained failed-cleanup job for the active sbx,
-microsandbox or OpenSandbox runtime where the request and evidence match the exact
+markers. It accepts only a retained failed-cleanup job for the active sbx or
+microsandbox runtime where the request and evidence match the exact
 job/run/attempt/evidence/SHAs, host cleanup was confirmed, and both the retained
 manifest and callback still record failed cleanup. Any marker it uses must match
 the active issuer/generation; an invalid marker or any mismatch is rejected. On
@@ -324,9 +324,7 @@ remove other jobs' Sandboxes or use a bulk prune. The recovery endpoint does not
 perform this removal for you.
 
 For microsandbox, confirm absence in the original Runner catalog as described in
-the [backend guide](microsandbox.md). For OpenSandbox, use the retained
-`sandboxId` and `sandboxOwnerNonce` as described below; maintenance verifies
-absence but does not delete workloads.
+the [backend guide](microsandbox.md).
 
 Then use the correct instance's authenticated Runner maintenance endpoint. Prepare `recovery-request.json` with the same six
 identity fields shown in the callback replay section below, taken from the
@@ -339,11 +337,10 @@ curl --fail-with-body --silent --show-error --config "$RUNNER_CURL_CONFIG" \
   "$RUNNER_ORIGIN/maintenance/recover-cleanup"
 ```
 
-This operation accepts retained failed sbx, microsandbox or OpenSandbox
+This operation accepts retained failed sbx or microsandbox
 callbacks, including jobs cancelled after their Core run was superseded, with
 valid callback evidence and the runtime's host-cleanup confirmation
-(`hostFilesCleanupConfirmed: true` for OpenSandbox, `hostCleanupConfirmed: true`
-for sbx and microsandbox). It verifies the immutable identity and artifact
+(`hostCleanupConfirmed: true` for sbx and microsandbox). It verifies the immutable identity and artifact
 hashes, requires the exact Sandbox to be absent, removes only its scoped sbx
 network policies and secrets, and revokes its LLM grant when configured.
 An existing Sandbox is never deleted by this recovery operation. Authentication
@@ -368,21 +365,6 @@ accepted report reopens the same-PR queue. A single job cleanup failure that doe
 not fail the inventory probe leaves unrelated work claimable. A restart can lose a staged claim. Later reviews of that PR become eligible automatically
 once the original 90-minute claim budget expires.
 
-For OpenSandbox, use the retained server-returned `sandboxId` and
-`sandboxOwnerNonce` to inspect the exact owned workload, sidecar and runtime
-volumes. Resolve any remaining owned resources through the configured server
-and Docker daemon before requesting recovery; never remove resources by a shared
-name prefix or use a bulk prune. The manifest must contain
-`hostFilesCleanupConfirmed: true`, which records host-directory removal
-independently of the failed sandbox cleanup. The currently configured runtime
-must match the retained runtime. Runner verifies an empty complete owner listing,
-a lookup of the exact sandbox ID returning 404, and absence of its Docker
-workload, sidecar and runtime volumes, then revokes the job grant. Neither an API
-404 alone nor an unknown create identity proves cleanup. The endpoint only
-verifies absence; it does not delete OpenSandbox workloads. Verification has a
-30-second deadline; a timeout interrupts verification, closes its SDK manager and
-transport, returns 502, keeps cleanup unresolved and releases the local recovery
-lock so the operator can retry.
 The original callback, manifest and terminal failure stay unchanged. Runner writes
 `cleanup-recovery.json` separately and sends an authenticated recovery report.
 Core retains a separate `cleanup-recoveries/` audit object and updates only the
@@ -401,7 +383,7 @@ Check the database-backed dashboard after recovery. A local audit file alone is
 not proof that Core accepted the report.
 
 Older archives without host-cleanup confirmation, missing retained callbacks,
-failed host-directory removal and OpenShell ownership recovery are unsupported.
+failed host-directory removal and retired-backend ownership recovery are unsupported.
 Do not add confirmation fields to historical evidence or fabricate callbacks.
 Those cases require separately verified operator recovery; this endpoint is not
 a general orphan-Sandbox sweep. Local host paths are deliberately not loaded from

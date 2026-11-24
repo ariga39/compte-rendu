@@ -151,8 +151,8 @@ cannot report complete, while that startup scan has any failed, invalid or
 foreign marker. Resume changes only the maintenance pause. It may retry the
 Sandbox ownership scan but never retries or clears the startup grant scan. Exact
 cleanup recovery can resolve an eligible failed cleanup and retry the sandbox
-scan, but it rejects invalid and foreign markers and is limited to sbx,
-microsandbox or OpenSandbox jobs whose retained evidence and callback still show
+scan, but it rejects invalid and foreign markers and is limited to sbx or
+microsandbox jobs whose retained evidence and callback still show
 matching failed cleanup; see [maintenance operations](operations.md#drain-before-maintenance).
 A successful startup scan is not continuous. A terminal revocation failure after
 startup fails that job without a vote and leaves its marker without closing
@@ -180,7 +180,7 @@ OpenCode starts. Checkout disables hooks, submodules and LFS smudge and removes
 the authenticated remote before agent execution.
 
 The shared review attempt budget is 90 minutes from Core's durable claim
-timestamp, including setup. Queue time is free. Runner receives the absolute deadline. The sbx and microsandbox backends refresh the GitHub read token for the same claimed job and repository before expiry. A failed refresh limits execution to the existing credential expiry minus one minute. OpenSandbox and OpenShell use that credential cap throughout. It reports whether the claim deadline or the credential
+timestamp, including setup. Queue time is free. Runner receives the absolute deadline. The sbx and microsandbox backends refresh the GitHub read token for the same claimed job and repository before expiry. A failed refresh limits execution to the existing credential expiry minus one minute. It reports whether the claim deadline or the credential
 ended a timeout. Setup consumes the same remaining budget; there is no
 agent-start reset. One same-session correction gets at most two minutes of its
 remainder; it is not another attempt. Evidence archival, revocation,
@@ -218,7 +218,7 @@ and `multi-review.json`, with one callback and one publication.
 The LLM grant permits the routes actually needed by the job. One-reviewer jobs do
 not grant an unused synthesis route. Cancellation revokes that grant and destroys
 the shared Sandbox: closing an OpenCode client does not stop its server sessions.
-This selection/service path supports sbx, microsandbox and OpenSandbox, not OpenShell.
+This selection/service path supports sbx and microsandbox.
 
 ## Sandbox runtime modules
 
@@ -233,20 +233,12 @@ as resources are created so partial setup can still be archived and cleaned.
   global/organization allows. Direct-model mode uses host secret resolution;
   service mode injects a short-lived job grant instead of an upstream key.
 - **microsandbox:** a local KVM microVM with read-only staging, per-job TLS credential injection and HTTPS-only destination rules. Cleanup verifies ownership and absence in the original catalog. See the [microsandbox installation guide](microsandbox.md).
-- **OpenSandbox:** official SDK execution on local Docker Engine, read-only host
-  checkout/configuration mounts, and sidecar Credential Vault for job grants and
-  GitHub read tokens. Runner provides SDK operations with a bounded execution
-  context and AbortSignal; remote command interruption uses its execution ID.
-  Cleanup rechecks ownership and confirms Docker workload/sidecar/volume absence.
-  See [deployment constraints](opensandbox.md).
-- **OpenShell:** fixed `/workspace/{checkout,config,evidence}`, preconfigured model
-  provider and job-owned GitHub provider. Startup preflight checks the configured
-  provider. Cleanup verifies ownership nonce and exact recorded identities;
-  malformed/uncertain get/list/delete results cannot confirm destruction.
 
-Runtime selection is startup configuration. Unknown kinds and incomplete
-runtime configuration fail before claims; no silent fallback to sbx occurs.
-See [security boundaries](security.md) for backend-specific assumptions.
+Runtime selection is startup configuration. Unknown or retired kinds and
+incomplete runtime configuration fail before claims; no silent fallback to sbx
+occurs. Recorded milestones carry a bounded lowercase identifier, so a new
+backend does not require a Core contract deployment. See
+[security boundaries](security.md) for backend-specific assumptions.
 
 ## Credentials and evidence
 
@@ -258,7 +250,7 @@ GitHub credential. Cleanup removes the job's credential sources and scoped rules
 In LLM service mode, supplier credentials stay in the installation’s Cloudflare account; Sandbox inference uses
 a job grant valid for four review budgets, with no renewal. Grant revocation and
 Sandbox cleanup are independent. An unconfirmed revocation fails the job even
-when Sandbox destruction succeeds. Direct-model and OpenShell provider modes have
+when Sandbox destruction succeeds. Direct-model and managed service modes have
 the separate credential paths documented in the installation guide.
 
 Repository text and GitHub context are untrusted evidence. The agent is read-only:
@@ -391,13 +383,10 @@ Recovery diagnostics identify the job, step and command status and omit stderr.
 
 ### Failed-cleanup reconciliation
 
-An authenticated Runner maintenance operation can reconcile a failed sbx,
-microsandbox or OpenSandbox run whose original host-directory cleanup was
+An authenticated Runner maintenance operation can reconcile a failed sbx or
+microsandbox run whose original host-directory cleanup was
 confirmed and whose exact Sandbox is now absent. It rechecks sbx policies/secrets
-or the microsandbox catalog identity. For OpenSandbox it requires retained
-authoritative identity and ownership nonce, an empty complete ownership listing,
-a specific identity lookup returning 404, and absence of the Docker workload,
-sidecar and runtime volumes. The configured runtime must match. It revokes the
+or the microsandbox catalog identity. The configured runtime must match. It revokes the
 job grant before reporting recovery. Original terminal evidence remains immutable;
 separate local and R2 recovery records provide the audit trail. Core matches the
 failed, superseded or cancelled run, job, attempt and immutable SHAs before
@@ -423,5 +412,5 @@ manifest and callback. After a restart the ownership scan removes verified orpha
 resources. Core can still show unconfirmed cleanup until an exact callback arrives.
 Later reviews become eligible after the original 90-minute claim budget, including
 when a restart loses an in-memory staged claim request ID. Legacy evidence lacking host
-confirmation, unknown OpenSandbox create identity and OpenShell recovery remain
+confirmation, unknown retired-backend identity and retired-backend recovery remain
 outside this operation; see the operations guide.
