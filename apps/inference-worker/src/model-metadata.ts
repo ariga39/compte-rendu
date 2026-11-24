@@ -4,12 +4,10 @@ import {
 } from '@compte-rendu/contracts';
 import { Option, Schema } from 'effect';
 
-const BoundedText = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(200));
 const StringList = Schema.Array(
   Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128)),
 ).check(Schema.isMaxLength(64));
 const NonNegative = Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0));
-const ReleaseDate = Schema.String.check(Schema.isPattern(/^\d{4}-\d{2}(-\d{2})?$/));
 const Reasoning = Schema.Struct({
   supported: Schema.optionalKey(Schema.Boolean),
   toggle: Schema.optionalKey(Schema.Boolean),
@@ -59,67 +57,48 @@ const Cost = Schema.Struct({
   cache_read: Schema.optionalKey(NonNegative),
   cache_write: Schema.optionalKey(NonNegative),
 });
+const { name, family, releaseDate } = ModelRouteMetadataSchema.fields;
 const RawModel = Schema.Struct({
-  name: Schema.optionalKey(BoundedText),
-  display_name: Schema.optionalKey(BoundedText),
-  displayName: Schema.optionalKey(BoundedText),
-  family: Schema.optionalKey(BoundedText),
-  type: Schema.optionalKey(BoundedText),
-  release_date: Schema.optionalKey(ReleaseDate),
+  name,
+  display_name: name,
+  displayName: name,
+  family,
+  type: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(64))),
+  release_date: releaseDate,
   modalities: Schema.optionalKey(Modalities),
   capabilities: Schema.optionalKey(Capabilities),
   cost: Schema.optionalKey(Cost),
 });
 type RawModel = typeof RawModel.Type;
-type MetadataCapabilities = NonNullable<ModelRouteMetadata['capabilities']>;
-type MetadataReasoning = NonNullable<MetadataCapabilities['reasoning']>;
 
-const compact = <T extends Record<string, unknown>>(value: T): T | undefined =>
-  Object.values(value).some((entry) => entry !== undefined) ? value : undefined;
+const withoutUndefined = <T extends object>(value: T): T => {
+  const record = value as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (record[key] === undefined) delete record[key];
+  }
+  return value;
+};
 
 const price = (entry: typeof CostEntry.Type | undefined): number | undefined =>
   typeof entry === 'number' ? entry : entry?.price;
 
-const mapReasoning = (
-  reasoning: NonNullable<RawModel['capabilities']>['reasoning'] | undefined,
-): MetadataReasoning | undefined => {
-  if (reasoning === undefined) return undefined;
-  return compact({
-    ...(reasoning.supported === undefined ? {} : { supported: reasoning.supported }),
-    ...(reasoning.toggle === undefined ? {} : { toggle: reasoning.toggle }),
-    ...(reasoning.effort === undefined ? {} : { effort: reasoning.effort }),
-    ...(reasoning.budget === undefined
-      ? {}
-      : {
-          budget: compact({
-            ...(reasoning.budget.min === undefined ? {} : { min: reasoning.budget.min }),
-            ...(reasoning.budget.max === undefined ? {} : { max: reasoning.budget.max }),
-          }),
-        }),
-  });
-};
-
-const mapCapabilities = (raw: RawModel): MetadataCapabilities | undefined => {
+const mapCapabilities = (raw: RawModel): Readonly<Record<string, unknown>> | undefined => {
   const capabilities = raw.capabilities;
   const modalities = raw.modalities;
   if (capabilities === undefined && modalities === undefined) return undefined;
-  const tools =
-    typeof capabilities?.tools === 'boolean' ? capabilities.tools : capabilities?.tools?.supported;
-  const input = capabilities?.input ?? modalities?.input;
-  const output = capabilities?.output ?? modalities?.output;
-  return compact({
-    ...(tools === undefined ? {} : { tools }),
-    ...(capabilities?.freeform === undefined ? {} : { freeform: capabilities.freeform }),
-    ...(input === undefined ? {} : { input }),
-    ...(output === undefined ? {} : { output }),
-    ...(capabilities?.reasoning === undefined
-      ? {}
-      : { reasoning: mapReasoning(capabilities.reasoning) }),
-    ...(capabilities?.temperature === undefined ? {} : { temperature: capabilities.temperature }),
+  const mapped = withoutUndefined({
+    ...capabilities,
+    tools:
+      typeof capabilities?.tools === 'boolean'
+        ? capabilities.tools
+        : capabilities?.tools?.supported,
+    input: capabilities?.input ?? modalities?.input,
+    output: capabilities?.output ?? modalities?.output,
   });
+  return Object.keys(mapped).length === 0 ? undefined : mapped;
 };
 
-const mapCost = (raw: RawModel): ModelRouteMetadata['cost'] | undefined => {
+const mapCost = (raw: RawModel): Readonly<Record<string, unknown>> | undefined => {
   if (raw.cost === undefined) return undefined;
   const text = raw.cost.text;
   const input = text?.input === undefined ? price(raw.cost.input) : price(text.input);
@@ -128,18 +107,15 @@ const mapCost = (raw: RawModel): ModelRouteMetadata['cost'] | undefined => {
     (typeof text?.input === 'object' ? text.input.cache?.read : undefined) ?? raw.cost.cache_read;
   const cacheWrite =
     (typeof text?.input === 'object' ? text.input.cache?.write : undefined) ?? raw.cost.cache_write;
-  return compact({
-    ...(input === undefined ? {} : { input }),
-    ...(output === undefined ? {} : { output }),
-    ...(cacheRead === undefined && cacheWrite === undefined
-      ? {}
-      : {
-          cache: compact({
-            ...(cacheRead === undefined ? {} : { read: cacheRead }),
-            ...(cacheWrite === undefined ? {} : { write: cacheWrite }),
-          }),
-        }),
+  const mapped = withoutUndefined({
+    input,
+    output,
+    cache:
+      cacheRead === undefined && cacheWrite === undefined
+        ? undefined
+        : withoutUndefined({ read: cacheRead, write: cacheWrite }),
   });
+  return Object.keys(mapped).length === 0 ? undefined : mapped;
 };
 
 /**
@@ -151,18 +127,15 @@ export const modelRouteMetadata = (raw: unknown): ModelRouteMetadata | undefined
   const decoded = Schema.decodeUnknownOption(RawModel)(raw);
   if (Option.isNone(decoded)) return undefined;
   const model = decoded.value;
-  const name = model.display_name ?? model.displayName ?? model.name;
-  const capabilities = mapCapabilities(model);
-  const cost = mapCost(model);
-  const metadata = compact({
-    ...(name === undefined ? {} : { name }),
-    ...(model.family === undefined ? {} : { family: model.family }),
-    ...(model.type === 'chat' ? { type: 'chat' as const } : {}),
-    ...(model.release_date === undefined ? {} : { releaseDate: model.release_date }),
-    ...(capabilities === undefined ? {} : { capabilities }),
-    ...(cost === undefined ? {} : { cost }),
+  const metadata = withoutUndefined({
+    name: model.display_name ?? model.displayName ?? model.name,
+    family: model.family,
+    type: model.type === 'chat' ? ('chat' as const) : undefined,
+    releaseDate: model.release_date,
+    capabilities: mapCapabilities(model),
+    cost: mapCost(model),
   });
-  if (metadata === undefined) return undefined;
+  if (Object.keys(metadata).length === 0) return undefined;
   const checked = Schema.decodeUnknownOption(ModelRouteMetadataSchema)(metadata);
   return Option.isNone(checked) ? undefined : checked.value;
 };
