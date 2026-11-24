@@ -4,10 +4,11 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createRunner } from '../apps/runner/src/runner';
 import { createClaimExecution } from './support/runner-execution';
-import { createSbxRuntimeFactory } from '../apps/runner/src/sandbox-runtime-sbx';
+import { createSbxSandboxBackend } from '../apps/runner/src/sandbox-runtime-sbx';
 import type {
+  HostRun,
   RunnerProcessResult,
-  SandboxCommand,
+  SandboxExecPort,
   SandboxJobSpec,
 } from '../apps/runner/src/sandbox-runtime';
 
@@ -55,7 +56,6 @@ const expectDrained = async (runner: ReturnType<typeof createRunner>) => {
 const jobSpec = (root: string, id: string): SandboxJobSpec => ({
   id,
   name: `compte-rendu-${id}`,
-  imageRef: 'review-image',
   cpu: '1',
   memoryGib: 2,
   env: [],
@@ -69,14 +69,14 @@ const jobSpec = (root: string, id: string): SandboxJobSpec => ({
 const setupCommand = (
   spec: SandboxJobSpec,
   failure: 'github' | 'policy' | 'create' | 'create-timeout' | null,
-): SandboxCommand => {
+): HostRun => {
   const rule = {
     id: 'owned-rule',
     resources: [spec.modelResource, spec.githubResource],
     sandbox_id: spec.name,
     editable: true,
   };
-  return async (args: readonly string[]): Promise<RunnerProcessResult> => {
+  return async (_program, args): Promise<RunnerProcessResult> => {
     if (args[0] === 'policy' && args[1] === 'ls')
       return { ...ok, stdout: JSON.stringify({ rules: [rule] }) };
     if (failure === 'github' && args[0] === 'secret' && args[1] === 'set')
@@ -118,7 +118,6 @@ const runnerOptions = (
   evidenceRoot,
   instanceId,
   authToken: 'runner-test-token',
-  modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
   modelConfig: JSON.stringify({
     id: 'opencode-go/review',
     baseUrl: 'https://llm.internal.example/v1',
@@ -188,6 +187,22 @@ const secretCommand = (
   return undefined;
 };
 
+const createSbxJob = (
+  spec: SandboxJobSpec,
+  failure: 'github' | 'policy' | 'create' | 'create-timeout' | null,
+  ownershipRootPath: string,
+) => {
+  const hostRun = setupCommand(spec, failure);
+  const exec: SandboxExecPort = { run: hostRun };
+  vi.stubEnv('MODEL_SECRET_COMMAND', 'secret-resolver get MODEL_API_KEY');
+  const runtime = createSbxSandboxBackend({
+    hostRun,
+    relayEnabled: false,
+    ownershipRoot: ownershipRootPath,
+  }).createJob(spec);
+  return { runtime, exec };
+};
+
 describe('Runner sbx startup reconciliation', () => {
   it('removes a provably owned Sandbox left by interrupted setup without touching another sandbox', async () => {
     const root = await mkdtemp(join(tmpdir(), 'cr-sbx-restart-'));
@@ -196,12 +211,9 @@ describe('Runner sbx startup reconciliation', () => {
     const spec = jobSpec(root, 'job-interrupted');
     await mkdir(spec.checkoutRoot, { recursive: true });
     await mkdir(spec.configRoot, { recursive: true });
-    const runtime = createSbxRuntimeFactory({
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-      ownershipRoot: ownershipRoot(root),
-    })(spec);
+    const { runtime, exec } = createSbxJob(spec, 'policy', ownershipRoot(root));
 
-    await expect(runtime.setup(setupCommand(spec, 'policy'))).rejects.toThrow();
+    await expect(runtime.setup(exec)).rejects.toThrow();
 
     const ownedRule = {
       id: 'owned-rule',
@@ -296,11 +308,8 @@ describe('Runner sbx startup reconciliation', () => {
     const spec = jobSpec(root, 'job-startup-gate');
     await mkdir(spec.checkoutRoot, { recursive: true });
     await mkdir(spec.configRoot, { recursive: true });
-    const runtime = createSbxRuntimeFactory({
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-      ownershipRoot: ownershipRoot(root),
-    })(spec);
-    await runtime.setup(setupCommand(spec, null));
+    const { runtime, exec } = createSbxJob(spec, null, ownershipRoot(root));
+    await runtime.setup(exec);
 
     let scanStarted!: () => void;
     const started = new Promise<void>((resolve) => {
@@ -339,12 +348,9 @@ describe('Runner sbx startup reconciliation', () => {
     const spec = jobSpec(root, 'job-no-create');
     await mkdir(spec.checkoutRoot, { recursive: true });
     await mkdir(spec.configRoot, { recursive: true });
-    const runtime = createSbxRuntimeFactory({
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-      ownershipRoot: ownershipRoot(root),
-    })(spec);
+    const { runtime, exec } = createSbxJob(spec, 'create', ownershipRoot(root));
 
-    await expect(runtime.setup(setupCommand(spec, 'create'))).rejects.toThrow();
+    await expect(runtime.setup(exec)).rejects.toThrow();
 
     const secrets = secretState();
     const commands: string[][] = [];
@@ -389,12 +395,9 @@ describe('Runner sbx startup reconciliation', () => {
     const spec = jobSpec(root, 'job-create-timeout');
     await mkdir(spec.checkoutRoot, { recursive: true });
     await mkdir(spec.configRoot, { recursive: true });
-    const runtime = createSbxRuntimeFactory({
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-      ownershipRoot: ownershipRoot(root),
-    })(spec);
+    const { runtime, exec } = createSbxJob(spec, 'create-timeout', ownershipRoot(root));
 
-    await expect(runtime.setup(setupCommand(spec, 'create-timeout'))).rejects.toThrow();
+    await expect(runtime.setup(exec)).rejects.toThrow();
 
     let present = true;
     const secrets = secretState();
@@ -434,12 +437,9 @@ describe('Runner sbx startup reconciliation', () => {
     const spec = jobSpec(root, 'job-before-create');
     await mkdir(spec.checkoutRoot, { recursive: true });
     await mkdir(spec.configRoot, { recursive: true });
-    const runtime = createSbxRuntimeFactory({
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-      ownershipRoot: ownershipRoot(root),
-    })(spec);
+    const { runtime, exec } = createSbxJob(spec, 'github', ownershipRoot(root));
 
-    await expect(runtime.setup(setupCommand(spec, 'github'))).rejects.toThrow();
+    await expect(runtime.setup(exec)).rejects.toThrow();
 
     const secrets = secretState();
     const commands: string[][] = [];
@@ -483,11 +483,8 @@ describe('Runner sbx startup reconciliation', () => {
     const spec = jobSpec(root, 'job-metadata');
     await mkdir(spec.checkoutRoot, { recursive: true });
     await mkdir(spec.configRoot, { recursive: true });
-    const runtime = createSbxRuntimeFactory({
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-      ownershipRoot: ownershipRoot(root),
-    })(spec);
-    await runtime.setup(setupCommand(spec, null));
+    const { runtime, exec } = createSbxJob(spec, null, ownershipRoot(root));
+    await runtime.setup(exec);
 
     const foreign = await inspectView(
       spec.name,
@@ -534,11 +531,8 @@ describe('Runner sbx startup reconciliation', () => {
     const spec = jobSpec(root, 'job-uncertain');
     await mkdir(spec.checkoutRoot, { recursive: true });
     await mkdir(spec.configRoot, { recursive: true });
-    const runtime = createSbxRuntimeFactory({
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-      ownershipRoot: ownershipRoot(root),
-    })(spec);
-    await runtime.setup(setupCommand(spec, null));
+    const { runtime, exec } = createSbxJob(spec, null, ownershipRoot(root));
+    await runtime.setup(exec);
 
     const secrets = secretState();
     const commands: string[][] = [];
@@ -594,11 +588,8 @@ describe('Runner sbx startup reconciliation', () => {
     const spec = jobSpec(root, 'job-secret-malformed');
     await mkdir(spec.checkoutRoot, { recursive: true });
     await mkdir(spec.configRoot, { recursive: true });
-    const runtime = createSbxRuntimeFactory({
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-      ownershipRoot: ownershipRoot(root),
-    })(spec);
-    await runtime.setup(setupCommand(spec, null));
+    const { runtime, exec } = createSbxJob(spec, null, ownershipRoot(root));
+    await runtime.setup(exec);
 
     let present = true;
     const commands: string[][] = [];
@@ -645,11 +636,8 @@ describe('Runner sbx startup reconciliation', () => {
     const spec = jobSpec(root, 'job-secret-postcondition');
     await mkdir(spec.checkoutRoot, { recursive: true });
     await mkdir(spec.configRoot, { recursive: true });
-    const runtime = createSbxRuntimeFactory({
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-      ownershipRoot: ownershipRoot(root),
-    })(spec);
-    await runtime.setup(setupCommand(spec, null));
+    const { runtime, exec } = createSbxJob(spec, null, ownershipRoot(root));
+    await runtime.setup(exec);
 
     let present = true;
     const commands: string[][] = [];
@@ -706,11 +694,12 @@ describe('Runner sbx startup reconciliation', () => {
     const spec = jobSpec(root, 'job-colocated');
     await mkdir(spec.checkoutRoot, { recursive: true });
     await mkdir(spec.configRoot, { recursive: true });
-    const runtime = createSbxRuntimeFactory({
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-      ownershipRoot: ownershipRoot(defaultEvidenceRoot, 'port-9101'),
-    })(spec);
-    await runtime.setup(setupCommand(spec, null));
+    const { runtime, exec } = createSbxJob(
+      spec,
+      null,
+      ownershipRoot(defaultEvidenceRoot, 'port-9101'),
+    );
+    await runtime.setup(exec);
 
     vi.stubEnv('PORT', '9102');
     const siblingCommands: string[][] = [];
@@ -778,11 +767,8 @@ describe('Runner sbx startup reconciliation', () => {
     const spec = jobSpec(root, 'job-resume-retry');
     await mkdir(spec.checkoutRoot, { recursive: true });
     await mkdir(spec.configRoot, { recursive: true });
-    const runtime = createSbxRuntimeFactory({
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-      ownershipRoot: ownershipRoot(root),
-    })(spec);
-    await runtime.setup(setupCommand(spec, null));
+    const { runtime, exec } = createSbxJob(spec, null, ownershipRoot(root));
+    await runtime.setup(exec);
 
     let mode: 'failed' | 'owned' = 'failed';
     let present = true;

@@ -43,7 +43,9 @@ const RunnerManifest = Schema.Struct({
     status: Schema.Literals(['destroyed', 'failed']),
   }),
   result: Schema.optional(StructuredReviewResult),
+  /** Read-only fallback for manifests written before backend-owned proofs. */
   catalogIdentity: Schema.optional(Schema.String),
+  recoveryProof: Schema.optional(Schema.Record(Schema.String, Schema.String)),
   // Retained as a free-form string so records written by a retired backend
   // remain readable even though no new job can select that runtime.
   runtime: Schema.optional(Schema.String),
@@ -73,7 +75,7 @@ export class CallbackRecoveryError extends Schema.TaggedError<CallbackRecoveryEr
 ) {}
 
 export type RecoveredCallback = {
-  readonly catalogIdentity?: string | undefined;
+  readonly recoveryProof?: Readonly<Record<string, string>> | undefined;
   readonly body: string;
   readonly callback: typeof RunnerResultCallback.Type;
   readonly manifest: RecoveredManifest;
@@ -107,7 +109,7 @@ export const recoverCallback = Effect.fn('recoverCallback')(function* (
   purpose:
     | 'replay'
     | {
-        readonly cleanupRuntime: 'sbx' | 'microsandbox';
+        readonly cleanupRuntime: string;
       } = 'replay',
 ): Effect.fn.Return<RecoveredCallback, CallbackRecoveryError> {
   const directory = join(evidenceRoot, request.evidenceId);
@@ -239,5 +241,10 @@ export const recoverCallback = Effect.fn('recoverCallback')(function* (
     return yield* fail('result-mismatch');
   }
 
-  return { body: text, callback, catalogIdentity: manifest.catalogIdentity, manifest };
+  const recoveryProof =
+    manifest.recoveryProof ??
+    (manifest.catalogIdentity === undefined
+      ? undefined
+      : { catalogIdentity: manifest.catalogIdentity });
+  return { body: text, callback, recoveryProof, manifest };
 });

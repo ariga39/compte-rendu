@@ -4,13 +4,13 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createRunner } from '../apps/runner/src/runner';
 import {
-  createMicrosandboxRuntimeFactory,
+  createMicrosandboxSandboxBackend,
   microsandboxCatalogIdentity,
-  reconcileMicrosandboxRestartResources,
 } from '../apps/runner/src/sandbox-runtime-microsandbox';
 import type {
+  HostRun,
   RunnerProcessResult,
-  SandboxCommand,
+  SandboxExecPort,
   SandboxJobSpec,
 } from '../apps/runner/src/sandbox-runtime';
 
@@ -34,7 +34,6 @@ const markerRoot = (root: string, instanceId: string) =>
 const jobSpec = (root: string, id: string): SandboxJobSpec => ({
   id,
   name: `compte-rendu-${id}`,
-  imageRef: 'review-image',
   cpu: '1',
   memoryGib: 2,
   env: [],
@@ -46,7 +45,17 @@ const jobSpec = (root: string, id: string): SandboxJobSpec => ({
   githubReadToken: 'github-token',
 });
 
-const setupCommand = (): SandboxCommand => async () => ok;
+const okHostRun: HostRun = async () => ok;
+const execPort = (hostRun: HostRun): SandboxExecPort => ({ run: hostRun });
+const createMsbBackend = (ownershipRoot: string, hostRun: HostRun = okHostRun) =>
+  createMicrosandboxSandboxBackend({
+    hostRun,
+    relayEnabled: true,
+    ownershipRoot,
+    image: 'review-image',
+  });
+const createMsbJob = (spec: SandboxJobSpec, ownershipRoot: string, hostRun: HostRun = okHostRun) =>
+  createMsbBackend(ownershipRoot, hostRun).createJob(spec);
 
 describe('microsandbox ownership recovery', () => {
   it('removes the marker when destroy verifies the sandbox is already absent', async () => {
@@ -59,19 +68,14 @@ describe('microsandbox ownership recovery', () => {
     vi.stubEnv('MSB_HOME', msbHome);
     const ownershipRoot = join(root, 'sandbox-owners', 'msb-absent-instance');
     const spec = jobSpec(root, 'msb-absent-job');
-    const runtime = createMicrosandboxRuntimeFactory(
-      'review-image',
-      async () => ok,
-      false,
-      ownershipRoot,
-    )(spec);
-    await runtime.setup(setupCommand());
-    const absent: SandboxCommand = async (_args) => ({
+    const runtime = createMsbJob(spec, ownershipRoot);
+    await runtime.setup(execPort(okHostRun));
+    const absent: HostRun = async () => ({
       ...ok,
       exitCode: 1,
       stderr: `error: sandbox not found: ${spec.name}`,
     });
-    await runtime.destroy(absent);
+    await runtime.destroy(execPort(absent));
     await expect(readdir(join(ownershipRoot, 'microsandbox'))).resolves.toEqual([]);
   });
 
@@ -85,13 +89,8 @@ describe('microsandbox ownership recovery', () => {
     vi.stubEnv('MSB_HOME', msbHome);
     const ownershipRoot = join(root, 'sandbox-owners', 'msb-intent-instance');
     const spec = jobSpec(root, 'msb-intent-job');
-    const runtime = createMicrosandboxRuntimeFactory(
-      'review-image',
-      async () => ok,
-      false,
-      ownershipRoot,
-    )(spec);
-    await runtime.setup(setupCommand());
+    const runtime = createMsbJob(spec, ownershipRoot);
+    await runtime.setup(execPort(okHostRun));
     const markerDir = join(ownershipRoot, 'microsandbox');
     const [markerName] = await readdir(markerDir);
     const markerPath = join(markerDir, markerName!);
@@ -103,7 +102,7 @@ describe('microsandbox ownership recovery', () => {
     });
 
     const removed: string[] = [];
-    const command: SandboxCommand = async (args) => {
+    const command: HostRun = async (_program, args) => {
       if (args[0] === 'inspect')
         return {
           ...ok,
@@ -116,11 +115,13 @@ describe('microsandbox ownership recovery', () => {
       return ok;
     };
 
-    await expect(reconcileMicrosandboxRestartResources(ownershipRoot, command)).resolves.toEqual({
+    await expect(
+      createMsbBackend(ownershipRoot, command).reconcileOrphans({ isLiveJob: () => false }),
+    ).resolves.toEqual({
       ok: false,
       recovered: 0,
       recoveredJobIds: [],
-      failures: [{ jobId: spec.id, sandboxName: spec.name }],
+      failures: [{ jobId: spec.id, sandboxName: spec.name, step: 'record' }],
     });
     expect(removed).toEqual([]);
     expect(await readdir(markerDir)).toHaveLength(1);
@@ -144,26 +145,23 @@ describe('microsandbox ownership recovery', () => {
     vi.stubEnv('MSB_HOME', msbHome);
     const ownershipRoot = join(root, 'sandbox-owners', failure);
     const spec = mutate(jobSpec(root, 'msb-setup-failure-job'));
-    const runtime = createMicrosandboxRuntimeFactory(
-      'review-image',
-      async () => ok,
-      false,
-      ownershipRoot,
-    )(spec);
+    const runtime = createMsbJob(spec, ownershipRoot);
     const commands: string[] = [];
-    const command: SandboxCommand = async (args) => {
+    const command: HostRun = async (_program, args) => {
       commands.push(args[0]!);
       return ok;
     };
 
-    await expect(runtime.setup(command)).rejects.toThrow();
-    await runtime.destroy(command);
+    await expect(runtime.setup(execPort(command))).rejects.toThrow();
+    await runtime.destroy(execPort(command));
 
     expect(commands).toEqual([]);
     await expect(readdir(join(ownershipRoot, 'microsandbox'))).rejects.toMatchObject({
       code: 'ENOENT',
     });
-    await expect(reconcileMicrosandboxRestartResources(ownershipRoot, command)).resolves.toEqual({
+    await expect(
+      createMsbBackend(ownershipRoot, command).reconcileOrphans({ isLiveJob: () => false }),
+    ).resolves.toEqual({
       ok: true,
       recovered: 0,
       recoveredJobIds: [],
@@ -183,15 +181,10 @@ describe('microsandbox ownership recovery', () => {
     const live = jobSpec(root, 'live-job');
     const stale = jobSpec(root, 'stale-job');
     for (const spec of [live, stale]) {
-      const runtime = createMicrosandboxRuntimeFactory(
-        'review-image',
-        async () => ok,
-        false,
-        ownershipRoot,
-      )(spec);
-      await runtime.setup(setupCommand());
+      const runtime = createMsbJob(spec, ownershipRoot);
+      await runtime.setup(execPort(okHostRun));
     }
-    const command: SandboxCommand = async (_args, _diag, options) => {
+    const command: HostRun = async (_program, _args, options) => {
       const name = _args[_args.length - 1];
       if (_args[0] === 'inspect') {
         if (name === stale.name)
@@ -207,7 +200,9 @@ describe('microsandbox ownership recovery', () => {
       return options?.captureStdout === true ? { ...ok, stdout: '' } : ok;
     };
     await expect(
-      reconcileMicrosandboxRestartResources(ownershipRoot, command, (id) => id === live.id),
+      createMsbBackend(ownershipRoot, command).reconcileOrphans({
+        isLiveJob: (id) => id === live.id,
+      }),
     ).resolves.toMatchObject({ recovered: 1, recoveredJobIds: [stale.id] });
     expect(await readdir(join(ownershipRoot, 'microsandbox'))).toHaveLength(1);
   });
@@ -221,14 +216,13 @@ describe('microsandbox ownership recovery', () => {
     const claimStarted = new Promise<void>((resolve) => {
       started = resolve;
     });
+    vi.stubEnv('RUNNER_SANDBOX_RUNTIME', 'microsandbox');
+    vi.stubEnv('MICROSANDBOX_IMAGE', 'review-image');
     const runner = createRunner({
       evidenceRoot: root,
       instanceId: 'close-poll-instance',
       authToken: 'runner-test-token',
       modelConfig,
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-      sandboxRuntime: 'microsandbox',
-      microsandboxImage: 'review-image',
       llmRelay: true,
       llmRelayGeneration: 'generation-a',
       callbackUrl: 'https://ingress.test/runner-callback',
@@ -271,13 +265,8 @@ describe('microsandbox ownership recovery', () => {
     const instanceId = 'close-scan-instance';
     const ownershipRoot = join(root, 'sandbox-owners', instanceId);
     for (const id of ['close-scan-a', 'close-scan-b']) {
-      const runtime = createMicrosandboxRuntimeFactory(
-        'review-image',
-        async () => ok,
-        false,
-        ownershipRoot,
-      )(jobSpec(root, id));
-      await runtime.setup(setupCommand());
+      const runtime = createMsbJob(jobSpec(root, id), ownershipRoot);
+      await runtime.setup(execPort(okHostRun));
     }
     let started!: () => void;
     const scanStarted = new Promise<void>((resolve) => {
@@ -288,14 +277,13 @@ describe('microsandbox ownership recovery', () => {
       release = resolve;
     });
     const inspected: string[] = [];
+    vi.stubEnv('RUNNER_SANDBOX_RUNTIME', 'microsandbox');
+    vi.stubEnv('MICROSANDBOX_IMAGE', 'review-image');
     const runner = createRunner({
       evidenceRoot: root,
       instanceId,
       authToken: 'runner-test-token',
       modelConfig,
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-      sandboxRuntime: 'microsandbox',
-      microsandboxImage: 'review-image',
       llmRelay: true,
       llmRelayGeneration: 'generation-a',
       callbackUrl: 'https://ingress.test/runner-callback',
@@ -342,13 +330,8 @@ describe('microsandbox ownership recovery', () => {
     const instanceId = 'msb-instance';
     const ownershipRoot = join(root, 'sandbox-owners', instanceId);
     const spec = jobSpec(root, 'msb-job');
-    const runtime = createMicrosandboxRuntimeFactory(
-      'review-image',
-      async () => ok,
-      false,
-      ownershipRoot,
-    )(spec);
-    await runtime.setup(setupCommand());
+    const runtime = createMsbJob(spec, ownershipRoot);
+    await runtime.setup(execPort(okHostRun));
     const markerDir = markerRoot(root, instanceId);
     const [markerName] = await readdir(markerDir);
     const marker = JSON.parse(await readFile(join(markerDir, markerName!), 'utf8')) as {
@@ -406,14 +389,13 @@ describe('microsandbox ownership recovery', () => {
       }
       return realSetTimeout(handler, timeout, ...args);
     }) as typeof globalThis.setTimeout);
+    vi.stubEnv('RUNNER_SANDBOX_RUNTIME', 'microsandbox');
+    vi.stubEnv('MICROSANDBOX_IMAGE', 'review-image');
     const runner = createRunner({
       evidenceRoot: root,
       instanceId,
       authToken: 'runner-test-token',
       modelConfig,
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
-      sandboxRuntime: 'microsandbox',
-      microsandboxImage: 'review-image',
       llmRelay: true,
       llmRelayGeneration: 'generation-a',
       callbackUrl: 'https://ingress.test/runner-callback',
@@ -468,13 +450,15 @@ describe('microsandbox ownership recovery', () => {
     // A non-directory marker root makes readdir fail with ENOTDIR, not ENOENT.
     await writeFile(join(ownershipRoot, 'microsandbox'), 'not a directory');
 
-    const result = await reconcileMicrosandboxRestartResources(ownershipRoot, async () => ok);
+    const result = await createMsbBackend(ownershipRoot).reconcileOrphans({
+      isLiveJob: () => false,
+    });
 
     expect(result).toEqual({
       ok: false,
       recovered: 0,
       recoveredJobIds: [],
-      failures: [{ jobId: 'redacted', sandboxName: 'redacted' }],
+      failures: [{ jobId: 'redacted', sandboxName: 'redacted', step: 'record' }],
     });
   });
 });

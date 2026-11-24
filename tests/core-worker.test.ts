@@ -3215,9 +3215,9 @@ describe('Core Worker', () => {
       );
     await schedule(eligibleEvent);
     let polled = false;
+    vi.stubEnv('MODEL_SECRET_COMMAND', 'secret-resolver get MODEL_API_KEY');
     const runner: ReturnType<typeof createRunner> = createRunner({
       authToken: 'runner-auth-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       claimUrl: 'https://core.internal/runner-claims',
       callbackUrl: 'https://core.internal/runner-results',
       callbackToken: 'callback',
@@ -3268,6 +3268,7 @@ describe('Core Worker', () => {
       expect((await stateStore.getRunOutcome(runId))?.runnerJobId).toBeUndefined();
     } finally {
       release.resolve();
+      vi.unstubAllEnvs();
       await runner.close();
       database.close();
     }

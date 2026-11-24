@@ -18,6 +18,7 @@ const evidenceRoot = async () => {
 };
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   for (const root of evidenceRoots.splice(0)) await rm(root, { recursive: true, force: true });
 });
 
@@ -332,7 +333,6 @@ describe('Runner relay configuration', () => {
         expect(() =>
           createRunner({
             authToken: 'runner-test-token',
-            modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
             modelConfig: JSON.stringify({
               id: 'opencode-go/deepseek-review',
               definition: { name: 'DeepSeek review' },
@@ -402,31 +402,42 @@ describe('Runner relay admission and recovery', () => {
       claimUrl: 'https://ingress.test/runner-claim',
       claimIntervalMs: 1,
       claimFetch: execution.claimFetch,
-      sandboxRuntimeFactory: (spec) => {
-        specs.push(spec);
-        let hostCleanupConfirmed = false;
-        const ok = { exitCode: 0, stdout: '', timedOut: false, truncated: false };
-        return {
-          metadata: {
-            created: true,
-            get hostCleanupConfirmed() {
-              return hostCleanupConfirmed;
+      sandboxBackend: {
+        kind: 'sbx',
+        health: () => 'ready',
+        checkReady: async () => 'ready',
+        reconcileOrphans: async () => ({
+          ok: true,
+          recovered: 0,
+          recoveredJobIds: [],
+          failures: [],
+        }),
+        createJob: (spec) => {
+          specs.push(spec);
+          let hostCleanupConfirmed = false;
+          const ok = { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+          return {
+            metadata: {
+              created: true,
+              get hostCleanupConfirmed() {
+                return hostCleanupConfirmed;
+              },
+              id: spec.name,
+              name: spec.name,
+              runtime: 'sbx',
+              imageRef: 'review:test',
+              evidenceRoot: '/tmp/compte-rendu-evidence',
             },
-            id: spec.name,
-            name: spec.name,
-            runtime: 'sbx',
-            imageRef: spec.imageRef,
-            evidenceRoot: '/tmp/compte-rendu-evidence',
-          },
-          setup: async () => {
-            injectedToken = await readFile(spec.modelTokenFile!, 'utf8');
-          },
-          exec: async () => ok,
-          copyOut: async () => ok,
-          destroy: async () => {
-            hostCleanupConfirmed = true;
-          },
-        };
+            setup: async () => {
+              injectedToken = await readFile(spec.modelTokenFile!, 'utf8');
+            },
+            exec: async () => ok,
+            copyOut: async () => ok,
+            destroy: async () => {
+              hostCleanupConfirmed = true;
+            },
+          };
+        },
       },
       callbackFetch: async (input, init) => {
         const inputUrl =
@@ -659,10 +670,10 @@ describe('Runner relay admission and recovery', () => {
     await writeFile(markerPath, jobId, { mode: 0o600 });
     const events: Array<Record<string, unknown>> = [];
     const execution = createClaimExecution();
+    vi.stubEnv('MODEL_SECRET_COMMAND', 'secret-resolver get MODEL_API_KEY');
     const runner = createRunner({
       evidenceRoot: root,
       authToken: 'runner-test-token',
-      modelSecretCommand: 'secret-resolver get MODEL_API_KEY',
       modelConfig: JSON.stringify({
         id: 'opencode-go/deepseek-flash',
         definition: { name: 'DeepSeek V4.1 Flash' },

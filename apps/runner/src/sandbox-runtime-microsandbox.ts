@@ -5,10 +5,25 @@ import { basename, join } from 'node:path';
 import { Schema } from 'effect';
 import {
   SandboxCreateError,
-  type SandboxCommand,
-  type SandboxRuntimeFactory,
+  type JobSandbox,
+  type OrphanReconcileResult,
+  type RunnerDiagnostic,
+  type RunnerProcessOptions,
   type RunnerProcessResult,
+  type SandboxBackend,
+  type SandboxBackendContext,
+  type SandboxCleanupConfirmation,
+  type SandboxExecPort,
+  type SandboxHealth,
+  type SandboxJobSpec,
+  type SandboxRecoveryFailure,
 } from './sandbox-runtime.js';
+
+type MsbCommand = (
+  args: readonly string[],
+  diagnostic?: RunnerDiagnostic,
+  options?: RunnerProcessOptions,
+) => Promise<RunnerProcessResult>;
 
 const evidenceRoot = '/tmp/compte-rendu-evidence';
 const inspectedSandbox = Schema.fromJsonString(
@@ -65,6 +80,11 @@ const localEnvironment = (): NodeJS.ProcessEnv => ({
   MSB_BACKEND: 'local',
 });
 
+const msbOptions = (options?: RunnerProcessOptions): RunnerProcessOptions => ({
+  ...options,
+  env: { ...localEnvironment(), ...options?.env },
+});
+
 const complete = (result: RunnerProcessResult) =>
   !result.timedOut &&
   !result.truncated &&
@@ -83,15 +103,7 @@ export const microsandboxCatalogIdentity = async () => {
     .digest('hex');
 };
 
-export const createMicrosandboxPreflight = (image: string) => async (command: SandboxCommand) => {
-  const options = { env: localEnvironment() };
-  const host = await command(['doctor'], undefined, options);
-  if (host.exitCode !== 0 || !complete(host)) return false;
-  const cached = await command(['image', 'inspect', image], undefined, options);
-  return cached.exitCode === 0 && complete(cached);
-};
-
-const inspect = async (command: SandboxCommand, name: string, catalog: string | undefined) => {
+const inspect = async (command: MsbCommand, name: string, catalog: string | undefined) => {
   if (!catalog || catalog !== (await microsandboxCatalogIdentity()))
     throw new Error('Microsandbox catalog changed');
   const result = await command(
@@ -109,8 +121,8 @@ const inspect = async (command: SandboxCommand, name: string, catalog: string | 
   return entry;
 };
 
-export const confirmMicrosandboxAbsent = async (
-  command: SandboxCommand,
+const confirmMicrosandboxAbsent = async (
+  command: MsbCommand,
   name: string,
   catalog: string | undefined,
 ) => {
@@ -118,198 +130,264 @@ export const confirmMicrosandboxAbsent = async (
     throw new Error('Microsandbox still present');
 };
 
-export const createMicrosandboxRuntimeFactory =
-  (
-    image: string,
-    rotationCommand: SandboxCommand,
-    allowFakeIp = false,
-    ownershipRoot?: string,
-  ): SandboxRuntimeFactory =>
-  (spec) => {
-    const { name } = spec;
-    const owner = randomUUID();
-    let catalog: string | undefined;
-    let attempted = false;
-    let created = false;
-    let closed = false;
-    let githubToken = spec.githubReadToken;
-    let creating: Promise<void> | undefined;
-    let rotation: Promise<RunnerProcessResult> | undefined;
-    const create = async (command: SandboxCommand) => {
-      const host = spec.modelResource.split(':')[0]!;
-      if (
-        !/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z][a-z0-9-]*$/i.test(host) ||
-        host === 'api.github.com' ||
-        spec.modelResource !== host + ':443' ||
-        !spec.modelTokenFile
-      )
-        throw new Error('Microsandbox requires a dedicated HTTPS grant endpoint on port 443');
-      const model = await readFile(spec.modelTokenFile, 'utf8');
-      const env = [
-        ...spec.env,
-        'NODE_EXTRA_CA_CERTS=/.msb/tls/ca.pem',
-        `XDG_CONFIG_HOME=${spec.configRoot}`,
-        `XDG_DATA_HOME=${evidenceRoot}/data`,
-        `XDG_STATE_HOME=${evidenceRoot}/state`,
-      ];
-      catalog = await microsandboxCatalogIdentity();
-      if (ownershipRoot !== undefined) {
-        await saveMarker(ownershipRoot, {
-          version: 1,
-          jobId: spec.id,
-          sandboxName: name,
-          catalog,
-          owner,
-          createAttempted: true,
-        });
-      }
-      attempted = true;
-      const result = await command(
-        [
-          'create',
-          '--name',
-          name,
-          '--label',
-          `cr-job-owner=${owner}`,
-          '--pull',
-          'never',
-          '--security',
-          'restricted',
-          '--deployment-profile',
-          allowFakeIp ? 'single-tenant' : 'multi-tenant',
-          ...(allowFakeIp ? ['--no-dns-rebind-protection'] : []),
-          '--max-tcp-connections',
-          '1024',
-          '--max-udp-connections',
-          '1024',
-          '--max-duration',
-          '2h',
-          '--cpus',
-          spec.cpu,
-          '--memory',
-          `${spec.memoryGib}G`,
-          '--mount-dir',
-          `${spec.checkoutRoot}:${spec.checkoutRoot}:ro,uid=1000,gid=1000`,
-          '--mount-dir',
-          `${spec.configRoot}:${spec.configRoot}:ro,uid=1000,gid=1000`,
-          '--net-default',
-          'deny',
-          '--net-rule',
-          `allow@${host}:tcp:443,allow@api.github.com:tcp:443`,
-          '--tls-intercept',
-          '--secret',
-          `OPENCODE_API_KEY:headers=authorization@${host}`,
-          '--secret',
-          'GH_TOKEN:headers=authorization@api.github.com',
-          ...env.flatMap((pair) => ['--env', pair]),
-          image,
-        ],
-        { stage: 'sandbox', command: 'create' },
-        { env: { ...localEnvironment(), OPENCODE_API_KEY: model, GH_TOKEN: githubToken } },
-      );
-      if (result.exitCode !== 0 || !complete(result)) throw new SandboxCreateError(result.timedOut);
-      created = true;
-    };
-    return {
-      metadata: {
-        runtime: 'microsandbox',
-        name,
-        id: name,
-        imageRef: image,
-        evidenceRoot,
-        get catalogIdentity() {
-          return catalog;
-        },
-        get created() {
-          return created;
-        },
-        hostCleanupConfirmed: true,
-      },
-      setup(command) {
-        creating = create(command);
-        return creating;
-      },
-      exec(args, command, options, diagnostic) {
-        return command(
-          [
-            'exec',
-            '--no-tty',
-            '--no-stdin',
-            '--user',
-            '1000',
-            '--workdir',
-            spec.checkoutRoot,
-            name,
-            '--',
-            ...args,
-          ],
-          diagnostic,
-          { ...options, env: localEnvironment() },
-        );
-      },
-      copyOut(path, destination, command, diagnostic, options) {
-        return command(['cp', `${name}:${path}`, destination], diagnostic, {
-          ...options,
-          env: localEnvironment(),
-        });
-      },
-      async rotateGithubReadToken(token) {
-        githubToken = token;
-        if (!creating) return;
-        await creating;
-        if (closed) throw new Error('Microsandbox is closing');
-        rotation = rotationCommand(
-          ['modify', name, '--secret', 'GH_TOKEN@api.github.com'],
-          undefined,
-          { env: { ...localEnvironment(), GH_TOKEN: token }, timeoutMs: 30_000 },
-        );
-        const result = await rotation;
-        if (result.exitCode !== 0 || !complete(result))
-          throw new Error('Microsandbox token update failed');
-      },
-      async destroy(command) {
-        closed = true;
-        await rotation?.catch(() => undefined);
-        if (!attempted) return;
-        const existing = await inspect(command, name, catalog);
-        if (!existing) {
-          if (ownershipRoot !== undefined) await removeMarker(ownershipRoot, spec.id);
-          return;
-        }
-        const persisted =
-          ownershipRoot === undefined
-            ? undefined
-            : await readMarker(ownershipRoot, markerName(spec.id));
-        const createAttempted =
-          ownershipRoot === undefined ? attempted : persisted?.createAttempted;
-        if (createAttempted !== true) throw new Error('Microsandbox creation was not attempted');
-        if (existing.config.labels['cr-job-owner'] !== owner)
-          throw new Error('Microsandbox owner mismatch');
-        const removed = await command(
-          ['rm', '-f', name],
-          { stage: 'cleanup', command: 'remove-sandbox' },
-          { env: localEnvironment() },
-        );
-        if (removed.exitCode !== 0 || !complete(removed))
-          throw new Error('Microsandbox removal failed');
-        await confirmMicrosandboxAbsent(command, name, catalog);
-        if (ownershipRoot !== undefined) await removeMarker(ownershipRoot, spec.id);
-      },
-    };
+const createMicrosandboxJobSandbox = (
+  program: string,
+  image: string,
+  allowFakeIp: boolean,
+  ownershipRoot: string | undefined,
+  backendCommand: MsbCommand,
+  spec: SandboxJobSpec,
+): JobSandbox => {
+  const { name } = spec;
+  const owner = randomUUID();
+  let catalog: string | undefined;
+  let attempted = false;
+  let created = false;
+  let closed = false;
+  let githubToken = spec.githubReadToken;
+  let creating: Promise<void> | undefined;
+  let rotation: Promise<RunnerProcessResult> | undefined;
+  const commandFor = (exec: SandboxExecPort): MsbCommand => {
+    return (args, diagnostic, options) => exec.run(program, args, msbOptions(options), diagnostic);
   };
+  const create = async (command: MsbCommand) => {
+    const host = spec.modelResource.split(':')[0]!;
+    if (
+      !/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z][a-z0-9-]*$/i.test(host) ||
+      host === 'api.github.com' ||
+      spec.modelResource !== host + ':443' ||
+      !spec.modelTokenFile
+    )
+      throw new Error('Microsandbox requires a dedicated HTTPS grant endpoint on port 443');
+    const model = await readFile(spec.modelTokenFile, 'utf8');
+    const env = [
+      ...spec.env,
+      'NODE_EXTRA_CA_CERTS=/.msb/tls/ca.pem',
+      `XDG_CONFIG_HOME=${spec.configRoot}`,
+      `XDG_DATA_HOME=${evidenceRoot}/data`,
+      `XDG_STATE_HOME=${evidenceRoot}/state`,
+    ];
+    catalog = await microsandboxCatalogIdentity();
+    if (ownershipRoot !== undefined) {
+      await saveMarker(ownershipRoot, {
+        version: 1,
+        jobId: spec.id,
+        sandboxName: name,
+        catalog,
+        owner,
+        createAttempted: true,
+      });
+    }
+    attempted = true;
+    const result = await command(
+      [
+        'create',
+        '--name',
+        name,
+        '--label',
+        `cr-job-owner=${owner}`,
+        '--pull',
+        'never',
+        '--security',
+        'restricted',
+        '--deployment-profile',
+        allowFakeIp ? 'single-tenant' : 'multi-tenant',
+        ...(allowFakeIp ? ['--no-dns-rebind-protection'] : []),
+        '--max-tcp-connections',
+        '1024',
+        '--max-udp-connections',
+        '1024',
+        '--max-duration',
+        '2h',
+        '--cpus',
+        spec.cpu,
+        '--memory',
+        `${spec.memoryGib}G`,
+        '--mount-dir',
+        `${spec.checkoutRoot}:${spec.checkoutRoot}:ro,uid=1000,gid=1000`,
+        '--mount-dir',
+        `${spec.configRoot}:${spec.configRoot}:ro,uid=1000,gid=1000`,
+        '--net-default',
+        'deny',
+        '--net-rule',
+        `allow@${host}:tcp:443,allow@api.github.com:tcp:443`,
+        '--tls-intercept',
+        '--secret',
+        `OPENCODE_API_KEY:headers=authorization@${host}`,
+        '--secret',
+        'GH_TOKEN:headers=authorization@api.github.com',
+        ...env.flatMap((pair) => ['--env', pair]),
+        image,
+      ],
+      { stage: 'sandbox', command: 'create' },
+      { env: { ...localEnvironment(), OPENCODE_API_KEY: model, GH_TOKEN: githubToken } },
+    );
+    if (result.exitCode !== 0 || !complete(result)) throw new SandboxCreateError(result.timedOut);
+    created = true;
+  };
+  return {
+    metadata: {
+      runtime: 'microsandbox',
+      name,
+      id: name,
+      imageRef: image,
+      evidenceRoot,
+      get recoveryProof() {
+        return catalog === undefined ? undefined : { catalogIdentity: catalog };
+      },
+      get created() {
+        return created;
+      },
+      hostCleanupConfirmed: true,
+    },
+    setup(exec) {
+      creating = create(commandFor(exec));
+      return creating;
+    },
+    exec(args, exec, options, diagnostic) {
+      return commandFor(exec)(
+        [
+          'exec',
+          '--no-tty',
+          '--no-stdin',
+          '--user',
+          '1000',
+          '--workdir',
+          spec.checkoutRoot,
+          name,
+          '--',
+          ...args,
+        ],
+        diagnostic,
+        options,
+      );
+    },
+    copyOut(path, destination, exec, diagnostic, options) {
+      return commandFor(exec)(['cp', `${name}:${path}`, destination], diagnostic, options);
+    },
+    async updateGithubReadToken(token) {
+      githubToken = token;
+      if (!creating) return;
+      await creating;
+      if (closed) throw new Error('Microsandbox is closing');
+      rotation = backendCommand(
+        ['modify', name, '--secret', 'GH_TOKEN@api.github.com'],
+        undefined,
+        { env: { GH_TOKEN: token }, timeoutMs: 30_000 },
+      );
+      const result = await rotation;
+      if (result.exitCode !== 0 || !complete(result))
+        throw new Error('Microsandbox token update failed');
+    },
+    async destroy(exec) {
+      const command = commandFor(exec);
+      closed = true;
+      await rotation?.catch(() => undefined);
+      if (!attempted) return;
+      const existing = await inspect(command, name, catalog);
+      if (!existing) {
+        if (ownershipRoot !== undefined) await removeMarker(ownershipRoot, spec.id);
+        return;
+      }
+      const persisted =
+        ownershipRoot === undefined
+          ? undefined
+          : await readMarker(ownershipRoot, markerName(spec.id));
+      const createAttempted = ownershipRoot === undefined ? attempted : persisted?.createAttempted;
+      if (createAttempted !== true) throw new Error('Microsandbox creation was not attempted');
+      if (existing.config.labels['cr-job-owner'] !== owner)
+        throw new Error('Microsandbox owner mismatch');
+      const removed = await command(['rm', '-f', name], {
+        stage: 'cleanup',
+        command: 'remove-sandbox',
+      });
+      if (removed.exitCode !== 0 || !complete(removed))
+        throw new Error('Microsandbox removal failed');
+      await confirmMicrosandboxAbsent(command, name, catalog);
+      if (ownershipRoot !== undefined) await removeMarker(ownershipRoot, spec.id);
+    },
+  };
+};
 
-export interface MicrosandboxRestartRecoveryResult {
-  readonly ok: boolean;
-  readonly recovered: number;
-  readonly recoveredJobIds: readonly string[];
-  readonly failures: ReadonlyArray<{ readonly jobId: string; readonly sandboxName: string }>;
+interface MicrosandboxSandboxBackendOptions extends SandboxBackendContext {
+  /** Overrides are for tests and explicit embedding; production reads the environment. */
+  readonly image?: string | undefined;
+  readonly allowFakeIp?: boolean | undefined;
 }
 
-export const reconcileMicrosandboxRestartResources = async (
+const nonEmpty = (value: string | undefined): string | undefined => {
+  const trimmed = value?.trim();
+  return trimmed === undefined || trimmed.length === 0 ? undefined : trimmed;
+};
+
+export const createMicrosandboxSandboxBackend = (
+  options: MicrosandboxSandboxBackendOptions,
+): SandboxBackend => {
+  const image = nonEmpty(options.image) ?? nonEmpty(process.env.MICROSANDBOX_IMAGE);
+  if (image === undefined) throw new Error('Microsandbox requires MICROSANDBOX_IMAGE');
+  if (!options.relayEnabled) throw new Error('Microsandbox requires the managed HTTPS LLM relay');
+  const program = nonEmpty(process.env.RUNNER_SANDBOX_CLI) ?? 'msb';
+  const allowFakeIp = options.allowFakeIp ?? process.env.MICROSANDBOX_ALLOW_FAKE_IP === '1';
+  let health: SandboxHealth = 'unready';
+  let retryAt = 0;
+  const backendCommand: MsbCommand = (args, diagnostic, processOptions) =>
+    options.hostRun(program, args, msbOptions(processOptions), diagnostic);
+  const checkReady = async (): Promise<SandboxHealth> => {
+    if (health === 'ready') return 'ready';
+    if (Date.now() < retryAt) return 'unready';
+    try {
+      const host = await backendCommand(['doctor'], undefined, { timeoutMs: 30 * 1000 });
+      if (host.exitCode !== 0 || !complete(host)) throw new Error('microsandbox doctor failed');
+      const cached = await backendCommand(['image', 'inspect', image], undefined, {
+        timeoutMs: 30 * 1000,
+      });
+      if (cached.exitCode !== 0 || !complete(cached)) throw new Error('microsandbox image missing');
+      health = 'ready';
+      retryAt = 0;
+      return 'ready';
+    } catch {
+      health = 'unready';
+      retryAt = Date.now() + 30_000;
+      return 'unready';
+    }
+  };
+  return {
+    kind: 'microsandbox',
+    health: () => health,
+    checkReady,
+    async reconcileOrphans({ isLiveJob, onlyJobId }): Promise<OrphanReconcileResult> {
+      return reconcileMicrosandboxRestartResources(
+        options.ownershipRoot,
+        backendCommand,
+        (jobId) =>
+          onlyJobId === undefined ? isLiveJob(jobId) : jobId !== onlyJobId || isLiveJob(jobId),
+      );
+    },
+    async confirmCleanupAbsent(input: SandboxCleanupConfirmation): Promise<void> {
+      await confirmMicrosandboxAbsent(
+        backendCommand,
+        input.sandboxName,
+        input.recoveryProof?.catalogIdentity,
+      );
+    },
+    createJob(spec: SandboxJobSpec): JobSandbox {
+      return createMicrosandboxJobSandbox(
+        program,
+        image,
+        allowFakeIp,
+        options.ownershipRoot,
+        backendCommand,
+        spec,
+      );
+    },
+  };
+};
+
+const reconcileMicrosandboxRestartResources = async (
   root: string,
-  command: SandboxCommand,
+  command: MsbCommand,
   isLive: (jobId: string) => boolean = () => false,
-): Promise<MicrosandboxRestartRecoveryResult> => {
+): Promise<OrphanReconcileResult> => {
   const directory = markerRoot(root);
   let names: string[];
   try {
@@ -321,17 +399,17 @@ export const reconcileMicrosandboxRestartResources = async (
       ok: false,
       recovered: 0,
       recoveredJobIds: [],
-      failures: [{ jobId: 'redacted', sandboxName: 'redacted' }],
+      failures: [{ jobId: 'redacted', sandboxName: 'redacted', step: 'record' }],
     };
   }
   let recovered = 0;
   const recoveredJobIds: string[] = [];
-  const failures: Array<{ jobId: string; sandboxName: string }> = [];
+  const failures: SandboxRecoveryFailure[] = [];
   for (const name of names) {
     if (!name.endsWith('.json')) continue;
     const record = await readMarker(root, name);
     if (record === undefined) {
-      failures.push({ jobId: 'redacted', sandboxName: 'redacted' });
+      failures.push({ jobId: 'redacted', sandboxName: 'redacted', step: 'record' });
       continue;
     }
     if (isLive(record.jobId)) continue;
@@ -353,7 +431,7 @@ export const reconcileMicrosandboxRestartResources = async (
       recovered += 1;
       recoveredJobIds.push(record.jobId);
     } catch {
-      failures.push({ jobId: record.jobId, sandboxName: record.sandboxName });
+      failures.push({ jobId: record.jobId, sandboxName: record.sandboxName, step: 'record' });
     }
   }
   return { ok: failures.length === 0, recovered, recoveredJobIds, failures };

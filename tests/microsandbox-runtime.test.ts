@@ -4,8 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, it } from 'vitest';
 import { runProcess } from '../apps/runner/src/runner.js';
-import { createMicrosandboxRuntimeFactory } from '../apps/runner/src/sandbox-runtime-microsandbox.js';
-import type { SandboxCommand } from '../apps/runner/src/sandbox-runtime.js';
+import { createMicrosandboxSandboxBackend } from '../apps/runner/src/sandbox-runtime-microsandbox.js';
+import type { HostRun, SandboxExecPort } from '../apps/runner/src/sandbox-runtime.js';
 
 it.skipIf(!process.env.CR_MICROSANDBOX_NATIVE_IMAGE)(
   'runs the review tools with read-only staging and exports evidence before destroying the VM',
@@ -13,7 +13,7 @@ it.skipIf(!process.env.CR_MICROSANDBOX_NATIVE_IMAGE)(
     const root = await mkdtemp(join(tmpdir(), 'cr-msb-live-'));
     const id = randomUUID();
     const bin = process.env.RUNNER_SANDBOX_CLI ?? 'msb';
-    const command: SandboxCommand = (args, _diagnostic, options) =>
+    const hostRun: HostRun = (_program, args, options) =>
       runProcess(bin, args, {
         captureStdout: true,
         captureStderr: true,
@@ -21,18 +21,20 @@ it.skipIf(!process.env.CR_MICROSANDBOX_NATIVE_IMAGE)(
         timeoutMs: 60_000,
         ...options,
       });
+    const exec: SandboxExecPort = { run: hostRun };
     const checkoutRoot = join(root, 'checkout');
     const configRoot = join(root, 'config');
     const token = join(root, 'grant');
-    const runtime = createMicrosandboxRuntimeFactory(
-      process.env.CR_MICROSANDBOX_NATIVE_IMAGE!,
-      command,
-    )({
+    const runtime = createMicrosandboxSandboxBackend({
+      hostRun,
+      relayEnabled: true,
+      ownershipRoot: join(root, 'owners'),
+      image: process.env.CR_MICROSANDBOX_NATIVE_IMAGE!,
+    }).createJob({
       id,
       name: 'compte-rendu-' + id,
       checkoutRoot,
       configRoot,
-      imageRef: 'unused',
       cpu: '1',
       memoryGib: 2,
       env: [],
@@ -48,24 +50,24 @@ it.skipIf(!process.env.CR_MICROSANDBOX_NATIVE_IMAGE)(
       await writeFile(join(configRoot, 'opencode', 'skill'), 'method', { mode: 0o600 });
       await writeFile(join(checkoutRoot, 'input'), 'fixture');
       await writeFile(token, 'synthetic-grant');
-      await runtime.setup(command);
+      await runtime.setup(exec);
       const result = await runtime.exec(
         [
           'sh',
           '-ec',
           'test "$(cat "$XDG_CONFIG_HOME/opencode/skill")" = method; test "$(cat input)" = fixture; test -n "$GH_TOKEN"; test "$GH_TOKEN" != synthetic-gh; test "$OPENCODE_API_KEY" != synthetic-grant; ! touch forbidden; opencode --version; gh --version; mkdir -p /tmp/probe/logs; printf evidence > /tmp/probe/logs/output',
         ],
-        command,
+        exec,
       );
       expect(result.exitCode, result.stderr).toBe(0);
       expect(result.stdout).toContain('opencode v2.4.1');
       await expect(readFile(join(checkoutRoot, 'forbidden'))).rejects.toThrow();
-      await runtime.rotateGithubReadToken!('synthetic-rotated');
-      const exported = await runtime.copyOut('/tmp/probe', join(root, 'output'), command);
+      await runtime.updateGithubReadToken!('synthetic-rotated');
+      const exported = await runtime.copyOut('/tmp/probe', join(root, 'output'), exec);
       expect(exported.exitCode, exported.stderr).toBe(0);
       expect(await readFile(join(root, 'output', 'logs', 'output'), 'utf8')).toBe('evidence');
     } finally {
-      await runtime.destroy(command);
+      await runtime.destroy(exec);
       await rm(root, { recursive: true, force: true });
     }
     expect(runtime.metadata.hostCleanupConfirmed).toBe(true);
@@ -85,7 +87,7 @@ it('destroys the sandbox after a pending credential update settles', async () =>
   const started = new Promise<void>((resolve) => {
     markStarted = resolve;
   });
-  const command: SandboxCommand = async (args) => {
+  const hostRun: HostRun = async (_program, args) => {
     if (args[0] === 'create') owner = args[args.indexOf('--label') + 1]!.split('=')[1];
     if (args[0] === 'modify') {
       rotating = true;
@@ -106,20 +108,22 @@ it('destroys the sandbox after a pending credential update settles', async () =>
     }
     return ok;
   };
+  const exec: SandboxExecPort = { run: hostRun };
   try {
     await mkdir(join(root, 'db'));
     await writeFile(join(root, 'db', 'msb.db'), '');
     const token = join(root, 'grant');
     await writeFile(token, 'test-grant');
-    const runtime = createMicrosandboxRuntimeFactory(
-      'fixture',
-      command,
-    )({
+    const runtime = createMicrosandboxSandboxBackend({
+      hostRun,
+      relayEnabled: true,
+      ownershipRoot: join(root, 'owners'),
+      image: 'fixture',
+    }).createJob({
       id: 'rotation',
       name,
       checkoutRoot: root,
       configRoot: root,
-      imageRef: 'fixture',
       cpu: '1',
       memoryGib: 2,
       env: [],
@@ -128,10 +132,10 @@ it('destroys the sandbox after a pending credential update settles', async () =>
       githubReadToken: 'initial',
       modelTokenFile: token,
     });
-    await runtime.setup(command);
-    const rotation = runtime.rotateGithubReadToken!('replacement');
+    await runtime.setup(exec);
+    const rotation = runtime.updateGithubReadToken!('replacement');
     await started;
-    await Promise.all([runtime.destroy(command), rotation]);
+    await Promise.all([runtime.destroy(exec), rotation]);
     expect(owner).toBeUndefined();
   } finally {
     if (previousHome === undefined) delete process.env.MSB_HOME;
