@@ -33,7 +33,7 @@ describe('Core callbacks and publication', () => {
     });
     if (claimed.kind !== 'claimed') throw new Error('duplicate callback run was not claimed');
     await claimRunnerJob(stateStore, { runId: claimed.runId, jobId: 'runner-job-1' });
-    await stateStore.recordCheckRun?.({ runId: claimed.runId, checkRunId: 321 });
+    await stateStore.recordCheckRun({ runId: claimed.runId, checkRunId: 321 });
     let signalPublicationStarted!: () => void;
     const publicationStarted = new Promise<void>((resolve) => {
       signalPublicationStarted = resolve;
@@ -124,7 +124,7 @@ describe('Core callbacks and publication', () => {
             occurredAt: '2026-09-01T03:10:00.000Z',
           });
         }
-        return stateStore.claimRunPublication!(input);
+        return stateStore.claimRunPublication(input);
       },
     };
     let reviews = 0;
@@ -186,7 +186,7 @@ describe('Core callbacks and publication', () => {
     });
     if (claimed.kind !== 'claimed') throw new Error('failure retry run was not claimed');
     await claimRunnerJob(stateStore, { runId: claimed.runId, jobId: 'runner-job-1' });
-    await stateStore.recordCheckRun?.({ runId: claimed.runId, checkRunId: 321 });
+    await stateStore.recordCheckRun({ runId: claimed.runId, checkRunId: 321 });
     const comments: string[] = [];
     const checkUpdates: string[] = [];
     let firstComment = true;
@@ -430,7 +430,7 @@ describe('Core callbacks and publication', () => {
     });
     if (claimed.kind !== 'claimed') throw new Error('manual test run was not claimed');
     await claimRunnerJob(stateStore, { runId: claimed.runId, jobId: 'runner-job-1' });
-    await stateStore.recordCheckRun?.({ runId: claimed.runId, checkRunId: 321 });
+    await stateStore.recordCheckRun({ runId: claimed.runId, checkRunId: 321 });
     const reactions: unknown[] = [];
     const comments: Array<{ body: string; [key: string]: unknown }> = [];
     const checkUpdates: unknown[] = [];
@@ -517,7 +517,7 @@ describe('Core callbacks and publication', () => {
     });
     if (claimed.kind !== 'claimed') throw new Error('manual superseded run was not claimed');
     await claimRunnerJob(stateStore, { runId: claimed.runId, jobId: 'runner-job-1' });
-    await stateStore.markRunSuperseded?.({
+    await stateStore.markRunSuperseded({
       runId: claimed.runId,
       occurredAt: '2026-09-01T00:00:01.000Z',
     });
@@ -578,7 +578,7 @@ describe('Core callbacks and publication', () => {
     });
     if (claimed.kind !== 'claimed') throw new Error('reaction failure run was not claimed');
     await claimRunnerJob(stateStore, { runId: claimed.runId, jobId: 'runner-job-1' });
-    await stateStore.recordCheckRun?.({ runId: claimed.runId, checkRunId: 321 });
+    await stateStore.recordCheckRun({ runId: claimed.runId, checkRunId: 321 });
     const comments: string[] = [];
     const checkUpdates: string[] = [];
     const worker = createCoreWorker(

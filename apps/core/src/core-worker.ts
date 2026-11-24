@@ -390,11 +390,7 @@ export const createCoreWorker = (
       const event = Option.getOrUndefined(Schema.decodeUnknownOption(ReviewEvent)(body));
       if (event === undefined) return new Response(null, { status: 400 });
 
-      if (
-        event.event === 'pull_request' &&
-        event.repositoryVisibility === 'private' &&
-        stateStore.invalidateRepositoryMetadata !== undefined
-      ) {
+      if (event.event === 'pull_request' && event.repositoryVisibility === 'private') {
         const observedAt = new Date().toISOString();
         await stateStore
           .invalidateRepositoryMetadata({

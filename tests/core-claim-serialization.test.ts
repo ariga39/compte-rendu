@@ -74,7 +74,7 @@ describe('Runner claim serialization', () => {
       runId: initial.runId,
       occurredAt: '2026-09-01T00:00:06.000Z',
     });
-    await store.clearRunnerJob?.({ runId: initial.runId, jobId: 'job-old' });
+    await store.clearRunnerJob({ runId: initial.runId, jobId: 'job-old' });
     expect(
       await store.claimNextJob({
         jobId: 'job-replacement',
@@ -709,10 +709,10 @@ describe('Runner claim serialization', () => {
         occurredAt: '2026-09-01T00:00:02.000Z',
       });
       await expect(
-        store.clearRunnerJob?.({ runId: claimed.runId, jobId: 'job-other' }),
+        store.clearRunnerJob({ runId: claimed.runId, jobId: 'job-other' }),
       ).resolves.toBe(false);
       await expect(
-        store.clearRunnerJob?.({ runId: claimed.runId, jobId: 'job-owner' }),
+        store.clearRunnerJob({ runId: claimed.runId, jobId: 'job-owner' }),
       ).resolves.toBe(true);
     } finally {
       database.close();

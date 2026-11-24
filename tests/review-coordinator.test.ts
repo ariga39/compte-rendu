@@ -37,7 +37,7 @@ const seedFailedCheckRun = async (
     occurredAt: '2026-09-12T00:00:00.000Z',
   });
   if (claim.kind !== 'claimed') throw new Error('failed run was not claimed');
-  await stateStore.recordCheckRun?.({ runId: claim.runId, checkRunId: input.checkRunId ?? 321 });
+  await stateStore.recordCheckRun({ runId: claim.runId, checkRunId: input.checkRunId ?? 321 });
   await stateStore.markSchedulingFailed({
     runId: claim.runId,
     occurredAt: '2026-09-12T00:01:00.000Z',
@@ -283,7 +283,7 @@ describe('Review coordinator', () => {
       occurredAt: '2026-08-25T00:00:00.000Z',
     });
     if (claimed.kind !== 'claimed') throw new Error('manual completion was not claimed');
-    await stateStore.recordCheckRun?.({ runId: claimed.runId, checkRunId: 321 });
+    await stateStore.recordCheckRun({ runId: claimed.runId, checkRunId: 321 });
     const coordinator = createReviewCoordinator({
       github: {
         addReaction: async ({ content }) => {
@@ -1348,7 +1348,7 @@ describe('Review coordinator', () => {
       occurredAt: '2026-09-12T00:00:00.000Z',
     });
     if (claim.kind !== 'claimed') throw new Error('failed run was not claimed');
-    await stateStore.recordCheckRun?.({ runId: claim.runId, checkRunId: 321 });
+    await stateStore.recordCheckRun({ runId: claim.runId, checkRunId: 321 });
     await stateStore.markSchedulingFailed({
       runId: claim.runId,
       occurredAt: '2026-09-12T00:01:00.000Z',
@@ -1479,7 +1479,7 @@ describe('Review coordinator', () => {
         occurredAt: '2026-09-12T00:00:00.000Z',
       });
       if (claim.kind !== 'claimed') throw new Error('active run was not claimed');
-      await stateStore.recordCheckRun?.({ runId: claim.runId, checkRunId: 321 });
+      await stateStore.recordCheckRun({ runId: claim.runId, checkRunId: 321 });
       return claim.runId;
     })();
     const nonfailed = await coordinator.handleReviewEvent({
@@ -2166,7 +2166,7 @@ it('retains superseded recovery identity while unblocking the next claim', async
     occurredAt: at,
   });
   if (next.kind !== 'claimed') throw new Error('replacement not scheduled');
-  await store.markRunSuperseded!({ runId: first.runId, occurredAt: at });
+  await store.markRunSuperseded({ runId: first.runId, occurredAt: at });
   expect(await store.claimNextJob({ jobId: 'next-job', attempt: 1, occurredAt: at })).toEqual({
     kind: 'empty',
   });
@@ -2180,13 +2180,13 @@ it('retains superseded recovery identity while unblocking the next claim', async
     sandboxName: 'compte-rendu-old-job',
     confirmedAt: at,
   };
-  expect(await store.validateRunnerCleanupRecovery!(report)).toEqual({ kind: 'recoverable' });
-  expect(await store.recoverRunnerCleanup!(report)).toMatchObject({ kind: 'recovered' });
-  expect(await store.recoverRunnerCleanup!(report)).toMatchObject({
+  expect(await store.validateRunnerCleanupRecovery(report)).toEqual({ kind: 'recoverable' });
+  expect(await store.recoverRunnerCleanup(report)).toMatchObject({ kind: 'recovered' });
+  expect(await store.recoverRunnerCleanup(report)).toMatchObject({
     kind: 'already',
     cleanupCompletedAt: at,
   });
-  expect(await store.getRunOutcome!(first.runId)).toMatchObject({
+  expect(await store.getRunOutcome(first.runId)).toMatchObject({
     status: 'superseded',
     runnerJobId: 'old-job',
     runnerAttempt: 1,

@@ -39,7 +39,7 @@ const fixture = async (claim = true) => {
 it('retains newer progress and immutable milestones when a terminal snapshot races it', async () => {
   const { store, identity, detail } = await fixture();
   await Promise.all([
-    store.recordProgress!({
+    store.recordProgress({
       ...identity,
       receivedAt: time(5),
       sequence: 3,
@@ -50,7 +50,7 @@ it('retains newer progress and immutable milestones when a terminal snapshot rac
         { stage: 'agent', startedAt: time(3) },
       ],
     }),
-    store.recordTerminalLifecycle!({
+    store.recordTerminalLifecycle({
       ...identity,
       receivedAt: time(6),
       sequence: 1,
@@ -91,11 +91,11 @@ it('persists bounded failure categories and keeps the first terminal time', asyn
 
 it('shows durable result receipt and publication milestones without inventing execution stages', async () => {
   const { store, identity, detail } = await fixture();
-  await store.recordResultReceived!({ ...identity, occurredAt: time(8) });
+  await store.recordResultReceived({ ...identity, occurredAt: time(8) });
   expect(await detail()).toMatchObject({
     task: { processing: 'received', resultReceivedAt: time(8), publicationStartedAt: null },
   });
-  await store.claimRunPublication!({
+  await store.claimRunPublication({
     runId: identity.runId,
     occurredAt: time(9),
     publishing: true,
@@ -116,7 +116,7 @@ it('shows durable result receipt and publication milestones without inventing ex
 it('counts a manual cancellation separately from failures in the received cohort', async () => {
   const { store, identity } = await fixture(false);
   await store.cancelRun({ runId: identity.runId, requestedByUid: 17, occurredAt: time(2) });
-  const overview = (since: string) => store.getPublicOverview!({ since, limit: 25 });
+  const overview = (since: string) => store.getPublicOverview({ since, limit: 25 });
   expect((await overview(time(0))).counts).toMatchObject({ cancelledLast24h: 1, failedLast24h: 0 });
   expect((await overview(time(1))).counts).toMatchObject({ cancelledLast24h: 0, failedLast24h: 0 });
 });
@@ -126,7 +126,7 @@ it('counts the received cohort and independently overlapping cleanup attention',
   await store.markRunCompleted({ runId: identity.runId, occurredAt: '2026-01-03T00:00:00.000Z' });
   expect(
     (
-      await store.getPublicOverview!({
+      await store.getPublicOverview({
         limit: 25,
         since: '2026-01-02T12:00:00.000Z',
       })
@@ -194,7 +194,7 @@ it('projects an authenticated failed callback through a fresh dashboard worker',
 
 it('does not advance a live report that changes an already recorded milestone', async () => {
   const { store, identity, detail } = await fixture();
-  await store.recordProgress!({
+  await store.recordProgress({
     ...identity,
     receivedAt: time(2),
     sequence: 1,
@@ -202,7 +202,7 @@ it('does not advance a live report that changes an already recorded milestone', 
     milestones: [{ stage: 'checkout', startedAt: time(1) }],
   });
   expect(
-    await store.recordProgress!({
+    await store.recordProgress({
       ...identity,
       receivedAt: time(5),
       sequence: 2,
@@ -225,7 +225,7 @@ it.each(['complete', 'publication', 'fail', 'supersede', 'replace'] as const)(
     const { store, identity, detail } = await fixture(path !== 'replace');
     const terminal = { runId: identity.runId, occurredAt: time(10) };
     if (path === 'complete') await store.markRunCompleted(terminal);
-    if (path === 'publication') await store.completeRunPublication!({ ...terminal });
+    if (path === 'publication') await store.completeRunPublication({ ...terminal });
     if (path === 'fail') await store.markSchedulingFailed(terminal);
     if (path === 'supersede') await store.markRunSuperseded(terminal);
     if (path === 'replace')
@@ -367,8 +367,8 @@ it('does not report fresh progress when a terminal snapshot is repeated', async 
     stage: 'checkout' as const,
     milestones: [{ stage: 'checkout' as const, startedAt: time(1) }],
   };
-  await store.recordTerminalLifecycle!({ ...snapshot, receivedAt: time(2) });
-  await store.recordTerminalLifecycle!({ ...snapshot, receivedAt: time(10) });
+  await store.recordTerminalLifecycle({ ...snapshot, receivedAt: time(2) });
+  await store.recordTerminalLifecycle({ ...snapshot, receivedAt: time(10) });
   expect(await detail()).toMatchObject({ task: { lastProgressAt: time(2) } });
 });
 

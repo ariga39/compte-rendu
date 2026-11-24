@@ -162,7 +162,7 @@ describe('Runner read-token renewal', () => {
         } else if (disposition === 'cancelled') {
           await store.cancelRun({ runId: input.runId, requestedByUid: 99, occurredAt });
         } else {
-          await store.claimRunPublication?.({ runId: input.runId, occurredAt });
+          await store.claimRunPublication({ runId: input.runId, occurredAt });
         }
 
         const response = await worker.fetch(

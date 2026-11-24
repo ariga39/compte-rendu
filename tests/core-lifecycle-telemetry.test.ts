@@ -988,7 +988,7 @@ describe('Core lifecycle telemetry and terminal classification', () => {
                   requestedByUid: 1,
                   occurredAt: new Date().toISOString(),
                 });
-                return state.claimRunPublication!(input);
+                return state.claimRunPublication(input);
               },
             }
           : failReadAfterSchedulingWrite(state, kind);
@@ -1081,7 +1081,7 @@ describe('Core lifecycle telemetry and terminal classification', () => {
                   requestedByUid: 1,
                   occurredAt: new Date().toISOString(),
                 });
-                return state.claimRunPublication!(input);
+                return state.claimRunPublication(input);
               },
             }
           : failReadAfterSchedulingWrite(state, kind);

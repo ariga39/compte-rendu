@@ -226,17 +226,15 @@ const claimAndSchedule = (
         Effect.catch(() => Effect.succeed(false)),
       );
       if (!canceled) return { disposition: 'scheduled' as const, ...admission };
-      if (stateStore.clearRunnerJob !== undefined) {
-        const cleared = yield* Effect.tryPromise({
-          try: () =>
-            stateStore.clearRunnerJob!({
-              runId: claim.activeRunnerJob!.runId,
-              jobId: claim.activeRunnerJob!.jobId,
-            }),
-          catch: () => false,
-        }).pipe(Effect.catch(() => Effect.succeed(false)));
-        if (!cleared) return { disposition: 'scheduled' as const, ...admission };
-      }
+      const cleared = yield* Effect.tryPromise({
+        try: () =>
+          stateStore.clearRunnerJob({
+            runId: claim.activeRunnerJob!.runId,
+            jobId: claim.activeRunnerJob!.jobId,
+          }),
+        catch: () => false,
+      }).pipe(Effect.catch(() => Effect.succeed(false)));
+      if (!cleared) return { disposition: 'scheduled' as const, ...admission };
       if (supersededOutcome !== undefined) {
         yield* recordSupersededLifecycle(
           lifecycleLog,

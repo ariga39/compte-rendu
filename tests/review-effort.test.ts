@@ -556,7 +556,7 @@ it('projects the admission effort snapshot and terminal route summary in public 
       },
     });
 
-    await store.recordModelUsage!({
+    await store.recordModelUsage({
       runId: admitted.runId,
       jobId: 'detail-job',
       attempt: 1,

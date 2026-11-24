@@ -37,8 +37,6 @@ export const resetPreviousReviewVerdicts = Effect.fn('resetPreviousReviewVerdict
   if (github.dismissPreviousReviews === undefined) return;
   return yield* Effect.tryPromise({
     try: async () => {
-      if (stateStore.listPriorReviewRunIds === undefined)
-        throw new Error('Review history unavailable');
       const previousRunIds = await stateStore.listPriorReviewRunIds(runId);
       if (previousRunIds.length === 0) return;
       return await github.dismissPreviousReviews!({
@@ -283,7 +281,7 @@ export const completeReviewEffect = Effect.fn('completeReview')(function* (
   ) {
     if (yield* cancellationWon) return { result: 'cancelled' as const, settled: false };
     const failedAt = yield* currentIso;
-    if (!ownsPublication && stateStore.claimRunPublication !== undefined) {
+    if (!ownsPublication) {
       ownsPublication = yield* claimFailureNotification();
     }
     const statusWriteSucceeded = yield* Effect.tryPromise({

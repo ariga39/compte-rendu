@@ -44,7 +44,7 @@ const verifyMetadata = async (
   repositoryId: number,
   visibility: 'public' | 'private',
 ) => {
-  const due = await store.listDueRepositoryMetadata!({
+  const due = await store.listDueRepositoryMetadata({
     now: '2026-01-01T00:00:00.000Z',
     limit: 50,
   });
@@ -52,14 +52,14 @@ const verifyMetadata = async (
     (entry) => entry.repositoryId === repositoryId && entry.installationId === installationId,
   );
   if (row === undefined) throw new Error('metadata row missing');
-  await store.claimRepositoryRefresh!({
+  await store.claimRepositoryRefresh({
     installationId,
     repositoryId,
     expectedRevision: row.revision,
     claimedAt: '2026-01-01T00:00:00.000Z',
     staleBefore: '2026-01-01T00:00:00.000Z',
   });
-  await store.recordRepositoryRefresh!({
+  await store.recordRepositoryRefresh({
     installationId,
     repositoryId,
     expectedRevision: row.revision,
@@ -537,7 +537,7 @@ describe('public dashboard reads are DB-only', () => {
       });
       expect(claimed.kind).toBe('claimed');
       expect(
-        await store.recordProgress!({
+        await store.recordProgress({
           runId: review.runId,
           jobId: `job-progress-${runtime}`,
           attempt: 1,
@@ -688,7 +688,7 @@ describe('public dashboard reads are DB-only', () => {
     });
     expect(review.kind).toBe('claimed');
     await verifyMetadata(store, 7, 401, 'public');
-    await store.setRefreshCooldown?.({ nextAllowedAt: '2999-01-01T00:00:00.000Z' });
+    await store.setRefreshCooldown({ nextAllowedAt: '2999-01-01T00:00:00.000Z' });
     let called = 0;
     const result = await runScheduledMetadataRefresh(coreEnv(database), {
       stateStore: store,
@@ -801,7 +801,7 @@ describe('public dashboard reads are DB-only', () => {
       job: job({ repositoryId: 320 }),
       occurredAt: '2026-01-01T00:00:00.000Z',
     });
-    const due = await store.listDueRepositoryMetadata!({
+    const due = await store.listDueRepositoryMetadata({
       now: '2026-01-01T00:00:00.000Z',
       limit: 50,
     });
@@ -810,7 +810,7 @@ describe('public dashboard reads are DB-only', () => {
     const first = '2026-01-01T00:01:00.000Z';
     const second = '2026-01-01T00:02:00.000Z';
     expect(
-      await store.claimRepositoryRefresh!({
+      await store.claimRepositoryRefresh({
         installationId: 7,
         repositoryId: 320,
         expectedRevision: row.revision,
@@ -819,7 +819,7 @@ describe('public dashboard reads are DB-only', () => {
       }),
     ).toBe(true);
     expect(
-      await store.claimRepositoryRefresh!({
+      await store.claimRepositoryRefresh({
         installationId: 7,
         repositoryId: 320,
         expectedRevision: row.revision,
@@ -827,7 +827,7 @@ describe('public dashboard reads are DB-only', () => {
         staleBefore: '2026-01-01T00:01:30.000Z',
       }),
     ).toBe(true);
-    const staleCompletion = await store.recordRepositoryRefresh!({
+    const staleCompletion = await store.recordRepositoryRefresh({
       installationId: 7,
       repositoryId: 320,
       expectedRevision: row.revision,
@@ -840,7 +840,7 @@ describe('public dashboard reads are DB-only', () => {
       updatedAt: second,
     });
     expect(staleCompletion).toBe(false);
-    const freshCompletion = await store.recordRepositoryRefresh!({
+    const freshCompletion = await store.recordRepositoryRefresh({
       installationId: 7,
       repositoryId: 320,
       expectedRevision: row.revision,
@@ -864,13 +864,13 @@ describe('public dashboard reads are DB-only', () => {
       occurredAt: '2026-01-01T00:00:00.000Z',
     });
     await verifyMetadata(store, 7, 321, 'private');
-    const due = await store.listDueRepositoryMetadata!({
+    const due = await store.listDueRepositoryMetadata({
       now: '2026-01-01T00:03:00.000Z',
       limit: 50,
     });
     const row = due.find((entry) => entry.repositoryId === 321);
     if (row === undefined) throw new Error('metadata row missing');
-    const downgraded = await store.invalidateRepositoryMetadata!({
+    const downgraded = await store.invalidateRepositoryMetadata({
       installationId: 7,
       repositoryId: 321,
       visibility: 'unknown',
@@ -879,7 +879,7 @@ describe('public dashboard reads are DB-only', () => {
       nextRefreshAt: '2026-01-01T00:04:00.000Z',
     });
     expect(downgraded).toBe(false);
-    const after = await store.listDueRepositoryMetadata!({
+    const after = await store.listDueRepositoryMetadata({
       now: '2026-01-01T00:04:00.000Z',
       limit: 50,
     });
@@ -889,11 +889,11 @@ describe('public dashboard reads are DB-only', () => {
   it('keeps the longer of two persisted refresh cooldowns', async () => {
     const database = new SqliteD1Database();
     const store = createD1ReviewStateStore(database);
-    await store.setRefreshCooldown!({ nextAllowedAt: '2026-01-01T00:05:00.000Z' });
-    await store.setRefreshCooldown!({ nextAllowedAt: '2026-01-01T00:01:00.000Z' });
-    expect(await store.getRefreshCooldown!()).toBe('2026-01-01T00:05:00.000Z');
-    await store.setRefreshCooldown!({ nextAllowedAt: '2026-01-01T00:10:00.000Z' });
-    expect(await store.getRefreshCooldown!()).toBe('2026-01-01T00:10:00.000Z');
+    await store.setRefreshCooldown({ nextAllowedAt: '2026-01-01T00:05:00.000Z' });
+    await store.setRefreshCooldown({ nextAllowedAt: '2026-01-01T00:01:00.000Z' });
+    expect(await store.getRefreshCooldown()).toBe('2026-01-01T00:05:00.000Z');
+    await store.setRefreshCooldown({ nextAllowedAt: '2026-01-01T00:10:00.000Z' });
+    expect(await store.getRefreshCooldown()).toBe('2026-01-01T00:10:00.000Z');
   });
 
   it('aborts and defers a repository lookup that exceeds the refresh deadline', async () => {
@@ -1016,7 +1016,7 @@ describe('public dashboard reads are DB-only', () => {
         }
       ).task.identity.kind;
     const runIdFor = async (repositoryId: number) => {
-      const rows = await store.listPublicRuns!({
+      const rows = await store.listPublicRuns({
         limit: 50,
         filter: { status: 'all', cleanup: 'all' },
         view: 'history',
@@ -1098,7 +1098,7 @@ describe('public dashboard reads are DB-only', () => {
           ...store,
           getRepositoryRefreshBacklog: async (input) => {
             vi.setSystemTime(Date.now() + 500);
-            return store.getRepositoryRefreshBacklog!(input);
+            return store.getRepositoryRefreshBacklog(input);
           },
         },
         github,
@@ -1144,7 +1144,7 @@ describe('public dashboard reads are DB-only', () => {
         stateStore: {
           ...store,
           claimRepositoryRefresh: async (input) => {
-            const claimed = await store.claimRepositoryRefresh!(input);
+            const claimed = await store.claimRepositoryRefresh(input);
             vi.setSystemTime(Date.now() + 10001);
             return claimed;
           },
@@ -1188,7 +1188,7 @@ describe('public dashboard reads are DB-only', () => {
         stateStore: {
           ...store,
           listDueRepositoryMetadata: async (input) => {
-            const rows = await store.listDueRepositoryMetadata!(input);
+            const rows = await store.listDueRepositoryMetadata(input);
             vi.setSystemTime(Date.now() + 10001);
             return rows;
           },
@@ -1520,7 +1520,7 @@ describe('public dashboard reads are DB-only', () => {
     expect(first.skipped).toBe('');
     expect(tokenExchanges).toBeGreaterThan(0);
     expect(tokenExchanges).toBeLessThan(8);
-    const cooldown = await store.getRefreshCooldown!();
+    const cooldown = await store.getRefreshCooldown();
     expect(cooldown).toBeDefined();
     expect(Date.parse(cooldown!)).toBeGreaterThan(Date.now());
 
