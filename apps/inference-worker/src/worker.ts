@@ -4,6 +4,7 @@ import { WorkerEntrypoint } from 'cloudflare:workers';
 import { Effect, Option, Schema } from 'effect';
 import {
   readBoundedRequestBody,
+  type EffortJobDetail,
   type ModelProfile,
   type ModelUsageSummary,
 } from '@compte-rendu/contracts';
@@ -19,6 +20,8 @@ import {
 import {
   admitRequest,
   authenticateGrant,
+  readEffortDetails,
+  readRouteEffortStates,
   readUsage,
   sweep,
   type AuthenticatedGrant,
@@ -38,6 +41,10 @@ import type { FrozenRoute } from './routes.ts';
 const INFERENCE_MAX_BYTES = 16 * 1024 * 1024;
 const GatewayIdentity = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const UsageInput = Schema.Struct({ jobId: Schema.NonEmptyString });
+const DetailInput = Schema.Struct({
+  jobId: Schema.NonEmptyString,
+  cursor: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(512))),
+});
 
 export interface InferenceWorkerEnv {
   readonly RELAY_CATALOG_SOURCES: string;
@@ -130,7 +137,7 @@ export class InferenceWorker extends WorkerEntrypoint<InferenceWorkerEnv> {
 
     const requestId = crypto.randomUUID();
     const admitted = await admitRequest(this.env.RELAY_DB, requestId, grant, route);
-    if (!admitted) return error(401, 'unauthorized');
+    if (!admitted.admitted) return error(401, 'unauthorized');
 
     if (profile === 'responses') {
       return Effect.runPromise(
@@ -185,6 +192,8 @@ export class InferenceWorker extends WorkerEntrypoint<InferenceWorkerEnv> {
         grant,
         route,
         body,
+        fallbackAt: admitted.fallbackAt,
+        fallbackReason: admitted.fallbackReason,
         request,
         waitUntil: (task) => this.ctx.waitUntil(task),
       }),
@@ -234,6 +243,19 @@ export class InferenceWorker extends WorkerEntrypoint<InferenceWorkerEnv> {
     const decoded = Schema.decodeUnknownOption(UsageInput, { onExcessProperty: 'error' })(input);
     if (Option.isNone(decoded)) return Promise.resolve(null);
     return readUsage(this.env.RELAY_DB, decoded.value.jobId);
+  }
+
+  effortStates(): Promise<{ readonly routes: Awaited<ReturnType<typeof readRouteEffortStates>> }> {
+    return readRouteEffortStates(this.env.RELAY_DB).then((routes) => ({ routes }));
+  }
+
+  effortDetails(input: {
+    readonly jobId: string;
+    readonly cursor?: string;
+  }): Promise<EffortJobDetail | null> {
+    const decoded = Schema.decodeUnknownOption(DetailInput, { onExcessProperty: 'error' })(input);
+    if (Option.isNone(decoded)) return Promise.resolve(null);
+    return readEffortDetails(this.env.RELAY_DB, decoded.value.jobId, decoded.value.cursor);
   }
 
   sweep(): Promise<number> {

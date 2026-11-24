@@ -1,16 +1,27 @@
 import { Effect, Option, Schema } from 'effect';
 import {
+  ChatEffortControls,
   ChatRequest,
   decodeStreamFrame,
   streamEventIsError,
+  streamFrameEffortReport,
   streamFrameIsError,
   streamFrameModel,
   streamFrameTerminal,
   streamFrameUsage,
+  type EffortAttemptDetail,
+  type EffortOutcomeKind,
   type UpstreamUsage,
 } from '@compte-rendu/contracts';
+import { readBoundedBody } from '@compte-rendu/contracts';
 import { createBoundedSseDecoder, type SseFrame } from './bounded-sse.ts';
-import { finalizeComplete, savePartial, type AuthenticatedGrant } from './ledger.ts';
+import {
+  finalizeComplete,
+  retryStillAllowed,
+  savePartial,
+  type AuthenticatedGrant,
+  type EffortFinalization,
+} from './ledger.ts';
 import type { D1DatabaseLike } from './grants.ts';
 import type { FrozenRoute } from './routes.ts';
 import { gatewayHeaders, gatewayUrl, type GatewayConfig } from './gateway';
@@ -24,6 +35,18 @@ const GATEWAY_PATH = '/chat/completions';
 const MAX_CHAT_FRAME_BYTES = 4 * 1024 * 1024;
 const MAX_HELD_FRAMES = 32;
 const MAX_HELD_BYTES = 64 * 1024;
+const MAX_ERROR_BODY_BYTES = 16 * 1024;
+const FALLBACK_REASON = 'upstream rejected reasoning_effort';
+
+// Every supported Chat thinking switch, effort, budget and alias. A fallback
+// request omits all of them, including values supplied by the client.
+const CHAT_THINKING_KEYS = [
+  'reasoning_effort',
+  'reasoning',
+  'thinking',
+  'verbosity',
+  'max_thinking_tokens',
+] as const;
 
 export interface InferenceRelayOptions {
   readonly database: D1DatabaseLike;
@@ -32,9 +55,18 @@ export interface InferenceRelayOptions {
   readonly grant: AuthenticatedGrant;
   readonly route: FrozenRoute;
   readonly body: Record<string, unknown>;
+  readonly fallbackAt?: number | null;
+  readonly fallbackReason?: string | null;
   readonly request: Request;
   readonly waitUntil: (task: Promise<unknown>) => void;
   readonly fetch?: (url: string, init: RequestInit) => Promise<Response>;
+}
+
+interface MutableAttempt {
+  attempt: 1 | 2;
+  sent: ChatEffortControls | null;
+  reported: ChatEffortControls | null;
+  result: 'complete' | 'rejected' | 'incomplete';
 }
 
 const failure = (status = 502): Response =>
@@ -62,9 +94,83 @@ const headersFor = (gateway: GatewayConfig, grant: AuthenticatedGrant, route: Fr
   session_id: grant.jobId,
 });
 
+const chatUpstreamBody = (
+  body: Record<string, unknown>,
+  route: FrozenRoute,
+  omitThinkingControls: boolean,
+): Record<string, unknown> => {
+  const outbound = { ...body };
+  if (omitThinkingControls || route.effort !== undefined) {
+    for (const key of CHAT_THINKING_KEYS) delete outbound[key];
+  }
+  if (!omitThinkingControls && route.effort !== undefined) {
+    Object.assign(outbound, route.effort.controls);
+  }
+  return {
+    ...outbound,
+    model: route.upstreamModel,
+    store: false,
+    stream: true,
+  };
+};
+
+const passthroughControls = (body: Record<string, unknown>): ChatEffortControls | null => {
+  const decoded = Schema.decodeUnknownOption(ChatEffortControls)({
+    ...(body.reasoning_effort === undefined ? {} : { reasoning_effort: body.reasoning_effort }),
+    ...(body.thinking === undefined ? {} : { thinking: body.thinking }),
+  });
+  return Option.isNone(decoded) ? null : decoded.value;
+};
+
+const isDeepSeekChat = (route: FrozenRoute): boolean =>
+  route.profile === 'chat' && /deepseek/i.test(route.upstreamModel);
+
+// Verified DeepSeek Chat deserializer envelope. The message must name exactly
+// reasoning_effort and the exact rejected value; everything else is ignored.
+const chatRejection = async (
+  response: Response,
+  route: FrozenRoute,
+  sent: ChatEffortControls | null,
+): Promise<string | null> => {
+  if (response.status !== 400 || sent?.reasoning_effort === undefined || !isDeepSeekChat(route))
+    return null;
+  const bounded = await readBoundedBody(response.body, MAX_ERROR_BODY_BYTES);
+  if (bounded.kind !== 'ok') return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(bounded.text) as unknown;
+  } catch {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== 'object' || !('error' in parsed)) return null;
+  const error = parsed.error;
+  if (error === null || typeof error !== 'object') return null;
+  const record = error as Record<string, unknown>;
+  if (record.type !== 'invalid_request_error') return null;
+  if (record.code !== 'invalid_request_error') return null;
+  if (record.param !== null) return null;
+  if (typeof record.message !== 'string') return null;
+  const match =
+    /^Failed to deserialize the JSON body into the target type: reasoning_effort: unknown variant `([^`]+)`, expected one of `/.exec(
+      record.message,
+    );
+  if (match === null || match[1] !== sent.reasoning_effort) return null;
+  return FALLBACK_REASON;
+};
+
 export const relayInference = (options: InferenceRelayOptions): Effect.Effect<Response> =>
   Effect.gen(function* () {
-    const { database, requestId, gateway, grant, route, body, request, waitUntil } = options;
+    const {
+      database,
+      requestId,
+      gateway,
+      grant,
+      route,
+      body,
+      fallbackAt = null,
+      request,
+      waitUntil,
+    } = options;
     const fetchUpstream = options.fetch ?? globalThis.fetch;
     const controller = new AbortController();
     const usage: { -readonly [K in keyof UpstreamUsage]: UpstreamUsage[K] } = {
@@ -76,6 +182,18 @@ export const relayInference = (options: InferenceRelayOptions): Effect.Effect<Re
       reasoningTokens: null,
       complete: false,
     };
+    const sharedFallback = fallbackAt !== null;
+    const attempts: MutableAttempt[] = [
+      {
+        attempt: 1,
+        sent: sharedFallback ? null : (route.effort?.controls ?? passthroughControls(body)),
+        reported: null,
+        result: 'incomplete',
+      },
+    ];
+    let retryUsed = false;
+    let fallback: EffortOutcomeKind | null = sharedFallback ? 'shared' : null;
+    let fallbackReason = sharedFallback ? (options.fallbackReason ?? FALLBACK_REASON) : null;
     let reader: ReadableStreamDefaultReader<SseFrame> | null = null;
     let downstream: ReadableStreamDefaultController<Uint8Array> | null = null;
     let finalized = false;
@@ -87,19 +205,35 @@ export const relayInference = (options: InferenceRelayOptions): Effect.Effect<Re
     let terminalBytes = 0;
     const terminal: Uint8Array[] = [];
 
+    const currentAttempt = (): MutableAttempt => attempts[attempts.length - 1]!;
+
+    const finalization = (): EffortFinalization => ({
+      routeId: route.routeId,
+      generation: route.effortGeneration ?? null,
+      fallback,
+      reason: fallbackReason,
+      attempts: attempts as readonly EffortAttemptDetail[],
+    });
+
     const cleanup = () => {
       clearTimeout(expiryTimer);
       request.signal.removeEventListener('abort', onRequestAbort);
     };
-    const finishOnce = async (complete: boolean) => {
-      if (finalized) return;
+    const finishOnce = async (
+      complete: boolean,
+    ): Promise<{ readonly completed: boolean; readonly switched: boolean }> => {
+      if (finalized) return { completed: false, switched: false };
       finalized = true;
       usage.complete = complete;
+      const effort = finalization();
       try {
-        if (complete) await finalizeComplete(database, requestId, usage);
-        else await savePartial(database, requestId, usage);
+        if (complete)
+          return await finalizeComplete(database, requestId, usage, effort, grant.tokenHash);
+        await savePartial(database, requestId, usage, effort);
+        return { completed: true, switched: false };
       } catch {
         await Effect.runPromise(Effect.logWarning('relay.accounting.failed'));
+        return { completed: false, switched: false };
       }
     };
     const cancelUpstream = async () => {
@@ -117,6 +251,11 @@ export const relayInference = (options: InferenceRelayOptions): Effect.Effect<Re
     const failStream = async () => {
       if (finalized || completed) return;
       failureStarted = true;
+      currentAttempt().result = currentAttempt().result === 'rejected' ? 'rejected' : 'incomplete';
+      if (retryUsed) {
+        fallback = 'failed';
+        fallbackReason ??= FALLBACK_REASON;
+      }
       await finishOnce(false);
       await teardown();
     };
@@ -133,23 +272,26 @@ export const relayInference = (options: InferenceRelayOptions): Effect.Effect<Re
     request.signal.addEventListener('abort', onRequestAbort, { once: true });
     if (request.signal.aborted) onRequestAbort();
 
-    const upstream = yield* Effect.tryPromise({
-      try: () =>
-        fetchUpstream(gatewayUrl(gateway, route.providerSlug, GATEWAY_PATH), {
-          method: 'POST',
-          headers: headersFor(gateway, grant, route),
-          body: JSON.stringify({ ...body, model: route.upstreamModel, store: false, stream: true }),
-          signal: controller.signal,
-          redirect: 'manual',
+    const attemptFetch = (omitThinkingControls: boolean) =>
+      Effect.tryPromise({
+        try: () =>
+          fetchUpstream(gatewayUrl(gateway, route.providerSlug, GATEWAY_PATH), {
+            method: 'POST',
+            headers: headersFor(gateway, grant, route),
+            body: JSON.stringify(chatUpstreamBody(body, route, omitThinkingControls)),
+            signal: controller.signal,
+            redirect: 'manual',
+          }),
+        catch: () => undefined,
+      }).pipe(
+        Effect.match({
+          onSuccess: (response) => response,
+          onFailure: () => null,
         }),
-      catch: () => undefined,
-    }).pipe(
-      Effect.match({
-        onSuccess: (response) => response,
-        onFailure: () => null,
-      }),
-    );
-    if (upstream === null) {
+      );
+
+    const firstUpstream = yield* attemptFetch(sharedFallback);
+    if (firstUpstream === null) {
       cleanup();
       yield* Effect.promise(() => finishOnce(false));
       return failure();
@@ -157,25 +299,79 @@ export const relayInference = (options: InferenceRelayOptions): Effect.Effect<Re
     if (failureStarted) {
       cleanup();
       yield* Effect.promise(
-        () => upstream.body?.cancel().catch(() => undefined) ?? Promise.resolve(),
+        () => firstUpstream.body?.cancel().catch(() => undefined) ?? Promise.resolve(),
       );
       return failure();
     }
-    if (upstream.type === 'opaqueredirect' || (upstream.status >= 300 && upstream.status <= 399)) {
+    if (
+      firstUpstream.type === 'opaqueredirect' ||
+      (firstUpstream.status >= 300 && firstUpstream.status <= 399)
+    ) {
       cleanup();
       yield* Effect.promise(
-        () => upstream.body?.cancel().catch(() => undefined) ?? Promise.resolve(),
+        () => firstUpstream.body?.cancel().catch(() => undefined) ?? Promise.resolve(),
       );
       yield* Effect.promise(() => finishOnce(false));
       return failure();
     }
-    if (!upstream.ok || upstream.body === null) {
+    let upstream: Response = firstUpstream;
+
+    if (!upstream.ok) {
+      const reason = sharedFallback
+        ? null
+        : yield* Effect.promise(() =>
+            chatRejection(upstream, route, attempts[0]!.sent).catch(() => null),
+          );
+      if (reason !== null) {
+        attempts[0]!.result = 'rejected';
+        fallback = 'failed';
+        fallbackReason = reason;
+        const allowed =
+          !request.signal.aborted &&
+          !failureStarted &&
+          (yield* Effect.promise(() =>
+            retryStillAllowed(database, requestId, grant, route).catch(() => false),
+          ));
+        if (!allowed) {
+          cleanup();
+          yield* Effect.promise(() => finishOnce(false));
+          return failure(upstream.status >= 400 && upstream.status <= 599 ? upstream.status : 502);
+        }
+        retryUsed = true;
+        attempts.push({ attempt: 2, sent: null, reported: null, result: 'incomplete' });
+        const secondUpstream = yield* attemptFetch(true);
+        if (secondUpstream === null) {
+          cleanup();
+          yield* Effect.promise(() => finishOnce(false));
+          return failure();
+        }
+        upstream = secondUpstream;
+        if (
+          secondUpstream.type === 'opaqueredirect' ||
+          (secondUpstream.status >= 300 && secondUpstream.status <= 399) ||
+          !secondUpstream.ok ||
+          secondUpstream.body === null
+        ) {
+          cleanup();
+          yield* Effect.promise(
+            () => upstream.body?.cancel().catch(() => undefined) ?? Promise.resolve(),
+          );
+          yield* Effect.promise(() => finishOnce(false));
+          return failure(upstream.status >= 400 && upstream.status <= 599 ? upstream.status : 502);
+        }
+      } else {
+        cleanup();
+        yield* Effect.promise(
+          () => upstream.body?.cancel().catch(() => undefined) ?? Promise.resolve(),
+        );
+        yield* Effect.promise(() => finishOnce(false));
+        return failure(upstream.status >= 400 && upstream.status <= 599 ? upstream.status : 502);
+      }
+    }
+    if (upstream.body === null) {
       cleanup();
-      yield* Effect.promise(
-        () => upstream.body?.cancel().catch(() => undefined) ?? Promise.resolve(),
-      );
       yield* Effect.promise(() => finishOnce(false));
-      return failure(upstream.status >= 400 && upstream.status <= 599 ? upstream.status : 502);
+      return failure();
     }
 
     reader = upstream.body.pipeThrough(createBoundedSseDecoder(MAX_CHAT_FRAME_BYTES)).getReader();
@@ -195,7 +391,28 @@ export const relayInference = (options: InferenceRelayOptions): Effect.Effect<Re
     };
     const completeStream = async (output: ReadableStreamDefaultController<Uint8Array>) => {
       if (failureStarted) return;
-      await finishOnce(true);
+      currentAttempt().result = 'complete';
+      fallback = retryUsed ? 'switched' : sharedFallback ? 'shared' : null;
+      const accounting = await finishOnce(true);
+      if (!accounting.completed && (route.effort !== undefined || fallbackAt !== null)) {
+        // A revoked/superseded fallback admission must not release a success
+        // terminator or claim a shared switch. Legacy no-effort requests keep
+        // their historical best-effort completion accounting.
+        completed = false;
+        await teardown();
+        return;
+      }
+      if (accounting.switched) {
+        waitUntil(
+          Effect.runPromise(
+            Effect.logInfo('relay.effort.fallback', {
+              routeId: route.routeId,
+              generation: route.effortGeneration ?? null,
+              reason: fallbackReason,
+            }),
+          ),
+        );
+      }
       completed = true;
       cleanup();
       try {
@@ -255,6 +472,8 @@ export const relayInference = (options: InferenceRelayOptions): Effect.Effect<Re
             const model = streamFrameModel(frame);
             if (model !== null) usage.model = model;
             Object.assign(usage, streamFrameUsage(frame));
+            const reported = streamFrameEffortReport(frame);
+            if (reported !== null) currentAttempt().reported = reported;
             if (streamFrameTerminal(frame)) finishMarker = true;
             if (errorEvent || streamFrameIsError(frame)) {
               await failStream();

@@ -1,4 +1,5 @@
 import { Option, Schema } from 'effect';
+import { ChatEffortControls } from './effort.ts';
 
 const optional = Schema.optionalKey(Schema.Unknown);
 const ChatFunction = Schema.StructWithRest(Schema.Struct({ name: Schema.String }), [
@@ -74,6 +75,8 @@ const StreamFrame = Schema.Struct({
   choices: Schema.optionalKey(Schema.Array(ChatChoice)),
   usage: Schema.optionalKey(Schema.Unknown),
   error: Schema.optionalKey(Schema.Unknown),
+  reasoning_effort: Schema.optionalKey(Schema.Unknown),
+  thinking: Schema.optionalKey(Schema.Struct({ type: Schema.optionalKey(Schema.Unknown) })),
   response: Schema.optionalKey(
     Schema.Struct({
       status: Schema.optionalKey(Schema.String),
@@ -137,3 +140,18 @@ export const streamFrameIsError = (frame: StreamFrame): boolean =>
   frame.type === 'error' ||
   frame.type === 'response.failed' ||
   frame.response?.status === 'failed';
+
+// Only explicit, bounded Chat control fields reported by the upstream are
+// accepted. Values that do not form one valid control are "not reported".
+const decodeChatEffortControls = Schema.decodeUnknownOption(ChatEffortControls);
+
+export const streamFrameEffortReport = (frame: StreamFrame): ChatEffortControls | null => {
+  // Ordinary token frames carry neither field. Keep this path allocation-free
+  // and never run schema validation for them.
+  if (frame.reasoning_effort === undefined && frame.thinking === undefined) return null;
+  const decoded = decodeChatEffortControls({
+    ...(frame.reasoning_effort === undefined ? {} : { reasoning_effort: frame.reasoning_effort }),
+    ...(frame.thinking === undefined ? {} : { thinking: frame.thinking }),
+  });
+  return Option.isNone(decoded) ? null : decoded.value;
+};

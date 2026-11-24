@@ -63,6 +63,76 @@ when reconciliation succeeds. CLI exit or client disconnection alone never prove
 that a server-managed session has stopped; the exported terminal state is required.
 Grant revocation and confirmed Sandbox destruction still run before final success.
 
+### Reasoning effort injection and route fallback
+
+Chat routes may declare a narrow, protocol-validated effort menu in the relay
+catalog. For the initial target models:
+
+```json
+{
+  "models": {
+    "review-provider/deepseek-v4.1-flash": {
+      "profile": "chat",
+      "efforts": [{ "name": "high", "controls": { "reasoning_effort": "high" } }]
+    },
+    "review-provider/mimo-v2.6-flash": {
+      "profile": "chat",
+      "efforts": [{ "name": "off", "controls": { "thinking": { "type": "disabled" } } }]
+    }
+  }
+}
+```
+
+Only `reasoning_effort` (`minimal`, `low`, `medium`, `high`, `max`) or
+`thinking.type: "disabled"` is accepted, exactly one per effort. The browser
+submits route IDs and effort names only. Core resolves the trusted controls and
+freezes `{routeId, generation, name, controls}` at admission. The v2 grant sends
+that frozen list to the relay; v1 rejects any explicit effort instead of silently
+dropping it. The relay validates snapshot entries by Chat protocol and granted
+route only, never against the mutable current menu, so a later settings edit does
+not invalidate an admitted job.
+
+For a request with an explicit effort, the relay removes every competing
+top-level Chat thinking control (including client `reasoning_effort`) and adds
+only the frozen controls. With no selected effort, client controls pass through
+unchanged.
+
+A fallback is enabled only for the verified DeepSeek Chat deserializer rejection
+([OpenCode Go field report](https://github.com/anomalyco/models.dev/issues/3962),
+[sanitized 400 envelope](https://github.com/bytedance/deer-flow/issues/4514)).
+It requires status 400, a DeepSeek Chat route, `error.type` and `error.code` both
+`invalid_request_error`, `error.param: null`, and a message whose
+`reasoning_effort: unknown variant \`<value>\``names exactly the value injected
+for this request. The relay makes one second attempt with all supported Chat
+thinking switches, efforts, budgets and aliases removed, after rechecking the
+same pending request, grant revocation/expiry and cancellation. Generic 400s,
+other fields, rate limits, auth errors, transport errors, timeouts and started
+streams never retry. MiMo`thinking` injection is supported, but it has no
+automatic recovery until a verified rejection sample exists.
+
+Fallback state is one row per route in relay D1. A grant generation at or below
+the tripped generation uses the upstream default; a newer generation (an explicit
+Core reset) tries the configured effort again. The switch is committed atomically
+with that request's completion, only when completion still owns the pending row
+and the grant is valid. The relay logs one structured event only when the
+watermark actually advances. It does not write state per frame or per normal
+request, and admission reads the state in the same statement that records the
+request.
+
+`effortStates()` returns the current route markers for settings.
+`effortDetails({jobId, cursor})` returns at most 20 authorized per-request
+attempt observations with keyset pagination. The terminal `ModelUsageSummary`
+carries a small per-route outcome summary aggregated across the whole job; it
+never embeds per-request attempts.
+
+For performance acceptance, compare the same streaming upstream, route count and
+concurrency across three groups: no selected effort, explicit effort, and shared
+fallback. Measure D1 round trips, rows read and rows written per request, first
+byte p50/p95, upstream-terminator-to-client-terminator p95, and the extra upstream
+round trip plus D1 cost of the first fallback. Normal admission and completion
+must not add D1 round trips; fallback state is read by the same admission
+statement and written only by an actual switch.
+
 ### Reading AI Gateway analytics
 
 For a catalog using Gateway discovery, the application’s minute cron sends a

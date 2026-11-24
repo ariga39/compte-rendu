@@ -249,6 +249,7 @@ const runOutcomeSelect = `
 
 interface PublicRunDbRow {
   model_usage?: string | null;
+  review_configuration?: string | null;
   review_decision: ReviewDecision | null;
   run_id: string;
   status: ReviewRunStatus;
@@ -286,6 +287,7 @@ interface PublicRunDbRow {
 
 const mapPublicRun = (row: PublicRunDbRow): PublicRunRow => ({
   modelUsage: row.model_usage,
+  reviewConfiguration: row.review_configuration ?? null,
   decision: row.review_decision,
   runId: row.run_id,
   status: row.status,
@@ -484,6 +486,7 @@ const queueBlockReasonColumn = (
 const publicRunColumns = (expiredBefore: string) => `
   r.run_id, r.status, r.installation_id, r.repository_id, r.pull_request_number,
   r.base_sha, r.head_sha, r.base_ref, r.head_ref, r.review_decision,
+  r.review_configuration,
   r.created_at, r.claimed_at, r.terminal_at, r.result_received_at, r.publication_started_at, r.runner_job_id, r.failure_phase, r.failure_reason, r.failure_http_status,
   r.runner_cleanup_status, ${queueBlockReasonColumn(expiredBefore)},
   r.progress_stage, r.progress_received_at, r.progress_milestones,
@@ -807,7 +810,11 @@ const createStore = (
              status, created_at, updated_at, comment_id, check_setup_status,
              repository_visibility_snapshot, base_ref, head_ref, review_configuration)
            SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, 'pending', ?, ?, ?,
-             (SELECT json_object('revision', revision, 'selection', json(COALESCE(selection, ?)))
+             (SELECT json_patch(
+                json_object('revision', revision, 'selection', json(COALESCE(selection, ?))),
+                CASE WHEN COALESCE(json_array_length(effort_snapshot), 0) > 0
+                  THEN json_object('efforts', json(effort_snapshot))
+                  ELSE json_object() END)
               FROM review_configuration WHERE id = 1 AND (selection IS NOT NULL OR ? IS NOT NULL))
            WHERE EXISTS (
              SELECT 1 FROM deliveries

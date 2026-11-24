@@ -1,5 +1,8 @@
 import { DateTime, Effect, Option, Schema } from 'effect';
 import {
+  type EffortJobDetail,
+  type EffortRouteState,
+  type FrozenRouteEffort,
   type ModelRouteDescriptor,
   type ModelUsageSummary,
   RUNNER_LLM_CONTROL_TIMEOUT_MS,
@@ -22,7 +25,7 @@ export interface RelayControl {
   usage(input: { jobId: string }): Promise<ModelUsageSummary | null>;
   issue(input: {
     jobId: string;
-    snapshot: { routes: readonly string[] };
+    snapshot: { routes: readonly string[]; efforts?: readonly FrozenRouteEffort[] };
     latestIssueDeadline: number;
   }): Promise<
     | { kind: 'issued'; token: string; expiresAt: string }
@@ -30,7 +33,7 @@ export interface RelayControl {
   >;
   issueV2?(input: {
     jobId: string;
-    snapshot: { routes: readonly string[] };
+    snapshot: { routes: readonly string[]; efforts?: readonly FrozenRouteEffort[] };
     latestIssueDeadline: number;
   }): Promise<
     | {
@@ -41,6 +44,8 @@ export interface RelayControl {
       }
     | { kind: 'duplicate' | 'deadline-exceeded' | 'invalid' }
   >;
+  effortStates?(): Promise<{ routes: readonly EffortRouteState[] }>;
+  effortDetails?(input: { jobId: string; cursor?: string }): Promise<EffortJobDetail | null>;
 }
 
 export async function handleRunnerLlmControl(
@@ -89,15 +94,27 @@ export async function handleRunnerLlmControl(
       .bind(runId, jobId, attempt)
       .first<{ review_configuration: string | null }>();
     if (!row?.review_configuration) return new Response(null, { status: 409 });
-    const { selection } = Schema.decodeUnknownSync(Schema.fromJsonString(ReviewConfiguration))(
+    const configuration = Schema.decodeUnknownSync(Schema.fromJsonString(ReviewConfiguration))(
       row.review_configuration,
     );
+    const selection = configuration.selection;
     if (!selection) return new Response(null, { status: 409 });
     const allowed = new Set(selection.reviewers);
     if (selection.reviewers.length > 1) allowed.add(selection.synthesis);
     if (routes.length !== allowed.size || routes.some((route) => !allowed.has(route)))
       return new Response(null, { status: 409 });
-    const snapshot = { routes: [...allowed] };
+    // The admission snapshot is authoritative. Legacy runs have no efforts and
+    // v1 is a Chat-only legacy contract, so only v2 carries them onward.
+    const efforts = (configuration.efforts ?? []).filter((effort) => allowed.has(effort.routeId));
+    if (
+      issuePath === 2 &&
+      (configuration.efforts ?? []).some((effort) => !allowed.has(effort.routeId))
+    )
+      return new Response(null, { status: 409 });
+    const snapshot =
+      issuePath === 2 && efforts.length > 0
+        ? { routes: [...allowed], efforts }
+        : { routes: [...allowed] };
     const latestIssueDeadline = now + RUNNER_LLM_CONTROL_TIMEOUT_MS;
     if (issuePath === 2) {
       const reply = await env.INFERENCE_RELAY.issueV2!({

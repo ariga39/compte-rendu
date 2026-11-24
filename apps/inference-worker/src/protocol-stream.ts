@@ -120,7 +120,7 @@ export const relayProtocolStream = (options: ProtocolStreamOptions): Effect.Effe
       finalizeStarted = true;
       if (!complete) return persistPartial();
       try {
-        if (!(await finalizeComplete(database, requestId, usage))) return false;
+        if (!(await finalizeComplete(database, requestId, usage)).completed) return false;
         usage.complete = true;
         return true;
       } catch {

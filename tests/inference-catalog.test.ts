@@ -63,12 +63,84 @@ it('replaces a source snapshot while retaining historical mappings for queued gr
   }
 });
 
+it('publishes only trusted Chat effort names and controls with selectable routes', async () => {
+  const db = database();
+  const source = {
+    url: 'https://models.example/v1/models',
+    prefix: 'review/',
+    providerSlug: 'custom-review',
+    credentialAlias: 'default',
+    models: {
+      'review/deepseek-v4.1-flash': {
+        profile: 'chat' as const,
+        efforts: [{ name: 'high', controls: { reasoning_effort: 'high' as const } }],
+      },
+      'review/mimo-v2.6-flash': {
+        profile: 'chat' as const,
+        efforts: [{ name: 'off', controls: { thinking: { type: 'disabled' as const } } }],
+      },
+    },
+  };
+  try {
+    vi.stubGlobal('fetch', async () =>
+      Response.json({
+        data: [{ id: 'deepseek-v4.1-flash' }, { id: 'mimo-v2.6-flash' }, { id: 'plain' }],
+      }),
+    );
+    await createRelayCatalog(db, [source]).refresh(60_000);
+    expect(await createRelayCatalog(db, [source]).get()).toMatchObject({
+      routes: ['review/deepseek-v4.1-flash', 'review/mimo-v2.6-flash'],
+      efforts: {
+        'review/deepseek-v4.1-flash': [{ name: 'high', controls: { reasoning_effort: 'high' } }],
+        'review/mimo-v2.6-flash': [{ name: 'off', controls: { thinking: { type: 'disabled' } } }],
+      },
+    });
+  } finally {
+    db.close();
+  }
+});
+
+it('rejects effort menus with conflicting or non-Chat controls in configuration', () => {
+  const decode = Schema.decodeUnknownOption(RelayCatalogSources, {
+    onExcessProperty: 'error',
+  });
+  const source = (efforts: unknown) => ({
+    url: 'https://models.example/v1/models',
+    prefix: 'review/',
+    providerSlug: 'custom-review',
+    credentialAlias: 'default',
+    models: { 'review/model': { profile: 'chat', efforts } },
+  });
+  expect(
+    decode([
+      source([
+        { name: 'mixed', controls: { reasoning_effort: 'high', thinking: { type: 'disabled' } } },
+      ]),
+    ]),
+  ).toMatchObject({ _tag: 'None' });
+  expect(decode([source([{ name: 'empty', controls: {} }])])).toMatchObject({ _tag: 'None' });
+  expect(
+    decode([
+      {
+        ...source([]),
+        models: {
+          'review/model': {
+            profile: 'responses',
+            efforts: [{ name: 'high', controls: { reasoning_effort: 'high' } }],
+          },
+        },
+      },
+    ]),
+  ).toMatchObject({ _tag: 'None' });
+});
+
 it('requires the operator bearer to read the relay catalog from the application', async () => {
   const { createApplication } = await import('../apps/dashboard/src/lib/server/application');
   const db = new SqliteD1Database();
   try {
     const catalog = {
       routes: ['provider/model'],
+      efforts: {},
       lastAttemptAt: null,
       lastSuccessAt: null,
       rejected: 0,

@@ -18,6 +18,7 @@ import type {
   RevokeGrantResult,
 } from '../../apps/inference-worker/src/grants';
 import type { ModelUsageSummary } from '../../packages/contracts/src';
+import type { EffortJobDetail, EffortRouteState } from '../../packages/contracts/src/effort';
 
 const GRANT_TTL_MS = 4 * REVIEW_ATTEMPT_BUDGET_MS;
 
@@ -29,6 +30,8 @@ interface InferenceBinding {
   issueV2(input: IssueGrantInput): Promise<IssueGrantV2Result>;
   revoke(input: RevokeGrantInput): Promise<RevokeGrantResult>;
   usage(input: { jobId: string }): Promise<ModelUsageSummary | null>;
+  effortStates(): Promise<{ routes: readonly EffortRouteState[] }>;
+  effortDetails(input: { jobId: string; cursor?: string }): Promise<EffortJobDetail | null>;
   sweep(): Promise<number>;
   scheduled(): Promise<void>;
 }
@@ -146,6 +149,104 @@ describe('Inference Worker runtime boundaries', () => {
         latestIssueDeadline: now + 60_000,
       }),
     ).resolves.toMatchObject({ kind: 'issued' });
+  });
+
+  it('freezes effort controls at admission instead of re-reading the mutable menu', async () => {
+    const routeId = 'frozen/effort';
+    await runtime.RELAY_DB.prepare(
+      `INSERT OR REPLACE INTO catalog_routes
+        (route_id, upstream_model, provider_slug, credential_alias, profile, efforts_json)
+       VALUES (?, 'deepseek-v4-flash', 'review-provider', 'review-alias', 'chat', ?)`,
+    )
+      .bind(routeId, JSON.stringify([{ name: 'high', controls: { reasoning_effort: 'high' } }]))
+      .run();
+    try {
+      await control('success');
+      const issued = await runtime.INFERENCE.issueV2({
+        jobId: 'runtime-frozen-effort',
+        snapshot: {
+          routes: [routeId],
+          efforts: [
+            {
+              routeId,
+              name: 'high',
+              generation: 0,
+              controls: { reasoning_effort: 'high' },
+            },
+          ],
+        },
+        latestIssueDeadline: (await d1Now()) + 60_000,
+      });
+      if (issued.kind !== 'issued') throw new Error('grant unavailable');
+      // A later settings edit must not invalidate the already-frozen admission.
+      await runtime.RELAY_DB.prepare(
+        "UPDATE catalog_routes SET efforts_json = '[]' WHERE route_id = ?",
+      )
+        .bind(routeId)
+        .run();
+      const response = await request(issued.token, { model: routeId, messages: [] });
+      expect(response.status).toBe(200);
+      await response.text();
+      expect(JSON.parse((await upstreamState()).requests[0]!.body).reasoning_effort).toBe('high');
+      await runtime.INFERENCE.revoke({ jobId: 'runtime-frozen-effort' });
+    } finally {
+      await runtime.RELAY_DB.prepare('DELETE FROM catalog_routes WHERE route_id = ?')
+        .bind(routeId)
+        .run();
+    }
+  });
+
+  it('rejects explicit efforts on the v1 grant and invalid effort snapshots on v2', async () => {
+    const now = await d1Now();
+    await expect(
+      runtime.INFERENCE.issue({
+        jobId: 'runtime-v1-effort',
+        snapshot: {
+          routes: ['deepseek-review'],
+          efforts: [
+            {
+              routeId: 'deepseek-review',
+              name: 'high',
+              generation: 0,
+              controls: { reasoning_effort: 'high' },
+            },
+          ],
+        },
+        latestIssueDeadline: now + 60_000,
+      }),
+    ).resolves.toEqual({ kind: 'invalid' });
+    for (const efforts of [
+      [
+        {
+          routeId: 'deepseek-review',
+          name: 'high',
+          generation: 0,
+          controls: { reasoning_effort: 'high' as const },
+        },
+        {
+          routeId: 'deepseek-review',
+          name: 'max',
+          generation: 0,
+          controls: { reasoning_effort: 'max' as const },
+        },
+      ],
+      [
+        {
+          routeId: 'step-review',
+          name: 'high',
+          generation: 0,
+          controls: { reasoning_effort: 'high' as const },
+        },
+      ],
+    ]) {
+      await expect(
+        runtime.INFERENCE.issueV2({
+          jobId: `runtime-invalid-effort-${efforts.length}-${efforts[0]!.routeId}`,
+          snapshot: { routes: ['deepseek-review'], efforts },
+          latestIssueDeadline: now + 60_000,
+        }),
+      ).resolves.toEqual({ kind: 'invalid' });
+    }
   });
 
   it('issues one frozen grant for a selection above the D1 parameter limit', async () => {
@@ -389,6 +490,562 @@ describe('Inference Worker public streaming', () => {
         .run();
       await runtime.INFERENCE.revoke({ jobId: 'runtime-frozen' });
     }
+  });
+
+  it('injects the route effort over a conflicting client reasoning setting', async () => {
+    await control('success');
+    await runtime.RELAY_DB.prepare('UPDATE catalog_routes SET efforts_json = ? WHERE route_id = ?')
+      .bind(
+        JSON.stringify([{ name: 'high', controls: { reasoning_effort: 'high' } }]),
+        'deepseek-review',
+      )
+      .run();
+    const issued = await runtime.INFERENCE.issueV2({
+      jobId: 'runtime-effort-injection',
+      snapshot: {
+        routes: ['deepseek-review'],
+        efforts: [
+          {
+            routeId: 'deepseek-review',
+            name: 'high',
+            generation: 0,
+            controls: { reasoning_effort: 'high' },
+          },
+        ],
+      },
+      latestIssueDeadline: (await d1Now()) + 60_000,
+    });
+    expect(issued.kind).toBe('issued');
+    if (issued.kind !== 'issued') throw new Error('expected an issued grant');
+
+    const response = await request(issued.token, {
+      model: 'deepseek-review',
+      messages: [],
+      reasoning_effort: 'low',
+    });
+    expect(response.status).toBe(200);
+    await response.text();
+
+    const body = JSON.parse((await upstreamState()).requests[0]!.body) as Record<string, unknown>;
+    expect(body.reasoning_effort).toBe('high');
+    await runtime.INFERENCE.revoke({ jobId: 'runtime-effort-injection' });
+  });
+
+  it('injects the MiMo off control when the client sends no thinking fields', async () => {
+    await control('success');
+    await runtime.RELAY_DB.prepare('UPDATE catalog_routes SET efforts_json = ? WHERE route_id = ?')
+      .bind(
+        JSON.stringify([{ name: 'off', controls: { thinking: { type: 'disabled' } } }]),
+        'step-review',
+      )
+      .run();
+    try {
+      const issued = await runtime.INFERENCE.issueV2({
+        jobId: 'runtime-mimo-off',
+        snapshot: {
+          routes: ['step-review'],
+          efforts: [
+            {
+              routeId: 'step-review',
+              name: 'off',
+              generation: 0,
+              controls: { thinking: { type: 'disabled' } },
+            },
+          ],
+        },
+        latestIssueDeadline: (await d1Now()) + 60_000,
+      });
+      expect(issued.kind).toBe('issued');
+      if (issued.kind !== 'issued') throw new Error('expected an issued grant');
+      const response = await request(issued.token, {
+        model: 'step-review',
+        messages: [],
+        reasoning_effort: 'low',
+      });
+      expect(response.status).toBe(200);
+      await response.text();
+      const body = JSON.parse((await upstreamState()).requests[0]!.body) as Record<string, unknown>;
+      expect(body.thinking).toEqual({ type: 'disabled' });
+      expect(body.reasoning_effort).toBeUndefined();
+      await runtime.INFERENCE.revoke({ jobId: 'runtime-mimo-off' });
+    } finally {
+      await runtime.RELAY_DB.prepare(
+        "UPDATE catalog_routes SET efforts_json = '[]' WHERE route_id IN ('deepseek-review', 'step-review')",
+      ).run();
+    }
+  });
+
+  it('falls back once on the verified DeepSeek rejection, then reuses the default', async () => {
+    const routeId = 'fallback/deepseek';
+    await runtime.RELAY_DB.prepare(
+      `INSERT OR REPLACE INTO catalog_routes
+        (route_id, upstream_model, provider_slug, credential_alias, profile, efforts_json)
+       VALUES (?, 'deepseek-v4-flash', 'review-provider', 'review-alias', 'chat', ?)`,
+    )
+      .bind(
+        routeId,
+        JSON.stringify([{ name: 'minimal', controls: { reasoning_effort: 'minimal' } }]),
+      )
+      .run();
+    await runtime.RELAY_DB.prepare('DELETE FROM route_effort_state WHERE route_id = ?')
+      .bind(routeId)
+      .run();
+    await control('deepseek-reject-minimal');
+    try {
+      const issueEffort = async (jobId: string, generation: number, name: string) => {
+        const controls =
+          name === 'minimal'
+            ? { reasoning_effort: 'minimal' as const }
+            : { reasoning_effort: 'high' as const };
+        const issued = await runtime.INFERENCE.issueV2({
+          jobId,
+          snapshot: {
+            routes: [routeId],
+            efforts: [{ routeId, name, generation, controls }],
+          },
+          latestIssueDeadline: (await d1Now()) + 60_000,
+        });
+        if (issued.kind !== 'issued') throw new Error(`grant unavailable: ${issued.kind}`);
+        return issued.token;
+      };
+
+      const messages = [
+        { role: 'assistant', content: 'Checking', reasoning_content: 'private reasoning' },
+        { role: 'tool', tool_call_id: 'call-1', content: 'tool result' },
+      ];
+      const tools = [{ type: 'function', function: { name: 'inspect', parameters: {} } }];
+      const first = await issueEffort('runtime-fallback-first', 0, 'minimal');
+      const firstResponse = await request(first, {
+        model: routeId,
+        messages,
+        tools,
+        reasoning_effort: 'high',
+      });
+      expect(firstResponse.status).toBe(200);
+      expect(await firstResponse.text()).toContain('[DONE]');
+      const afterFirst = await upstreamState();
+      expect(afterFirst.requests).toHaveLength(2);
+      expect(JSON.parse(afterFirst.requests[0]!.body).reasoning_effort).toBe('minimal');
+      const retryBody = JSON.parse(afterFirst.requests[1]!.body) as Record<string, unknown>;
+      expect(retryBody.reasoning_effort).toBeUndefined();
+      expect(retryBody.thinking).toBeUndefined();
+      expect(retryBody.messages).toEqual(messages);
+      expect(retryBody.tools).toEqual(tools);
+
+      await expect(
+        runtime.INFERENCE.usage({ jobId: 'runtime-fallback-first' }),
+      ).resolves.toMatchObject({
+        efforts: [
+          {
+            route: routeId,
+            selected: 'minimal',
+            generation: 0,
+            outcomes: [
+              {
+                kind: 'switched',
+                reason: 'upstream rejected reasoning_effort',
+                requests: 1,
+              },
+            ],
+          },
+        ],
+      });
+      const details = await runtime.INFERENCE.effortDetails({
+        jobId: 'runtime-fallback-first',
+      });
+      expect(details?.requests[0]?.attempts).toEqual([
+        {
+          attempt: 1,
+          sent: { reasoning_effort: 'minimal' },
+          reported: null,
+          result: 'rejected',
+        },
+        { attempt: 2, sent: null, reported: null, result: 'complete' },
+      ]);
+
+      const sharedCount = (await upstreamState()).requests.length;
+      const second = await issueEffort('runtime-fallback-shared', 0, 'high');
+      const sharedResponse = await request(second, {
+        model: routeId,
+        messages: [],
+        reasoning_effort: 'high',
+      });
+      expect(sharedResponse.status).toBe(200);
+      await sharedResponse.text();
+      const sharedRequests = (await upstreamState()).requests.slice(sharedCount);
+      expect(sharedRequests).toHaveLength(1);
+      expect(
+        (JSON.parse(sharedRequests[0]!.body) as Record<string, unknown>).reasoning_effort,
+      ).toBeUndefined();
+      await expect(
+        runtime.INFERENCE.usage({ jobId: 'runtime-fallback-shared' }),
+      ).resolves.toMatchObject({
+        efforts: [
+          { route: routeId, selected: 'high', generation: 0, outcomes: [{ kind: 'shared' }] },
+        ],
+      });
+      const states = await runtime.INFERENCE.effortStates();
+      expect(
+        (states.routes as readonly Record<string, unknown>[]).find(
+          (entry) => entry.routeId === routeId,
+        ),
+      ).toMatchObject({
+        routeId,
+        generation: 0,
+        reason: 'upstream rejected reasoning_effort',
+      });
+
+      await control('success');
+      const resetCount = (await upstreamState()).requests.length;
+      const reset = await issueEffort('runtime-fallback-reset', 1, 'high');
+      const resetResponse = await request(reset, { model: routeId, messages: [] });
+      expect(resetResponse.status).toBe(200);
+      await resetResponse.text();
+      const resetRequests = (await upstreamState()).requests.slice(resetCount);
+      expect(JSON.parse(resetRequests[0]!.body).reasoning_effort).toBe('high');
+
+      await runtime.INFERENCE.revoke({ jobId: 'runtime-fallback-first' });
+      await runtime.INFERENCE.revoke({ jobId: 'runtime-fallback-shared' });
+      await runtime.INFERENCE.revoke({ jobId: 'runtime-fallback-reset' });
+    } finally {
+      await runtime.RELAY_DB.prepare('DELETE FROM route_effort_state WHERE route_id = ?')
+        .bind(routeId)
+        .run();
+      await runtime.RELAY_DB.prepare('DELETE FROM catalog_routes WHERE route_id = ?')
+        .bind(routeId)
+        .run();
+    }
+  });
+
+  it('does not retry a generic 400 or a non-DeepSeek route', async () => {
+    const genericRoute = 'fallback/generic';
+    const otherRoute = 'fallback/other';
+    await runtime.RELAY_DB.prepare(
+      `INSERT OR REPLACE INTO catalog_routes
+        (route_id, upstream_model, provider_slug, credential_alias, profile, efforts_json)
+       VALUES (?, 'deepseek-v4-flash', 'review-provider', 'review-alias', 'chat', ?)`,
+    )
+      .bind(
+        genericRoute,
+        JSON.stringify([{ name: 'minimal', controls: { reasoning_effort: 'minimal' } }]),
+      )
+      .run();
+    await runtime.RELAY_DB.prepare(
+      `INSERT OR REPLACE INTO catalog_routes
+        (route_id, upstream_model, provider_slug, credential_alias, profile, efforts_json)
+       VALUES (?, 'mimo-v2.6-flash', 'review-provider', 'review-alias', 'chat', ?)`,
+    )
+      .bind(
+        otherRoute,
+        JSON.stringify([{ name: 'off', controls: { thinking: { type: 'disabled' } } }]),
+      )
+      .run();
+    await runtime.RELAY_DB.prepare('DELETE FROM route_effort_state WHERE route_id IN (?, ?)')
+      .bind(genericRoute, otherRoute)
+      .run();
+    try {
+      await control('deepseek-reject-generic');
+      const generic = await runtime.INFERENCE.issueV2({
+        jobId: 'runtime-fallback-generic',
+        snapshot: {
+          routes: [genericRoute],
+          efforts: [
+            {
+              routeId: genericRoute,
+              name: 'minimal',
+              generation: 0,
+              controls: { reasoning_effort: 'minimal' },
+            },
+          ],
+        },
+        latestIssueDeadline: (await d1Now()) + 60_000,
+      });
+      if (generic.kind !== 'issued') throw new Error('grant unavailable');
+      const before = (await upstreamState()).requests.length;
+      const response = await request(generic.token, { model: genericRoute, messages: [] });
+      expect(response.status).toBe(400);
+      expect((await upstreamState()).requests).toHaveLength(before + 1);
+
+      await control('other-model-reject');
+      const other = await runtime.INFERENCE.issueV2({
+        jobId: 'runtime-fallback-other',
+        snapshot: {
+          routes: [otherRoute],
+          efforts: [
+            {
+              routeId: otherRoute,
+              name: 'off',
+              generation: 0,
+              controls: { thinking: { type: 'disabled' } },
+            },
+          ],
+        },
+        latestIssueDeadline: (await d1Now()) + 60_000,
+      });
+      if (other.kind !== 'issued') throw new Error('grant unavailable');
+      const otherBefore = (await upstreamState()).requests.length;
+      const otherResponse = await request(other.token, { model: otherRoute, messages: [] });
+      expect(otherResponse.status).toBe(400);
+      expect((await upstreamState()).requests).toHaveLength(otherBefore + 1);
+      await runtime.INFERENCE.revoke({ jobId: 'runtime-fallback-generic' });
+      await runtime.INFERENCE.revoke({ jobId: 'runtime-fallback-other' });
+    } finally {
+      await runtime.RELAY_DB.prepare('DELETE FROM route_effort_state WHERE route_id IN (?, ?)')
+        .bind(genericRoute, otherRoute)
+        .run();
+      await runtime.RELAY_DB.prepare('DELETE FROM catalog_routes WHERE route_id IN (?, ?)')
+        .bind(genericRoute, otherRoute)
+        .run();
+    }
+  });
+
+  it('sends at most one retry when revoke lands between attempts', async () => {
+    const routeId = 'fallback/revoked';
+    await runtime.RELAY_DB.prepare(
+      `INSERT OR REPLACE INTO catalog_routes
+        (route_id, upstream_model, provider_slug, credential_alias, profile, efforts_json)
+       VALUES (?, 'deepseek-v4-flash', 'review-provider', 'review-alias', 'chat', ?)`,
+    )
+      .bind(
+        routeId,
+        JSON.stringify([{ name: 'minimal', controls: { reasoning_effort: 'minimal' } }]),
+      )
+      .run();
+    await runtime.RELAY_DB.prepare('DELETE FROM route_effort_state WHERE route_id = ?')
+      .bind(routeId)
+      .run();
+    await control('deepseek-reject-minimal-delayed');
+    try {
+      const issued = await runtime.INFERENCE.issueV2({
+        jobId: 'runtime-fallback-revoked',
+        snapshot: {
+          routes: [routeId],
+          efforts: [
+            {
+              routeId,
+              name: 'minimal',
+              generation: 0,
+              controls: { reasoning_effort: 'minimal' },
+            },
+          ],
+        },
+        latestIssueDeadline: (await d1Now()) + 60_000,
+      });
+      if (issued.kind !== 'issued') throw new Error('grant unavailable');
+      const before = (await upstreamState()).requests.length;
+      const pending = request(issued.token, { model: routeId, messages: [] });
+      await waitFor(async () => (await upstreamState()).requests.length === before + 1);
+      await runtime.INFERENCE.revoke({ jobId: 'runtime-fallback-revoked' });
+      await release();
+      const response = await pending;
+      expect(response.status).toBe(400);
+      expect((await upstreamState()).requests).toHaveLength(before + 1);
+      await expect(
+        runtime.INFERENCE.usage({ jobId: 'runtime-fallback-revoked' }),
+      ).resolves.toMatchObject({ models: [{ requests: 1, incompleteRequests: 1 }] });
+    } finally {
+      await runtime.RELAY_DB.prepare('DELETE FROM route_effort_state WHERE route_id = ?')
+        .bind(routeId)
+        .run();
+      await runtime.RELAY_DB.prepare('DELETE FROM catalog_routes WHERE route_id = ?')
+        .bind(routeId)
+        .run();
+    }
+  });
+
+  it('pages authorized attempt details and aggregates the full job summary', async () => {
+    const routeId = 'fallback/paged';
+    await runtime.RELAY_DB.prepare(
+      `INSERT OR REPLACE INTO catalog_routes
+        (route_id, upstream_model, provider_slug, credential_alias, profile, efforts_json)
+       VALUES (?, 'deepseek-v4-flash', 'review-provider', 'review-alias', 'chat', ?)`,
+    )
+      .bind(routeId, JSON.stringify([{ name: 'high', controls: { reasoning_effort: 'high' } }]))
+      .run();
+    await runtime.RELAY_DB.prepare('DELETE FROM route_effort_state WHERE route_id = ?')
+      .bind(routeId)
+      .run();
+    await control('success');
+    try {
+      const issued = await runtime.INFERENCE.issueV2({
+        jobId: 'runtime-effort-paged',
+        snapshot: {
+          routes: [routeId],
+          efforts: [
+            {
+              routeId,
+              name: 'high',
+              generation: 0,
+              controls: { reasoning_effort: 'high' },
+            },
+          ],
+        },
+        latestIssueDeadline: (await d1Now()) + 60_000,
+      });
+      if (issued.kind !== 'issued') throw new Error('grant unavailable');
+      for (let index = 0; index < 21; index += 1) {
+        const response = await request(issued.token, { model: routeId, messages: [] });
+        expect(response.status).toBe(200);
+        await response.text();
+      }
+      const first = await runtime.INFERENCE.effortDetails({ jobId: 'runtime-effort-paged' });
+      expect(first?.requests).toHaveLength(20);
+      expect(first?.nextCursor).toEqual(expect.any(String));
+      const second = await runtime.INFERENCE.effortDetails({
+        jobId: 'runtime-effort-paged',
+        cursor: first!.nextCursor!,
+      });
+      expect(second?.requests).toHaveLength(1);
+      expect(second?.nextCursor).toBeNull();
+      await expect(
+        runtime.INFERENCE.usage({ jobId: 'runtime-effort-paged' }),
+      ).resolves.toMatchObject({
+        efforts: [
+          { route: routeId, selected: 'high', generation: 0, outcomes: [{ requests: 21 }] },
+        ],
+      });
+      await runtime.INFERENCE.revoke({ jobId: 'runtime-effort-paged' });
+    } finally {
+      await runtime.RELAY_DB.prepare('DELETE FROM route_effort_state WHERE route_id = ?')
+        .bind(routeId)
+        .run();
+      await runtime.RELAY_DB.prepare('DELETE FROM catalog_routes WHERE route_id = ?')
+        .bind(routeId)
+        .run();
+    }
+  });
+
+  it('records a supported client control as sent when the route has no selected effort', async () => {
+    await control('success');
+    const issued = await runtime.INFERENCE.issueV2({
+      jobId: 'runtime-passthrough',
+      snapshot: { routes: ['deepseek-review'] },
+      latestIssueDeadline: (await d1Now()) + 60_000,
+    });
+    if (issued.kind !== 'issued') throw new Error('grant unavailable');
+    const response = await request(issued.token, {
+      model: 'deepseek-review',
+      messages: [],
+      reasoning_effort: 'low',
+    });
+    expect(response.status).toBe(200);
+    await response.text();
+    const details = await runtime.INFERENCE.effortDetails({ jobId: 'runtime-passthrough' });
+    expect(details?.requests[0]?.selected).toBeNull();
+    expect(details?.requests[0]?.attempts).toEqual([
+      {
+        attempt: 1,
+        sent: { reasoning_effort: 'low' },
+        reported: null,
+        result: 'complete',
+      },
+    ]);
+    await runtime.INFERENCE.revoke({ jobId: 'runtime-passthrough' });
+  });
+
+  it('keeps an older grant generation in fallback after a newer generation trips', async () => {
+    const routeId = 'fallback/generation';
+    await runtime.RELAY_DB.prepare(
+      `INSERT OR REPLACE INTO catalog_routes
+        (route_id, upstream_model, provider_slug, credential_alias, profile, efforts_json)
+       VALUES (?, 'deepseek-v4-flash', 'review-provider', 'review-alias', 'chat', ?)`,
+    )
+      .bind(routeId, '[]')
+      .run();
+    await runtime.RELAY_DB.prepare('DELETE FROM route_effort_state WHERE route_id = ?')
+      .bind(routeId)
+      .run();
+    await control('deepseek-reject-minimal');
+    try {
+      const issue = async (jobId: string, generation: number, name: 'minimal' | 'high') => {
+        const controls =
+          name === 'minimal'
+            ? { reasoning_effort: 'minimal' as const }
+            : { reasoning_effort: 'high' as const };
+        const issued = await runtime.INFERENCE.issueV2({
+          jobId,
+          snapshot: {
+            routes: [routeId],
+            efforts: [{ routeId, generation, name, controls }],
+          },
+          latestIssueDeadline: (await d1Now()) + 60_000,
+        });
+        if (issued.kind !== 'issued') throw new Error('grant unavailable');
+        return issued.token;
+      };
+      const newer = await issue('runtime-generation-newer', 1, 'minimal');
+      const newerResponse = await request(newer, { model: routeId, messages: [] });
+      expect(newerResponse.status).toBe(200);
+      await newerResponse.text();
+      const state = await runtime.INFERENCE.effortStates();
+      expect(
+        (state.routes as readonly Record<string, unknown>[]).find(
+          (entry) => entry.routeId === routeId,
+        ),
+      ).toMatchObject({ generation: 1 });
+
+      const older = await issue('runtime-generation-older', 0, 'high');
+      const before = (await upstreamState()).requests.length;
+      const response = await request(older, {
+        model: routeId,
+        messages: [],
+        reasoning_effort: 'high',
+      });
+      expect(response.status).toBe(200);
+      await response.text();
+      const olderRequest = (await upstreamState()).requests[before];
+      expect(
+        (JSON.parse(olderRequest!.body) as Record<string, unknown>).reasoning_effort,
+      ).toBeUndefined();
+      await runtime.INFERENCE.revoke({ jobId: 'runtime-generation-newer' });
+      await runtime.INFERENCE.revoke({ jobId: 'runtime-generation-older' });
+    } finally {
+      await runtime.RELAY_DB.prepare('DELETE FROM route_effort_state WHERE route_id = ?')
+        .bind(routeId)
+        .run();
+      await runtime.RELAY_DB.prepare('DELETE FROM catalog_routes WHERE route_id = ?')
+        .bind(routeId)
+        .run();
+    }
+  });
+
+  it('records only an explicit upstream control report, never reasoning tokens', async () => {
+    await control('effort-report');
+    const issued = await runtime.INFERENCE.issueV2({
+      jobId: 'runtime-effort-report',
+      snapshot: {
+        routes: ['deepseek-review'],
+        efforts: [
+          {
+            routeId: 'deepseek-review',
+            name: 'high',
+            generation: 0,
+            controls: { reasoning_effort: 'high' },
+          },
+        ],
+      },
+      latestIssueDeadline: (await d1Now()) + 60_000,
+    });
+    if (issued.kind !== 'issued') throw new Error('grant unavailable');
+    const response = await request(issued.token, { model: 'deepseek-review', messages: [] });
+    expect(response.status).toBe(200);
+    await response.text();
+    const details = await runtime.INFERENCE.effortDetails({ jobId: 'runtime-effort-report' });
+    expect(details?.requests[0]?.attempts).toEqual([
+      {
+        attempt: 1,
+        sent: { reasoning_effort: 'high' },
+        reported: { reasoning_effort: 'max' },
+        result: 'complete',
+      },
+    ]);
+    await expect(
+      runtime.INFERENCE.usage({ jobId: 'runtime-effort-report' }),
+    ).resolves.toMatchObject({
+      models: [{ reasoningTokens: { total: 1, reportedRequests: 1 } }],
+      efforts: [{ route: 'deepseek-review', selected: 'high', outcomes: [{ kind: null }] }],
+    });
+    await runtime.INFERENCE.revoke({ jobId: 'runtime-effort-report' });
   });
 
   it('rejects wrong, unknown, revoked and ungranted routes before upstream inference', async () => {

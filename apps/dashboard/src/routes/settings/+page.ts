@@ -1,4 +1,8 @@
-import type { ReviewConfiguration } from '@compte-rendu/contracts';
+import type {
+  EffortRouteState,
+  ReviewConfiguration,
+  RouteEffortOption,
+} from '@compte-rendu/contracts';
 import type { PageLoad } from './$types';
 
 export const load: PageLoad = async ({ fetch, depends }) => {
@@ -21,6 +25,10 @@ export const load: PageLoad = async ({ fetch, depends }) => {
   const settings = (await reply.json()) as {
     configuration: ReviewConfiguration;
     routes: string[];
+    efforts?: Record<string, readonly RouteEffortOption[]>;
+    effortStates?: readonly EffortRouteState[];
+    effortStateUnavailable?: boolean;
+    effortDrift?: readonly string[];
     catalogRefreshFailed: boolean;
     lastAttemptAt: string | null;
   };

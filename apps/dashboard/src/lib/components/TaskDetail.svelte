@@ -9,6 +9,8 @@
     StructuredListRow,
   } from 'carbon-components-svelte';
   import Badge from '#lib/components/Badge.svelte';
+  import EffortRequestDetails from '#lib/components/EffortRequestDetails.svelte';
+  import EffortSummary from '#lib/components/EffortSummary.svelte';
   import ModelUsage from '#lib/components/ModelUsage.svelte';
   import Toolbar from '#lib/components/Toolbar.svelte';
   import { requestCancellation } from '#lib/api.ts';
@@ -578,6 +580,12 @@
         </StructuredList>
 
         <ModelUsage usage={dash.data.detail.usage} />
+        {#if dash.data.detail.efforts}
+          <EffortSummary efforts={dash.data.detail.efforts} />
+        {/if}
+        {#key runId}
+          <EffortRequestDetails runId={runId} operator={operator()} />
+        {/key}
 
       </section>
     </div>

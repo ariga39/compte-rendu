@@ -9,6 +9,7 @@ export type FailureCause = typeof RunnerFailureCause.Type;
 export type MultiReviewSelection = {
   readonly reviewers: readonly string[];
   readonly synthesis: string;
+  readonly efforts?: Readonly<Record<string, string>>;
 };
 
 export const MULTI_PROVIDER_ID = 'compte-rendu';

@@ -1,5 +1,10 @@
-import { Schema } from 'effect';
-import type { ModelProfile, ModelRouteLimit } from '@compte-rendu/contracts';
+import { Option, Schema } from 'effect';
+import {
+  RouteEfforts,
+  type ModelProfile,
+  type ModelRouteLimit,
+  type RouteEffortOption,
+} from '@compte-rendu/contracts';
 import {
   CatalogModelId,
   MAX_CATALOG_MODELS,
@@ -25,6 +30,7 @@ const normalizedLimit = (limit: ModelRouteLimit): ModelRouteLimit => ({
 });
 export interface RelayCatalogSnapshot {
   readonly routes: readonly string[];
+  readonly efforts: Readonly<Record<string, readonly RouteEffortOption[]>>;
   readonly lastAttemptAt: string | null;
   readonly lastSuccessAt: string | null;
   readonly rejected: number;
@@ -35,6 +41,7 @@ interface RouteModel {
   readonly model: string;
   readonly profile: ModelProfile;
   readonly limit: ModelRouteLimit | null;
+  readonly efforts: readonly RouteEffortOption[];
 }
 
 interface CatalogRead {
@@ -129,7 +136,12 @@ const readSource = async (
         rejected += 1;
         continue;
       }
-      models[routeId] = { model: entry.id, profile, limit: override?.limit ?? null };
+      models[routeId] = {
+        model: entry.id,
+        profile,
+        limit: override?.limit ?? null,
+        efforts: override?.efforts ?? [],
+      };
     }
     if (result.next === null) return { models, rejected };
     if (visited.has(result.next)) throw new Error('catalog continuation loop');
@@ -154,7 +166,8 @@ const sameLimit = (left: ModelRouteLimit | null, right: ModelRouteLimit | null):
 const sameRouteModel = (left: RouteModel, right: RouteModel): boolean =>
   left.model === right.model &&
   left.profile === right.profile &&
-  sameLimit(left.limit, right.limit);
+  sameLimit(left.limit, right.limit) &&
+  JSON.stringify(left.efforts) === JSON.stringify(right.efforts);
 
 function candidateSources(sources: readonly Source[], gateway: GatewayConfig | null) {
   const groups = new Map<string, CandidateSource>();
@@ -189,6 +202,7 @@ function candidateSources(sources: readonly Source[], gateway: GatewayConfig | n
           model,
           profile: override?.profile ?? sourceDefaultProfile(source),
           limit: override?.limit ?? null,
+          efforts: override?.efforts ?? [],
         };
         if (resolved.profile === 'gemini' && !isGeminiUpstreamModel(model)) {
           group.invalid = true;
@@ -241,18 +255,20 @@ function candidateSources(sources: readonly Source[], gateway: GatewayConfig | n
 const canonicalLimit = (json: string) =>
   `(CASE WHEN ${json} IS NULL THEN '' ELSE coalesce(CAST(json_extract(${json}, '$.context') AS TEXT), '') || '|' || coalesce(CAST(json_extract(${json}, '$.output') AS TEXT), '') END)`;
 const storedLimit = `coalesce((SELECT ${canonicalLimit('l.value')} FROM json_each(s.route_limits) l WHERE l.key=m.key), '')`;
+const storedEfforts = `coalesce((SELECT e.value FROM json_each(s.route_efforts) e WHERE e.key=m.key), '[]')`;
 
 // Both the picker and the budget count the same set, preferring discovered IDs
-// when an alias refers to exactly the same upstream model, credential, profile
-// and configured limit.
+// when an alias refers to exactly the same upstream model, credential, profile,
+// configured limit and effort menu.
 const active = `SELECT m.key AS id, m.value AS model, s.provider, s.credential,
   coalesce((SELECT p.value FROM json_each(s.route_profiles) p WHERE p.key=m.key), 'chat') AS profile,
   ${storedLimit} AS limit_key,
+  ${storedEfforts} AS efforts_key,
   s.is_alias
   FROM catalog_sources s JOIN json_each(?) cfg ON cfg.key=s.source_key, json_each(s.models) m
   WHERE (s.is_alias=0 OR EXISTS (SELECT 1 FROM json_each(cfg.value) a WHERE a.key=m.key AND a.value=m.value))`;
 const visible = `SELECT DISTINCT id FROM (
-  SELECT id, is_alias, MIN(is_alias) OVER (PARTITION BY provider, credential, model, profile, limit_key) AS preferred
+  SELECT id, is_alias, MIN(is_alias) OVER (PARTITION BY provider, credential, model, profile, limit_key, efforts_key) AS preferred
   FROM candidates
 ) WHERE is_alias = preferred`;
 
@@ -312,6 +328,15 @@ export function createRelayCatalog(
                 ),
               ),
         );
+        const proposedEfforts = JSON.stringify(
+          error
+            ? {}
+            : Object.fromEntries(
+                Object.entries(models).flatMap(([id, route]) =>
+                  route.efforts.length === 0 ? [] : [[id, route.efforts]],
+                ),
+              ),
+        );
         const { key, provider, credential } = group;
         const alias = Number(group.aliases !== undefined);
         statements.push(
@@ -320,10 +345,11 @@ export function createRelayCatalog(
               ${active} AND s.source_key <> ?
               UNION ALL SELECT m.key, m.value, ?, ?, coalesce(p.value,'chat'),
                 coalesce((SELECT ${canonicalLimit('l.value')} FROM json_each(?) l WHERE l.key=m.key), ''),
+                coalesce((SELECT e.value FROM json_each(?) e WHERE e.key=m.key), '[]'),
                 ?
                 FROM json_each(?) m LEFT JOIN json_each(?) p ON p.key=m.key
             )
-            INSERT INTO catalog_sources(source_key, provider, credential, is_alias, rejected, error)
+            INSERT INTO catalog_sources(source_key, provider, credential, is_alias, rejected, error, route_efforts)
             SELECT ?, ?, ?, ?, ?, CASE
               WHEN ? IS NOT NULL THEN ?
               WHEN EXISTS (SELECT 1 FROM json_each(?) m
@@ -334,17 +360,20 @@ export function createRelayCatalog(
                   OR r.credential_alias IS NOT ?
                   OR r.profile IS NOT coalesce(p.value,'chat')
                   OR ${canonicalLimit('r.limit_json')} IS NOT
-                    coalesce((SELECT ${canonicalLimit('l.value')} FROM json_each(?) l WHERE l.key=m.key), ''))
+                    coalesce((SELECT ${canonicalLimit('l.value')} FROM json_each(?) l WHERE l.key=m.key), '')
+                  OR r.efforts_json IS NOT
+                    coalesce((SELECT e.value FROM json_each(?) e WHERE e.key=m.key), '[]'))
                 THEN 'route mapping conflict'
               WHEN (SELECT COUNT(*) FROM (${visible})) > ? THEN 'catalog limit reached'
-            END WHERE ${fresh}
-            ON CONFLICT(source_key) DO UPDATE SET rejected=excluded.rejected,error=excluded.error`)
+            END, ? WHERE ${fresh}
+            ON CONFLICT(source_key) DO UPDATE SET rejected=excluded.rejected,error=excluded.error,route_efforts=excluded.route_efforts`)
             .bind(
               configured,
               key,
               provider,
               credential,
               proposedLimits,
+              proposedEfforts,
               alias,
               proposedModels,
               proposedProfiles,
@@ -360,19 +389,22 @@ export function createRelayCatalog(
               provider,
               credential,
               proposedLimits,
+              proposedEfforts,
               MAX_CATALOG_MODELS,
+              proposedEfforts,
               at,
             ),
           db
             .prepare(
-              `UPDATE catalog_sources SET models=?, route_profiles=?, route_limits=? WHERE source_key=? AND error IS NULL AND ${fresh}`,
+              `UPDATE catalog_sources SET models=?, route_profiles=?, route_limits=?, route_efforts=? WHERE source_key=? AND error IS NULL AND ${fresh}`,
             )
-            .bind(proposedModels, proposedProfiles, proposedLimits, key, at),
+            .bind(proposedModels, proposedProfiles, proposedLimits, proposedEfforts, key, at),
           db
-            .prepare(`INSERT INTO catalog_routes(route_id, upstream_model, provider_slug, credential_alias, profile, limit_json)
+            .prepare(`INSERT INTO catalog_routes(route_id, upstream_model, provider_slug, credential_alias, profile, limit_json, efforts_json)
             SELECT m.key, m.value, s.provider, s.credential,
               coalesce((SELECT p.value FROM json_each(s.route_profiles) p WHERE p.key=m.key), 'chat'),
-              (SELECT l.value FROM json_each(s.route_limits) l WHERE l.key=m.key)
+              (SELECT l.value FROM json_each(s.route_limits) l WHERE l.key=m.key),
+              coalesce((SELECT e.value FROM json_each(s.route_efforts) e WHERE e.key=m.key), '[]')
             FROM catalog_sources s,json_each(s.models) m
             WHERE s.source_key=? AND s.error IS NULL AND ${fresh}
             ON CONFLICT(route_id) DO NOTHING`)
@@ -394,11 +426,15 @@ export function createRelayCatalog(
       const meta = await db
         .prepare(`WITH candidates AS (${active})
         SELECT (SELECT json_group_array(id) FROM (${visible} ORDER BY id)) AS routes,
+          (SELECT json_group_object(v.id, json(coalesce(r.efforts_json, '[]')))
+            FROM (${visible}) v LEFT JOIN catalog_routes r ON r.route_id = v.id
+            WHERE coalesce(r.efforts_json, '[]') <> '[]') AS efforts,
           EXISTS (SELECT 1 FROM catalog_sources JOIN json_each(?) cfg ON cfg.key=source_key) AS initialized,
           last_attempt,last_complete,rejected,error FROM catalog_refresh WHERE id=1`)
         .bind(configured, configured)
         .first<{
           routes: string;
+          efforts: string | null;
           initialized: number;
           last_attempt: number | null;
           last_complete: number | null;
@@ -409,15 +445,19 @@ export function createRelayCatalog(
       if (!meta.initialized)
         return {
           routes: [],
+          efforts: {},
           lastAttemptAt: null,
           lastSuccessAt: null,
           rejected: 0,
           lastRefreshError: null,
         };
+      const decodeEfforts = Schema.decodeUnknownOption(Schema.fromJsonString(RouteEfforts));
+      const decodedEfforts = decodeEfforts(meta.efforts ?? '{}');
       return {
         routes: Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Array(Schema.String)))(
           meta.routes,
         ),
+        efforts: Option.isSome(decodedEfforts) ? decodedEfforts.value : {},
         lastAttemptAt:
           meta.last_attempt === null ? null : new Date(meta.last_attempt).toISOString(),
         lastSuccessAt:

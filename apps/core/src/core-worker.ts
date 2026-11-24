@@ -14,6 +14,7 @@ import {
   RunnerCleanupRecoveryReport,
   RunnerResultCallback,
   StructuredReviewResult,
+  EffortJobDetail,
   sanitizeOperationalLogEvent,
 } from '@compte-rendu/contracts';
 import {
@@ -46,10 +47,19 @@ import {
   type RefreshSummary,
 } from './dashboard';
 
+type CoreRelayCatalog = Omit<
+  import('../../inference-worker/src/catalog').RelayCatalogSnapshot,
+  'efforts'
+> & {
+  // Old relay deployments do not return the effort catalog. Keep it optional so
+  // Core can roll forward before the inference Worker is upgraded.
+  readonly efforts?: import('../../inference-worker/src/catalog').RelayCatalogSnapshot['efforts'];
+};
+
 export interface CoreWorkerEnv extends Partial<CoreEnv> {
   readonly REVIEW_DB: D1DatabaseLike;
   readonly INFERENCE_RELAY?: import('./runner-llm-control').RelayControl & {
-    catalog(): Promise<import('../../inference-worker/src/catalog').RelayCatalogSnapshot>;
+    catalog(): Promise<CoreRelayCatalog>;
     refreshCatalog(scheduledTime: number): Promise<void>;
   };
   readonly GITHUB_APP_ID: string;
@@ -250,6 +260,7 @@ export const createCoreWorker = (
   ReturnType<typeof createJobControl> & {
     reconcileCheckDeliveries(now: number): Promise<void>;
     reconcilePublications(now: number): Promise<void>;
+    effortDetail(runId: string, cursor?: string): Promise<Response>;
   } => {
   const tokenProvider = createGitHubAppTokenProvider({
     appId: env.GITHUB_APP_ID,
@@ -1200,6 +1211,45 @@ export const createCoreWorker = (
   };
 
   return {
+    async effortDetail(runId, cursor) {
+      const noStore = { 'cache-control': 'no-store' };
+      if (env.INFERENCE_RELAY?.effortDetails === undefined)
+        return Response.json(
+          { error: 'effort details unavailable' },
+          { status: 503, headers: noStore },
+        );
+      try {
+        const outcome = await stateStore.getRunOutcome(runId);
+        if (outcome?.runnerJobId === undefined)
+          return Response.json(
+            { error: 'effort details unavailable' },
+            { status: 404, headers: noStore },
+          );
+        const detail = await env.INFERENCE_RELAY.effortDetails({
+          jobId: outcome.runnerJobId,
+          ...(cursor === undefined || cursor === '' ? {} : { cursor }),
+        });
+        if (detail === null)
+          return Response.json(
+            { error: 'Effort request details are no longer retained.' },
+            { status: 404, headers: noStore },
+          );
+        const decoded = Schema.decodeUnknownOption(EffortJobDetail, {
+          onExcessProperty: 'error',
+        })(detail);
+        return Option.isSome(decoded)
+          ? Response.json(decoded.value, { headers: noStore })
+          : Response.json(
+              { error: 'effort details unavailable' },
+              { status: 503, headers: noStore },
+            );
+      } catch {
+        return Response.json(
+          { error: 'effort details unavailable' },
+          { status: 503, headers: noStore },
+        );
+      }
+    },
     async reconcileCheckDeliveries(now) {
       const work = (await stateStore.listPendingCheckDeliveries?.({ limit: 8 })) ?? [];
       const occurredAt = new Date(now).toISOString();
@@ -1319,7 +1369,10 @@ export const createCoreWorker = (
       createPostHogLifecycleLog(env, context),
     ),
     fetch: async (request, _env, context) => {
-      if (new URL(request.url).pathname === '/review-configuration') {
+      if (
+        new URL(request.url).pathname === '/review-configuration' ||
+        new URL(request.url).pathname === '/review-configuration/efforts/reset'
+      ) {
         return handleReviewConfiguration(
           request,
           env.REVIEW_DB,

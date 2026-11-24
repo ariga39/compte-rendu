@@ -3226,6 +3226,17 @@ export const createRunner = (options: RunnerOptions = {}) => {
         failure = { reason: 'configuration' };
         return;
       }
+      // Explicit effort controls require the profile-aware v2 grant. A v1
+      // issuer cannot carry them, so fail closed instead of silently dropping
+      // the operator's selection.
+      if (
+        relayEnabled &&
+        grantVersion === '1' &&
+        (multiConfiguration?.efforts?.some((effort) => effort.name !== undefined) ?? false)
+      ) {
+        failure = { reason: 'configuration' };
+        return;
+      }
       if (multi) {
         if (
           sandboxRuntime.kind === 'openshell' ||
@@ -3939,6 +3950,9 @@ export const createRunner = (options: RunnerOptions = {}) => {
                     revision: multiConfiguration!.revision,
                     reviewers: [...multiSelection.reviewers],
                     synthesis: multiSelection.synthesis,
+                    ...(multiSelection.efforts === undefined
+                      ? {}
+                      : { efforts: multiSelection.efforts }),
                   },
                   // The admission-time frozen selection is recorded even when
                   // later validation fails, so a failed job still shows which
@@ -3946,6 +3960,9 @@ export const createRunner = (options: RunnerOptions = {}) => {
                   frozenSelection: {
                     reviewers: [...multiSelection.reviewers],
                     synthesis: multiSelection.synthesis,
+                    ...(multiSelection.efforts === undefined
+                      ? {}
+                      : { efforts: multiSelection.efforts }),
                   },
                   ...(job.multiReview === undefined
                     ? {}
@@ -3955,6 +3972,9 @@ export const createRunner = (options: RunnerOptions = {}) => {
                           frozenSelection: {
                             reviewers: [...job.multiReview.selection.reviewers],
                             synthesis: job.multiReview.selection.synthesis,
+                            ...(job.multiReview.selection.efforts === undefined
+                              ? {}
+                              : { efforts: job.multiReview.selection.efforts }),
                           },
                           rootSessionId: job.multiReview.rootSessionId,
                           reviewers: job.multiReview.reviewers.map((reviewer) => ({

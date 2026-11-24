@@ -1,4 +1,7 @@
 import {
+  EffortName,
+  EffortRouteSummary,
+  ModelRouteId,
   PublicHistoryPage,
   PublicDashboardSnapshot,
   PublicTaskDetail,
@@ -38,9 +41,24 @@ function decodeHistoryPage(data: unknown) {
   }
 }
 
-function decodeTaskDetail(data: unknown) {
+const DetailEfforts = Schema.Struct({
+  selection: Schema.Array(
+    Schema.Struct({
+      route: ModelRouteId,
+      name: Schema.NullOr(EffortName),
+      generation: Schema.Natural,
+    }),
+  ),
+  summary: Schema.NullOr(Schema.Array(EffortRouteSummary)),
+});
+const TaskDetailWithEfforts = Schema.Struct({
+  ...PublicTaskDetail.fields,
+  efforts: Schema.optionalKey(Schema.NullOr(DetailEfforts)),
+});
+
+function decodeTaskDetail(data: unknown): TaskDetail {
   try {
-    return Schema.decodeUnknownSync(PublicTaskDetail)(data);
+    return Schema.decodeUnknownSync(TaskDetailWithEfforts)(data) as TaskDetail;
   } catch {
     throw new PollError();
   }
