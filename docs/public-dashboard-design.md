@@ -204,7 +204,7 @@ against the built frontend. They cover privacy/expiry, pagination, ownership,
 terminal races, polling, drawers and failure presentation. See
 [installation](installation.md#public-dashboard) for assets, Cron and deployment
 requirements. Runtime sources are `apps/core/src/dashboard.ts`,
-`review-state-store.ts`, `apps/dashboard/src/lib/` and the shared contracts.
+`dashboard-metadata-store.ts`, `apps/dashboard/src/lib/` and the shared contracts.
 
 ### Model usage
 

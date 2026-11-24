@@ -9,14 +9,14 @@ import {
 } from '@compte-rendu/contracts';
 import { GitHubRequestError } from './github-review-adapter';
 import type {
-  GitHubAdapter,
   PublicRunCursor,
   PublicRunFilter,
   PublicRunRow,
   PublicRunView,
   RepositoryMetadataRow,
-  ReviewPublicationStateStore,
-} from './index';
+} from './dashboard-metadata-store';
+import type { GitHubAdapter } from './github-adapter-contract';
+import type { ReviewPublicationStateStore } from './review-state-store';
 
 const IDENTITY_LIFETIME_MS = 5 * 60 * 1000;
 const REFRESH_INTERVAL_MS = 2 * 60 * 1000;
@@ -30,7 +30,7 @@ const DEFAULT_LIMIT = 25;
 const MAX_LIMIT = 100;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-const nowIso = () => Effect.runPromise(DateTime.now.pipe(Effect.map(DateTime.formatIso)));
+const nowIso = () => new Date().toISOString();
 const isoFromMs = (ms: number): string => DateTime.formatIso(DateTime.makeUnsafe(ms));
 
 export const IsoTimestamp = Schema.String.check(
@@ -230,7 +230,7 @@ export const handleDashboardRequest = async (
   if (request.method !== 'GET') return undefined;
   const url = new URL(request.url);
   const store = dependencies.stateStore;
-  const now = await nowIso();
+  const now = nowIso();
 
   if (url.pathname === '/api/dashboard' || url.pathname === '/dashboard') {
     if (store.getPublicOverview === undefined) return unavailable();
@@ -373,15 +373,14 @@ export interface RefreshSummary {
 export const refreshRepositoryMetadata = async (
   dependencies: RepositoryRefreshDependencies,
 ): Promise<RefreshSummary> => {
-  const started = DateTime.toEpochMillis(await Effect.runPromise(DateTime.now));
+  const started = Date.now();
   const store = dependencies.stateStore;
   let dueAtStart: number | null = null;
   let oldestDueAgeMs: number | null = null;
   let dispatched = 0;
   let failed = 0;
   let budgetExhausted = false;
-  const elapsed = async () =>
-    Math.max(0, DateTime.toEpochMillis(await Effect.runPromise(DateTime.now)) - started);
+  const elapsed = async () => Math.max(0, Date.now() - started);
   const withinBudget = async () => {
     if ((await elapsed()) < REFRESH_DISPATCH_BUDGET_MS) return true;
     budgetExhausted = true;
@@ -404,14 +403,14 @@ export const refreshRepositoryMetadata = async (
   ) {
     return finish('unavailable');
   }
-  const now = dependencies.now ?? (await nowIso());
-  const backlog = await store.getRepositoryRefreshBacklog?.({ now });
+  const now = dependencies.now ?? nowIso();
+  const backlog = await store.getRepositoryRefreshBacklog({ now });
   dueAtStart = backlog?.due ?? null;
   oldestDueAgeMs =
     backlog?.oldestDueAt == null
       ? null
       : Math.max(0, Date.parse(now) - Date.parse(backlog.oldestDueAt));
-  const cooldown = (await store.getRefreshCooldown?.()) ?? undefined;
+  const cooldown = (await store.getRefreshCooldown()) ?? undefined;
   if (cooldown !== undefined && cooldown > now) return finish('cooldown');
   const timeoutMs = dependencies.timeoutMs ?? REFRESH_TIMEOUT_MS;
   const batch = dependencies.batch ?? DEFAULT_BATCH;
@@ -464,14 +463,14 @@ export const refreshRepositoryMetadata = async (
       if (error instanceof GitHubRequestError && (error.status === 429 || error.status === 403)) {
         throttled = true;
         failed += 1;
-        await store.setRefreshCooldown?.({
+        await store.setRefreshCooldown({
           nextAllowedAt: isoFromMs(Date.parse(now) + (error.retryAfterMs ?? THROTTLE_COOLDOWN_MS)),
         });
         return;
       }
       if (error instanceof GitHubRequestError && error.status === 404) {
         const retryAt = isoFromMs(Date.parse(now) + DAY_MS);
-        const revoked = await store.invalidateRepositoryMetadata?.({
+        const revoked = await store.invalidateRepositoryMetadata({
           installationId: row.installationId,
           repositoryId: row.repositoryId,
           visibility: 'unknown',
