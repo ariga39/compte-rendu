@@ -71,15 +71,14 @@ import {
 } from './llm-service-client.js';
 import { createReadTokenClient, type ReadTokenClient } from './read-token-client.js';
 import {
-  MULTI_PROVIDER_ID,
   SUPERVISOR_AGENT_ID,
   decodeSessionExport,
   dedupedRoutes,
   extractReviewSubmission,
-  modelReference,
   multiReviewConfig,
   participants,
   parseChildSessionPage,
+  routeModelIdentity,
   sessionSucceeded,
   type ChildSession,
   type MultiReviewSelection,
@@ -3114,6 +3113,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
     let agentParsed: ParsedAgentResult | undefined;
     let executionModel: string | undefined;
     let submissionIdentity: SessionIdentity | undefined;
+    let descriptors: readonly ModelRouteDescriptor[] | undefined;
     const evidenceId = job.state.evidenceId ?? job.id;
     const evidencePath = join(evidenceRoot, evidenceId);
     const multiConfiguration = job.input.reviewConfiguration;
@@ -3167,11 +3167,19 @@ export const createRunner = (options: RunnerOptions = {}) => {
       for (const sessionId of job.sessionIds.slice(1)) {
         const info = decodeSessionExport(await readExport(sessionId))?.info;
         if (info === undefined || info.parentID !== rootSessionId) continue;
+        const model = info.model;
+        const route =
+          model === undefined
+            ? ''
+            : (multiSelection.reviewers.find((candidate) => {
+                const identity = routeModelIdentity(candidate, descriptors);
+                return identity.providerID === model.providerID && identity.id === model.id;
+              }) ?? model.id);
         reviewers.push({
           participant: info.agent ?? '',
-          route: info.model?.id ?? '',
+          route,
           sessionId,
-          model: info.model === undefined ? '' : modelReference(info.model.id),
+          model: model === undefined ? '' : `${model.providerID}/${model.id}`,
         });
       }
       job.multiReview = {
@@ -3277,7 +3285,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
         return;
       }
 
-      let descriptors: readonly ModelRouteDescriptor[] | undefined;
       if (llmServiceClient !== undefined && multiSelection !== undefined) {
         const grantRoutes = directExecution
           ? [multiSelection.reviewers[0]!]
@@ -3333,7 +3340,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
       const promptReviewers = multi
         ? participants(multiSelection).map(({ participant, route }) => ({
             participant,
-            model: modelReference(route),
+            model: routeModelIdentity(route, descriptors).reference,
           }))
         : modelId === undefined
           ? []
@@ -3470,37 +3477,35 @@ export const createRunner = (options: RunnerOptions = {}) => {
       }
       update(job, { stage: 'agent' });
       reportStage(job, 'agent');
-      const agentModel = multi
-        ? modelReference(directExecution ? multiSelection.reviewers[0]! : multiSelection.synthesis)
-        : modelId;
+      const agentRoute = multi
+        ? directExecution
+          ? multiSelection.reviewers[0]!
+          : multiSelection.synthesis
+        : undefined;
+      const agentIdentity =
+        agentRoute === undefined ? undefined : routeModelIdentity(agentRoute, descriptors);
+      const agentModel = agentIdentity?.reference ?? modelId;
       const agentName = multi && !directExecution ? SUPERVISOR_AGENT_ID : 'review';
       executionModel = agentModel;
-      submissionIdentity = multi
-        ? directExecution
+      submissionIdentity =
+        agentIdentity === undefined
           ? {
               agent: 'review',
-              model: {
-                providerID: MULTI_PROVIDER_ID,
-                id: multiSelection.reviewers[0]!,
-              },
+              model: (() => {
+                const reference = modelId!;
+                const slash = reference.indexOf('/');
+                return slash === -1
+                  ? { providerID: 'opencode-go', id: reference }
+                  : {
+                      providerID: reference.slice(0, slash),
+                      id: reference.slice(slash + 1),
+                    };
+              })(),
             }
           : {
-              agent: SUPERVISOR_AGENT_ID,
-              model: { providerID: MULTI_PROVIDER_ID, id: multiSelection.synthesis },
-            }
-        : {
-            agent: 'review',
-            model: (() => {
-              const reference = modelId!;
-              const slash = reference.indexOf('/');
-              return slash === -1
-                ? { providerID: 'opencode-go', id: reference }
-                : {
-                    providerID: reference.slice(0, slash),
-                    id: reference.slice(slash + 1),
-                  };
-            })(),
-          };
+              agent: agentName,
+              model: { providerID: agentIdentity.providerID, id: agentIdentity.id },
+            };
       agent = await runtime.exec(
         [
           'opencode',

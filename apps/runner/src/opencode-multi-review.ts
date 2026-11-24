@@ -203,6 +203,20 @@ export const participantId = (index: number) => `reviewer-${index}`;
 
 export const modelReference = (route: string) => `${MULTI_PROVIDER_ID}/${route}`;
 
+export const routeModelIdentity = (
+  route: string,
+  descriptors?: readonly ModelRouteDescriptor[],
+): { readonly providerID: string; readonly id: string; readonly reference: string } => {
+  const slash = route.indexOf('/');
+  if (descriptors !== undefined && slash > 0 && slash < route.length - 1)
+    return {
+      providerID: route.slice(0, slash),
+      id: route.slice(slash + 1),
+      reference: route,
+    };
+  return { providerID: MULTI_PROVIDER_ID, id: route, reference: modelReference(route) };
+};
+
 export const dedupedRoutes = (selection: MultiReviewSelection): readonly string[] => [
   ...new Set([...selection.reviewers, selection.synthesis]),
 ];
@@ -288,48 +302,68 @@ export const multiReviewConfig = (options: {
   const roster = participants(options.selection);
   const reviewerPermissionsValue = reviewerPermissions(options.shellPermissionRules);
   const baseURL = options.serviceBaseUrl;
-  const models = options.descriptors
+  const descriptorModels = new Map<string, Record<string, unknown>>();
+  for (const descriptor of options.descriptors ?? []) {
+    const identity = routeModelIdentity(descriptor.routeId, options.descriptors);
+    const models = descriptorModels.get(identity.providerID) ?? {};
+    models[identity.id] = {
+      ...descriptor.metadata,
+      ...modelConfig(descriptor, baseURL),
+      ...(descriptor.profile !== 'gemini' && identity.id !== descriptor.routeId
+        ? { modelID: descriptor.routeId }
+        : {}),
+      ...(descriptor.limit === undefined ? {} : { limit: descriptor.limit }),
+    };
+    descriptorModels.set(identity.providerID, models);
+  }
+  const providers = options.descriptors
     ? Object.fromEntries(
-        options.descriptors.map((d) => [
-          d.routeId,
-          { ...d.metadata, ...modelConfig(d, baseURL), limit: d.limit },
+        [...descriptorModels].map(([id, models]) => [
+          id,
+          {
+            name: 'Compte-rendu service',
+            canonical: id === MULTI_PROVIDER_ID ? 'opencode-go' : id,
+            package: '@opencode/ai/providers/openai-compatible',
+            settings: { baseURL },
+            models,
+          },
         ]),
       )
-    : Object.fromEntries(
-        dedupedRoutes(options.selection).map((route) => [route, { settings: { baseURL } }]),
-      );
-  const providers = {
-    [MULTI_PROVIDER_ID]: {
-      name: 'Compte-rendu service',
-      canonical: 'opencode-go',
-      package: '@opencode/ai/providers/openai-compatible',
-      settings: options.descriptors ? { baseURL } : { baseURL, apiKey: relayCredential },
-      models,
-    },
-  };
+    : {
+        [MULTI_PROVIDER_ID]: {
+          name: 'Compte-rendu service',
+          canonical: 'opencode-go',
+          package: '@opencode/ai/providers/openai-compatible',
+          settings: { baseURL, apiKey: relayCredential },
+          models: Object.fromEntries(
+            dedupedRoutes(options.selection).map((route) => [route, { settings: { baseURL } }]),
+          ),
+        },
+      };
+  const referenceFor = (route: string) => routeModelIdentity(route, options.descriptors).reference;
   if (roster.length === 1) {
     const route = roster[0]!.route;
     return JSON.stringify({
-      model: modelReference(route),
+      model: referenceFor(route),
       providers,
       agents: {
         review: {
           description: 'Pull request reviewer',
           mode: 'primary',
-          model: modelReference(route),
+          model: referenceFor(route),
           permissions: reviewerPermissionsValue,
         },
       },
     });
   }
   return JSON.stringify({
-    model: modelReference(options.selection.synthesis),
+    model: referenceFor(options.selection.synthesis),
     providers,
     agents: {
       [SUPERVISOR_AGENT_ID]: {
         description: 'Multi-model review supervisor',
         mode: 'primary',
-        model: modelReference(options.selection.synthesis),
+        model: referenceFor(options.selection.synthesis),
         permissions: supervisorPermissions(roster),
       },
       ...Object.fromEntries(
@@ -338,7 +372,7 @@ export const multiReviewConfig = (options: {
           {
             description: `Multi-model reviewer ${participant}`,
             mode: 'subagent',
-            model: modelReference(route),
+            model: referenceFor(route),
             system: options.reviewerTask,
             permissions: reviewerPermissionsValue,
           },

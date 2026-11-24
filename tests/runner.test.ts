@@ -12,6 +12,7 @@ import {
   type RunnerProcessResult,
 } from '../apps/runner/src/runner';
 import { createSbxRuntimeFactory } from '../apps/runner/src/sandbox-runtime-sbx';
+import { multiReviewConfig } from '../apps/runner/src/opencode-multi-review';
 import { createCoreWorker } from '../apps/core/src/core-worker';
 import type {
   JobSandboxRuntime,
@@ -10130,6 +10131,151 @@ describe('Runner multi-model review', () => {
       await rm(controlRoot, { recursive: true, force: true });
     }
   };
+
+  it('uses configured provider/model route IDs as OpenCode identities', () => {
+    const config = JSON.parse(
+      multiReviewConfig({
+        selection: {
+          reviewers: ['review-provider/gpt-6-luna', 'openai-platform/gpt-6-luna'],
+          synthesis: 'review-provider/gpt-6-luna',
+        },
+        serviceBaseUrl: 'https://inference.example/v1',
+        descriptors: [
+          {
+            routeId: 'review-provider/gpt-6-luna',
+            profile: 'chat',
+            limit: { context: 1_000_000, output: 384_000 },
+            metadata: { name: 'Luna Go' },
+          },
+          {
+            routeId: 'openai-platform/gpt-6-luna',
+            profile: 'responses',
+            limit: { context: 1_050_000, output: 128_000 },
+            metadata: { name: 'Luna OpenAI' },
+          },
+        ],
+        shellPermissionRules: [],
+        reviewerTask: 'review task',
+      }),
+    );
+    expect(config.model).toBe('review-provider/gpt-6-luna');
+    expect(config.agents['reviewer-0'].model).toBe('review-provider/gpt-6-luna');
+    expect(config.agents['reviewer-1'].model).toBe('openai-platform/gpt-6-luna');
+    expect(Object.keys(config.providers['review-provider'].models)).toEqual(['gpt-6-luna']);
+    expect(Object.keys(config.providers['openai-platform'].models)).toEqual(['gpt-6-luna']);
+    expect(config.providers['review-provider']).toMatchObject({
+      canonical: 'review-provider',
+      settings: { baseURL: 'https://inference.example/v1' },
+      models: {
+        'gpt-6-luna': {
+          modelID: 'review-provider/gpt-6-luna',
+          name: 'Luna Go',
+          limit: { context: 1_000_000, output: 384_000 },
+        },
+      },
+    });
+    expect(config.providers['openai-platform']).toMatchObject({
+      canonical: 'openai-platform',
+      settings: { baseURL: 'https://inference.example/v1' },
+      models: {
+        'gpt-6-luna': {
+          modelID: 'openai-platform/gpt-6-luna',
+          name: 'Luna OpenAI',
+          package: '@opencode/ai/providers/openai',
+          settings: {
+            baseURL: 'https://inference.example/v1',
+            apiKey: '{env:OPENCODE_API_KEY}',
+          },
+          limit: { context: 1_050_000, output: 128_000 },
+        },
+      },
+    });
+  });
+
+  it('keeps the v1 provider and references when descriptors are absent', () => {
+    const config = JSON.parse(
+      multiReviewConfig({
+        selection: {
+          reviewers: ['review-provider/gpt-6-luna'],
+          synthesis: 'review-provider/gpt-6-luna',
+        },
+        serviceBaseUrl: 'https://inference.example/v1',
+        shellPermissionRules: [],
+        reviewerTask: 'review task',
+      }),
+    );
+    expect(config.model).toBe('compte-rendu/review-provider/gpt-6-luna');
+    expect(config.agents.review.model).toBe('compte-rendu/review-provider/gpt-6-luna');
+    expect(Object.keys(config.providers)).toEqual(['compte-rendu']);
+    expect(config.providers['compte-rendu'].models).toEqual({
+      'review-provider/gpt-6-luna': { settings: { baseURL: 'https://inference.example/v1' } },
+    });
+  });
+
+  it('restores qualified child evidence routes from the selected model identity', async () => {
+    const qualifiedSelection = {
+      revision: 3,
+      selection: {
+        reviewers: ['review-provider/gpt-6-luna', 'openai-platform/gpt-6-luna'],
+        synthesis: 'review-provider/gpt-6-luna',
+      },
+    };
+    const children = [
+      {
+        id: 'ses_multi_child_a',
+        parentID: rootSession,
+        agent: 'reviewer-0',
+        model: { providerID: 'review-provider', id: 'gpt-6-luna' },
+        outcome: 'succeeded',
+      },
+      {
+        id: 'ses_multi_child_b',
+        parentID: rootSession,
+        agent: 'reviewer-1',
+        model: { providerID: 'openai-platform', id: 'gpt-6-luna' },
+        outcome: 'succeeded',
+      },
+    ];
+    const childExport = (id: string, agent: string, providerID: string) =>
+      JSON.stringify({
+        info: {
+          id,
+          parentID: rootSession,
+          agent,
+          model: { providerID, id: 'gpt-6-luna' },
+          outcome: 'succeeded',
+        },
+        messages: [],
+      });
+    const qualifiedRoot = JSON.parse(rootExport) as {
+      info: { model: { providerID: string; id: string } };
+      messages: Array<{ model?: { providerID: string; id: string } }>;
+    };
+    qualifiedRoot.info.model = { providerID: 'review-provider', id: 'gpt-6-luna' };
+    for (const message of qualifiedRoot.messages)
+      if (message.model !== undefined)
+        message.model = { providerID: 'review-provider', id: 'gpt-6-luna' };
+    const result = await runScenario({
+      selection: qualifiedSelection,
+      descriptors: [
+        { routeId: 'review-provider/gpt-6-luna', profile: 'chat' },
+        { routeId: 'openai-platform/gpt-6-luna', profile: 'responses' },
+      ],
+      children,
+      rootExport: JSON.stringify(qualifiedRoot),
+      exports: {
+        [rootSession]: JSON.stringify(qualifiedRoot),
+        ses_multi_child_a: childExport('ses_multi_child_a', 'reviewer-0', 'review-provider'),
+        ses_multi_child_b: childExport('ses_multi_child_b', 'reviewer-1', 'openai-platform'),
+      },
+    });
+    expect(result.terminal).toMatchObject({ status: 'succeeded' });
+    expect(
+      (result.multiReviewDocument as { reviewers: Array<{ route: string }> }).reviewers.map(
+        (reviewer) => reviewer.route,
+      ),
+    ).toEqual(['review-provider/gpt-6-luna', 'openai-platform/gpt-6-luna']);
+  });
 
   it('delivers the frozen adapter per route while keeping reviewer identities stable', async () => {
     const result = await runScenario({
