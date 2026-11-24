@@ -206,21 +206,27 @@ catalog is trusted input; the browser cannot invent `reasoning_effort`,
 `thinking`, budgets or aliases. A route without a name keeps the client's
 existing request behaviour. Removing a name returns that route to the default.
 
-Saving writes the public selection and an internal frozen snapshot. Each selected
-route gets one generation and, when chosen, the name and trusted controls from
-the catalog. Admission copies the whole snapshot into the run's
+Saving writes the public selection and an internal frozen snapshot. It freezes
+only the routes that this selection actually executes: the single reviewer, or
+all reviewers plus synthesis when there is more than one reviewer. A different
+configured synthesis route is not frozen or granted for a single-reviewer job.
+Each execution route gets one generation and, when chosen, the name and trusted
+controls from the catalog. Default generation-0 entries without an explicit
+effort are omitted because they carry no instruction and would be invalid on a
+non-Chat route. Admission copies the snapshot into the run's
 `reviewConfiguration` in the same D1 statement that creates the run. Changing or
 removing a catalog option later does not rewrite an existing save or queued job.
 Editor-facing settings show a missing saved name as unavailable and require a
 replacement before the next save.
 
-`GET /runner-llm/issue-v2` receives the frozen `{routeId, generation, name,
+`POST /runner-llm/issue-v2` receives the frozen `{routeId, generation, name,
 controls}` entries for the routes the job actually uses, and the relay validates
-them against its trusted history. The legacy v1 grant does not carry efforts.
-Runner fails a job with a configuration failure when its frozen snapshot
-contains effort names but it is configured for a v1 grant instead of silently
-dropping them. The thawed job snapshot and `multi-review.json` retain the frozen
-selection, including efforts.
+them against its trusted history. Entries for routes outside the grant, including
+an unused synthesis route in an older snapshot, are not forwarded. The legacy v1
+grant does not carry efforts. Core refuses a v1 grant with an explicit effort for
+an executed route rather than silently dropping it, and Runner fails the job with
+a configuration failure in the same situation. The thawed job snapshot and
+`multi-review.json` retain the frozen selection, including efforts.
 
 ### Fallback state and explicit reset
 

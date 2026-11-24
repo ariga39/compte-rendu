@@ -28,13 +28,14 @@ export const RouteEffortOptions = Schema.Array(RouteEffortOption).check(
     { expected: 'distinct effort names' },
   ),
 );
+export const SourceEfforts = Schema.Record(RouteId, RouteEffortOptions);
 export const ModelRouteOverride = Schema.Struct({
   profile: ModelProfile,
   limit: Schema.optionalKey(ModelRouteLimit),
-  efforts: Schema.optionalKey(RouteEffortOptions),
 });
 export type ModelRouteOverride = typeof ModelRouteOverride.Type;
 const routeOverrides = Schema.Record(RouteId, ModelRouteOverride);
+const sourceEfforts = { efforts: Schema.optionalKey(SourceEfforts) };
 function nativeProfile(slug: string): ModelProfile | undefined {
   if (slug === 'native:anthropic') return 'messages';
   if (slug === 'native:google-ai-studio') return 'gemini';
@@ -44,6 +45,7 @@ export const RelayCatalogSource = Schema.Union([
   Schema.Struct({
     ...providerFields,
     ...profileFields,
+    ...sourceEfforts,
     discovery: Schema.Literal('gateway'),
     prefix: DiscoveryPrefix,
     aliases: Schema.optionalKey(aliases),
@@ -52,6 +54,7 @@ export const RelayCatalogSource = Schema.Union([
   Schema.Struct({
     ...providerFields,
     ...profileFields,
+    ...sourceEfforts,
     url: Schema.String.check(Schema.isPattern(/^https:\/\//)),
     prefix: DiscoveryPrefix,
     aliases: Schema.optionalKey(aliases),
@@ -60,6 +63,7 @@ export const RelayCatalogSource = Schema.Union([
   Schema.Struct({
     ...providerFields,
     ...profileFields,
+    ...sourceEfforts,
     aliases: aliases.check(
       Schema.makeFilter((value) => Object.keys(value).length > 0, {
         expected: 'at least one explicit alias',
@@ -71,16 +75,37 @@ export const RelayCatalogSource = Schema.Union([
   Schema.makeFilter(
     (source) => {
       const required = nativeProfile(source.providerSlug);
-      const profiles = [
+      const configuredProfiles = [
         ...(source.profile ? [source.profile] : []),
         ...(source.profiles ?? []),
+      ];
+      const profiles = [
+        ...configuredProfiles,
         ...Object.values(source.models ?? {}).map((m) => m.profile),
       ];
       if (required && !profiles.every((profile) => profile === required)) return false;
       // Reasoning effort injection is implemented for Chat only in this release.
-      return Object.values(source.models ?? {}).every(
-        (model) => model.efforts === undefined || model.profile === 'chat',
-      );
+      // An explicit alias/model profile is already knowable. Discovery routes are
+      // revalidated against their effective profile during refresh.
+      const choices =
+        configuredProfiles.length > 0
+          ? configuredProfiles
+          : [required ?? sourceDefaultProfile(source)];
+      for (const routeId of Object.keys(source.efforts ?? {})) {
+        const override = source.models?.[routeId];
+        if (override !== undefined) {
+          if (override.profile !== 'chat') return false;
+          continue;
+        }
+        if (Object.hasOwn(source.aliases ?? {}, routeId)) {
+          if (sourceDefaultProfile(source) !== 'chat') return false;
+          continue;
+        }
+        // An alias-only source has no other selectable route IDs.
+        if (!('prefix' in source)) return false;
+        if (!choices.includes('chat')) return false;
+      }
+      return true;
     },
     { expected: 'profile supported by the native Gateway destination' },
   ),

@@ -103,12 +103,20 @@ export async function handleRunnerLlmControl(
     if (selection.reviewers.length > 1) allowed.add(selection.synthesis);
     if (routes.length !== allowed.size || routes.some((route) => !allowed.has(route)))
       return new Response(null, { status: 409 });
-    // The admission snapshot is authoritative. Legacy runs have no efforts and
-    // v1 is a Chat-only legacy contract, so only v2 carries them onward.
-    const efforts = (configuration.efforts ?? []).filter((effort) => allowed.has(effort.routeId));
+    // The admission snapshot is authoritative, but a snapshot frozen by an
+    // older build may contain entries for routes this job does not call. Send
+    // only granted routes, and never forward an ungranted control. A
+    // generation-only default entry carries no instruction, so omit it;
+    // nonzero generations stay so reset state remains ordered.
+    const efforts = (configuration.efforts ?? []).filter(
+      (effort) =>
+        allowed.has(effort.routeId) && (effort.name !== undefined || effort.generation > 0),
+    );
+    // v1 cannot carry explicit controls. Refuse the grant rather than silently
+    // dropping the operator's selection.
     if (
-      issuePath === 2 &&
-      (configuration.efforts ?? []).some((effort) => !allowed.has(effort.routeId))
+      issuePath === 1 &&
+      efforts.some((effort) => effort.name !== undefined || effort.controls !== undefined)
     )
       return new Response(null, { status: 409 });
     const snapshot =

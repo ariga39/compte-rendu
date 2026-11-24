@@ -132,6 +132,13 @@ const readSource = async (
       // A well-formed model that offers none of the configured protocols is
       // omitted rather than failing the source snapshot.
       if (profile === undefined) continue;
+      const efforts = source.efforts?.[routeId] ?? [];
+      // A declared Chat effort on a route whose effective profile is not Chat
+      // invalidates the source refresh instead of silently dropping the menu.
+      if (efforts.length > 0 && profile !== 'chat') {
+        rejected += 1;
+        continue;
+      }
       if (profile === 'gemini' && !isGeminiUpstreamModel(entry.id)) {
         rejected += 1;
         continue;
@@ -140,7 +147,7 @@ const readSource = async (
         model: entry.id,
         profile,
         limit: override?.limit ?? null,
-        efforts: override?.efforts ?? [],
+        efforts,
       };
     }
     if (result.next === null) return { models, rejected };
@@ -202,9 +209,12 @@ function candidateSources(sources: readonly Source[], gateway: GatewayConfig | n
           model,
           profile: override?.profile ?? sourceDefaultProfile(source),
           limit: override?.limit ?? null,
-          efforts: override?.efforts ?? [],
+          efforts: source.efforts?.[id] ?? [],
         };
-        if (resolved.profile === 'gemini' && !isGeminiUpstreamModel(model)) {
+        if (
+          (resolved.efforts.length > 0 && resolved.profile !== 'chat') ||
+          (resolved.profile === 'gemini' && !isGeminiUpstreamModel(model))
+        ) {
           group.invalid = true;
           continue;
         }
