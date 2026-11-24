@@ -94,6 +94,11 @@ discovery route whose effective profile resolves to non-Chat, rejects that
 source refresh. With an existing `models` allowlist, only allowlisted routes
 remain visible; `efforts` never re-enables a filtered route.
 
+The menu is mutable only through a successful source publication. Changing,
+removing or adding a same-name effort updates new grants; a failed refresh
+keeps the previous menu and model snapshot, and already-admitted jobs keep their
+frozen controls. Effort changes never alter alias/discovery visibility.
+
 Only `reasoning_effort` (`minimal`, `low`, `medium`, `high`, `max`) or
 `thinking.type: "disabled"` is accepted, exactly one per effort. The browser
 submits route IDs and effort names only. Core resolves the trusted controls and

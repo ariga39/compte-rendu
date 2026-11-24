@@ -394,10 +394,11 @@ export const relayInference = (options: InferenceRelayOptions): Effect.Effect<Re
       currentAttempt().result = 'complete';
       fallback = retryUsed ? 'switched' : sharedFallback ? 'shared' : null;
       const accounting = await finishOnce(true);
-      if (!accounting.completed && (route.effort !== undefined || fallbackAt !== null)) {
-        // A revoked/superseded fallback admission must not release a success
-        // terminator or claim a shared switch. Legacy no-effort requests keep
-        // their historical best-effort completion accounting.
+      if (!accounting.completed && fallback === 'switched') {
+        // Only the first successful fallback is an atomic product commit: a
+        // failed/revoked/zero-match settlement must not release a success
+        // terminator or a switch event. Ordinary explicit/shared streams keep
+        // their historical best-effort termination on accounting failure.
         completed = false;
         await teardown();
         return;

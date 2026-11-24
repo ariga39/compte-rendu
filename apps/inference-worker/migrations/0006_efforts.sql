@@ -2,8 +2,6 @@
 -- trusted catalog data; browsers only submit route IDs and effort names.
 ALTER TABLE catalog_routes ADD COLUMN efforts_json TEXT NOT NULL DEFAULT '[]';
 
-ALTER TABLE catalog_sources ADD COLUMN route_efforts TEXT NOT NULL DEFAULT '{}';
-
 -- Shared fallback state is one row per route in this relay D1 database. The
 -- generation is advanced only by an explicit Core reset. A state row never
 -- applies to a newer generation.

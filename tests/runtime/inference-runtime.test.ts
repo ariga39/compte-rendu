@@ -249,6 +249,53 @@ describe('Inference Worker runtime boundaries', () => {
     }
   });
 
+  it('accepts generation-only effort metadata on non-Chat grants but rejects controls', async () => {
+    const routeId = 'legacy/responses';
+    await runtime.RELAY_DB.prepare(
+      `INSERT OR REPLACE INTO catalog_routes
+        (route_id, upstream_model, provider_slug, credential_alias, profile)
+       VALUES (?, 'responses-native', 'review-provider', 'review-alias', 'responses')`,
+    )
+      .bind(routeId)
+      .run();
+    try {
+      const issued = await runtime.INFERENCE.issueV2({
+        jobId: 'runtime-nonchat-generation',
+        snapshot: {
+          routes: [routeId],
+          efforts: [{ routeId, generation: 4 }],
+        },
+        latestIssueDeadline: (await d1Now()) + 60_000,
+      });
+      expect(issued).toMatchObject({
+        kind: 'issued',
+        descriptors: [{ routeId, profile: 'responses' }],
+      });
+      await runtime.INFERENCE.revoke({ jobId: 'runtime-nonchat-generation' });
+      await expect(
+        runtime.INFERENCE.issueV2({
+          jobId: 'runtime-nonchat-controls',
+          snapshot: {
+            routes: [routeId],
+            efforts: [
+              {
+                routeId,
+                generation: 4,
+                name: 'high',
+                controls: { reasoning_effort: 'high' },
+              },
+            ],
+          },
+          latestIssueDeadline: (await d1Now()) + 60_000,
+        }),
+      ).resolves.toEqual({ kind: 'invalid' });
+    } finally {
+      await runtime.RELAY_DB.prepare('DELETE FROM catalog_routes WHERE route_id = ?')
+        .bind(routeId)
+        .run();
+    }
+  });
+
   it('issues one frozen grant for a selection above the D1 parameter limit', async () => {
     const routes = Array.from({ length: 101 }, (_, index) => `bulk-${index}`);
     await runtime.RELAY_DB.prepare(
@@ -1046,6 +1093,208 @@ describe('Inference Worker public streaming', () => {
       efforts: [{ route: 'deepseek-review', selected: 'high', outcomes: [{ kind: null }] }],
     });
     await runtime.INFERENCE.revoke({ jobId: 'runtime-effort-report' });
+  });
+
+  it('keeps best-effort termination for ordinary explicit and shared accounting failures', async () => {
+    const routeId = 'fallback/accounting';
+    await runtime.RELAY_DB.prepare(
+      `INSERT OR REPLACE INTO catalog_routes
+        (route_id, upstream_model, provider_slug, credential_alias, profile, efforts_json)
+       VALUES (?, 'deepseek-v4-flash', 'review-provider', 'review-alias', 'chat', ?)`,
+    )
+      .bind(routeId, JSON.stringify([{ name: 'high', controls: { reasoning_effort: 'high' } }]))
+      .run();
+    await runtime.RELAY_DB.prepare('DELETE FROM route_effort_state WHERE route_id = ?')
+      .bind(routeId)
+      .run();
+    const installFailure = () =>
+      runtime.RELAY_DB.prepare(
+        `CREATE TRIGGER fail_effort_completion
+         BEFORE UPDATE OF status ON inference_requests
+         WHEN NEW.status = 'complete'
+         BEGIN SELECT RAISE(ABORT, 'injected accounting failure'); END`,
+      ).run();
+    const dropFailure = () =>
+      runtime.RELAY_DB.prepare('DROP TRIGGER IF EXISTS fail_effort_completion').run();
+    await control('success');
+    try {
+      const explicit = await runtime.INFERENCE.issueV2({
+        jobId: 'runtime-accounting-explicit',
+        snapshot: {
+          routes: [routeId],
+          efforts: [
+            {
+              routeId,
+              generation: 0,
+              name: 'high',
+              controls: { reasoning_effort: 'high' },
+            },
+          ],
+        },
+        latestIssueDeadline: (await d1Now()) + 60_000,
+      });
+      if (explicit.kind !== 'issued') throw new Error('grant unavailable');
+      await installFailure();
+      const explicitResponse = await request(explicit.token, { model: routeId, messages: [] });
+      expect(explicitResponse.status).toBe(200);
+      expect(await explicitResponse.text()).toContain('[DONE]');
+      await dropFailure();
+
+      await runtime.RELAY_DB.prepare(
+        `INSERT INTO route_effort_state (route_id, generation, fallback_at, reason)
+         VALUES (?, 0, ?, 'upstream rejected reasoning_effort')`,
+      )
+        .bind(routeId, Date.now())
+        .run();
+      const shared = await runtime.INFERENCE.issueV2({
+        jobId: 'runtime-accounting-shared',
+        snapshot: {
+          routes: [routeId],
+          efforts: [
+            {
+              routeId,
+              generation: 0,
+              name: 'high',
+              controls: { reasoning_effort: 'high' },
+            },
+          ],
+        },
+        latestIssueDeadline: (await d1Now()) + 60_000,
+      });
+      if (shared.kind !== 'issued') throw new Error('grant unavailable');
+      await installFailure();
+      const sharedResponse = await request(shared.token, { model: routeId, messages: [] });
+      expect(sharedResponse.status).toBe(200);
+      expect(await sharedResponse.text()).toContain('[DONE]');
+      await dropFailure();
+      await runtime.INFERENCE.revoke({ jobId: 'runtime-accounting-explicit' });
+      await runtime.INFERENCE.revoke({ jobId: 'runtime-accounting-shared' });
+    } finally {
+      await dropFailure();
+      await runtime.RELAY_DB.prepare('DELETE FROM route_effort_state WHERE route_id = ?')
+        .bind(routeId)
+        .run();
+      await runtime.RELAY_DB.prepare('DELETE FROM catalog_routes WHERE route_id = ?')
+        .bind(routeId)
+        .run();
+    }
+  });
+
+  it('suppresses the successful terminator when the first fallback settlement fails', async () => {
+    const routeId = 'fallback/settlement';
+    await runtime.RELAY_DB.prepare(
+      `INSERT OR REPLACE INTO catalog_routes
+        (route_id, upstream_model, provider_slug, credential_alias, profile, efforts_json)
+       VALUES (?, 'deepseek-v4-flash', 'review-provider', 'review-alias', 'chat', ?)`,
+    )
+      .bind(
+        routeId,
+        JSON.stringify([{ name: 'minimal', controls: { reasoning_effort: 'minimal' } }]),
+      )
+      .run();
+    await runtime.RELAY_DB.prepare('DELETE FROM route_effort_state WHERE route_id = ?')
+      .bind(routeId)
+      .run();
+    await runtime.RELAY_DB.prepare(
+      `CREATE TRIGGER fail_effort_completion
+       BEFORE UPDATE OF status ON inference_requests
+       WHEN NEW.status = 'complete'
+       BEGIN SELECT RAISE(ABORT, 'injected accounting failure'); END`,
+    ).run();
+    await control('deepseek-reject-minimal');
+    try {
+      const issued = await runtime.INFERENCE.issueV2({
+        jobId: 'runtime-settlement-failure',
+        snapshot: {
+          routes: [routeId],
+          efforts: [
+            {
+              routeId,
+              generation: 0,
+              name: 'minimal',
+              controls: { reasoning_effort: 'minimal' },
+            },
+          ],
+        },
+        latestIssueDeadline: (await d1Now()) + 60_000,
+      });
+      if (issued.kind !== 'issued') throw new Error('grant unavailable');
+      const response = await request(issued.token, { model: routeId, messages: [] });
+      expect(response.status).toBe(200);
+      await expect(response.text()).rejects.toThrow();
+      const state = await runtime.RELAY_DB.prepare(
+        'SELECT COUNT(*) AS count FROM route_effort_state WHERE route_id = ?',
+      )
+        .bind(routeId)
+        .first<{ readonly count: number }>();
+      expect(state?.count).toBe(0);
+      await runtime.INFERENCE.revoke({ jobId: 'runtime-settlement-failure' });
+    } finally {
+      await runtime.RELAY_DB.prepare('DROP TRIGGER IF EXISTS fail_effort_completion').run();
+      await runtime.RELAY_DB.prepare('DELETE FROM route_effort_state WHERE route_id = ?')
+        .bind(routeId)
+        .run();
+      await runtime.RELAY_DB.prepare('DELETE FROM catalog_routes WHERE route_id = ?')
+        .bind(routeId)
+        .run();
+    }
+  });
+
+  it('suppresses the first fallback terminator on an actual revoke before completion', async () => {
+    const routeId = 'fallback/revoke-settlement';
+    await runtime.RELAY_DB.prepare(
+      `INSERT OR REPLACE INTO catalog_routes
+        (route_id, upstream_model, provider_slug, credential_alias, profile, efforts_json)
+       VALUES (?, 'deepseek-v4-flash', 'review-provider', 'review-alias', 'chat', ?)`,
+    )
+      .bind(
+        routeId,
+        JSON.stringify([{ name: 'minimal', controls: { reasoning_effort: 'minimal' } }]),
+      )
+      .run();
+    await runtime.RELAY_DB.prepare('DELETE FROM route_effort_state WHERE route_id = ?')
+      .bind(routeId)
+      .run();
+    await control('deepseek-reject-minimal-then-hold');
+    try {
+      const issued = await runtime.INFERENCE.issueV2({
+        jobId: 'runtime-revoke-settlement',
+        snapshot: {
+          routes: [routeId],
+          efforts: [
+            {
+              routeId,
+              generation: 0,
+              name: 'minimal',
+              controls: { reasoning_effort: 'minimal' },
+            },
+          ],
+        },
+        latestIssueDeadline: (await d1Now()) + 60_000,
+      });
+      if (issued.kind !== 'issued') throw new Error('grant unavailable');
+      const before = (await upstreamState()).requests.length;
+      const pending = request(issued.token, { model: routeId, messages: [] });
+      await waitFor(async () => (await upstreamState()).requests.length === before + 2);
+      await runtime.INFERENCE.revoke({ jobId: 'runtime-revoke-settlement' });
+      await release();
+      const response = await pending;
+      expect(response.status).toBe(200);
+      await expect(response.text()).rejects.toThrow();
+      const state = await runtime.RELAY_DB.prepare(
+        'SELECT COUNT(*) AS count FROM route_effort_state WHERE route_id = ?',
+      )
+        .bind(routeId)
+        .first<{ readonly count: number }>();
+      expect(state?.count).toBe(0);
+    } finally {
+      await runtime.RELAY_DB.prepare('DELETE FROM route_effort_state WHERE route_id = ?')
+        .bind(routeId)
+        .run();
+      await runtime.RELAY_DB.prepare('DELETE FROM catalog_routes WHERE route_id = ?')
+        .bind(routeId)
+        .run();
+    }
   });
 
   it('rejects wrong, unknown, revoked and ungranted routes before upstream inference', async () => {

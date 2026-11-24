@@ -168,7 +168,11 @@ const issueFor = (database: D1DatabaseLike, version: 1 | 2) =>
         withEffort.push(route);
         continue;
       }
-      if (route.profile !== 'chat') return { kind: 'invalid' as const };
+      // Explicit controls are Chat-only. Generation-only metadata is accepted
+      // for any granted profile and ignored where it has no meaning, so a legacy
+      // Chat snapshot stays usable after the route's profile changes.
+      if (effort.name !== undefined && route.profile !== 'chat')
+        return { kind: 'invalid' as const };
       withEffort.push({
         ...route,
         effortGeneration: effort.generation,

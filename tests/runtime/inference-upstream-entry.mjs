@@ -477,6 +477,9 @@ export default {
         await releasePromise;
         return deepseekRejection(sent ?? 'missing');
       }
+      if (scenario === 'deepseek-reject-minimal-then-hold') {
+        return sent === 'minimal' ? deepseekRejection(sent) : heldResponse('deepseek-native');
+      }
       if (scenario === 'deepseek-reject-minimal' && sent !== 'minimal')
         return streamResponse(successWire('deepseek-native'));
       if (scenario === 'deepseek-reject-mismatch') return deepseekRejection('different-value');
