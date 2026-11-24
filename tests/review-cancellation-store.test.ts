@@ -196,7 +196,7 @@ describe('D1 cancellation store', () => {
     }
 
     await expect(
-      store.claimRunPublication?.({
+      store.claimRunPublication({
         runId,
         occurredAt: '2026-11-19T00:02:00.000Z',
         publishing: true,
@@ -244,7 +244,7 @@ describe('D1 cancellation store', () => {
       },
     });
     await expect(
-      store.listCancellationWork?.({
+      store.listCancellationWork({
         retryBefore: '2026-11-19T01:00:00.000Z',
         recoveryBefore: '2026-11-18T00:00:00.000Z',
         limit: 10,
@@ -267,7 +267,7 @@ describe('D1 cancellation store', () => {
       job: job(),
     });
     await expect(
-      store.claimRunPublication?.({
+      store.claimRunPublication({
         runId: publishedRun,
         occurredAt: '2026-11-19T00:01:00.000Z',
         publishing: true,
@@ -409,7 +409,7 @@ describe('D1 cancellation store', () => {
     const store = createTestReviewStore();
     const runId = await schedule(store, 'cancel-check-setup');
     await expect(
-      store.claimCheckSetup?.({
+      store.claimCheckSetup({
         runId,
         claimedAt: '2026-11-19T00:00:30.000Z',
         staleBefore: '2026-11-19T00:00:00.000Z',
@@ -421,21 +421,21 @@ describe('D1 cancellation store', () => {
       occurredAt: '2026-11-19T00:01:00.000Z',
     });
     await expect(
-      store.claimCheckSetup?.({
+      store.claimCheckSetup({
         runId,
         claimedAt: '2026-11-19T00:01:30.000Z',
         staleBefore: '2026-11-19T00:01:00.000Z',
       }),
     ).resolves.toBe(false);
     await expect(
-      store.recordCheckRun?.({
+      store.recordCheckRun({
         runId,
         checkRunId: 321,
         setupClaim: '2026-11-19T00:00:30.000Z',
       }),
     ).resolves.toBe(true);
 
-    const work = await store.listCancellationWork?.({
+    const work = await store.listCancellationWork({
       retryBefore: '2026-11-19T00:02:00.000Z',
       recoveryBefore: '2026-11-19T00:00:00.000Z',
       limit: 10,
@@ -448,40 +448,40 @@ describe('D1 cancellation store', () => {
         needsCheckReconciliation: true,
       },
     ]);
-    await store.recordCheckCancellationAttempt?.({
+    await store.recordCheckCancellationAttempt({
       runId,
       checkRunId: 321,
       occurredAt: '2026-11-19T00:02:00.000Z',
       expectedLastAttempt: null,
     });
     await expect(
-      store.listCancellationWork?.({
+      store.listCancellationWork({
         retryBefore: '2026-11-19T00:01:59.000Z',
         recoveryBefore: '2026-11-19T00:00:00.000Z',
         limit: 10,
       }),
     ).resolves.toEqual([]);
     await expect(
-      store.listCancellationWork?.({
+      store.listCancellationWork({
         retryBefore: '2026-11-19T00:02:00.000Z',
         recoveryBefore: '2026-11-19T00:00:00.000Z',
         limit: 10,
       }),
     ).resolves.toMatchObject([{ runId, needsCheckReconciliation: true }]);
-    await store.confirmCheckCancelled?.({
+    await store.confirmCheckCancelled({
       runId,
       checkRunId: 321,
       occurredAt: '2026-11-19T00:02:01.000Z',
     });
     await expect(
-      store.listCancellationWork?.({
+      store.listCancellationWork({
         retryBefore: '2026-11-19T01:00:00.000Z',
         recoveryBefore: '2026-11-19T00:00:00.000Z',
         limit: 10,
       }),
     ).resolves.toEqual([]);
     await expect(
-      store.confirmCheckCancelled?.({
+      store.confirmCheckCancelled({
         runId,
         checkRunId: 321,
         occurredAt: '2026-11-19T00:02:02.000Z',
@@ -521,14 +521,14 @@ describe('D1 cancellation store', () => {
       pullRequestNumber: 43,
       headSha: '3'.repeat(40),
     });
-    await store.recordCheckRun?.({ runId, checkRunId: 501 });
+    await store.recordCheckRun({ runId, checkRunId: 501 });
     await store.cancelRun({
       runId,
       requestedByUid: 1001,
       occurredAt: '2026-11-19T00:01:00.000Z',
     });
     await expect(
-      store.recordCheckCancellationAttempt?.({
+      store.recordCheckCancellationAttempt({
         runId,
         checkRunId: 501,
         occurredAt: '2026-11-19T00:01:30.000Z',
@@ -536,27 +536,27 @@ describe('D1 cancellation store', () => {
       }),
     ).resolves.toBe(true);
     await expect(
-      store.confirmCheckCancelled?.({
+      store.confirmCheckCancelled({
         runId,
         checkRunId: 501,
         occurredAt: '2026-11-19T00:01:31.000Z',
       }),
     ).resolves.toBe(true);
     await expect(
-      store.listCancellationWork?.({
+      store.listCancellationWork({
         retryBefore: '2026-11-19T00:02:00.000Z',
         recoveryBefore: '2026-11-19T00:00:00.000Z',
         limit: 10,
       }),
     ).resolves.toEqual([]);
 
-    await expect(store.reopenCheckCancellation?.({ runId, checkRunId: 501 })).resolves.toBe(true);
-    await expect(store.reopenCheckCancellation?.({ runId, checkRunId: 999 })).resolves.toBe(false);
+    await expect(store.reopenCheckCancellation({ runId, checkRunId: 501 })).resolves.toBe(true);
+    await expect(store.reopenCheckCancellation({ runId, checkRunId: 999 })).resolves.toBe(false);
     await expect(
-      store.reopenCheckCancellation?.({ runId: scheduledRun, checkRunId: 501 }),
+      store.reopenCheckCancellation({ runId: scheduledRun, checkRunId: 501 }),
     ).resolves.toBe(false);
     await expect(
-      store.listCancellationWork?.({
+      store.listCancellationWork({
         retryBefore: '2026-11-19T00:02:00.000Z',
         recoveryBefore: '2026-11-19T00:00:00.000Z',
         limit: 10,
@@ -564,7 +564,7 @@ describe('D1 cancellation store', () => {
     ).resolves.toMatchObject([{ runId, needsCheckReconciliation: true }]);
 
     await expect(
-      store.recordCheckCancellationAttempt?.({
+      store.recordCheckCancellationAttempt({
         runId,
         checkRunId: 501,
         occurredAt: '2026-11-19T00:02:01.000Z',
@@ -572,14 +572,14 @@ describe('D1 cancellation store', () => {
       }),
     ).resolves.toBe(true);
     await expect(
-      store.confirmCheckCancelled?.({
+      store.confirmCheckCancelled({
         runId,
         checkRunId: 501,
         occurredAt: '2026-11-19T00:02:02.000Z',
       }),
     ).resolves.toBe(true);
     await expect(
-      store.listCancellationWork?.({
+      store.listCancellationWork({
         retryBefore: '2026-11-19T00:02:03.000Z',
         recoveryBefore: '2026-11-19T00:00:00.000Z',
         limit: 10,
@@ -617,14 +617,14 @@ describe('D1 cancellation store', () => {
       sandboxName: 'sandbox',
       confirmedAt: '2026-11-19T00:02:00.000Z',
     };
-    await expect(store.validateRunnerCleanupRecovery?.(recovery)).resolves.toEqual({
+    await expect(store.validateRunnerCleanupRecovery(recovery)).resolves.toEqual({
       kind: 'recoverable',
     });
-    await expect(store.recoverRunnerCleanup?.(recovery)).resolves.toEqual({
+    await expect(store.recoverRunnerCleanup(recovery)).resolves.toEqual({
       kind: 'recovered',
       cleanupCompletedAt: '2026-11-19T00:02:00.000Z',
     });
-    await expect(store.validateRunnerCleanupRecovery?.(recovery)).resolves.toEqual({
+    await expect(store.validateRunnerCleanupRecovery(recovery)).resolves.toEqual({
       kind: 'already',
       cleanupCompletedAt: '2026-11-19T00:02:00.000Z',
     });
@@ -658,7 +658,7 @@ describe('D1 cancellation store', () => {
     });
 
     await expect(
-      store.listCancellationWork?.({
+      store.listCancellationWork({
         retryBefore: '2026-11-19T01:00:00.000Z',
         recoveryBefore: '2026-11-19T00:00:45.000Z',
         limit: 10,
@@ -676,7 +676,7 @@ describe('D1 cancellation store', () => {
     ]);
 
     await expect(
-      store.listCancellationWork?.({
+      store.listCancellationWork({
         retryBefore: '2026-11-19T01:00:00.000Z',
         recoveryBefore: '2026-11-19T00:02:00.000Z',
         limit: 10,
@@ -691,7 +691,7 @@ describe('D1 cancellation store', () => {
     ]);
 
     await expect(
-      store.confirmRunnerDestroyed?.({
+      store.confirmRunnerDestroyed({
         runId,
         jobId: 'foreign-job',
         attempt: 1,
@@ -699,7 +699,7 @@ describe('D1 cancellation store', () => {
       }),
     ).resolves.toBe(false);
     await expect(
-      store.confirmRunnerDestroyed?.({
+      store.confirmRunnerDestroyed({
         runId,
         jobId: 'recovery-job',
         attempt: 2,
@@ -707,7 +707,7 @@ describe('D1 cancellation store', () => {
       }),
     ).resolves.toBe(false);
     await expect(
-      store.confirmRunnerDestroyed?.({
+      store.confirmRunnerDestroyed({
         runId,
         jobId: 'recovery-job',
         attempt: 1,
@@ -737,7 +737,7 @@ describe('D1 cancellation store', () => {
       evidence: { key: 'late-cancellation-evidence' },
     });
     await expect(
-      store.listCancellationWork?.({
+      store.listCancellationWork({
         retryBefore: '2026-11-19T01:00:00.000Z',
         recoveryBefore: '2026-11-18T00:00:00.000Z',
         limit: 10,
@@ -775,14 +775,14 @@ describe('D1 cancellation store', () => {
     });
 
     await expect(
-      store.listCancellationWork?.({
+      store.listCancellationWork({
         retryBefore: '2026-11-19T01:00:00.000Z',
         recoveryBefore: '2026-11-18T00:00:00.000Z',
         limit: 10,
       }),
     ).resolves.toMatchObject([{ runId: firstRun }, { runId: secondRun }]);
     await expect(
-      store.listCancellationWork?.({
+      store.listCancellationWork({
         runId: secondRun,
         retryBefore: '2026-11-19T01:00:00.000Z',
         recoveryBefore: '2026-11-18T00:00:00.000Z',
@@ -790,7 +790,7 @@ describe('D1 cancellation store', () => {
       }),
     ).resolves.toMatchObject([{ runId: secondRun, needsRunnerStop: true }]);
     await expect(
-      store.listCancellationWork?.({
+      store.listCancellationWork({
         runId: 'missing-run',
         retryBefore: '2026-11-19T01:00:00.000Z',
         recoveryBefore: '2026-11-18T00:00:00.000Z',
@@ -803,7 +803,7 @@ describe('D1 cancellation store', () => {
     const store = createTestReviewStore();
     const runId = await schedule(store, 'cancellation-cas');
     await claimRunnerJob(store, { occurredAt: claimedAt, runId, jobId: 'cas-job', job: job() });
-    await store.recordCheckRun?.({ runId, checkRunId: 321 });
+    await store.recordCheckRun({ runId, checkRunId: 321 });
     await store.cancelRun({
       runId,
       requestedByUid: 1001,
@@ -811,7 +811,7 @@ describe('D1 cancellation store', () => {
     });
 
     const [snapshot] =
-      (await store.listCancellationWork?.({
+      (await store.listCancellationWork({
         runId,
         retryBefore: '2026-11-19T00:02:00.000Z',
         recoveryBefore: '2026-11-19T00:00:00.000Z',
@@ -826,14 +826,14 @@ describe('D1 cancellation store', () => {
     });
 
     const stopResults = await Promise.all([
-      store.recordRunnerStopAttempt!({
+      store.recordRunnerStopAttempt({
         runId,
         jobId: 'cas-job',
         attempt: 1,
         occurredAt: '2026-11-19T00:02:00.000Z',
         expectedLastAttempt: snapshot.runnerStopAttemptedAt,
       }),
-      store.recordRunnerStopAttempt!({
+      store.recordRunnerStopAttempt({
         runId,
         jobId: 'cas-job',
         attempt: 1,
@@ -844,13 +844,13 @@ describe('D1 cancellation store', () => {
     expect(stopResults.filter(Boolean)).toHaveLength(1);
 
     const checkResults = await Promise.all([
-      store.recordCheckCancellationAttempt!({
+      store.recordCheckCancellationAttempt({
         runId,
         checkRunId: 321,
         occurredAt: '2026-11-19T00:02:00.000Z',
         expectedLastAttempt: snapshot.checkCancelAttemptedAt,
       }),
-      store.recordCheckCancellationAttempt!({
+      store.recordCheckCancellationAttempt({
         runId,
         checkRunId: 321,
         occurredAt: '2026-11-19T00:02:01.000Z',
@@ -860,7 +860,7 @@ describe('D1 cancellation store', () => {
     expect(checkResults.filter(Boolean)).toHaveLength(1);
 
     const [leased] =
-      (await store.listCancellationWork?.({
+      (await store.listCancellationWork({
         runId,
         retryBefore: '2026-11-19T00:02:02.000Z',
         recoveryBefore: '2026-11-19T00:00:00.000Z',
@@ -875,7 +875,7 @@ describe('D1 cancellation store', () => {
     );
 
     await expect(
-      store.recordRunnerStopAttempt!({
+      store.recordRunnerStopAttempt({
         runId,
         jobId: 'cas-job',
         attempt: 1,
@@ -884,7 +884,7 @@ describe('D1 cancellation store', () => {
       }),
     ).resolves.toBe(true);
     await expect(
-      store.recordCheckCancellationAttempt!({
+      store.recordCheckCancellationAttempt({
         runId,
         checkRunId: 321,
         occurredAt: '2026-11-19T00:03:00.000Z',
@@ -892,7 +892,7 @@ describe('D1 cancellation store', () => {
       }),
     ).resolves.toBe(true);
     await expect(
-      store.recordRunnerStopAttempt!({
+      store.recordRunnerStopAttempt({
         runId,
         jobId: 'cas-job',
         attempt: 1,
@@ -901,7 +901,7 @@ describe('D1 cancellation store', () => {
       }),
     ).resolves.toBe(false);
     await expect(
-      store.recordCheckCancellationAttempt!({
+      store.recordCheckCancellationAttempt({
         runId,
         checkRunId: 321,
         occurredAt: '2026-11-19T00:04:00.000Z',
@@ -931,7 +931,7 @@ describe('D1 cancellation store', () => {
     }
 
     await expect(
-      store.listCancellationWork?.({
+      store.listCancellationWork({
         retryBefore: '2026-11-19T01:00:00.000Z',
         recoveryBefore: '2026-11-18T00:00:00.000Z',
         limit: 2,
@@ -940,7 +940,7 @@ describe('D1 cancellation store', () => {
       { runId: runIds[0], needsRunnerStop: true },
       { runId: runIds[1], needsRunnerStop: true },
     ]);
-    await store.recordRunnerStopAttempt?.({
+    await store.recordRunnerStopAttempt({
       runId: runIds[0] as string,
       jobId: 'runner-job-0',
       attempt: 1,
@@ -948,14 +948,14 @@ describe('D1 cancellation store', () => {
       expectedLastAttempt: null,
     });
     await expect(
-      store.listCancellationWork?.({
+      store.listCancellationWork({
         retryBefore: '2026-11-19T00:09:59.000Z',
         recoveryBefore: '2026-11-18T00:00:00.000Z',
         limit: 10,
       }),
     ).resolves.toMatchObject([{ runId: runIds[1] }, { runId: runIds[2] }]);
     await expect(
-      store.recordRunnerStopAttempt?.({
+      store.recordRunnerStopAttempt({
         runId: runIds[0] as string,
         jobId: 'foreign-job',
         attempt: 1,

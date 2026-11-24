@@ -156,8 +156,7 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
     failure?: PublicTaskFailure,
   ): Promise<ReviewOutcome | undefined> => {
     const notificationClaimed =
-      (outcome.status === 'scheduled' || outcome.status === 'failed') &&
-      stateStore.claimRunPublication !== undefined
+      outcome.status === 'scheduled' || outcome.status === 'failed'
         ? await stateStore.claimRunPublication({ runId, occurredAt })
         : false;
     const statusWriteSucceeded = await stateStore.markSchedulingFailed({
@@ -329,11 +328,7 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
       attempt: callback.attempt,
       occurredAt: new Date().toISOString(),
     });
-    if (
-      callback.lifecycle !== undefined &&
-      validateProgressSnapshot(callback.lifecycle) &&
-      stateStore.recordTerminalLifecycle !== undefined
-    ) {
+    if (callback.lifecycle !== undefined && validateProgressSnapshot(callback.lifecycle)) {
       const lifecycleAt = await Effect.runPromise(
         DateTime.now.pipe(Effect.map(DateTime.formatIso)),
       );
@@ -539,9 +534,6 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
     } catch {
       return new Response(null, { status: 400 });
     }
-    if (stateStore.invalidateRepositoryMetadataBatch === undefined) {
-      return new Response(null, { status: 503 });
-    }
     const observedAt = new Date().toISOString();
     await stateStore.invalidateRepositoryMetadataBatch({
       installationId: event.installationId,
@@ -568,7 +560,6 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
       return new Response(null, { status: 400 });
     }
     if (!validateProgressSnapshot(report)) return new Response(null, { status: 400 });
-    if (stateStore.recordProgress === undefined) return new Response(null, { status: 503 });
     const occurredAt = new Date().toISOString();
     const recorded = await stateStore
       .recordProgress({
@@ -884,7 +875,7 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
         const checkRunId = latest.checkRunId ?? current.checkRunId;
         if (wroteInProgress && checkRunId !== undefined) {
           await stateStore
-            .reopenCheckCancellation?.({ runId: claim.runId, checkRunId })
+            .reopenCheckCancellation({ runId: claim.runId, checkRunId })
             .catch(() => false);
           const confirmAt = await Effect.runPromise(
             DateTime.now.pipe(Effect.map(DateTime.formatIso)),
@@ -911,9 +902,7 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
       if (
         requestId &&
         !claim.replay &&
-        !(await stateStore
-          .markClaimPrepared?.(claim.runId, jobId, claim.attempt)
-          .catch(() => false))
+        !(await stateStore.markClaimPrepared(claim.runId, jobId, claim.attempt).catch(() => false))
       )
         return new Response(null, { status: 503 });
       return new Response(JSON.stringify(input), {

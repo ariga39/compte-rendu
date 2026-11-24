@@ -669,7 +669,7 @@ describe('Core Check setup and delivery reconciliation', () => {
     });
     if (claimed.kind !== 'claimed') throw new Error('retry run was not claimed');
     await claimRunnerJob(stateStore, { runId: claimed.runId, jobId: 'runner-job-1' });
-    await stateStore.recordCheckRun?.({ runId: claimed.runId, checkRunId: 321 });
+    await stateStore.recordCheckRun({ runId: claimed.runId, checkRunId: 321 });
     const reviews: unknown[] = [];
     const createChecks: unknown[] = [];
     const firstUpdates: unknown[] = [];
@@ -786,7 +786,7 @@ describe('Core Check setup and delivery reconciliation', () => {
     });
     if (claimed.kind !== 'claimed') throw new Error('retry run was not claimed');
     await claimRunnerJob(stateStore, { runId: claimed.runId, jobId: 'runner-job-1' });
-    await stateStore.recordCheckRun?.({ runId: claimed.runId, checkRunId: 321 });
+    await stateStore.recordCheckRun({ runId: claimed.runId, checkRunId: 321 });
     const reviews: unknown[] = [];
     let checkAvailable = false;
     const updates: string[] = [];
@@ -957,7 +957,7 @@ describe('Core Check setup and delivery reconciliation', () => {
     });
     if (claimed.kind !== 'claimed') throw new Error('failure run was not claimed');
     await claimRunnerJob(stateStore, { runId: claimed.runId, jobId: 'runner-job-1' });
-    await stateStore.recordCheckRun?.({ runId: claimed.runId, checkRunId: 321 });
+    await stateStore.recordCheckRun({ runId: claimed.runId, checkRunId: 321 });
     const reviews: unknown[] = [];
     const firstUpdates: string[] = [];
     const retriedUpdates: string[] = [];
@@ -1043,7 +1043,7 @@ describe('Core Check setup and delivery reconciliation', () => {
           occurredAt: `2026-09-01T00:00:0${index}.000Z`,
         });
         if (claimed.kind !== 'claimed') throw new Error('sweep run was not claimed');
-        await stateStore.recordCheckRun!({
+        await stateStore.recordCheckRun({
           runId: claimed.runId,
           checkRunId: 1000 + index,
         });
@@ -1051,7 +1051,7 @@ describe('Core Check setup and delivery reconciliation', () => {
           runId: claimed.runId,
           occurredAt: `2026-09-01T00:01:0${index % 10}.000Z`,
         });
-        await stateStore.claimCheckDelivery!({
+        await stateStore.claimCheckDelivery({
           runId: claimed.runId,
           checkRunId: 1000 + index,
           occurredAt: `2026-09-01T00:02:${String(index).padStart(2, '0')}.000Z`,

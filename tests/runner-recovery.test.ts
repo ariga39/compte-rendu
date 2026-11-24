@@ -2303,7 +2303,7 @@ describe('Runner backend outage recovery', () => {
         backendUp = true;
         await vi.waitFor(
           async () => {
-            expect(await stateStore.getPublicRun!(old.runId)).toMatchObject({
+            expect(await stateStore.getPublicRun(old.runId)).toMatchObject({
               status: 'failed',
               runnerCleanupStatus: 'destroyed',
             });

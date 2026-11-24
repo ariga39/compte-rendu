@@ -40,7 +40,7 @@ it('retries an unconfirmed operator stop, ends the Check, and acknowledges verif
     });
     if (queued.kind !== 'claimed') throw new Error('expected queued run');
     const { runId } = queued;
-    await state.recordCheckRun!({ runId, checkRunId: 42 });
+    await state.recordCheckRun({ runId, checkRunId: 42 });
     await state.claimNextJob({ jobId: 'job-one', attempt: 1, occurredAt: now.toISOString() });
     const stops: Request[] = [];
     const updateCheckRun = vi.fn(async () => {});
@@ -187,7 +187,7 @@ it.each([false, true])(
       });
       if (queued.kind !== 'claimed') throw new Error('expected queued run');
       const { runId } = queued;
-      await state.recordCheckRun!({ runId, checkRunId: 777 });
+      await state.recordCheckRun({ runId, checkRunId: 777 });
 
       const started = deferred<void>();
       const release = deferred<void>();
@@ -246,15 +246,15 @@ it.each([false, true])(
 
       if (repairFails) {
         expect(statuses.at(-1)).toBe('in_progress');
-        await expect(state.listCancellationWork!(cancellationWindow())).resolves.toMatchObject([
+        await expect(state.listCancellationWork(cancellationWindow())).resolves.toMatchObject([
           { runId, needsCheckReconciliation: true },
         ]);
         await core.reconcileCancellations(Date.now() + 61_000);
         expect(statuses.at(-1)).toBe('cancelled');
-        await expect(state.listCancellationWork!(cancellationWindow())).resolves.toEqual([]);
+        await expect(state.listCancellationWork(cancellationWindow())).resolves.toEqual([]);
       } else {
         expect(statuses.at(-1)).toBe('cancelled');
-        await expect(state.listCancellationWork!(cancellationWindow())).resolves.toEqual([]);
+        await expect(state.listCancellationWork(cancellationWindow())).resolves.toEqual([]);
       }
     } finally {
       database.close();
@@ -338,7 +338,7 @@ it.each(['lease', 'delivery'] as const)(
       });
       if (queued.kind !== 'claimed') throw new Error('expected queued run');
       const { runId } = queued;
-      await state.recordCheckRun!({ runId, checkRunId: 42 });
+      await state.recordCheckRun({ runId, checkRunId: 42 });
       await state.claimNextJob({ jobId: 'job-one', attempt: 1, occurredAt: now.toISOString() });
       const failLease = async () => {
         throw new Error('state credential ghp_state_secret');
@@ -395,7 +395,7 @@ it.each(['lease', 'delivery'] as const)(
         ]),
       );
       expect(JSON.stringify(events)).not.toMatch(/ghp_|secret/);
-      await expect(state.listCancellationWork!(cancellationWindow())).resolves.toMatchObject([
+      await expect(state.listCancellationWork(cancellationWindow())).resolves.toMatchObject([
         { runId, needsRunnerStop: true, needsCheckReconciliation: true },
       ]);
       expect((await core.cancelReview(runId, 123)).status).toBe(202);

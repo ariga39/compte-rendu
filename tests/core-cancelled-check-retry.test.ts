@@ -23,7 +23,7 @@ describe('Core cancelled Check retry feedback', () => {
       occurredAt: '2026-09-12T00:00:00.000Z',
     });
     if (failed.kind !== 'claimed') throw new Error('failed run was not claimed');
-    await stateStore.recordCheckRun?.({ runId: failed.runId, checkRunId: 321 });
+    await stateStore.recordCheckRun({ runId: failed.runId, checkRunId: 321 });
     await stateStore.markSchedulingFailed({
       runId: failed.runId,
       occurredAt: '2026-09-12T00:01:00.000Z',
@@ -113,7 +113,7 @@ describe('Core cancelled Check retry feedback', () => {
         });
         if (initial.kind !== 'claimed') throw new Error('cancelled run was not admitted');
         const runId = initial.runId;
-        await stateStore.recordCheckRun?.({ runId, checkRunId: 321 });
+        await stateStore.recordCheckRun({ runId, checkRunId: 321 });
         await claimRunnerJob(stateStore, {
           runId,
           jobId: 'runner-job-cancel-retry',
@@ -239,7 +239,7 @@ describe('Core cancelled Check retry feedback', () => {
         occurredAt: '2026-09-12T00:00:00.000Z',
       });
       if (older.kind !== 'claimed') throw new Error('older run was not admitted');
-      await stateStore.recordCheckRun?.({ runId: older.runId, checkRunId: 331 });
+      await stateStore.recordCheckRun({ runId: older.runId, checkRunId: 331 });
       const olderJob = await claimRunnerJob(stateStore, {
         runId: older.runId,
         jobId: 'runner-job-older-cancel',
@@ -250,7 +250,7 @@ describe('Core cancelled Check retry feedback', () => {
         requestedByUid: 1,
         occurredAt: '2026-09-12T00:00:20.000Z',
       });
-      await stateStore.confirmRunnerDestroyed!({
+      await stateStore.confirmRunnerDestroyed({
         runId: older.runId,
         jobId: olderJob.jobId,
         attempt: olderJob.attempt,
@@ -270,7 +270,7 @@ describe('Core cancelled Check retry feedback', () => {
         occurredAt: '2026-09-12T00:00:40.000Z',
       });
       if (newer.kind !== 'claimed') throw new Error('newer run was not admitted');
-      await stateStore.recordCheckRun?.({ runId: newer.runId, checkRunId: 332 });
+      await stateStore.recordCheckRun({ runId: newer.runId, checkRunId: 332 });
       const newerJob = await claimRunnerJob(stateStore, {
         runId: newer.runId,
         jobId: 'runner-job-newer-cancel',
@@ -341,7 +341,7 @@ describe('Core cancelled Check retry feedback', () => {
         }),
       ).resolves.toEqual({ kind: 'empty' });
 
-      await stateStore.confirmRunnerDestroyed!({
+      await stateStore.confirmRunnerDestroyed({
         runId: newer.runId,
         jobId: newerJob.jobId,
         attempt: newerJob.attempt,
@@ -386,7 +386,7 @@ describe('Core cancelled Check retry feedback', () => {
         occurredAt: '2026-09-12T00:00:00.000Z',
       });
       if (initial.kind !== 'claimed') throw new Error('stale run was not admitted');
-      await stateStore.recordCheckRun?.({ runId: initial.runId, checkRunId: 351 });
+      await stateStore.recordCheckRun({ runId: initial.runId, checkRunId: 351 });
       await claimRunnerJob(stateStore, {
         runId: initial.runId,
         jobId: 'runner-job-stale-clear-retry',
@@ -478,7 +478,7 @@ describe('Core cancelled Check retry feedback', () => {
         occurredAt: '2026-09-12T00:00:00.000Z',
       });
       if (failed.kind !== 'claimed') throw new Error('failed run was not admitted');
-      await stateStore.recordCheckRun?.({ runId: failed.runId, checkRunId: 341 });
+      await stateStore.recordCheckRun({ runId: failed.runId, checkRunId: 341 });
       await stateStore.markSchedulingFailed({
         runId: failed.runId,
         occurredAt: '2026-09-12T00:00:10.000Z',
@@ -703,7 +703,7 @@ describe('Core cancelled Check retry feedback', () => {
         occurredAt: '2026-09-12T00:00:00.000Z',
       });
       if (cancelled.kind !== 'claimed') throw new Error('cancelled run was not admitted');
-      await stateStore.recordCheckRun?.({ runId: cancelled.runId, checkRunId: 333 });
+      await stateStore.recordCheckRun({ runId: cancelled.runId, checkRunId: 333 });
       await claimRunnerJob(stateStore, {
         runId: cancelled.runId,
         jobId: 'runner-job-feedback-failed',
@@ -790,7 +790,7 @@ describe('Core cancelled Check retry feedback', () => {
       });
       if (initial.kind !== 'claimed') throw new Error('cancelled run was not admitted');
       const runId = initial.runId;
-      await stateStore.recordCheckRun?.({ runId, checkRunId: 322 });
+      await stateStore.recordCheckRun({ runId, checkRunId: 322 });
       await stateStore.cancelRun({
         runId,
         requestedByUid: 1,

@@ -136,8 +136,6 @@ const notFound = () =>
   new Response(null, { status: 404, headers: { 'cache-control': 'no-store' } });
 const badRequest = () =>
   new Response(null, { status: 400, headers: { 'cache-control': 'no-store' } });
-const unavailable = () =>
-  new Response(null, { status: 503, headers: { 'cache-control': 'no-store' } });
 
 const StatusValue = Schema.Literals([
   'all',
@@ -233,7 +231,6 @@ export const handleDashboardRequest = async (
   const now = nowIso();
 
   if (url.pathname === '/api/dashboard' || url.pathname === '/dashboard') {
-    if (store.getPublicOverview === undefined) return unavailable();
     const since = isoFromMs(Date.parse(now) - DAY_MS);
     const { counts, rows } = await store.getPublicOverview({ since, limit: DEFAULT_LIMIT });
     const last = rows.at(-1);
@@ -256,7 +253,6 @@ export const handleDashboardRequest = async (
   }
 
   if (url.pathname === '/api/jobs' || url.pathname === '/jobs') {
-    if (store.listPublicRuns === undefined) return unavailable();
     const raw = {
       ...(url.searchParams.has('status') ? { status: url.searchParams.get('status') } : {}),
       ...(url.searchParams.has('cleanup') ? { cleanup: url.searchParams.get('cleanup') } : {}),
@@ -301,7 +297,6 @@ export const handleDashboardRequest = async (
 
   const detailPrefix = '/api/jobs/';
   if (url.pathname.startsWith(detailPrefix) || url.pathname.startsWith('/jobs/')) {
-    if (store.getPublicRun === undefined) return unavailable();
     const prefix = url.pathname.startsWith(detailPrefix) ? detailPrefix : '/jobs/';
     let runId: string;
     try {
@@ -395,22 +390,14 @@ export const refreshRepositoryMetadata = async (
     durationMs: await elapsed(),
     budgetExhausted,
   });
-  if (
-    store.listDueRepositoryMetadata === undefined ||
-    store.claimRepositoryRefresh === undefined ||
-    store.recordRepositoryRefresh === undefined ||
-    store.deferRepositoryRefresh === undefined
-  ) {
-    return finish('unavailable');
-  }
   const now = dependencies.now ?? nowIso();
   const backlog = await store.getRepositoryRefreshBacklog({ now });
-  dueAtStart = backlog?.due ?? null;
+  dueAtStart = backlog.due;
   oldestDueAgeMs =
-    backlog?.oldestDueAt == null
+    backlog.oldestDueAt == null
       ? null
       : Math.max(0, Date.parse(now) - Date.parse(backlog.oldestDueAt));
-  const cooldown = (await store.getRefreshCooldown()) ?? undefined;
+  const cooldown = await store.getRefreshCooldown();
   if (cooldown !== undefined && cooldown > now) return finish('cooldown');
   const timeoutMs = dependencies.timeoutMs ?? REFRESH_TIMEOUT_MS;
   const batch = dependencies.batch ?? DEFAULT_BATCH;
@@ -421,7 +408,7 @@ export const refreshRepositoryMetadata = async (
   let throttled = false;
   const processRow = async (row: RepositoryMetadataRow): Promise<void> => {
     if (throttled) return;
-    const claimed = await store.claimRepositoryRefresh!({
+    const claimed = await store.claimRepositoryRefresh({
       installationId: row.installationId,
       repositoryId: row.repositoryId,
       expectedRevision: row.revision,
@@ -446,7 +433,7 @@ export const refreshRepositoryMetadata = async (
       );
       const identityExpiresAt =
         metadata.visibility === 'public' ? isoFromMs(Date.parse(now) + IDENTITY_LIFETIME_MS) : null;
-      await store.recordRepositoryRefresh!({
+      await store.recordRepositoryRefresh({
         installationId: row.installationId,
         repositoryId: row.repositoryId,
         expectedRevision: row.revision,
@@ -479,7 +466,7 @@ export const refreshRepositoryMetadata = async (
           nextRefreshAt: retryAt,
         });
         if (revoked !== true) {
-          await store.deferRepositoryRefresh!({
+          await store.deferRepositoryRefresh({
             installationId: row.installationId,
             repositoryId: row.repositoryId,
             expectedRevision: row.revision,
@@ -491,7 +478,7 @@ export const refreshRepositoryMetadata = async (
         return;
       }
       failed += 1;
-      await store.deferRepositoryRefresh!({
+      await store.deferRepositoryRefresh({
         installationId: row.installationId,
         repositoryId: row.repositoryId,
         expectedRevision: row.revision,

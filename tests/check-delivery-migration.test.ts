@@ -31,26 +31,26 @@ describe('Check delivery migration', () => {
     try {
       database.migrateThrough('0017_review_check_delivery.sql');
       const store = createD1ReviewStateStore(database);
-      await expect(store.listPendingCheckDeliveries!({ limit: 10 })).resolves.toEqual([]);
+      await expect(store.listPendingCheckDeliveries({ limit: 10 })).resolves.toEqual([]);
 
       await expect(
-        store.claimCheckDelivery!({
+        store.claimCheckDelivery({
           runId: 'historical-run',
           checkRunId: 321,
           occurredAt: '2026-11-19T00:02:00.000Z',
         }),
       ).resolves.toBe(true);
-      await expect(store.listPendingCheckDeliveries!({ limit: 10 })).resolves.toEqual([
+      await expect(store.listPendingCheckDeliveries({ limit: 10 })).resolves.toEqual([
         { runId: 'historical-run', checkRunId: 321 },
       ]);
       await expect(
-        store.confirmCheckDelivery!({
+        store.confirmCheckDelivery({
           runId: 'historical-run',
           checkRunId: 321,
           occurredAt: '2026-11-19T00:03:00.000Z',
         }),
       ).resolves.toBe(true);
-      await expect(store.listPendingCheckDeliveries!({ limit: 10 })).resolves.toEqual([]);
+      await expect(store.listPendingCheckDeliveries({ limit: 10 })).resolves.toEqual([]);
     } finally {
       database.close();
     }

@@ -948,7 +948,7 @@ describe('Core admission, claims, and manual policy', () => {
         expect((await stateStore.getRunOutcome(fresh.runId))?.status).toBe('scheduled');
         expect(
           (
-            await stateStore.getPublicOverview!({
+            await stateStore.getPublicOverview({
               since: '2026-09-01T00:00:00.000Z',
               limit: 10,
             })
@@ -1031,7 +1031,7 @@ describe('Core admission, claims, and manual policy', () => {
       expect(expired?.cleanup).toBeUndefined();
       expect(
         (
-          await stateStore.getPublicOverview!({
+          await stateStore.getPublicOverview({
             since: '2026-09-01T00:00:00.000Z',
             limit: 10,
           })
@@ -1350,17 +1350,17 @@ describe('Core admission, claims, and manual policy', () => {
       const staleFailure = await scheduleAndClaim(62);
       const activePublication = await scheduleAndClaim(63);
 
-      await stateStore.recordResultReceived!({
+      await stateStore.recordResultReceived({
         runId: freshResult.runId,
         jobId: freshResult.jobId,
         attempt: 1,
         occurredAt: '2026-09-01T00:50:00.000Z',
       });
-      await stateStore.claimRunPublication!({
+      await stateStore.claimRunPublication({
         runId: staleFailure.runId,
         occurredAt: '2026-09-01T00:05:00.000Z',
       });
-      await stateStore.claimRunPublication!({
+      await stateStore.claimRunPublication({
         runId: activePublication.runId,
         occurredAt: '2026-09-01T00:05:00.000Z',
         publishing: true,
@@ -1445,7 +1445,7 @@ describe('Core admission, claims, and manual policy', () => {
         });
         expect(
           (
-            await stateStore.getPublicOverview!({
+            await stateStore.getPublicOverview({
               since: '2026-09-01T00:00:00.000Z',
               limit: 10,
             })
@@ -1831,7 +1831,7 @@ describe('Core admission, claims, and manual policy', () => {
       });
       if (claimed.kind !== 'claimed') throw new Error('test run was not claimed');
       await claimRunnerJob(stateStore, { runId: claimed.runId, jobId: 'runner-job-1' });
-      await stateStore.recordCheckRun?.({ runId: claimed.runId, checkRunId: 321 });
+      await stateStore.recordCheckRun({ runId: claimed.runId, checkRunId: 321 });
 
       const stored: Array<{ key: string; value: ArrayBuffer | string }> = [];
       const reviews: unknown[] = [];
@@ -2038,8 +2038,6 @@ describe('Core admission, claims, and manual policy', () => {
       if (claimed.kind !== 'claimed') throw new Error('recovery run was not claimed');
       await claimRunnerJob(stateStore, { runId: claimed.runId, jobId: 'runner-job-1' });
       // The Worker stopped after claiming publication. GitHub may have accepted the POST.
-      if (stateStore.claimRunPublication === undefined)
-        throw new Error('publication claim unavailable');
       await stateStore.claimRunPublication({
         runId: claimed.runId,
         occurredAt: '2026-09-01T00:00:04.000Z',
