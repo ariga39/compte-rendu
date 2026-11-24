@@ -284,6 +284,15 @@ refresh updates it, and the next grant uses the new value; an already-issued
 grant keeps its frozen route mapping. Changing only a limit needs no new route
 ID or manual override.
 
+Runner treats a route ID in `provider/model` form as the OpenCode logical model
+identity: the first path segment is the provider ID, the remainder is the short
+model ID, and the full authorized route ID is still sent as the wire `modelID`.
+This keeps same-named models from different prefixes separately selectable while
+their requests continue through the job relay. Provider configuration uses that
+same first segment as `canonical`; it does not inherit a native provider endpoint
+or credential. Unqualified route IDs keep the historical `compte-rendu/<route>`
+identity. Gemini retains its opaque relay handle as the transport `modelID`.
+
 Discovery retains each provider's complete model entry. The v2 grant maps only
 the OpenCode-supported model information at the client boundary: display name,
 family, release date, tool/media capabilities, reasoning variants and per-token
@@ -298,8 +307,8 @@ and preserves a historical route served by another upstream.
 [
   {
     "discovery": "gateway",
-    "prefix": "review-provider/",
-    "providerSlug": "custom-review",
+    "prefix": "opencode-go/",
+    "providerSlug": "custom-opencode-go",
     "credentialAlias": "default"
   },
   {
