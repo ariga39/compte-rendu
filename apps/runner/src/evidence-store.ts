@@ -41,21 +41,19 @@ export const secureEvidenceTree = async (root: string): Promise<void> => {
 export const redactEvidenceTextFiles = async (
   evidencePath: string,
   secrets: readonly string[],
-  sessionIds: readonly string[],
 ): Promise<boolean> => {
   const active = secrets.filter((value) => value.length > 0);
   if (active.length === 0) return false;
   let found = false;
+  const entries = await readdir(evidencePath);
   for (const name of [
     'opencode.jsonl',
     'opencode.stderr',
     'validated-review.md',
     'opencode-session-list.json',
     'multi-review.json',
-    ...(await readdir(evidencePath)).filter((name) =>
-      /^opencode-child-sessions-[1-9]\d*\.json$/.test(name),
-    ),
-    ...sessionIds.map((id) => `opencode-export-${id}.json`),
+    ...entries.filter((name) => /^opencode-child-sessions-[1-9]\d*\.json$/.test(name)),
+    ...entries.filter((name) => /^opencode-export-[A-Za-z0-9._:-]+\.json$/.test(name)),
   ]) {
     const path = join(evidencePath, name);
     let text: string;
@@ -116,15 +114,22 @@ export const archiveEvidence = async (input: {
   readonly agent: RunnerProcessResult | undefined;
   readonly submissionSessionId: string | undefined;
   readonly multiSelection: MultiReviewSelection | undefined;
+  readonly sessionIds: string[];
 }): Promise<{
   readonly complete: boolean;
   readonly terminal: boolean;
-  readonly sessionIds: readonly string[];
 }> => {
-  const { evidencePath, sandbox, archivePort, agent, submissionSessionId, multiSelection } = input;
+  const {
+    evidencePath,
+    sandbox,
+    archivePort,
+    agent,
+    submissionSessionId,
+    multiSelection,
+    sessionIds,
+  } = input;
   let complete = agent?.streamError !== true;
   let terminal = false;
-  const sessionIds: string[] = [];
   const fileExists = async (path: string) => {
     try {
       await stat(path);
@@ -317,7 +322,7 @@ export const archiveEvidence = async (input: {
   if (sessionIds.some((sessionId) => !files.includes(`opencode-export-${sessionId}.json`))) {
     complete = false;
   }
-  return { complete, terminal, sessionIds };
+  return { complete, terminal };
 };
 
 const callbackEvidence = async (input: {

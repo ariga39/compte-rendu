@@ -53,6 +53,35 @@ describe('Runner Job HTTP interface', () => {
     },
   );
 
+  it('expires the archive budget and still destroys the sandbox and delivers the callback', async () => {
+    let now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const callbacks: Request[] = [];
+    let advanced = false;
+    try {
+      const run = await runAgentScenario({
+        runId: 'archive-budget-exhausted',
+        output: finalMarkdownJsonl(),
+        callbackRequests: callbacks,
+        onProcess: (args) => {
+          if (!advanced && args[0] === 'cp') {
+            advanced = true;
+            now += 2 * 60 * 1000 + 1;
+          }
+        },
+      });
+      expect(advanced).toBe(true);
+      expect(run.terminal).toMatchObject({
+        status: 'failed',
+        failure: { reason: 'evidence' },
+        sandbox: { cleanup: 'destroyed' },
+      });
+      expect(callbacks).toHaveLength(1);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   it('does not claim durable work until local Job admission is fully configured', async () => {
     let claims = 0;
     for (const overrides of [
