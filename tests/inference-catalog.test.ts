@@ -1295,7 +1295,7 @@ it('rejects a discovered Gemini override whose model id is not one segment', asy
   }
 });
 
-it('exposes only the explicit allowlist from an ID-only listing and freezes configured limits', async () => {
+it('exposes the explicit allowlist and refreshes configured model limits', async () => {
   const db = database();
   const source = {
     url: 'https://api.openai.example/v1/models',
@@ -1320,14 +1320,6 @@ it('exposes only the explicit allowlist from an ID-only listing and freezes conf
     expect(await catalog.get()).toMatchObject({
       routes: ['openai-platform/gpt-6.2-sol'],
       lastRefreshError: null,
-    });
-    expect(
-      db.database
-        .prepare('SELECT profile, limit_json FROM catalog_routes WHERE route_id = ?')
-        .get('openai-platform/gpt-6.2-sol'),
-    ).toEqual({
-      profile: 'responses',
-      limit_json: '{"context":1050000,"output":128000}',
     });
 
     const issued = await createGrantControl(db).issueV2({
@@ -1367,16 +1359,49 @@ it('exposes only the explicit allowlist from an ID-only listing and freezes conf
     await changed.refresh(100);
     expect(await changed.get()).toMatchObject({
       routes: ['openai-platform/gpt-6.2-sol'],
-      lastSuccessAt: new Date(50).toISOString(),
-      lastRefreshError: 'route mapping conflict',
+      lastSuccessAt: new Date(100).toISOString(),
+      lastRefreshError: null,
     });
-    expect(
-      db.database
-        .prepare('SELECT profile, limit_json FROM catalog_routes WHERE route_id = ?')
-        .get('openai-platform/gpt-6.2-sol'),
-    ).toEqual({
-      profile: 'responses',
-      limit_json: '{"context":1050000,"output":128000}',
+    await expect(
+      createGrantControl(db).issueV2({
+        jobId: 'job-sol-updated',
+        snapshot: { routes: ['openai-platform/gpt-6.2-sol'] },
+        latestIssueDeadline: deadline(),
+      }),
+    ).resolves.toMatchObject({
+      kind: 'issued',
+      descriptors: [
+        {
+          routeId: 'openai-platform/gpt-6.2-sol',
+          profile: 'responses',
+          limit: { context: 1_050_000, output: 100_000 },
+        },
+      ],
+    });
+
+    const removed = createRelayCatalog(db, [
+      {
+        ...source,
+        models: {
+          'openai-platform/gpt-6.2-sol': { profile: 'responses' },
+        },
+      },
+    ]);
+    await removed.refresh(150);
+    expect(await removed.get()).toMatchObject({
+      routes: ['openai-platform/gpt-6.2-sol'],
+      lastSuccessAt: new Date(150).toISOString(),
+      lastRefreshError: null,
+    });
+    await expect(
+      createGrantControl(db).issueV2({
+        jobId: 'job-sol-removed',
+        snapshot: { routes: ['openai-platform/gpt-6.2-sol'] },
+        latestIssueDeadline: deadline(),
+      }),
+    ).resolves.toMatchObject({
+      kind: 'issued',
+      descriptors: [{ routeId: 'openai-platform/gpt-6.2-sol', profile: 'responses' }],
     });
   } finally {
     db.close();
@@ -1421,15 +1446,6 @@ it('retains discovered model metadata in v2 descriptors without exposing catalog
       routes: ['go/deepseek-v4.1-flash'],
       lastRefreshError: null,
     });
-    expect(
-      JSON.parse(
-        (
-          db.database
-            .prepare('SELECT metadata_json FROM catalog_routes WHERE route_id = ?')
-            .get('go/deepseek-v4.1-flash') as { readonly metadata_json: string }
-        ).metadata_json,
-      ),
-    ).toMatchObject(entry);
 
     const issued = await createGrantControl(db).issueV2({
       jobId: 'job-metadata',
@@ -1468,7 +1484,7 @@ it('retains discovered model metadata in v2 descriptors without exposing catalog
   }
 });
 
-it('fills a previously missing discovered limit on an existing route during refresh', async () => {
+it('refreshes an upstream model limit without changing the route', async () => {
   const db = database();
   const source = {
     url: 'https://models.example/v1/models',
@@ -1480,11 +1496,6 @@ it('fills a previously missing discovered limit on an existing route during refr
     let entries: unknown[] = [{ id: 'model' }];
     vi.stubGlobal('fetch', async () => Response.json({ data: entries }));
     await createRelayCatalog(db, [source]).refresh(50);
-    expect(
-      db.database
-        .prepare('SELECT limit_json FROM catalog_routes WHERE route_id = ?')
-        .get('go/model'),
-    ).toEqual({ limit_json: null });
     await expect(
       createGrantControl(db).issueV2({
         jobId: 'job-before-limit',
@@ -1496,18 +1507,13 @@ it('fills a previously missing discovered limit on an existing route during refr
       descriptors: [{ routeId: 'go/model', profile: 'chat' }],
     });
 
-    entries = [{ id: 'model', limit: { context: 1_000, output: 500 } }];
+    entries = [{ id: 'model', name: 'Model 2', limit: { context: 2_000, output: 500 } }];
     await createRelayCatalog(db, [source]).refresh(100);
     expect(await createRelayCatalog(db, [source]).get()).toMatchObject({
       routes: ['go/model'],
-      lastRefreshError: null,
       lastSuccessAt: new Date(100).toISOString(),
+      lastRefreshError: null,
     });
-    expect(
-      db.database
-        .prepare('SELECT limit_json FROM catalog_routes WHERE route_id = ?')
-        .get('go/model'),
-    ).toEqual({ limit_json: '{"context":1000,"output":500}' });
     await expect(
       createGrantControl(db).issueV2({
         jobId: 'job-after-limit',
@@ -1517,82 +1523,14 @@ it('fills a previously missing discovered limit on an existing route during refr
     ).resolves.toMatchObject({
       kind: 'issued',
       descriptors: [
-        { routeId: 'go/model', profile: 'chat', limit: { context: 1_000, output: 500 } },
+        {
+          routeId: 'go/model',
+          profile: 'chat',
+          limit: { context: 2_000, output: 500 },
+          metadata: { name: 'Model 2' },
+        },
       ],
     });
-    expect(
-      JSON.parse(
-        (
-          db.database
-            .prepare('SELECT route_mapping FROM grants WHERE job_id = ?')
-            .get('job-before-limit') as { readonly route_mapping: string }
-        ).route_mapping,
-      ),
-    ).toEqual([
-      {
-        routeId: 'go/model',
-        upstreamModel: 'model',
-        providerSlug: 'custom-go',
-        credentialAlias: 'default',
-        profile: 'chat',
-      },
-    ]);
-
-    entries = [{ id: 'model', name: 'Model 2', limit: { context: 2_000, output: 500 } }];
-    await createRelayCatalog(db, [source]).refresh(200);
-    expect(await createRelayCatalog(db, [source]).get()).toMatchObject({
-      routes: ['go/model'],
-      lastSuccessAt: new Date(200).toISOString(),
-      lastRefreshError: null,
-    });
-    expect(
-      db.database
-        .prepare(
-          'SELECT limit_json, limit_source, metadata_json FROM catalog_routes WHERE route_id = ?',
-        )
-        .get('go/model'),
-    ).toMatchObject({
-      limit_json: '{"context":2000,"output":500}',
-      limit_source: 'discovered',
-    });
-    expect(
-      JSON.parse(
-        (
-          db.database
-            .prepare('SELECT metadata_json FROM catalog_routes WHERE route_id = ?')
-            .get('go/model') as { readonly metadata_json: string }
-        ).metadata_json,
-      ),
-    ).toMatchObject({ name: 'Model 2' });
-    await expect(
-      createGrantControl(db).issueV2({
-        jobId: 'job-after-limit-2',
-        snapshot: { routes: ['go/model'] },
-        latestIssueDeadline: deadline(),
-      }),
-    ).resolves.toMatchObject({
-      kind: 'issued',
-      descriptors: [
-        { routeId: 'go/model', profile: 'chat', limit: { context: 2_000, output: 500 } },
-      ],
-    });
-    expect(
-      JSON.parse(
-        (
-          db.database
-            .prepare('SELECT route_mapping FROM grants WHERE job_id = ?')
-            .get('job-before-limit') as { readonly route_mapping: string }
-        ).route_mapping,
-      ),
-    ).toEqual([
-      {
-        routeId: 'go/model',
-        upstreamModel: 'model',
-        providerSlug: 'custom-go',
-        credentialAlias: 'default',
-        profile: 'chat',
-      },
-    ]);
   } finally {
     db.close();
   }
@@ -1741,7 +1679,7 @@ it('keeps unqualified ID-only discovery unchanged', async () => {
   }
 });
 
-it('resolves each alias from its producing source and rejects conflicting descriptors', async () => {
+it('resolves each alias from its producing source and rejects conflicting destinations or protocols', async () => {
   const db = database();
   const source = (
     aliases: Record<string, string>,
@@ -1765,10 +1703,10 @@ it('resolves each alias from its producing source and rejects conflicting descri
         { 'route-b': 'model-b' },
         { 'route-b': { profile: 'responses', limit: { context: 200, output: 50 } } },
       ),
-      // Same resolved descriptor, different object key order: not a conflict.
+      // Same route and destination with a changed refreshable limit is not a conflict.
       source(
         { 'route-a': 'model-a' },
-        { 'route-a': { profile: 'chat', limit: { output: 50, context: 100 } } },
+        { 'route-a': { profile: 'chat', limit: { output: 60, context: 300 } } },
       ),
     ]);
     await catalog.refresh(10);
@@ -1781,7 +1719,7 @@ it('resolves each alias from its producing source and rejects conflicting descri
         .prepare('SELECT route_id, profile, limit_json FROM catalog_routes ORDER BY route_id')
         .all(),
     ).toEqual([
-      { route_id: 'route-a', profile: 'chat', limit_json: '{"context":100,"output":50}' },
+      { route_id: 'route-a', profile: 'chat', limit_json: '{"context":300,"output":60}' },
       { route_id: 'route-b', profile: 'responses', limit_json: '{"context":200,"output":50}' },
     ]);
 
@@ -1810,7 +1748,7 @@ it('resolves each alias from its producing source and rejects conflicting descri
         .prepare('SELECT route_id, profile, limit_json FROM catalog_routes ORDER BY route_id')
         .all(),
     ).toEqual([
-      { route_id: 'route-a', profile: 'chat', limit_json: '{"context":100,"output":50}' },
+      { route_id: 'route-a', profile: 'chat', limit_json: '{"context":300,"output":60}' },
       { route_id: 'route-b', profile: 'responses', limit_json: '{"context":200,"output":50}' },
     ]);
   } finally {
@@ -1818,7 +1756,7 @@ it('resolves each alias from its producing source and rejects conflicting descri
   }
 });
 
-it('keeps a differently limited alias visible beside its discovered route', async () => {
+it('prefers the discovered route when an alias differs only by a refreshable limit', async () => {
   const db = database();
   try {
     vi.stubGlobal('fetch', async () => Response.json({ data: [{ id: 'model' }] }));
@@ -1838,8 +1776,18 @@ it('keeps a differently limited alias visible beside its discovered route', asyn
     ]);
     await catalog.refresh(10);
     expect(await catalog.get()).toMatchObject({
-      routes: ['legacy', 'p/model'],
+      routes: ['p/model'],
       lastRefreshError: null,
+    });
+    await expect(
+      createGrantControl(db).issueV2({
+        jobId: 'job-legacy-alias-limit',
+        snapshot: { routes: ['legacy'] },
+        latestIssueDeadline: deadline(),
+      }),
+    ).resolves.toMatchObject({
+      kind: 'issued',
+      descriptors: [{ routeId: 'legacy', profile: 'chat', limit: { context: 100 } }],
     });
   } finally {
     db.close();
