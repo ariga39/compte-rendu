@@ -1,8 +1,8 @@
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createRunner } from '../apps/runner/src/runner';
+import { createRunner, runProcess } from '../apps/runner/src/runner';
 import { createClaimExecution } from './support/runner-execution';
 import { createSbxSandboxBackend } from '../apps/runner/src/sandbox-runtime-sbx';
 import type {
@@ -296,6 +296,90 @@ describe('Runner sbx startup reconciliation', () => {
       expect(commands).toContainEqual(['secret', 'ls', '--json', '--sandbox', spec.name]);
       await claimGateOpen(runner);
       await expectDrained(runner);
+    } finally {
+      await runner.close();
+    }
+  });
+
+  it('recovers an owned Sandbox through the production process runner', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-sbx-process-recovery-'));
+    roots.push(root);
+    vi.stubEnv('TMPDIR', root);
+    const spec = jobSpec(root, 'job-process-recovery');
+    await mkdir(spec.checkoutRoot, { recursive: true });
+    await mkdir(spec.configRoot, { recursive: true });
+    const { runtime, exec } = createSbxJob(spec, null, ownershipRoot(root));
+    await runtime.setup(exec);
+
+    const stateRoot = join(root, 'state');
+    await mkdir(stateRoot);
+    await writeFile(join(stateRoot, 'present'), '');
+    await writeFile(join(stateRoot, 'rule'), '');
+    const cli = join(root, 'sbx-fixture-cli');
+    await writeFile(
+      cli,
+      `#!/bin/sh
+state="\${CR_STATE}"
+case "$1" in
+  inspect)
+    if [ -f "$state/present" ]; then
+      printf '{"name":"%s","workspace":"%s","additional_workspaces":[{"dir":"%s"}]}\\n' "\${CR_SANDBOX}" "\${CR_WORKSPACE}" "\${CR_CONFIG}"
+    else
+      printf "error: sandbox '%s' not found\\n" "\${CR_SANDBOX}" >&2
+      exit 1
+    fi
+    ;;
+  rm)
+    rm -f "$state/present"
+    ;;
+  policy)
+    if [ "$2" = "ls" ]; then
+      if [ -f "$state/rule" ]; then
+        printf '{"rules":[{"id":"owned-rule","resources":["%s","%s"],"sandbox_id":"%s","editable":true}]}\\n' "\${CR_MODEL_RESOURCE}" "\${CR_GITHUB_RESOURCE}" "\${CR_SANDBOX}"
+      else
+        printf '{"rules":[]}\\n'
+      fi
+    elif [ "$2" = "rm" ]; then
+      rm -f "$state/rule"
+    fi
+    ;;
+  secret)
+    if [ "$2" = "ls" ]; then printf '{"secrets":[],"custom_secrets":[]}\\n'; fi
+    ;;
+esac
+exit 0
+`,
+      { mode: 0o755 },
+    );
+    vi.stubEnv('RUNNER_SANDBOX_CLI', cli);
+    vi.stubEnv('CR_STATE', stateRoot);
+    vi.stubEnv('CR_SANDBOX', spec.name);
+    vi.stubEnv('CR_WORKSPACE', spec.checkoutRoot);
+    vi.stubEnv('CR_CONFIG', spec.configRoot);
+    vi.stubEnv('CR_MODEL_RESOURCE', spec.modelResource);
+    vi.stubEnv('CR_GITHUB_RESOURCE', spec.githubResource);
+
+    const runner = createRunner({
+      evidenceRoot: root,
+      instanceId: DEFAULT_INSTANCE_ID,
+      authToken: 'runner-test-token',
+      claimUrl: '',
+      modelConfig: JSON.stringify({
+        id: 'opencode-go/review',
+        baseUrl: 'https://llm.internal.example/v1',
+        definition: { name: 'Review' },
+      }),
+      process: runProcess,
+    });
+
+    try {
+      await vi.waitFor(
+        async () => {
+          await expect(readdir(ownershipRoot(root))).resolves.toHaveLength(0);
+          await expect(readFile(join(stateRoot, 'present'))).rejects.toThrow();
+        },
+        { timeout: 5_000 },
+      );
     } finally {
       await runner.close();
     }

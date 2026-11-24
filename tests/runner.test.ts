@@ -1007,22 +1007,27 @@ const completedWithoutSubmitJsonl = (sessionId: string) =>
   });
 
 describe('Runner Job HTTP interface', () => {
-  it('fails sbx direct startup without a model credential resolver', () => {
-    const previous = process.env.MODEL_SECRET_COMMAND;
-    try {
-      delete process.env.MODEL_SECRET_COMMAND;
-      expect(() =>
-        createProductionRunner({
-          modelConfig: standardModelConfig,
-          callbackUrl: 'https://ingress.test/runner-callback',
-          callbackToken: 'callback-token',
-          claimUrl: 'https://ingress.test/runner-claim',
-        }),
-      ).toThrow(/MODEL_SECRET_COMMAND/);
-    } finally {
-      if (previous !== undefined) process.env.MODEL_SECRET_COMMAND = previous;
-    }
-  });
+  it.each([undefined, '', '   '])(
+    'fails sbx direct startup without a usable model credential resolver: %j',
+    (resolver) => {
+      const previous = process.env.MODEL_SECRET_COMMAND;
+      try {
+        if (resolver === undefined) delete process.env.MODEL_SECRET_COMMAND;
+        else process.env.MODEL_SECRET_COMMAND = resolver;
+        expect(() =>
+          createProductionRunner({
+            modelConfig: standardModelConfig,
+            callbackUrl: 'https://ingress.test/runner-callback',
+            callbackToken: 'callback-token',
+            claimUrl: 'https://ingress.test/runner-claim',
+          }),
+        ).toThrow(/MODEL_SECRET_COMMAND/);
+      } finally {
+        if (previous === undefined) delete process.env.MODEL_SECRET_COMMAND;
+        else process.env.MODEL_SECRET_COMMAND = previous;
+      }
+    },
+  );
 
   it('does not claim durable work until local Job admission is fully configured', async () => {
     let claims = 0;

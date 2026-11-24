@@ -27,6 +27,10 @@ type SbxCommand = (
 ) => Promise<RunnerProcessResult>;
 
 const MAX_POLICY_JSON_BYTES = 256 * 1024;
+const nonEmpty = (value: string | undefined): string | undefined => {
+  const trimmed = value?.trim();
+  return trimmed === undefined || trimmed.length === 0 ? undefined : trimmed;
+};
 const SBX_MODEL_ENV = 'OPENCODE_API_KEY';
 const SBX_LAUNCHER = 'shell';
 const SBX_EVIDENCE_ROOT = '/tmp/petit-chiba-opencode-evidence';
@@ -433,7 +437,12 @@ const redactSbxStderr = (
   options: SbxRuntimeOptions,
   result: RunnerProcessResult,
 ): RunnerProcessResult => {
-  if (options.modelSecretCommand === undefined || result.stderr === undefined) return result;
+  if (
+    options.modelSecretCommand === undefined ||
+    options.modelSecretCommand.length === 0 ||
+    result.stderr === undefined
+  )
+    return result;
   const stderr = result.stderr.replaceAll(options.modelSecretCommand, '[redacted]');
   return stderr === result.stderr ? result : { ...result, stderr };
 };
@@ -892,7 +901,9 @@ const confirmSbxCleanup = Effect.fn('confirmSbxCleanup')(function* (
 
 export const createSbxSandboxBackend = (context: SandboxBackendContext): SandboxBackend => {
   const program = process.env.RUNNER_SANDBOX_CLI ?? process.env.SBX_BIN ?? 'sbx';
-  const modelSecretCommand = context.relayEnabled ? undefined : process.env.MODEL_SECRET_COMMAND;
+  const modelSecretCommand = context.relayEnabled
+    ? undefined
+    : nonEmpty(process.env.MODEL_SECRET_COMMAND);
   if (!context.relayEnabled && modelSecretCommand === undefined) {
     throw new Error(
       'sbx direct mode requires MODEL_SECRET_COMMAND to resolve the model credential',

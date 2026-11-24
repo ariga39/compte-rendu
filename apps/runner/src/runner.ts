@@ -107,6 +107,11 @@ const ARCHIVE_COMMAND_TIMEOUT_MS = 30 * 1000;
 const ARCHIVE_PHASE_TIMEOUT_MS = 2 * 60 * 1000;
 const MAX_CHILD_SESSION_PAGES = 100;
 const MAX_DIAGNOSTIC_STDERR_BYTES = 4 * 1024;
+// Instance-level backend commands are independent of a job's remaining budget.
+// Preserve the prior recovery command's bounded capture and short timeout;
+// per-call options still override these defaults where a finer bound is known.
+const INSTANCE_COMMAND_TIMEOUT_MS = CLEANUP_COMMAND_TIMEOUT_MS;
+const MAX_INSTANCE_COMMAND_BYTES = 256 * 1024;
 const MAX_AGENT_OUTPUT_BYTES = MAX_REVIEW_RESULT_BYTES;
 const MAX_REQUEST_BYTES = 64 * 1024;
 const CALLBACK_REQUEST_TIMEOUT_MS = 30 * 1000;
@@ -1063,8 +1068,14 @@ export const createRunner = (options: RunnerOptions = {}) => {
   if (!RUNNER_INSTANCE_ID.test(instanceId)) throw new Error('invalid Runner instance identity');
   const sandboxOwnershipRoot = join(evidenceRoot, 'sandbox-owners', instanceId);
   const executeProcess = options.process ?? runProcess;
-  const hostRun: HostRun = (program, args, processOptions) =>
-    executeProcess(program, args, processOptions);
+  const hostRun: HostRun = (program, args, processOptions = {}) =>
+    executeProcess(program, args, {
+      captureStdout: true,
+      captureStderr: true,
+      maxBytes: MAX_INSTANCE_COMMAND_BYTES,
+      timeoutMs: INSTANCE_COMMAND_TIMEOUT_MS,
+      ...processOptions,
+    });
   const sandboxBackend =
     options.sandboxBackend ??
     createSandboxBackend(

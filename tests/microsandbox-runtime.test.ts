@@ -1,10 +1,13 @@
-import { randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { expect, it } from 'vitest';
-import { runProcess } from '../apps/runner/src/runner.js';
-import { createMicrosandboxSandboxBackend } from '../apps/runner/src/sandbox-runtime-microsandbox.js';
+import { expect, it, vi } from 'vitest';
+import { createRunner, runProcess } from '../apps/runner/src/runner.js';
+import {
+  createMicrosandboxSandboxBackend,
+  microsandboxCatalogIdentity,
+} from '../apps/runner/src/sandbox-runtime-microsandbox.js';
 import type { HostRun, SandboxExecPort } from '../apps/runner/src/sandbox-runtime.js';
 
 it.skipIf(!process.env.CR_MICROSANDBOX_NATIVE_IMAGE)(
@@ -140,6 +143,108 @@ it('destroys the sandbox after a pending credential update settles', async () =>
   } finally {
     if (previousHome === undefined) delete process.env.MSB_HOME;
     else process.env.MSB_HOME = previousHome;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it('recovers an owned sandbox through the production process runner', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cr-msb-process-recovery-'));
+  const previous = {
+    home: process.env.MSB_HOME,
+    cli: process.env.RUNNER_SANDBOX_CLI,
+    runtime: process.env.RUNNER_SANDBOX_RUNTIME,
+    image: process.env.MICROSANDBOX_IMAGE,
+  };
+  try {
+    await mkdir(join(root, 'db'));
+    await writeFile(join(root, 'db', 'msb.db'), 'catalog');
+    process.env.MSB_HOME = root;
+    const id = 'job-process-recovery';
+    const sandboxName = `compte-rendu-${id}`;
+    const instanceId = 'test-runner';
+    const owners = join(root, 'sandbox-owners', instanceId);
+    const markerRoot = join(owners, 'microsandbox');
+    await mkdir(markerRoot, { recursive: true });
+    const catalog = await microsandboxCatalogIdentity();
+    await writeFile(
+      join(markerRoot, `${createHash('sha256').update(id).digest('hex')}.json`),
+      `${JSON.stringify({
+        version: 1,
+        jobId: id,
+        sandboxName,
+        catalog,
+        owner: 'owner-1',
+        createAttempted: true,
+      })}\n`,
+    );
+
+    const stateRoot = join(root, 'state');
+    await mkdir(stateRoot);
+    await writeFile(join(stateRoot, 'present'), 'owner-1');
+    const cli = join(root, 'msb-fixture-cli');
+    await writeFile(
+      cli,
+      `#!/bin/sh
+state="$MSB_HOME/state"
+case "$1" in
+  inspect)
+    if [ -f "$state/present" ]; then
+      owner=$(cat "$state/present")
+      printf '{"name":"%s","config":{"labels":{"cr-job-owner":"%s"}}}\\n' "${sandboxName}" "$owner"
+    else
+      printf 'error: sandbox not found: %s\\n' "${sandboxName}" >&2
+      exit 1
+    fi
+    ;;
+  rm)
+    rm -f "$state/present"
+    ;;
+esac
+exit 0
+`,
+      { mode: 0o755 },
+    );
+
+    process.env.RUNNER_SANDBOX_CLI = cli;
+    process.env.RUNNER_SANDBOX_RUNTIME = 'microsandbox';
+    process.env.MICROSANDBOX_IMAGE = 'fixture';
+    const runner = createRunner({
+      evidenceRoot: root,
+      instanceId,
+      authToken: 'runner-test-token',
+      claimUrl: '',
+      llmRelay: true,
+      llmRelayGeneration: 'generation-1',
+      callbackUrl: 'https://ingress.test/runner-callback',
+      callbackToken: 'callback-token',
+      modelConfig: JSON.stringify({
+        id: 'opencode-go/review',
+        baseUrl: 'https://llm.internal.example/v1',
+        definition: { name: 'Review' },
+      }),
+      process: runProcess,
+    });
+    try {
+      await vi.waitFor(
+        async () => {
+          await expect(readdir(markerRoot)).resolves.toHaveLength(0);
+          await expect(readFile(join(stateRoot, 'present'))).rejects.toThrow();
+        },
+        { timeout: 5_000 },
+      );
+    } finally {
+      await runner.close();
+    }
+  } finally {
+    for (const [key, value] of [
+      ['MSB_HOME', previous.home],
+      ['RUNNER_SANDBOX_CLI', previous.cli],
+      ['RUNNER_SANDBOX_RUNTIME', previous.runtime],
+      ['MICROSANDBOX_IMAGE', previous.image],
+    ] as const) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
     await rm(root, { recursive: true, force: true });
   }
 });
