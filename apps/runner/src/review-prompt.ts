@@ -60,23 +60,41 @@ const outputInstruction =
   'Never label an incomplete review or a context/tooling failure approve. Do not infer the decision from finding counts or process exit codes. ' +
   'Concision, the TLDR template and review style are instructions, not additional validity rules.';
 
-export const reviewPrompt = (input: ReviewPromptInput): string => {
-  const reviewers = input.reviewers ?? [];
+const reviewTaskSection = (input: ReviewPromptInput): string => {
   const task =
     `Review ${input.repositoryName} pull request #${input.pullRequestNumber}. ` +
     `${reviewScope} ${reviewLimits} ${reviewContext(input)} ${reviewSkill}`;
+  return `Review task:\n${task}\n\nFinal output:\n${outputInstruction}`;
+};
+
+// Native foreground subagents receive this trusted per-job contract through
+// their configured `system` field. The supervisor only supplies the fixed short
+// dispatch instruction, so it cannot paraphrase or omit the task.
+export const reviewerSystemPrompt = (input: ReviewPromptInput): string =>
+  `You are one independent reviewer for this configured review.\n\n${reviewTaskSection(input)}`;
+
+const reviewerInstruction =
+  'Perform one independent review using the complete task and output contract in your system instructions.';
+
+export const reviewPrompt = (input: ReviewPromptInput): string => {
+  const reviewers = input.reviewers ?? [];
+  if (reviewers.length <= 1) {
+    return (
+      'There is one configured reviewer. Perform the review directly and return its final conclusion; no extra delegation or synthesis turn is needed.\n' +
+      `\n${reviewTaskSection(input)}`
+    );
+  }
   const execution =
-    reviewers.length > 1
-      ? 'Start all configured reviewers in parallel using foreground subagent tasks (background: false) for one independent review each. Wait for every configured reviewer to return, then synthesize one final review:\n' +
-        reviewers.map(({ participant, model }) => `- ${participant}: ${model}`).join('\n') +
-        '\nThe Review task is for the independent reviewers. As supervisor, do not load the skill yourself; pass its loading instruction to each reviewer. ' +
-        'Give each reviewer both the Review task and Final output sections below in full. Delegate repository inspection to the reviewers. ' +
-        'Once their reviews return, only synthesize the supplied results: compare their evidence, remove duplicates and weak claims, and preserve substantive disagreements rather than forcing consensus. ' +
-        'Do not load skills or inspect code during synthesis; use only the supplied reviews to handle conflicting advice. ' +
-        'Do not request follow-up reviews or verification rounds, and do not inspect the repository again to verify their conclusions. ' +
-        'Express unresolved uncertainty in the final review instead of starting another round.\n'
-      : 'There is one configured reviewer. Perform the review directly and return its final conclusion; no extra delegation or synthesis turn is needed.\n';
-  return `${execution}\nReview task:\n${task}\n\nFinal output:\n${outputInstruction}`;
+    'Start all configured reviewers in parallel using foreground subagent tasks (background: false) for one independent review each. ' +
+    `For every configured reviewer below, use exactly this task instruction as the prompt: "${reviewerInstruction}" ` +
+    'Do not restate, summarize, or replace that trusted task. Wait for every configured reviewer to return, then synthesize one final review:\n' +
+    reviewers.map(({ participant, model }) => `- ${participant}: ${model}`).join('\n') +
+    '\nThe full Review task and Final output contract are provided to each reviewer in its system instructions. As supervisor, do not load the skill yourself. Delegate repository inspection to the reviewers. ' +
+    'Once their reviews return, only synthesize the supplied results: compare their evidence, remove duplicates and weak claims, and preserve substantive disagreements rather than forcing consensus. ' +
+    'Do not load skills or inspect code during synthesis; use only the supplied reviews to handle conflicting advice. ' +
+    'Do not request follow-up reviews or verification rounds, and do not inspect the repository again to verify their conclusions. ' +
+    'Express unresolved uncertainty in the final review instead of starting another round.\n';
+  return `${execution}\nFinal output:\n${outputInstruction}`;
 };
 
 export const reviewCorrectionPrompt =
