@@ -556,6 +556,7 @@ export const runAgentScenario = async (scenario: {
   evidenceRoot?: string;
   repositoryReadToken?: string;
   agentProcess?: (options: RunnerProcessOptions) => Promise<RunnerProcessResult>;
+  onProcess?: (args: readonly string[], options: RunnerProcessOptions) => void | Promise<void>;
   sandboxBackend?: SandboxBackend;
   logEvents?: unknown[];
   onRunner?: (runner: ReturnType<typeof createRunner>) => void;
@@ -645,6 +646,7 @@ export const runAgentScenario = async (scenario: {
               },
             },
       process: async (_command, args, options = {}) => {
+        await scenario.onProcess?.(args, options);
         if (_command === 'msb') {
           const ok = { exitCode: 0, stdout: '', truncated: false, timedOut: false };
           if (args[0] === 'create') msbOwner = args[args.indexOf('--label') + 1]?.split('=')[1];

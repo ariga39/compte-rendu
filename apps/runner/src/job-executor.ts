@@ -11,6 +11,7 @@ import type { ChildProcess } from 'node:child_process';
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Effect } from 'effect';
 import type {
   RunnerDiagnostic,
   RunnerProcess,
@@ -1078,6 +1079,9 @@ export const createJobExecutor = (deps: JobExecutorDependencies) => {
           job.usage = await llmServiceClient?.usage(job.id);
         } catch {
           // Usage is optional telemetry: preserve review/cleanup outcomes when unavailable.
+          void Effect.runPromise(
+            Effect.logWarning('llm.usage.unavailable', { jobId: job.id }),
+          ).catch(() => undefined);
         }
       }
       const submissionSessionId =
@@ -1086,16 +1090,10 @@ export const createJobExecutor = (deps: JobExecutorDependencies) => {
       if (evidenceReady && job.sandboxCreated) {
         job.progress?.stage('evidence');
         try {
+          const archiveDeadlineAt = currentEpochMillis() + ARCHIVE_PHASE_TIMEOUT_MS;
           const archivePort: SandboxExecPort = {
             run: (program, args, processOptions, diagnostic) =>
-              runArchive(
-                job,
-                program,
-                args,
-                currentEpochMillis() + ARCHIVE_PHASE_TIMEOUT_MS,
-                processOptions,
-                diagnostic,
-              ),
+              runArchive(job, program, args, archiveDeadlineAt, processOptions, diagnostic),
           };
           const archived = await archiveEvidence({
             evidencePath,
@@ -1104,8 +1102,8 @@ export const createJobExecutor = (deps: JobExecutorDependencies) => {
             agent,
             submissionSessionId,
             multiSelection: job.input.reviewConfiguration?.selection ?? undefined,
+            sessionIds: job.sessionIds,
           });
-          job.sessionIds = [...archived.sessionIds];
           evidenceComplete = archived.complete;
           sessionTerminal = archived.terminal;
           if (!evidenceComplete) evidenceFailure = 'archive-incomplete';
@@ -1119,7 +1117,7 @@ export const createJobExecutor = (deps: JobExecutorDependencies) => {
         const evidenceSecrets = jobCredentialValues(job);
         if (evidenceSecrets.length > 0) {
           try {
-            if (await redactEvidenceTextFiles(evidencePath, evidenceSecrets, job.sessionIds)) {
+            if (await redactEvidenceTextFiles(evidencePath, evidenceSecrets)) {
               failure ??= { reason: 'evidence' };
               evidenceComplete = false;
               evidenceFailure = 'credential-in-output';
@@ -1663,6 +1661,9 @@ export const createJobExecutor = (deps: JobExecutorDependencies) => {
             job.deadlineAt = fallbackAt;
             job.deadlineLimit = 'credential';
           }
+          void Effect.runPromise(
+            Effect.logWarning('runner.read-token.refresh-failed', { jobId: job.id }),
+          ).catch(() => undefined);
         },
         reachCredentialDeadline: () => {
           if (Date.now() >= job.deadlineAt) stopExecution();
@@ -1687,7 +1688,13 @@ export const createJobExecutor = (deps: JobExecutorDependencies) => {
     } finally {
       handle.setAbortHandler(undefined);
       job.readToken?.stop();
+      job.readToken?.clearSecrets();
       job.progress?.stop();
+      job.grantToken = '';
+      job.processCredentialValues.length = 0;
+      job.sandbox = undefined;
+      job.multiReview = undefined;
+      job.sessionIds = [];
       handle.resolveDone();
     }
   };
