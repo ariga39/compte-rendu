@@ -332,6 +332,33 @@ models. Cleanup failure keeps same-PR replacement blocked until destruction is
 confirmed. Check/analytics/progress delivery is best effort and must not become
 an execution gate. Do not extend fail-closed into unrelated speculative controls.
 
+## Runner state ownership
+
+`createRunner` is an assembly point and HTTP adapter. It delegates to focused
+owners instead of holding every execution object:
+
+- `JobRegistry` retains only the public state and small lifecycle handle for an
+  admitted job: identity, SHAs, cleanup-recovery flags, `abort()` and `done`.
+  Sandboxes, child processes, token leases, sessions, grants and host temporary
+  directories are not stored there.
+- `ClaimScheduler` owns single-flight claiming, claim reservation IDs, queued
+  stop replay, drain/resume, outage staging and the startup claim gate.
+- `CleanupReconciler` owns retained-evidence cleanup recovery, startup/orphan
+  reconciliation, deferred recovery and replay delivery.
+- `JobExecutor` owns one execution stack. Its sandbox, child process, token
+  lease, progress reporter, grant material, checkout/config/grant directories,
+  sessions, usage and multi-review evidence live only for that execution and
+  are released when it finishes. Finalization order remains grant revocation,
+  evidence archival/redaction, manifest finalization, cleanup, callback and
+  finally job retirement.
+- `GrantLedger`, `ReadTokenLease`, `ProgressReporter`, the evidence store and the
+  host process port own their own state and timers. Claim scheduling and cleanup
+  recovery depend on these narrow ports, never on the assembly module.
+
+A new backend still only implements the sandbox backend contract; these owners
+remain unchanged. Runner tests are split by public behavior domain and share
+fixtures through `tests/support/runner-harness.ts`.
+
 ## Deep modules and test seams
 
 Tests observe public behavior through these established seams:
