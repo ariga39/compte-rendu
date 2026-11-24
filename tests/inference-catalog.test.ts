@@ -1868,6 +1868,7 @@ it('lets an explicit no-tools capability beat the legacy chat default', async ()
             id: 'no-tools',
             api: { responses: {} },
             capabilities: { tools: { supported: false } },
+            limit: { context: 8_192, output: 0 },
           },
           { id: 'ordinary', api: { responses: {} } },
         ],
@@ -1884,6 +1885,7 @@ it('lets an explicit no-tools capability beat the legacy chat default', async ()
     await catalog.refresh(10);
     expect(await catalog.get()).toMatchObject({
       routes: ['p/ordinary'],
+      rejected: 0,
       lastRefreshError: null,
     });
   } finally {
@@ -1917,6 +1919,43 @@ it('preserves the previous snapshot for malformed rich capabilities', async () =
     expect(await catalog.get()).toMatchObject({
       routes: ['p/saved'],
       lastSuccessAt: new Date(10).toISOString(),
+      lastRefreshError: 'refresh failed',
+    });
+  } finally {
+    db.close();
+  }
+});
+
+it('rejects malformed reviewable entries and invalid-ID non-tool entries', async () => {
+  const db = database();
+  const source = {
+    url: 'https://models.example/models',
+    prefix: 'p/',
+    providerSlug: 'custom-review',
+    credentialAlias: 'default',
+  };
+  try {
+    vi.stubGlobal('fetch', async () =>
+      Response.json({
+        data: [
+          {
+            id: 'reviewable-chat',
+            capabilities: { tools: { supported: true } },
+            limit: { context: 1_000, output: 0 },
+          },
+          {
+            id: 'invalid id',
+            capabilities: { tools: { supported: false } },
+            limit: { context: 1_000, output: 0 },
+          },
+        ],
+      }),
+    );
+    const catalog = createRelayCatalog(db, [source]);
+    await catalog.refresh(50);
+    expect(await catalog.get()).toMatchObject({
+      routes: [],
+      rejected: 2,
       lastRefreshError: 'refresh failed',
     });
   } finally {
