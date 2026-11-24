@@ -31,7 +31,11 @@ inference remains the evidence that a model worked for a particular request.
 
 ### Refresh and storage
 
-Keep the existing immutable route mappings for grant issuance. Store each source’s complete selectable membership in one D1 row, including
+Keep the existing immutable route mappings for grant issuance. Route mapping
+and profile remain immutable, as does an explicit operator limit. Provider-
+advertised model metadata, including an advertised limit, refreshes normally
+and affects the next grant; already-issued grants keep their frozen mapping.
+Store each source’s complete selectable membership in one D1 row, including
 a valid empty list. A shared refresh timestamp orders the atomic batch. Derive the source key from normalized provider
 slug, credential alias, discovery mode, prefix and configured URL where applicable.
 Reordering configuration must not change identity. Explicitly configured aliases

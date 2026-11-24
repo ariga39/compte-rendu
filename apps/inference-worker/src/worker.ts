@@ -41,6 +41,10 @@ import type { FrozenRoute } from './routes.ts';
 const INFERENCE_MAX_BYTES = 16 * 1024 * 1024;
 const GatewayIdentity = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const UsageInput = Schema.Struct({ jobId: Schema.NonEmptyString });
+const CatalogInput = Schema.Struct({
+  includeModels: Schema.optionalKey(Schema.Boolean),
+  models: Schema.optionalKey(Schema.Boolean),
+});
 const DetailInput = Schema.Struct({
   jobId: Schema.NonEmptyString,
   cursor: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(512))),
@@ -219,8 +223,13 @@ export class InferenceWorker extends WorkerEntrypoint<InferenceWorkerEnv> {
     return createRelayCatalog(this.env.RELAY_DB, sources, gatewayConfig(this.env));
   }
 
-  catalog() {
-    return this.#modelCatalog().get();
+  catalog(input: unknown = {}) {
+    const decoded = Schema.decodeUnknownOption(CatalogInput, { onExcessProperty: 'error' })(input);
+    if (Option.isNone(decoded)) return this.#modelCatalog().get();
+    const { includeModels, models } = decoded.value;
+    return this.#modelCatalog().get(
+      includeModels === true || models === true ? { includeModels: true } : {},
+    );
   }
 
   refreshCatalog(scheduledTime: number) {

@@ -398,6 +398,62 @@ it('requires the operator bearer to read the relay catalog from the application'
   }
 });
 
+it('serves complete upstream model records only on an authorized detail read', async () => {
+  const { createApplication } = await import('../apps/dashboard/src/lib/server/application');
+  const relayDb = database();
+  const coreDb = new SqliteD1Database();
+  const entry = {
+    id: 'model',
+    name: 'Model',
+    custom: { nested: { value: 'kept' } },
+    api: { 'chat-completions': { base_url: 'https://upstream.example/v1' } },
+  };
+  try {
+    vi.stubGlobal('fetch', async () => Response.json({ data: [entry] }));
+    const relay = createRelayCatalog(relayDb, [
+      {
+        url: 'https://models.example/v1/models',
+        prefix: 'p/',
+        providerSlug: 'custom-review',
+        credentialAlias: 'default',
+      },
+    ]);
+    await relay.refresh(50);
+    const app = createApplication({
+      REVIEW_DB: coreDb,
+      GITHUB_APP_ID: '1',
+      GITHUB_APP_PRIVATE_KEY: 'unused',
+      WEBHOOK_SECRET: 'unused',
+      ALLOWED_INSTALLATION_IDS: '[1]',
+      REVIEW_CONFIGURATION_TOKEN: 'operator',
+      INFERENCE_RELAY: {
+        issue: async () => ({ kind: 'invalid' }),
+        revoke: async () => ({ kind: 'revoked' }),
+        usage: async () => null,
+        catalog: async (input) => relay.get(input),
+        refreshCatalog: async () => {},
+      },
+    });
+    const get = (query = '', bearer = 'operator') =>
+      app.fetch(
+        new Request(`https://reviews.example/api/review-configuration/catalog${query}`, {
+          headers: { authorization: 'Bearer ' + bearer },
+        }),
+      );
+    expect((await get('?models=1', 'other')).status).toBe(401);
+    const compact = (await (await get()).json()) as Record<string, unknown>;
+    expect(compact).toMatchObject({ routes: ['p/model'] });
+    expect(compact).not.toHaveProperty('models');
+    const detail = (await (await get('?models=1')).json()) as {
+      readonly models: Readonly<Record<string, unknown>>;
+    };
+    expect(detail.models).toEqual({ 'p/model': entry });
+  } finally {
+    relayDb.close();
+    coreDb.close();
+  }
+});
+
 it('rejects a snapshot over the distinct selectable route limit and keeps the prior snapshot', async () => {
   const db = database();
   const catalog = createRelayCatalog(db, [
@@ -1321,6 +1377,340 @@ it('exposes only the explicit allowlist from an ID-only listing and freezes conf
     ).toEqual({
       profile: 'responses',
       limit_json: '{"context":1050000,"output":128000}',
+    });
+  } finally {
+    db.close();
+  }
+});
+
+it('retains discovered model metadata in v2 descriptors without exposing catalog transport', async () => {
+  const db = database();
+  const source = {
+    url: 'https://models.example/v1/models',
+    prefix: 'go/',
+    providerSlug: 'custom-go',
+    credentialAlias: 'default',
+  };
+  const entry = {
+    id: 'deepseek-v4.1-flash',
+    name: 'DeepSeek V4.1 Flash 1017',
+    family: 'deepseek-flash',
+    type: 'chat',
+    release_date: '2026-10-17',
+    limit: { context: 1_000_000, output: 384_000 },
+    modalities: { input: ['text', 'image/png'], output: ['text'] },
+    capabilities: {
+      tools: { supported: true },
+      reasoning: { supported: true, effort: ['low', 'high', 'max'] },
+      temperature: true,
+    },
+    cost: { text: { input: { price: 0.15, cache: { read: 0.003 } }, output: { price: 0.6 } } },
+    api: {
+      'chat-completions': {
+        base_url: 'https://upstream.example/v1',
+        sdk: { openaiai: '@evil/adapter' },
+      },
+    },
+    custom: { nested: true },
+  };
+  try {
+    vi.stubGlobal('fetch', async () => Response.json({ data: [entry] }));
+    const catalog = createRelayCatalog(db, [source]);
+    await catalog.refresh(50);
+    expect(await catalog.get()).toMatchObject({
+      routes: ['go/deepseek-v4.1-flash'],
+      lastRefreshError: null,
+    });
+    expect(
+      JSON.parse(
+        (
+          db.database
+            .prepare('SELECT metadata_json FROM catalog_routes WHERE route_id = ?')
+            .get('go/deepseek-v4.1-flash') as { readonly metadata_json: string }
+        ).metadata_json,
+      ),
+    ).toMatchObject(entry);
+
+    const issued = await createGrantControl(db).issueV2({
+      jobId: 'job-metadata',
+      snapshot: { routes: ['go/deepseek-v4.1-flash'] },
+      latestIssueDeadline: deadline(),
+    });
+    expect(issued).toMatchObject({
+      kind: 'issued',
+      descriptors: [
+        {
+          routeId: 'go/deepseek-v4.1-flash',
+          profile: 'chat',
+          limit: { context: 1_000_000, output: 384_000 },
+          metadata: {
+            name: 'DeepSeek V4.1 Flash 1017',
+            family: 'deepseek-flash',
+            type: 'chat',
+            releaseDate: '2026-10-17',
+            capabilities: {
+              tools: true,
+              input: ['text', 'image/png'],
+              output: ['text'],
+              reasoning: { supported: true, effort: ['low', 'high', 'max'] },
+              temperature: true,
+            },
+            cost: { input: 0.15, output: 0.6, cache: { read: 0.003 } },
+          },
+        },
+      ],
+    });
+    const exposed = JSON.stringify(issued);
+    expect(exposed).not.toContain('upstream.example');
+    expect(exposed).not.toContain('@evil/adapter');
+  } finally {
+    db.close();
+  }
+});
+
+it('fills a previously missing discovered limit on an existing route during refresh', async () => {
+  const db = database();
+  const source = {
+    url: 'https://models.example/v1/models',
+    prefix: 'go/',
+    providerSlug: 'custom-go',
+    credentialAlias: 'default',
+  };
+  try {
+    let entries: unknown[] = [{ id: 'model' }];
+    vi.stubGlobal('fetch', async () => Response.json({ data: entries }));
+    await createRelayCatalog(db, [source]).refresh(50);
+    expect(
+      db.database
+        .prepare('SELECT limit_json FROM catalog_routes WHERE route_id = ?')
+        .get('go/model'),
+    ).toEqual({ limit_json: null });
+    await expect(
+      createGrantControl(db).issueV2({
+        jobId: 'job-before-limit',
+        snapshot: { routes: ['go/model'] },
+        latestIssueDeadline: deadline(),
+      }),
+    ).resolves.toMatchObject({
+      kind: 'issued',
+      descriptors: [{ routeId: 'go/model', profile: 'chat' }],
+    });
+
+    entries = [{ id: 'model', limit: { context: 1_000, output: 500 } }];
+    await createRelayCatalog(db, [source]).refresh(100);
+    expect(await createRelayCatalog(db, [source]).get()).toMatchObject({
+      routes: ['go/model'],
+      lastRefreshError: null,
+      lastSuccessAt: new Date(100).toISOString(),
+    });
+    expect(
+      db.database
+        .prepare('SELECT limit_json FROM catalog_routes WHERE route_id = ?')
+        .get('go/model'),
+    ).toEqual({ limit_json: '{"context":1000,"output":500}' });
+    await expect(
+      createGrantControl(db).issueV2({
+        jobId: 'job-after-limit',
+        snapshot: { routes: ['go/model'] },
+        latestIssueDeadline: deadline(),
+      }),
+    ).resolves.toMatchObject({
+      kind: 'issued',
+      descriptors: [
+        { routeId: 'go/model', profile: 'chat', limit: { context: 1_000, output: 500 } },
+      ],
+    });
+    expect(
+      JSON.parse(
+        (
+          db.database
+            .prepare('SELECT route_mapping FROM grants WHERE job_id = ?')
+            .get('job-before-limit') as { readonly route_mapping: string }
+        ).route_mapping,
+      ),
+    ).toEqual([
+      {
+        routeId: 'go/model',
+        upstreamModel: 'model',
+        providerSlug: 'custom-go',
+        credentialAlias: 'default',
+        profile: 'chat',
+      },
+    ]);
+
+    entries = [{ id: 'model', name: 'Model 2', limit: { context: 2_000, output: 500 } }];
+    await createRelayCatalog(db, [source]).refresh(200);
+    expect(await createRelayCatalog(db, [source]).get()).toMatchObject({
+      routes: ['go/model'],
+      lastSuccessAt: new Date(200).toISOString(),
+      lastRefreshError: null,
+    });
+    expect(
+      db.database
+        .prepare(
+          'SELECT limit_json, limit_source, metadata_json FROM catalog_routes WHERE route_id = ?',
+        )
+        .get('go/model'),
+    ).toMatchObject({
+      limit_json: '{"context":2000,"output":500}',
+      limit_source: 'discovered',
+    });
+    expect(
+      JSON.parse(
+        (
+          db.database
+            .prepare('SELECT metadata_json FROM catalog_routes WHERE route_id = ?')
+            .get('go/model') as { readonly metadata_json: string }
+        ).metadata_json,
+      ),
+    ).toMatchObject({ name: 'Model 2' });
+    await expect(
+      createGrantControl(db).issueV2({
+        jobId: 'job-after-limit-2',
+        snapshot: { routes: ['go/model'] },
+        latestIssueDeadline: deadline(),
+      }),
+    ).resolves.toMatchObject({
+      kind: 'issued',
+      descriptors: [
+        { routeId: 'go/model', profile: 'chat', limit: { context: 2_000, output: 500 } },
+      ],
+    });
+    expect(
+      JSON.parse(
+        (
+          db.database
+            .prepare('SELECT route_mapping FROM grants WHERE job_id = ?')
+            .get('job-before-limit') as { readonly route_mapping: string }
+        ).route_mapping,
+      ),
+    ).toEqual([
+      {
+        routeId: 'go/model',
+        upstreamModel: 'model',
+        providerSlug: 'custom-go',
+        credentialAlias: 'default',
+        profile: 'chat',
+      },
+    ]);
+  } finally {
+    db.close();
+  }
+});
+
+it('retains native Anthropic display names and token limits in v2 descriptors', async () => {
+  const db = database();
+  try {
+    vi.stubGlobal('fetch', async () =>
+      Response.json({
+        data: [
+          {
+            id: 'claude-a',
+            display_name: 'Claude A',
+            created_at: '2026-01-02T03:04:05Z',
+            max_input_tokens: 200_000,
+            max_tokens: 64_000,
+          },
+          {
+            id: 'claude-b',
+            display_name: 'Claude B',
+            max_input_tokens: null,
+            max_tokens: null,
+          },
+        ],
+        has_more: false,
+      }),
+    );
+    const sources = Schema.decodeUnknownSync(RelayCatalogSources)([
+      {
+        discovery: 'gateway',
+        prefix: 'p/',
+        providerSlug: 'native:anthropic',
+        credentialAlias: 'review',
+        models: {
+          'p/claude-a': { profile: 'messages' },
+          'p/claude-b': { profile: 'messages' },
+        },
+      },
+    ]);
+    await createRelayCatalog(db, sources, {
+      accountId: 'account',
+      gatewayId: 'gateway',
+      runToken: 'test',
+    }).refresh(60);
+    await expect(
+      createGrantControl(db).issueV2({
+        jobId: 'job-native-anthropic',
+        snapshot: { routes: ['p/claude-a', 'p/claude-b'] },
+        latestIssueDeadline: deadline(),
+      }),
+    ).resolves.toMatchObject({
+      kind: 'issued',
+      descriptors: [
+        {
+          routeId: 'p/claude-a',
+          profile: 'messages',
+          limit: { context: 200_000, output: 64_000 },
+          metadata: { name: 'Claude A' },
+        },
+        {
+          routeId: 'p/claude-b',
+          profile: 'messages',
+          metadata: { name: 'Claude B' },
+        },
+      ],
+    });
+  } finally {
+    db.close();
+  }
+});
+
+it('retains native Google display names and token limits in v2 descriptors', async () => {
+  const db = database();
+  try {
+    vi.stubGlobal('fetch', async () =>
+      Response.json({
+        models: [
+          {
+            name: 'models/gemini-a',
+            displayName: 'Gemini A',
+            inputTokenLimit: 1_000_000,
+            outputTokenLimit: 65_536,
+            supportedGenerationMethods: ['generateContent'],
+          },
+        ],
+      }),
+    );
+    const sources = Schema.decodeUnknownSync(RelayCatalogSources)([
+      {
+        discovery: 'gateway',
+        prefix: 'g/',
+        providerSlug: 'native:google-ai-studio',
+        credentialAlias: 'review',
+        models: { 'g/gemini-a': { profile: 'gemini' } },
+      },
+    ]);
+    await createRelayCatalog(db, sources, {
+      accountId: 'account',
+      gatewayId: 'gateway',
+      runToken: 'test',
+    }).refresh(60);
+    await expect(
+      createGrantControl(db).issueV2({
+        jobId: 'job-native-google',
+        snapshot: { routes: ['g/gemini-a'] },
+        latestIssueDeadline: deadline(),
+      }),
+    ).resolves.toMatchObject({
+      kind: 'issued',
+      descriptors: [
+        {
+          routeId: 'g/gemini-a',
+          profile: 'gemini',
+          limit: { context: 1_000_000, output: 65_536 },
+          metadata: { name: 'Gemini A' },
+        },
+      ],
     });
   } finally {
     db.close();

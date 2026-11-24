@@ -59,7 +59,10 @@ type CoreRelayCatalog = Omit<
 export interface CoreWorkerEnv extends Partial<CoreEnv> {
   readonly REVIEW_DB: D1DatabaseLike;
   readonly INFERENCE_RELAY?: import('./runner-llm-control').RelayControl & {
-    catalog(): Promise<CoreRelayCatalog>;
+    catalog(input?: {
+      readonly includeModels?: boolean;
+      readonly models?: boolean;
+    }): Promise<CoreRelayCatalog>;
     refreshCatalog(scheduledTime: number): Promise<void>;
   };
   readonly GITHUB_APP_ID: string;

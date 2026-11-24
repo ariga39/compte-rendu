@@ -4,8 +4,10 @@ import {
   REVIEW_ATTEMPT_BUDGET_MS,
   ModelRouteLimit,
   type ModelRouteDescriptor,
+  type ModelRouteMetadata,
 } from '@compte-rendu/contracts';
 import { FrozenRouteMapping, RouteId, legacyFrozenMapping, type FrozenRoute } from './routes.ts';
+import { modelRouteMetadata } from './model-metadata.ts';
 
 export const GRANT_TTL_MS = 4 * REVIEW_ATTEMPT_BUDGET_MS;
 
@@ -106,11 +108,21 @@ interface CatalogRouteRow {
   readonly credentialAlias: string;
   readonly profile: FrozenRoute['profile'];
   readonly limit_json: string | null;
+  readonly metadata_json: string | null;
 }
 
 const decodeStoredLimit = Schema.decodeUnknownOption(Schema.fromJsonString(ModelRouteLimit), {
   onExcessProperty: 'error',
 });
+
+const metadataFromStored = (value: string | null): ModelRouteMetadata | undefined => {
+  if (value === null) return undefined;
+  try {
+    return modelRouteMetadata(JSON.parse(value) as unknown);
+  } catch {
+    return undefined;
+  }
+};
 
 const issueFor = (database: D1DatabaseLike, version: 1 | 2) =>
   Effect.fn('InferenceGrantControl.issue')(function* (input: IssueGrantInput) {
@@ -124,7 +136,7 @@ const issueFor = (database: D1DatabaseLike, version: 1 | 2) =>
         .prepare(
           `SELECT route_id AS routeId, upstream_model AS upstreamModel,
                  provider_slug AS providerSlug, credential_alias AS credentialAlias,
-                 profile, limit_json
+                 profile, limit_json, metadata_json
           FROM catalog_routes
           WHERE route_id IN (SELECT value FROM json_each(?))`,
         )
@@ -132,8 +144,11 @@ const issueFor = (database: D1DatabaseLike, version: 1 | 2) =>
         .all<CatalogRouteRow>(),
     );
     const routes: FrozenRoute[] = [];
+    const metadata = new Map<string, ModelRouteMetadata>();
     for (const row of rows.results) {
-      const { limit_json: limitJson, ...route } = row;
+      const { limit_json: limitJson, metadata_json: metadataJson, ...route } = row;
+      const mapped = metadataFromStored(metadataJson);
+      if (mapped !== undefined) metadata.set(route.routeId, mapped);
       if (limitJson === null) {
         routes.push(route);
         continue;
@@ -237,6 +252,7 @@ const issueFor = (database: D1DatabaseLike, version: 1 | 2) =>
       token,
       expiresAt: new Date(stored.expires_at).toISOString(),
       frozen: withEffort,
+      metadata,
     };
   });
 
@@ -287,11 +303,15 @@ export const createGrantControl = (database: D1DatabaseLike): InferenceGrantCont
         kind: 'issued',
         token: result.token,
         expiresAt: result.expiresAt,
-        descriptors: result.frozen.map(({ routeId, profile, limit }) => ({
-          routeId,
-          profile,
-          ...(limit === undefined ? {} : { limit }),
-        })),
+        descriptors: result.frozen.map(({ routeId, profile, limit }) => {
+          const metadata = result.metadata.get(routeId);
+          return {
+            routeId,
+            profile,
+            ...(limit === undefined ? {} : { limit }),
+            ...(metadata === undefined ? {} : { metadata }),
+          };
+        }),
       };
     },
     revoke: (input) => Effect.runPromise(revoke(input)),

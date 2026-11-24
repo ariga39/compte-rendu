@@ -16,7 +16,7 @@ REVIEW_MODEL_CONFIG={"id":"opencode-go/deepseek-review","baseUrl":"https://<INFE
 
 Use the HTTPS callback origin and its Runner bearer for grant control. The inference hostname must be a separate HTTPS FQDN on port 443 with base path `/v1`. The Sandbox receives a job-scoped credential through the runtime’s secret injection mechanism. Supplier credentials and the Gateway Run token stay in Cloudflare. OpenShell uses its own provider integration.
 
-The Runner calls `/runner-llm/issue` with the run ID, job ID, attempt and routes. The profile-aware endpoint is `/runner-llm/issue-v2`; it returns only the grant token, expiry and one client descriptor per frozen route: `{ routeId, profile, limit? }` where `profile` is `chat`, `responses`, `messages` or `gemini`. The descriptor omits the upstream model, provider slug, credential alias and URL. v1 remains a Chat Completions-only contract and keeps its historical response shape. Grants expire after four review budgets (currently six hours); Sandbox resource lifetime stays pinned separately at two hours. The Runner records the issuer origin and backend generation before issuance and revokes by job ID on completion or cancellation. Keep the generation stable for the corresponding relay D1 database. An unreachable issuer or unrecognized marker blocks further admission until recovery. See [maintenance drain](operations.md#drain-before-maintenance).
+The Runner calls `/runner-llm/issue` with the run ID, job ID, attempt and routes. The profile-aware endpoint is `/runner-llm/issue-v2`; it returns only the grant token, expiry and one client descriptor per frozen route: `{ routeId, profile, limit?, metadata? }` where `profile` is `chat`, `responses`, `messages` or `gemini`. `metadata` carries only the OpenCode-supported model description, such as name, family, release date, capabilities and cost. The descriptor omits the upstream model, provider slug, credential alias and URL. v1 remains a Chat Completions-only contract and keeps its historical response shape. Grants expire after four review budgets (currently six hours); Sandbox resource lifetime stays pinned separately at two hours. The Runner records the issuer origin and backend generation before issuance and revokes by job ID on completion or cancellation. Keep the generation stable for the corresponding relay D1 database. An unreachable issuer or unrecognized marker blocks further admission until recovery. See [maintenance drain](operations.md#drain-before-maintenance).
 
 ### Upgrading an installation with the former local service
 
@@ -169,8 +169,8 @@ allowance consumption. Consult the provider’s billing data for that amount.
 inference Worker serve versioned grants. In v2 the Runner requests
 `/runner-llm/issue-v2` and configures each selected model from the returned
 route descriptor. The descriptor selects a bundled adapter and can specify
-context and output limits. All models use the existing sandbox inference
-hostname and job credential. Issuance is attempted once. An unavailable v2
+context and output limits plus the OpenCode-supported model description. All
+models use the existing sandbox inference hostname and job credential. Issuance is attempted once. An unavailable v2
 endpoint or a descriptor set that differs from the frozen selection fails the
 job and triggers grant cleanup. A failed issuance records a fixed `grant`
 Runner diagnostic. An invalid body on a successful response, including a
@@ -225,9 +225,11 @@ Deploy the corresponding inference endpoint before enabling its routes in a
 roster. Catalog discovery and grant issuance can succeed before the deployed
 Worker serves that protocol.
 Gateway discovery follows Anthropic’s `after_id` cursor or Google's
-`pageToken` cursor. Declare verified routes in `models` when the list supplies
-IDs without tool capability metadata, or use explicit aliases. The Gemini
-route uses the Google Generative Language v1beta endpoint.
+`pageToken` cursor. Anthropic’s `max_input_tokens` and `max_tokens` fields
+become context and output limits; Google’s `inputTokenLimit` and
+`outputTokenLimit` do the same. Declare verified routes in `models` when the
+list supplies IDs without tool capability metadata, or use explicit aliases.
+The Gemini route uses the Google Generative Language v1beta endpoint.
 
 Choose discovery according to how that provider exposes its model list.
 
@@ -275,11 +277,20 @@ explicit `capabilities.tools.supported: false` always omits that model, even for
 a legacy unqualified source. Malformed rich capability metadata fails the source
 refresh and keeps the previous snapshot.
 
-The route mapping, profile and configured limit are immutable once published.
-Changing any of them for an existing route is a mapping conflict and keeps the
-previous snapshot; use a new route ID. Limit equality is semantic, so object key
-order does not create a conflict. Sources without `models` keep their existing
-unqualified discovery behaviour.
+The route mapping and profile are immutable once published. An explicitly
+configured limit is also part of that trusted mapping: changing or removing it
+for an existing route is a mapping conflict and keeps the previous snapshot.
+A provider-advertised limit and the rest of the provider entry are mutable
+description. A normal refresh updates them, and the next grant uses the new
+value; an already-issued grant keeps its frozen route mapping. An upstream
+limit change therefore needs no new route ID or manual override.
+
+Discovery retains each provider's complete model entry. The v2 grant maps only
+the OpenCode-supported model information at the client boundary: display name,
+family, release date, tool/media capabilities, reasoning variants and per-token
+cost, including cache read and write pricing. Provider transport fields such as
+`api.base_url`, its SDK package and credential routing are not copied; Runner
+still uses the trusted profile adapter, relay endpoint and route ID.
 
 For example, this configuration discovers models on one authenticated upstream
 and preserves a historical route served by another upstream.
@@ -306,6 +317,8 @@ the review configuration operator bearer to see route IDs and refresh status.
 The catalog returns the latest complete list per discovery source. A valid
 empty list withdraws that source's candidates; a failed refresh preserves its
 last complete list. Existing reviews can still resolve their frozen route IDs.
-Apply the relay D1 migrations before deploying the inference Worker. Verify a
+Add `?models=1` to the same authorized request to include the complete retained
+upstream record for each visible route. That detail is opt-in so the ordinary
+settings list does not carry every provider object. Apply the relay D1 migrations before deploying the inference Worker. Verify a
 successful scheduled refresh and the expected model IDs on this endpoint before
 rolling out the dashboard. See [model selection](review-configuration.md#selectable-model-catalog).
