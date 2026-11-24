@@ -56,6 +56,12 @@ const CatalogEntry = Schema.Struct({
   ),
   limit: Schema.optionalKey(Schema.NullOr(CatalogLimit)),
 });
+const NonReviewableEntry = Schema.Struct({
+  id: CatalogModelId,
+  capabilities: Schema.Struct({
+    tools: Schema.Struct({ supported: Schema.Literal(false) }),
+  }),
+});
 export interface CatalogModel {
   readonly id: string;
   /** Null means an ID-only listing without protocol metadata. */
@@ -233,8 +239,13 @@ export const readModelCatalogPage = async (
   let rejected = 0;
   for (const entry of page.data) {
     const model = Schema.decodeUnknownOption(CatalogEntry)(entry);
-    if (Option.isNone(model)) rejected++;
-    else models.push(catalogModel(model.value, metadataRecord(entry)));
+    if (Option.isSome(model)) {
+      models.push(catalogModel(model.value, metadataRecord(entry)));
+      continue;
+    }
+    // Embedding models can declare zero output tokens and no tool support.
+    if (Option.isSome(Schema.decodeUnknownOption(NonReviewableEntry)(entry))) continue;
+    rejected++;
   }
   return { models, rejected, next };
 };
