@@ -203,13 +203,17 @@ Configuration changes affect new admissions, not queued/running jobs. The protec
 URLs. `selection: null` restores the installation default. For managed inference, Core snapshots `RELAY_DEFAULT_MODEL_ROUTE` as a single-reviewer selection at admission.
 
 One explicit reviewer runs directly; multiple reviewers use a supervisor and
-selected subagents in one Sandbox. Both use the same review prompt and final
-output contract. The prompt requests one independent review per participant,
-in parallel using foreground tasks, followed by synthesis after all reviewers
-return. It forbids follow-up reviews and verification rounds. Runner does not
-impose an internal workflow, coverage ledger or child submission protocol. Child
-exports are best-effort evidence, not extra result gates. The job retains frozen
-selection and `multi-review.json`, with one callback and one publication.
+selected subagents in one Sandbox. The same Runner-owned review task and final
+output contract is supplied directly to one reviewer or through each
+multi-review child's agent system prompt. The compact supervisor prompt names
+the frozen roster and requests one independent review per participant, in
+parallel using foreground tasks with one fixed short instruction, followed by
+synthesis after all reviewers return. The supervisor keeps the final output
+contract but does not repeat the trusted task it dispatches. It forbids
+follow-up reviews and verification rounds. Runner does not impose an internal
+workflow, coverage ledger or child submission protocol. Child exports are
+best-effort evidence, not extra result gates. The job retains frozen selection
+and `multi-review.json`, with one callback and one publication.
 
 The LLM grant permits the routes actually needed by the job. One-reviewer jobs do
 not grant an unused synthesis route. Cancellation revokes that grant and destroys
@@ -265,8 +269,10 @@ model; a prompt alone is not a security boundary.
 
 `apps/runner/src/review-prompt.ts` owns the task contract: exact revisions,
 GitHub context collection, static inspection limits, reviewer orchestration and
-final output. Single-reviewer and multi-reviewer jobs receive the same contract;
-only execution instructions differ. The format-correction reminder reuses the
+final output. A single reviewer receives the full contract directly; every
+multi-review child receives the same contract through its configured system
+prompt, while the supervisor receives only the fixed dispatch instruction,
+synthesis rules and final output. The format-correction reminder reuses the
 same output requirements.
 
 The bundled `code-review` skill owns the review method: contextual reading,

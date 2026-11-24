@@ -282,6 +282,7 @@ export const multiReviewConfig = (options: {
   readonly serviceBaseUrl: string;
   readonly descriptors?: readonly ModelRouteDescriptor[] | undefined;
   readonly shellPermissionRules: ReadonlyArray<readonly [string, 'allow' | 'deny']>;
+  readonly reviewerTask: string;
 }): string => {
   const roster = participants(options.selection);
   const reviewerPermissionsValue = reviewerPermissions(options.shellPermissionRules);
@@ -337,6 +338,7 @@ export const multiReviewConfig = (options: {
             description: `Multi-model reviewer ${participant}`,
             mode: 'subagent',
             model: modelReference(route),
+            system: options.reviewerTask,
             permissions: reviewerPermissionsValue,
           },
         ]),

@@ -91,7 +91,7 @@ import {
   createOpenShellRuntimeFactory,
 } from './sandbox-runtime-openshell.js';
 import { recoverCallback, ReplayCallbackRequest } from './callback-recovery.js';
-import { reviewPrompt, reviewCorrectionPrompt } from './review-prompt.js';
+import { reviewPrompt, reviewCorrectionPrompt, reviewerSystemPrompt } from './review-prompt.js';
 import { reviewSkills } from './review-skill.js';
 import {
   readRunnerSettingsSync,
@@ -3317,14 +3317,15 @@ export const createRunner = (options: RunnerOptions = {}) => {
         : modelId === undefined
           ? []
           : [{ participant: 'reviewer-0', model: modelId }];
-      const agentPrompt = reviewPrompt({
+      const promptInput = {
         repositoryName: job.input.repositoryName,
         pullRequestNumber: job.input.pullRequestNumber,
         baseSha: job.input.baseSha,
         mergeBaseSha,
         headSha: job.input.headSha,
         reviewers: promptReviewers,
-      });
+      };
+      const agentPrompt = reviewPrompt(promptInput);
       const configRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-opencode-config-'));
       job.configRoot = configRoot;
       for (const skill of reviewSkills) {
@@ -3340,6 +3341,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
             descriptors,
             serviceBaseUrl: serviceBaseUrl!.toString(),
             shellPermissionRules,
+            reviewerTask: reviewerSystemPrompt(promptInput),
           })
         : openCodeConfig;
 

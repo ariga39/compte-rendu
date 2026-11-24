@@ -10331,10 +10331,16 @@ describe('Runner multi-model review', () => {
     const supervisorPromptText = (result.agentArgs ?? []).join(' ');
     expect(supervisorPromptText).toContain('reviewer-0');
     expect(supervisorPromptText).toContain('reviewer-1');
-    expect(supervisorPromptText).toContain('Review task');
     expect(supervisorPromptText).toContain('synthesize');
     expect(supervisorPromptText).toContain('Start all configured reviewers in parallel');
     expect(supervisorPromptText).toContain('foreground subagent tasks (background: false)');
+    expect(supervisorPromptText).toContain(
+      'use exactly this task instruction as the prompt: ' +
+        '"Perform one independent review using the complete task and output contract in your system instructions."',
+    );
+    expect(supervisorPromptText).toContain(
+      'Do not restate, summarize, or replace that trusted task',
+    );
     expect(supervisorPromptText).toContain('Wait for every configured reviewer to return');
     expect(supervisorPromptText).toContain(
       'Once their reviews return, only synthesize the supplied results',
@@ -10345,10 +10351,29 @@ describe('Runner multi-model review', () => {
     expect(supervisorPromptText).toContain(
       'do not inspect the repository again to verify their conclusions',
     );
+    // The supervisor keeps the synthesis contract but does not repeat the full
+    // trusted review task it dispatches to each reviewer.
+    expect(supervisorPromptText).not.toContain('Review task:');
+    expect(supervisorPromptText).not.toContain('The token is a capability, never review evidence');
+    expect(supervisorPromptText).not.toContain('gh pr view');
     expect(supervisorPromptText).toContain('TLDR:');
     expect(supervisorPromptText).toContain('Return your final answer in exactly this form');
     expect(supervisorPromptText).toContain('DECISION: approve');
     expect(supervisorPromptText).not.toContain('submit_review');
+
+    const reviewerSystem = config.agents['reviewer-0'].system as string;
+    expect(reviewerSystem).toBe(config.agents['reviewer-1'].system);
+    expect(reviewerSystem).toContain(
+      'You are one independent reviewer for this configured review.',
+    );
+    expect(reviewerSystem).toContain(baseSha);
+    expect(reviewerSystem).toContain(headSha);
+    expect(reviewerSystem).toContain('Load the bundled `code-review` skill');
+    expect(reviewerSystem).toContain('The token is a capability, never review evidence');
+    expect(reviewerSystem).toContain('This is a static review');
+    expect(reviewerSystem).toContain('Return your final answer in exactly this form');
+    expect(reviewerSystem).toContain('DECISION: approve');
+    expect(reviewerSystem).toContain('TLDR:');
 
     expect(result.manifest.multiReview).toMatchObject({
       revision: 3,
@@ -10538,16 +10563,24 @@ describe('Runner multi-model review', () => {
     });
   });
 
-  it('delivers one shared review contract to a single reviewer and a multi roster', async () => {
+  it('delivers the shared review contract directly and in every reviewer system', async () => {
     const single = await runAgentScenario({
       runId: 'run-shared-prompt-single',
       output: finalMarkdownJsonl(),
     });
     const multi = await runScenario({ runId: 'run-shared-prompt-multi' });
     const singlePrompt = single.agentArgs?.join(' ') ?? '';
-    const multiPrompt = multi.agentArgs?.join(' ') ?? '';
+    const multiSupervisorPrompt = multi.agentArgs?.join(' ') ?? '';
+    const multiConfig = JSON.parse(
+      multi
+        .createArgs!.find((value) => value.startsWith('OPENCODE_CONFIG_CONTENT='))!
+        .slice('OPENCODE_CONFIG_CONTENT='.length),
+    );
+    const reviewerPrompts = ['reviewer-0', 'reviewer-1'].map(
+      (participant) => multiConfig.agents[participant].system as string,
+    );
 
-    for (const prompt of [singlePrompt, multiPrompt]) {
+    for (const prompt of [singlePrompt, ...reviewerPrompts]) {
       expect(prompt).toContain('Load the bundled `code-review` skill');
       expect(prompt).toContain('during independent review');
       expect(prompt).toContain('The skill supplies the review method');
@@ -10573,15 +10606,22 @@ describe('Runner multi-model review', () => {
     }
     expect(singlePrompt).toContain('There is one configured reviewer');
     expect(singlePrompt).not.toContain('reviewer-1');
-    expect(multiPrompt).toContain('reviewer-0');
-    expect(multiPrompt).toContain('reviewer-1');
-    expect(multiPrompt).toContain('synthesize');
-    expect(multiPrompt).toContain('As supervisor, do not load the skill yourself');
-    expect(multiPrompt).toContain('The Review task is for the independent reviewers');
-    expect(multiPrompt).toContain('Do not load skills or inspect code during synthesis');
-    expect(multiPrompt).toContain(
-      'Give each reviewer both the Review task and Final output sections below in full',
+    for (const prompt of reviewerPrompts) {
+      expect(prompt).not.toContain('There is one configured reviewer');
+    }
+    expect(multiSupervisorPrompt).toContain('reviewer-0');
+    expect(multiSupervisorPrompt).toContain('reviewer-1');
+    expect(multiSupervisorPrompt).toContain('synthesize');
+    expect(multiSupervisorPrompt).toContain('As supervisor, do not load the skill yourself');
+    expect(multiSupervisorPrompt).toContain(
+      'The full Review task and Final output contract are provided to each reviewer in its system instructions',
     );
+    expect(multiSupervisorPrompt).toContain('Do not load skills or inspect code during synthesis');
+    expect(multiSupervisorPrompt).toContain(
+      'use exactly this task instruction as the prompt: ' +
+        '"Perform one independent review using the complete task and output contract in your system instructions."',
+    );
+    expect(multiSupervisorPrompt).not.toContain('The token is a capability, never review evidence');
   });
 
   it('uses only the reviewer route for a one-model roster with a distinct synthesis alias', async () => {
