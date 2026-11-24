@@ -44,6 +44,8 @@ test('saves an explicit selection when switching from the instance default', asy
   await page.getByLabel('Use the instance default').uncheck();
   await page.getByLabel('review/a', { exact: true }).check();
   await page.getByLabel('Synthesis model').selectOption('review/b');
+  await expect(page.getByLabel('Thinking effort for review/a')).toBeVisible();
+  await expect(page.getByLabel('Thinking effort for review/b')).toHaveCount(0);
   const sent = page.waitForRequest((request) => request.method() === 'PUT');
   await page.getByRole('button', { name: 'Save changes' }).click();
   expect((await sent).postDataJSON()).toEqual({

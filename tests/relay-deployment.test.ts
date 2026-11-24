@@ -26,6 +26,9 @@ it('renders the instance relay with a separate D1, private service binding and H
           prefix: 'p/',
           providerSlug: 'native:openai',
           credentialAlias: 'default',
+          efforts: {
+            'p/deepseek-v4.1-flash': [{ name: 'high', controls: { reasoning_effort: 'high' } }],
+          },
         },
         {
           providerSlug: 'custom-legacy',
@@ -124,6 +127,32 @@ it('rejects provider slugs, credential aliases and route IDs outside the frozen 
     {
       ...base,
       catalogSources: [{ ...base.catalogSources[0], prefix: `${'a'.repeat(127)}a` }],
+    },
+    {
+      ...base,
+      catalogSources: [
+        {
+          ...base.catalogSources[0],
+          models: {
+            'p/model': {
+              profile: 'chat',
+              efforts: [{ name: 'high', controls: { reasoning_effort: 'high' } }],
+            },
+          },
+        },
+      ],
+    },
+    {
+      ...base,
+      catalogSources: [
+        {
+          ...base.catalogSources[0],
+          profile: 'responses',
+          efforts: {
+            'p/model': [{ name: 'high', controls: { reasoning_effort: 'high' } }],
+          },
+        },
+      ],
     },
     { ...base, defaultRoute: 'review provider' },
   ];

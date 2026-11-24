@@ -39,9 +39,14 @@ const decodeSnapshot = (value: string | null | undefined) =>
         () => [] as readonly FrozenRouteEffort[],
       );
 
-const selectedRoutes = (selection: ReviewModelSelection): string[] => [
+const configuredRoutes = (selection: ReviewModelSelection): string[] => [
   ...new Set([...selection.reviewers, selection.synthesis]),
 ];
+
+// A single reviewer returns directly and never calls the synthesis route, so
+// only multi-reviewer jobs freeze or grant the synthesis route.
+const executionRoutes = (selection: ReviewModelSelection): string[] =>
+  selection.reviewers.length > 1 ? configuredRoutes(selection) : [selection.reviewers[0]!];
 
 const ConfigurationInput = Schema.fromJsonString(
   Schema.Struct({
@@ -65,25 +70,22 @@ const buildSnapshot = (input: {
   };
   readonly generations: ReadonlyMap<string, number>;
 }): readonly FrozenRouteEffort[] | undefined => {
-  const routes = selectedRoutes(input.selection);
+  const routes = executionRoutes(input.selection);
+  const configured = configuredRoutes(input.selection);
   const requested = input.selection.efforts ?? {};
-  if (Object.keys(requested).some((route) => !routes.includes(route))) return undefined;
+  if (Object.keys(requested).some((route) => !configured.includes(route))) return undefined;
   const allowed = new Set(input.catalog.routes);
   if (routes.some((route) => !allowed.has(route))) return undefined;
-  // A selection without effort names keeps the legacy client-controlled shape,
-  // except that a route which already advanced past generation 0 must keep its
-  // generation frozen. Otherwise a post-reset save would reactivate the old
-  // shared fallback marker on the next admission.
-  if (Object.keys(requested).length === 0)
-    return routes
-      .map((routeId) => ({ routeId, generation: input.generations.get(routeId) ?? 0 }))
-      .filter((entry) => entry.generation > 0);
   const snapshot: FrozenRouteEffort[] = [];
   for (const routeId of routes) {
     const generation = input.generations.get(routeId) ?? 0;
     const name = requested[routeId];
     if (name === undefined) {
-      snapshot.push({ routeId, generation });
+      // A default generation adds nothing: the relay has no fallback state to
+      // apply before generation 0 advances, and a generation-only entry on a
+      // non-Chat route would be rejected. Preserve only a nonzero generation so
+      // an ordinary post-reset save cannot reactivate the old shared marker.
+      if (generation > 0) snapshot.push({ routeId, generation });
       continue;
     }
     const option = input.catalog.efforts?.[routeId]?.find((entry) => entry.name === name);
@@ -196,27 +198,31 @@ export const resetReviewEffort = (
         return response({ error: 'configuration changed; reload before resetting' }, 409);
       const selection = decodeStoredSelection(row.selection);
       if (selection === undefined) return response({ error: 'configuration unavailable' }, 503);
-      if (selection === null || !selectedRoutes(selection).includes(input.value.route))
+      if (selection === null || !executionRoutes(selection).includes(input.value.route))
         return response({ error: 'model route is not configured' }, 400);
 
       const generations = yield* Effect.tryPromise(() => readGenerations(database));
       const current = new Map(
         parseSnapshot(row.effort_snapshot).map((entry) => [entry.routeId, entry]),
       );
+      const target = current.get(input.value.route);
       const targetGeneration =
-        Math.max(
-          generations.get(input.value.route) ?? 0,
-          current.get(input.value.route)?.generation ?? 0,
-        ) + 1;
-      const nextSnapshot = selectedRoutes(selection).map((routeId) => {
+        Math.max(generations.get(input.value.route) ?? 0, target?.generation ?? 0) + 1;
+      const entryFor = (
+        routeId: string,
+        generation: number,
+        existing: FrozenRouteEffort | undefined,
+      ): FrozenRouteEffort =>
+        existing?.name === undefined || existing.controls === undefined
+          ? { routeId, generation }
+          : { routeId, generation, name: existing.name, controls: existing.controls };
+      const nextSnapshot = executionRoutes(selection).flatMap((routeId) => {
         const existing = current.get(routeId);
-        if (routeId === input.value.route)
-          return { ...(existing ?? { routeId }), routeId, generation: targetGeneration };
-        return {
-          ...(existing ?? { routeId }),
-          routeId,
-          generation: Math.max(generations.get(routeId) ?? 0, existing?.generation ?? 0),
-        };
+        if (routeId === input.value.route) return [entryFor(routeId, targetGeneration, existing)];
+        const generation = Math.max(generations.get(routeId) ?? 0, existing?.generation ?? 0);
+        return existing?.name !== undefined || generation > 0
+          ? [entryFor(routeId, generation, existing)]
+          : [];
       });
       const results = yield* Effect.tryPromise(() =>
         database.batch([

@@ -70,15 +70,13 @@ it('publishes only trusted Chat effort names and controls with selectable routes
     prefix: 'review/',
     providerSlug: 'custom-review',
     credentialAlias: 'default',
-    models: {
-      'review/deepseek-v4.1-flash': {
-        profile: 'chat' as const,
-        efforts: [{ name: 'high', controls: { reasoning_effort: 'high' as const } }],
-      },
-      'review/mimo-v2.6-flash': {
-        profile: 'chat' as const,
-        efforts: [{ name: 'off', controls: { thinking: { type: 'disabled' as const } } }],
-      },
+    efforts: {
+      'review/deepseek-v4.1-flash': [
+        { name: 'high', controls: { reasoning_effort: 'high' as const } },
+      ],
+      'review/mimo-v2.6-flash': [
+        { name: 'off', controls: { thinking: { type: 'disabled' as const } } },
+      ],
     },
   };
   try {
@@ -89,7 +87,7 @@ it('publishes only trusted Chat effort names and controls with selectable routes
     );
     await createRelayCatalog(db, [source]).refresh(60_000);
     expect(await createRelayCatalog(db, [source]).get()).toMatchObject({
-      routes: ['review/deepseek-v4.1-flash', 'review/mimo-v2.6-flash'],
+      routes: ['review/deepseek-v4.1-flash', 'review/mimo-v2.6-flash', 'review/plain'],
       efforts: {
         'review/deepseek-v4.1-flash': [{ name: 'high', controls: { reasoning_effort: 'high' } }],
         'review/mimo-v2.6-flash': [{ name: 'off', controls: { thinking: { type: 'disabled' } } }],
@@ -104,34 +102,112 @@ it('rejects effort menus with conflicting or non-Chat controls in configuration'
   const decode = Schema.decodeUnknownOption(RelayCatalogSources, {
     onExcessProperty: 'error',
   });
-  const source = (efforts: unknown) => ({
+  const source = (efforts: unknown, overrides: Record<string, unknown> = {}) => ({
     url: 'https://models.example/v1/models',
     prefix: 'review/',
     providerSlug: 'custom-review',
     credentialAlias: 'default',
-    models: { 'review/model': { profile: 'chat', efforts } },
+    efforts,
+    ...overrides,
   });
   expect(
     decode([
-      source([
-        { name: 'mixed', controls: { reasoning_effort: 'high', thinking: { type: 'disabled' } } },
-      ]),
+      source({
+        'review/model': [
+          {
+            name: 'mixed',
+            controls: { reasoning_effort: 'high', thinking: { type: 'disabled' } },
+          },
+        ],
+      }),
     ]),
   ).toMatchObject({ _tag: 'None' });
-  expect(decode([source([{ name: 'empty', controls: {} }])])).toMatchObject({ _tag: 'None' });
+  expect(decode([source({ 'review/model': [{ name: 'empty', controls: {} }] })])).toMatchObject({
+    _tag: 'None',
+  });
   expect(
     decode([
-      {
-        ...source([]),
+      source(
+        { 'review/model': [{ name: 'high', controls: { reasoning_effort: 'high' } }] },
+        { models: { 'review/model': { profile: 'responses' } } },
+      ),
+    ]),
+  ).toMatchObject({ _tag: 'None' });
+  // The removed, unshipped nested syntax is not a second configuration path.
+  expect(
+    decode([
+      source(undefined, {
         models: {
           'review/model': {
-            profile: 'responses',
+            profile: 'chat',
             efforts: [{ name: 'high', controls: { reasoning_effort: 'high' } }],
           },
         },
-      },
+      }),
     ]),
   ).toMatchObject({ _tag: 'None' });
+});
+
+it('keeps the models allowlist behavior while sparse efforts stay orthogonal', async () => {
+  const db = database();
+  const source = {
+    url: 'https://models.example/v1/models',
+    prefix: 'p/',
+    providerSlug: 'custom-review',
+    credentialAlias: 'default',
+    models: { 'p/one': { profile: 'chat' as const } },
+    efforts: {
+      'p/one': [{ name: 'high', controls: { reasoning_effort: 'high' as const } }],
+      'p/two': [{ name: 'off', controls: { thinking: { type: 'disabled' as const } } }],
+    },
+  };
+  try {
+    vi.stubGlobal('fetch', async () => Response.json({ data: [{ id: 'one' }, { id: 'two' }] }));
+    await createRelayCatalog(db, [source]).refresh(60_000);
+    expect(await createRelayCatalog(db, [source]).get()).toMatchObject({
+      routes: ['p/one'],
+      efforts: {
+        'p/one': [{ name: 'high', controls: { reasoning_effort: 'high' } }],
+      },
+    });
+  } finally {
+    db.close();
+  }
+});
+
+it('rejects a source refresh when an effort route resolves to a non-Chat profile', async () => {
+  const db = database();
+  const source = {
+    url: 'https://models.example/v1/models',
+    prefix: 'p/',
+    providerSlug: 'custom-review',
+    credentialAlias: 'default',
+    profile: 'chat' as const,
+    profiles: ['chat', 'responses'] as const,
+    efforts: {
+      'p/route': [{ name: 'high', controls: { reasoning_effort: 'high' as const } }],
+    },
+  };
+  try {
+    vi.stubGlobal('fetch', async () =>
+      Response.json({
+        data: [
+          {
+            id: 'route',
+            api: { responses: {} },
+            recommended_api: 'responses',
+          },
+        ],
+      }),
+    );
+    await createRelayCatalog(db, [source]).refresh(60_000);
+    expect(await createRelayCatalog(db, [source]).get()).toMatchObject({
+      routes: [],
+      lastRefreshError: 'refresh failed',
+    });
+  } finally {
+    db.close();
+  }
 });
 
 it('requires the operator bearer to read the relay catalog from the application', async () => {

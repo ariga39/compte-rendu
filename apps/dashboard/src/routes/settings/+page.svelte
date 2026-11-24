@@ -19,7 +19,9 @@
   });
   const effortOptions = (route: string) => data.settings?.efforts?.[route] ?? [];
   const selectedRoutes = $derived(
-    [...new Set([...reviewers, synthesis].filter((route) => route.length > 0))],
+    reviewers.length > 1
+      ? [...new Set([...reviewers, synthesis].filter((route) => route.length > 0))]
+      : reviewers.slice(0, 1),
   );
   const effortState = (route: string) =>
     data.settings?.effortStates?.find((state) => state.routeId === route) ?? null;

@@ -66,22 +66,33 @@ Grant revocation and confirmed Sandbox destruction still run before final succes
 ### Reasoning effort injection and route fallback
 
 Chat routes may declare a narrow, protocol-validated effort menu in the relay
-catalog. For the initial target models:
+catalog. The menu is a sparse source-level `efforts` map keyed by the actual
+route ID; it is orthogonal to the optional `models` allowlist. Existing
+`models` profile/limit allowlists keep their current behavior. For the initial
+target models, on an otherwise unrestricted discovery source:
 
 ```json
 {
-  "models": {
-    "review-provider/deepseek-v4.1-flash": {
-      "profile": "chat",
-      "efforts": [{ "name": "high", "controls": { "reasoning_effort": "high" } }]
-    },
-    "review-provider/mimo-v2.6-flash": {
-      "profile": "chat",
-      "efforts": [{ "name": "off", "controls": { "thinking": { "type": "disabled" } } }]
-    }
+  "discovery": "gateway",
+  "prefix": "review-provider/",
+  "providerSlug": "custom-review",
+  "credentialAlias": "default",
+  "efforts": {
+    "review-provider/deepseek-v4.1-flash": [
+      { "name": "high", "controls": { "reasoning_effort": "high" } }
+    ],
+    "review-provider/mimo-v2.6-flash": [
+      { "name": "off", "controls": { "thinking": { "type": "disabled" } } }
+    ]
   }
 }
 ```
+
+Routes without an entry (including newly discovered ones) keep an empty menu.
+Declaring an effort on a route with an explicit non-Chat profile, or on a
+discovery route whose effective profile resolves to non-Chat, rejects that
+source refresh. With an existing `models` allowlist, only allowlisted routes
+remain visible; `efforts` never re-enables a filtered route.
 
 Only `reasoning_effort` (`minimal`, `low`, `medium`, `high`, `max`) or
 `thinking.type: "disabled"` is accepted, exactly one per effort. The browser
