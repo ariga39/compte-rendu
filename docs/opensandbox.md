@@ -76,7 +76,7 @@ OpenShell use). It includes pinned OpenCode and GitHub CLI versions and does not
 inherit a Docker sbx image:
 
 ```sh
-docker build -f apps/runner/openshell-template/Dockerfile -t compte-rendu-review:2.0.32 .
+docker build -f apps/runner/openshell-template/Dockerfile -t compte-rendu-review:2.4.1 .
 ```
 
 The image runs as UID 1000. The Runner's staging files must be readable by that
