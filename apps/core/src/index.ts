@@ -1645,11 +1645,10 @@ const claimAndSchedule = (
           : { blockingCleanupStatus: claim.blockingCleanupStatus }),
       };
     }
-    const admission = {
-      ...(claim.blockingCleanupStatus === undefined
+    const admission =
+      claim.blockingCleanupStatus === undefined
         ? {}
-        : { blockingCleanupStatus: claim.blockingCleanupStatus }),
-    };
+        : { blockingCleanupStatus: claim.blockingCleanupStatus };
 
     yield* recordLifecycleLog(lifecycleLog, {
       event: 'review scheduled',

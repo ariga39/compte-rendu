@@ -1,8 +1,7 @@
 # syntax=docker/dockerfile:1
-# OpenShell review image: Ubuntu base with a pinned OpenCode release binary and
-# a pinned GitHub CLI. Unlike the sbx template, this uses a plain Ubuntu base
-# and runs as UID 1000 with /workspace as the fixed sandbox path for the
-# checkout, configuration, and evidence trees.
+# Plain OCI review image for the microsandbox backend: Ubuntu base with a
+# pinned OpenCode release binary and a pinned GitHub CLI. Unlike the sbx
+# template, this uses a plain Ubuntu base and runs as UID 1000.
 FROM ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git bash tar gzip unzip && rm -rf /var/lib/apt/lists/*

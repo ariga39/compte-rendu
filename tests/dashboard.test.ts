@@ -519,6 +519,101 @@ describe('public dashboard reads are DB-only', () => {
     expect(detail.milestones).toEqual([checkout, sandbox, agent]);
   });
 
+  it.each(['opensandbox', 'openshell', 'future-backend', 'constructor'] as const)(
+    'keeps %s progress readable without a Core contract change',
+    async (runtime) => {
+      const database = new SqliteD1Database();
+      const store = createD1ReviewStateStore(database);
+      const review = await store.claimReview({
+        deliveryId: `d-progress-${runtime}`,
+        job: job({ repositoryId: 201 }),
+        occurredAt: '2026-01-01T00:00:00.000Z',
+      });
+      if (review.kind !== 'claimed') throw new Error('expected claimed');
+      const claimed = await store.claimNextJob({
+        jobId: `job-progress-${runtime}`,
+        attempt: 1,
+        occurredAt: '2026-01-01T00:00:10.000Z',
+      });
+      expect(claimed.kind).toBe('claimed');
+      expect(
+        await store.recordProgress!({
+          runId: review.runId,
+          jobId: `job-progress-${runtime}`,
+          attempt: 1,
+          receivedAt: '2026-01-01T00:00:11.000Z',
+          sequence: 1,
+          stage: 'sandbox',
+          milestones: [
+            { stage: 'checkout', startedAt: '2026-01-01T00:00:11.000Z' },
+            {
+              stage: 'sandbox',
+              runtime,
+              startedAt: '2026-01-01T00:00:11.000Z',
+            },
+          ],
+        }),
+      ).toBe(true);
+      const worker = createCoreWorker(coreEnv(database));
+      const detail = await asJson<{
+        milestones: { stage: string; runtime?: string }[];
+      }>(await get(worker, `/api/jobs/${review.runId}`));
+      expect(detail.milestones).toEqual([
+        { stage: 'checkout', startedAt: '2026-01-01T00:00:11.000Z' },
+        {
+          stage: 'sandbox',
+          runtime,
+          startedAt: '2026-01-01T00:00:11.000Z',
+        },
+      ]);
+    },
+  );
+
+  it.each(['OpenSandbox', 'third_backend', '3backend', 'a'.repeat(33)])(
+    'rejects the invalid runtime identifier %s in runner progress',
+    async (runtime) => {
+      const database = new SqliteD1Database();
+      const store = createD1ReviewStateStore(database);
+      const review = await store.claimReview({
+        deliveryId: `d-progress-invalid-${runtime}`,
+        job: job({ repositoryId: 202 }),
+        occurredAt: '2026-01-01T00:00:00.000Z',
+      });
+      if (review.kind !== 'claimed') throw new Error('expected claimed');
+      const claimed = await store.claimNextJob({
+        jobId: 'job-progress-invalid',
+        attempt: 1,
+        occurredAt: '2026-01-01T00:00:10.000Z',
+      });
+      expect(claimed.kind).toBe('claimed');
+      const worker = createCoreWorker(coreEnv(database));
+      const response = await worker.fetch(
+        new Request('https://core.internal/runner-progress', {
+          method: 'POST',
+          headers: {
+            'x-compte-rendu-runner-progress': 'verified',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            runId: review.runId,
+            id: 'job-progress-invalid',
+            attempt: 1,
+            sequence: 1,
+            stage: 'sandbox',
+            milestones: [
+              {
+                stage: 'sandbox',
+                runtime,
+                startedAt: '2026-01-01T00:00:11.000Z',
+              },
+            ],
+          }),
+        }),
+      );
+      expect(response.status).toBe(400);
+    },
+  );
+
   it('forwards public dashboard reads through ingress without leaking private identity', async () => {
     const database = new SqliteD1Database();
     const store = createD1ReviewStateStore(database);

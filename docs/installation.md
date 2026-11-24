@@ -574,78 +574,13 @@ and every file it reads outside writable sandbox mounts.
 
 The Runner executes reviews through a per-job sandbox runtime adapter.
 `RUNNER_SANDBOX_RUNTIME` selects `sbx` (the default, unchanged production path)
-or one of `microsandbox`, `openshell` and `opensandbox`. For the local KVM backend, follow the [microsandbox installation guide](microsandbox.md). For the Docker Engine backend, follow
-[OpenSandbox installation](opensandbox.md), including its private standard-port
-inference endpoint. An unknown value, or incomplete runtime configuration,
-fails at startup before any claim or admission.
+or `microsandbox`. For the local KVM backend, follow the
+[microsandbox installation guide](microsandbox.md). An unknown or retired value,
+or incomplete runtime configuration, fails at startup before any claim or
+admission; there is no silent fallback.
 
-OpenShell additionally requires:
-
-- `OPENSHELL_IMAGE` — the review image, for example a locally built
-  `compte-rendu-openshell:<tag>` from `apps/runner/openshell-template/Dockerfile`.
-  The Docker `sbx` template reference is never reused.
-- a gateway: `OPENSHELL_GATEWAY` (a registered name) or
-  `OPENSHELL_GATEWAY_ENDPOINT` (for example `http://127.0.0.1:18670`).
-- `OPENSHELL_MODEL_PROVIDER` — the pre-provisioned model provider name; its
-  credential lives gateway-side, so OpenShell never runs `MODEL_SECRET_COMMAND`.
-- optional `OPENSHELL_GITHUB_PROFILE` (default `cr-github`) and
-  `RUNNER_SANDBOX_CLI` (default `openshell`).
-
-TLS certificate verification stays enabled for HTTPS or named gateways;
-`OPENSHELL_GATEWAY_INSECURE` only turns verification off. An explicit
-`http://127.0.0.1:<port>` loopback endpoint is plaintext by design, not a
-verification failure. The gateway ships no provider profiles, so import the
-non-secret samples from `apps/runner/openshell-template/` before starting the
-Runner:
-
-```sh
-openshell profile import -f apps/runner/openshell-template/cr-model.yaml
-openshell profile import -f apps/runner/openshell-template/cr-github.yaml
-```
-
-Import into the same workspace the Runner operates in (default `default`) rather
-than `--global`: provider creation and the startup preflight are workspace
-scoped, and a global import is not merged into that workspace. The Runner's
-startup preflight pages `provider list --output json` and fails closed unless
-the configured model provider is present.
-
-Create the pre-provisioned model provider from the host environment without
-putting the key on the command line: set `OPENCODE_API_KEY` in the environment
-and pass the bare key so OpenShell reads it from the child process environment,
-never argv:
-
-```sh
-OPENCODE_API_KEY="$(cat /run/secrets/model-key)" \
-  openshell provider create --name cr158-model --type cr-model --credential OPENCODE_API_KEY
-```
-
-On a host that runs only the Runner and manages the OpenShell gateway
-separately, the unit's `ExecStart` is just the Node process — there is no
-`sg kvm` / `sbx daemon start` prefix. If you edit the base unit that already
-defines an `ExecStart`, clear it with a blank assignment before the new one;
-otherwise systemd keeps the first `ExecStart`:
-
-```ini
-[Service]
-ExecStart=
-ExecStart=<ABSOLUTE_NODE> <REPO_ROOT>/apps/runner/dist/runner.js
-```
-
-Alternatively, leave the base unit untouched and supply the Node-only
-`ExecStart` as a drop-in override (for example
-`~/.config/systemd/user/<RUNNER_UNIT>.d/openshell.conf` with the same two lines); a
-drop-in replaces the accumulated value the same way. The gateway is started and
-supervised separately (for example by its own container or service); the Runner
-only needs `RUNNER_SANDBOX_CLI` to resolve the `openshell` binary and the
-gateway endpoint/name.
-
-`cr-model` declares the model credential `OPENCODE_API_KEY`, permits only
-`POST` to `opencode.ai` under `protocol: rest` + `enforcement: enforce`, and
-allows only `/usr/local/bin/opencode`. `cr-github` gives
-`/usr/local/bin/gh` read-only REST and `read-only` GraphQL to `api.github.com`
-only. The Runner creates one unique GitHub provider per job and deletes only
-that provider during cleanup. OpenShell sandboxes use the fixed in-sandbox paths
-`/workspace/checkout`, `/workspace/config`, and `/workspace/evidence`.
+Microsandbox additionally requires `MICROSANDBOX_IMAGE` and the managed HTTPS
+relay. Set `RUNNER_SANDBOX_CLI` when `msb` is not on the service `PATH`.
 
 The Runner derives its claim URL by resolving `/runner-claim` on the same
 origin as `RUNNER_CALLBACK_URL`; no separate claim URL environment variable is
@@ -1043,10 +978,10 @@ limits.
 ### Multi-model review configuration
 
 Deploy Core migration `0012_review_configuration.sql` and the multi-model-capable
-Runner before enabling a selection. This execution path requires sbx, microsandbox or OpenSandbox, OpenCode 2,
+Runner before enabling a selection. This execution path requires sbx or microsandbox, OpenCode 2,
 and the managed relay. A selection can contain one reviewer; it runs directly with the same prompt
 and output contract used for multiple reviewers. Jobs retain the selection
-frozen when admitted. OpenShell does not support this multi-model path yet.
+frozen when admitted.
 
 Configure the [relay model catalog](llm-service.md#managed-relay-model-catalog) and verify it lists every selected route. Preserve old route IDs and their mappings while queued and running jobs reference them.
 

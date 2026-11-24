@@ -9,7 +9,6 @@ import type {
   RunnerProcessResult,
   SandboxCommand,
   SandboxJobSpec,
-  SandboxOperation,
 } from '../apps/runner/src/sandbox-runtime';
 
 const ok: RunnerProcessResult = {
@@ -77,24 +76,19 @@ const setupCommand = (
     sandbox_id: spec.name,
     editable: true,
   };
-  return Object.assign(
-    async (args: readonly string[]): Promise<RunnerProcessResult> => {
-      if (args[0] === 'policy' && args[1] === 'ls')
-        return { ...ok, stdout: JSON.stringify({ rules: [rule] }) };
-      if (failure === 'github' && args[0] === 'secret' && args[1] === 'set')
-        return { ...ok, exitCode: 1, stderr: 'github secret setup failed' };
-      if (failure === 'create' && args[0] === 'create')
-        return { ...ok, exitCode: 1, stderr: 'create failed' };
-      if (failure === 'create-timeout' && args[0] === 'create')
-        return { ...ok, exitCode: 1, timedOut: true };
-      if (failure === 'policy' && args[0] === 'policy' && args[1] === 'allow')
-        return { ...ok, exitCode: 1 };
-      return ok;
-    },
-    {
-      execute: async (operation: SandboxOperation) => operation({}),
-    },
-  );
+  return async (args: readonly string[]): Promise<RunnerProcessResult> => {
+    if (args[0] === 'policy' && args[1] === 'ls')
+      return { ...ok, stdout: JSON.stringify({ rules: [rule] }) };
+    if (failure === 'github' && args[0] === 'secret' && args[1] === 'set')
+      return { ...ok, exitCode: 1, stderr: 'github secret setup failed' };
+    if (failure === 'create' && args[0] === 'create')
+      return { ...ok, exitCode: 1, stderr: 'create failed' };
+    if (failure === 'create-timeout' && args[0] === 'create')
+      return { ...ok, exitCode: 1, timedOut: true };
+    if (failure === 'policy' && args[0] === 'policy' && args[1] === 'allow')
+      return { ...ok, exitCode: 1 };
+    return ok;
+  };
 };
 
 // Sanitized `sbx inspect --json` fixture using the pinned 0.48.0 wire fields.

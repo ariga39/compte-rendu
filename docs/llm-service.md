@@ -4,7 +4,7 @@ The application Worker authorizes a Runner grant against the claimed job, attemp
 
 ### Remote relay transport
 
-Set the following variables on an sbx or OpenSandbox Runner:
+Set the following variables on an sbx or microsandbox Runner:
 
 ```dotenv
 RUNNER_LLM_RELAY=1
@@ -14,7 +14,7 @@ RUNNER_CALLBACK_TOKEN=<static-runner-callback-token>
 REVIEW_MODEL_CONFIG={"id":"opencode-go/deepseek-review","baseUrl":"https://<INFERENCE_FQDN>/v1","definition":{"name":"DeepSeek review"}}
 ```
 
-Use the HTTPS callback origin and its Runner bearer for grant control. The inference hostname must be a separate HTTPS FQDN on port 443 with base path `/v1`. The Sandbox receives a job-scoped credential through the runtime’s secret injection mechanism. Supplier credentials and the Gateway Run token stay in Cloudflare. OpenShell uses its own provider integration.
+Use the HTTPS callback origin and its Runner bearer for grant control. The inference hostname must be a separate HTTPS FQDN on port 443 with base path `/v1`. The Sandbox receives a job-scoped credential through the runtime’s secret injection mechanism. Supplier credentials and the Gateway Run token stay in Cloudflare.
 
 The Runner calls `/runner-llm/issue` with the run ID, job ID, attempt and routes. The profile-aware endpoint is `/runner-llm/issue-v2`; it returns only the grant token, expiry and one client descriptor per frozen route: `{ routeId, profile, limit?, metadata? }` where `profile` is `chat`, `responses`, `messages` or `gemini`. `metadata` carries only the OpenCode-supported model description, such as name, family, release date, capabilities and cost. The descriptor omits the upstream model, provider slug, credential alias and URL. v1 remains a Chat Completions-only contract and keeps its historical response shape. Grants expire after four review budgets (currently six hours); Sandbox resource lifetime stays pinned separately at two hours. The Runner records the issuer origin and backend generation before issuance and revokes by job ID on completion or cancellation. Keep the generation stable for the corresponding relay D1 database. An unreachable issuer or unrecognized marker blocks further admission until recovery. See [maintenance drain](operations.md#drain-before-maintenance).
 

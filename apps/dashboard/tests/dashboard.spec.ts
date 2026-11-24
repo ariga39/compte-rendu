@@ -1008,6 +1008,29 @@ test('task details identify the recorded sandbox backend', async ({ page, harnes
   await expect(page.locator('.fact', { hasText: 'Sandbox backend' })).toContainText('microsandbox');
 });
 
+for (const [runtime, label] of [
+  ['opensandbox', 'OpenSandbox (retired)'],
+  ['future-backend', 'future-backend'],
+  ['constructor', 'constructor'],
+] as const) {
+  test(`task details read the ${runtime} sandbox backend label`, async ({
+    page,
+    harness,
+    base,
+  }) => {
+    harness.setHandler(() =>
+      ok(
+        detailData(task({ runId: `run-${runtime}` }), [
+          { stage: 'sandbox', startedAt: NOW, runtime },
+        ]),
+      ),
+    );
+    await page.goto(`${base}/jobs/run-${runtime}`);
+    await page.getByText('Technical details', { exact: true }).click();
+    await expect(page.locator('.fact', { hasText: 'Sandbox backend' })).toContainText(label);
+  });
+}
+
 test('detail shows DB processing milestones and neutral legacy observations', async ({
   page,
   harness,

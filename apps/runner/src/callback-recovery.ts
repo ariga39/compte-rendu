@@ -12,12 +12,6 @@ import {
 const EvidenceId = Schema.String.check(
   Schema.isPattern(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i),
 );
-const SandboxRuntimeId = Schema.String.check(
-  Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/),
-);
-const OwnershipNonce = Schema.String.check(
-  Schema.isPattern(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i),
-);
 
 export const ReplayCallbackRequest = Schema.Struct({
   evidenceId: EvidenceId,
@@ -50,12 +44,12 @@ const RunnerManifest = Schema.Struct({
   }),
   result: Schema.optional(StructuredReviewResult),
   catalogIdentity: Schema.optional(Schema.String),
+  // Retained as a free-form string so records written by a retired backend
+  // remain readable even though no new job can select that runtime.
   runtime: Schema.optional(Schema.String),
   sandboxName: Schema.optional(Schema.String),
   sandboxId: Schema.optional(Schema.String),
-  sandboxOwnerNonce: Schema.optional(Schema.String),
   hostCleanupConfirmed: Schema.optional(Schema.Boolean),
-  hostFilesCleanupConfirmed: Schema.optional(Schema.Boolean),
 });
 export type RecoveredManifest = typeof RunnerManifest.Type;
 
@@ -113,7 +107,7 @@ export const recoverCallback = Effect.fn('recoverCallback')(function* (
   purpose:
     | 'replay'
     | {
-        readonly cleanupRuntime: 'sbx' | 'microsandbox' | 'opensandbox';
+        readonly cleanupRuntime: 'sbx' | 'microsandbox';
       } = 'replay',
 ): Effect.fn.Return<RecoveredCallback, CallbackRecoveryError> {
   const directory = join(evidenceRoot, request.evidenceId);
@@ -215,17 +209,7 @@ export const recoverCallback = Effect.fn('recoverCallback')(function* (
     ) {
       return yield* fail('unsupported-recovery');
     }
-    if (purpose.cleanupRuntime === 'opensandbox') {
-      if (
-        manifest.hostFilesCleanupConfirmed !== true ||
-        Option.isNone(Schema.decodeUnknownOption(SandboxRuntimeId)(manifest.sandboxId)) ||
-        Option.isNone(Schema.decodeUnknownOption(OwnershipNonce)(manifest.sandboxOwnerNonce))
-      ) {
-        return yield* fail('unsupported-recovery');
-      }
-    } else if (manifest.hostCleanupConfirmed !== true) {
-      return yield* fail('unsupported-recovery');
-    }
+    if (manifest.hostCleanupConfirmed !== true) return yield* fail('unsupported-recovery');
   }
 
   if (

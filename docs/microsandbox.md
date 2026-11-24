@@ -17,7 +17,7 @@ Build the review image on a Docker build host and transfer the saved archive
 to the Runner. Use a versioned tag for the image you intend to deploy.
 
 ```sh
-docker build -f apps/runner/openshell-template/Dockerfile -t compte-rendu-review:local .
+docker build -f apps/runner/microsandbox-template/Dockerfile -t compte-rendu-review:local .
 docker save -o review.tar compte-rendu-review:local
 ```
 

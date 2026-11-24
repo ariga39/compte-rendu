@@ -16,7 +16,7 @@ from experiments and proposals; a research recommendation is not a shipped featu
 | Understand local Worker integration coverage                     | [Runtime tracer](local-runtime-tracer.md)                                               |
 | Sign in and grant operator access                                | [Dashboard authorization](review-configuration.md#dashboard-sign-in-and-model-settings) |
 | Stop a queued or running review                                  | [Operator cancellation](operations.md#operator-cancellation)                            |
-| Configure the OpenSandbox backend                                | [OpenSandbox](opensandbox.md)                                                           |
+| Run reviews with the microsandbox backend                        | [microsandbox](microsandbox.md)                                                         |
 | Find older PoCs, source research and migration decisions         | [Archive](archive/README.md)                                                            |
 
 For end users, the dashboard's `/help` page is rendered from

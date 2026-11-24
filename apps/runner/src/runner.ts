@@ -2,7 +2,7 @@ import type { ModelRouteDescriptor } from '@compte-rendu/contracts';
 import type { ModelUsageSummary } from '@compte-rendu/contracts';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { createWriteStream, readFileSync, type WriteStream } from 'node:fs';
+import { createWriteStream, type WriteStream } from 'node:fs';
 import {
   chmod,
   mkdir,
@@ -37,14 +37,13 @@ import {
   SandboxCreateError,
   resolveSandboxRuntimeConfig,
   type JobSandboxRuntime,
+  type ActiveSandboxRuntimeKind,
   type RunnerDiagnostic,
   type RunnerProcess,
   type RunnerProcessOptions,
   type RunnerProcessResult,
   type SandboxCommand,
-  type SandboxOperation,
   type SandboxRuntimeFactory,
-  type SandboxRuntimeKind,
 } from './sandbox-runtime.js';
 import {
   appendFileBytes,
@@ -58,7 +57,6 @@ import {
   createMicrosandboxPreflight,
   reconcileMicrosandboxRestartResources,
 } from './sandbox-runtime-microsandbox.js';
-import { createOpenSandboxRuntimeFactory } from './sandbox-runtime-opensandbox.js';
 import {
   createSbxRuntimeFactory,
   reconcileSbxRestartResources,
@@ -85,10 +83,6 @@ import {
   type ReviewSubmission,
   type SessionIdentity,
 } from './opencode-multi-review.js';
-import {
-  createOpenShellPreflight,
-  createOpenShellRuntimeFactory,
-} from './sandbox-runtime-openshell.js';
 import { recoverCallback, ReplayCallbackRequest } from './callback-recovery.js';
 import { reviewPrompt, reviewCorrectionPrompt, reviewerSystemPrompt } from './review-prompt.js';
 import { reviewSkills } from './review-skill.js';
@@ -99,6 +93,7 @@ import {
 } from './runner-settings.js';
 
 export type {
+  ActiveSandboxRuntimeKind,
   RunnerDiagnostic,
   RunnerProcess,
   RunnerProcessOptions,
@@ -118,7 +113,6 @@ const CREDENTIAL_EXPIRY_SAFETY_MARGIN_MS = FINALIZATION_BUDGET_MS;
 // Refresh early enough to replace a long-lived run's credential before it
 // expires, without shortening it to the finalization reserve.
 const READ_TOKEN_REFRESH_LEAD_MS = 5 * 60 * 1000;
-const OPENSANDBOX_RESOURCE_LIFETIME_SECONDS = 2 * 60 * 60;
 const GRANT_REVOKE_ATTEMPTS = 2;
 const GRANT_REVOKE_BUDGET_MS = 15 * 1000;
 const CLEANUP_COMMAND_TIMEOUT_MS = 30 * 1000;
@@ -741,13 +735,11 @@ type RunnerJob = {
   readonly done: Promise<void>;
   resolveDone: () => void;
   child?: ChildProcess;
-  sdkController?: AbortController;
   abortRequested: boolean;
   cleanupRecoveryPending: boolean;
   sandboxAttempted: boolean;
   sandboxCreated: boolean;
   hostCleanupConfirmed?: boolean;
-  hostFilesCleanupConfirmed?: boolean;
   sessionIds: string[];
   multiReview?: RunnerMultiReviewEvidence;
   sandboxRuntime?: JobSandboxRuntime;
@@ -783,7 +775,7 @@ type RunnerJob = {
 
 export interface RunnerOptions {
   readonly sbxPath?: string;
-  readonly sandboxRuntime?: SandboxRuntimeKind;
+  readonly sandboxRuntime?: ActiveSandboxRuntimeKind;
   readonly sandboxCliPath?: string;
   readonly sandboxRuntimeFactory?: SandboxRuntimeFactory;
   /** Opt in to the remote relay control plane over the callback origin. */
@@ -791,19 +783,6 @@ export interface RunnerOptions {
   readonly llmGrantVersion?: 1 | 2;
   readonly llmRelayGeneration?: string;
   readonly microsandboxImage?: string;
-  readonly opensandbox?: {
-    readonly endpoint?: string;
-    readonly apiKeyFile?: string;
-    readonly image?: string;
-  };
-  readonly openshell?: {
-    readonly gateway?: string;
-    readonly gatewayEndpoint?: string;
-    readonly modelProvider?: string;
-    readonly image?: string;
-    readonly githubProfile?: string;
-    readonly insecure?: boolean;
-  };
   readonly authToken?: string;
   readonly modelSecretCommand?: string;
   readonly modelConfig?: string;
@@ -1063,28 +1042,11 @@ export const createRunner = (options: RunnerOptions = {}) => {
     kind: options.sandboxRuntime ?? process.env.RUNNER_SANDBOX_RUNTIME,
     cliPath: options.sandboxCliPath ?? process.env.RUNNER_SANDBOX_CLI,
     microsandboxImage: options.microsandboxImage ?? process.env.MICROSANDBOX_IMAGE,
-    opensandboxEndpoint: options.opensandbox?.endpoint ?? process.env.OPENSANDBOX_ENDPOINT,
-    opensandboxApiKeyFile: options.opensandbox?.apiKeyFile ?? process.env.OPENSANDBOX_API_KEY_FILE,
-    opensandboxImage: options.opensandbox?.image ?? process.env.OPENSANDBOX_IMAGE,
-    openshellGateway: options.openshell?.gateway ?? process.env.OPENSHELL_GATEWAY,
-    openshellEndpoint: options.openshell?.gatewayEndpoint ?? process.env.OPENSHELL_GATEWAY_ENDPOINT,
-    openshellModelProvider:
-      options.openshell?.modelProvider ?? process.env.OPENSHELL_MODEL_PROVIDER,
-    openshellImage: options.openshell?.image ?? process.env.OPENSHELL_IMAGE,
-    openshellGithubProfile:
-      options.openshell?.githubProfile ?? process.env.OPENSHELL_GITHUB_PROFILE,
-    openshellInsecure: options.openshell?.insecure ?? process.env.OPENSHELL_GATEWAY_INSECURE,
   });
-  if (sandboxRuntime.kind === 'openshell' && sandboxRuntime.openshell === undefined) {
-    throw new Error('OpenShell sandbox runtime configuration is incomplete');
-  }
   const relayFlag = options.llmRelay ?? process.env.RUNNER_LLM_RELAY;
   const relayEnabled = isEnabled(relayFlag);
   if (sandboxRuntime.kind === 'microsandbox' && !relayEnabled) {
     throw new Error('Microsandbox requires the managed HTTPS LLM relay');
-  }
-  if (relayEnabled && sandboxRuntime.kind === 'openshell') {
-    throw new Error('LLM service mode does not support the OpenShell sandbox runtime yet');
   }
   const relayCallbackUrl = nonEmpty(options.callbackUrl ?? process.env.RUNNER_CALLBACK_URL);
   const relayCallbackToken = nonEmpty(options.callbackToken ?? process.env.RUNNER_CALLBACK_TOKEN);
@@ -1123,25 +1085,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
   const modelSecretCommand = relayEnabled
     ? undefined
     : (options.modelSecretCommand ?? process.env.MODEL_SECRET_COMMAND);
-  let opensandboxOptions: Parameters<typeof createOpenSandboxRuntimeFactory>[0] | undefined;
-  if (sandboxRuntime.opensandbox !== undefined) {
-    if (!relayEnabled) throw new Error('OpenSandbox requires the managed HTTPS LLM relay');
-    let apiKey: string;
-    try {
-      apiKey = readFileSync(sandboxRuntime.opensandbox.apiKeyFile, 'utf8').trim();
-      if (apiKey.length === 0) throw new Error('empty');
-    } catch {
-      throw new Error('invalid OpenSandbox API key file');
-    }
-    opensandboxOptions = {
-      endpoint: sandboxRuntime.opensandbox.endpoint,
-      apiKey,
-      image: sandboxRuntime.opensandbox.image,
-      // A review and teardown fit in two hours. Relay grants retain their
-      // separate four-times-budget lifetime.
-      lifetimeSeconds: OPENSANDBOX_RESOURCE_LIFETIME_SECONDS,
-    };
-  }
   const evidenceRoot =
     options.evidenceRoot ??
     process.env.RUNNER_EVIDENCE_ROOT ??
@@ -1164,11 +1107,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
           process.env.MICROSANDBOX_ALLOW_FAKE_IP === '1',
           sandboxOwnershipRoot,
         )
-      : opensandboxOptions !== undefined
-        ? createOpenSandboxRuntimeFactory(opensandboxOptions)
-        : sandboxRuntime.kind === 'openshell'
-          ? createOpenShellRuntimeFactory(sandboxRuntime.openshell!)
-          : createSbxRuntimeFactory({ modelSecretCommand, ownershipRoot: sandboxOwnershipRoot }));
+      : createSbxRuntimeFactory({ modelSecretCommand, ownershipRoot: sandboxOwnershipRoot }));
   const modelResolverMissing =
     sandboxRuntime.kind === 'sbx' &&
     !relayEnabled &&
@@ -1354,7 +1293,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
     job.readTokenDeadlineTimer = undefined;
   };
   const stopActiveExecution = (job: RunnerJob) => {
-    job.sdkController?.abort();
     const child = job.child;
     if (child !== undefined) {
       stop(child);
@@ -1703,7 +1641,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
     let verificationFailed = false;
     try {
       const kind = sandboxRuntime.kind;
-      if (kind !== 'sbx' && kind !== 'microsandbox' && kind !== 'opensandbox')
+      if (kind !== 'sbx' && kind !== 'microsandbox')
         return { accepted: false, status: 409, error: 'cleanup recovery rejected' };
       const recovered = await Effect.runPromise(
         recoverCallback(evidenceRoot, input, { cleanupRuntime: kind }).pipe(Effect.option),
@@ -1728,30 +1666,8 @@ export const createRunner = (options: RunnerOptions = {}) => {
             sandboxName,
             recovered.value.catalogIdentity,
           );
-        } else if (kind === 'sbx') {
-          await Effect.runPromise(confirmSbxCleanup(sandboxName, input.jobId, recoveryCommand));
         } else {
-          const confirmCleanupAbsent = sandboxRuntimeFactory.confirmCleanupAbsent;
-          const sandboxId = manifest.sandboxId;
-          const ownershipNonce = manifest.sandboxOwnerNonce;
-          if (
-            confirmCleanupAbsent === undefined ||
-            sandboxId === undefined ||
-            ownershipNonce === undefined
-          ) {
-            return { accepted: false, status: 409, error: 'cleanup recovery rejected' };
-          }
-          await Effect.runPromise(
-            Effect.tryPromise({
-              try: (signal) =>
-                confirmCleanupAbsent(
-                  { sandboxId, ownershipNonce, sandboxName },
-                  recoveryCommand,
-                  signal,
-                ),
-              catch: () => new Error('cleanup recovery not confirmed'),
-            }).pipe(Effect.timeout(CLEANUP_COMMAND_TIMEOUT_MS)),
-          );
+          await Effect.runPromise(confirmSbxCleanup(sandboxName, input.jobId, recoveryCommand));
         }
       } catch (error) {
         verificationFailed = true;
@@ -2274,73 +2190,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
     await recordLog(event);
   };
 
-  const runSdkOperation = async (
-    job: RunnerJob,
-    operation: SandboxOperation,
-    diagnostic: RunnerDiagnostic | undefined,
-    processOptions: RunnerProcessOptions = {},
-    timeoutMs: number,
-    abortable: boolean,
-  ): Promise<RunnerProcessResult> => {
-    const controller = new AbortController();
-    let timedOut = false;
-    let grace: ReturnType<typeof setTimeout> | undefined;
-    const failed = (): RunnerProcessResult => ({
-      exitCode: 1,
-      stdout: '',
-      timedOut,
-      truncated: false,
-      streamError: true,
-    });
-    if (abortable && job.abortRequested) return failed();
-    if (abortable) job.sdkController = controller;
-    const stopped = new Promise<RunnerProcessResult>((resolve) => {
-      controller.signal.addEventListener(
-        'abort',
-        () => {
-          grace = setTimeout(() => resolve(failed()), 5_000);
-        },
-        { once: true },
-      );
-    });
-    const timer = setTimeout(
-      () => {
-        timedOut = true;
-        controller.abort();
-      },
-      Math.max(1, timeoutMs),
-    );
-    trackProcessCredentialValues(job, processOptions.credentialValues);
-    const credentialValues = jobCredentialValues(job);
-    let result: RunnerProcessResult;
-    try {
-      result = await Promise.race([
-        operation({
-          ...processOptions,
-          maxBytes:
-            processOptions.maxBytes ??
-            (diagnostic === undefined ? undefined : MAX_DIAGNOSTIC_STDERR_BYTES),
-          signal: controller.signal,
-          timeoutMs,
-          captureStderr: processOptions.captureStderr ?? diagnostic !== undefined,
-          stderrRedactions: [
-            ...credentialValues,
-            ...(processOptions.stderrRedactions ?? []),
-          ].filter((value): value is string => value !== undefined && value.length > 0),
-          credentialValues,
-        }).catch(failed),
-        stopped,
-      ]);
-      if (timedOut) result = { ...result, exitCode: 1, timedOut: true };
-    } finally {
-      clearTimeout(timer);
-      if (grace !== undefined) clearTimeout(grace);
-      if (job.sdkController === controller) job.sdkController = undefined;
-    }
-    if (diagnostic !== undefined) await recordCommand(job, diagnostic, result);
-    return result;
-  };
-
   const runTracked = async (
     job: RunnerJob,
     command: string,
@@ -2470,31 +2319,11 @@ export const createRunner = (options: RunnerOptions = {}) => {
     if (!(await fileExists(join(evidencePath, 'opencode.stderr')))) complete = false;
 
     const runtime = job.sandboxRuntime;
-    const archiveCommand: SandboxCommand = Object.assign(
-      (
-        args: readonly string[],
-        diagnostic?: RunnerDiagnostic,
-        processOptions?: RunnerProcessOptions,
-      ) => runArchive(job, sandboxPortPath, args, deadlineAt, processOptions, diagnostic),
-      {
-        execute: (
-          operation: SandboxOperation,
-          diagnostic?: RunnerDiagnostic,
-          processOptions?: RunnerProcessOptions,
-        ) =>
-          runSdkOperation(
-            job,
-            operation,
-            diagnostic,
-            processOptions,
-            Math.min(
-              processOptions?.timeoutMs ?? ARCHIVE_COMMAND_TIMEOUT_MS,
-              deadlineAt - Date.now(),
-            ),
-            false,
-          ),
-      },
-    );
+    const archiveCommand: SandboxCommand = (
+      args: readonly string[],
+      diagnostic?: RunnerDiagnostic,
+      processOptions?: RunnerProcessOptions,
+    ) => runArchive(job, sandboxPortPath, args, deadlineAt, processOptions, diagnostic);
     if (runtime === undefined) {
       complete = false;
     } else {
@@ -2849,30 +2678,13 @@ export const createRunner = (options: RunnerOptions = {}) => {
     };
     if (job.sandboxAttempted && job.sandboxRuntime !== undefined) {
       try {
-        await job.sandboxRuntime.destroy(
-          Object.assign(cleanupProcess, {
-            execute: (
-              operation: SandboxOperation,
-              diagnostic?: RunnerDiagnostic,
-              processOptions?: RunnerProcessOptions,
-            ) =>
-              runSdkOperation(
-                job,
-                operation,
-                diagnostic,
-                processOptions,
-                CLEANUP_COMMAND_TIMEOUT_MS,
-                false,
-              ),
-          }),
-        );
+        await job.sandboxRuntime.destroy(cleanupProcess);
       } catch {
         sandboxClean = false;
       }
     }
     const hostClean = await removeHostDirectories(job);
     const clean = sandboxClean && hostClean;
-    job.hostFilesCleanupConfirmed = hostClean;
     job.cleanupRecoveryPending = !sandboxClean;
     if (job.cleanupRecoveryPending) job.cleanupRecoveryRetryAt = Date.now();
     job.hostCleanupConfirmed =
@@ -3256,11 +3068,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
         return;
       }
       if (multi) {
-        if (
-          sandboxRuntime.kind === 'openshell' ||
-          llmServiceClient === undefined ||
-          serviceBaseUrl === undefined
-        ) {
+        if (llmServiceClient === undefined || serviceBaseUrl === undefined) {
           failure = { reason: 'agent' };
           return;
         }
@@ -3393,40 +3201,11 @@ export const createRunner = (options: RunnerOptions = {}) => {
       job.sandboxRuntime = runtime;
       job.sandboxAttempted = true;
       reportStage(job, 'sandbox');
-      const setupCommand: SandboxCommand = Object.assign(
-        (
-          args: readonly string[],
-          diagnostic?: RunnerDiagnostic,
-          processOptions?: RunnerProcessOptions,
-        ) =>
-          runTracked(
-            job,
-            sandboxPortPath,
-            args,
-            sandboxRuntime.kind === 'openshell'
-              ? {
-                  ...processOptions,
-                  env: { ...strippedSandboxEnvironment, ...processOptions?.env },
-                }
-              : processOptions,
-            diagnostic,
-          ),
-        {
-          execute: (
-            operation: SandboxOperation,
-            diagnostic?: RunnerDiagnostic,
-            processOptions?: RunnerProcessOptions,
-          ) =>
-            runSdkOperation(
-              job,
-              operation,
-              diagnostic,
-              processOptions,
-              Math.min(processOptions?.timeoutMs ?? SETUP_TIMEOUT_MS, remainingExecutionMs(job)),
-              true,
-            ),
-        },
-      );
+      const setupCommand: SandboxCommand = (
+        args: readonly string[],
+        diagnostic?: RunnerDiagnostic,
+        processOptions?: RunnerProcessOptions,
+      ) => runTracked(job, sandboxPortPath, args, processOptions, diagnostic);
       try {
         await runtime.setup(setupCommand);
       } catch (error) {
@@ -3930,7 +3709,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
             jobId: job.id,
             sandboxName: job.sandboxName,
             sandboxId: job.sandboxRuntime?.metadata.id ?? job.sandboxName,
-            sandboxOwnerNonce: job.sandboxRuntime?.metadata.ownershipNonce,
             catalogIdentity: job.sandboxRuntime?.metadata.catalogIdentity,
             sandboxRuntimeName: job.sandboxRuntime?.metadata.name ?? job.sandboxName,
             runtime: job.sandboxRuntime?.metadata.runtime ?? sandboxRuntime.kind,
@@ -4047,7 +3825,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
             evidenceFailure,
             cleanup: { status: cleaned ? 'destroyed' : 'failed' },
             hostCleanupConfirmed: job.hostCleanupConfirmed === true,
-            hostFilesCleanupConfirmed: job.hostFilesCleanupConfirmed === true,
             files: await evidenceFiles(evidencePath),
           });
           manifestFinalized = true;
@@ -4225,15 +4002,10 @@ export const createRunner = (options: RunnerOptions = {}) => {
     return jsonResponse(202, publicState(job));
   };
 
-  const openshellConfiguration =
-    sandboxRuntime.kind === 'openshell' ? sandboxRuntime.openshell : undefined;
-  const microsandboxPreflight = sandboxRuntime.kind === 'microsandbox';
-  const runtimePreflight =
-    sandboxRuntime.microsandboxImage !== undefined
-      ? createMicrosandboxPreflight(sandboxRuntime.microsandboxImage)
-      : openshellConfiguration === undefined
-        ? undefined
-        : createOpenShellPreflight(openshellConfiguration);
+  const microsandboxPreflight = sandboxRuntime.microsandboxImage !== undefined;
+  const runtimePreflight = microsandboxPreflight
+    ? createMicrosandboxPreflight(sandboxRuntime.microsandboxImage!)
+    : undefined;
   let preflightPromise: Promise<boolean> | undefined;
   let preflightRetryAt = 0;
   const ensurePreflight = async (): Promise<boolean> => {
@@ -4439,7 +4211,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
     if (request.method === 'DELETE') {
       if (job.state.status === 'queued' || job.state.status === 'running') {
         job.abortRequested = true;
-        job.sdkController?.abort();
         const child = job.child;
         if (child !== undefined) {
           stop(child);

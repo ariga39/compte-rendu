@@ -54,22 +54,10 @@ the operator's host baseline is deny-all and other global/organization rules do
 not add access. Runner does not establish or periodically repair that baseline.
 Inspect effective scoped policy during installation and upgrades.
 
-OpenSandbox uses local Docker Engine container isolation, without a vendor login
-for lifecycle operations. Its per-job default-deny domain policy allows only the
-inference FQDN and GitHub API. The required egress image adds the official TCP
-port floor (80/443); domain policy alone is insufficient to restrict ports on
-an allowed host. Vault holds the real tokens outside the workload and injects
-them only for scoped hosts/paths. Host checkout and configuration mounts are
-read-only; the Docker socket, control API key and grant files are not mounted.
-Runner verifies nonce ownership before deletion and checks Docker resources
-afterward. See [deployment requirements](opensandbox.md); ordinary container
-isolation is not equivalent to sbx's VM boundary.
-
-OpenShell's ordinary Docker backend is container isolation, not automatically a
-microVM. Its gateway owns model/GitHub provider injection and policy. Runner checks
-resource ownership labels and recorded identities before deletion and requires
-positive deletion confirmation. It does not interpret transport errors as absence.
-OpenShell does not currently support this project's LLM-service/multi-model path.
+microsandbox runs each job in a local KVM microVM with read-only staging,
+host-side TLS credential injection and deny-by-default HTTPS rules scoped to the
+inference hostname and GitHub API. Cleanup verifies the original catalog, exact
+VM name and owner nonce. See the [microsandbox guide](microsandbox.md).
 
 Managed inference permits the configured HTTPS inference hostname. Grant control uses the application origin and a Runner credential kept outside the Sandbox. The inference Worker constructs its upstream URL and headers from its own configuration and the frozen grant.
 
