@@ -32,10 +32,59 @@ export const ModelRouteLimit = Schema.Struct({
   }),
 );
 export type ModelRouteLimit = typeof ModelRouteLimit.Type;
+
+const ModelMetadataText = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(200));
+const ModelMetadataList = Schema.Array(
+  Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128)),
+).check(Schema.isMaxLength(64));
+const ModelMetadataCostValue = Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0));
+export const ModelRouteMetadata = Schema.Struct({
+  name: Schema.optionalKey(ModelMetadataText),
+  family: Schema.optionalKey(ModelMetadataText),
+  type: Schema.optionalKey(Schema.Literal('chat')),
+  releaseDate: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^\d{4}-\d{2}(-\d{2})?$/))),
+  capabilities: Schema.optionalKey(
+    Schema.Struct({
+      tools: Schema.optionalKey(Schema.Boolean),
+      freeform: Schema.optionalKey(ModelMetadataList),
+      input: Schema.optionalKey(ModelMetadataList),
+      output: Schema.optionalKey(ModelMetadataList),
+      reasoning: Schema.optionalKey(
+        Schema.Struct({
+          supported: Schema.optionalKey(Schema.Boolean),
+          toggle: Schema.optionalKey(Schema.Boolean),
+          effort: Schema.optionalKey(ModelMetadataList),
+          budget: Schema.optionalKey(
+            Schema.Struct({
+              min: Schema.optionalKey(ModelMetadataCostValue),
+              max: Schema.optionalKey(ModelMetadataCostValue),
+            }),
+          ),
+        }),
+      ),
+      temperature: Schema.optionalKey(Schema.Boolean),
+    }),
+  ),
+  cost: Schema.optionalKey(
+    Schema.Struct({
+      input: Schema.optionalKey(ModelMetadataCostValue),
+      output: Schema.optionalKey(ModelMetadataCostValue),
+      cache: Schema.optionalKey(
+        Schema.Struct({
+          read: Schema.optionalKey(ModelMetadataCostValue),
+          write: Schema.optionalKey(ModelMetadataCostValue),
+        }),
+      ),
+    }),
+  ),
+});
+export type ModelRouteMetadata = typeof ModelRouteMetadata.Type;
+
 export const ModelRouteDescriptor = Schema.Struct({
   routeId: ModelRouteId,
   profile: ModelProfile,
   limit: Schema.optionalKey(ModelRouteLimit),
+  metadata: Schema.optionalKey(ModelRouteMetadata),
 });
 export type ModelRouteDescriptor = typeof ModelRouteDescriptor.Type;
 

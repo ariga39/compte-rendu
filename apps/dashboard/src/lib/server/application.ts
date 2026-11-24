@@ -78,9 +78,13 @@ export function createApplication(env: ApplicationEnv, dependencies: CoreWorkerD
           return new Response(null, { status: 401 });
         if (!env.INFERENCE_RELAY) return new Response(null, { status: 503 });
         try {
-          return Response.json(await env.INFERENCE_RELAY.catalog(), {
-            headers: { 'cache-control': 'no-store' },
-          });
+          const params = new URL(request.url).searchParams;
+          const detail = (name: string) => ['1', 'true'].includes(params.get(name) ?? '');
+          const includeModels = detail('models') || detail('includeModels');
+          return Response.json(
+            await env.INFERENCE_RELAY.catalog(includeModels ? { includeModels: true } : undefined),
+            { headers: { 'cache-control': 'no-store' } },
+          );
         } catch {
           return new Response(null, { status: 503 });
         }

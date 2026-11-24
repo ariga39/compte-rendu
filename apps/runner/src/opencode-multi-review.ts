@@ -278,6 +278,15 @@ function modelConfig(descriptor: ModelRouteDescriptor, baseURL: string) {
   }
 }
 
+const modelMetadataConfig = (metadata: ModelRouteDescriptor['metadata']) => ({
+  ...(metadata?.name === undefined ? {} : { name: metadata.name }),
+  ...(metadata?.family === undefined ? {} : { family: metadata.family }),
+  ...(metadata?.type === undefined ? {} : { type: metadata.type }),
+  ...(metadata?.releaseDate === undefined ? {} : { releaseDate: metadata.releaseDate }),
+  ...(metadata?.capabilities === undefined ? {} : { capabilities: metadata.capabilities }),
+  ...(metadata?.cost === undefined ? {} : { cost: metadata.cost }),
+});
+
 export const multiReviewConfig = (options: {
   readonly selection: MultiReviewSelection;
   readonly serviceBaseUrl: string;
@@ -292,7 +301,11 @@ export const multiReviewConfig = (options: {
     ? Object.fromEntries(
         options.descriptors.map((d) => [
           d.routeId,
-          { ...modelConfig(d, baseURL), ...(d.limit && { limit: d.limit }) },
+          {
+            ...modelConfig(d, baseURL),
+            ...modelMetadataConfig(d.metadata),
+            ...(d.limit && { limit: d.limit }),
+          },
         ]),
       )
     : Object.fromEntries(

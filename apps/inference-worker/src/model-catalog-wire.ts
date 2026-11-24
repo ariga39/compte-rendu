@@ -1,4 +1,4 @@
-import { ModelProfile, readBoundedBody } from '@compte-rendu/contracts';
+import { type ModelRouteLimit, ModelProfile, readBoundedBody } from '@compte-rendu/contracts';
 import { Option, Schema } from 'effect';
 
 const MAX_CATALOG_BYTES = 256 * 1024;
@@ -12,6 +12,25 @@ export const CatalogModelId = Schema.String.check(
   Schema.isPattern(/^[A-Za-z0-9._:/-]+$/),
 );
 
+const positiveLimit = Schema.Int.check(Schema.isGreaterThan(0));
+const CatalogLimit = Schema.Struct({
+  context: Schema.optionalKey(positiveLimit),
+  output: Schema.optionalKey(positiveLimit),
+});
+const normalizedLimit = (
+  limit: typeof CatalogLimit.Type | null | undefined,
+): ModelRouteLimit | null => {
+  if (limit === undefined || limit === null) return null;
+  const normalized = {
+    ...(limit.context === undefined ? {} : { context: limit.context }),
+    ...(limit.output === undefined ? {} : { output: limit.output }),
+  };
+  return normalized.context === undefined && normalized.output === undefined ? null : normalized;
+};
+const metadataRecord = (value: unknown): Readonly<Record<string, unknown>> | null =>
+  value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Readonly<Record<string, unknown>>)
+    : null;
 const apiEndpoint = Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown));
 const apiEndpoints = {
   'chat-completions': apiEndpoint,
@@ -35,6 +54,7 @@ const CatalogEntry = Schema.Struct({
       tools: Schema.optionalKey(Schema.Struct({ supported: Schema.optionalKey(Schema.Boolean) })),
     }),
   ),
+  limit: Schema.optionalKey(Schema.NullOr(CatalogLimit)),
 });
 export interface CatalogModel {
   readonly id: string;
@@ -42,6 +62,9 @@ export interface CatalogModel {
   readonly profiles: readonly ModelProfile[] | null;
   readonly recommended: ModelProfile | null;
   readonly toolsSupported: boolean | null;
+  readonly limit: ModelRouteLimit | null;
+  /** The complete upstream entry, retained for the client-facing boundary. */
+  readonly metadata: Readonly<Record<string, unknown>> | null;
 }
 const optionalLink = Schema.optionalKey(Schema.NullOr(Schema.NonEmptyString));
 const noCursor = Schema.optionalKey(Schema.NullOr(Schema.Literal('')));
@@ -76,7 +99,11 @@ const linkHeader = (response: Response): string[] => {
   return targets;
 };
 
-const catalogModel = (entry: typeof CatalogEntry.Type): CatalogModel => {
+const catalogModel = (
+  entry: typeof CatalogEntry.Type,
+  metadata: Readonly<Record<string, unknown>> | null,
+  limit: ModelRouteLimit | null = normalizedLimit(entry.limit),
+): CatalogModel => {
   const toolsSupported = entry.capabilities?.tools?.supported ?? null;
   const supported =
     entry.api === undefined
@@ -90,25 +117,31 @@ const catalogModel = (entry: typeof CatalogEntry.Type): CatalogModel => {
     entry.recommended_api === undefined
       ? null
       : (Object.entries(ApiProfile).find(([name]) => name === entry.recommended_api)?.[1] ?? null);
-  return { id: entry.id, profiles: supported, recommended, toolsSupported };
+  return { id: entry.id, profiles: supported, recommended, toolsSupported, limit, metadata };
 };
 
+const NativeAnthropicModel = Schema.Struct({
+  id: CatalogModelId,
+  max_input_tokens: Schema.optionalKey(Schema.NullOr(positiveLimit)),
+  max_tokens: Schema.optionalKey(Schema.NullOr(positiveLimit)),
+});
 const NativeAnthropicPage = Schema.fromJsonString(
   Schema.Struct({
-    data: Schema.Array(Schema.Struct({ id: CatalogModelId })),
+    data: Schema.Array(Schema.Unknown),
     has_more: Schema.Boolean,
     last_id: Schema.optionalKey(Schema.NullOr(CatalogModelId)),
   }),
 );
 const PageToken = Schema.NonEmptyString.check(Schema.isMaxLength(2048));
+const NativeGoogleModel = Schema.Struct({
+  name: Schema.String.check(Schema.isPattern(/^models\/[a-zA-Z0-9._-]+$/)),
+  supportedGenerationMethods: Schema.Array(Schema.String),
+  inputTokenLimit: Schema.optionalKey(Schema.NullOr(positiveLimit)),
+  outputTokenLimit: Schema.optionalKey(Schema.NullOr(positiveLimit)),
+});
 const NativeGooglePage = Schema.fromJsonString(
   Schema.Struct({
-    models: Schema.Array(
-      Schema.Struct({
-        name: Schema.String.check(Schema.isPattern(/^models\/[a-zA-Z0-9._-]+$/)),
-        supportedGenerationMethods: Schema.Array(Schema.String),
-      }),
-    ),
+    models: Schema.Array(Schema.Unknown),
     nextPageToken: Schema.optionalKey(PageToken),
   }),
 );
@@ -130,7 +163,17 @@ export const readModelCatalogPage = async (
     const page = Schema.decodeUnknownSync(NativeAnthropicPage)(body.text);
     if (page.has_more && !page.last_id) throw new Error('missing catalog cursor');
     return {
-      models: page.data.map(catalogModel),
+      models: page.data.map((entry) => {
+        const model = Schema.decodeUnknownSync(NativeAnthropicModel)(entry);
+        return catalogModel(
+          { id: model.id },
+          metadataRecord(entry),
+          normalizedLimit({
+            context: model.max_input_tokens ?? undefined,
+            output: model.max_tokens ?? undefined,
+          }),
+        );
+      }),
       rejected: 0,
       next: page.has_more && page.last_id ? cursorUrl(currentUrl, 'after_id', page.last_id) : null,
     };
@@ -139,8 +182,21 @@ export const readModelCatalogPage = async (
     const page = Schema.decodeUnknownSync(NativeGooglePage)(body.text);
     return {
       models: page.models
-        .filter((m) => m.supportedGenerationMethods.includes('generateContent'))
-        .map((m) => catalogModel({ id: m.name.slice('models/'.length) })),
+        .map((entry) => ({
+          entry,
+          model: Schema.decodeUnknownSync(NativeGoogleModel)(entry),
+        }))
+        .filter(({ model }) => model.supportedGenerationMethods.includes('generateContent'))
+        .map(({ entry, model }) =>
+          catalogModel(
+            { id: model.name.slice('models/'.length) },
+            metadataRecord(entry),
+            normalizedLimit({
+              context: model.inputTokenLimit ?? undefined,
+              output: model.outputTokenLimit ?? undefined,
+            }),
+          ),
+        ),
       rejected: 0,
       next: page.nextPageToken ? cursorUrl(currentUrl, 'pageToken', page.nextPageToken) : null,
     };
@@ -178,7 +234,7 @@ export const readModelCatalogPage = async (
   for (const entry of page.data) {
     const model = Schema.decodeUnknownOption(CatalogEntry)(entry);
     if (Option.isNone(model)) rejected++;
-    else models.push(catalogModel(model.value));
+    else models.push(catalogModel(model.value, metadataRecord(entry)));
   }
   return { models, rejected, next };
 };

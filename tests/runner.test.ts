@@ -10158,6 +10158,59 @@ describe('Runner multi-model review', () => {
     expect(config.agents['reviewer-1'].model).toBe('compte-rendu/step-5-preview');
   });
 
+  it('applies discovered model metadata without replacing the trusted relay adapter', async () => {
+    const result = await runScenario({
+      descriptors: [
+        {
+          routeId: 'step-5-preview',
+          profile: 'responses',
+          limit: { context: 120000, output: 15000 },
+          metadata: {
+            name: 'Step 5 Preview',
+            family: 'step',
+            releaseDate: '2026-10-01',
+            capabilities: {
+              tools: true,
+              input: ['text'],
+              output: ['text'],
+              reasoning: { supported: true, effort: ['low', 'high'] },
+            },
+            cost: { input: 1.25, output: 10, cache: { read: 0.25 } },
+          },
+        },
+        { routeId: 'deepseek-v4.1-flash', profile: 'chat', metadata: { name: 'DeepSeek' } },
+      ],
+    });
+    expect(result.terminal.status).toBe('succeeded');
+    const config = JSON.parse(
+      result
+        .createArgs!.find((x) => x.startsWith('OPENCODE_CONFIG_CONTENT='))!
+        .slice('OPENCODE_CONFIG_CONTENT='.length),
+    );
+    const provider = config.providers['compte-rendu'];
+    expect(provider.settings.baseURL).toBe('https://inference.example/v1');
+    expect(provider.models['step-5-preview']).toMatchObject({
+      package: '@opencode/ai/providers/openai',
+      settings: {
+        baseURL: 'https://inference.example/v1',
+        apiKey: '{env:OPENCODE_API_KEY}',
+      },
+      name: 'Step 5 Preview',
+      family: 'step',
+      releaseDate: '2026-10-01',
+      limit: { context: 120000, output: 15000 },
+      capabilities: {
+        tools: true,
+        input: ['text'],
+        output: ['text'],
+        reasoning: { supported: true, effort: ['low', 'high'] },
+      },
+      cost: { input: 1.25, output: 10, cache: { read: 0.25 } },
+    });
+    expect(provider.models['step-5-preview'].modelID).toBeUndefined();
+    expect(provider.models['deepseek-v4.1-flash']).toMatchObject({ name: 'DeepSeek' });
+  });
+
   it('configures signed Messages and path-routed Gemini models on the same sandbox relay', async () => {
     const result = await runScenario({
       descriptors: [
