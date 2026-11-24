@@ -6,7 +6,7 @@ import {
   RETRY_REVIEW_ACTION,
 } from '@compte-rendu/contracts';
 import { GitHubNotFoundError, GitHubRequestError, parseRetryAfterMs } from './github-http';
-import type { GitHubAdapter } from './index';
+import type { GitHubAdapter } from './github-adapter-contract';
 import { formatReviewPublicationMarker } from './review-publication-format';
 
 const Repository = Schema.Struct({

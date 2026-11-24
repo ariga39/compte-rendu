@@ -4,21 +4,24 @@ import {
   type OperationalLog,
 } from '@compte-rendu/contracts';
 import type {
-  CoreLifecycleLog,
-  GitHubAdapter,
+  CancellationStore,
   ReviewCancellationState,
   ReviewCancellationWorkItem,
-  ReviewOutcome,
-  ReviewStateQueries,
-} from './index';
+} from './cancellation-store';
+import type { CoreLifecycleLog } from './core-observability';
+import type { GitHubAdapter } from './github-adapter-contract';
+import type { ReviewLifecycleStore } from './review-lifecycle-store';
+import type { ReviewOutcome } from './review-records';
 import type { RunnerJobSubmitter } from './runner-job-client';
 
 type LifecycleContext = {
   readonly waitUntil: (task: Promise<unknown>) => void;
 };
 
+type JobControlStore = ReviewLifecycleStore & CancellationStore;
+
 export function createJobControl(
-  state: ReviewStateQueries,
+  state: JobControlStore,
   github: GitHubAdapter,
   runner?: RunnerJobSubmitter,
   log?: OperationalLog,
@@ -70,7 +73,7 @@ export function createJobControl(
       return;
     const identity = { runId: item.runId, jobId: item.runnerJobId, attempt: item.runnerAttempt };
     if (
-      !(await state.recordRunnerStopAttempt?.({
+      !(await state.recordRunnerStopAttempt({
         ...identity,
         occurredAt,
         expectedLastAttempt: item.runnerStopAttemptedAt,
@@ -81,7 +84,7 @@ export function createJobControl(
       ...identity,
       claimDeadlineAt: Date.parse(item.claimedAt) + REVIEW_ATTEMPT_BUDGET_MS,
     });
-    if (destroyed) await state.confirmRunnerDestroyed?.({ ...identity, occurredAt });
+    if (destroyed) await state.confirmRunnerDestroyed({ ...identity, occurredAt });
   }
 
   async function endCheck(item: ReviewCancellationWorkItem, occurredAt: string) {
@@ -89,7 +92,7 @@ export function createJobControl(
       return;
     const identity = { runId: item.runId, checkRunId: item.checkRunId };
     if (
-      !(await state.recordCheckCancellationAttempt?.({
+      !(await state.recordCheckCancellationAttempt({
         ...identity,
         occurredAt,
         expectedLastAttempt: item.checkCancelAttemptedAt,
@@ -105,7 +108,7 @@ export function createJobControl(
       status: 'cancelled',
       cancellationReason: 'manual',
     });
-    await state.confirmCheckCancelled?.({ ...identity, occurredAt });
+    await state.confirmCheckCancelled({ ...identity, occurredAt });
   }
 
   const recordCancellation = async (
@@ -161,13 +164,12 @@ export function createJobControl(
     },
     async reconcileCancellations(now: number, runId?: string) {
       const occurredAt = new Date(now).toISOString();
-      const work =
-        (await state.listCancellationWork?.({
-          retryBefore: new Date(now - 60_000).toISOString(),
-          recoveryBefore: new Date(now - REVIEW_ATTEMPT_BUDGET_MS - 60_000).toISOString(),
-          limit: runId ? 1 : 8,
-          runId,
-        })) ?? [];
+      const work = await state.listCancellationWork({
+        retryBefore: new Date(now - 60_000).toISOString(),
+        recoveryBefore: new Date(now - REVIEW_ATTEMPT_BUDGET_MS - 60_000).toISOString(),
+        limit: runId ? 1 : 8,
+        runId,
+      });
       const outcomes = await Promise.allSettled(
         work.flatMap((item) => [
           deliver(item.runId, 'runner-stop', () => stop(item, occurredAt)),

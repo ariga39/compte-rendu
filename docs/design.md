@@ -118,6 +118,17 @@ allowlisted HTTP endpoints are exposed. Runner is private. The inference hostnam
 There is no Cloudflare Workflow or message queue. See [installation](installation.md)
 and [LLM service](llm-service.md) for configuration, grants and deployment order.
 
+Core is assembled from admission, Runner protocol, publication/Check delivery and
+public projection seams rather than one monolithic module. D1 access is split by
+the transaction that owns it: `ReviewLifecycleStore` (admission, claims,
+evidence and publication lifecycle), `CheckRunStore` (Check setup/delivery
+leases), `CancellationStore` (stop and Check cancellation), and
+`DashboardMetadataStore` (public projection, progress and metadata refresh).
+`createD1ReviewStateStore` composes the four required ports for existing callers.
+`runner-evidence.ts` owns the shared manifest/artifact SHA-256 validation used by
+Runner callbacks and publication reconciliation; Core keeps one evidence trust
+decision rather than parallel copies.
+
 ## Runner Job and pull interface
 
 `POST /runner-claim` returns an immutable `RunnerJobInput` or 204. Ingress
@@ -370,7 +381,7 @@ Tests observe public behavior through these established seams:
 | Review coordinator                | Policy, deduplication, freshness, terminal publication through external adapters                                |
 | Runner HTTP/process/runtime ports | Admission, capacity, agent result, evidence, deadlines and confirmed cleanup                                    |
 | LLM control/inference HTTP        | Grants, route authorization, native streaming, cancellation and sanitization                                    |
-| Store query interface             | Persisted run/disclosure queries and atomic ownership transitions                                               |
+| Core store ports                  | Persisted run/disclosure queries and atomic ownership transitions by transaction owner                          |
 | Built dashboard in browser        | Navigation, filters, privacy expiry, refresh and accessibility                                                  |
 
 Use behavior-based TDD with narrow external adapters, not private-helper or

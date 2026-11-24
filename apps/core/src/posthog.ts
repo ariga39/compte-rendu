@@ -1,5 +1,5 @@
 import { Option, Schema } from 'effect';
-import { CoreLifecycleEvent, type CoreLifecycleLog } from './index';
+import { CoreLifecycleEvent, type CoreLifecycleLog } from './core-observability';
 
 interface PostHogEnvironment {
   readonly POSTHOG_ENABLED?: string;

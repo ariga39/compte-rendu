@@ -103,7 +103,9 @@ configured; they are not the product state or an authorization dependency.
 
 - Ingress: `apps/ingress/src/`
 - Ownership, publication and projection: `apps/core/src/core-worker.ts`,
-  `review-state-store.ts`, `github-review-adapter.ts`, `dashboard.ts`
+  `runner-protocol.ts`, `review-publication.ts`, `review-admission.ts`,
+  `review-lifecycle-store.ts`, `check-run-store.ts`, `cancellation-store.ts`,
+  `dashboard-metadata-store.ts`, `github-review-adapter.ts`, `dashboard.ts`
 - Runner and runtimes: `apps/runner/src/runner.ts`, `sandbox-runtime-*.ts`
 - Grant and upstream boundaries: `apps/inference-worker/src/grants.ts`, `relay.ts`
 - Agent permissions and prompt: `apps/runner/src/opencode-multi-review.ts`,
