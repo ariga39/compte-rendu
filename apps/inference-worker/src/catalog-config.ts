@@ -1,5 +1,5 @@
 import { Schema } from 'effect';
-import { ModelProfile, ModelRouteLimit } from '@compte-rendu/contracts';
+import { ModelProfile, ModelRouteLimit, RouteEffortOption } from '@compte-rendu/contracts';
 import { CredentialAlias, ProviderSlug, RouteId } from './route-schema.ts';
 
 export { RouteId } from './route-schema.ts';
@@ -22,9 +22,16 @@ const profileFields = {
   ),
 };
 const aliases = Schema.Record(RouteId, RouteId);
+export const RouteEffortOptions = Schema.Array(RouteEffortOption).check(
+  Schema.makeFilter(
+    (options) => new Set(options.map((option) => option.name)).size === options.length,
+    { expected: 'distinct effort names' },
+  ),
+);
 export const ModelRouteOverride = Schema.Struct({
   profile: ModelProfile,
   limit: Schema.optionalKey(ModelRouteLimit),
+  efforts: Schema.optionalKey(RouteEffortOptions),
 });
 export type ModelRouteOverride = typeof ModelRouteOverride.Type;
 const routeOverrides = Schema.Record(RouteId, ModelRouteOverride);
@@ -64,13 +71,16 @@ export const RelayCatalogSource = Schema.Union([
   Schema.makeFilter(
     (source) => {
       const required = nativeProfile(source.providerSlug);
-      if (!required) return true;
       const profiles = [
         ...(source.profile ? [source.profile] : []),
         ...(source.profiles ?? []),
         ...Object.values(source.models ?? {}).map((m) => m.profile),
       ];
-      return profiles.every((profile) => profile === required);
+      if (required && !profiles.every((profile) => profile === required)) return false;
+      // Reasoning effort injection is implemented for Chat only in this release.
+      return Object.values(source.models ?? {}).every(
+        (model) => model.efforts === undefined || model.profile === 'chat',
+      );
     },
     { expected: 'profile supported by the native Gateway destination' },
   ),

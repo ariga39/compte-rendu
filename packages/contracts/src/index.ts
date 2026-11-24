@@ -6,7 +6,9 @@ export {
 } from './read-request-body.ts';
 import { Schema } from 'effect';
 import { ModelUsageSummary } from './model-usage.ts';
+import { EffortName, FrozenRouteEffort, ModelRouteId } from './effort.ts';
 export { MODEL_USAGE_ROW_LIMIT, ModelUsageSummary } from './model-usage.ts';
+export * from './effort.ts';
 export * from './stream.ts';
 export * from './usage.ts';
 
@@ -19,7 +21,6 @@ export const REVIEW_ATTEMPT_BUDGET_MS = 90 * 60 * 1000;
 export const RunnerDeadline = Schema.Literals(['claim', 'credential']);
 export type RunnerDeadline = typeof RunnerDeadline.Type;
 
-export const ModelRouteId = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9._:/-]{1,128}$/));
 export const ModelProfile = Schema.Literals(['chat', 'responses', 'messages', 'gemini']);
 export type ModelProfile = typeof ModelProfile.Type;
 export const ModelRouteLimit = Schema.Struct({
@@ -46,11 +47,15 @@ export const ReviewModelSelection = Schema.Struct({
     }),
   ),
   synthesis: ModelRouteId,
+  // Operator-facing names only. Parameters live in the internal effort snapshot.
+  efforts: Schema.optionalKey(Schema.Record(ModelRouteId, EffortName)),
 });
 export type ReviewModelSelection = typeof ReviewModelSelection.Type;
 export const ReviewConfiguration = Schema.Struct({
   revision: Schema.Natural,
   selection: Schema.NullOr(ReviewModelSelection),
+  // Frozen at admission from the trusted catalog; omitted for legacy runs.
+  efforts: Schema.optionalKey(Schema.Array(FrozenRouteEffort)),
 });
 export type ReviewConfiguration = typeof ReviewConfiguration.Type;
 

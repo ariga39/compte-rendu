@@ -258,6 +258,24 @@ const successWire = (model) =>
   finishFrame() +
   'data: [DONE]\n\n';
 
+const deepseekRejection = (value) =>
+  // Verified DeepSeek Chat deserializer envelope:
+  // https://github.com/anomalyco/models.dev/issues/3962 (lines 147-151)
+  // https://github.com/bytedance/deer-flow/issues/4514
+  Response.json(
+    {
+      error: {
+        message:
+          'Failed to deserialize the JSON body into the target type: reasoning_effort: ' +
+          `unknown variant \`${value}\`, expected one of \`high\`, \`low\`, \`medium\`, \`max\`, \`xhigh\` at line 1 column 26189`,
+        type: 'invalid_request_error',
+        param: null,
+        code: 'invalid_request_error',
+      },
+    },
+    { status: 400 },
+  );
+
 const partialWire = (model) =>
   `data: {"model":"${model}","choices":[{"index":0,"delta":{"content":"Partial"},"finish_reason":null}]}\n\n` +
   usageFrame(model);
@@ -441,6 +459,40 @@ export default {
     if (messages !== null) return streamResponse(messages);
     const gemini = geminiProtocolStream(scenario, body);
     if (gemini !== null) return streamResponse(gemini);
+    if (scenario === 'effort-report') {
+      return streamResponse(
+        `data: {"model":"deepseek-native","choices":[],"reasoning_effort":"max"}\n\n` +
+          successWire('deepseek-native'),
+      );
+    }
+    if (scenario.startsWith('deepseek-reject')) {
+      let parsed = null;
+      try {
+        parsed = JSON.parse(body);
+      } catch {
+        parsed = null;
+      }
+      const sent = parsed?.reasoning_effort;
+      if (scenario === 'deepseek-reject-minimal-delayed') {
+        await releasePromise;
+        return deepseekRejection(sent ?? 'missing');
+      }
+      if (scenario === 'deepseek-reject-minimal' && sent !== 'minimal')
+        return streamResponse(successWire('deepseek-native'));
+      if (scenario === 'deepseek-reject-mismatch') return deepseekRejection('different-value');
+      if (scenario === 'deepseek-reject-generic')
+        return Response.json({ error: { message: 'bad request' } }, { status: 400 });
+      return deepseekRejection(sent ?? 'missing');
+    }
+    if (scenario === 'other-model-reject') {
+      let parsed = null;
+      try {
+        parsed = JSON.parse(body);
+      } catch {
+        parsed = null;
+      }
+      return deepseekRejection(parsed?.reasoning_effort ?? 'missing');
+    }
     if (scenario === 'responses-success') return streamResponse(responsesSuccessWire());
     if (scenario === 'responses-incomplete') return streamResponse(responsesIncompleteWire());
     if (scenario === 'responses-failed') return streamResponse(responsesFailedWire());

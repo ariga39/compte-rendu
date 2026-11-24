@@ -1,4 +1,5 @@
 import type {
+  EffortRouteSummary,
   PublicMilestone,
   PublicOverview,
   PublicTaskDetail,
@@ -9,7 +10,18 @@ import type {
 export type TaskState = PublicTaskState;
 export type PublicIdentity = Extract<PublicTaskIdentity, { kind: 'public' }>;
 export type Overview = PublicOverview;
-export type TaskDetail = PublicTaskDetail;
+export interface EffortSelectionEntry {
+  route: string;
+  name: string | null;
+  generation: number;
+}
+export interface DetailEfforts {
+  selection: EffortSelectionEntry[];
+  summary: EffortRouteSummary[] | null;
+}
+export type TaskDetail = PublicTaskDetail & {
+  efforts?: DetailEfforts | null;
+};
 
 export type TimelineStage =
   | PublicMilestone['stage']

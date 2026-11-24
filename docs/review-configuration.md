@@ -184,3 +184,104 @@ the snapshot before enabling any selection. A one-reviewer selection runs direct
 reviewers and one synthesis inside a single Sandbox. It retains
 its frozen configuration and participant evidence, and publishes only after
 validation, grant revocation and confirmed Sandbox cleanup.
+
+## Thinking effort
+
+Migration `0018_effort_configuration.sql` adds the internal effort snapshot and
+the per-route reset generations. The public selection may include an `efforts`
+object that maps a selected route ID to an operator-facing effort name:
+
+```json
+{
+  "reviewers": ["review-provider/deepseek-v4.1-flash"],
+  "synthesis": "review-provider/deepseek-v4.1-flash",
+  "efforts": { "review-provider/deepseek-v4.1-flash": "high" }
+}
+```
+
+The value is only a name. Requests never carry upstream thinking fields. Core
+resolves the name against the relay catalog (`efforts[route][] = {name, controls}`)
+and rejects an unknown route, an unknown name or any extra field. The relay
+catalog is trusted input; the browser cannot invent `reasoning_effort`,
+`thinking`, budgets or aliases. A route without a name keeps the client's
+existing request behaviour. Removing a name returns that route to the default.
+
+Saving writes the public selection and an internal frozen snapshot. Each selected
+route gets one generation and, when chosen, the name and trusted controls from
+the catalog. Admission copies the whole snapshot into the run's
+`reviewConfiguration` in the same D1 statement that creates the run. Changing or
+removing a catalog option later does not rewrite an existing save or queued job.
+Editor-facing settings show a missing saved name as unavailable and require a
+replacement before the next save.
+
+`GET /runner-llm/issue-v2` receives the frozen `{routeId, generation, name,
+controls}` entries for the routes the job actually uses, and the relay validates
+them against its trusted history. The legacy v1 grant does not carry efforts.
+Runner fails a job with a configuration failure when its frozen snapshot
+contains effort names but it is configured for a v1 grant instead of silently
+dropping them. The thawed job snapshot and `multi-review.json` retain the frozen
+selection, including efforts.
+
+### Fallback state and explicit reset
+
+The relay may switch a route to the upstream default after a verified parameter
+rejection. That shared state is keyed by the instance-local route ID and is not
+copied into grants or per-job rows. Settings read it with the relay
+`effortStates()` control call and show **Fallback · using upstream default**, the
+first switch time and the controlled reason next to the selected route.
+
+An explicit reset advances only that route's Core generation. `POST
+/review-configuration/efforts/reset` (dedicated operator token) and the
+dashboard's same-origin, editor-authorized `POST /api/model-settings/effort-reset`
+accept `{revision, route}`. The reset uses the ordinary configuration revision:
+a stale revision returns 409 and does not advance the generation. It applies
+only to runs admitted after the reset; already queued, claimed or running jobs
+keep the generation frozen at their admission. Ordinary configuration saves
+never reset a route.
+
+Core keeps the advanced generation on a later ordinary save, even when that save
+omits effort names. Otherwise a post-reset save could freeze generation 0 again
+and reactivate the older relay marker. Settings hide a relay state whose
+generation is older than the Core snapshot, so a successful reset removes the
+live fallback badge while historical job summaries remain unchanged.
+
+### Public detail and authorized request details
+
+The public detail response keeps the admission snapshot separate from token
+usage:
+
+```json
+{
+  "efforts": {
+    "selection": [
+      { "route": "review-provider/deepseek-v4.1-flash", "name": "high", "generation": 0 }
+    ],
+    "summary": [
+      {
+        "route": "review-provider/deepseek-v4.1-flash",
+        "selected": "high",
+        "generation": 0,
+        "outcomes": [
+          { "kind": "switched", "reason": "upstream rejected reasoning_effort", "requests": 1 }
+        ]
+      }
+    ]
+  }
+}
+```
+
+While a run is active only `selection` is meaningful; `summary` is `null` until
+the terminal callback's usage snapshot is stored. A route that was configured but
+never called has no execution outcome. The page does not claim to know the
+upstream's internal thinking strength.
+
+The current editor may load bounded per-request ledger records with `GET
+/api/jobs/:runId/effort-details` (optional `cursor`). The endpoint requires the
+same editor authorization as settings and reads the relay `effortDetails()`
+control call; it never exposes prompts, raw upstream bodies, credentials,
+signatures or reasoning content. Each request lists at most two attempts with
+the sent and reported allowlisted controls and `complete`, `rejected` or
+`incomplete` status. `nextCursor` supports further retained pages. A missing
+grant or an expired ledger returns a controlled "no longer retained" response;
+an interrupted or missing record is `incomplete`, not a confirmed "not sent" or
+"not reported".

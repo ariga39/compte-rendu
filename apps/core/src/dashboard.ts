@@ -4,6 +4,7 @@ import {
   PublicTaskFailure,
   PublicMilestone,
   REVIEW_PROGRESS_STAGES,
+  ReviewConfiguration,
   type PublicTaskState,
 } from '@compte-rendu/contracts';
 import { GitHubRequestError } from './github-review-adapter';
@@ -117,6 +118,19 @@ export const projectPublicTask = (row: PublicRunRow, now: string): PublicTaskSta
 
 const json = (body: unknown, status = 200) =>
   Response.json(body, { status, headers: { 'cache-control': 'no-store' } });
+
+const effortSelection = (raw: string | null | undefined) => {
+  if (raw == null) return [];
+  const decoded = Schema.decodeUnknownOption(Schema.fromJsonString(ReviewConfiguration), {
+    onExcessProperty: 'error',
+  })(raw);
+  if (Option.isNone(decoded)) return [];
+  return (decoded.value.efforts ?? []).map((effort) => ({
+    route: effort.routeId,
+    name: effort.name ?? null,
+    generation: effort.generation,
+  }));
+};
 
 const notFound = () =>
   new Response(null, { status: 404, headers: { 'cache-control': 'no-store' } });
@@ -303,15 +317,20 @@ export const handleDashboardRequest = async (
         ? Option.none()
         : Schema.decodeUnknownOption(PublicMilestonesSchema)(row.progressMilestones);
     const milestones = Option.isSome(parsedMilestones) ? parsedMilestones.value : [];
+    const usage =
+      row.modelUsage == null
+        ? null
+        : Option.getOrNull(
+            Schema.decodeUnknownOption(Schema.fromJsonString(ModelUsageSummary))(row.modelUsage),
+          );
     return json({
       generatedAt: now,
       task: projectPublicTask(row, now),
-      usage:
-        row.modelUsage == null
-          ? null
-          : Option.getOrNull(
-              Schema.decodeUnknownOption(Schema.fromJsonString(ModelUsageSummary))(row.modelUsage),
-            ),
+      usage,
+      efforts: {
+        selection: effortSelection(row.reviewConfiguration),
+        summary: usage?.efforts ?? null,
+      },
       milestones,
       processingMilestones: [
         ...(row.resultReceivedAt === null

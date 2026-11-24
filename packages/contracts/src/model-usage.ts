@@ -1,4 +1,5 @@
 import { Schema } from 'effect';
+import { EffortRouteSummary } from './effort.ts';
 
 const SafeIdentity = Schema.String.check(
   Schema.isMaxLength(128),
@@ -34,6 +35,9 @@ export const MODEL_USAGE_ROW_LIMIT = 32;
 export const ModelUsageSummary = Schema.Struct({
   version: Schema.Literal(1),
   models: Schema.Array(ModelUsageRow).check(Schema.isMaxLength(MODEL_USAGE_ROW_LIMIT)),
+  efforts: Schema.optionalKey(
+    Schema.Array(EffortRouteSummary).check(Schema.isMaxLength(MODEL_USAGE_ROW_LIMIT)),
+  ),
   truncated: Schema.optionalKey(Schema.Boolean),
 });
 export type ModelUsageSummary = typeof ModelUsageSummary.Type;

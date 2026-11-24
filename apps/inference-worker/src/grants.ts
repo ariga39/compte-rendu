@@ -1,5 +1,6 @@
 import { Effect, Option, Schema } from 'effect';
 import {
+  FrozenRouteEffort,
   REVIEW_ATTEMPT_BUDGET_MS,
   ModelRouteLimit,
   type ModelRouteDescriptor,
@@ -16,6 +17,14 @@ export const ResolvedGrantSnapshot = Schema.Struct({
     Schema.makeFilter((routes) => new Set(routes).size === routes.length, {
       expected: 'distinct routes',
     }),
+  ),
+  efforts: Schema.optionalKey(
+    Schema.Array(FrozenRouteEffort).check(
+      Schema.makeFilter(
+        (efforts) => new Set(efforts.map((effort) => effort.routeId)).size === efforts.length,
+        { expected: 'distinct effort routes' },
+      ),
+    ),
   ),
 });
 export type ResolvedGrantSnapshot = typeof ResolvedGrantSnapshot.Type;
@@ -138,11 +147,40 @@ const issueFor = (database: D1DatabaseLike, version: 1 | 2) =>
       decoded.value.snapshot.routes.map((id) => catalog.get(id)),
     );
     if (Option.isNone(frozen)) return { kind: 'invalid' as const };
-    // v1 is a Chat Completions-only contract. It must not hand a non-chat
-    // profile to a Runner that cannot route it, and its persisted mapping stays
-    // byte-compatible with the pre-profile relay.
-    if (version === 1 && frozen.value.some((route) => route.profile !== 'chat'))
+    // v1 is a Chat Completions-only legacy contract. It must not hand a non-chat
+    // profile to a Runner that cannot route it, and it must never silently drop
+    // an explicit effort selection.
+    if (version === 1) {
+      if ((decoded.value.snapshot.efforts?.length ?? 0) > 0) return { kind: 'invalid' as const };
+      if (frozen.value.some((route) => route.profile !== 'chat'))
+        return { kind: 'invalid' as const };
+    }
+
+    // The frozen snapshot is authoritative; never re-check against the mutable
+    // catalog effort menu. Validate only protocol/route compatibility here.
+    const effortByRoute = new Map(
+      (decoded.value.snapshot.efforts ?? []).map((effort) => [effort.routeId, effort]),
+    );
+    const withEffort: FrozenRoute[] = [];
+    for (const route of frozen.value) {
+      const effort = effortByRoute.get(route.routeId);
+      if (effort === undefined) {
+        withEffort.push(route);
+        continue;
+      }
+      if (route.profile !== 'chat') return { kind: 'invalid' as const };
+      withEffort.push({
+        ...route,
+        effortGeneration: effort.generation,
+        ...(effort.name === undefined || effort.controls === undefined
+          ? {}
+          : { effort: { name: effort.name, controls: effort.controls } }),
+      });
+    }
+    if (effortByRoute.size !== (decoded.value.snapshot.efforts ?? []).length)
       return { kind: 'invalid' as const };
+    for (const routeId of effortByRoute.keys())
+      if (!catalog.has(routeId)) return { kind: 'invalid' as const };
 
     const token = randomToken();
     const tokenHash = yield* Effect.promise(() => sha256Hex(token));
@@ -163,7 +201,7 @@ const issueFor = (database: D1DatabaseLike, version: 1 | 2) =>
           decoded.value.jobId,
           tokenHash,
           JSON.stringify(decoded.value.snapshot),
-          JSON.stringify(version === 1 ? legacyFrozenMapping(frozen.value) : frozen.value),
+          JSON.stringify(version === 1 ? legacyFrozenMapping(withEffort) : withEffort),
           GRANT_TTL_MS,
           decoded.value.latestIssueDeadline,
           decoded.value.latestIssueDeadline,
@@ -194,7 +232,7 @@ const issueFor = (database: D1DatabaseLike, version: 1 | 2) =>
       kind: 'issued' as const,
       token,
       expiresAt: new Date(stored.expires_at).toISOString(),
-      frozen: frozen.value,
+      frozen: withEffort,
     };
   });
 

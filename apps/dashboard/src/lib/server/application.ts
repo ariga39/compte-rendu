@@ -21,7 +21,8 @@ export function createApplication(env: ApplicationEnv, dependencies: CoreWorkerD
       const path = new URL(request.url).pathname;
       if (path === '/api/session') return sessionViewer(request, env);
       if (path.startsWith('/auth/')) return authRoute(request, env);
-      if (path === '/api/model-settings') return modelSettings(request, env);
+      if (path === '/api/model-settings' || path === '/api/model-settings/effort-reset')
+        return modelSettings(request, env);
       const cancel = /^\/api\/jobs\/([A-Za-z0-9._~-]{1,128})\/cancel$/.exec(path);
       if (cancel) {
         if (request.method !== 'POST') return noStore(405);
@@ -46,6 +47,24 @@ export function createApplication(env: ApplicationEnv, dependencies: CoreWorkerD
           return response;
         } catch {
           return noStore(503, { error: 'Review cancellation is temporarily unavailable.' });
+        }
+      }
+      const effortDetail = /^\/api\/jobs\/([A-Za-z0-9._~-]{1,128})\/effort-details$/.exec(path);
+      if (effortDetail) {
+        if (request.method !== 'GET') return noStore(405);
+        const operator = await requireOperator(
+          request,
+          env,
+          'This GitHub account is not authorized to inspect review requests.',
+        );
+        if (operator instanceof Response) return operator;
+        try {
+          return await createCoreWorker(env, dependencies).effortDetail(
+            effortDetail[1],
+            new URL(request.url).searchParams.get('cursor') ?? undefined,
+          );
+        } catch {
+          return noStore(503, { error: 'Effort request details are temporarily unavailable.' });
         }
       }
       if (path.startsWith('/runner-llm/'))

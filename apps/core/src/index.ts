@@ -224,6 +224,7 @@ export type PublicRunStatusValue =
 
 export interface PublicRunRow {
   modelUsage?: string | null;
+  reviewConfiguration?: string | null;
   decision: ReviewDecision | null;
   runId: string;
   status: PublicRunStatusValue;

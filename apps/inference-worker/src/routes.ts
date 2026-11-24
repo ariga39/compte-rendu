@@ -1,5 +1,10 @@
 import { Effect, Option, Schema } from 'effect';
-import { ModelProfile, ModelRouteLimit, SafeModel } from '@compte-rendu/contracts';
+import {
+  AppliedRouteEffort,
+  ModelProfile,
+  ModelRouteLimit,
+  SafeModel,
+} from '@compte-rendu/contracts';
 import { CredentialAlias, ProviderSlug, RouteId } from './route-schema.ts';
 
 export { RouteId } from './route-schema.ts';
@@ -18,6 +23,8 @@ export const FrozenRoute = Schema.Struct({
   credentialAlias: CredentialAlias,
   profile: ModelProfile.pipe(Schema.withDecodingDefaultKey(Effect.succeed('chat'))),
   limit: Schema.optionalKey(ModelRouteLimit),
+  effortGeneration: Schema.optionalKey(Schema.Natural),
+  effort: Schema.optionalKey(AppliedRouteEffort),
 });
 export type FrozenRoute = typeof FrozenRoute.Type;
 

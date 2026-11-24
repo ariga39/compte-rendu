@@ -115,6 +115,132 @@ test('shows an empty provider list after the last model is withdrawn', async ({
   await expect(page.getByRole('status')).toHaveText('No models are currently listed.');
 });
 
+test('selects a per-route effort, saves it, shows the fallback marker and resets it', async ({
+  page,
+  harness,
+  base,
+}) => {
+  let reset = false;
+  harness.setHandler((url, req) => {
+    if (url.pathname === '/api/model-settings/effort-reset' && req.method === 'POST') {
+      reset = true;
+      return { status: 200, json: { revision: 3 } };
+    }
+    if (url.pathname !== '/api/model-settings') return { status: 404 };
+    if (req.method === 'PUT') return { status: 200, json: { revision: 3 } };
+    return {
+      status: 200,
+      json: {
+        routes: ['review/a'],
+        efforts: { 'review/a': [{ name: 'high', controls: { reasoning_effort: 'high' } }] },
+        effortStates: reset
+          ? []
+          : [
+              {
+                routeId: 'review/a',
+                generation: 0,
+                fallbackAt: '2026-10-16T12:00:00.000Z',
+                reason: 'upstream rejected reasoning_effort',
+              },
+            ],
+        configuration: {
+          revision: 2,
+          selection: { reviewers: ['review/a'], synthesis: 'review/a' },
+        },
+      },
+    };
+  });
+  await page.goto(base + '/settings');
+  await expect(page.getByTestId('effort-fallback-review/a')).toContainText(
+    'using upstream default',
+  );
+  await page.getByLabel('Thinking effort for review/a').selectOption('high');
+  const saved = page.waitForRequest((request) => request.method() === 'PUT');
+  await page.getByRole('button', { name: 'Save changes' }).click();
+  expect((await saved).postDataJSON()).toEqual({
+    revision: 2,
+    selection: {
+      reviewers: ['review/a'],
+      synthesis: 'review/a',
+      efforts: { 'review/a': 'high' },
+    },
+  });
+  const resetRequest = page.waitForRequest((request) =>
+    request.url().endsWith('/api/model-settings/effort-reset'),
+  );
+  await page.getByTestId('effort-reset-review/a').click();
+  expect((await resetRequest).postDataJSON()).toEqual({ revision: 2, route: 'review/a' });
+  await expect(page.getByTestId('effort-fallback-review/a')).toHaveCount(0);
+  await expect(page.getByRole('status')).toContainText('re-enabled');
+});
+
+test('shows a saved effort that is no longer in the catalog and blocks saving', async ({
+  page,
+  harness,
+  base,
+}) => {
+  harness.setHandler(() => ({
+    status: 200,
+    json: {
+      routes: ['review/a'],
+      efforts: { 'review/a': [{ name: 'high', controls: { reasoning_effort: 'high' } }] },
+      configuration: {
+        revision: 4,
+        selection: {
+          reviewers: ['review/a'],
+          synthesis: 'review/a',
+          efforts: { 'review/a': 'removed' },
+        },
+      },
+    },
+  }));
+  await page.goto(base + '/settings');
+  await expect(page.getByRole('alert')).toContainText('no longer available');
+  await expect(page.getByRole('button', { name: 'Save changes' })).toBeDisabled();
+  await page.getByLabel('Thinking effort for review/a').selectOption('high');
+  await expect(page.getByRole('button', { name: 'Save changes' })).toBeEnabled();
+});
+
+test('warns when the same effort name maps to different controls and adopts it only on save', async ({
+  page,
+  harness,
+  base,
+}) => {
+  let resaved = false;
+  harness.setHandler((url, req) => {
+    if (url.pathname !== '/api/model-settings') return { status: 404 };
+    if (req.method === 'PUT') {
+      resaved = true;
+      return { status: 200, json: { revision: 5 } };
+    }
+    return {
+      status: 200,
+      json: {
+        routes: ['review/a'],
+        efforts: { 'review/a': [{ name: 'high', controls: { reasoning_effort: 'low' } }] },
+        effortDrift: resaved ? [] : ['review/a'],
+        configuration: {
+          revision: 4,
+          selection: {
+            reviewers: ['review/a'],
+            synthesis: 'review/a',
+            efforts: { 'review/a': 'high' },
+          },
+        },
+      },
+    };
+  });
+  await page.goto(base + '/settings');
+  await expect(page.getByTestId('effort-drift')).toContainText('changed since this selection');
+  await expect(page.getByRole('button', { name: 'Save changes' })).toBeEnabled();
+  const saved = page.waitForRequest((request) => request.method() === 'PUT');
+  await page.getByRole('button', { name: 'Save changes' }).click();
+  expect((await saved).postDataJSON()).toMatchObject({
+    selection: { efforts: { 'review/a': 'high' } },
+  });
+  await expect(page.getByTestId('effort-drift')).toHaveCount(0);
+});
+
 test('distinguishes an uninitialized catalog from a complete empty list', async ({
   page,
   harness,
