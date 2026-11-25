@@ -1,5 +1,5 @@
-import { DateTime } from 'effect';
 import type { RunnerProgressSnapshot, RunnerProgressStage } from '@compte-rendu/contracts';
+import { currentIso } from './runner-clock.js';
 
 export interface ProgressIdentity {
   readonly id: string;
@@ -88,7 +88,7 @@ export const createProgressReporter = (options: ProgressReporterOptions): Progre
           {
             stage,
             ...(stage === 'sandbox' ? { runtime: options.runtime() } : {}),
-            startedAt: DateTime.formatIso(DateTime.nowUnsafe()),
+            startedAt: currentIso(),
           },
         ],
       };

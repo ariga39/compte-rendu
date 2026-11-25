@@ -1,6 +1,6 @@
 import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { Effect, Option, Schema } from 'effect';
+import { Option, Schema } from 'effect';
 import {
   GitHubSha,
   MAX_RUNNER_CALLBACK_BYTES,
@@ -77,13 +77,25 @@ export type RecoveredCallback = {
   readonly manifest: RecoveredManifest;
 };
 
-const fail = (reason: CallbackRecoveryReason) => Effect.fail(new CallbackRecoveryError({ reason }));
+const fail = (reason: CallbackRecoveryReason): never => {
+  throw new CallbackRecoveryError({ reason });
+};
 
-const readStat = (path: string, reason: CallbackRecoveryReason) =>
-  Effect.tryPromise({
-    try: () => stat(path),
-    catch: () => new CallbackRecoveryError({ reason }),
-  });
+const readStat = async (path: string, reason: CallbackRecoveryReason) => {
+  try {
+    return await stat(path);
+  } catch {
+    return fail(reason);
+  }
+};
+
+const readRecoveryFile = async (path: string, reason: CallbackRecoveryReason) => {
+  try {
+    return await readFile(path);
+  } catch {
+    return fail(reason);
+  }
+};
 
 const decodeArchivedCallback = (text: string) =>
   Option.getOrUndefined(
@@ -127,48 +139,42 @@ export const cleanupConfirmedCallbackBody = (
     cleanupCompletedAt: confirmedAt,
   });
 
-export const recoverCallback = Effect.fn('recoverCallback')(function* (
+export const recoverCallback = async (
   evidenceRoot: string,
   request: CleanupRecoveryRequest,
   cleanupRuntime: string,
-): Effect.fn.Return<RecoveredCallback, CallbackRecoveryError> {
+): Promise<RecoveredCallback> => {
   const directory = join(evidenceRoot, request.evidenceId);
-  const directoryInfo = yield* readStat(directory, 'missing-evidence');
-  if (!directoryInfo.isDirectory()) return yield* fail('missing-evidence');
+  const directoryInfo = await readStat(directory, 'missing-evidence');
+  if (!directoryInfo.isDirectory()) return fail('missing-evidence');
 
   const callbackPath = join(directory, 'callback.json');
-  const callbackInfo = yield* readStat(callbackPath, 'missing-callback');
-  if (!callbackInfo.isFile()) return yield* fail('missing-callback');
-  if (callbackInfo.size > MAX_RUNNER_CALLBACK_BYTES) return yield* fail('oversized-callback');
+  const callbackInfo = await readStat(callbackPath, 'missing-callback');
+  if (!callbackInfo.isFile()) return fail('missing-callback');
+  if (callbackInfo.size > MAX_RUNNER_CALLBACK_BYTES) return fail('oversized-callback');
 
-  const body = yield* Effect.tryPromise({
-    try: () => readFile(callbackPath),
-    catch: () => new CallbackRecoveryError({ reason: 'missing-callback' }),
-  });
-  if (body.byteLength > MAX_RUNNER_CALLBACK_BYTES) return yield* fail('oversized-callback');
+  const body = await readRecoveryFile(callbackPath, 'missing-callback');
+  if (body.byteLength > MAX_RUNNER_CALLBACK_BYTES) return fail('oversized-callback');
 
   const callback = decodeArchivedCallback(new TextDecoder().decode(body));
-  if (callback === undefined) return yield* fail('invalid-callback');
+  if (callback === undefined) return fail('invalid-callback');
 
   // The local manifest binds the failed callback to its cleanup evidence.
   const manifestPath = join(directory, 'manifest.json');
-  const manifestInfo = yield* readStat(manifestPath, 'invalid-manifest');
+  const manifestInfo = await readStat(manifestPath, 'invalid-manifest');
   if (!manifestInfo.isFile() || manifestInfo.size > MAX_RUNNER_CALLBACK_BYTES) {
-    return yield* fail('invalid-manifest');
+    return fail('invalid-manifest');
   }
-  const manifestBytes = yield* Effect.tryPromise({
-    try: () => readFile(manifestPath),
-    catch: () => new CallbackRecoveryError({ reason: 'invalid-manifest' }),
-  });
+  const manifestBytes = await readRecoveryFile(manifestPath, 'invalid-manifest');
   if (manifestBytes.byteLength > MAX_RUNNER_CALLBACK_BYTES) {
-    return yield* fail('invalid-manifest');
+    return fail('invalid-manifest');
   }
   const manifest = Option.getOrUndefined(
     Schema.decodeUnknownOption(Schema.fromJsonString(RunnerManifest))(
       new TextDecoder().decode(manifestBytes),
     ),
   );
-  if (manifest === undefined) return yield* fail('invalid-manifest');
+  if (manifest === undefined) return fail('invalid-manifest');
 
   if (
     manifest.jobId !== request.jobId ||
@@ -186,7 +192,7 @@ export const recoverCallback = Effect.fn('recoverCallback')(function* (
     callback.headSha !== manifest.headSha ||
     manifest.terminal.status !== callback.status
   ) {
-    return yield* fail('identity-mismatch');
+    return fail('identity-mismatch');
   }
 
   const sandboxIdentity =
@@ -199,13 +205,13 @@ export const recoverCallback = Effect.fn('recoverCallback')(function* (
     manifest.cleanup.status !== 'failed' ||
     callback.sandbox.cleanup !== 'failed'
   ) {
-    return yield* fail('unsupported-recovery');
+    return fail('unsupported-recovery');
   }
-  if (manifest.hostCleanupConfirmed !== true) return yield* fail('unsupported-recovery');
+  if (manifest.hostCleanupConfirmed !== true) return fail('unsupported-recovery');
 
   if (manifest.result !== undefined || callback.failure === undefined) {
-    return yield* fail('result-mismatch');
+    return fail('result-mismatch');
   }
 
   return { callback, recoveryProof: manifest.recoveryProof, manifest };
-});
+};

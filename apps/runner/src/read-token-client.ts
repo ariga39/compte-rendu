@@ -1,5 +1,6 @@
 import { readBoundedBody } from '@compte-rendu/contracts';
-import { Effect, Schema } from 'effect';
+import { Schema } from 'effect';
+import { HostRequestAbortError, runWithHostDeadline } from './host-request.js';
 
 const ReadTokenResponse = Schema.fromJsonString(
   Schema.Struct({
@@ -41,52 +42,48 @@ class ReadTokenRefreshError extends Schema.TaggedError<ReadTokenRefreshError>()(
  * callback origin and bearer token as terminal delivery. Errors never include
  * a response body, credential or lease value.
  */
-export const createReadTokenClient = (options: ReadTokenClientOptions): ReadTokenClient => {
-  const refreshEffect = Effect.fn('ReadTokenClient.refresh')(function* (
-    identity: ReadTokenIdentity,
-    externalSignal?: AbortSignal,
-  ) {
-    const text = yield* Effect.tryPromise({
-      try: async (signal) => {
-        const response = await (options.fetch ?? globalThis.fetch)(options.url, {
-          method: 'POST',
-          headers: {
-            authorization: `Bearer ${options.token}`,
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify(identity),
-          redirect: 'error',
-          signal: externalSignal === undefined ? signal : AbortSignal.any([signal, externalSignal]),
-        });
-        if (response.status !== 200) {
-          await response.body?.cancel().catch(() => undefined);
-          throw new ReadTokenRefreshError();
-        }
-        const body = await readBoundedBody(response.body, READ_TOKEN_RESPONSE_MAX_BYTES);
-        if (body.kind === 'too-large') throw new ReadTokenRefreshError();
-        return body.text;
-      },
-      catch: () => new ReadTokenRefreshError(),
-    }).pipe(Effect.timeout(options.timeoutMs ?? READ_TOKEN_REQUEST_TIMEOUT_MS));
-    const decoded = yield* Schema.decodeUnknownEffect(ReadTokenResponse, {
-      onExcessProperty: 'error',
-    })(text).pipe(Effect.mapError(() => new ReadTokenRefreshError()));
-    return { token: decoded.token, expiresAt: decoded.expiresAt.getTime() };
-  });
-
-  return {
-    async refresh(identity, externalSignal) {
-      try {
-        return await Effect.runPromise(
-          refreshEffect(identity, externalSignal),
-          externalSignal === undefined ? undefined : { signal: externalSignal },
+export const createReadTokenClient = (options: ReadTokenClientOptions): ReadTokenClient => ({
+  async refresh(identity, externalSignal) {
+    try {
+      const text = await runWithHostDeadline(
+        {
+          timeoutMs: options.timeoutMs ?? READ_TOKEN_REQUEST_TIMEOUT_MS,
+          signal: externalSignal,
+        },
+        async (signal) => {
+          const response = await (options.fetch ?? globalThis.fetch)(options.url, {
+            method: 'POST',
+            headers: {
+              authorization: `Bearer ${options.token}`,
+              'content-type': 'application/json',
+            },
+            body: JSON.stringify(identity),
+            redirect: 'error',
+            signal,
+          });
+          if (response.status !== 200) {
+            await response.body?.cancel().catch(() => undefined);
+            throw new ReadTokenRefreshError();
+          }
+          const body = await readBoundedBody(response.body, READ_TOKEN_RESPONSE_MAX_BYTES);
+          if (body.kind === 'too-large') throw new ReadTokenRefreshError();
+          return body.text;
+        },
+      );
+      const decoded = await Schema.decodeUnknownPromise(ReadTokenResponse, {
+        onExcessProperty: 'error',
+      })(text).catch(() => {
+        throw new ReadTokenRefreshError();
+      });
+      return { token: decoded.token, expiresAt: decoded.expiresAt.getTime() };
+    } catch (error) {
+      if (error instanceof HostRequestAbortError)
+        throw new Error(
+          error.reason === 'timeout'
+            ? 'read token refresh timed out'
+            : 'read token refresh aborted',
         );
-      } catch (error) {
-        if (externalSignal?.aborted === true) throw new Error('read token refresh aborted');
-        if (Schema.is(Schema.Struct({ _tag: Schema.Literal('TimeoutError') }))(error))
-          throw new Error('read token refresh timed out');
-        throw new Error('read token refresh failed');
-      }
-    },
-  };
-};
+      throw new Error('read token refresh failed');
+    }
+  },
+});

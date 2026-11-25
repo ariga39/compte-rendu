@@ -1,4 +1,3 @@
-import { Effect, Option } from 'effect';
 import {
   sandboxBackendCheckReady,
   sandboxBackendHealth,
@@ -107,12 +106,12 @@ export const createCleanupReconciler = (deps: CleanupReconcilerDependencies) => 
     let sandboxName: string | undefined;
     let recoveryProof: SandboxRecoveryProof | undefined;
     try {
-      const recovered = await Effect.runPromise(
-        recoverCallback(evidenceRoot, input, sandboxBackend.kind).pipe(Effect.option),
+      const recovered = await recoverCallback(evidenceRoot, input, sandboxBackend.kind).catch(
+        () => undefined,
       );
-      if (Option.isNone(recovered))
+      if (recovered === undefined)
         return { accepted: false, status: 409, error: 'cleanup recovery rejected' };
-      const manifest = recovered.value.manifest;
+      const manifest = recovered.manifest;
       const exactSandboxName = manifest.sandboxName;
       const identity =
         exactSandboxName === undefined ? undefined : sandboxResourceIdentity(exactSandboxName);
@@ -123,7 +122,7 @@ export const createCleanupReconciler = (deps: CleanupReconcilerDependencies) => 
       )
         return { accepted: false, status: 409, error: 'cleanup recovery rejected' };
       sandboxName = exactSandboxName;
-      recoveryProof = recovered.value.recoveryProof;
+      recoveryProof = recovered.recoveryProof;
       if (sandboxBackend.confirmCleanupAbsent === undefined)
         return { accepted: false, status: 409, error: 'cleanup recovery rejected' };
       try {
@@ -139,7 +138,7 @@ export const createCleanupReconciler = (deps: CleanupReconcilerDependencies) => 
       if (llmServiceClient !== undefined && !(await grantRevoker.revoke(input.jobId, true)))
         throw new Error('grant revocation not confirmed');
       const confirmedAt = currentIso();
-      const body = cleanupConfirmedCallbackBody(recovered.value, confirmedAt);
+      const body = cleanupConfirmedCallbackBody(recovered, confirmedAt);
       if (body === undefined)
         return { accepted: false, status: 502, error: 'cleanup recovery not confirmed' };
       // One real v2 failed callback. Core owns the terminal state and retry

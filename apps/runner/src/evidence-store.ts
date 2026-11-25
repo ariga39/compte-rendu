@@ -1,6 +1,6 @@
 import { chmod, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { Duration, Effect, Option, Result, Schema } from 'effect';
+import { Option, Schema } from 'effect';
 import {
   MAX_RUNNER_EVIDENCE_BYTES,
   RunnerEvidenceUpload,
@@ -18,6 +18,9 @@ import {
   type ChildSession,
   type MultiReviewSelection,
 } from './opencode-multi-review.js';
+import type { WarnLog } from './operational-log.js';
+import { HostRequestAbortError, runWithHostDeadline } from './host-request.js';
+import { delayMillis } from './runner-clock.js';
 
 export const secureEvidenceTree = async (root: string): Promise<void> => {
   await chmod(root, 0o700);
@@ -504,6 +507,7 @@ export interface EvidenceUploadSenderOptions {
   readonly token?: string | undefined;
   readonly fetch: typeof fetch;
   readonly timeoutMs: number;
+  readonly warn: WarnLog;
 }
 
 export interface EvidenceUploadDeliveryInput {
@@ -634,9 +638,7 @@ const sendEvidence = async (
   })(options.url, body);
   if (!delivered.ok) {
     // The complete local evidence directory remains the recovery copy.
-    await Effect.runPromise(Effect.logWarning('runner evidence upload unavailable')).catch(
-      () => undefined,
-    );
+    options.warn('runner evidence upload unavailable');
   }
 };
 
@@ -670,43 +672,39 @@ export interface BoundedDeliveryOptions {
     | undefined;
 }
 
-class BoundedDeliveryError extends Schema.TaggedError<BoundedDeliveryError>()(
-  'BoundedDeliveryError',
-  {},
-) {}
-
 export const createBoundedDelivery = (options: BoundedDeliveryOptions) => {
-  const deliver = Effect.fn('BoundedDelivery.post')(function* (url: string, body: string) {
-    return yield* Effect.tryPromise({
-      try: async (signal) => {
-        const response = await options.fetch(url, {
-          method: 'POST',
-          headers: {
-            authorization: `Bearer ${options.token}`,
-            'content-type': 'application/json',
-          },
-          body,
-          signal,
-        });
-        await response.body?.cancel().catch(() => undefined);
-        return response.status;
-      },
-      catch: () => new BoundedDeliveryError(),
-    }).pipe(Effect.timeout(options.timeoutMs));
-  });
   const attemptDelivery = async (url: string, body: string): Promise<BoundedDelivery> => {
-    const result = await Effect.runPromise(Effect.result(deliver(url, body)));
-    if (Result.isFailure(result)) {
+    try {
+      const response = await runWithHostDeadline(
+        { timeoutMs: options.timeoutMs },
+        async (signal) => {
+          const response = await options.fetch(url, {
+            method: 'POST',
+            headers: {
+              authorization: `Bearer ${options.token}`,
+              'content-type': 'application/json',
+            },
+            body,
+            signal,
+          });
+          await response.body?.cancel().catch(() => undefined);
+          return response;
+        },
+      );
+      return response.status === 202
+        ? { ok: true, status: 202 }
+        : { ok: false, reason: 'http-error', status: response.status };
+    } catch (error) {
+      // A timeout is distinct from a transport failure even when the fetch
+      // implementation ignores the abort signal.
       return {
         ok: false,
-        reason: Schema.is(Schema.Struct({ _tag: Schema.Literal('TimeoutError') }))(result.failure)
-          ? 'timeout'
-          : 'transport-error',
+        reason:
+          error instanceof HostRequestAbortError && error.reason === 'timeout'
+            ? 'timeout'
+            : 'transport-error',
       };
     }
-    return result.success === 202
-      ? { ok: true, status: 202 }
-      : { ok: false, reason: 'http-error', status: result.success };
   };
   return async (url: string, body: string): Promise<BoundedDelivery> => {
     if (options.token === undefined) return { ok: false, reason: 'transport-error' };
@@ -716,7 +714,7 @@ export const createBoundedDelivery = (options: BoundedDeliveryOptions) => {
         : options.retryDelaysMs;
     let result: BoundedDelivery = { ok: false, reason: 'transport-error' };
     for (const [index, delay] of delays.entries()) {
-      if (delay > 0) await Effect.runPromise(Effect.sleep(Duration.millis(delay)));
+      if (delay > 0) await delayMillis(delay);
       result = await attemptDelivery(url, body);
       await options.onAttempt?.(index + 1, result);
       if (result.ok) return result;

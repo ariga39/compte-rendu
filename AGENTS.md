@@ -14,9 +14,13 @@
   [recovery](docs/operations.md#operations-and-troubleshooting)).
 - Use behavior-based TDD through the seams accepted in `docs/design.md`: one
   failing behavior, minimal implementation, then the next slice.
-- Use stable Effect 4 for runtime code. Before implementation, read the applicable
-  guidance in <https://github.com/Effect-TS/skills> and follow its Effect 4
-  conventions.
+- Use stable Effect 4 for Core and Ingress runtime code. Before implementation,
+  read the applicable guidance in <https://github.com/Effect-TS/skills> and follow
+  its Effect 4 conventions.
+- Runner execution and finalization use plain `async/await` behind its host clock,
+  logging, process and fetch ports. Keep Effect `Schema` for boundary validation,
+  and do not add mid-stack `Effect.runPromise` bridges for clock reads, warning
+  logs, retry sleeps or one-shot host calls.
 - Tests observe public behavior. Do not test private functions, internal call
   counts/order, or implementation decomposition.
 - Fail closed for authorization, revision freshness, credential handling, agent
