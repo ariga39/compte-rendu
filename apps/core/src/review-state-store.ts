@@ -11,7 +11,7 @@ import { createReviewLifecycleStore, type ReviewLifecycleStore } from './review-
 export type { D1DatabaseLike, D1PreparedStatementLike, D1ResultLike } from './review-store-support';
 
 export type { ReviewLifecycleStore } from './review-lifecycle-store';
-export type { CheckRunStore, ReviewCheckDeliveryWorkItem } from './check-run-store';
+export type { CheckRunStore } from './check-run-store';
 export type {
   CancellationStore,
   ReviewCancellationResult,

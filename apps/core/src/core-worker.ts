@@ -104,7 +104,7 @@ export const createCoreWorker = (
   dependencies: CoreWorkerDependencies = {},
 ): WorkerEntrypoint<CoreWorkerEnv> &
   ReturnType<typeof createJobControl> & {
-    reconcileCheckDeliveries(now: number): Promise<void>;
+    reconcileRecoveries(now: number): Promise<void>;
     reconcilePublications(now: number): Promise<void>;
     effortDetail(runId: string, cursor?: string): Promise<Response>;
   } => {
@@ -162,8 +162,107 @@ export const createCoreWorker = (
       : { getReadInstallationToken: dependencies.getReadInstallationToken }),
   });
 
+  const jobControl = createJobControl(stateStore, github, runner, log, (context) =>
+    createPostHogLifecycleLog(env, context),
+  );
+
+  const reconcilePublications = async (now: number): Promise<void> => {
+    const ids = await stateStore.claimStalledPublications(
+      new Date(now - REVIEW_ATTEMPT_BUDGET_MS).toISOString(),
+      new Date(now).toISOString(),
+      4,
+    );
+    const captures: Promise<unknown>[] = [];
+    const lifecycle = createPostHogLifecycleLog(env, {
+      waitUntil: (task) => captures.push(task),
+    });
+    let incomplete = false;
+    for (const runId of ids) {
+      let reason: 'state' | 'evidence' | 'publication' | 'check' = 'state';
+      try {
+        const outcome = await stateStore.getRunOutcome(runId);
+        if (outcome?.status !== 'scheduled' || !outcome.publicationClaimedAt) continue;
+        if (outcome.runnerJobId === undefined || outcome.runnerAttempt === undefined) {
+          throw new Error('Current Runner identity is unavailable');
+        }
+        reason = 'evidence';
+        let output: unknown;
+        const publication = await readPublicationRecord(env.EVIDENCE_BUCKET, {
+          runId,
+          jobId: outcome.runnerJobId,
+          attempt: outcome.runnerAttempt,
+        });
+        if (publication.kind !== 'valid') {
+          throw new Error(
+            publication.kind === 'invalid'
+              ? 'Invalid publication record'
+              : 'Publication record is unavailable',
+          );
+        }
+        output = publication.record.result;
+        reason = 'publication';
+        const disposition = await createCoordinator(lifecycle).completeReview({
+          runId,
+          output,
+          reconcileClaimedAt: outcome.publicationClaimedAt,
+        });
+        const settled = await stateStore.getRunOutcome(runId);
+        if (!settled || settled.status === 'scheduled')
+          throw new Error('Publication still pending');
+        if (
+          (settled.status === 'completed' || settled.status === 'failed') &&
+          disposition === settled.status
+        ) {
+          await protocol.recordFinishedLifecycle(
+            lifecycle,
+            settled,
+            settled.status,
+            undefined,
+            settled.status === 'failed' ? { phase: 'publication', reason: 'unknown' } : undefined,
+            runId,
+          );
+        }
+        if (settled.status === 'completed' && settled.checkRunId !== undefined) {
+          reason = 'check';
+          await publishTerminalCheck({ github, stateStore, runId }).catch(() => undefined);
+        }
+      } catch {
+        incomplete = true;
+        try {
+          await log.record({
+            phase: 'publication',
+            outcome: 'reconciliation_incomplete',
+            runId,
+            reason,
+          });
+        } catch {
+          // Continue reconciling other runs if the log sink fails.
+        }
+      }
+    }
+    await Promise.allSettled(captures);
+    if (incomplete) throw new Error('Publication reconciliation incomplete');
+  };
+
+  const reconcileRecoveries = async (now: number): Promise<void> => {
+    const results = await Promise.allSettled([
+      jobControl.reconcileCancellations(now),
+      reconcilePublications(now),
+    ]);
+    const failures = results.filter(
+      (result): result is PromiseRejectedResult => result.status === 'rejected',
+    );
+    if (failures.length === 1) throw failures[0]!.reason;
+    if (failures.length > 1)
+      throw new AggregateError(
+        failures.map((failure) => failure.reason),
+        'Scheduled recovery failed: review cancellation, publication',
+      );
+  };
+
   return {
     ...protocol,
+    ...jobControl,
     async effortDetail(runId, cursor) {
       const noStore = { 'cache-control': 'no-store' };
       if (env.INFERENCE_RELAY?.effortDetails === undefined)
@@ -203,109 +302,8 @@ export const createCoreWorker = (
         );
       }
     },
-    async reconcileCheckDeliveries(now) {
-      const work = (await stateStore.listPendingCheckDeliveries({ limit: 8 })) ?? [];
-      const occurredAt = new Date(now).toISOString();
-      let incomplete = false;
-      for (const item of work) {
-        try {
-          const outcome = await stateStore.getRunOutcome(item.runId);
-          if (outcome === undefined || outcome.checkRunId !== item.checkRunId) {
-            incomplete = true;
-            continue;
-          }
-          await publishTerminalCheck({ github, stateStore, runId: item.runId, occurredAt });
-        } catch {
-          incomplete = true;
-        }
-      }
-      if (incomplete) throw new Error('Check delivery reconciliation incomplete');
-    },
-    async reconcilePublications(now) {
-      const ids = await stateStore.claimStalledPublications(
-        new Date(now - REVIEW_ATTEMPT_BUDGET_MS).toISOString(),
-        new Date(now).toISOString(),
-        4,
-      );
-      const captures: Promise<unknown>[] = [];
-      const lifecycle = createPostHogLifecycleLog(env, {
-        waitUntil: (task) => captures.push(task),
-      });
-      let incomplete = false;
-      for (const runId of ids) {
-        let reason: 'state' | 'evidence' | 'publication' | 'check' = 'state';
-        try {
-          const outcome = await stateStore.getRunOutcome(runId);
-          if (outcome?.status !== 'scheduled' || !outcome.publicationClaimedAt) continue;
-          if (outcome.runnerJobId === undefined || outcome.runnerAttempt === undefined) {
-            throw new Error('Current Runner identity is unavailable');
-          }
-          reason = 'evidence';
-          let output: unknown;
-          const publication = await readPublicationRecord(env.EVIDENCE_BUCKET, {
-            runId,
-            jobId: outcome.runnerJobId,
-            attempt: outcome.runnerAttempt,
-          });
-          if (publication.kind !== 'valid') {
-            throw new Error(
-              publication.kind === 'invalid'
-                ? 'Invalid publication record'
-                : 'Publication record is unavailable',
-            );
-          }
-          output = publication.record.result;
-          reason = 'publication';
-          const disposition = await createCoordinator(lifecycle).completeReview({
-            runId,
-            output,
-            reconcileClaimedAt: outcome.publicationClaimedAt,
-          });
-          const settled = await stateStore.getRunOutcome(runId);
-          if (!settled || settled.status === 'scheduled')
-            throw new Error('Publication still pending');
-          if (
-            (settled.status === 'completed' || settled.status === 'failed') &&
-            disposition === settled.status
-          ) {
-            await protocol.recordFinishedLifecycle(
-              lifecycle,
-              settled,
-              settled.status,
-              undefined,
-              settled.status === 'failed' ? { phase: 'publication', reason: 'unknown' } : undefined,
-              runId,
-            );
-          }
-          if (settled.status === 'completed' && settled.checkRunId !== undefined) {
-            reason = 'check';
-            await publishTerminalCheck({
-              github,
-              stateStore,
-              runId,
-              occurredAt: new Date(now).toISOString(),
-            });
-          }
-        } catch {
-          incomplete = true;
-          try {
-            await log.record({
-              phase: 'publication',
-              outcome: 'reconciliation_incomplete',
-              runId,
-              reason,
-            });
-          } catch {
-            // Continue reconciling other runs if the log sink fails.
-          }
-        }
-      }
-      await Promise.allSettled(captures);
-      if (incomplete) throw new Error('Publication reconciliation incomplete');
-    },
-    ...createJobControl(stateStore, github, runner, log, (context) =>
-      createPostHogLifecycleLog(env, context),
-    ),
+    reconcilePublications,
+    reconcileRecoveries,
     fetch: async (request, _env, context) => {
       if (
         new URL(request.url).pathname === '/review-configuration' ||

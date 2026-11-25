@@ -76,10 +76,6 @@ it('retries an unconfirmed operator stop, ends the Check, and acknowledges verif
     );
     const first = await core.cancelReview(runId, 123);
     expect(first.status).toBe(202);
-    await core.reconcileCancellations(Date.now());
-    expect(stops[0]?.headers.get('x-compte-rendu-claim-deadline')).toBe(
-      String(+now + REVIEW_ATTEMPT_BUDGET_MS),
-    );
     expect(updateCheckRun).toHaveBeenCalledWith(
       expect.objectContaining({
         checkRunId: 42,
@@ -87,6 +83,11 @@ it('retries an unconfirmed operator stop, ends the Check, and acknowledges verif
         cancellationReason: 'manual',
       }),
     );
+    await core.reconcileCancellations(Date.now());
+    expect(stops[0]?.headers.get('x-compte-rendu-claim-deadline')).toBe(
+      String(+now + REVIEW_ATTEMPT_BUDGET_MS),
+    );
+    expect(updateCheckRun).toHaveBeenCalledTimes(1);
     expect((await core.cancelReview(runId, 123)).status).toBe(202);
     await core.reconcileCancellations(Date.now() + 61_000);
     expect((await core.cancelReview(runId, 123)).status).toBe(200);
@@ -166,101 +167,81 @@ it('records one cancellation lifecycle event for a queued run', async () => {
   }
 });
 
-it.each([false, true])(
-  'reopens Check reconciliation when a claim writes in_progress after cancellation (repair failure: %s)',
-  async (repairFails) => {
-    const database = new SqliteD1Database();
-    try {
-      const state = createD1ReviewStateStore(database);
-      const queued = await state.claimReview({
-        deliveryId: 'late-check-write',
-        occurredAt: new Date().toISOString(),
-        job: {
-          repositoryId: 1,
-          installationId: 2,
-          pullRequestNumber: 3,
-          baseSha: '1'.repeat(40),
-          headSha: '2'.repeat(40),
-          trigger: 'manual',
-          commentId: 99,
-        },
-      });
-      if (queued.kind !== 'claimed') throw new Error('expected queued run');
-      const { runId } = queued;
-      await state.recordCheckRun({ runId, checkRunId: 777 });
+it('ends the Check immediately and directly repairs a stale in-progress write after cancellation', async () => {
+  const database = new SqliteD1Database();
+  try {
+    const state = createD1ReviewStateStore(database);
+    const queued = await state.claimReview({
+      deliveryId: 'late-check-write',
+      occurredAt: new Date().toISOString(),
+      job: {
+        repositoryId: 1,
+        installationId: 2,
+        pullRequestNumber: 3,
+        baseSha: '1'.repeat(40),
+        headSha: '2'.repeat(40),
+        trigger: 'manual',
+        commentId: 99,
+      },
+    });
+    if (queued.kind !== 'claimed') throw new Error('expected queued run');
+    const { runId } = queued;
+    await state.recordCheckRun({ runId, checkRunId: 777 });
 
-      const started = deferred<void>();
-      const release = deferred<void>();
-      const statuses: string[] = [];
-      let failNextCancelled = false;
-      const updateCheckRun = async ({ status }: { status: string }) => {
-        if (status === 'in_progress') {
-          started.resolve();
-          await release.promise;
-        } else if (status === 'cancelled' && failNextCancelled) {
-          failNextCancelled = false;
-          throw new Error('GitHub Check update failed');
-        }
-        statuses.push(status);
-      };
-      const env = {
-        REVIEW_DB: database,
-        GITHUB_APP_ID: '1',
-        GITHUB_APP_PRIVATE_KEY: 'test',
-        RUNNER_AUTH_TOKEN: 'test',
-        RUNNER: { fetch: async () => new Response(null, { status: 404 }) },
-      };
-      const core = createCoreWorker(env, {
-        stateStore: state,
-        github: {
-          updateCheckRun,
-          getRepositoryUrl: async () => 'https://github.com/example/repo.git',
-          loadReviewTarget: async () => ({ headSha: '2'.repeat(40) }),
-        },
-        getReadInstallationToken: async () => ({
-          token: 'test-read',
-          expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
-        }),
-      });
-
-      const claim = core.fetch(
-        new Request('https://core.internal/runner-claims', {
-          method: 'POST',
-          headers: { 'x-compte-rendu-runner-claim': 'verified' },
-        }),
-        env,
-      );
-      await started.promise;
-      expect((await core.cancelReview(runId, 123)).status).toBe(202);
-      await core.reconcileCancellations(Date.now());
-      expect(statuses).toEqual(['cancelled']);
-
-      if (repairFails) failNextCancelled = true;
-      release.resolve();
-      expect((await claim).status).toBe(204);
-      expect((await core.cancelReview(runId, 123)).status).toBe(200);
-      expect(await state.getRunOutcome(runId)).toMatchObject({
-        status: 'cancelled',
-        runnerJobId: expect.any(String),
-      });
-
-      if (repairFails) {
-        expect(statuses.at(-1)).toBe('in_progress');
-        await expect(state.listCancellationWork(cancellationWindow())).resolves.toMatchObject([
-          { runId, needsCheckReconciliation: true },
-        ]);
-        await core.reconcileCancellations(Date.now() + 61_000);
-        expect(statuses.at(-1)).toBe('cancelled');
-        await expect(state.listCancellationWork(cancellationWindow())).resolves.toEqual([]);
-      } else {
-        expect(statuses.at(-1)).toBe('cancelled');
-        await expect(state.listCancellationWork(cancellationWindow())).resolves.toEqual([]);
+    const started = deferred<void>();
+    const release = deferred<void>();
+    const statuses: string[] = [];
+    const updateCheckRun = async ({ status }: { status: string }) => {
+      if (status === 'in_progress') {
+        started.resolve();
+        await release.promise;
       }
-    } finally {
-      database.close();
-    }
-  },
-);
+      statuses.push(status);
+    };
+    const env = {
+      REVIEW_DB: database,
+      GITHUB_APP_ID: '1',
+      GITHUB_APP_PRIVATE_KEY: 'test',
+      RUNNER_AUTH_TOKEN: 'test',
+      RUNNER: { fetch: async () => new Response(null, { status: 404 }) },
+    };
+    const core = createCoreWorker(env, {
+      stateStore: state,
+      github: {
+        updateCheckRun,
+        getRepositoryUrl: async () => 'https://github.com/example/repo.git',
+        loadReviewTarget: async () => ({ headSha: '2'.repeat(40) }),
+      },
+      getReadInstallationToken: async () => ({
+        token: 'test-read',
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+      }),
+    });
+
+    const claim = core.fetch(
+      new Request('https://core.internal/runner-claims', {
+        method: 'POST',
+        headers: { 'x-compte-rendu-runner-claim': 'verified' },
+      }),
+      env,
+    );
+    await started.promise;
+    expect((await core.cancelReview(runId, 123)).status).toBe(202);
+    expect(statuses).toEqual(['cancelled']);
+
+    release.resolve();
+    expect((await claim).status).toBe(204);
+    expect((await core.cancelReview(runId, 123)).status).toBe(200);
+    expect(await state.getRunOutcome(runId)).toMatchObject({
+      status: 'cancelled',
+      runnerJobId: expect.any(String),
+    });
+    expect(statuses.at(-1)).toBe('cancelled');
+    await expect(state.listCancellationWork(cancellationWindow())).resolves.toEqual([]);
+  } finally {
+    database.close();
+  }
+});
 
 it('releases a cancelled claim when token preparation finishes before Runner receives it', async () => {
   const database = new SqliteD1Database();
@@ -317,8 +298,65 @@ it('releases a cancelled claim when token preparation finishes before Runner rec
   }
 });
 
+it('keeps cancellation terminal when the immediate Check update fails', async () => {
+  const database = new SqliteD1Database();
+  try {
+    const state = createD1ReviewStateStore(database);
+    const now = new Date();
+    const queued = await state.claimReview({
+      deliveryId: 'cancellation-check-failure',
+      occurredAt: now.toISOString(),
+      job: {
+        repositoryId: 1,
+        installationId: 2,
+        pullRequestNumber: 3,
+        baseSha: '1'.repeat(40),
+        headSha: '2'.repeat(40),
+        trigger: 'automatic',
+      },
+    });
+    if (queued.kind !== 'claimed') throw new Error('expected queued run');
+    const { runId } = queued;
+    await state.recordCheckRun({ runId, checkRunId: 42 });
+    await state.claimNextJob({ jobId: 'job-one', attempt: 1, occurredAt: now.toISOString() });
+    const events: OperationalLogEvent[] = [];
+    const core = createCoreWorker(
+      {
+        REVIEW_DB: database,
+        GITHUB_APP_ID: '1',
+        GITHUB_APP_PRIVATE_KEY: 'test',
+        RUNNER_AUTH_TOKEN: 'test',
+        RUNNER: { fetch: async () => new Response(null, { status: 404 }) },
+      },
+      {
+        stateStore: state,
+        log: { record: (event) => void events.push(event) },
+        github: {
+          updateCheckRun: async () => {
+            throw new Error('github credential ghp_check_secret');
+          },
+        },
+      },
+    );
+
+    expect((await core.cancelReview(runId, 123)).status).toBe(202);
+    expect(await state.getRunOutcome(runId)).toMatchObject({ status: 'cancelled' });
+    expect(events).toEqual([
+      {
+        phase: 'cancellation',
+        outcome: 'delivery_failed',
+        runId,
+        kind: 'check-cancel',
+      },
+    ]);
+    expect(JSON.stringify(events)).not.toMatch(/ghp_|secret/);
+  } finally {
+    database.close();
+  }
+});
+
 it.each(['lease', 'delivery'] as const)(
-  'identifies both cancellation failures at the %s boundary without exposing credentials',
+  'identifies a Runner-stop cancellation failure at the %s boundary without exposing credentials',
   async (boundary) => {
     const database = new SqliteD1Database();
     try {
@@ -358,45 +396,26 @@ it.each(['lease', 'delivery'] as const)(
         },
         {
           stateStore:
-            boundary === 'delivery'
-              ? state
-              : {
-                  ...state,
-                  recordRunnerStopAttempt: failLease,
-                  recordCheckCancellationAttempt: failLease,
-                },
+            boundary === 'delivery' ? state : { ...state, recordRunnerStopAttempt: failLease },
           log: { record: (event) => void events.push(event) },
-          github: {
-            updateCheckRun: async () => {
-              throw new Error('github credential ghp_check_secret');
-            },
-          },
+          github: { updateCheckRun: async () => {} },
         },
       );
       expect((await core.cancelReview(runId, 123)).status).toBe(202);
       await expect(core.reconcileCancellations(Date.now())).rejects.toThrow(
         'Review cancellation delivery failed',
       );
-      expect(events).toHaveLength(2);
-      expect(events).toEqual(
-        expect.arrayContaining([
-          {
-            phase: 'cancellation',
-            outcome: 'delivery_failed',
-            runId,
-            kind: 'runner-stop',
-          },
-          {
-            phase: 'cancellation',
-            outcome: 'delivery_failed',
-            runId,
-            kind: 'check-cancel',
-          },
-        ]),
-      );
+      expect(events).toEqual([
+        {
+          phase: 'cancellation',
+          outcome: 'delivery_failed',
+          runId,
+          kind: 'runner-stop',
+        },
+      ]);
       expect(JSON.stringify(events)).not.toMatch(/ghp_|secret/);
       await expect(state.listCancellationWork(cancellationWindow())).resolves.toMatchObject([
-        { runId, needsRunnerStop: true, needsCheckReconciliation: true },
+        { runId, needsRunnerStop: true },
       ]);
       expect((await core.cancelReview(runId, 123)).status).toBe(202);
     } finally {

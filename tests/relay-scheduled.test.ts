@@ -124,9 +124,9 @@ it('surfaces a cancellation retry failure when metadata refresh also fails', asy
     );
     expect(failure).toBeInstanceOf(AggregateError);
     expect((failure as AggregateError).errors.map(String)).toContainEqual(
-      expect.stringContaining('Review cancellation reconciliation failed'),
+      expect.stringContaining('Review cancellation delivery failed'),
     );
-    expect(String(failure)).toContain('review cancellation');
+    expect(String(failure)).toContain('review recovery');
     expect(String(failure)).toContain('metadata refresh');
     expect(String(failure)).not.toContain('private relay detail');
     expect(events).toEqual(expect.arrayContaining([{ phase: 'relay', outcome: 'refresh_failed' }]));

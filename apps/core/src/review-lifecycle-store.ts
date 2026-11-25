@@ -189,9 +189,8 @@ const staleScheduledRunPage = `SELECT run_id, delivery_id, check_run_id FROM rev
   ORDER BY COALESCE(claimed_at, created_at) ASC, run_id ASC
   LIMIT ?`;
 
-// Expire at most one bounded page per admission or claim attempt. The terminal
-// Check delivery is enqueued from the same page before the run transitions; the
-// existing reconciliation publishes it even when the Runner never returns.
+// Expire at most one bounded page per admission or claim attempt. A terminal
+// Check stays best effort even when the Runner never returns.
 export const expireStaleScheduledClaims = async (database: D1DatabaseLike, occurredAt: string) => {
   const expiredBefore = claimExpiryCutoff(occurredAt);
   const expired = await database
@@ -200,26 +199,6 @@ export const expireStaleScheduledClaims = async (database: D1DatabaseLike, occur
     .first<{ run_id: string }>();
   if (expired === null) return;
   await database.batch([
-    database
-      .prepare(
-        `INSERT INTO review_check_deliveries
-           (run_id, check_run_id, status, created_at, attempted_at)
-         SELECT run_id, check_run_id, 'pending', ?, ?
-         FROM (${staleScheduledRunPage})
-         WHERE check_run_id IS NOT NULL
-         ON CONFLICT(run_id) DO UPDATE SET status = 'pending',
-           attempted_at = excluded.attempted_at, confirmed_at = NULL
-         WHERE review_check_deliveries.check_run_id = excluded.check_run_id
-           AND review_check_deliveries.status = 'pending'`,
-      )
-      .bind(
-        occurredAt,
-        occurredAt,
-        expiredBefore,
-        expiredBefore,
-        expiredBefore,
-        STALE_CLAIM_SWEEP_LIMIT,
-      ),
     database
       .prepare(
         `UPDATE deliveries SET status = 'failed', updated_at = ?

@@ -406,7 +406,7 @@ describe('D1 cancellation store', () => {
     ).resolves.toMatchObject({ kind: 'claimed', runId: replacementRun });
   });
 
-  it('guards check setup and exposes an in-flight check for cancellation reconciliation', async () => {
+  it('guards Check setup after cancellation without scheduling a Check retry', async () => {
     const store = createTestReviewStore();
     const runId = await schedule(store, 'cancel-check-setup');
     await expect(
@@ -435,59 +435,13 @@ describe('D1 cancellation store', () => {
         setupClaim: '2026-11-19T00:00:30.000Z',
       }),
     ).resolves.toBe(true);
-
-    const work = await store.listCancellationWork({
-      retryBefore: '2026-11-19T00:02:00.000Z',
-      recoveryBefore: '2026-11-19T00:00:00.000Z',
-      limit: 10,
-    });
-    expect(work).toMatchObject([
-      {
-        runId,
-        checkRunId: 321,
-        needsRunnerStop: false,
-        needsCheckReconciliation: true,
-      },
-    ]);
-    await store.recordCheckCancellationAttempt({
-      runId,
-      checkRunId: 321,
-      occurredAt: '2026-11-19T00:02:00.000Z',
-      expectedLastAttempt: null,
-    });
-    await expect(
-      store.listCancellationWork({
-        retryBefore: '2026-11-19T00:01:59.000Z',
-        recoveryBefore: '2026-11-19T00:00:00.000Z',
-        limit: 10,
-      }),
-    ).resolves.toEqual([]);
     await expect(
       store.listCancellationWork({
         retryBefore: '2026-11-19T00:02:00.000Z',
         recoveryBefore: '2026-11-19T00:00:00.000Z',
         limit: 10,
       }),
-    ).resolves.toMatchObject([{ runId, needsCheckReconciliation: true }]);
-    await store.confirmCheckCancelled({
-      runId,
-      checkRunId: 321,
-      occurredAt: '2026-11-19T00:02:01.000Z',
-    });
-    await expect(
-      store.listCancellationWork({
-        retryBefore: '2026-11-19T01:00:00.000Z',
-        recoveryBefore: '2026-11-19T00:00:00.000Z',
-        limit: 10,
-      }),
     ).resolves.toEqual([]);
-    await expect(
-      store.confirmCheckCancelled({
-        runId,
-        checkRunId: 321,
-        occurredAt: '2026-11-19T00:02:02.000Z',
-      }),
-    ).resolves.toBe(false);
   });
 
   it('retains the first confirmed teardown time when a later callback supplies it', async () => {
@@ -516,80 +470,6 @@ describe('D1 cancellation store', () => {
     expect((await store.getRunOutcome(runId))?.evidence?.cleanupCompletedAt).toBe(
       '2026-11-19T00:02:00.000Z',
     );
-  });
-
-  it('reopens a reconciled Check cancellation after a stale in-progress write', async () => {
-    const store = createTestReviewStore();
-    const runId = await schedule(store, 'cancel-check-reopen');
-    const scheduledRun = await schedule(store, 'cancel-check-reopen-scheduled', {
-      ...job(),
-      pullRequestNumber: 43,
-      headSha: '3'.repeat(40),
-    });
-    await store.recordCheckRun({ runId, checkRunId: 501 });
-    await store.cancelRun({
-      runId,
-      requestedByUid: 1001,
-      occurredAt: '2026-11-19T00:01:00.000Z',
-    });
-    await expect(
-      store.recordCheckCancellationAttempt({
-        runId,
-        checkRunId: 501,
-        occurredAt: '2026-11-19T00:01:30.000Z',
-        expectedLastAttempt: null,
-      }),
-    ).resolves.toBe(true);
-    await expect(
-      store.confirmCheckCancelled({
-        runId,
-        checkRunId: 501,
-        occurredAt: '2026-11-19T00:01:31.000Z',
-      }),
-    ).resolves.toBe(true);
-    await expect(
-      store.listCancellationWork({
-        retryBefore: '2026-11-19T00:02:00.000Z',
-        recoveryBefore: '2026-11-19T00:00:00.000Z',
-        limit: 10,
-      }),
-    ).resolves.toEqual([]);
-
-    await expect(store.reopenCheckCancellation({ runId, checkRunId: 501 })).resolves.toBe(true);
-    await expect(store.reopenCheckCancellation({ runId, checkRunId: 999 })).resolves.toBe(false);
-    await expect(
-      store.reopenCheckCancellation({ runId: scheduledRun, checkRunId: 501 }),
-    ).resolves.toBe(false);
-    await expect(
-      store.listCancellationWork({
-        retryBefore: '2026-11-19T00:02:00.000Z',
-        recoveryBefore: '2026-11-19T00:00:00.000Z',
-        limit: 10,
-      }),
-    ).resolves.toMatchObject([{ runId, needsCheckReconciliation: true }]);
-
-    await expect(
-      store.recordCheckCancellationAttempt({
-        runId,
-        checkRunId: 501,
-        occurredAt: '2026-11-19T00:02:01.000Z',
-        expectedLastAttempt: null,
-      }),
-    ).resolves.toBe(true);
-    await expect(
-      store.confirmCheckCancelled({
-        runId,
-        checkRunId: 501,
-        occurredAt: '2026-11-19T00:02:02.000Z',
-      }),
-    ).resolves.toBe(true);
-    await expect(
-      store.listCancellationWork({
-        retryBefore: '2026-11-19T00:02:03.000Z',
-        recoveryBefore: '2026-11-19T00:00:00.000Z',
-        limit: 10,
-      }),
-    ).resolves.toEqual([]);
   });
 
   it('recovers a failed cancelled-run cleanup and keeps destroyed teardown monotonic', async () => {
@@ -801,7 +681,7 @@ describe('D1 cancellation store', () => {
     ).resolves.toEqual([]);
   });
 
-  it('leases one stop and one Check dispatch per observed attempt snapshot', async () => {
+  it('leases one Runner stop per observed attempt snapshot', async () => {
     const store = createTestReviewStore();
     const runId = await schedule(store, 'cancellation-cas');
     await claimRunnerJob(store, { occurredAt: claimedAt, runId, jobId: 'cas-job', job: job() });
@@ -822,9 +702,7 @@ describe('D1 cancellation store', () => {
     if (snapshot === undefined) throw new Error('cancellation work was not visible');
     expect(snapshot).toMatchObject({
       runnerStopAttemptedAt: null,
-      checkCancelAttemptedAt: null,
       needsRunnerStop: true,
-      needsCheckReconciliation: true,
     });
 
     const stopResults = await Promise.all([
@@ -845,22 +723,6 @@ describe('D1 cancellation store', () => {
     ]);
     expect(stopResults.filter(Boolean)).toHaveLength(1);
 
-    const checkResults = await Promise.all([
-      store.recordCheckCancellationAttempt({
-        runId,
-        checkRunId: 321,
-        occurredAt: '2026-11-19T00:02:00.000Z',
-        expectedLastAttempt: snapshot.checkCancelAttemptedAt,
-      }),
-      store.recordCheckCancellationAttempt({
-        runId,
-        checkRunId: 321,
-        occurredAt: '2026-11-19T00:02:01.000Z',
-        expectedLastAttempt: snapshot.checkCancelAttemptedAt,
-      }),
-    ]);
-    expect(checkResults.filter(Boolean)).toHaveLength(1);
-
     const [leased] =
       (await store.listCancellationWork({
         runId,
@@ -871,9 +733,6 @@ describe('D1 cancellation store', () => {
     if (leased === undefined) throw new Error('leased cancellation work was not visible');
     expect(['2026-11-19T00:02:00.000Z', '2026-11-19T00:02:01.000Z']).toContain(
       leased.runnerStopAttemptedAt,
-    );
-    expect(['2026-11-19T00:02:00.000Z', '2026-11-19T00:02:01.000Z']).toContain(
-      leased.checkCancelAttemptedAt,
     );
 
     await expect(
@@ -886,26 +745,10 @@ describe('D1 cancellation store', () => {
       }),
     ).resolves.toBe(true);
     await expect(
-      store.recordCheckCancellationAttempt({
-        runId,
-        checkRunId: 321,
-        occurredAt: '2026-11-19T00:03:00.000Z',
-        expectedLastAttempt: leased.checkCancelAttemptedAt,
-      }),
-    ).resolves.toBe(true);
-    await expect(
       store.recordRunnerStopAttempt({
         runId,
         jobId: 'cas-job',
         attempt: 1,
-        occurredAt: '2026-11-19T00:04:00.000Z',
-        expectedLastAttempt: null,
-      }),
-    ).resolves.toBe(false);
-    await expect(
-      store.recordCheckCancellationAttempt({
-        runId,
-        checkRunId: 321,
         occurredAt: '2026-11-19T00:04:00.000Z',
         expectedLastAttempt: null,
       }),

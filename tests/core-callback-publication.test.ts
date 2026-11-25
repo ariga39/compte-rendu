@@ -606,6 +606,13 @@ describe('Core callbacks and publication', () => {
           checkRunId: 321,
           status: 'failure',
         },
+        {
+          runId: claimed.runId,
+          repositoryId: 11,
+          installationId: 7,
+          checkRunId: 321,
+          status: 'failure',
+        },
       ]);
     } finally {
       database.close();

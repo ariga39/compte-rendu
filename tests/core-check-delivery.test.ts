@@ -646,7 +646,7 @@ describe('Core Check setup and delivery reconciliation', () => {
     }
   });
 
-  it('retries a transient terminal Check update from a fresh Worker without another review or Check', async () => {
+  it('keeps a rejected terminal Check best effort without a durable retry or another review', async () => {
     const database = new SqliteD1Database();
     const stateStore = createD1ReviewStateStore(database);
     const claimed = await stateStore.claimReview({
@@ -744,7 +744,12 @@ describe('Core Check setup and delivery reconciliation', () => {
           },
         },
       );
-      await freshWorker.reconcileCheckDeliveries(Date.now());
+      await freshWorker.reconcileRecoveries(Date.now());
+      expect(retriedUpdates).toEqual([]);
+      expect(reviews).toHaveLength(1);
+      expect(createChecks).toEqual([]);
+
+      expect((await freshWorker.fetch(callback())).status).toBe(202);
       expect(retriedUpdates).toEqual([
         {
           runId: claimed.runId,
@@ -756,10 +761,6 @@ describe('Core Check setup and delivery reconciliation', () => {
         },
       ]);
       expect(reviews).toHaveLength(1);
-      expect(createChecks).toEqual([]);
-
-      await freshWorker.reconcileCheckDeliveries(Date.now());
-      expect(retriedUpdates).toHaveLength(1);
     } finally {
       database.close();
     }
@@ -831,7 +832,7 @@ describe('Core Check setup and delivery reconciliation', () => {
     }
   });
 
-  it('retries a terminal Check after late Check setup when the first catch-up fails', async () => {
+  it('does not retry a failed late Check catch-up from scheduled recovery', async () => {
     const database = new SqliteD1Database();
     const backgroundTasks: Promise<unknown>[] = [];
     const check = deferred<{ id: number }>();
@@ -919,17 +920,8 @@ describe('Core Check setup and delivery reconciliation', () => {
       ]);
 
       checkAvailable = true;
-      await worker.reconcileCheckDeliveries(Date.now());
-      expect(retriedUpdates).toEqual([
-        {
-          runId: claimed.runId,
-          repositoryId: 11,
-          installationId: 7,
-          checkRunId: 322,
-          status: 'success',
-          decision: 'comment',
-        },
-      ]);
+      await worker.reconcileRecoveries(Date.now());
+      expect(retriedUpdates).toEqual([]);
       expect(checkRequests).toHaveLength(1);
     } finally {
       check.resolve({ id: 322 });
@@ -1004,79 +996,6 @@ describe('Core Check setup and delivery reconciliation', () => {
       expect((await worker.fetch(callback())).status).toBe(202);
       expect(retriedUpdates).toEqual(['failure']);
       expect(reviews).toEqual([]);
-
-      const freshWorker = createCoreWorker(
-        {
-          REVIEW_DB: database,
-          GITHUB_APP_ID: '1234567',
-          GITHUB_APP_PRIVATE_KEY: 'test-private-key',
-          EVIDENCE_BUCKET: { put: async () => undefined },
-        },
-        { stateStore: createD1ReviewStateStore(database), github },
-      );
-      await freshWorker.reconcileCheckDeliveries(Date.now());
-      expect(retriedUpdates).toEqual(['failure']);
-      expect(reviews).toEqual([]);
-    } finally {
-      database.close();
-    }
-  });
-
-  it('rotates pending Check deliveries so an unavailable Check cannot starve later rows', async () => {
-    const database = new SqliteD1Database();
-    const stateStore = createD1ReviewStateStore(database);
-    const runIds: string[] = [];
-    try {
-      for (let index = 1; index <= 10; index += 1) {
-        const claimed = await stateStore.claimReview({
-          deliveryId: `delivery-check-sweep-${index}`,
-          job: {
-            repositoryId: 11,
-            pullRequestNumber: 100 + index,
-            installationId: 7,
-            baseSha: eligibleEvent.baseSha,
-            headSha: eligibleEvent.headSha,
-            trigger: 'automatic',
-          },
-          occurredAt: `2026-09-01T00:00:0${index}.000Z`,
-        });
-        if (claimed.kind !== 'claimed') throw new Error('sweep run was not claimed');
-        await stateStore.recordCheckRun({
-          runId: claimed.runId,
-          checkRunId: 1000 + index,
-        });
-        await stateStore.markRunCompleted({
-          runId: claimed.runId,
-          occurredAt: `2026-09-01T00:01:0${index % 10}.000Z`,
-        });
-        await stateStore.claimCheckDelivery({
-          runId: claimed.runId,
-          checkRunId: 1000 + index,
-          occurredAt: `2026-09-01T00:02:${String(index).padStart(2, '0')}.000Z`,
-        });
-        runIds.push(claimed.runId);
-      }
-
-      const updates: number[] = [];
-      const worker = createCoreWorker(coreEnv(database), {
-        stateStore,
-        github: {
-          updateCheckRun: async ({ checkRunId }) => {
-            if (checkRunId !== 1010) throw new Error('Check is permanently unavailable');
-            updates.push(checkRunId);
-          },
-        },
-      });
-
-      await expect(worker.reconcileCheckDeliveries(Date.now())).rejects.toThrow(
-        'Check delivery reconciliation incomplete',
-      );
-      expect(updates).not.toContain(1010);
-      await expect(worker.reconcileCheckDeliveries(Date.now() + 60_000)).rejects.toThrow(
-        'Check delivery reconciliation incomplete',
-      );
-      expect(updates).toContain(1010);
-      expect(runIds).toHaveLength(10);
     } finally {
       database.close();
     }

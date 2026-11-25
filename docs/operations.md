@@ -79,7 +79,7 @@ The per-instance numeric GitHub UID list in `DASHBOARD_MODEL_EDITOR_IDS` authori
 
 An authorized same-origin `POST /api/jobs/:runId/cancel` accepts a queued review immediately (200). A claimed review returns 202 until Runner confirms cleanup. Repeating the request retrieves its current cancellation state. A 409 means publication or another terminal outcome already won. Cancelling never withdraws a published GitHub review.
 
-The Worker ends the GitHub Check and requests a stop using the recorded Runner job and attempt. The minute cron retries pending deliveries if the Worker or Runner was unavailable. A Runner 404 leaves cleanup unconfirmed. A known failed cleanup uses the verified maintenance procedure below and blocks the same PR until exact destruction is confirmed. Unknown pending cleanup does not qualify for that procedure; only an exact late original callback can update it, and any actual orphan is identified and removed through backend ownership. A later run is blocked while a cancelled claim is inside the 90-minute execution budget; after that budget an unknown pending cleanup stops blocking, while a known failed cleanup continues to block. Cleanup visibility and queue blocking are independent: cancelled pending cleanup remains visible until confirmed.
+The Worker ends the GitHub Check immediately and requests a stop using the recorded Runner job and attempt. A failed Check update is best effort and is not retried from a queue. The minute cron durably retries the Runner stop if the Worker or Runner was unavailable. A Runner 404 leaves cleanup unconfirmed. A known failed cleanup uses the verified maintenance procedure below and blocks the same PR until exact destruction is confirmed. Unknown pending cleanup does not qualify for that procedure; only an exact late original callback can update it, and any actual orphan is identified and removed through backend ownership. A later run is blocked while a cancelled claim is inside the 90-minute execution budget; after that budget an unknown pending cleanup stops blocking, while a known failed cleanup continues to block. Cleanup visibility and queue blocking are independent: cancelled pending cleanup remains visible until confirmed.
 
 ## Operations and troubleshooting
 
@@ -227,6 +227,15 @@ starting it. After startup, verify service health, configured concurrency and
 Sandbox recovery status. Verify the behavior affected by the release. For
 publication changes, use the next controlled review to check the exact revision,
 review output and visible GitHub publication.
+
+### Check retry storage removal
+
+Migration `0019_remove_check_delivery_retries.sql` drops
+`review_check_deliveries` and the cancellation Check timestamps. Deploy the Worker that no longer
+uses these objects, verify that it serves requests and runs the scheduled handler,
+then apply the migration. Rolling back to an older Worker requires restoring
+its schema first. Terminal and cancellation Check updates are direct and best effort;
+Runner stop retries remain durable.
 
 ### Review deadline rollout
 
@@ -540,15 +549,14 @@ publication source. Retained evidence is not deleted after acceptance. If
 publication remains uncertain, inspect the callback and Core diagnostics before
 starting a new review; do not edit the evidence or clear ownership.
 
-Terminal Check delivery is independent of publication. If GitHub transiently
-rejects the final PATCH, D1 retains pending work for that run's exact Check. The
-same cron retries it from the persisted terminal status and decision, including
-after a Worker restart, late Check setup or a duplicate callback. A bounded sweep
-takes the least recently attempted rows first, so a permanently unavailable Check
-does not block later deliveries. Retries only update the recorded Check; they do
-not create another Check or post another review, and a terminal Check is never
-moved back to an earlier state. Existing historical completed Checks are not swept.
-Manual cancellation continues to use its own Check reconciliation timestamps.
+Terminal Check updates are independent of publication and best effort. If GitHub
+transiently rejects the final PATCH, the Check can remain at its earlier state;
+there is no durable delivery queue. Late Check setup and later callbacks make a
+fresh direct attempt from the persisted terminal status and decision. Those
+attempts only update the recorded Check: they do not create another Check or post
+another review, and a terminal Check is never moved back to an earlier state.
+Manual cancellation sends its cancelled Check update immediately; only the Runner
+stop is retried by the scheduled recovery pass.
 
 ## Uninstall and cleanup
 

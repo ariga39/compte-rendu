@@ -36,15 +36,16 @@ Check setup is best effort after durable admission, outside the webhook response
 path. Its D1 ownership lease prevents concurrent setup; late setup catches up to
 the persisted run. Check failure does not prevent execution or terminal feedback.
 A Check is queued until claim, in progress after claim, and successful only after
-publication. On failure, Core requests a failed Check. A GitHub update error can leave the Check showing an earlier state. Supersession and manual cancellation complete it as cancelled, with distinct explanations.
+publication. On failure, Core requests a failed Check. Supersession and manual
+cancellation send cancelled updates with distinct explanations.
 `details_url` points to that run's dashboard page. The configurable Check name
-also supplies the dashboard title. A terminal Check update that GitHub temporarily
-rejects leaves durable D1 delivery work for the exact existing Check. The scheduled
-handler retries it from the persisted run status and decision; late setup and
-duplicate callbacks use the same path. Reconciliation never creates another Check
-or review, never regresses a terminal Check, and rotates bounded sweeps by last
-attempt so one unavailable Check cannot starve later runs. Manual cancellation keeps
-its separate reconciliation timestamps.
+also supplies the dashboard title. Terminal and cancellation Check updates are
+direct and best effort: a GitHub error can leave the Check showing an earlier
+state and is not retried from a durable queue. Late setup and later callbacks
+make a fresh direct attempt from the persisted run status and decision. Core
+never creates another Check or review for the same run and never regresses a
+terminal Check. Manual cancellation sends its Check update immediately; only its
+Runner stop keeps durable retry work.
 
 Core is the only GitHub publisher. It derives repository, PR and commit from the
 admitted run, rechecks the head, and uses a publication claim plus run marker to
@@ -118,11 +119,11 @@ allowlisted HTTP endpoints are exposed. Runner is private. The inference hostnam
 There is no Cloudflare Workflow or message queue. See [installation](installation.md)
 and [LLM service](llm-service.md) for configuration, grants and deployment order.
 
-Core is assembled from admission, Runner protocol, publication/Check delivery and
+Core is assembled from admission, Runner protocol, publication/Check update and
 public projection seams rather than one monolithic module. D1 access is split by
 the transaction that owns it: `ReviewLifecycleStore` (admission, claims,
-evidence and publication lifecycle), `CheckRunStore` (Check setup/delivery
-leases), `CancellationStore` (stop and Check cancellation), and
+evidence and publication lifecycle), `CheckRunStore` (Check setup leases),
+`CancellationStore` (Runner stop and immediate Check cancellation), and
 `DashboardMetadataStore` (public projection, progress and metadata refresh).
 `createD1ReviewStateStore` composes the four required ports for existing callers.
 Live callbacks are slim and authoritative through D1 ownership and a small
@@ -373,7 +374,7 @@ do not become zero and are not publication gates. See [usage semantics](llm-serv
 [Dashboard behavior](public-dashboard-design.md) defines overview, filtered history,
 detail drawers, privacy and refresh. Every public read uses D1 only and triggers
 no GitHub or Runner request. Core refreshes repository metadata independently via
-its scheduled handler. Signed-in operators can edit the review roster and cancel runs before publication starts. Cancellation and publication compete for durable ownership of the same run. The Worker retries the GitHub Check update and Runner stop independently. See [operator cancellation](operations.md#operator-cancellation). Only currently verified public identity is disclosed;
+its scheduled handler. Signed-in operators can edit the review roster and cancel runs before publication starts. Cancellation and publication compete for durable ownership of the same run. Cancellation updates the GitHub Check immediately and durably retries only the Runner stop. One scheduled recovery entry queries Runner stops and stalled publications independently, so one unavailable source cannot starve the other. See [operator cancellation](operations.md#operator-cancellation). Only currently verified public identity is disclosed;
 private, unknown or expired identities are anonymous.
 
 Status is product state; assignment and stage timestamps are observations, not

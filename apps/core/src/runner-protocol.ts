@@ -208,7 +208,7 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
         .catch(() => undefined);
     }
     if (failed && winner.checkRunId !== undefined && github.updateCheckRun !== undefined) {
-      await publishTerminalCheck({ github, stateStore, runId, occurredAt }).catch(() => undefined);
+      await publishTerminalCheck({ github, stateStore, runId }).catch(() => undefined);
     }
     if (notificationClaimed && failed && github.createIssueComment !== undefined) {
       try {
@@ -314,7 +314,6 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
           github,
           stateStore,
           runId: callback.runId,
-          occurredAt: new Date().toISOString(),
         }).catch(() => undefined);
       }
       return new Response(null, { status: 202 });
@@ -392,7 +391,6 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
             github,
             stateStore,
             runId: callback.runId,
-            occurredAt: new Date().toISOString(),
           }).catch(() => undefined);
         }
         await recordFinishedLifecycle(lifecycleLog, outcome, 'superseded', callback);
@@ -444,7 +442,6 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
           github,
           stateStore,
           runId: callback.runId,
-          occurredAt: new Date().toISOString(),
         }).catch(() => undefined);
       }
       return new Response(null, { status: finalOutcome.status === 'failed' ? 503 : 202 });
@@ -754,7 +751,6 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
           github,
           stateStore,
           runId: claim.runId,
-          occurredAt,
         }).catch(() => undefined);
       }
       await recordFinishedLifecycle(
@@ -868,18 +864,11 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
       }
       // A cancellation can win while the in_progress Check write is in flight.
       // Re-read before handing the job to Runner so the claim is released and
-      // a stale Check write is reconciled durably instead of leaving the Check
-      // in progress forever.
+      // one direct best-effort write can replace the stale in-progress state.
       const latest = await stateStore.getRunOutcome(claim.runId).catch(() => current);
       if (latest?.status === 'cancelled') {
         const checkRunId = latest.checkRunId ?? current.checkRunId;
         if (wroteInProgress && checkRunId !== undefined) {
-          await stateStore
-            .reopenCheckCancellation({ runId: claim.runId, checkRunId })
-            .catch(() => false);
-          const confirmAt = await Effect.runPromise(
-            DateTime.now.pipe(Effect.map(DateTime.formatIso)),
-          );
           await github.updateCheckRun!({
             runId: claim.runId,
             repositoryId: latest.repositoryId,
@@ -887,15 +876,7 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
             checkRunId,
             status: 'cancelled',
             cancellationReason: 'manual',
-          })
-            .then(() =>
-              stateStore.confirmCheckCancelled({
-                runId: claim.runId,
-                checkRunId,
-                occurredAt: confirmAt,
-              }),
-            )
-            .catch(() => undefined);
+          }).catch(() => undefined);
         }
         return releaseUndeliveredCancellation();
       }

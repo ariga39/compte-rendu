@@ -151,15 +151,8 @@ export const completeReviewEffect = Effect.fn('completeReview')(function* (
   if (outcome.status === 'cancelled') return 'cancelled' as const;
   const updateCheck = Effect.fn('updateReviewCheck')(function* () {
     if (outcome.checkRunId === undefined || github.updateCheckRun === undefined) return;
-    const checkOccurredAt = yield* currentIso;
     yield* Effect.tryPromise({
-      try: () =>
-        publishTerminalCheck({
-          github,
-          stateStore,
-          runId: input.runId,
-          occurredAt: checkOccurredAt,
-        }),
+      try: () => publishTerminalCheck({ github, stateStore, runId: input.runId }),
       catch: () => undefined,
     }).pipe(Effect.catch(() => Effect.succeed(undefined)));
   });
@@ -557,10 +550,8 @@ export const publishTerminalCheck = async (input: {
   github: GitHubAdapter;
   stateStore: ReviewCompletionStateStore;
   runId: string;
-  occurredAt: string;
-  reopen?: boolean;
 }): Promise<boolean> => {
-  const { github, stateStore, runId, occurredAt, reopen } = input;
+  const { github, stateStore, runId } = input;
   if (github.updateCheckRun === undefined) return false;
   const outcome = await stateStore.getRunOutcome(runId);
   const status = checkStatusForOutcome(outcome);
@@ -573,39 +564,16 @@ export const publishTerminalCheck = async (input: {
   ) {
     return false;
   }
-  const checkRunId = outcome.checkRunId;
-  // Manual cancellation keeps its independent reconciliation timestamps.
-  if (
-    !(await stateStore.claimCheckDelivery({
-      runId,
-      checkRunId,
-      occurredAt,
-      ...(reopen === undefined ? {} : { reopen }),
-    }))
-  ) {
-    return false;
-  }
-  const current = await stateStore.getRunOutcome(runId);
-  const currentStatus = checkStatusForOutcome(current);
-  if (
-    current === undefined ||
-    current.checkRunId !== checkRunId ||
-    currentStatus !== status ||
-    current.status === 'cancelled'
-  ) {
-    return false;
-  }
   await github.updateCheckRun({
     runId,
-    repositoryId: current.repositoryId,
-    installationId: current.installationId,
-    checkRunId,
+    repositoryId: outcome.repositoryId,
+    installationId: outcome.installationId,
+    checkRunId: outcome.checkRunId,
     status,
-    ...(status === 'success' && current.decision !== undefined
-      ? { decision: current.decision }
+    ...(status === 'success' && outcome.decision !== undefined
+      ? { decision: outcome.decision }
       : {}),
   });
-  await stateStore.confirmCheckDelivery({ runId, checkRunId, occurredAt });
   return true;
 };
 
@@ -655,16 +623,13 @@ export const setupCheck = Effect.fn('setupCheck')(function* (
           catch: () => undefined,
         }).pipe(Effect.catch(() => Effect.succeed(undefined)));
         const status = checkStatusForOutcome(current);
-        const occurredAt = DateTime.formatIso(yield* DateTime.now);
-        const deliverTerminal = (outcome: ReviewOutcome, reopen = false) =>
+        const deliverTerminal = (outcome: ReviewOutcome) =>
           Effect.tryPromise({
             try: () =>
               publishTerminalCheck({
                 github,
                 stateStore,
                 runId,
-                occurredAt,
-                ...(reopen ? { reopen: true } : {}),
               }).then(() => outcome),
             catch: () => undefined,
           }).pipe(Effect.catch(() => Effect.succeed(undefined)));
@@ -678,13 +643,7 @@ export const setupCheck = Effect.fn('setupCheck')(function* (
                 checkRunId: checkRun.id,
                 status: 'cancelled',
                 cancellationReason: 'manual',
-              }).then(() =>
-                stateStore.confirmCheckCancelled({
-                  runId,
-                  checkRunId: checkRun.id,
-                  occurredAt,
-                }),
-              ),
+              }),
             catch: () => undefined,
           }).pipe(Effect.catch(() => Effect.succeed(undefined)));
         if (current !== undefined && status !== undefined && github.updateCheckRun !== undefined) {
@@ -715,7 +674,7 @@ export const setupCheck = Effect.fn('setupCheck')(function* (
               latestStatus !== 'in_progress'
             ) {
               if (latest.status === 'cancelled') yield* endCancelled(latest);
-              else yield* deliverTerminal(latest, true);
+              else yield* deliverTerminal(latest);
             }
           }
         }

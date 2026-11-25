@@ -87,28 +87,22 @@ export function createJobControl(
     if (destroyed) await state.confirmRunnerDestroyed({ ...identity, occurredAt });
   }
 
-  async function endCheck(item: ReviewCancellationWorkItem, occurredAt: string) {
-    if (!item.needsCheckReconciliation || item.checkRunId === null || !github.updateCheckRun)
-      return;
-    const identity = { runId: item.runId, checkRunId: item.checkRunId };
-    if (
-      !(await state.recordCheckCancellationAttempt({
-        ...identity,
-        occurredAt,
-        expectedLastAttempt: item.checkCancelAttemptedAt,
-      }))
-    )
-      return;
-    const outcome = await state.getRunOutcome(item.runId);
-    if (outcome?.status !== 'cancelled') return;
-    await github.updateCheckRun({
-      ...identity,
-      installationId: outcome.installationId,
-      repositoryId: outcome.repositoryId,
-      status: 'cancelled',
-      cancellationReason: 'manual',
-    });
-    await state.confirmCheckCancelled({ ...identity, occurredAt });
+  async function endCheckNow(cancellation: ReviewCancellationState) {
+    if (cancellation.checkRunId === null || github.updateCheckRun === undefined) return;
+    try {
+      const outcome = await state.getRunOutcome(cancellation.runId);
+      if (outcome?.status !== 'cancelled') return;
+      await github.updateCheckRun({
+        runId: cancellation.runId,
+        checkRunId: cancellation.checkRunId,
+        installationId: outcome.installationId,
+        repositoryId: outcome.repositoryId,
+        status: 'cancelled',
+        cancellationReason: 'manual',
+      });
+    } catch {
+      await recordDeliveryFailure(cancellation.runId, 'check-cancel');
+    }
   }
 
   const recordCancellation = async (
@@ -157,7 +151,10 @@ export function createJobControl(
       });
       if (result.kind === 'not_found') return response(404);
       if (result.kind === 'conflict') return response(409);
-      if (result.kind === 'cancelled') await recordCancellation(result.cancellation, context);
+      if (result.kind === 'cancelled') {
+        await recordCancellation(result.cancellation, context);
+        await endCheckNow(result.cancellation);
+      }
       const { runnerJobId, cleanup } = result.cancellation;
       const pending = runnerJobId !== null && cleanup !== 'destroyed';
       return response(pending ? 202 : 200, pending);
@@ -171,10 +168,7 @@ export function createJobControl(
         runId,
       });
       const outcomes = await Promise.allSettled(
-        work.flatMap((item) => [
-          deliver(item.runId, 'runner-stop', () => stop(item, occurredAt)),
-          deliver(item.runId, 'check-cancel', () => endCheck(item, occurredAt)),
-        ]),
+        work.map((item) => deliver(item.runId, 'runner-stop', () => stop(item, occurredAt))),
       );
       if (outcomes.some((outcome) => outcome.status === 'rejected'))
         throw new Error('Review cancellation delivery failed');
