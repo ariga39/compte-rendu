@@ -107,32 +107,27 @@ const readSource = async (
       const profile =
         override !== undefined
           ? override.profile
-          : entry.profiles === null
-            ? // An ID-only listing cannot verify a non-chat operation.
-              // Qualified sources may still expose a chat default, but
-              // Responses requires an explicit `models` override.
-              !qualified || preferredProfile === 'chat'
-              ? 'chat'
-              : undefined
-            : entry.profiles.length === 0
-              ? // A rich entry that advertises only retired protocols is
-                // omitted rather than defaulted to Chat.
-                undefined
-              : !qualified
-                ? // Unqualified legacy sources keep their historical chat
-                  // default for entries that still advertise a supported
-                  // protocol.
-                  'chat'
-                : (() => {
-                    const supported = allowedProfiles.filter((candidate) =>
-                      entry.profiles!.includes(candidate),
-                    );
-                    if (supported.length === 0) return undefined;
-                    if (entry.recommended !== null && supported.includes(entry.recommended))
-                      return entry.recommended;
-                    if (supported.includes(preferredProfile)) return preferredProfile;
-                    return supported[0];
-                  })();
+          : !qualified
+            ? // Unqualified legacy sources keep their historical chat
+              // default for every reviewable entry.
+              'chat'
+            : entry.profiles === null
+              ? // An ID-only listing cannot verify a non-chat operation.
+                // Qualified sources may still expose a chat default, but
+                // Responses requires an explicit `models` override.
+                preferredProfile === 'chat'
+                ? 'chat'
+                : undefined
+              : (() => {
+                  const supported = allowedProfiles.filter((candidate) =>
+                    entry.profiles!.includes(candidate),
+                  );
+                  if (supported.length === 0) return undefined;
+                  if (entry.recommended !== null && supported.includes(entry.recommended))
+                    return entry.recommended;
+                  if (supported.includes(preferredProfile)) return preferredProfile;
+                  return supported[0];
+                })();
       // A well-formed model that offers none of the configured protocols is
       // omitted rather than failing the source snapshot.
       if (profile === undefined) continue;
