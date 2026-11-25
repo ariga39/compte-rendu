@@ -1228,6 +1228,13 @@ restarting the upgraded Runner, remove any `MODEL_SECRET_COMMAND` entry from
 its environment file or service unit, even if the relay was already enabled.
 The Runner rejects this retired setting at startup.
 
+If rolling back to a direct-provider Runner, first pause webhook admissions
+and let the managed Runner finish all queued and running reviews. Verify the
+Core queue is empty, then drain and stop the managed Runner. Restore the
+matching Core revision, database schema, and direct-provider Runner configuration
+before restarting and resuming admissions. A direct-provider Runner cannot
+execute jobs with a frozen managed selection.
+
 A direct-provider installation has an old Runner without a relay client. Prepare
 one target-release checkout and both configs first, outside the maintenance
 window, then drain and switch. Only these differences apply:
