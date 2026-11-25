@@ -152,7 +152,12 @@ export const createGitHubPublicationProbe = async (
 
     const expected = claimed.get(callback.id);
     if (expected === undefined) return response(404);
-    if (expected.job.runId !== callback.runId || expected.job.attempt !== callback.attempt) {
+    if (
+      expected.job.runId !== callback.runId ||
+      expected.job.attempt !== callback.attempt ||
+      expected.job.baseSha !== callback.baseSha ||
+      expected.job.headSha !== callback.headSha
+    ) {
       return response(409);
     }
 
