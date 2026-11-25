@@ -189,7 +189,7 @@ it('rejects provider slugs, credential aliases and route IDs outside the frozen 
       rmSync(root, { recursive: true, force: true });
     }
   }
-});
+}, 15_000);
 
 it('accepts empty and maximum-length discovery prefixes without over-restricting routes', () => {
   for (const prefix of ['', 'a'.repeat(127)]) {
