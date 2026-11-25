@@ -1,24 +1,15 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createRunner, runProcess } from '../apps/runner/src/runner';
-import { createClaimExecution } from './support/runner-execution';
+import { createRunner } from '../apps/runner/src/runner';
 import { createSbxSandboxBackend } from '../apps/runner/src/sandbox-runtime-sbx';
-import type {
-  HostRun,
-  RunnerProcessResult,
-  SandboxExecPort,
-  SandboxJobSpec,
-} from '../apps/runner/src/sandbox-runtime';
+import { sandboxResourceName } from '../apps/runner/src/sandbox-resource-name';
+import type { HostRun, RunnerProcessResult } from '../apps/runner/src/sandbox-runtime';
+import { createClaimExecution } from './support/runner-execution';
 
-const ok: RunnerProcessResult = {
-  exitCode: 0,
-  stdout: '',
-  timedOut: false,
-  truncated: false,
-};
-
+const ok: RunnerProcessResult = { exitCode: 0, stdout: '', timedOut: false, truncated: false };
 const roots: string[] = [];
 
 afterEach(async () => {
@@ -26,98 +17,85 @@ afterEach(async () => {
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
 
-const maintenance = (
-  runner: ReturnType<typeof createRunner>,
-  path: 'drain' | 'resume',
-): Promise<Response> =>
-  runner.handle(
-    new Request(`http://runner/maintenance/${path}`, {
-      method: 'POST',
-      headers: { authorization: 'Bearer runner-test-token' },
-    }),
-  );
+type Rule = { id: string; resources: string[]; sandbox_id: string; editable: boolean };
+type Secret = { scope: string; type: string; name: string };
+type CustomSecret = { scope: string; placeholder: string };
 
-const expectDrained = async (runner: ReturnType<typeof createRunner>) => {
-  await maintenance(runner, 'drain');
-  await vi.waitFor(async () => {
-    const response = await runner.handle(
-      new Request('http://runner/maintenance', {
-        headers: { authorization: 'Bearer runner-test-token' },
-      }),
-    );
-    expect(await response.json()).toMatchObject({
-      draining: true,
-      drained: true,
-      claimPollingHalted: false,
-    });
-  });
-};
-
-const jobSpec = (root: string, id: string): SandboxJobSpec => ({
-  id,
-  name: `compte-rendu-${id}`,
-  cpu: '1',
-  memoryGib: 2,
-  env: [],
-  hostScratchRoot: root,
-  checkoutRoot: join(root, 'checkout'),
-  configRoot: join(root, 'config'),
-  modelResource: 'llm.example.test:443',
-  githubResource: 'api.github.com:443',
-  githubReadToken: 'host-only-github',
-});
-
-const setupCommand = (
-  spec: SandboxJobSpec,
-  failure: 'github' | 'policy' | 'create' | 'create-timeout' | null,
-): HostRun => {
-  const rule = {
-    id: 'owned-rule',
-    resources: [spec.modelResource, spec.githubResource],
-    sandbox_id: spec.name,
-    editable: true,
+const sandboxFixture = () => {
+  const state = {
+    names: [] as string[],
+    rules: [] as Rule[],
+    secrets: [] as Secret[],
+    customSecrets: [] as CustomSecret[],
+    listFailure: undefined as RunnerProcessResult | undefined,
+    secretListFailure: undefined as RunnerProcessResult | undefined,
+    cascade: true,
   };
-  return async (_program, args): Promise<RunnerProcessResult> => {
+  const hostRun: HostRun = async (_program, args) => {
+    if (args[0] === 'ls' && args[1] === '-q') {
+      if (state.listFailure !== undefined) return state.listFailure;
+      return { ...ok, stdout: state.names.join('\n') };
+    }
     if (args[0] === 'policy' && args[1] === 'ls')
-      return { ...ok, stdout: JSON.stringify({ rules: [rule] }) };
-    if (failure === 'github' && args[0] === 'secret' && args[1] === 'set')
-      return { ...ok, exitCode: 1, stderr: 'github secret setup failed' };
-    if (failure === 'create' && args[0] === 'create')
-      return { ...ok, exitCode: 1, stderr: 'create failed' };
-    if (failure === 'create-timeout' && args[0] === 'create')
-      return { ...ok, exitCode: 1, timedOut: true };
-    if (failure === 'policy' && args[0] === 'policy' && args[1] === 'allow')
-      return { ...ok, exitCode: 1 };
+      return { ...ok, stdout: JSON.stringify({ rules: state.rules }) };
+    if (args[0] === 'policy' && args[1] === 'rm') {
+      const id = args[args.indexOf('--id') + 1];
+      state.rules = state.rules.filter((rule) => rule.id !== id);
+      return ok;
+    }
+    if (args[0] === 'secret' && args[1] === 'ls') {
+      if (state.secretListFailure !== undefined) return state.secretListFailure;
+      const scope = args.includes('--sandbox') ? args[args.indexOf('--sandbox') + 1] : undefined;
+      return {
+        ...ok,
+        stdout: JSON.stringify({
+          secrets: state.secrets.filter((secret) => scope === undefined || secret.scope === scope),
+          custom_secrets: state.customSecrets.filter(
+            (secret) => scope === undefined || secret.scope === scope,
+          ),
+        }),
+      };
+    }
+    if (args[0] === 'secret' && args[1] === 'rm') {
+      const scope = args[args.indexOf('--sandbox') + 1];
+      const placeholder = args.includes('--placeholder')
+        ? args[args.indexOf('--placeholder') + 1]
+        : undefined;
+      const name = args[2]!;
+      state.customSecrets = state.customSecrets.filter(
+        (secret) => !(secret.scope === scope && secret.placeholder === placeholder),
+      );
+      state.secrets = state.secrets.filter(
+        (secret) => !(secret.scope === scope && secret.name === name),
+      );
+      return ok;
+    }
+    if (args[0] === 'inspect') {
+      const name = args[1]!;
+      return state.names.includes(name)
+        ? { ...ok, stdout: JSON.stringify({ name }) }
+        : { ...ok, exitCode: 1, stderr: `error: sandbox '${name}' not found` };
+    }
+    if (args[0] === 'rm') {
+      state.names = state.names.filter((name) => name !== args[2]);
+      if (state.cascade) {
+        state.rules = state.rules.filter((rule) => rule.sandbox_id !== args[2]);
+        state.secrets = state.secrets.filter((secret) => secret.scope !== args[2]);
+        state.customSecrets = state.customSecrets.filter((secret) => secret.scope !== args[2]);
+      }
+      return ok;
+    }
     return ok;
   };
+  return { state, hostRun };
 };
-
-// Sanitized `sbx inspect --json` fixture using the pinned 0.48.0 wire fields.
-const inspectView = async (
-  sandboxName: string,
-  workspace: string,
-  config: string,
-): Promise<Record<string, unknown>> => {
-  const text = await readFile(new URL('./fixtures/sbx-inspect-view.json', import.meta.url), 'utf8');
-  return JSON.parse(
-    text
-      .replaceAll('__SANDBOX_NAME__', sandboxName)
-      .replaceAll('__WORKSPACE__', workspace)
-      .replaceAll('__CONFIG__', config),
-  ) as Record<string, unknown>;
-};
-
-const DEFAULT_INSTANCE_ID = 'test-runner';
-const ownershipRoot = (root: string, instanceId = DEFAULT_INSTANCE_ID) =>
-  join(root, 'sandbox-owners', instanceId);
 
 const runnerOptions = (
   evidenceRoot: string,
-  process: (args: readonly string[]) => Promise<RunnerProcessResult>,
-  instanceId = DEFAULT_INSTANCE_ID,
+  hostRun: HostRun,
+  extra: Record<string, unknown> = {},
 ) => ({
   evidenceRoot,
-  instanceId,
   authToken: 'runner-test-token',
   modelConfig: JSON.stringify({
     id: 'opencode-go/review',
@@ -126,811 +104,217 @@ const runnerOptions = (
   }),
   callbackUrl: 'https://ingress.test/runner-callback',
   callbackToken: 'callback-token',
+  llmRelay: true,
   claimUrl: '',
-  process: async (_command: string, args: readonly string[]) => process(args),
+  process: async (_command: string, args: readonly string[]) => hostRun('sbx', args),
+  ...extra,
 });
 
-const claimExecutions = new WeakMap<object, ReturnType<typeof createClaimExecution>>();
-
-const createSbxRunner = (options: Parameters<typeof createRunner>[0]) => {
-  const claim = createClaimExecution();
-  const runner = createRunner({
-    ...options,
-    claimUrl: 'https://ingress.test/runner-claim',
-    claimIntervalMs: 10,
-    claimFetch: claim.claimFetch,
-    callbackFetch: claim.callbackFetch,
-  });
-  claimExecutions.set(runner, claim);
-  return runner;
-};
-
-const claimGate = (runner: ReturnType<typeof createRunner>) => {
-  const claim = claimExecutions.get(runner);
-  if (claim === undefined) throw new Error('missing claim fixture');
-  return claim;
-};
-
-const claimGateOpen = async (runner: ReturnType<typeof createRunner>) => {
-  await vi.waitFor(() => expect(claimGate(runner).claimRequests.length).toBeGreaterThan(0));
-};
-
-const notFound = (name: string): RunnerProcessResult => ({
-  ...ok,
-  exitCode: 1,
-  stderr: `error: sandbox '${name}' not found`,
-});
-
-const secretState = () => ({
-  custom: true,
-  github: true,
-});
-
-const secretCommand = (
-  args: readonly string[],
-  state: ReturnType<typeof secretState>,
-  spec: SandboxJobSpec,
-): RunnerProcessResult | undefined => {
-  if (args[0] !== 'secret') return undefined;
-  if (args[1] === 'rm') {
-    if (args[2] === '--placeholder') state.custom = false;
-    if (args[2] === 'github') state.github = false;
-    return ok;
-  }
-  if (args[1] === 'ls')
-    return {
-      ...ok,
-      stdout: JSON.stringify({
-        secrets: state.github ? [{ scope: spec.name, type: 'service', name: 'github' }] : [],
-        custom_secrets: state.custom ? [{ scope: spec.name, placeholder: `cr-${spec.id}` }] : [],
-      }),
-    };
-  return undefined;
-};
-
-const createSbxJob = (
-  spec: SandboxJobSpec,
-  failure: 'github' | 'policy' | 'create' | 'create-timeout' | null,
-  ownershipRootPath: string,
-) => {
-  const hostRun = setupCommand(spec, failure);
-  const exec: SandboxExecPort = { run: hostRun };
-  vi.stubEnv('MODEL_SECRET_COMMAND', 'secret-resolver get MODEL_API_KEY');
-  const runtime = createSbxSandboxBackend({
-    hostRun,
-    relayEnabled: false,
-    ownershipRoot: ownershipRootPath,
-  }).createJob(spec);
-  return { runtime, exec };
-};
-
-describe('Runner sbx startup reconciliation', () => {
-  it('removes a provably owned Sandbox left by interrupted setup without touching another sandbox', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'cr-sbx-restart-'));
+describe('sbx age cleanup', () => {
+  it('removes expired VM, policies and secrets while preserving fresh and foreign resources', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-sbx-sweep-'));
     roots.push(root);
-    vi.stubEnv('TMPDIR', root);
-    const spec = jobSpec(root, 'job-interrupted');
-    await mkdir(spec.checkoutRoot, { recursive: true });
-    await mkdir(spec.configRoot, { recursive: true });
-    const { runtime, exec } = createSbxJob(spec, 'policy', ownershipRoot(root));
-
-    await expect(runtime.setup(exec)).rejects.toThrow();
-
-    const ownedRule = {
-      id: 'owned-rule',
-      resources: [spec.modelResource, spec.githubResource],
-      sandbox_id: spec.name,
-      editable: true,
-    };
-    const foreignRule = {
-      id: 'foreign-rule',
-      resources: ['other.example.test:443'],
-      sandbox_id: 'other-sandbox',
-      editable: true,
-    };
-    let present = true;
-    const secrets = secretState();
-    const commands: string[][] = [];
-    const runner = createSbxRunner(
-      runnerOptions(root, async (args) => {
-        commands.push([...args]);
-        const secret = secretCommand(args, secrets, spec);
-        if (secret !== undefined) return secret;
-        if (args[0] === 'inspect') {
-          if (!present) return notFound(spec.name);
-          return {
-            ...ok,
-            stdout: JSON.stringify(
-              await inspectView(spec.name, spec.checkoutRoot, spec.configRoot),
-            ),
-          };
-        }
-        if (args[0] === 'policy' && args[1] === 'ls')
-          return {
-            ...ok,
-            stdout: JSON.stringify({ rules: present ? [ownedRule, foreignRule] : [] }),
-          };
-        if (args[0] === 'rm') present = false;
-        return ok;
-      }),
-    );
+    const { state, hostRun } = sandboxFixture();
+    const expired = sandboxResourceName(randomUUID(), Date.now() - 3 * 60 * 60 * 1000);
+    const fresh = sandboxResourceName(randomUUID());
+    const foreign = 'other-owner-sandbox';
+    state.names = [expired, fresh, foreign];
+    state.rules = [
+      {
+        id: 'expired-rule',
+        resources: ['llm.example.test:443'],
+        sandbox_id: expired,
+        editable: true,
+      },
+      { id: 'fresh-rule', resources: ['llm.example.test:443'], sandbox_id: fresh, editable: true },
+      {
+        id: 'foreign-rule',
+        resources: ['other.example.test:443'],
+        sandbox_id: foreign,
+        editable: true,
+      },
+    ];
+    state.secrets = [
+      { scope: expired, type: 'service', name: 'github' },
+      { scope: fresh, type: 'service', name: 'github' },
+      { scope: foreign, type: 'service', name: 'github' },
+    ];
+    state.customSecrets = [
+      { scope: expired, placeholder: 'cr-expired' },
+      { scope: fresh, placeholder: 'cr-fresh' },
+    ];
+    const runner = createRunner(runnerOptions(root, hostRun));
 
     try {
-      await vi.waitFor(() => expect(commands.some((args) => args[0] === 'rm')).toBe(true));
-      expect(commands).toContainEqual([
-        'policy',
-        'rm',
-        'network',
-        '--id',
-        'owned-rule',
-        '--sandbox',
-        spec.name,
-        '--force',
-      ]);
-      expect(commands).not.toContainEqual([
-        'policy',
-        'rm',
-        'network',
-        '--id',
-        'foreign-rule',
-        '--sandbox',
-        'other-sandbox',
-        '--force',
-      ]);
-      expect(commands).toContainEqual([
-        'secret',
-        'rm',
-        '--placeholder',
-        `cr-${spec.id}`,
-        '--sandbox',
-        spec.name,
-        '--force',
-      ]);
-      expect(commands).toContainEqual([
-        'secret',
-        'rm',
-        'github',
-        '--sandbox',
-        spec.name,
-        '--force',
-      ]);
-      expect(commands).toContainEqual(['secret', 'ls', '--json', '--sandbox', spec.name]);
-      await claimGateOpen(runner);
-      await expectDrained(runner);
+      await vi.waitFor(() => expect(state.names).toEqual([fresh, foreign]), { timeout: 5_000 });
+      expect(state.rules.map((rule) => rule.sandbox_id)).toEqual([fresh, foreign]);
+      expect(state.secrets.map((secret) => secret.scope)).toEqual([fresh, foreign]);
+      expect(state.customSecrets.map((secret) => secret.scope)).toEqual([fresh]);
     } finally {
       await runner.close();
     }
   });
 
-  it('recovers an owned Sandbox through the production process runner', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'cr-sbx-process-recovery-'));
+  it('removes an expired never-created scoped secret', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-sbx-orphan-secret-'));
     roots.push(root);
-    vi.stubEnv('TMPDIR', root);
-    const spec = jobSpec(root, 'job-process-recovery');
-    await mkdir(spec.checkoutRoot, { recursive: true });
-    await mkdir(spec.configRoot, { recursive: true });
-    const { runtime, exec } = createSbxJob(spec, null, ownershipRoot(root));
-    await runtime.setup(exec);
+    const { state, hostRun } = sandboxFixture();
+    const expired = sandboxResourceName(randomUUID(), Date.now() - 3 * 60 * 60 * 1000);
+    state.customSecrets = [{ scope: expired, placeholder: 'cr-never-created' }];
+    const backend = createSbxSandboxBackend({ hostRun, relayEnabled: true });
 
-    const stateRoot = join(root, 'state');
-    await mkdir(stateRoot);
-    await writeFile(join(stateRoot, 'present'), '');
-    await writeFile(join(stateRoot, 'rule'), '');
-    const cli = join(root, 'sbx-fixture-cli');
-    await writeFile(
-      cli,
-      `#!/bin/sh
-state="\${CR_STATE}"
-case "$1" in
-  inspect)
-    if [ -f "$state/present" ]; then
-      printf '{"name":"%s","workspace":"%s","additional_workspaces":[{"dir":"%s"}]}\\n' "\${CR_SANDBOX}" "\${CR_WORKSPACE}" "\${CR_CONFIG}"
-    else
-      printf "error: sandbox '%s' not found\\n" "\${CR_SANDBOX}" >&2
-      exit 1
-    fi
-    ;;
-  rm)
-    rm -f "$state/present"
-    ;;
-  policy)
-    if [ "$2" = "ls" ]; then
-      if [ -f "$state/rule" ]; then
-        printf '{"rules":[{"id":"owned-rule","resources":["%s","%s"],"sandbox_id":"%s","editable":true}]}\\n' "\${CR_MODEL_RESOURCE}" "\${CR_GITHUB_RESOURCE}" "\${CR_SANDBOX}"
-      else
-        printf '{"rules":[]}\\n'
-      fi
-    elif [ "$2" = "rm" ]; then
-      rm -f "$state/rule"
-    fi
-    ;;
-  secret)
-    if [ "$2" = "ls" ]; then printf '{"secrets":[],"custom_secrets":[]}\\n'; fi
-    ;;
-esac
-exit 0
-`,
-      { mode: 0o755 },
-    );
-    vi.stubEnv('RUNNER_SANDBOX_CLI', cli);
-    vi.stubEnv('CR_STATE', stateRoot);
-    vi.stubEnv('CR_SANDBOX', spec.name);
-    vi.stubEnv('CR_WORKSPACE', spec.checkoutRoot);
-    vi.stubEnv('CR_CONFIG', spec.configRoot);
-    vi.stubEnv('CR_MODEL_RESOURCE', spec.modelResource);
-    vi.stubEnv('CR_GITHUB_RESOURCE', spec.githubResource);
+    await expect(backend.reconcileOrphans!({ isLiveJob: () => false })).resolves.toMatchObject({
+      ok: true,
+      recovered: 1,
+    });
+    expect(state.customSecrets).toEqual([]);
+  });
 
+  it('keeps concurrent sweeps idempotent', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-sbx-race-'));
+    roots.push(root);
+    const { state, hostRun } = sandboxFixture();
+    const expired = sandboxResourceName(randomUUID(), Date.now() - 3 * 60 * 60 * 1000);
+    state.names = [expired];
+    state.secrets = [{ scope: expired, type: 'service', name: 'github' }];
+    const backend = createSbxSandboxBackend({ hostRun, relayEnabled: true });
+
+    const [first, second] = await Promise.all([
+      backend.reconcileOrphans!({ isLiveJob: () => false }),
+      backend.reconcileOrphans!({ isLiveJob: () => false }),
+    ]);
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+    expect(state.names).toEqual([]);
+    expect(state.secrets).toEqual([]);
+  });
+
+  it('leaves everything in place when the sandbox inventory fails or truncates', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-sbx-list-failure-'));
+    roots.push(root);
+    const { state, hostRun } = sandboxFixture();
+    const expired = sandboxResourceName(randomUUID(), Date.now() - 3 * 60 * 60 * 1000);
+    state.names = [expired];
+    state.listFailure = { ...ok, truncated: true };
+    const backend = createSbxSandboxBackend({ hostRun, relayEnabled: true });
+
+    await expect(backend.reconcileOrphans!({ isLiveJob: () => false })).resolves.toMatchObject({
+      ok: false,
+      recovered: 0,
+    });
+    expect(state.names).toEqual([expired]);
+  });
+
+  it('leaves everything in place when the scoped secret inventory fails', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-sbx-secret-failure-'));
+    roots.push(root);
+    const { state, hostRun } = sandboxFixture();
+    const expired = sandboxResourceName(randomUUID(), Date.now() - 3 * 60 * 60 * 1000);
+    state.names = [expired];
+    state.secretListFailure = { ...ok, exitCode: 1, stderr: 'secret inventory unavailable' };
+    const backend = createSbxSandboxBackend({ hostRun, relayEnabled: true });
+
+    await expect(backend.reconcileOrphans!({ isLiveJob: () => false })).resolves.toMatchObject({
+      ok: false,
+      recovered: 0,
+    });
+    expect(state.names).toEqual([expired]);
+  });
+
+  it('removes only an exact retained target from a trusted manifest', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-sbx-target-'));
+    roots.push(root);
+    const { state, hostRun } = sandboxFixture();
+    const jobId = randomUUID();
+    const target = sandboxResourceName(jobId, Date.now() - 3 * 60 * 60 * 1000);
+    const other = sandboxResourceName(randomUUID());
+    state.names = [target, other];
+    const backend = createSbxSandboxBackend({ hostRun, relayEnabled: true });
+
+    await expect(
+      backend.reconcileOrphans!({
+        isLiveJob: () => false,
+        only: { jobId, sandboxName: target },
+      }),
+    ).resolves.toMatchObject({ ok: true, recovered: 1, recoveredJobIds: [jobId] });
+    expect(state.names).toEqual([other]);
+  });
+
+  it('rejects an exact target whose job identity does not match the name', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-sbx-target-mismatch-'));
+    roots.push(root);
+    const { state, hostRun } = sandboxFixture();
+    const target = sandboxResourceName(randomUUID(), Date.now() - 3 * 60 * 60 * 1000);
+    state.names = [target];
+    const backend = createSbxSandboxBackend({ hostRun, relayEnabled: true });
+
+    await expect(
+      backend.reconcileOrphans!({
+        isLiveJob: () => false,
+        only: { jobId: 'other-job', sandboxName: target },
+      }),
+    ).resolves.toMatchObject({ ok: false, recovered: 0 });
+    expect(state.names).toEqual([target]);
+  });
+
+  it('does not hold a healthy claim behind a slow startup inventory', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-sbx-claim-'));
+    roots.push(root);
+    const { hostRun } = sandboxFixture();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let started!: () => void;
+    const inventoryStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const claim = createClaimExecution();
     const runner = createRunner({
-      evidenceRoot: root,
-      instanceId: DEFAULT_INSTANCE_ID,
-      authToken: 'runner-test-token',
-      claimUrl: '',
-      modelConfig: JSON.stringify({
-        id: 'opencode-go/review',
-        baseUrl: 'https://llm.internal.example/v1',
-        definition: { name: 'Review' },
-      }),
-      process: runProcess,
-    });
-
-    try {
-      await vi.waitFor(
-        async () => {
-          await expect(readdir(ownershipRoot(root))).resolves.toHaveLength(0);
-          await expect(readFile(join(stateRoot, 'present'))).rejects.toThrow();
-        },
-        { timeout: 5_000 },
-      );
-    } finally {
-      await runner.close();
-    }
-  });
-
-  it('waits for the initial ownership scan before the first claim', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'cr-sbx-startup-gate-'));
-    roots.push(root);
-    vi.stubEnv('TMPDIR', root);
-    const spec = jobSpec(root, 'job-startup-gate');
-    await mkdir(spec.checkoutRoot, { recursive: true });
-    await mkdir(spec.configRoot, { recursive: true });
-    const { runtime, exec } = createSbxJob(spec, null, ownershipRoot(root));
-    await runtime.setup(exec);
-
-    let scanStarted!: () => void;
-    const started = new Promise<void>((resolve) => {
-      scanStarted = resolve;
-    });
-    let releaseScan!: () => void;
-    const scanGate = new Promise<void>((resolve) => {
-      releaseScan = resolve;
-    });
-    const runner = createSbxRunner({
-      ...runnerOptions(root, async (args) => {
-        if (args[0] === 'inspect') {
-          scanStarted();
-          await scanGate;
-          return notFound(spec.name);
+      ...runnerOptions(root, async (program, args) => {
+        if (args[0] === 'ls' && args[1] === '-q') {
+          started();
+          await gate;
         }
-        return ok;
+        return hostRun(program, args);
       }),
+      claimUrl: 'https://ingress.test/runner-claim',
+      claimIntervalMs: 10,
+      claimFetch: claim.claimFetch,
+      callbackFetch: claim.callbackFetch,
     });
     try {
-      await started;
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      expect(claimGate(runner).claimRequests).toHaveLength(0);
-      releaseScan();
-      await claimGateOpen(runner);
+      await inventoryStarted;
+      await vi.waitFor(() => expect(claim.claimRequests.length).toBeGreaterThan(0));
     } finally {
-      releaseScan();
+      release();
       await runner.close();
     }
   });
 
-  it('reconciles an interrupted setup that never created a Sandbox without touching policies', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'cr-sbx-restart-'));
+  it('confirms absence only after the exact sandbox is gone and cleans scoped resources', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-sbx-confirm-'));
     roots.push(root);
-    vi.stubEnv('TMPDIR', root);
-    const spec = jobSpec(root, 'job-no-create');
-    await mkdir(spec.checkoutRoot, { recursive: true });
-    await mkdir(spec.configRoot, { recursive: true });
-    const { runtime, exec } = createSbxJob(spec, 'create', ownershipRoot(root));
+    const { state, hostRun } = sandboxFixture();
+    const jobId = randomUUID();
+    const name = sandboxResourceName(jobId);
+    state.names = [name];
+    state.rules = [
+      { id: 'owned-rule', resources: ['llm.example.test:443'], sandbox_id: name, editable: true },
+    ];
+    state.secrets = [{ scope: name, type: 'service', name: 'github' }];
+    state.customSecrets = [{ scope: name, placeholder: `cr-${jobId}` }];
+    const backend = createSbxSandboxBackend({ hostRun, relayEnabled: true });
 
-    await expect(runtime.setup(exec)).rejects.toThrow();
+    await expect(backend.confirmCleanupAbsent?.({ jobId, sandboxName: name })).rejects.toThrow();
+    expect(state.rules).toHaveLength(1);
 
-    const secrets = secretState();
-    const commands: string[][] = [];
-    const runner = createSbxRunner(
-      runnerOptions(root, async (args) => {
-        commands.push([...args]);
-        const secret = secretCommand(args, secrets, spec);
-        if (secret !== undefined) return secret;
-        if (args[0] === 'inspect') return notFound(spec.name);
-        return ok;
-      }),
-    );
-
-    try {
-      await vi.waitFor(() =>
-        expect(
-          commands.some(
-            (args) => args[0] === 'secret' && args[1] === 'rm' && args[2] === '--placeholder',
-          ),
-        ).toBe(true),
-      );
-      expect(commands.some((args) => args[0] === 'rm')).toBe(false);
-      expect(commands.some((args) => args[0] === 'policy')).toBe(false);
-      expect(commands).toContainEqual([
-        'secret',
-        'rm',
-        'github',
-        '--sandbox',
-        spec.name,
-        '--force',
-      ]);
-      await claimGateOpen(runner);
-    } finally {
-      await runner.close();
-    }
-  });
-
-  it('removes a timed-out created Sandbox without touching policies it never attempted', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'cr-sbx-restart-'));
-    roots.push(root);
-    vi.stubEnv('TMPDIR', root);
-    const spec = jobSpec(root, 'job-create-timeout');
-    await mkdir(spec.checkoutRoot, { recursive: true });
-    await mkdir(spec.configRoot, { recursive: true });
-    const { runtime, exec } = createSbxJob(spec, 'create-timeout', ownershipRoot(root));
-
-    await expect(runtime.setup(exec)).rejects.toThrow();
-
-    let present = true;
-    const secrets = secretState();
-    const commands: string[][] = [];
-    const runner = createSbxRunner(
-      runnerOptions(root, async (args) => {
-        commands.push([...args]);
-        const secret = secretCommand(args, secrets, spec);
-        if (secret !== undefined) return secret;
-        if (args[0] === 'inspect') {
-          if (!present) return notFound(spec.name);
-          return {
-            ...ok,
-            stdout: JSON.stringify(
-              await inspectView(spec.name, spec.checkoutRoot, spec.configRoot),
-            ),
-          };
-        }
-        if (args[0] === 'rm') present = false;
-        return ok;
-      }),
-    );
-
-    try {
-      await vi.waitFor(() => expect(commands.some((args) => args[0] === 'rm')).toBe(true));
-      expect(commands.some((args) => args[0] === 'policy')).toBe(false);
-      await claimGateOpen(runner);
-    } finally {
-      await runner.close();
-    }
-  });
-
-  it('rejects a present same-name Sandbox when creation was only an intent', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'cr-sbx-restart-'));
-    roots.push(root);
-    vi.stubEnv('TMPDIR', root);
-    const spec = jobSpec(root, 'job-before-create');
-    await mkdir(spec.checkoutRoot, { recursive: true });
-    await mkdir(spec.configRoot, { recursive: true });
-    const { runtime, exec } = createSbxJob(spec, 'github', ownershipRoot(root));
-
-    await expect(runtime.setup(exec)).rejects.toThrow();
-
-    const secrets = secretState();
-    const commands: string[][] = [];
-    const runner = createSbxRunner(
-      runnerOptions(root, async (args) => {
-        commands.push([...args]);
-        const secret = secretCommand(args, secrets, spec);
-        if (secret !== undefined) return secret;
-        if (args[0] === 'inspect')
-          return {
-            ...ok,
-            stdout: JSON.stringify(
-              await inspectView(spec.name, spec.checkoutRoot, spec.configRoot),
-            ),
-          };
-        return ok;
-      }),
-    );
-
-    try {
-      await vi.waitFor(() => expect(commands.some((args) => args[0] === 'inspect')).toBe(true));
-      await vi.waitFor(async () => {
-        expect(await (await maintenance(runner, 'drain')).json()).toMatchObject({
-          drained: false,
-          claimPollingHalted: false,
-        });
-      });
-      expect(commands.some((args) => args[0] === 'rm')).toBe(false);
-      expect(commands.some((args) => args[0] === 'policy' && args[1] === 'rm')).toBe(false);
-      expect(commands.some((args) => args[0] === 'secret' && args[1] === 'rm')).toBe(false);
-      await claimGateOpen(runner);
-    } finally {
-      await runner.close();
-    }
-  });
-
-  it('ignores an expected string in unrelated inspect metadata', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'cr-sbx-restart-'));
-    roots.push(root);
-    vi.stubEnv('TMPDIR', root);
-    const spec = jobSpec(root, 'job-metadata');
-    await mkdir(spec.checkoutRoot, { recursive: true });
-    await mkdir(spec.configRoot, { recursive: true });
-    const { runtime, exec } = createSbxJob(spec, null, ownershipRoot(root));
-    await runtime.setup(exec);
-
-    const foreign = await inspectView(
-      spec.name,
-      join(root, 'unrelated-workspace'),
-      join(root, 'unrelated-config'),
-    );
-    foreign.kits = [spec.checkoutRoot];
-    foreign.secrets = [{ name: `cr-${spec.id}` }];
-    const secrets = secretState();
-    const commands: string[][] = [];
-    const runner = createSbxRunner(
-      runnerOptions(root, async (args) => {
-        commands.push([...args]);
-        const secret = secretCommand(args, secrets, spec);
-        if (secret !== undefined) return secret;
-        if (args[0] === 'inspect') return { ...ok, stdout: JSON.stringify(foreign) };
-        if (args[0] === 'policy' && args[1] === 'ls')
-          return { ...ok, stdout: JSON.stringify({ rules: [] }) };
-        return ok;
-      }),
-    );
-
-    try {
-      await vi.waitFor(() => expect(commands.some((args) => args[0] === 'inspect')).toBe(true));
-      await vi.waitFor(async () => {
-        expect(await (await maintenance(runner, 'drain')).json()).toMatchObject({
-          drained: false,
-          claimPollingHalted: false,
-        });
-      });
-      expect(commands.some((args) => args[0] === 'rm')).toBe(false);
-      expect(commands.some((args) => args[0] === 'policy' && args[1] === 'rm')).toBe(false);
-      expect(commands.some((args) => args[0] === 'secret' && args[1] === 'rm')).toBe(false);
-      await claimGateOpen(runner);
-    } finally {
-      await runner.close();
-    }
-  });
-
-  it('keeps an uncertain verification fail-closed without deleting anything', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'cr-sbx-restart-'));
-    roots.push(root);
-    vi.stubEnv('TMPDIR', root);
-    const spec = jobSpec(root, 'job-uncertain');
-    await mkdir(spec.checkoutRoot, { recursive: true });
-    await mkdir(spec.configRoot, { recursive: true });
-    const { runtime, exec } = createSbxJob(spec, null, ownershipRoot(root));
-    await runtime.setup(exec);
-
-    const secrets = secretState();
-    const commands: string[][] = [];
-    const runner = createSbxRunner(
-      runnerOptions(root, async (args) => {
-        commands.push([...args]);
-        const secret = secretCommand(args, secrets, spec);
-        if (secret !== undefined) return secret;
-        if (args[0] === 'inspect')
-          return {
-            ...ok,
-            exitCode: 1,
-            stderr: 'not signed in to Docker',
-          };
-        return ok;
-      }),
-    );
-
-    try {
-      await vi.waitFor(() => expect(commands.some((args) => args[0] === 'inspect')).toBe(true));
-      await vi.waitFor(async () => {
-        expect(await (await maintenance(runner, 'drain')).json()).toMatchObject({
-          drained: false,
-          claimPollingHalted: false,
-        });
-      });
-      expect(commands.some((args) => args[0] === 'rm')).toBe(false);
-      expect(commands.some((args) => args[0] === 'policy' && args[1] === 'rm')).toBe(false);
-      expect(commands.some((args) => args[0] === 'secret' && args[1] === 'rm')).toBe(false);
-      await claimGateOpen(runner);
-    } finally {
-      await runner.close();
-    }
-  });
-
-  it.each([
-    {
-      name: 'missing envelope',
-      listed: { ...ok, stdout: '{"error":"unavailable"}' },
-    },
-    {
-      name: 'unusable candidate identity',
-      listed: { ...ok, stdout: '{"secrets":[{}],"custom_secrets":[]}' },
-    },
-    {
-      name: 'stream error',
-      listed: { ...ok, stdout: '{"secrets":[],"custom_secrets":[]}', streamError: true },
-    },
-  ])('keeps the record for malformed native secret listing: $name', async ({ listed }) => {
-    const root = await mkdtemp(join(tmpdir(), 'cr-sbx-restart-'));
-    roots.push(root);
-    vi.stubEnv('TMPDIR', root);
-    const spec = jobSpec(root, 'job-secret-malformed');
-    await mkdir(spec.checkoutRoot, { recursive: true });
-    await mkdir(spec.configRoot, { recursive: true });
-    const { runtime, exec } = createSbxJob(spec, null, ownershipRoot(root));
-    await runtime.setup(exec);
-
-    let present = true;
-    const commands: string[][] = [];
-    const runner = createSbxRunner(
-      runnerOptions(root, async (args) => {
-        commands.push([...args]);
-        if (args[0] === 'inspect') {
-          if (!present) return notFound(spec.name);
-          return {
-            ...ok,
-            stdout: JSON.stringify(
-              await inspectView(spec.name, spec.checkoutRoot, spec.configRoot),
-            ),
-          };
-        }
-        if (args[0] === 'policy' && args[1] === 'ls')
-          return { ...ok, stdout: JSON.stringify({ rules: [] }) };
-        if (args[0] === 'rm') present = false;
-        if (args[0] === 'secret' && args[1] === 'ls') return listed;
-        return ok;
-      }),
-    );
-
-    try {
-      await vi.waitFor(() =>
-        expect(commands).toContainEqual(['secret', 'ls', '--json', '--sandbox', spec.name]),
-      );
-      await vi.waitFor(async () => {
-        expect(await (await maintenance(runner, 'drain')).json()).toMatchObject({
-          drained: false,
-          claimPollingHalted: false,
-        });
-      });
-      await claimGateOpen(runner);
-    } finally {
-      await runner.close();
-    }
-  });
-
-  it('keeps the record when native secret removal is not confirmed absent', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'cr-sbx-restart-'));
-    roots.push(root);
-    vi.stubEnv('TMPDIR', root);
-    const spec = jobSpec(root, 'job-secret-postcondition');
-    await mkdir(spec.checkoutRoot, { recursive: true });
-    await mkdir(spec.configRoot, { recursive: true });
-    const { runtime, exec } = createSbxJob(spec, null, ownershipRoot(root));
-    await runtime.setup(exec);
-
-    let present = true;
-    const commands: string[][] = [];
-    const runner = createSbxRunner(
-      runnerOptions(root, async (args) => {
-        commands.push([...args]);
-        if (args[0] === 'inspect') {
-          if (!present) return notFound(spec.name);
-          return {
-            ...ok,
-            stdout: JSON.stringify(
-              await inspectView(spec.name, spec.checkoutRoot, spec.configRoot),
-            ),
-          };
-        }
-        if (args[0] === 'policy' && args[1] === 'ls')
-          return { ...ok, stdout: JSON.stringify({ rules: [] }) };
-        if (args[0] === 'rm') present = false;
-        if (args[0] === 'secret' && args[1] === 'ls')
-          return {
-            ...ok,
-            stdout: JSON.stringify({
-              secrets: [{ scope: spec.name, type: 'service', name: 'github' }],
-              custom_secrets: [{ scope: spec.name, placeholder: `cr-${spec.id}` }],
-            }),
-          };
-        return ok;
-      }),
-    );
-
-    try {
-      await vi.waitFor(() =>
-        expect(commands).toContainEqual(['secret', 'ls', '--json', '--sandbox', spec.name]),
-      );
-      await vi.waitFor(async () => {
-        expect(await (await maintenance(runner, 'drain')).json()).toMatchObject({
-          drained: false,
-          claimPollingHalted: false,
-        });
-      });
-      await claimGateOpen(runner);
-    } finally {
-      await runner.close();
-    }
-  });
-
-  it('does not reconcile ownership records belonging to a co-located Runner instance', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'cr-sbx-restart-'));
-    roots.push(root);
-    vi.stubEnv('TMPDIR', root);
-    vi.stubEnv('XDG_STATE_HOME', root);
-    vi.stubEnv('PORT', '9101');
-    const defaultEvidenceRoot = join(root, 'compte-rendu', 'reviews');
-    const spec = jobSpec(root, 'job-colocated');
-    await mkdir(spec.checkoutRoot, { recursive: true });
-    await mkdir(spec.configRoot, { recursive: true });
-    const { runtime, exec } = createSbxJob(
-      spec,
-      null,
-      ownershipRoot(defaultEvidenceRoot, 'port-9101'),
-    );
-    await runtime.setup(exec);
-
-    vi.stubEnv('PORT', '9102');
-    const siblingCommands: string[][] = [];
-    const sibling = createSbxRunner({
-      ...runnerOptions(
-        root,
-        async (args) => {
-          siblingCommands.push([...args]);
-          return ok;
-        },
-        'runner-b',
-      ),
-      evidenceRoot: undefined,
-      instanceId: undefined,
-    });
-    try {
-      await claimGateOpen(sibling);
-      expect(siblingCommands).toEqual([]);
-    } finally {
-      await sibling.close();
-    }
-
-    let present = true;
-    const secrets = secretState();
-    vi.stubEnv('PORT', '9101');
-    const ownCommands: string[][] = [];
-    const own = createSbxRunner({
-      ...runnerOptions(
-        root,
-        async (args) => {
-          ownCommands.push([...args]);
-          const secret = secretCommand(args, secrets, spec);
-          if (secret !== undefined) return secret;
-          if (args[0] === 'inspect') {
-            if (!present) return notFound(spec.name);
-            return {
-              ...ok,
-              stdout: JSON.stringify(
-                await inspectView(spec.name, spec.checkoutRoot, spec.configRoot),
-              ),
-            };
-          }
-          if (args[0] === 'policy' && args[1] === 'ls')
-            return { ...ok, stdout: JSON.stringify({ rules: [] }) };
-          if (args[0] === 'rm') present = false;
-          return ok;
-        },
-        'runner-a',
-      ),
-      evidenceRoot: undefined,
-      instanceId: undefined,
-    });
-    try {
-      await vi.waitFor(() => expect(ownCommands.some((args) => args[0] === 'rm')).toBe(true));
-      await claimGateOpen(own);
-    } finally {
-      await own.close();
-    }
-  });
-
-  it('attributes a failed startup scan and recovers on demand', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'cr-sbx-restart-'));
-    roots.push(root);
-    vi.stubEnv('TMPDIR', root);
-    const spec = jobSpec(root, 'job-resume-retry');
-    await mkdir(spec.checkoutRoot, { recursive: true });
-    await mkdir(spec.configRoot, { recursive: true });
-    const { runtime, exec } = createSbxJob(spec, null, ownershipRoot(root));
-    await runtime.setup(exec);
-
-    let mode: 'failed' | 'owned' = 'failed';
-    let present = true;
-    const secrets = secretState();
-    const events: unknown[] = [];
-    const canary = 'ghp_CANARY_SECRET_MUST_NOT_APPEAR_IN_LOGS';
-    const canaryUrl = 'https://user:canary@example.test/path?token=ghp_CANARY';
-    const runner = createSbxRunner({
-      ...runnerOptions(root, async (args) => {
-        const secret = secretCommand(args, secrets, spec);
-        if (secret !== undefined) return secret;
-        if (args[0] === 'inspect') {
-          if (mode === 'failed')
-            return {
-              ...ok,
-              exitCode: 1,
-              stderr: `not signed in to Docker; token=${canary}; ${canaryUrl}`,
-            };
-          if (!present) return notFound(spec.name);
-          return {
-            ...ok,
-            stdout: JSON.stringify(
-              await inspectView(spec.name, spec.checkoutRoot, spec.configRoot),
-            ),
-          };
-        }
-        if (args[0] === 'policy' && args[1] === 'ls')
-          return { ...ok, stdout: JSON.stringify({ rules: [] }) };
-        if (args[0] === 'rm') present = false;
-        return ok;
-      }),
-      log: { record: (event) => void events.push(event) },
-    });
-
-    try {
-      await vi.waitFor(() =>
-        expect(events).toContainEqual(
-          expect.objectContaining({
-            phase: 'runner',
-            outcome: 'sandbox-recovery',
-            recovered: 0,
-            blocked: 1,
-            failures: [
-              expect.objectContaining({
-                jobId: spec.id,
-                sandboxName: spec.name,
-                step: 'inspect',
-                command: 'inspect',
-                exitCode: 1,
-                timedOut: false,
-                truncated: false,
-                stderrTruncated: false,
-                streamError: false,
-                processError: false,
-              }),
-            ],
-          }),
-        ),
-      );
-      const recoveryEvent = events.find((event) =>
-        JSON.stringify(event).includes('"outcome":"sandbox-recovery"'),
-      );
-      expect(recoveryEvent).toBeDefined();
-      expect(JSON.stringify(recoveryEvent)).not.toContain(canary);
-      expect(JSON.stringify(recoveryEvent)).not.toContain('canary@example.test');
-      expect(
-        (recoveryEvent as { failures?: Array<Record<string, unknown>> }).failures?.[0],
-      ).not.toHaveProperty('stderr');
-      expect(await (await maintenance(runner, 'drain')).json()).toMatchObject({
-        drained: false,
-        claimPollingHalted: false,
-      });
-      mode = 'owned';
-      await maintenance(runner, 'resume');
-      await expectDrained(runner);
-    } finally {
-      await runner.close();
-    }
+    state.names = [];
+    await expect(
+      backend.confirmCleanupAbsent?.({ jobId, sandboxName: name }),
+    ).resolves.toBeUndefined();
+    expect(state.rules).toEqual([]);
+    expect(state.secrets).toEqual([]);
+    expect(state.customSecrets).toEqual([]);
   });
 });

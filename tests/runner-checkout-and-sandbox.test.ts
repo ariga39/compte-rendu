@@ -214,7 +214,6 @@ describe('Runner Job HTTP interface', () => {
       },
     ];
     let sandboxRemoved = false;
-    let secretRemoved = false;
     const runner = createProductionRunnerWithMergeBase({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
@@ -247,10 +246,6 @@ describe('Runner Job HTTP interface', () => {
         }
         if (args[0] === 'rm' && args[1] === '--force') {
           sandboxRemoved = true;
-          return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
-        }
-        if (args[0] === 'secret' && args[1] === 'rm') {
-          secretRemoved = true;
           return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
         }
         await writeEvidenceFixture(args, options, resultLine);
@@ -286,7 +281,6 @@ describe('Runner Job HTTP interface', () => {
       sandbox: { cleanup: 'failed' },
     });
     expect(sandboxRemoved).toBe(true);
-    expect(secretRemoved).toBe(true);
   });
   it('fails cleanup when a read-only policy rule remains attached after Sandbox removal', async () => {
     const baseSha = '1111111111111111111111111111111111111111';
@@ -428,7 +422,7 @@ describe('Runner Job HTTP interface', () => {
             return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
           }
           policyLists += 1;
-          if (policyLists === 1) {
+          if (policyLists === 2) {
             return { exitCode: 1, stdout: '', timedOut: false, truncated: false };
           }
           return {
@@ -658,120 +652,6 @@ describe('Runner Job HTTP interface', () => {
       status: 'succeeded',
       sandbox: { cleanup: 'destroyed' },
     });
-  });
-  it('does not remove a replacement rule when a recorded policy ID disappears', async () => {
-    const baseSha = '1111111111111111111111111111111111111111';
-    const headSha = '2222222222222222222222222222222222222222';
-    const resultLine = finalMarkdownJsonl(undefined, 'replacement-session');
-    const sandboxRules: Array<Record<string, unknown>> = [
-      {
-        id: 'default-deny-all',
-        resources: ['**'],
-        editable: false,
-        origin: 'local',
-        layer: 'local',
-      },
-    ];
-    let setupLookups = 0;
-    let replacementRemoved = false;
-    let sandboxRemoved = false;
-    let secretRemoved = false;
-    const runner = createProductionRunnerWithMergeBase({
-      evidenceRoot: sharedEvidenceRoot,
-      authToken: 'runner-test-token',
-      process: async (_command, args, options = {}) => {
-        if (args[0] === 'create')
-          return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
-        if (args[0] === 'policy' && args[1] === 'allow') {
-          const sandbox = args[args.indexOf('--sandbox') + 1];
-          const resource = args[args.length - 1];
-          sandboxRules.push({
-            id: `${sandbox}-${resource}`,
-            resources: [resource],
-            sandbox_id: sandbox,
-            editable: true,
-            origin: 'local',
-            layer: 'local',
-          });
-          return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
-        }
-        if (args[0] === 'policy' && args[1] === 'ls') {
-          if (options.captureStdout !== true) {
-            return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
-          }
-          if (setupLookups < 2) {
-            setupLookups += 1;
-          } else if (!sandboxRules.some((rule) => rule.id === 'replacement-model')) {
-            const modelIndex = sandboxRules.findIndex((rule) =>
-              String(rule.id).endsWith('-opencode.ai:443'),
-            );
-            const modelRule = sandboxRules[modelIndex];
-            sandboxRules.splice(modelIndex, 1);
-            sandboxRules.push({
-              ...modelRule,
-              id: 'replacement-model',
-            });
-          }
-          return {
-            exitCode: 0,
-            stdout: JSON.stringify({ rules: sandboxRules }) + '\n',
-            timedOut: false,
-            truncated: false,
-          };
-        }
-        if (args[0] === 'policy' && args[1] === 'rm') {
-          const ruleId = args[args.indexOf('--id') + 1];
-          if (ruleId === 'replacement-model') replacementRemoved = true;
-          const index = sandboxRules.findIndex((rule) => rule.id === ruleId);
-          if (index >= 0) sandboxRules.splice(index, 1);
-          return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
-        }
-        if (args[0] === 'rm' && args[1] === '--force') {
-          sandboxRemoved = true;
-          return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
-        }
-        if (args[0] === 'secret' && args[1] === 'rm') {
-          secretRemoved = true;
-          return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
-        }
-        await writeEvidenceFixture(args, options, resultLine);
-        return {
-          exitCode: 0,
-          stdout: args.includes('rev-parse')
-            ? `${baseSha}\n${headSha}\n`
-            : args.includes('session')
-              ? '[{"id":"replacement-session"}]\n'
-              : args.includes('export')
-                ? '{"session":"replacement-session","full":true}\n'
-                : options.captureStdout === true
-                  ? `${resultLine}\n`
-                  : '',
-          timedOut: false,
-          truncated: false,
-        };
-      },
-    });
-    const submittedJob = {
-      ...runnerJobFields,
-      runId: 'run-93-policy-replacement',
-      attempt: 1,
-      repositoryUrl: 'https://github.com/acme/reviewed.git',
-      baseSha,
-      headSha,
-    };
-    runner.enqueue(submittedJob);
-    const id = submittedJob.id;
-    await expect(waitForTerminal(runner, id)).resolves.toMatchObject({
-      status: 'failed',
-      failure: { reason: 'cleanup' },
-      sandbox: { cleanup: 'failed' },
-    });
-    expect(replacementRemoved).toBe(false);
-    expect(sandboxRemoved).toBe(true);
-    expect(secretRemoved).toBe(true);
-    expect(sandboxRules).toEqual(
-      expect.arrayContaining([expect.objectContaining({ id: 'replacement-model' })]),
-    );
   });
   it('retains sanitized checkout failure diagnostics without exposing credentials', async () => {
     const events: unknown[] = [];
@@ -1308,7 +1188,9 @@ describe('Runner Job HTTP interface', () => {
     expect(result.secretArgs?.[result.secretArgs.indexOf('--host') + 1]).toBe('model.example.test');
     expect(result.allowedResources).toContain('model.example.test:443');
     expect(result.allowedResources).not.toContain('opencode.ai:443');
-    expect(result.removedRuleIds).toContain('compte-rendu-runner-job-test-model.example.test:443');
+    expect(
+      result.removedRuleIds.some((id) => id.endsWith('-runner-job-test-model.example.test:443')),
+    ).toBe(true);
     const configContent = result.createArgs?.find((value) =>
       value.startsWith('OPENCODE_CONFIG_CONTENT='),
     );
@@ -1354,7 +1236,9 @@ describe('Runner Job HTTP interface', () => {
     expect(result.secretArgs?.[result.secretArgs.indexOf('--host') + 1]).toBe('model.example.test');
     expect(result.allowedResources).toContain('model.example.test:8443');
     expect(result.allowedResources).not.toContain('opencode.ai:443');
-    expect(result.removedRuleIds).toContain('compte-rendu-runner-job-test-model.example.test:8443');
+    expect(
+      result.removedRuleIds.some((id) => id.endsWith('-runner-job-test-model.example.test:8443')),
+    ).toBe(true);
     const configContent = result.createArgs?.find((value) =>
       value.startsWith('OPENCODE_CONFIG_CONTENT='),
     );

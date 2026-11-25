@@ -1,6 +1,5 @@
-import { createHash } from 'node:crypto';
-import { chmod, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
-import { basename, join } from 'node:path';
+import { chmod, rename, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { Effect, Option, Schema } from 'effect';
 import type {
   JobSandbox,
@@ -18,6 +17,7 @@ import type {
   SandboxRecoveryStep,
 } from './sandbox-runtime.js';
 import { SandboxCreateError } from './sandbox-runtime.js';
+import { sandboxResourceIdentity, sweepableSandboxResource } from './sandbox-resource-name.js';
 
 type SbxCommand = (
   args: readonly string[],
@@ -53,18 +53,6 @@ const networkPolicyRulesFrom = (stdout: string): readonly NetworkPolicyRuleValue
   }
 };
 
-// Mirrors the `sbx inspect --json` view in the pinned sbx 0.48.0 CLI.
-const SbxInspectWorkspace = Schema.Struct({
-  dir: Schema.NonEmptyString,
-  read_only: Schema.optional(Schema.Boolean),
-});
-const SbxInspectView = Schema.Struct({
-  name: Schema.NonEmptyString,
-  workspace: Schema.optional(Schema.String),
-  additional_workspaces: Schema.optional(Schema.Array(SbxInspectWorkspace)),
-});
-type SbxInspectView = typeof SbxInspectView.Type;
-
 const SbxSecretList = Schema.Struct({
   secrets: Schema.Array(
     Schema.Struct({
@@ -81,25 +69,9 @@ const SbxSecretList = Schema.Struct({
   ),
 });
 
-const SbxOwnershipRecord = Schema.Struct({
-  version: Schema.Literal(1),
-  jobId: Schema.NonEmptyString,
-  sandboxName: Schema.NonEmptyString,
-  workspacePath: Schema.NonEmptyString,
-  configPath: Schema.NonEmptyString,
-  modelResource: Schema.NonEmptyString,
-  githubResource: Schema.NonEmptyString,
-  modelSecretAttempted: Schema.Boolean,
-  githubSecretAttempted: Schema.Boolean,
-  createAttempted: Schema.Boolean,
-  policyAttempted: Schema.Boolean,
-});
-type SbxOwnershipRecord = typeof SbxOwnershipRecord.Type;
-
 type SandboxRecoveryFailureDetail = Omit<SandboxRecoveryFailure, 'jobId' | 'sandboxName'>;
 
 const commandFailure = (
-  record: SbxOwnershipRecord | undefined,
   step: SandboxRecoveryStep,
   command: string | undefined,
   result: RunnerProcessResult | undefined,
@@ -120,57 +92,6 @@ const commandFailure = (
         }),
   };
 };
-
-const ownershipMarkerName = (jobId: string) =>
-  `${createHash('sha256').update(jobId).digest('hex')}.json`;
-
-const saveOwnershipRecord = async (root: string, record: SbxOwnershipRecord) => {
-  const path = join(root, ownershipMarkerName(record.jobId));
-  const temporary = `${path}.tmp`;
-  await mkdir(root, { recursive: true, mode: 0o700 });
-  await writeFile(temporary, `${JSON.stringify(record)}\n`, { mode: 0o600 });
-  await chmod(temporary, 0o600);
-  await rename(temporary, path);
-};
-
-const removeOwnershipRecord = async (root: string, jobId: string) => {
-  await rm(join(root, ownershipMarkerName(jobId)), { force: true });
-};
-
-const readOwnershipRecord = async (
-  root: string,
-  name: string,
-): Promise<SbxOwnershipRecord | undefined> => {
-  let text: string;
-  try {
-    text = await readFile(join(root, name), 'utf8');
-  } catch {
-    return undefined;
-  }
-  const record = Option.getOrUndefined(
-    Schema.decodeUnknownOption(Schema.fromJsonString(SbxOwnershipRecord), {
-      onExcessProperty: 'error',
-    })(text),
-  );
-  if (
-    record === undefined ||
-    basename(name) !== ownershipMarkerName(record.jobId) ||
-    record.sandboxName !== `compte-rendu-${record.jobId}` ||
-    (record.githubSecretAttempted && !record.modelSecretAttempted) ||
-    (record.createAttempted && !record.githubSecretAttempted) ||
-    (record.policyAttempted && !record.createAttempted)
-  )
-    return undefined;
-  return record;
-};
-
-const inspectViewFrom = (stdout: string): SbxInspectView | undefined =>
-  Option.getOrUndefined(Schema.decodeUnknownOption(Schema.fromJsonString(SbxInspectView))(stdout));
-
-const ownsSbxSandbox = (view: SbxInspectView, record: SbxOwnershipRecord): boolean =>
-  view.name === record.sandboxName &&
-  (view.workspace === record.workspacePath ||
-    view.additional_workspaces?.some((mount) => mount.dir === record.configPath) === true);
 
 const sandboxAbsent = (result: RunnerProcessResult, sandboxName: string): boolean =>
   result.exitCode === 1 &&
@@ -203,209 +124,302 @@ const listAllNetworkPolicies = async (command: SbxCommand): Promise<SbxPolicyLis
   return rules === undefined ? { ok: false, result: listed } : { ok: true, rules, result: listed };
 };
 
-const attemptedPolicyResources = (record: SbxOwnershipRecord): ReadonlySet<string> =>
-  new Set([record.modelResource, record.githubResource]);
-
-const ownedPolicyRule = (record: SbxOwnershipRecord, rule: NetworkPolicyRuleValue): boolean => {
-  if (rule.sandbox_id !== record.sandboxName || !rule.editable || rule.resources.length === 0)
-    return false;
-  const attempted = attemptedPolicyResources(record);
-  return rule.resources.every((resource) => attempted.has(resource));
-};
-
-const scopedSecretsAbsent = async (
-  record: SbxOwnershipRecord,
-  command: SbxCommand,
-): Promise<SandboxRecoveryFailureDetail | undefined> => {
-  if (!record.modelSecretAttempted && !record.githubSecretAttempted) return undefined;
-  const commandName = 'secret ls';
-  const listed = await command(
-    ['secret', 'ls', '--json', '--sandbox', record.sandboxName],
-    { stage: 'cleanup', command: 'confirm-restart-secrets-absent', includeStderr: true },
-    { captureStdout: true, maxBytes: MAX_POLICY_JSON_BYTES },
-  );
-  if (
-    listed.exitCode !== 0 ||
-    listed.timedOut ||
-    listed.truncated ||
-    listed.stderrTruncated === true ||
-    listed.streamError === true ||
-    listed.processError === true
-  )
-    return commandFailure(record, 'secret-verify', commandName, listed);
-  const secrets = Option.getOrUndefined(
-    Schema.decodeUnknownOption(Schema.fromJsonString(SbxSecretList))(listed.stdout),
-  );
-  if (secrets === undefined) return commandFailure(record, 'secret-verify', commandName, listed);
-  if (
-    record.modelSecretAttempted &&
-    secrets.custom_secrets.some((secret) => secret.placeholder === `cr-${record.jobId}`)
-  )
-    return commandFailure(record, 'secret-verify', commandName, listed);
-  if (
-    record.githubSecretAttempted &&
-    secrets.secrets.some((secret) => secret.name === 'github' || secret.type === 'github')
-  )
-    return commandFailure(record, 'secret-verify', commandName, listed);
-  return undefined;
-};
-
 interface SbxRuntimeOptions {
   /** Host command that resolves the model API key; runs only in the sbx adapter. */
   readonly modelSecretCommand?: string;
-  /** Private per-instance directory for retained Sandbox ownership records. */
-  readonly ownershipRoot?: string;
   /** Executable selected by the registration layer. */
   readonly program: string;
   /** Called after any destroy failure so the instance can refresh its health. */
   readonly onDestroyFailure?: () => Promise<void>;
 }
 
-const removeOwnedSbxResources = async (
-  record: SbxOwnershipRecord,
+const complete = (result: RunnerProcessResult) =>
+  !result.timedOut &&
+  !result.truncated &&
+  !result.stderrTruncated &&
+  !result.streamError &&
+  !result.processError;
+
+const listSandboxNames = async (
+  command: SbxCommand,
+): Promise<
+  | { readonly ok: true; readonly names: readonly string[] }
+  | { readonly ok: false; readonly result: RunnerProcessResult }
+> => {
+  const listed = await command(
+    ['ls', '-q'],
+    { stage: 'cleanup', command: 'inspect-sandbox-inventory', includeStderr: true },
+    { captureStdout: true, captureStderr: true, maxBytes: MAX_POLICY_JSON_BYTES },
+  );
+  if (!complete(listed) || listed.exitCode !== 0) return { ok: false, result: listed };
+  return {
+    ok: true,
+    names: listed.stdout
+      .split('\n')
+      .map((name) => name.trim())
+      .filter((name) => name.length > 0),
+  };
+};
+
+type ScopedSecrets = typeof SbxSecretList.Type;
+
+const listScopedSecrets = async (
+  command: SbxCommand,
+  sandboxName?: string,
+): Promise<
+  | {
+      readonly ok: true;
+      readonly secrets: ScopedSecrets;
+      readonly result: RunnerProcessResult;
+    }
+  | { readonly ok: false; readonly result: RunnerProcessResult }
+> => {
+  const listed = await command(
+    ['secret', 'ls', '--json', ...(sandboxName === undefined ? [] : ['--sandbox', sandboxName])],
+    { stage: 'cleanup', command: 'inspect-secret-inventory', includeStderr: true },
+    { captureStdout: true, maxBytes: MAX_POLICY_JSON_BYTES },
+  );
+  if (!complete(listed) || listed.exitCode !== 0) return { ok: false, result: listed };
+  const secrets = Option.getOrUndefined(
+    Schema.decodeUnknownOption(Schema.fromJsonString(SbxSecretList))(listed.stdout),
+  );
+  return secrets === undefined
+    ? { ok: false, result: listed }
+    : { ok: true, secrets, result: listed };
+};
+
+const removeScopedSecrets = async (
+  sandboxName: string,
+  command: SbxCommand,
+): Promise<SandboxRecoveryFailureDetail | undefined> => {
+  // The global inventory remains readable after `rm` and also exposes a secret
+  // registered before the VM was ever created.
+  const listed = await listScopedSecrets(command);
+  if (!listed.ok) return commandFailure('secret-list', 'secret ls', listed.result);
+  for (const secret of listed.secrets.custom_secrets.filter(
+    (candidate) => candidate.scope === sandboxName,
+  )) {
+    await command(
+      ['secret', 'rm', '--placeholder', secret.placeholder, '--sandbox', sandboxName, '--force'],
+      { stage: 'cleanup', command: 'remove-secret', includeStderr: true },
+    );
+  }
+  for (const secret of listed.secrets.secrets.filter(
+    (candidate) => candidate.scope === sandboxName,
+  )) {
+    await command(['secret', 'rm', secret.name, '--sandbox', sandboxName, '--force'], {
+      stage: 'cleanup',
+      command: 'remove-secret',
+      includeStderr: true,
+    });
+  }
+  const remaining = await listScopedSecrets(command);
+  if (!remaining.ok) return commandFailure('secret-verify', 'secret ls', remaining.result);
+  if (
+    remaining.secrets.secrets.some((secret) => secret.scope === sandboxName) ||
+    remaining.secrets.custom_secrets.some((secret) => secret.scope === sandboxName)
+  )
+    return commandFailure('secret-verify', 'secret ls', remaining.result);
+  return undefined;
+};
+
+/**
+ * Remove the exact named Sandbox plus every policy and secret scoped to that
+ * exact name. The caller supplies the name from a trusted retained manifest.
+ * Inventory failures never authorize a removal, and the final postconditions
+ * verify the native absence instead of trusting exit codes or age.
+ */
+const removeExactSbxResources = async (
+  sandboxName: string,
+  command: SbxCommand,
+): Promise<SandboxRecoveryFailureDetail | undefined> => {
+  const policies = await listAllNetworkPolicies(command);
+  if (!policies.ok) return commandFailure('policy-list', 'policy ls', policies.result);
+  for (const rule of policies.rules.filter(
+    (candidate) => candidate.sandbox_id === sandboxName && candidate.editable,
+  )) {
+    await command(
+      ['policy', 'rm', 'network', '--id', rule.id, '--sandbox', sandboxName, '--force'],
+      { stage: 'cleanup', command: 'remove-network-policy', includeStderr: true },
+    );
+  }
+
+  const inspect = await command(
+    ['inspect', sandboxName, '--json'],
+    { stage: 'cleanup', command: 'inspect-sandbox', includeStderr: true },
+    { captureStdout: true, captureStderr: true },
+  );
+  const present =
+    inspect.exitCode === 0 && complete(inspect)
+      ? true
+      : sandboxAbsent(inspect, sandboxName)
+        ? false
+        : undefined;
+  if (present === undefined) return commandFailure('inspect', 'inspect', inspect);
+  if (present) {
+    // A normal sbx create installs sandbox-scoped non-editable rules. `rm`
+    // cascades them; never require editing every scoped rule before removal.
+    const removed = await command(['rm', '--force', sandboxName], {
+      stage: 'cleanup',
+      command: 'remove-sandbox',
+      includeStderr: true,
+    });
+    const inspected = await command(
+      ['inspect', sandboxName, '--json'],
+      { stage: 'cleanup', command: 'confirm-sandbox-absent', includeStderr: true },
+      { captureStdout: true, captureStderr: true },
+    );
+    if (!sandboxAbsent(inspected, sandboxName))
+      return commandFailure('sandbox-remove', 'rm', removed);
+  }
+
+  const secretFailure = await removeScopedSecrets(sandboxName, command);
+
+  // Inspect surviving policies after the VM is gone and only remove an editable
+  // orphan. An unremovable survivor stays fail-closed.
+  const afterRemoval = await listAllNetworkPolicies(command);
+  if (!afterRemoval.ok) return commandFailure('policy-list', 'policy ls', afterRemoval.result);
+  for (const rule of afterRemoval.rules.filter(
+    (candidate) => candidate.sandbox_id === sandboxName && candidate.editable,
+  )) {
+    await command(
+      ['policy', 'rm', 'network', '--id', rule.id, '--sandbox', sandboxName, '--force'],
+      { stage: 'cleanup', command: 'remove-network-policy', includeStderr: true },
+    );
+  }
+  const remainingPolicies = await listAllNetworkPolicies(command);
+  if (
+    !remainingPolicies.ok ||
+    remainingPolicies.rules.some((rule) => rule.sandbox_id === sandboxName)
+  )
+    return commandFailure('policy-verify', 'policy ls', remainingPolicies.result);
+  if (secretFailure !== undefined) return secretFailure;
+
+  const finalInspect = await command(
+    ['inspect', sandboxName, '--json'],
+    { stage: 'cleanup', command: 'confirm-sandbox-absent', includeStderr: true },
+    { captureStdout: true, captureStderr: true },
+  );
+  return sandboxAbsent(finalInspect, sandboxName)
+    ? undefined
+    : commandFailure('sandbox-verify', 'inspect', finalInspect);
+};
+
+/**
+ * Confirm the exact Sandbox is already absent, then remove only policies and
+ * secrets scoped to that exact name. Recovery never deletes a present Sandbox.
+ */
+const confirmExactSbxResourcesAbsent = async (
+  sandboxName: string,
   command: SbxCommand,
 ): Promise<SandboxRecoveryFailureDetail | undefined> => {
   const inspect = await command(
-    ['inspect', record.sandboxName, '--json'],
-    { stage: 'cleanup', command: 'inspect-restart-sandbox', includeStderr: true },
+    ['inspect', sandboxName, '--json'],
+    { stage: 'cleanup', command: 'confirm-sandbox-absent', includeStderr: true },
     { captureStdout: true, captureStderr: true },
   );
-  let removeSandbox = false;
-  if (inspect.exitCode === 0 && !inspect.timedOut && !inspect.truncated) {
-    if (!record.createAttempted) return commandFailure(record, 'ownership', 'inspect', inspect);
-    const view = inspectViewFrom(inspect.stdout);
-    if (view === undefined || !ownsSbxSandbox(view, record))
-      return commandFailure(record, 'ownership', 'inspect', inspect);
-    removeSandbox = true;
-  } else if (!sandboxAbsent(inspect, record.sandboxName)) {
-    return commandFailure(record, 'inspect', 'inspect', inspect);
-  }
+  if (!sandboxAbsent(inspect, sandboxName))
+    return commandFailure('sandbox-present', 'inspect', inspect);
 
-  let firstFailure: SandboxRecoveryFailureDetail | undefined;
-  const remember = (failure: SandboxRecoveryFailureDetail) => {
-    firstFailure ??= failure;
-  };
-
-  if (record.policyAttempted) {
-    const policies = await listAllNetworkPolicies(command);
-    if (!policies.ok) return commandFailure(record, 'policy-list', 'policy ls', policies.result);
-    for (const rule of policies.rules.filter((candidate) => ownedPolicyRule(record, candidate))) {
-      const removed = await command(
-        ['policy', 'rm', 'network', '--id', rule.id, '--sandbox', record.sandboxName, '--force'],
-        { stage: 'cleanup', command: 'remove-restart-network-policy', includeStderr: true },
-      );
-      if (removed.exitCode !== 0 || removed.timedOut)
-        remember(commandFailure(record, 'policy-remove', 'policy rm', removed));
-    }
-  }
-
-  if (removeSandbox) {
-    const removed = await command(['rm', '--force', record.sandboxName], {
-      stage: 'cleanup',
-      command: 'remove-restart-sandbox',
-      includeStderr: true,
-    });
-    if (removed.exitCode !== 0 || removed.timedOut) {
-      const inspected = await command(
-        ['inspect', record.sandboxName, '--json'],
-        { stage: 'cleanup', command: 'confirm-restart-sandbox-absent', includeStderr: true },
-        { captureStdout: true, captureStderr: true },
-      );
-      if (!sandboxAbsent(inspected, record.sandboxName))
-        remember(commandFailure(record, 'sandbox-remove', 'rm', removed));
-    }
-  }
-
-  if (record.policyAttempted) {
-    const remaining = await listAllNetworkPolicies(command);
-    if (!remaining.ok || remaining.rules.some((rule) => rule.sandbox_id === record.sandboxName))
-      remember(commandFailure(record, 'policy-verify', 'policy ls', remaining.result));
-  }
-
-  if (record.modelSecretAttempted) {
-    const removed = await command(
-      [
-        'secret',
-        'rm',
-        '--placeholder',
-        `cr-${record.jobId}`,
-        '--sandbox',
-        record.sandboxName,
-        '--force',
-      ],
-      { stage: 'cleanup', command: 'remove-restart-secret', includeStderr: true },
+  const policies = await listAllNetworkPolicies(command);
+  if (!policies.ok) return commandFailure('policy-list', 'policy ls', policies.result);
+  for (const rule of policies.rules.filter(
+    (candidate) => candidate.sandbox_id === sandboxName && candidate.editable,
+  )) {
+    await command(
+      ['policy', 'rm', 'network', '--id', rule.id, '--sandbox', sandboxName, '--force'],
+      { stage: 'cleanup', command: 'remove-network-policy', includeStderr: true },
     );
-    if (removed.exitCode !== 0 || removed.timedOut)
-      remember(commandFailure(record, 'secret-remove', 'secret rm', removed));
   }
-  if (record.githubSecretAttempted) {
-    const removed = await command(
-      ['secret', 'rm', 'github', '--sandbox', record.sandboxName, '--force'],
-      { stage: 'cleanup', command: 'remove-restart-github-secret', includeStderr: true },
-    );
-    if (removed.exitCode !== 0 || removed.timedOut)
-      remember(commandFailure(record, 'secret-remove', 'secret rm', removed));
-  }
-  const secretFailure = await scopedSecretsAbsent(record, command);
-  if (secretFailure !== undefined) remember(secretFailure);
+  const remaining = await listAllNetworkPolicies(command);
+  if (!remaining.ok || remaining.rules.some((rule) => rule.sandbox_id === sandboxName))
+    return commandFailure('policy-verify', 'policy ls', remaining.result);
 
-  if (removeSandbox) {
-    const inspected = await command(
-      ['inspect', record.sandboxName, '--json'],
-      { stage: 'cleanup', command: 'confirm-restart-sandbox-absent', includeStderr: true },
-      { captureStdout: true, captureStderr: true },
-    );
-    if (!sandboxAbsent(inspected, record.sandboxName))
-      remember(commandFailure(record, 'sandbox-verify', 'inspect', inspected));
-  }
-  return firstFailure;
+  const secretFailure = await removeScopedSecrets(sandboxName, command);
+  if (secretFailure !== undefined) return secretFailure;
+
+  const finalInspect = await command(
+    ['inspect', sandboxName, '--json'],
+    { stage: 'cleanup', command: 'confirm-sandbox-absent', includeStderr: true },
+    { captureStdout: true, captureStderr: true },
+  );
+  return sandboxAbsent(finalInspect, sandboxName)
+    ? undefined
+    : commandFailure('sandbox-verify', 'inspect', finalInspect);
 };
 
-const reconcileSbxRestartResources = async (
-  root: string,
+const reconcileSbxResources = async (
   command: SbxCommand,
   isLive: (jobId: string) => boolean = () => false,
+  only?: { readonly jobId: string; readonly sandboxName: string },
 ): Promise<OrphanReconcileResult> => {
-  let names: string[];
-  try {
-    names = await readdir(root);
-  } catch (error) {
-    if (Schema.is(Schema.Struct({ code: Schema.Literal('ENOENT') }))(error))
-      return { ok: true, recovered: 0, recoveredJobIds: [], failures: [] };
+  if (only !== undefined) {
+    const identity = sandboxResourceIdentity(only.sandboxName);
+    if (identity === undefined || identity.jobId !== only.jobId)
+      return {
+        ok: false,
+        recovered: 0,
+        recoveredJobIds: [],
+        failures: [{ jobId: only.jobId, sandboxName: only.sandboxName, step: 'identity' }],
+      };
+    const failure = await removeExactSbxResources(only.sandboxName, command);
+    return failure === undefined
+      ? { ok: true, recovered: 1, recoveredJobIds: [only.jobId], failures: [] }
+      : {
+          ok: false,
+          recovered: 0,
+          recoveredJobIds: [],
+          failures: [{ jobId: only.jobId, sandboxName: only.sandboxName, ...failure }],
+        };
+  }
+
+  const names = await listSandboxNames(command);
+  if (!names.ok)
     return {
       ok: false,
       recovered: 0,
       recoveredJobIds: [],
-      failures: [{ jobId: 'redacted', sandboxName: 'redacted', step: 'record' }],
+      failures: [{ jobId: 'redacted', sandboxName: 'redacted', step: 'sandbox-list' }],
     };
+  const policies = await listAllNetworkPolicies(command);
+  if (!policies.ok)
+    return {
+      ok: false,
+      recovered: 0,
+      recoveredJobIds: [],
+      failures: [{ jobId: 'redacted', sandboxName: 'redacted', step: 'policy-list' }],
+    };
+  const secrets = await listScopedSecrets(command);
+  if (!secrets.ok)
+    return {
+      ok: false,
+      recovered: 0,
+      recoveredJobIds: [],
+      failures: [{ jobId: 'redacted', sandboxName: 'redacted', step: 'secret-list' }],
+    };
+
+  const candidates = new Set<string>(names.names);
+  for (const rule of policies.rules) {
+    if (rule.sandbox_id !== null && rule.sandbox_id !== undefined) candidates.add(rule.sandbox_id);
   }
+  for (const secret of secrets.secrets.secrets) candidates.add(secret.scope);
+  for (const secret of secrets.secrets.custom_secrets) candidates.add(secret.scope);
+
+  const now = Date.now();
   let recovered = 0;
   const recoveredJobIds: string[] = [];
   const failures: SandboxRecoveryFailure[] = [];
-  for (const name of names) {
-    if (!name.endsWith('.json')) continue;
-    const record = await readOwnershipRecord(root, name);
-    if (record === undefined) {
-      failures.push({ jobId: 'redacted', sandboxName: 'redacted', step: 'record' });
-      continue;
-    }
-    if (isLive(record.jobId)) continue;
-    const failure = await removeOwnedSbxResources(record, command);
+  for (const sandboxName of candidates) {
+    const identity = sandboxResourceIdentity(sandboxName);
+    if (identity === undefined || !sweepableSandboxResource(sandboxName, now)) continue;
+    if (isLive(identity.jobId)) continue;
+    const failure = await removeExactSbxResources(sandboxName, command);
     if (failure !== undefined) {
-      failures.push({ jobId: record.jobId, sandboxName: record.sandboxName, ...failure });
+      failures.push({ jobId: identity.jobId, sandboxName, ...failure });
       continue;
     }
-    try {
-      await removeOwnershipRecord(root, record.jobId);
-      recovered += 1;
-      recoveredJobIds.push(record.jobId);
-    } catch {
-      failures.push({
-        jobId: record.jobId,
-        sandboxName: record.sandboxName,
-        step: 'record-remove',
-      });
-    }
+    recovered += 1;
+    recoveredJobIds.push(identity.jobId);
   }
   return { ok: failures.length === 0, recovered, recoveredJobIds, failures };
 };
@@ -457,20 +471,11 @@ const commandFor = (options: SbxRuntimeOptions, exec: SandboxExecPort): SbxComma
 const createSbxJobSandbox = (options: SbxRuntimeOptions, spec: SandboxJobSpec): JobSandbox => {
   const placeholder = `cr-${spec.id}`;
   const modelHost = spec.modelResource.replace(/:\d+$/, '');
-  const networkRules: Array<{ resource: string; id?: string }> = [];
-  let githubServiceCleanupRequired = false;
   let tokenPath: string | undefined;
   let activeGithubReadToken = spec.githubReadToken;
   let tokenWriteChain: Promise<void> = Promise.resolve();
   let destroyed = false;
   let created = false;
-  let ownership: SbxOwnershipRecord | undefined;
-  const markOwnership = async (patch: Partial<SbxOwnershipRecord>) => {
-    if (ownership === undefined) return;
-    ownership = { ...ownership, ...patch };
-    if (options.ownershipRoot !== undefined)
-      await saveOwnershipRecord(options.ownershipRoot, ownership);
-  };
   const metadata = {
     // The rotating GitHub token lives under the Runner-owned host scratch root,
     // outside the guest-mounted checkout/config paths. The Runner removes that
@@ -494,63 +499,6 @@ const createSbxJobSandbox = (options: SbxRuntimeOptions, spec: SandboxJobSpec): 
     get evidenceRoot() {
       return SBX_EVIDENCE_ROOT;
     },
-  };
-
-  const listPolicies = async (
-    command: SbxCommand,
-    includeSource: boolean,
-    diagnostic: RunnerDiagnostic,
-  ) => {
-    const listed = await command(
-      [
-        'policy',
-        'ls',
-        '--json',
-        ...(includeSource ? ['--source', 'local'] : []),
-        ...(!includeSource ? ['--include-inactive'] : []),
-        '--type',
-        'network',
-      ],
-      diagnostic,
-      { captureStdout: true, maxBytes: MAX_POLICY_JSON_BYTES },
-    );
-    if (listed.exitCode !== 0 || listed.timedOut || listed.truncated) return undefined;
-    if (
-      listed.stderrTruncated === true ||
-      listed.streamError === true ||
-      listed.processError === true
-    )
-      return undefined;
-    return networkPolicyRulesFrom(listed.stdout);
-  };
-
-  const findRule = async (
-    command: SbxCommand,
-    expected: { resource: string; id?: string },
-  ): Promise<NetworkPolicyRuleValue | undefined> => {
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const rules = await listPolicies(command, true, {
-        stage: 'cleanup',
-        command: 'inspect-network-policy',
-        includeStderr: true,
-      });
-      if (rules === undefined) continue;
-      if (expected.id !== undefined) {
-        const exact = rules.find(
-          (rule) => rule.id === expected.id && rule.sandbox_id === spec.name,
-        );
-        if (exact !== undefined) return exact;
-        continue;
-      }
-      const candidates = rules.filter(
-        (rule) =>
-          rule.editable &&
-          rule.sandbox_id === spec.name &&
-          rule.resources.includes(expected.resource),
-      );
-      if (candidates.length === 1) return candidates[0];
-    }
-    return undefined;
   };
 
   // The `--refresh on-demand` service source rereads this exact host file for
@@ -582,27 +530,10 @@ const createSbxJobSandbox = (options: SbxRuntimeOptions, spec: SandboxJobSpec): 
 
   const setup = async (exec: SandboxExecPort) => {
     const command = commandFor(options, exec);
-    if (options.ownershipRoot !== undefined) {
-      ownership = {
-        version: 1,
-        jobId: spec.id,
-        sandboxName: spec.name,
-        workspacePath: spec.checkoutRoot,
-        configPath: spec.configRoot,
-        modelResource: spec.modelResource,
-        githubResource: spec.githubResource,
-        modelSecretAttempted: false,
-        githubSecretAttempted: false,
-        createAttempted: false,
-        policyAttempted: false,
-      };
-      await saveOwnershipRecord(options.ownershipRoot, ownership);
-    }
     const modelSecretSource =
       spec.modelTokenFile === undefined
         ? (options.modelSecretCommand ?? '')
         : `/usr/bin/cat ${shellQuote(spec.modelTokenFile)}`;
-    await markOwnership({ modelSecretAttempted: true });
     const secret = await command(
       [
         'secret',
@@ -624,9 +555,7 @@ const createSbxJobSandbox = (options: SbxRuntimeOptions, spec: SandboxJobSpec): 
 
     const tokenFile = join(spec.hostScratchRoot, 'github-read-token');
     tokenPath = tokenFile;
-    githubServiceCleanupRequired = true;
     await writeActiveGithubToken(activeGithubReadToken);
-    await markOwnership({ githubSecretAttempted: true });
     const githubSecret = await command(
       [
         'secret',
@@ -645,7 +574,6 @@ const createSbxJobSandbox = (options: SbxRuntimeOptions, spec: SandboxJobSpec): 
       throw new Error('sandbox github secret setup failed');
     }
 
-    await markOwnership({ createAttempted: true });
     const create = await command(
       [
         'create',
@@ -675,22 +603,16 @@ const createSbxJobSandbox = (options: SbxRuntimeOptions, spec: SandboxJobSpec): 
     if (create.exitCode !== 0 || create.timedOut) throw new SandboxCreateError(create.timedOut);
     created = true;
 
-    await markOwnership({ policyAttempted: true });
     for (const [resource, commandName, inspectName] of [
       [spec.modelResource, 'allow-network', 'inspect-network-policy'],
       [spec.githubResource, 'allow-github-network', 'inspect-github-network-policy'],
     ] as const) {
-      const rule: { resource: string; id?: string } = { resource };
-      networkRules.push(rule);
       const allowed = await command(
         ['policy', 'allow', 'network', '--sandbox', spec.name, resource],
         { stage: 'sandbox', command: commandName, includeStderr: true },
       );
       if (allowed.timedOut) throw new Error('sandbox policy setup timed out');
-      if (allowed.exitCode !== 0) {
-        networkRules.pop();
-        throw new Error('sandbox policy setup failed');
-      }
+      if (allowed.exitCode !== 0) throw new Error('sandbox policy setup failed');
       const policies = await command(
         ['policy', 'ls', spec.name, '--json', '--source', 'local', '--type', 'network'],
         { stage: 'sandbox', command: inspectName, includeStderr: true },
@@ -708,7 +630,6 @@ const createSbxJobSandbox = (options: SbxRuntimeOptions, spec: SandboxJobSpec): 
             candidate.resources.includes(resource),
         ) ?? [];
       if (matches.length !== 1) throw new Error('sandbox policy verification failed');
-      rule.id = matches[0].id;
     }
   };
 
@@ -738,66 +659,8 @@ const createSbxJobSandbox = (options: SbxRuntimeOptions, spec: SandboxJobSpec): 
     destroyed = true;
     try {
       await tokenWriteChain.catch(() => undefined);
-      let clean = true;
-      for (const expected of networkRules) {
-        const matching = await findRule(command, expected);
-        // An expected policy can already be absent after a partial destroy.
-        // The complete final inventory is authoritative for whether any policy
-        // scoped to this exact Sandbox remains; a transient removal failure
-        // after the rule disappeared must not fail a confirmed retry, and a
-        // failed or ambiguous lookup never authorizes deleting anything else.
-        if (matching === undefined) continue;
-        await command(
-          ['policy', 'rm', 'network', '--id', matching.id, '--sandbox', spec.name, '--force'],
-          { stage: 'cleanup', command: 'remove-network-policy', includeStderr: true },
-        );
-      }
-      const removed = await command(['rm', '--force', spec.name], {
-        stage: 'cleanup',
-        command: 'remove-sandbox',
-        includeStderr: true,
-      });
-      if (removed.exitCode !== 0 || removed.timedOut) {
-        const inspected = await command(
-          ['inspect', spec.name, '--json'],
-          { stage: 'cleanup', command: 'confirm-sandbox-absent', includeStderr: true },
-          { captureStdout: true, captureStderr: true },
-        );
-        if (!sandboxAbsent(inspected, spec.name)) clean = false;
-      }
-      const remaining = await listPolicies(command, false, {
-        stage: 'cleanup',
-        command: 'inspect-network-policy',
-        includeStderr: true,
-      });
-      if (remaining === undefined || remaining.some((rule) => rule.sandbox_id === spec.name)) {
-        clean = false;
-      }
-      const secret = await command(
-        ['secret', 'rm', '--placeholder', placeholder, '--sandbox', spec.name, '--force'],
-        { stage: 'cleanup', command: 'remove-secret', includeStderr: true },
-      );
-      if (secret.exitCode !== 0 || secret.timedOut) clean = false;
-      if (githubServiceCleanupRequired) {
-        const github = await command(
-          ['secret', 'rm', 'github', '--sandbox', spec.name, '--force'],
-          {
-            stage: 'cleanup',
-            command: 'remove-github-secret',
-            includeStderr: true,
-          },
-        );
-        if (github.exitCode !== 0 || github.timedOut) clean = false;
-      }
-      if (!clean) throw new Error('sbx sandbox cleanup was not confirmed');
-      if (ownership !== undefined && options.ownershipRoot !== undefined) {
-        try {
-          await removeOwnershipRecord(options.ownershipRoot, ownership.jobId);
-          ownership = undefined;
-        } catch {
-          throw new Error('sbx sandbox cleanup was not confirmed');
-        }
-      }
+      const failure = await removeExactSbxResources(spec.name, command);
+      if (failure !== undefined) throw new Error('sbx sandbox cleanup was not confirmed');
     } catch (error) {
       await options.onDestroyFailure?.();
       throw error;
@@ -816,80 +679,21 @@ const createSbxJobSandbox = (options: SbxRuntimeOptions, spec: SandboxJobSpec): 
   return { metadata, setup, exec, copyOut, updateGithubReadToken, destroy };
 };
 
-const Policies = Schema.Struct({
-  rules: Schema.Array(
-    Schema.Struct({
-      id: Schema.NonEmptyString,
-      sandbox_id: Schema.optional(Schema.Union([Schema.String, Schema.Null])),
-      editable: Schema.Boolean,
-    }),
-  ),
-});
-
-const complete = (result: RunnerProcessResult) =>
-  !result.timedOut &&
-  !result.truncated &&
-  !result.stderrTruncated &&
-  !result.streamError &&
-  !result.processError;
-
 class CleanupRecoveryError extends Schema.TaggedError<CleanupRecoveryError>()(
   'CleanupRecoveryError',
   {},
 ) {}
 
-/** Recovery never removes a sandbox whose ownership cannot be reconstructed. */
 const confirmSbxCleanup = Effect.fn('confirmSbxCleanup')(function* (
   sandboxName: string,
-  jobId: string,
   command: SbxCommand,
 ) {
-  const run = (args: readonly string[]) =>
-    Effect.tryPromise({
-      try: () => command(args, undefined, { captureStdout: true, captureStderr: true }),
-      catch: () => new CleanupRecoveryError(),
-    });
-  const inspect = yield* run(['inspect', sandboxName, '--json']);
-  if (!sandboxAbsent(inspect, sandboxName)) {
-    return yield* new CleanupRecoveryError();
-  }
-  const list = Effect.fn('listRecoveryPolicies')(function* () {
-    const result = yield* run([
-      'policy',
-      'ls',
-      '--json',
-      '--include-inactive',
-      '--type',
-      'network',
-    ]);
-    if (!complete(result) || result.exitCode !== 0) return yield* new CleanupRecoveryError();
-    return yield* Schema.decodeUnknownEffect(Schema.fromJsonString(Policies))(result.stdout).pipe(
-      Effect.mapError(() => new CleanupRecoveryError()),
-    );
+  const failure = yield* Effect.tryPromise({
+    try: () => confirmExactSbxResourcesAbsent(sandboxName, command),
+    catch: () => new CleanupRecoveryError(),
   });
-  const policies = yield* list();
-  for (const rule of policies.rules.filter((rule) => rule.sandbox_id === sandboxName)) {
-    if (!rule.editable) return yield* new CleanupRecoveryError();
-    const removed = yield* run([
-      'policy',
-      'rm',
-      'network',
-      '--id',
-      rule.id,
-      '--sandbox',
-      sandboxName,
-      '--force',
-    ]);
-    if (!complete(removed) || removed.exitCode !== 0) return yield* new CleanupRecoveryError();
-  }
-  if ((yield* list()).rules.some((rule) => rule.sandbox_id === sandboxName))
+  if (failure !== undefined) {
     return yield* new CleanupRecoveryError();
-  for (const args of [
-    ['secret', 'rm', '--placeholder', `cr-${jobId}`, '--sandbox', sandboxName, '--force'],
-    ['secret', 'rm', 'github', '--sandbox', sandboxName, '--force'],
-  ]) {
-    const result = yield* run(args);
-    if (!complete(result) || result.exitCode !== 0) return yield* new CleanupRecoveryError();
   }
 });
 
@@ -906,7 +710,6 @@ export const createSbxSandboxBackend = (context: SandboxBackendContext): Sandbox
   const runtimeOptions: SbxRuntimeOptions = {
     program,
     ...(modelSecretCommand === undefined ? {} : { modelSecretCommand }),
-    ownershipRoot: context.ownershipRoot,
     onDestroyFailure: async () => {
       if (!(await probeAccess())) health = 'outage';
     },
@@ -945,15 +748,14 @@ export const createSbxSandboxBackend = (context: SandboxBackendContext): Sandbox
       health = 'ready';
       return 'ready';
     },
-    async reconcileOrphans({ isLiveJob, onlyJobId }): Promise<OrphanReconcileResult> {
-      const result = await reconcileSbxRestartResources(context.ownershipRoot, command, (jobId) =>
-        onlyJobId === undefined ? isLiveJob(jobId) : jobId !== onlyJobId || isLiveJob(jobId),
-      );
-      if (!result.ok && !(await probeAccess())) health = 'outage';
-      return result;
+    async reconcileOrphans({ isLiveJob, only }): Promise<OrphanReconcileResult> {
+      // Inventory or removal failures are retried on their own cadence. They
+      // must not halt a healthy claim loop unless a destroy already established
+      // a backend-wide access outage.
+      return reconcileSbxResources(command, isLiveJob, only);
     },
     async confirmCleanupAbsent(input: SandboxCleanupConfirmation): Promise<void> {
-      await Effect.runPromise(confirmSbxCleanup(input.sandboxName, input.jobId, command));
+      await Effect.runPromise(confirmSbxCleanup(input.sandboxName, command));
     },
     createJob(spec: SandboxJobSpec): JobSandbox {
       return createSbxJobSandbox(runtimeOptions, spec);

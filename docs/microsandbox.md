@@ -58,14 +58,18 @@ Start with one review and confirm its verdict, archived evidence and destroyed
 cleanup. To roll back, drain microsandbox work first, then restore the previous
 Runner runtime settings and restart the unit.
 
-Runner automatically retries orphan cleanup using its ownership record. For
-manual inspection, use the same account, local backend and original
-`MSB_HOME`. Check the exact manifest name with `msb inspect --format json
-<sandboxName>`. If an operator has confirmed ownership and stopped the job,
+Runner names each VM `compte-rendu-<epoch>-<jobId>` and sweeps exact names older
+than the attempt budget plus a finalization margin. It decodes `msb ls --format
+json` as an array of records, corroborates age with `created_at`, and re-checks
+absence in the same catalog. For manual inspection, use the same account, local
+backend and original `MSB_HOME`. Check the exact manifest name with `msb inspect
+--format json <sandboxName>`. If an operator has confirmed the job is stopped,
 `msb rm -f <sandboxName>` removes that VM. The authenticated
 [cleanup recovery operation](operations.md) requires an explicit absence result
-from the original catalog. Moving or replacing its database invalidates this
-proof, even if the replacement catalog is empty.
+from the original catalog. A same-name lookup in another catalog returning "not
+found" is not absence proof, even if the replacement catalog is empty. A native
+`--max-duration` expiry stops the VM but may leave it listed; the age sweep or an
+explicit `msb rm` still removes it.
 
 To run the native adapter test on a prepared KVM host, set
 `CR_MICROSANDBOX_NATIVE_IMAGE` to the locally loaded tag and run

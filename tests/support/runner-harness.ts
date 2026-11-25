@@ -213,6 +213,43 @@ export const withMergeBaseFixture = (
   };
 };
 
+/**
+ * Test-process convenience: most Runner behavior tests do not model the native
+ * cleanup inventory. Supply an empty secret inventory, and make a successful
+ * `rm --force` followed by inspect report the exact not-found shape.
+ */
+export const withCleanupTestDefaults = (original: RunnerProcess): RunnerProcess => {
+  const removed = new Set<string>();
+  return async (command, args, options) => {
+    const result = await original(command, args, options);
+    if (args[0] === 'secret' && args[1] === 'ls' && result.exitCode === 0) {
+      try {
+        const parsed = JSON.parse(result.stdout) as {
+          secrets?: unknown;
+          custom_secrets?: unknown;
+        };
+        if (!Array.isArray(parsed.secrets) || !Array.isArray(parsed.custom_secrets)) {
+          return { ...result, stdout: '{"secrets":[],"custom_secrets":[]}' };
+        }
+      } catch {
+        return { ...result, stdout: '{"secrets":[],"custom_secrets":[]}' };
+      }
+    }
+    if (args[0] === 'rm' && result.exitCode === 0 && !result.timedOut) {
+      if (args[2] !== undefined) removed.add(args[2]);
+    }
+    if (args[0] === 'inspect' && removed.has(args[1] ?? '')) {
+      return {
+        ...result,
+        exitCode: 1,
+        stdout: '',
+        stderr: `error: sandbox '${args[1]}' not found`,
+      };
+    }
+    return result;
+  };
+};
+
 export type ClaimExecution = ReturnType<typeof createClaimExecution>;
 export type RunnerOptions = NonNullable<Parameters<typeof createProductionRunner>[0]>;
 
@@ -273,7 +310,7 @@ export const createProductionRunnerWithMergeBase = (options: RunnerOptions = {})
       ? createProductionRunner(optionsWithCallback)
       : createProductionRunner({
           ...optionsWithCallback,
-          process: withMergeBaseFixture(options.process),
+          process: withCleanupTestDefaults(withMergeBaseFixture(options.process)),
         });
   return withClaimSubmission(runner, execution, cleanupRoot);
 };
@@ -320,11 +357,9 @@ export const withClaimSubmission = (
 export const createRunner = (options: TestRunnerOptions = {}) => {
   const { mergeBase: mergeBaseOverride, ...productionOptions } = withTestDestroyDefaults(options);
   const { options: optionsWithCallback, execution, cleanupRoot } = withAutoClaim(productionOptions);
-  const originalProcess = productionOptions.process;
-  if (originalProcess === undefined) {
-    return withClaimSubmission(createProductionRunner(optionsWithCallback), execution, cleanupRoot);
-  }
+  const originalProcess = productionOptions.process ?? runProcess;
   const mergeBaseProcess = withMergeBaseFixture(originalProcess, mergeBaseOverride);
+  const removedSandboxes = new Set<string>();
   const rules: Array<Record<string, unknown>> = [
     {
       id: 'default-deny-all',
@@ -337,6 +372,18 @@ export const createRunner = (options: TestRunnerOptions = {}) => {
   const runner = createProductionRunner({
     ...optionsWithCallback,
     process: async (command, args, processOptions) => {
+      if (args[0] === 'ls' && args[1] === '-q') {
+        return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+      }
+      if (args[0] === 'secret' && args[1] === 'ls') {
+        return {
+          exitCode: 0,
+          stdout:
+            processOptions?.captureStdout === true ? '{"secrets":[],"custom_secrets":[]}' : '',
+          timedOut: false,
+          truncated: false,
+        };
+      }
       if (args[0] === 'policy' && args[1] === 'ls') {
         return {
           exitCode: 0,
@@ -346,6 +393,31 @@ export const createRunner = (options: TestRunnerOptions = {}) => {
         };
       }
       const result = await mergeBaseProcess(command, args, processOptions);
+      if (args[0] === 'rm' && result.exitCode === 0 && !result.timedOut) {
+        const sandboxName = args[2];
+        if (sandboxName !== undefined) {
+          removedSandboxes.add(sandboxName);
+          for (let index = rules.length - 1; index >= 0; index -= 1) {
+            if (rules[index]!.sandbox_id === sandboxName) rules.splice(index, 1);
+          }
+        }
+      }
+      if (args[0] === 'inspect' && removedSandboxes.has(args[1]!)) {
+        return {
+          ...result,
+          exitCode: 1,
+          stdout: '',
+          stderr: `error: sandbox '${args[1]}' not found`,
+        };
+      }
+      if (
+        args[0] === 'secret' &&
+        args[1] === 'ls' &&
+        result.exitCode === 0 &&
+        result.stdout.trim() === ''
+      ) {
+        return { ...result, stdout: '{"secrets":[],"custom_secrets":[]}' };
+      }
       if (
         args[0] === 'cp' &&
         result.exitCode === 0 &&
@@ -405,7 +477,6 @@ beforeEach(async () => {
 
 afterEach(async () => {
   vi.unstubAllEnvs();
-  await rm(join(sharedEvidenceRoot, 'sandbox-owners'), { recursive: true, force: true });
 });
 
 afterAll(async () => {
@@ -596,7 +667,8 @@ export const runAgentScenario = async (scenario: {
   let secretArgs: readonly string[] | undefined;
   const allowedResources: string[] = [];
   const removedRuleIds: string[] = [];
-  let msbOwner: string | undefined;
+  let msbPresent = false;
+  let msbName: string | undefined;
   let cleanupRemovalFailures = scenario.cleanupRemovalFailures ?? 0;
   const reviewConfiguration =
     scenario.reviewConfiguration ??
@@ -685,26 +757,33 @@ export const runAgentScenario = async (scenario: {
         await scenario.onProcess?.(args, options);
         if (_command === 'msb') {
           const ok = { exitCode: 0, stdout: '', truncated: false, timedOut: false };
-          if (args[0] === 'create') msbOwner = args[args.indexOf('--label') + 1]?.split('=')[1];
+          if (args[0] === 'create') {
+            msbPresent = true;
+            msbName = args[args.indexOf('--name') + 1];
+          }
+          if (args[0] === 'ls')
+            return {
+              ...ok,
+              stdout: JSON.stringify(
+                msbPresent ? [{ name: msbName, created_at: new Date().toISOString() }] : [],
+              ),
+            };
           if (args[0] === 'rm') {
             if (scenario.cleanupFailure) return { ...ok, exitCode: 1 };
             if (cleanupRemovalFailures > 0) {
               cleanupRemovalFailures -= 1;
               return { ...ok, exitCode: 1 };
             }
-            msbOwner = undefined;
+            msbPresent = false;
             return ok;
           }
           if (args[0] === 'inspect') {
             const name = args.at(-1)!;
-            return msbOwner === undefined
+            return !msbPresent || name !== msbName
               ? { ...ok, exitCode: 1, stderr: 'error: sandbox not found: ' + name }
               : {
                   ...ok,
-                  stdout: JSON.stringify({
-                    name,
-                    config: { labels: { 'cr-job-owner': msbOwner } },
-                  }),
+                  stdout: JSON.stringify({ name, created_at: new Date().toISOString() }),
                 };
           }
         }
@@ -753,7 +832,7 @@ export const runAgentScenario = async (scenario: {
             ? (scenario.exitCode ?? 0)
             : isCreate && scenario.create !== undefined
               ? (scenario.create.exitCode ?? 1)
-              : (scenario.cleanupFailure && args[0] === 'policy' && args[1] === 'rm') ||
+              : (scenario.cleanupFailure && isSandboxRemoval) ||
                   (scenario.sandboxRemovalFailure === true && isSandboxRemoval)
                 ? 1
                 : 0,
@@ -875,7 +954,6 @@ export const runReminderScenario = async (scenario: {
   let githubSecretArgs: readonly string[] | undefined;
   let agentRuns = 0;
   const runner = createRunner({
-    instanceId: crypto.randomUUID(),
     evidenceRoot: sharedEvidenceRoot,
     authToken: 'runner-test-token',
     ...(scenario.logEvents === undefined
@@ -995,7 +1073,8 @@ export const runReminderScenario = async (scenario: {
             : args.includes('session')
               ? `[{"id":"${sessionId}"}]\n`
               : '',
-        ...(scenario.cleanupStderr === undefined || args[0] !== 'secret' || args[1] !== 'rm'
+        ...(scenario.cleanupStderr === undefined ||
+        !((args[0] === 'rm' && args[1] === '--force') || (args[0] === 'policy' && args[1] === 'rm'))
           ? {}
           : { stderr: scenario.cleanupStderr }),
         timedOut: isCreate && scenario.createTimedOut === true,
@@ -1037,7 +1116,7 @@ export const runReminderScenario = async (scenario: {
     agentRuns,
     createCommands,
     sessionId,
-    sandboxName,
+    sandboxName: (manifest.sandboxName as string | undefined) ?? sandboxName,
     githubSecretArgs,
     githubTokenPath,
     githubTokenSnapshots,

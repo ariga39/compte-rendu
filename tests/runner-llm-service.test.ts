@@ -353,9 +353,6 @@ describe('Runner LLM lifecycle failures', () => {
         evidenceRoot,
         cleanupFailure: true,
       });
-      // Startup sbx reconciliation is covered separately through retained
-      // ownership records.
-      await rm(join(evidenceRoot, 'sandbox-owners'), { recursive: true, force: true });
       let claims = 0;
       restarted = createProductionRunnerWithMergeBase({
         ...relayOptions(f.relay),

@@ -1,19 +1,25 @@
-import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { expect, it, vi } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import { createRunner, runProcess } from '../apps/runner/src/runner.js';
-import {
-  createMicrosandboxSandboxBackend,
-  microsandboxCatalogIdentity,
-} from '../apps/runner/src/sandbox-runtime-microsandbox.js';
+import { createMicrosandboxSandboxBackend } from '../apps/runner/src/sandbox-runtime-microsandbox.js';
+import { sandboxResourceName } from '../apps/runner/src/sandbox-resource-name.js';
 import type { HostRun, SandboxExecPort } from '../apps/runner/src/sandbox-runtime.js';
+
+const roots: string[] = [];
+
+afterEach(async () => {
+  vi.unstubAllEnvs();
+  for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
+});
 
 it.skipIf(!process.env.CR_MICROSANDBOX_NATIVE_IMAGE)(
   'runs the review tools with read-only staging and exports evidence before destroying the VM',
   async () => {
     const root = await mkdtemp(join(tmpdir(), 'cr-msb-live-'));
+    roots.push(root);
     const id = randomUUID();
     const bin = process.env.RUNNER_SANDBOX_CLI ?? 'msb';
     const hostRun: HostRun = (_program, args, options) =>
@@ -31,11 +37,10 @@ it.skipIf(!process.env.CR_MICROSANDBOX_NATIVE_IMAGE)(
     const runtime = createMicrosandboxSandboxBackend({
       hostRun,
       relayEnabled: true,
-      ownershipRoot: join(root, 'owners'),
       image: process.env.CR_MICROSANDBOX_NATIVE_IMAGE!,
     }).createJob({
       id,
-      name: 'compte-rendu-' + id,
+      name: sandboxResourceName(id),
       checkoutRoot,
       configRoot,
       hostScratchRoot: root,
@@ -81,18 +86,19 @@ it.skipIf(!process.env.CR_MICROSANDBOX_NATIVE_IMAGE)(
 
 it('destroys the sandbox after a pending credential update settles', async () => {
   const root = await mkdtemp(join(tmpdir(), 'cr-msb-rotation-'));
+  roots.push(root);
   const previousHome = process.env.MSB_HOME;
   process.env.MSB_HOME = root;
-  const name = 'compte-rendu-rotation';
+  const name = sandboxResourceName('rotation');
   const ok = { exitCode: 0, stdout: '', timedOut: false, truncated: false };
-  let owner: string | undefined;
+  let present = false;
   let rotating = false;
   let markStarted!: () => void;
   const started = new Promise<void>((resolve) => {
     markStarted = resolve;
   });
   const hostRun: HostRun = async (_program, args) => {
-    if (args[0] === 'create') owner = args[args.indexOf('--label') + 1]!.split('=')[1];
+    if (args[0] === 'create') present = true;
     if (args[0] === 'modify') {
       rotating = true;
       markStarted();
@@ -100,15 +106,12 @@ it('destroys the sandbox after a pending credential update settles', async () =>
       rotating = false;
     }
     if (args[0] === 'inspect')
-      return owner === undefined
-        ? { ...ok, exitCode: 1, stderr: 'error: sandbox not found: ' + name }
-        : {
-            ...ok,
-            stdout: JSON.stringify({ name, config: { labels: { 'cr-job-owner': owner } } }),
-          };
+      return present
+        ? { ...ok, stdout: JSON.stringify({ name }) }
+        : { ...ok, exitCode: 1, stderr: 'error: sandbox not found: ' + name };
     if (args[0] === 'rm') {
       if (rotating) return { ...ok, exitCode: 1, stderr: 'credential update in progress' };
-      owner = undefined;
+      present = false;
     }
     return ok;
   };
@@ -121,7 +124,6 @@ it('destroys the sandbox after a pending credential update settles', async () =>
     const runtime = createMicrosandboxSandboxBackend({
       hostRun,
       relayEnabled: true,
-      ownershipRoot: join(root, 'owners'),
       image: 'fixture',
     }).createJob({
       id: 'rotation',
@@ -141,7 +143,7 @@ it('destroys the sandbox after a pending credential update settles', async () =>
     const rotation = runtime.updateGithubReadToken!('replacement');
     await started;
     await Promise.all([runtime.destroy(exec), rotation]);
-    expect(owner).toBeUndefined();
+    expect(present).toBe(false);
   } finally {
     if (previousHome === undefined) delete process.env.MSB_HOME;
     else process.env.MSB_HOME = previousHome;
@@ -149,11 +151,11 @@ it('destroys the sandbox after a pending credential update settles', async () =>
   }
 });
 
-it('recovers an owned sandbox through the production process runner', async () => {
+it('sweeps an expired VM on Runner startup and preserves a fresh VM', async () => {
   const root = await mkdtemp(join(tmpdir(), 'cr-msb-process-recovery-'));
+  roots.push(root);
   const previous = {
     home: process.env.MSB_HOME,
-    cli: process.env.RUNNER_SANDBOX_CLI,
     runtime: process.env.RUNNER_SANDBOX_RUNTIME,
     image: process.env.MICROSANDBOX_IMAGE,
   };
@@ -161,58 +163,42 @@ it('recovers an owned sandbox through the production process runner', async () =
     await mkdir(join(root, 'db'));
     await writeFile(join(root, 'db', 'msb.db'), 'catalog');
     process.env.MSB_HOME = root;
-    const id = 'job-process-recovery';
-    const sandboxName = `compte-rendu-${id}`;
-    const instanceId = 'test-runner';
-    const owners = join(root, 'sandbox-owners', instanceId);
-    const markerRoot = join(owners, 'microsandbox');
-    await mkdir(markerRoot, { recursive: true });
-    const catalog = await microsandboxCatalogIdentity();
-    await writeFile(
-      join(markerRoot, `${createHash('sha256').update(id).digest('hex')}.json`),
-      `${JSON.stringify({
-        version: 1,
-        jobId: id,
-        sandboxName,
-        catalog,
-        owner: 'owner-1',
-        createAttempted: true,
-      })}\n`,
-    );
-
-    const stateRoot = join(root, 'state');
-    await mkdir(stateRoot);
-    await writeFile(join(stateRoot, 'present'), 'owner-1');
-    const cli = join(root, 'msb-fixture-cli');
-    await writeFile(
-      cli,
-      `#!/bin/sh
-state="$MSB_HOME/state"
-case "$1" in
-  inspect)
-    if [ -f "$state/present" ]; then
-      owner=$(cat "$state/present")
-      printf '{"name":"%s","config":{"labels":{"cr-job-owner":"%s"}}}\\n' "${sandboxName}" "$owner"
-    else
-      printf 'error: sandbox not found: %s\\n' "${sandboxName}" >&2
-      exit 1
-    fi
-    ;;
-  rm)
-    rm -f "$state/present"
-    ;;
-esac
-exit 0
-`,
-      { mode: 0o755 },
-    );
-
-    process.env.RUNNER_SANDBOX_CLI = cli;
+    const expired = sandboxResourceName(crypto.randomUUID(), Date.now() - 3 * 60 * 60 * 1000);
+    const fresh = sandboxResourceName(crypto.randomUUID());
+    let names = [expired, fresh];
+    const createdAt = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
+    const fakeProcess = async (_command: string, args: readonly string[]) => {
+      if (args[0] === 'ls')
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify(names.map((name) => ({ name, created_at: createdAt }))),
+          timedOut: false,
+          truncated: false,
+        };
+      if (args[0] === 'inspect') {
+        const name = args.at(-1)!;
+        return names.includes(name)
+          ? {
+              exitCode: 0,
+              stdout: JSON.stringify({ name, created_at: createdAt }),
+              timedOut: false,
+              truncated: false,
+            }
+          : {
+              exitCode: 1,
+              stdout: '',
+              stderr: `error: sandbox not found: ${name}`,
+              timedOut: false,
+              truncated: false,
+            };
+      }
+      if (args[0] === 'rm') names = names.filter((name) => name !== args[2]);
+      return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+    };
     process.env.RUNNER_SANDBOX_RUNTIME = 'microsandbox';
     process.env.MICROSANDBOX_IMAGE = 'fixture';
     const runner = createRunner({
       evidenceRoot: root,
-      instanceId,
       authToken: 'runner-test-token',
       claimUrl: '',
       llmRelay: true,
@@ -223,23 +209,16 @@ exit 0
         baseUrl: 'https://llm.internal.example/v1',
         definition: { name: 'Review' },
       }),
-      process: runProcess,
+      process: fakeProcess,
     });
     try {
-      await vi.waitFor(
-        async () => {
-          await expect(readdir(markerRoot)).resolves.toHaveLength(0);
-          await expect(readFile(join(stateRoot, 'present'))).rejects.toThrow();
-        },
-        { timeout: 5_000 },
-      );
+      await vi.waitFor(() => expect(names).toEqual([fresh]), { timeout: 5_000 });
     } finally {
       await runner.close();
     }
   } finally {
     for (const [key, value] of [
       ['MSB_HOME', previous.home],
-      ['RUNNER_SANDBOX_CLI', previous.cli],
       ['RUNNER_SANDBOX_RUNTIME', previous.runtime],
       ['MICROSANDBOX_IMAGE', previous.image],
     ] as const) {

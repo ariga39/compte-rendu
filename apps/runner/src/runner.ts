@@ -46,7 +46,6 @@ const EVIDENCE_REQUEST_TIMEOUT_MS = 30 * 1000;
 const DEFAULT_CALLBACK_RETRY_DELAYS_MS = [0, 2_000, 5_000, 15_000, 30_000] as const;
 const CLAIM_REQUEST_TIMEOUT_MS = 30 * 1000;
 const DEFAULT_CONCURRENCY = 1;
-const RUNNER_INSTANCE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
 const nonEmpty = (value: string | undefined): string | undefined => {
   const trimmed = value?.trim();
@@ -89,8 +88,6 @@ export interface RunnerOptions {
   readonly authToken?: string;
   readonly modelConfig?: string;
   readonly evidenceRoot?: string;
-  /** Stable deployment identity for per-instance Sandbox ownership records. */
-  readonly instanceId?: string;
   readonly process?: RunnerProcess;
   readonly log?: OperationalLog;
   readonly callbackUrl?: string;
@@ -186,10 +183,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
       'compte-rendu',
       'reviews',
     );
-  const instanceId =
-    options.instanceId ?? process.env.RUNNER_INSTANCE_ID ?? `port-${process.env.PORT ?? 8080}`;
-  if (!RUNNER_INSTANCE_ID.test(instanceId)) throw new Error('invalid Runner instance identity');
-  const sandboxOwnershipRoot = join(evidenceRoot, 'sandbox-owners', instanceId);
   const executeProcess = options.process ?? runProcess;
   const hostRun: HostRun = createHostRun(executeProcess);
   const sandboxBackend =
@@ -198,7 +191,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
       { kind: process.env.RUNNER_SANDBOX_RUNTIME },
       {
         hostRun,
-        ownershipRoot: sandboxOwnershipRoot,
         relayEnabled,
       },
     );

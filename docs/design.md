@@ -174,9 +174,9 @@ polling rather than risk duplicate ownership.
 
 Authenticated private maintenance endpoints pause new claims
 without cancelling jobs or in-flight claim reservations. At startup Runner
-reconciles Sandbox ownership records; it does not scan or replay grant markers
-from a previous release. Resume changes only the maintenance pause and may retry
-the Sandbox ownership scan. Exact cleanup recovery can resolve an eligible failed
+sweeps expired timestamped Sandboxes without delaying claims; it does not scan
+or replay grant markers from a previous release. Resume changes only the
+maintenance pause and may retry the Sandbox sweep. Exact cleanup recovery can resolve an eligible failed
 cleanup without a separate recovery channel: Runner verifies the retained failed
 callback and manifest, confirms the exact Sandbox is absent, and sends one real
 slim `failed` callback with cleanup `destroyed`. Core then applies that terminal
@@ -278,7 +278,7 @@ This selection/service path supports sbx and microsandbox.
 
 Runner builds one instance-level sandbox backend once at startup. Each backend
 validates its own configuration, owns its executable/environment, readiness and
-outage state, ownership records, orphan reconciliation and any cleanup-absence
+outage state, age sweeping, orphan reconciliation and any cleanup-absence
 proof. Readiness and recovery hooks (`health`, `checkReady`, `reconcileOrphans`,
 `confirmCleanupAbsent`) are optional, so a backend with native expiry can omit
 no-op plumbing. The Runner treats an absent hook as ready/no-op and asks only for
@@ -297,7 +297,7 @@ as resources are created so partial setup can still be archived and cleaned.
   Explicit per-job rules rely on the host's deny-all policy and absence of other
   global/organization allows. Direct-model mode uses host secret resolution;
   service mode injects a short-lived job grant instead of an upstream key.
-- **microsandbox:** a local KVM microVM with read-only staging, per-job TLS credential injection and HTTPS-only destination rules. Cleanup verifies ownership and absence in the original catalog. See the [microsandbox installation guide](microsandbox.md).
+- **microsandbox:** a local KVM microVM with read-only staging, per-job TLS credential injection and HTTPS-only destination rules. Cleanup sweeps timestamped VMs, protects recent `created_at` records and verifies absence in the original catalog. See the [microsandbox installation guide](microsandbox.md).
 
 Runtime selection is startup configuration. Unknown or retired kinds and
 incomplete runtime configuration fail before claims; no silent fallback to sbx
@@ -458,31 +458,51 @@ not proof of crash recovery. Keep missing behavior in issues rather than describ
 it as delivered. Merge bounded changes when their main behavior is correct and
 reviewed; non-critical findings become follow-up issues.
 
-### Startup ownership reconciliation
+### Resource age sweeping and cleanup confirmation
 
-For sbx, the adapter retains a private ownership record under
-`<evidenceRoot>/sandbox-owners/<instanceId>/` before creating each scoped
-resource. `instanceId` comes from `RUNNER_INSTANCE_ID` or, by default, the
-configured listener port, so co-located Runners sharing an evidence root still
-have separate records. The record contains the Job identity, exact Sandbox name,
-the per-job host workspace/config paths and which setup steps were attempted; it
-contains no repository content, model output, sessions or credentials. On
-startup the Runner checks each recorded name with `sbx inspect --json`. A present
-Sandbox is removed only when the
-inspection's exact `name` matches and its `workspace` or an
-`additional_workspaces[].dir` equals the retained host path. Runner then removes
-only network policies whose `sandbox_id` and resources match the recorded
-attempted rules, the exact Sandbox, and the recorded scoped secrets. It verifies
-Sandbox and policy absence plus the native `sbx secret ls --json` postcondition
-before clearing the record. An absent Sandbox is treated as interrupted setup:
-only steps recorded as attempted before the interruption are reconciled. An
-intent recorded before creation cannot authorize deleting a same-name Sandbox or
-its policies. A missing, foreign, malformed or unverifiable identity keeps the
-record and leaves resources untouched. Names, prefixes and unrelated inspect metadata never establish ownership.
-For microsandbox, Runner checks the original catalog, exact VM name and owner
-nonce. Both adapters retry unresolved ownership records automatically and skip
-live jobs. A backend outage can delay cleanup while other jobs proceed.
-Recovery diagnostics identify the job, step and command status and omit stderr.
+Every Runner-owned Sandbox name is reserved and parseable:
+`compte-rendu-<epoch-seconds>-<jobId>`. The epoch is captured before the resource
+is created. Runner sweeps its backends at startup and periodically, removing
+only names whose age exceeds the attempt budget plus a finalization margin:
+ninety minutes plus thirty minutes. Under a wall clock that advances
+continuously, a claimed review's last possible live use is its attempt deadline
+plus bounded archive and destroy retries, so the two-hour threshold is after
+that use. The guarantee does not cover arbitrary wall-clock jumps; the sweep
+also skips any job the local registry reports as live. Broad inventory sweeps
+accept only the exact generated UUID shape, so unrelated `compte-rendu-*` names
+are never candidates. Exact cleanup from a trusted retained manifest may still
+name a non-UUID direct claim.
+
+For sbx, the sweeper inventories `sbx ls -q`, native `sbx secret ls --json`
+scopes and network-policy `sandbox_id` values. It removes the exact named
+Sandbox with `sbx rm --force`; a normal create may install sandbox-scoped
+non-editable rules, so editing every rule is not a precondition. The sweep then
+verifies Sandbox absence, removes only an editable orphan rule, confirms policy
+and secret absence, and preserves any surviving unremovable attachment as a
+failure. Missing or truncated inventory authorizes no removal. Concurrent
+sweeps are idempotent because every candidate is re-verified after removal.
+Runner no longer keeps per-instance ownership records or workspace/config-path
+proofs.
+
+For microsandbox, `msb ls --format json` is decoded as an array of records and
+only each row's exact `name` is considered; malformed listings remove nothing.
+The original catalog identity, exact VM name and `created_at` corroborate age
+before removal, and absence is always re-checked in that same catalog. A lost
+`rm` race with another sweep is settled by that final exact absence; a present
+VM, catalog mismatch or invalid/truncated inspection still fails. A
+same-name lookup in a different catalog returning "not found" is not evidence of
+absence.
+
+The physical sweep does not update Core. A same-PR cleanup blocker is released
+only by the retained-evidence recovery path: it verifies the exact manifest name
+and job identity, proves backend absence, and sends one real `failed` callback
+with cleanup `destroyed`. `POST /maintenance/recover-cleanup` and
+`confirmCleanupAbsent` therefore remain the minimum confirmation path. Startup
+sweeping no longer gates new claims; an unresolved sweep keeps drain pending.
+Pre-sweeper `compte-rendu-<jobId>` leftovers have no trustworthy age: drain or
+dispose of them manually before upgrading, with no indefinite compatibility
+shim. Recovery diagnostics identify the job, step and command status and omit
+stderr.
 
 ### Failed-cleanup reconciliation
 
@@ -491,9 +511,10 @@ microsandbox run whose backend confirmed its own sandbox-scoped host resources a
 whose exact Sandbox is now absent. Runner scratch roots are tracked separately and
 do not gate same-PR eligibility. Runner reads the retained local `callback.json` and
 `manifest.json` without modifying either file, verifies the six identity fields,
-the backend runtime, the exact Sandbox name, the failed terminal status, failed
-cleanup and the backend's own host-resource confirmation, then asks the backend
-for its absence proof. A Runner scratch-removal failure fails the job and logs
+the backend runtime, the exact reserved Sandbox name and matching job identity,
+the failed terminal status, failed cleanup and the backend's own host-resource
+confirmation, then asks the backend for its absence proof. The same-name
+microsandbox proof is bound to the originating catalog. A Runner scratch-removal failure fails the job and logs
 the directory on the host. Backend proof remains valid. Runner makes a bounded
 grant revocation when the relay is configured and sends
 one real slim `version: 2` `failed` callback to `POST /runner-callback`. That
@@ -512,12 +533,12 @@ no more than once every 30 seconds per pending job. A Core 409 or other permanen
 4xx is a terminal delivery rejection: Runner does not replay a second callback,
 and stops automatic delivery with a bounded job/run/status diagnostic. Only
 408/429/5xx or timeout/network failures remain retryable. When exact absence fails
-because the owned Sandbox still exists, Runner runs the ownership reaper scoped
-to that job before the next attempt; other ownership records are skipped. The
+because the exact retained Sandbox still exists, Runner re-runs the exact-name
+reaper before the next attempt; other resources are skipped. The
 terminal verdict is unchanged and completed work never restarts.
 
 While the job is in memory, Runner can report verified cleanup using its retained
-manifest and callback. After a restart the ownership scan removes verified orphan
+manifest and callback. After a restart the age sweep removes verified orphan
 resources. A known failed cleanup blocks later reviews until this confirmation;
 unknown pending cleanup follows the original 90-minute claim budget, including
 when a restart loses an in-memory staged claim request ID. Legacy evidence lacking the

@@ -188,10 +188,18 @@ export interface OrphanReconcileResult {
   readonly failures: readonly SandboxRecoveryFailure[];
 }
 
+export interface SandboxCleanupTarget {
+  readonly jobId: string;
+  /** Exact name from the retained, trusted terminal manifest. */
+  readonly sandboxName: string;
+  /** Backend-private proof from the same manifest, when the backend needs it. */
+  readonly recoveryProof?: SandboxRecoveryProof | undefined;
+}
+
 export interface OrphanReconcileInput {
   readonly isLiveJob: (jobId: string) => boolean;
-  /** Restrict this scan to one retained job; other ownership records are skipped. */
-  readonly onlyJobId?: string;
+  /** Restrict this scan to one exact retained Sandbox; other resources are skipped. */
+  readonly only?: SandboxCleanupTarget;
 }
 
 export interface SandboxCleanupConfirmation {
@@ -202,7 +210,7 @@ export interface SandboxCleanupConfirmation {
 
 /**
  * A process-lifetime sandbox backend. It owns configuration validation,
- * readiness/outage state, ownership records and orphan reconciliation. A new
+ * readiness/outage state, age sweeping and orphan reconciliation. A new
  * backend only implements this interface and adds one registry entry below.
  * Readiness and recovery hooks are optional so a backend with native expiry
  * does not need no-op plumbing.
@@ -234,7 +242,7 @@ export const sandboxBackendHealth = (backend: SandboxBackend): SandboxHealth =>
 export const sandboxBackendCheckReady = async (backend: SandboxBackend): Promise<SandboxHealth> =>
   backend.checkReady === undefined ? 'ready' : backend.checkReady();
 
-/** A backend without ownership records has nothing to reconcile. */
+/** A backend without age sweeping has nothing to reconcile. */
 export const sandboxBackendReconcileOrphans = async (
   backend: SandboxBackend,
   input: OrphanReconcileInput,
@@ -245,7 +253,6 @@ export const sandboxBackendReconcileOrphans = async (
 
 export interface SandboxBackendContext {
   readonly hostRun: HostRun;
-  readonly ownershipRoot: string;
   readonly relayEnabled: boolean;
 }
 

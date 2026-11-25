@@ -7,6 +7,7 @@ import {
   RunnerTerminalCallback,
   StructuredReviewResult,
 } from '@compte-rendu/contracts';
+import { sandboxResourceIdentity } from './sandbox-resource-name.js';
 
 const EvidenceId = Schema.String.check(
   Schema.isPattern(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i),
@@ -188,10 +189,13 @@ export const recoverCallback = Effect.fn('recoverCallback')(function* (
     return yield* fail('identity-mismatch');
   }
 
+  const sandboxIdentity =
+    manifest.sandboxName === undefined ? undefined : sandboxResourceIdentity(manifest.sandboxName);
   if (
     callback.status !== 'failed' ||
     manifest.runtime !== cleanupRuntime ||
-    manifest.sandboxName !== `compte-rendu-${request.jobId}` ||
+    sandboxIdentity === undefined ||
+    sandboxIdentity.jobId !== request.jobId ||
     manifest.cleanup.status !== 'failed' ||
     callback.sandbox.cleanup !== 'failed'
   ) {

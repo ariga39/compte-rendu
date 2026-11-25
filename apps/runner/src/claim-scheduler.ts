@@ -116,8 +116,9 @@ export const createClaimScheduler = (deps: ClaimSchedulerDependencies): ClaimSch
   };
   const claimNextJob = async () => {
     if (deps.isClosed()) return;
-    await deps.cleanup.startup.catch(() => undefined);
-    if (deps.isClosed()) return;
+    // The startup sweep protects only resources whose age already exceeds any
+    // possible live use. A slow inventory must not hold a healthy claim loop;
+    // drain still waits for the tracked sweep.
     let needsCleanupRecovery = deps.cleanup.pendingCount() > 0;
     if (sandboxBackendHealth(deps.backend) === 'outage') {
       const ready = await sandboxBackendCheckReady(deps.backend);

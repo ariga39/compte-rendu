@@ -420,7 +420,14 @@ describe('Runner relay admission and recovery', () => {
         status: 'failed',
         failure: { reason: 'configuration' },
       });
-      expect(commands).toEqual([]);
+      expect(
+        commands.filter(
+          (command) =>
+            !command.startsWith('ls -q') &&
+            !command.startsWith('policy ls') &&
+            !command.startsWith('secret ls'),
+        ),
+      ).toEqual([]);
     } finally {
       await runner.close();
     }
