@@ -179,14 +179,10 @@ validated lifecycle event and registers each with `waitUntil()`.
 ## Update and rollback
 
 A compatible update, including documentation-only changes, may deploy without a
-drain. A breaking release upgrades the Worker and Runner as one pair in a brief
-maintenance window; mixed-version operation is not a default requirement.
+drain. A breaking release uses the pair sequence below in a brief maintenance
+window; mixed-version operation is not a default requirement.
 
-For a compatible or documentation-only update, run the applicable checks, merge
-any tracked configuration changes, deploy any affected Worker, and verify the
-affected behavior. No drain or version pairing is required.
-
-For a breaking release:
+For every deployment:
 
 1. Run `corepack pnpm check`, `corepack pnpm test`, and
    `corepack pnpm build` against the immutable checkout being released.
@@ -197,18 +193,30 @@ For a breaking release:
    settings, assets and Cron changes. Preserve instance account/resource IDs,
    `DASHBOARD_ORIGIN`, domains, allowlists, branding and deliberate overrides; reconcile changed
    defaults rather than blindly replacing them. Render only when instance files
-   are absent, then restore those instance settings from the backup. Prepare the
-   matching Worker and Runner artifacts, but do not deploy yet.
-3. Pause claims on every Runner served by the Worker being upgraded: drain it and wait for `drained: true`, or stop it
-   when it cannot drain. Confirm `activeJobs: 0`, no in-flight claim and no
-   unresolved cleanup obligation. See [drain before maintenance](#drain-before-maintenance).
-4. Apply any reviewed migration with the D1 command in the installation guide,
-   then deploy the matching Core Worker/Ingress and each Runner with claims still
-   paused, using `apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc`.
-5. Verify artifact hash, service health, configured concurrency, Sandbox recovery
-   status. Resume claims once this instance runs the matching pair and passes
-   those checks. Verify publication changes on the next review by inspecting
-   its exact revision, output and visible GitHub publication.
+   are absent, then restore those instance settings from the backup.
+3. Review migration compatibility. Choose a backward-compatible or staged
+   migration where possible; a truly incompatible one-step migration requires
+   quiescing Worker HTTP/webhooks and scheduled writers during the schema/code
+   switch. Retire obsolete fields and tables only after the old Worker no longer
+   uses them.
+
+For a compatible or documentation-only update, apply the compatible migrations
+the new Worker needs before switching to it, deploy the affected Worker using
+`apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc`, and verify the affected behavior.
+No Runner drain or version pairing is required.
+
+For a breaking release:
+
+1. Drain every old Runner served by the Worker and wait for `drained: true` with
+   `activeJobs: 0`, no in-flight claim and no unresolved cleanup obligation, then
+   stop it. See [drain before maintenance](#drain-before-maintenance).
+2. Deploy and verify the matching Worker and schema first, using
+   `apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc`. Apply the reviewed migration
+   after the old Runner is stopped.
+3. Start the replacement Runner only after the Worker and schema are ready, then
+   verify artifact hash, health, concurrency and Sandbox recovery. A newly
+   started Runner can claim immediately after its startup ownership scan;
+   maintenance drain is in-memory. Verify the artifact on disk before startup if it must be checked before the first claim.
 
 ### Review deadline rollout
 
@@ -225,36 +233,25 @@ exact directory on the host for cleanup.
 The callback and evidence manifest identify the limiting clock for an exhausted
 attempt. The dashboard reports a timeout.
 
-Drain before replacing the Runner binary. Queued jobs receive their deadline when
-claimed after resume. The inference Worker issues six-hour grants, independently
-of the execution deadline.
+Queued jobs receive their deadline when claimed after the replacement Runner
+starts. The inference Worker issues six-hour grants, independently of the
+execution deadline.
 
 ### Slim v2 callback rollout
 
 Removing legacy `v1` callback acceptance is a one-way, non-rolling change: an old
 Runner posting an inline `v1` callback to a v2-only Core is rejected, not queued.
-Do not mix old callbacks with the new Core or allow an old Runner to claim during
-the switch.
+Use the breaking-release sequence above.
 
-1. Drain every Runner instance that targets this Core, wait for
-   `drained: true` on each, and confirm `activeJobs: 0`, no in-flight claim and no
-   unresolved cleanup obligation. Check Core's dashboard for failed cleanup
-   still blocking a PR, including jobs the Runner lost across a restart. Resolve
-   these jobs with the old Runner while it can still read the legacy microsandbox
-   catalog identity. Keep the compatible versions active until the blockers
-   clear. Queued work stays in D1.
-2. Confirm there is no terminal outcome still awaiting delivery. If a retained
-   successful result has not been accepted by Core, replay it with
-   `POST /maintenance/replay-callback` **before** upgrading the Core Worker while
-   the currently compatible callback receiver is still deployed. Acceptance is
-   not publication; verify the review outcome in the dashboard.
-3. Deploy the Core Worker/Ingress upgrade and each Runner to the slim `v2`
-   callback with claims still paused. Do not resume one instance early to test a
-   mixed version set.
-4. Resume claims only after every Runner on the instance uses the new shape, then
-   exercise one controlled review end to end. Rollback has the same rule: drain
-   all Runners and replay any undelivered successful result before reverting the
-   callback receiver.
+Before deploying the v2-only Worker, resolve failed-cleanup jobs visible in the
+dashboard while the old Runner can still read the legacy microsandbox catalog
+identity. If a retained successful result has not been accepted by Core, replay
+it with `POST /maintenance/replay-callback`; acceptance is not publication, so
+verify the review outcome in the dashboard.
+
+After replacing the Runner, exercise one controlled review end to end. Rollback
+uses the same order and replays any undelivered successful result before
+reverting the callback receiver.
 
 ### Migrating an existing two-Worker installation
 
@@ -277,11 +274,14 @@ Cron together. Database and bucket contents remain in place.
 If a compatible release is bad, stop webhook delivery if it is generating new
 runs. Roll back the affected Worker to its last known-good deployment in the
 Cloudflare Workers deployment controls, using the matching application build and
-compatible database schema. For a breaking release, pause claims and wait for
-drained or stopped Runners before reverting the matching Worker/Runner pair, then
-resume only after the same checks pass. Do not delete D1 tables or edit the applied migration ledger to undo
-a release. A schema rollback is a separate, reviewed migration or an operator
-approved D1 recovery action.
+compatible database schema. For a breaking release, drain and stop the Runner,
+restore the matching Worker and schema first, then start the matching replacement
+Runner. The same claim rule applies: a started Runner can claim immediately, and
+drain is in-memory; keep it stopped until the Worker is ready if claims must
+remain stopped. An incompatible one-step rollback migration follows the same
+quiesce-or-stage rule. Do not delete D1 tables or edit the applied migration
+ledger to undo a release. A schema rollback is a separate, reviewed migration or
+an operator approved D1 recovery action.
 
 ## Drain before maintenance
 
@@ -326,7 +326,8 @@ maintenance pause and may retry the Sandbox ownership scan; it never clears an
 ownership-related claim halt or failed cleanup. If maintenance is cancelled,
 send `POST /maintenance/resume` with the same curl configuration. Drain is
 in-memory: a restarted Runner begins normal claiming automatically after its
-startup ownership scan.
+startup ownership scan. Starting a replacement is therefore a resume; start it
+only when the Worker is ready.
 
 The explicit cleanup recovery accepts only a retained failed-cleanup job for the
 active sbx or microsandbox runtime where the request and evidence match the exact
