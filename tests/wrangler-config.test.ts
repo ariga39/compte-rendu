@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { join, resolve } from 'node:path';
@@ -119,7 +127,29 @@ describe('Wrangler deployment tooling', () => {
     const instanceName = 'package-script-invocation';
     const outputPaths = {
       application: resolve(repositoryRoot, 'apps/dashboard', `wrangler.${instanceName}.jsonc`),
+      inference: resolve(repositoryRoot, 'apps/inference-worker', `wrangler.${instanceName}.jsonc`),
     };
+    const relayRoot = mkdtempSync(join(tmpdir(), 'compte-rendu-relay-config-'));
+    const relayConfigPath = join(relayRoot, 'relay.json');
+    writeFileSync(
+      relayConfigPath,
+      JSON.stringify({
+        accountId: '0123456789abcdef0123456789abcdef',
+        databaseId: '11234567-89ab-4cde-8123-456789abcdef',
+        hostname: 'inference.example.net',
+        gatewayId: 'review',
+        defaultRoute: 'review-provider/deepseek-v4.1-flash',
+        catalogSources: [
+          {
+            url: 'https://models.example.net/v1/models',
+            prefix: 'review-provider/',
+            providerSlug: 'custom-review',
+            credentialAlias: 'default',
+          },
+        ],
+      }),
+      { mode: 0o600 },
+    );
     const documentedCommand = readFileSync(
       resolve(repositoryRoot, 'docs/installation.md'),
       'utf8',
@@ -127,6 +157,7 @@ describe('Wrangler deployment tooling', () => {
 
     expect(documentedCommand).toBeDefined();
     expect(existsSync(outputPaths.application)).toBe(false);
+    expect(existsSync(outputPaths.inference)).toBe(false);
 
     const rendererArguments = documentedCommand!
       .replace('corepack pnpm ', '')
@@ -136,6 +167,8 @@ describe('Wrangler deployment tooling', () => {
       .replaceAll('<RUNNER_VPC_SERVICE_ID>', runnerVpcServiceId)
       .replaceAll('<GITHUB_INSTALLATION_IDS_JSON>', allowedInstallationIds)
       .replaceAll('<GITHUB_BOT_AUTHOR_IDS_JSON>', allowedBotAuthorIds)
+      .replaceAll('<GITHUB_CHECK_NAME>', '')
+      .replaceAll('<RELAY_CONFIG_FILE>', relayConfigPath)
       .split(/\s+/)
       .map((argument) => argument.replace(/^'(.*)'$/, '$1'));
 
@@ -163,8 +196,20 @@ describe('Wrangler deployment tooling', () => {
       expect(readFileSync(outputPaths.application, 'utf8')).toContain(
         `"ALLOWED_INSTALLATION_IDS": "${allowedInstallationIds}"`,
       );
+      expect(readFileSync(outputPaths.application, 'utf8')).toContain(
+        '"binding":"INFERENCE_RELAY"',
+      );
+      expect(readFileSync(outputPaths.application, 'utf8')).toContain(
+        '"RELAY_DEFAULT_MODEL_ROUTE": "review-provider/deepseek-v4.1-flash"',
+      );
+      expect(readFileSync(outputPaths.application, 'utf8')).not.toContain('POSTHOG');
+      expect(readFileSync(outputPaths.inference, 'utf8')).toContain(
+        '"database_name": "package-script-invocation-relay-grants"',
+      );
     } finally {
       rmSync(outputPaths.application, { force: true });
+      rmSync(outputPaths.inference, { force: true });
+      rmSync(relayRoot, { recursive: true, force: true });
     }
   });
 

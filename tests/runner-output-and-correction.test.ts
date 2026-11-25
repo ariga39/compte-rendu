@@ -268,14 +268,14 @@ describe('Runner Job HTTP interface', () => {
         id: 'scenario-session',
         outcome: 'succeeded',
         agent: 'review',
-        model: { providerID: 'opencode-go', id: 'deepseek-flash' },
+        model: { providerID: 'compte-rendu', id: 'deepseek-review' },
       },
       messages: [
         {
           type: 'assistant',
           id: 'msg-earlier',
           agent: 'review',
-          model: { providerID: 'opencode-go', id: 'deepseek-flash' },
+          model: { providerID: 'compte-rendu', id: 'deepseek-review' },
           finish: 'stop',
           content: [{ type: 'text', text: validText }],
         },
@@ -284,7 +284,7 @@ describe('Runner Job HTTP interface', () => {
           type: 'assistant',
           id: 'msg-final',
           agent: 'review',
-          model: { providerID: 'opencode-go', id: 'deepseek-flash' },
+          model: { providerID: 'compte-rendu', id: 'deepseek-review' },
           finish: 'stop',
           content: 'not-an-array',
         },
@@ -308,14 +308,14 @@ describe('Runner Job HTTP interface', () => {
         id: 'scenario-session',
         outcome: 'succeeded',
         agent: 'review',
-        model: { providerID: 'opencode-go', id: 'deepseek-flash' },
+        model: { providerID: 'compte-rendu', id: 'deepseek-review' },
       },
       messages: [
         {
           type: 'assistant',
           id: 'msg-final',
           agent: 'review',
-          model: { providerID: 'opencode-go', id: 'deepseek-flash' },
+          model: { providerID: 'compte-rendu', id: 'deepseek-review' },
           finish: 'stop',
           content: [
             {
