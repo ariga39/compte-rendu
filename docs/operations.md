@@ -214,6 +214,29 @@ Drain before replacing the Runner binary. Queued jobs receive their deadline whe
 claimed after resume. The inference Worker issues six-hour grants, independently
 of the execution deadline.
 
+### Slim v2 callback rollout
+
+Removing legacy `v1` callback acceptance is a one-way, non-rolling change: an old
+Runner posting an inline `v1` callback to a v2-only Core is rejected, not queued.
+Do not mix old callbacks with the new Core or allow an old Runner to claim during
+the switch.
+
+1. Drain every Runner instance that targets this Core, wait for
+   `drained: true` on each, and confirm `activeJobs: 0`, no in-flight claim and no
+   unresolved cleanup obligation. Queued work stays in D1.
+2. Confirm there is no terminal outcome still awaiting delivery. If a retained
+   successful result has not been accepted by Core, replay it with
+   `POST /maintenance/replay-callback` **before** upgrading the Core Worker while
+   the currently compatible callback receiver is still deployed. Acceptance is
+   not publication; verify the review outcome in the dashboard.
+3. Deploy the Core Worker/Ingress upgrade and each Runner to the slim `v2`
+   callback with claims still paused. Do not resume one instance early to test a
+   mixed version set.
+4. Resume claims only after every Runner on the instance uses the new shape, then
+   exercise one controlled review end to end. Rollback has the same rule: drain
+   all Runners and replay any undelivered successful result before reverting the
+   callback receiver.
+
 ### Migrating an existing two-Worker installation
 
 Keep the public Worker name/domain, D1 and R2 IDs, VPC service, allowlists,
