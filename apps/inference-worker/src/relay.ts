@@ -522,6 +522,8 @@ const FORBIDDEN_CHAT_KEYS = [...COMMON_FORBIDDEN_KEYS, 'web_search_options', 'fi
 
 const isLocalMessage = (message: unknown): boolean => {
   if (!isRecord(message)) return false;
+  if (message.role === 'assistant' && isRecord(message.audio) && hasAnyKey(message.audio, ['id']))
+    return false;
   const content = message.content;
   return (
     content === undefined ||
