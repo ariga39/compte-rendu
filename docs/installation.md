@@ -134,12 +134,26 @@ The member role `Connectivity Directory Bind` is sufficient for attaching an
 existing VPC Service; Admin is required for VPC Service provisioning and
 deletion. Wrangler OAuth uses the broader `connectivity:admin` scope for both
 operations. Do not describe either member role as a custom token permission.
-Select the single deployment account as the
-token resource; no zone, DNS, Access, KV, Pages, or Workers Routes permission
-is needed for this product. R2 bucket creation and lifecycle configuration do
-require `Workers R2 Storage Edit`. See Cloudflare's
+
+Select the single deployment account as the token resource. The application
+Worker, R2 and Access/KV/Pages need no zone or DNS permission. Managed inference
+does attach `<INFERENCE_FQDN>` as a Workers Custom Domain, however: the hostname
+must be free in an active Cloudflare zone in this account and must not already
+have a CNAME. Custom Domains create the DNS record and certificate themselves,
+so do not grant DNS Edit merely to create a record. Attaching one requires
+`Workers Routes Write` on that zone plus normal Worker deploy access; the Attach
+Domain API permission list names `Workers Scripts Write`. Pinned Wrangler 4.124.0 resolves a
+custom-domain hostname without `zone_id` by querying `/zones` by `name` and
+`account.id`, walking parent labels, and fails if no zone is visible. If the
+hostname has no active zone in the account, create or transfer that zone first.
+R2 bucket creation and lifecycle configuration require `Workers R2 Storage
+Edit`. See Cloudflare's
+[Custom Domains](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/),
+[Attach Domain API](https://developers.cloudflare.com/api/resources/workers/subresources/domains/methods/update),
+[Workers roles and permissions](https://developers.cloudflare.com/workers/authorization/workers/),
 [VPC Service roles](https://developers.cloudflare.com/workers-vpc/configuration/vpc-services/#required-roles),
 [OAuth scopes](https://github.com/cloudflare/workers-sdk/blob/wrangler%404.124.0/packages/workers-auth/src/core/scopes.ts),
+[pinned Wrangler zone lookup](https://github.com/cloudflare/workers-sdk/blob/wrangler%404.124.0/packages/deploy-helpers/src/triggers/zones.ts),
 and [API-token permission catalog](https://developers.cloudflare.com/fundamentals/api/reference/permissions/).
 
 Tunnel administration is a separate operation. Wrangler 4.124.0 requires a
@@ -856,6 +870,11 @@ uses the temporary invocation described above.
      ]
    }
    ```
+
+   `<INFERENCE_FQDN>` must be a free hostname in an active Cloudflare zone in
+   this account; the relay deployment attaches it as a Workers Custom Domain and
+   creates its DNS record and certificate. See
+   [zone and custom-domain permissions](#access-and-credentials).
 
    ```sh
    corepack pnpm render:wrangler <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '<GITHUB_BOT_AUTHOR_IDS_JSON>' '<GITHUB_CHECK_NAME>' '<RELAY_CONFIG_FILE>'
