@@ -158,5 +158,8 @@ export function handleRunnerLlmControl(
       { token: reply.token, expiresAt: reply.expiresAt },
       { status: 201, headers: { 'cache-control': 'no-store' } },
     );
-  }).pipe(Effect.catch(() => Effect.succeed(new Response(null, { status: 503 }))));
+  }).pipe(
+    Effect.catch(() => Effect.succeed(new Response(null, { status: 503 }))),
+    Effect.catchDefect(() => Effect.succeed(new Response(null, { status: 503 }))),
+  );
 }
