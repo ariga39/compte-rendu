@@ -75,7 +75,11 @@ describe('Runner terminal callback retention', () => {
           return new Response(null, { status: 202 });
         },
         process: async (_command, args) => {
-          if (!['ls', 'policy', 'secret'].includes(args[0]!)) executionCalls.push([...args]);
+          const readOnly =
+            args[0] === 'ls' ||
+            (args[0] === 'policy' && args[1] === 'ls') ||
+            (args[0] === 'secret' && args[1] === 'ls');
+          if (!readOnly) executionCalls.push([...args]);
           return { exitCode: 1, stdout: '', timedOut: false, truncated: false };
         },
       });
@@ -1419,7 +1423,7 @@ describe('Runner backend outage recovery', () => {
         return new Response(null, { status: 202 });
       },
       process: async (_command, args) => {
-        if (args[0] === 'ls') {
+        if (args[0] === 'ls' && args[1] === '-q') {
           probeStarted();
           await probeGate;
           return ok;

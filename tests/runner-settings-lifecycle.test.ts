@@ -80,8 +80,8 @@ describe('Runner settings reload', () => {
       callbackUrl: 'https://ingress.test/runner-callback',
       callbackToken: 'test-callback',
       callbackTimeoutMs: 1_000_000,
-      process: async (): Promise<RunnerProcessResult> => ({
-        exitCode: 1,
+      process: async (_command, args): Promise<RunnerProcessResult> => ({
+        exitCode: args[0] === 'ls' ? 0 : 1,
         stdout: '',
         timedOut: false,
         truncated: false,
@@ -347,7 +347,12 @@ describe('Runner persisted lifecycle reporting', () => {
         terminals.push(await new Request('https://ingress.test', init).json());
         return new Response(null, { status: 202 });
       },
-      process: async () => ({ exitCode: 1, stdout: '', timedOut: false, truncated: false }),
+      process: async (_command, args) => ({
+        exitCode: args[0] === 'ls' ? 0 : 1,
+        stdout: '',
+        timedOut: false,
+        truncated: false,
+      }),
     });
     try {
       runner.enqueue({

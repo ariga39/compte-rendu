@@ -282,7 +282,9 @@ outage state, age sweeping, orphan reconciliation and any cleanup-absence
 proof. Readiness and recovery hooks (`health`, `checkReady`, `reconcileOrphans`,
 `confirmCleanupAbsent`) are optional, so a backend with native expiry can omit
 no-op plumbing. The Runner treats an absent hook as ready/no-op and asks only for
-per-job sandboxes. Adding a backend means
+per-job sandboxes. sbx starts unready and the first claim runs its bounded `sbx
+ls` probe; cold-start unavailability holds queued work without waiting for the
+age sweep, and later healthy polls skip the probe. Adding a backend means
 adding one implementation and one registration; Runner, Core and the public
 contract stay unchanged.
 
@@ -400,7 +402,7 @@ owners instead of holding every execution object:
   Sandboxes, child processes, token leases, sessions, grants and host temporary
   directories are not stored there.
 - `ClaimScheduler` owns single-flight claiming, claim reservation IDs, queued
-  stop replay, drain/resume, outage staging and the startup claim gate.
+  stop replay, drain/resume, outage staging and the first-claim readiness gate.
 - `CleanupReconciler` owns retained-evidence cleanup recovery, startup/orphan
   reconciliation, deferred recovery and confirmed cleanup delivery.
 - `JobExecutor` owns one execution stack and only sequences phases. Its sandbox,

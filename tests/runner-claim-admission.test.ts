@@ -315,7 +315,11 @@ describe('Runner Job HTTP interface', () => {
         });
       },
       process: async (_command, args) => {
-        if (!['ls', 'policy', 'secret'].includes(args[0]!)) processCalls += 1;
+        const readOnly =
+          args[0] === 'ls' ||
+          (args[0] === 'policy' && args[1] === 'ls') ||
+          (args[0] === 'secret' && args[1] === 'ls');
+        if (!readOnly) processCalls += 1;
         return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
       },
     });
@@ -374,7 +378,11 @@ describe('Runner Job HTTP interface', () => {
         },
         claimIntervalMs: 1,
         process: async (_command, args) => {
-          if (!['ls', 'policy', 'secret'].includes(args[0]!)) processCalls += 1;
+          const readOnly =
+            args[0] === 'ls' ||
+            (args[0] === 'policy' && args[1] === 'ls') ||
+            (args[0] === 'secret' && args[1] === 'ls');
+          if (!readOnly) processCalls += 1;
           return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
         },
       });
@@ -391,7 +399,11 @@ describe('Runner Job HTTP interface', () => {
       modelConfig: standardModelConfig,
       evidenceRoot: sharedEvidenceRoot,
       process: async (_command, args) => {
-        if (!['ls', 'policy', 'secret'].includes(args[0]!)) processCalls += 1;
+        const readOnly =
+          args[0] === 'ls' ||
+          (args[0] === 'policy' && args[1] === 'ls') ||
+          (args[0] === 'secret' && args[1] === 'ls');
+        if (!readOnly) processCalls += 1;
         return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
       },
     });
@@ -447,7 +459,11 @@ describe('Runner concurrency', () => {
       },
       claimIntervalMs: 1,
       process: async (_command: string, args: readonly string[]): Promise<RunnerProcessResult> => {
-        if (!['ls', 'policy', 'secret'].includes(args[0]!)) processCalls += 1;
+        const readOnly =
+          args[0] === 'ls' ||
+          (args[0] === 'policy' && args[1] === 'ls') ||
+          (args[0] === 'secret' && args[1] === 'ls');
+        if (!readOnly) processCalls += 1;
         return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
       },
     };
@@ -1347,6 +1363,7 @@ describe('Runner claim reservations', () => {
           callbackReleases.push(() => resolve(new Response(null, { status: 202 }))),
         ),
       process: async (_command, args) => {
+        if (args[0] === 'ls') return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
         if (args.includes('clone')) await cloneGate;
         return { exitCode: 1, stdout: '', timedOut: false, truncated: false };
       },

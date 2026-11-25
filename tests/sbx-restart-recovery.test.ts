@@ -8,13 +8,15 @@ import { createSbxSandboxBackend } from '../apps/runner/src/sandbox-runtime-sbx'
 import { sandboxResourceName } from '../apps/runner/src/sandbox-resource-name';
 import type { HostRun, RunnerProcessResult } from '../apps/runner/src/sandbox-runtime';
 import { createClaimExecution } from './support/runner-execution';
+import { runnerJobFields } from './support/runner-harness';
 
 const ok: RunnerProcessResult = { exitCode: 0, stdout: '', timedOut: false, truncated: false };
 const roots: string[] = [];
 
 afterEach(async () => {
   vi.unstubAllEnvs();
-  for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
+  for (const root of roots.splice(0))
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
 });
 
 type Rule = { id: string; resources: string[]; sandbox_id: string; editable: boolean };
@@ -255,6 +257,46 @@ describe('sbx age cleanup', () => {
       }),
     ).resolves.toMatchObject({ ok: false, recovered: 0 });
     expect(state.names).toEqual([target]);
+  });
+
+  it('holds queued work when sbx access is unavailable at cold start and claims after recovery', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-sbx-cold-start-'));
+    roots.push(root);
+    let backendUp = false;
+    let failedProbe!: () => void;
+    const failedProbeSeen = new Promise<void>((resolve) => {
+      failedProbe = resolve;
+    });
+    const execution = createClaimExecution();
+    execution.enqueue({
+      ...runnerJobFields,
+      runId: 'run-cold-start',
+      attempt: 1,
+      repositoryUrl: 'https://github.com/acme/reviewed.git',
+      baseSha: '1'.repeat(40),
+      headSha: '2'.repeat(40),
+    });
+    const runner = createRunner({
+      ...runnerOptions(root, async (_command, args) => {
+        if (backendUp) return ok;
+        if (args[0] === 'ls') failedProbe();
+        return { ...ok, exitCode: 1, stderr: 'not signed in to Docker' };
+      }),
+      claimUrl: 'https://ingress.test/runner-claim',
+      claimIntervalMs: 10,
+      claimFetch: execution.claimFetch,
+      callbackFetch: execution.callbackFetch,
+    });
+    try {
+      await failedProbeSeen;
+      expect(execution.claimRequests).toHaveLength(0);
+      backendUp = true;
+      await vi.waitFor(() => expect(execution.claimRequests.length).toBeGreaterThan(0), {
+        timeout: 5_000,
+      });
+    } finally {
+      await runner.close();
+    }
   });
 
   it('does not hold a healthy claim behind a slow startup inventory', async () => {
