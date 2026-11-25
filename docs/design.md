@@ -58,8 +58,9 @@ is not proof that no review was published.
 
 OpenCode 2 returns one final assistant submission with a first line
 `DECISION: <decision>` (`approve`, `request_changes`, `comment`), one blank line,
-then the non-empty, bounded review as raw Markdown. The earlier
-`{decision, markdown}` JSON object remains accepted for compatibility. Runner
+then the non-empty, bounded review as raw Markdown. Only this final text form is
+accepted for new reviews; the former `{decision, markdown}` JSON object is not a
+current wire format, and previously stored terminal results remain readable. Runner
 extracts the submission from the completed session export, checking exact
 session/model/agent identity, successful outcome, final assistant `stop` and final
 successful `idle`. Intermediate analysis and tools are not results. There is no
@@ -71,7 +72,7 @@ calls share the original deadline. Abort, timeout, truncation, abnormal completi
 or ambiguous session identity do not authorize correction. After any live
 correction, Runner revokes the model grant, exports and redacts evidence, and
 validates the archived final result before destruction. Unresolved invalid output
-publishes no vote; Runner does not repair malformed JSON or extract result
+publishes no vote; Runner does not repair malformed output or extract result
 substrings from prose, and never infers a decision.
 
 The shared prompt asks for concise, adversarial review of necessity, correctness
