@@ -40,11 +40,12 @@ builds/tests, edits and GitHub writes. Repository contents and PR discussion are
 untrusted evidence, not instructions. Model compliance is not the outer security
 boundary.
 
-The final response uses the `DECISION` header plus raw Markdown (the earlier
-JSON `decision` + `markdown` form is still accepted), verified from the completed
-V2 session export. A bounded same-session correction runs before revocation and
-cleanup. There is no submission plugin, child-report schema or coverage ledger.
-Prompt style and the TLDR template are not security or validity gates.
+The final response uses the `DECISION` header plus raw Markdown, verified from the
+completed V2 session export. The JSON `decision` + `markdown` wire form is not
+accepted for new reviews; previously stored terminal results remain readable. A
+bounded same-session correction runs before revocation and cleanup. There is no
+submission plugin, child-report schema or coverage ledger. Prompt style and the
+TLDR template are not security or validity gates.
 
 ## Runtime isolation and egress
 

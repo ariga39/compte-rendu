@@ -30,12 +30,13 @@ result is invalid output, never approval.
 
 OpenCode returns one final assistant submission whose first line is
 `DECISION: <decision>`, followed by one blank line and the raw review Markdown.
-No custom submission tool is required. The earlier JSON object containing
-`decision` and `markdown` remains accepted for compatibility, but it is not the
-primary output form. Runner validates the shared structural contract: exactly
+No custom submission tool is required. Only this final text form is accepted for
+new reviews; the former JSON object containing `decision` and `markdown` is not a
+current wire format. Runner validates the shared structural contract: exactly
 one known decision on the header line, non-empty Markdown after the separator and
 the size bound. It also verifies the exact session and authoritative normal
-completion. The final Markdown is preserved unchanged for Core publication.
+completion. The final Markdown is preserved unchanged for Core publication, and
+historical stored terminal results remain readable.
 
 One prompt serves every roster size, including a single configured model. It
 asks for concise adversarial review: challenge the PR's claimed need, verify its

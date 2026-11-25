@@ -510,8 +510,9 @@ state and proxy-only credentials; never copy personal OpenCode auth/state into
 the image or job. Managed inference is the only model credential path: each job
 gets a short-lived grant, and Runner configures OpenCode from the frozen route
 selection and grant descriptors. Final output is a `DECISION` header plus raw
-Markdown (the earlier JSON `decision` + `markdown` form remains accepted), with
-one same-session correction before cleanup; no submission plugin is installed.
+Markdown, with one same-session correction before cleanup; the former JSON
+`decision` + `markdown` wire form is not accepted, while historical stored
+results remain readable. No submission plugin is installed.
 See [review decisions](review-decisions-design.md).
 
 The runner listens only on IPv4 loopback port `8080`. It runs as the persistent
@@ -1224,11 +1225,12 @@ no separate fresh-install procedure.
 
 For an already managed installation, keep the generated Worker configs and the
 existing Runner environment file with its valid values. Before restarting the
-upgraded Runner, remove `MODEL_SECRET_COMMAND`, `RUNNER_LLM_SERVICE_SOCKET`, and
-any disabled `RUNNER_LLM_RELAY` value (`0`, `false`, `off`, `no`, or any other
-non-enabled value; only `1`, `true`, `yes`, `on`, or unset are accepted). Remove any old
-`RUNNER_LLM_GRANT_VERSION=1` setting. This release issues v2 grants by default. The Runner rejects the
-removed command/socket and disabled relay at startup.
+upgraded Runner, remove `MODEL_SECRET_COMMAND` and any disabled
+`RUNNER_LLM_RELAY` value (`0`, `false`, `off`, `no`, or any other non-enabled
+value; only `1`, `true`, `yes`, `on`, or unset are accepted). Remove any old
+`RUNNER_LLM_GRANT_VERSION=1` setting. The retired `RUNNER_LLM_SERVICE_SOCKET` is
+ignored, so removing it is optional. This release issues v2 grants by default.
+The Runner rejects the removed command, disabled relay, and grant v1 at startup.
 
 Before a rollback across model protocols, pause admissions and finish every
 queued and running review with the current Runner. Once Core's queue is empty,
