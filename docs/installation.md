@@ -520,8 +520,10 @@ On a first installation, create its environment file with mode `0600` and put
 each required variable on one line in systemd `EnvironmentFile` syntax. Values
 are not shell-expanded, so do not use `export` or backslash continuations, and
 keep the JSON on one line. On a managed upgrade, keep the existing file and
-values. A direct-provider Runner must replace its managed fields as described
-in [Upgrading a direct-provider installation](#upgrading-a-direct-provider-installation);
+valid values, then apply the
+[managed Runner upgrade prerequisite](#managed-runner-upgrade-prerequisite).
+A direct-provider Runner must replace its managed fields as described in
+[Upgrading a direct-provider installation](#upgrading-a-direct-provider-installation);
 the `install` command truncates the destination:
 
 ```sh
@@ -1220,21 +1222,30 @@ before the application Worker. Provider and catalog details remain in the
 [managed relay catalog](llm-service.md#managed-relay-model-catalog). There is
 no separate fresh-install procedure.
 
-### Upgrading a direct-provider installation
+### Managed Runner upgrade prerequisite
 
-For an already managed installation, keep the generated Worker configs and
-follow the [normal update procedure](operations.md#update-and-rollback). Before
-restarting the upgraded Runner, remove any `MODEL_SECRET_COMMAND` entry from
-its environment file or service unit, even if the relay was already enabled.
-The Runner rejects this retired setting at startup.
+For an already managed installation, keep the generated Worker configs and the
+existing Runner environment file with its valid values. Before restarting the
+upgraded Runner, remove `MODEL_SECRET_COMMAND`, `RUNNER_LLM_SERVICE_SOCKET`, and
+any disabled `RUNNER_LLM_RELAY` value (`0`, `false`, `off`, `no`, or any other
+non-enabled value; only `1`, `true`, `yes`, `on`, or unset are accepted). Set
+`RUNNER_LLM_GRANT_VERSION=2` for the current v2 roster. The Runner rejects the
+removed command/socket and disabled relay at startup.
 
 Before a rollback across model protocols, pause admissions and finish every
 queued and running review with the current Runner. Once Core's queue is empty,
-drain and stop it. For a managed v1 target, save a v1-compatible Chat roster
-and default route without effort or limit overrides, and configure the matching
-grant version on the rollback Runner. For a direct-provider target, restore
-its original model and credential configuration. Restore the matching Worker
-revisions, schema and Runner artifact before restarting and resuming admissions.
+drain and stop it. Before restoring a roster, verify against the target-version
+inference and application Workers that every reviewer, synthesis and default
+route plus the required provider credentials and configuration is supported;
+explicitly check paths the target cannot serve, such as `native:openai`.
+For a managed v1 target, save only a verified v1-compatible Chat roster and
+default route without effort or limit overrides, and configure the matching
+grant version on the rollback Runner. For a direct-provider target, restore its
+original model and credential configuration. Restore that verified roster and
+default route before switching the matching Worker revisions, schema and Runner
+artifact, then restart and resume admissions.
+
+### Upgrading a direct-provider installation
 
 A direct-provider installation has an old Runner without a relay client. Prepare
 one target-release checkout and both configs first, outside the maintenance
@@ -1323,12 +1334,11 @@ window, then drain and switch. Only these differences apply:
    step 6 `REVIEW_DB` command. Confirm the default route through the deployed
    application as described in step 9 before admission resumes.
 
-7. Before starting the new Runner, migrate the existing
-   `<ABSOLUTE_RUNNER_ENV_FILE>`: remove `MODEL_SECRET_COMMAND`, any disabled
-   `RUNNER_LLM_RELAY` value and `RUNNER_LLM_SERVICE_SOCKET`; set
-   `RUNNER_LLM_RELAY=1` and `RUNNER_LLM_GRANT_VERSION=2`; set
-   `RUNNER_CALLBACK_URL=https://<INGRESS_HOST>/runner-callback` and
-   `RUNNER_CALLBACK_TOKEN=<static-runner-callback-token>`; and replace
+7. Before starting the new Runner, apply the
+   [managed Runner upgrade prerequisite](#managed-runner-upgrade-prerequisite)
+   to `<ABSOLUTE_RUNNER_ENV_FILE>`, then set `RUNNER_LLM_RELAY=1`,
+   `RUNNER_CALLBACK_URL=https://<INGRESS_HOST>/runner-callback`,
+   `RUNNER_CALLBACK_TOKEN=<static-runner-callback-token>`, and replace
    `REVIEW_MODEL_CONFIG` with the managed config whose `baseUrl` is
    `https://<INFERENCE_FQDN>/v1`. Keep `RUNNER_AUTH_TOKEN` and concurrency.
 
