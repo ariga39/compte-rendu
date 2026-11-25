@@ -119,9 +119,7 @@ export const handleReviewConfiguration = (
 ): Promise<Response> => {
   if (!operatorToken?.trim() || request.headers.get('authorization') !== `Bearer ${operatorToken}`)
     return Promise.resolve(response({ error: 'unauthorized' }, 401));
-  return new URL(request.url).pathname.endsWith('/efforts/reset')
-    ? resetReviewEffort(request, database)
-    : applyReviewConfiguration(request, database, relay);
+  return applyReviewConfiguration(request, database, relay);
 };
 
 export const applyReviewConfiguration = (

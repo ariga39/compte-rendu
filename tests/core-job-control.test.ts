@@ -1,5 +1,5 @@
 import { expect, it, vi } from 'vitest';
-import { createCoreWorker } from './support/core-http-adapter';
+import { createCoreWorker } from '../apps/core/src/core-worker';
 import { createD1ReviewStateStore } from '../apps/core/src/review-state-store';
 import { REVIEW_ATTEMPT_BUDGET_MS, type OperationalLogEvent } from '../packages/contracts/src';
 import { SqliteD1Database } from './support/d1-database';
@@ -218,12 +218,10 @@ it('ends the Check immediately and directly repairs a stale in-progress write af
       }),
     });
 
-    const claim = core.fetch(
-      new Request('https://core.internal/runner-claims', {
+    const claim = core.claimRunnerJob(
+      new Request('https://reviews.test/runner-claim', {
         method: 'POST',
-        headers: { 'x-compte-rendu-runner-claim': 'verified' },
       }),
-      env,
     );
     await started.promise;
     expect((await core.cancelReview(runId, 123)).status).toBe(202);
@@ -276,19 +274,14 @@ it('releases a cancelled claim when token preparation finishes before Runner rec
         return { token: 'test-read', expiresAt: new Date(Date.now() + 3600000).toISOString() };
       },
     });
-    const response = await core.fetch(
-      new Request('https://core.internal/runner-claims', {
+    const response = await core.claimRunnerJob(
+      new Request('https://reviews.test/runner-claim', {
         method: 'POST',
-        headers: { 'x-compte-rendu-runner-claim': 'verified' },
       }),
-      env,
     );
     expect(response.status).toBe(204);
     expect((await core.cancelReview(queued.runId, 123)).status).toBe(200);
-    const history = await core.fetch(
-      new Request('https://core.internal/api/jobs?status=cancelled'),
-      env,
-    );
+    const history = await core.listPublicJobs(new URLSearchParams('status=cancelled'));
     expect(history.status).toBe(200);
     expect(await history.json()).toMatchObject({
       tasks: [{ runId: queued.runId, status: 'cancelled', identity: { kind: 'anonymous' } }],

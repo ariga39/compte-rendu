@@ -103,7 +103,7 @@ it('issues a relay grant only to the Runner owning the frozen review routes', as
       application.fetch(
         new Request('https://reviews.test/runner-llm/issue', {
           method: 'POST',
-          headers: { authorization: 'Bearer ' + token, 'x-compte-rendu-runner-llm': 'verified' },
+          headers: { authorization: 'Bearer ' + token },
           body: JSON.stringify({ ...payload, ...overrides }),
         }),
       );

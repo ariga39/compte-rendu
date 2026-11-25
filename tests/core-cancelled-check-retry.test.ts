@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createCoreWorker } from './support/core-http-adapter';
+import { createCoreWorker } from '../apps/core/src/core-worker';
 import { createD1ReviewStateStore } from '../apps/core/src/index';
 import { createGitHubPublicationAdapter } from '../apps/core/src/github-review-adapter';
 import { SqliteD1Database } from './support/d1-database';
@@ -56,28 +56,22 @@ describe('Core cancelled Check retry feedback', () => {
     });
 
     try {
-      const response = await worker.fetch(
-        new Request('https://core.internal/review-events', {
-          method: 'POST',
-          body: JSON.stringify({
-            deliveryId: 'delivery-core-worker-check-rerequest',
-            event: 'check_run',
-            action: 'rerequested',
-            repositoryId: 11,
-            installationId: 7,
-            checkRunId: 321,
-            externalRunId: failed.runId,
-            senderLogin: 'maintainer',
-          }),
-        }),
-      );
-      expect(response.status).toBe(202);
+      const response = await worker.submitReviewEvent({
+        deliveryId: 'delivery-core-worker-check-rerequest',
+        event: 'check_run',
+        action: 'rerequested',
+        repositoryId: 11,
+        installationId: 7,
+        checkRunId: 321,
+        externalRunId: failed.runId,
+        senderLogin: 'maintainer',
+      });
+      expect(response).toBe('accepted');
       expect(await stateStore.getRunOutcome(failed.runId)).toMatchObject({ status: 'failed' });
 
-      const claimResponse = await worker.fetch(
-        new Request('https://core.internal/runner-claims', {
+      const claimResponse = await worker.claimRunnerJob(
+        new Request('https://reviews.test/runner-claim', {
           method: 'POST',
-          headers: { 'x-compte-rendu-runner-claim': 'verified' },
         }),
       );
       expect(claimResponse.status).toBe(200);
@@ -160,27 +154,22 @@ describe('Core cancelled Check retry feedback', () => {
           }),
         });
         const retry = (deliveryId: string) =>
-          worker.fetch(
-            new Request('https://core.internal/review-events', {
-              method: 'POST',
-              body: JSON.stringify({
-                deliveryId,
-                event: 'check_run',
-                action: 'rerequested',
-                repositoryId: 11,
-                installationId: 7,
-                checkRunId: 321,
-                externalRunId: runId,
-                senderLogin: 'maintainer',
-              }),
-            }),
-          );
+          worker.submitReviewEvent({
+            deliveryId,
+            event: 'check_run',
+            action: 'rerequested',
+            repositoryId: 11,
+            installationId: 7,
+            checkRunId: 321,
+            externalRunId: runId,
+            senderLogin: 'maintainer',
+          });
 
-        expect((await retry(`retry-${initialCleanup}-unauthorized`)).status).toBe(202);
+        expect(await retry(`retry-${initialCleanup}-unauthorized`)).toBe('accepted');
         expect(updates).toEqual([]);
 
         permission = 'write';
-        expect((await retry(`retry-${initialCleanup}-blocked`)).status).toBe(202);
+        expect(await retry(`retry-${initialCleanup}-blocked`)).toBe('accepted');
         expect(updates).toEqual([
           expect.objectContaining({
             checkRunId: 321,
@@ -200,12 +189,11 @@ describe('Core cancelled Check retry feedback', () => {
 
         await recordTestEvidence(stateStore, { runId, evidence, sandboxCleanup: 'destroyed' });
         vi.setSystemTime(new Date('2026-09-12T00:01:05Z'));
-        expect((await retry(`retry-${initialCleanup}-recovered`)).status).toBe(202);
+        expect(await retry(`retry-${initialCleanup}-recovered`)).toBe('accepted');
         expect(updates).toHaveLength(1);
-        const claim = await worker.fetch(
-          new Request('https://core.internal/runner-claims', {
+        const claim = await worker.claimRunnerJob(
+          new Request('https://reviews.test/runner-claim', {
             method: 'POST',
-            headers: { 'x-compte-rendu-runner-claim': 'verified' },
           }),
         );
         expect(claim.status).toBe(200);
@@ -307,22 +295,17 @@ describe('Core cancelled Check retry feedback', () => {
         }),
       });
 
-      const retry = await worker.fetch(
-        new Request('https://core.internal/review-events', {
-          method: 'POST',
-          body: JSON.stringify({
-            deliveryId: 'retry-older-check',
-            event: 'check_run',
-            action: 'rerequested',
-            repositoryId: 11,
-            installationId: 7,
-            checkRunId: 331,
-            externalRunId: older.runId,
-            senderLogin: 'maintainer',
-          }),
-        }),
-      );
-      expect(retry.status).toBe(202);
+      const retry = await worker.submitReviewEvent({
+        deliveryId: 'retry-older-check',
+        event: 'check_run',
+        action: 'rerequested',
+        repositoryId: 11,
+        installationId: 7,
+        checkRunId: 331,
+        externalRunId: older.runId,
+        senderLogin: 'maintainer',
+      });
+      expect(retry).toBe('accepted');
       expect(updates).toEqual([
         expect.objectContaining({
           checkRunId: 331,
@@ -347,10 +330,9 @@ describe('Core cancelled Check retry feedback', () => {
         attempt: newerJob.attempt,
         occurredAt: '2026-09-12T00:02:00.000Z',
       });
-      const claim = await worker.fetch(
-        new Request('https://core.internal/runner-claims', {
+      const claim = await worker.claimRunnerJob(
+        new Request('https://reviews.test/runner-claim', {
           method: 'POST',
-          headers: { 'x-compte-rendu-runner-claim': 'verified' },
         }),
       );
       expect(claim.status).toBe(200);
@@ -424,22 +406,17 @@ describe('Core cancelled Check retry feedback', () => {
         }),
       });
 
-      const retry = await worker.fetch(
-        new Request('https://core.internal/review-events', {
-          method: 'POST',
-          body: JSON.stringify({
-            deliveryId: 'retry-stale-clear',
-            event: 'check_run',
-            action: 'rerequested',
-            repositoryId: 11,
-            installationId: 7,
-            checkRunId: 351,
-            externalRunId: initial.runId,
-            senderLogin: 'maintainer',
-          }),
-        }),
-      );
-      expect(retry.status).toBe(202);
+      const retry = await worker.submitReviewEvent({
+        deliveryId: 'retry-stale-clear',
+        event: 'check_run',
+        action: 'rerequested',
+        repositoryId: 11,
+        installationId: 7,
+        checkRunId: 351,
+        externalRunId: initial.runId,
+        senderLogin: 'maintainer',
+      });
+      expect(retry).toBe('accepted');
       expect(updates).toEqual([]);
       await expect(
         stateStore.claimNextJob({
@@ -533,22 +510,17 @@ describe('Core cancelled Check retry feedback', () => {
         }),
       });
 
-      const response = await worker.fetch(
-        new Request('https://core.internal/review-events', {
-          method: 'POST',
-          body: JSON.stringify({
-            deliveryId: 'retry-failed-check',
-            event: 'check_run',
-            action: 'rerequested',
-            repositoryId: 11,
-            installationId: 7,
-            checkRunId: 341,
-            externalRunId: failed.runId,
-            senderLogin: 'maintainer',
-          }),
-        }),
-      );
-      expect(response.status).toBe(202);
+      const response = await worker.submitReviewEvent({
+        deliveryId: 'retry-failed-check',
+        event: 'check_run',
+        action: 'rerequested',
+        repositoryId: 11,
+        installationId: 7,
+        checkRunId: 341,
+        externalRunId: failed.runId,
+        senderLogin: 'maintainer',
+      });
+      expect(response).toBe('accepted');
       expect(updates).toEqual([]);
       await expect(stateStore.getRunOutcome(failed.runId)).resolves.toMatchObject({
         status: 'failed',
@@ -630,23 +602,18 @@ describe('Core cancelled Check retry feedback', () => {
         });
 
         vi.setSystemTime(new Date(occurredAt));
-        const response = await worker.fetch(
-          new Request('https://core.internal/review-events', {
-            method: 'POST',
-            body: JSON.stringify({
-              deliveryId: 'comment-during-cleanup',
-              event: 'issue_comment',
-              action: 'created',
-              repositoryId: 11,
-              pullRequestNumber: 47,
-              installationId: 7,
-              commentId: 987,
-              commenterLogin: 'maintainer',
-              command: '/ai-review',
-            }),
-          }),
-        );
-        expect(response.status).toBe(202);
+        const response = await worker.submitReviewEvent({
+          deliveryId: 'comment-during-cleanup',
+          event: 'issue_comment',
+          action: 'created',
+          repositoryId: 11,
+          pullRequestNumber: 47,
+          installationId: 7,
+          commentId: 987,
+          commenterLogin: 'maintainer',
+          command: '/ai-review',
+        });
+        expect(response).toBe('accepted');
         expect(updates).toEqual([]);
         expect(reactions).toEqual(
           scheduled
@@ -744,22 +711,17 @@ describe('Core cancelled Check retry feedback', () => {
         }),
       });
 
-      const response = await worker.fetch(
-        new Request('https://core.internal/review-events', {
-          method: 'POST',
-          body: JSON.stringify({
-            deliveryId: 'retry-feedback-failure',
-            event: 'check_run',
-            action: 'rerequested',
-            repositoryId: 11,
-            installationId: 7,
-            checkRunId: 333,
-            externalRunId: cancelled.runId,
-            senderLogin: 'maintainer',
-          }),
-        }),
-      );
-      expect(response.status).toBe(202);
+      const response = await worker.submitReviewEvent({
+        deliveryId: 'retry-feedback-failure',
+        event: 'check_run',
+        action: 'rerequested',
+        repositoryId: 11,
+        installationId: 7,
+        checkRunId: 333,
+        externalRunId: cancelled.runId,
+        senderLogin: 'maintainer',
+      });
+      expect(response).toBe('accepted');
       expect(logs).toContainEqual({
         phase: 'core',
         outcome: 'retry_feedback_failed',
@@ -821,27 +783,21 @@ describe('Core cancelled Check retry feedback', () => {
         }),
       });
 
-      const response = await worker.fetch(
-        new Request('https://core.internal/review-events', {
-          method: 'POST',
-          body: JSON.stringify({
-            deliveryId: 'retry-never-dispatched',
-            event: 'check_run',
-            action: 'rerequested',
-            repositoryId: 11,
-            installationId: 7,
-            checkRunId: 322,
-            externalRunId: runId,
-            senderLogin: 'maintainer',
-          }),
-        }),
-      );
-      expect(response.status).toBe(202);
+      const response = await worker.submitReviewEvent({
+        deliveryId: 'retry-never-dispatched',
+        event: 'check_run',
+        action: 'rerequested',
+        repositoryId: 11,
+        installationId: 7,
+        checkRunId: 322,
+        externalRunId: runId,
+        senderLogin: 'maintainer',
+      });
+      expect(response).toBe('accepted');
       expect(updates).toEqual([]);
-      const claim = await worker.fetch(
-        new Request('https://core.internal/runner-claims', {
+      const claim = await worker.claimRunnerJob(
+        new Request('https://reviews.test/runner-claim', {
           method: 'POST',
-          headers: { 'x-compte-rendu-runner-claim': 'verified' },
         }),
       );
       expect(claim.status).toBe(200);

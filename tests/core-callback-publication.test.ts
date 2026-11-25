@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createCoreWorker } from './support/core-http-adapter';
+import { createCoreWorker } from '../apps/core/src/core-worker';
 import { createD1ReviewStateStore } from '../apps/core/src/index';
 import { createGitHubPublicationAdapter } from '../apps/core/src/github-review-adapter';
 import type { OperationalLogEvent } from '../packages/contracts/src';
@@ -71,19 +71,18 @@ describe('Core callbacks and publication', () => {
       },
     );
     const callback = async () =>
-      new Request('https://core.internal/runner-results', {
+      new Request('https://reviews.test/runner-callback', {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          'x-compte-rendu-runner-callback': 'verified',
         },
         body: await successfulCallback(claimed.runId),
       });
 
     try {
-      const winner = worker.fetch(await callback());
+      const winner = worker.handleRunnerCallback(await callback());
       await publicationStarted;
-      const duplicate = await worker.fetch(await callback());
+      const duplicate = await worker.handleRunnerCallback(await callback());
       expect(duplicate.status).toBe(503);
       expect(checkUpdates).toEqual([]);
       finishPublication();
@@ -148,12 +147,11 @@ describe('Core callbacks and publication', () => {
 
     try {
       vi.setSystemTime(new Date('2026-09-01T01:31:00Z'));
-      const response = await worker.fetch(
-        new Request('https://core.internal/runner-results', {
+      const response = await worker.handleRunnerCallback(
+        new Request('https://reviews.test/runner-callback', {
           method: 'POST',
           headers: {
             'content-type': 'application/json',
-            'x-compte-rendu-runner-callback': 'verified',
           },
           body: await successfulCallback(claimed.runId, 'runner-job-1'),
         }),
@@ -220,18 +218,17 @@ describe('Core callbacks and publication', () => {
     );
     const callbackBody = await successfulCallback(claimed.runId);
     const request = () =>
-      new Request('https://core.internal/runner-results', {
+      new Request('https://reviews.test/runner-callback', {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          'x-compte-rendu-runner-callback': 'verified',
         },
         body: callbackBody,
       });
 
     try {
-      expect((await worker.fetch(request())).status).toBe(503);
-      expect((await worker.fetch(request())).status).toBe(202);
+      expect((await worker.handleRunnerCallback(request())).status).toBe(503);
+      expect((await worker.handleRunnerCallback(request())).status).toBe(202);
       expect(comments).toEqual([
         `Review job failed. Check the reviews on this commit before retrying with \`/ai-review\`.\n\n<!-- compte-rendu:failure:run:${claimed.runId} -->`,
       ]);
@@ -329,23 +326,26 @@ describe('Core callbacks and publication', () => {
       },
     );
     const callback = async (runId: string, id = 'runner-job-1') =>
-      new Request('https://core.internal/runner-results', {
+      new Request('https://reviews.test/runner-callback', {
         method: 'POST',
         headers: {
-          'x-compte-rendu-runner-callback': 'verified',
           'content-type': 'application/json',
         },
         body: await successfulCallback(runId, id),
       });
     try {
-      expect((await worker.fetch(await callback('unknown-run'))).status).toBe(404);
-      expect((await worker.fetch(await callback(failed.runId, 'failed-job'))).status).toBe(202);
-      expect((await worker.fetch(await callback(superseded.runId, 'superseded-job'))).status).toBe(
-        202,
-      );
-      expect((await worker.fetch(await callback(superseded.runId, 'superseded-job'))).status).toBe(
-        202,
-      );
+      expect((await worker.handleRunnerCallback(await callback('unknown-run'))).status).toBe(404);
+      expect(
+        (await worker.handleRunnerCallback(await callback(failed.runId, 'failed-job'))).status,
+      ).toBe(202);
+      expect(
+        (await worker.handleRunnerCallback(await callback(superseded.runId, 'superseded-job')))
+          .status,
+      ).toBe(202);
+      expect(
+        (await worker.handleRunnerCallback(await callback(superseded.runId, 'superseded-job')))
+          .status,
+      ).toBe(202);
       expect(reactions).toHaveLength(1);
       expect(checkUpdates).toHaveLength(1);
       await claimRunnerJob(stateStore, {
@@ -356,7 +356,9 @@ describe('Core callbacks and publication', () => {
       });
       const current = await stateStore.getRunOutcome(replacement.runId);
       expect(current).toMatchObject({ runnerJobId: 'replacement-job', runnerAttempt: 2 });
-      const stale = await worker.fetch(await callback(replacement.runId, 'previous-job'));
+      const stale = await worker.handleRunnerCallback(
+        await callback(replacement.runId, 'previous-job'),
+      );
       expect(stale.status).toBe(409);
       expect(await stateStore.getRunOutcome(replacement.runId)).toEqual(current);
       expect(stored).toHaveLength(0);
@@ -414,18 +416,17 @@ describe('Core callbacks and publication', () => {
     );
     const callbackBody = await successfulCallback(claimed.runId);
     const callbackRequest = () =>
-      new Request('https://core.internal/runner-results', {
+      new Request('https://reviews.test/runner-callback', {
         method: 'POST',
         headers: {
-          'x-compte-rendu-runner-callback': 'verified',
           'content-type': 'application/json',
         },
         body: callbackBody,
       });
     try {
-      const first = worker.fetch(callbackRequest());
+      const first = worker.handleRunnerCallback(callbackRequest());
       await publicationStartedPromise;
-      const second = worker.fetch(callbackRequest());
+      const second = worker.handleRunnerCallback(callbackRequest());
       await new Promise((resolve) => setTimeout(resolve, 10));
       expect(published).toHaveLength(1);
       releasePublication();
@@ -496,22 +497,23 @@ describe('Core callbacks and publication', () => {
     );
     const callbackBody = await failedCallback(claimed.runId);
     const callback = () =>
-      new Request('https://core.internal/runner-results', {
+      new Request('https://reviews.test/runner-callback', {
         method: 'POST',
         headers: {
-          'x-compte-rendu-runner-callback': 'verified',
           'content-type': 'application/json',
         },
         body: callbackBody,
       });
 
     try {
-      expect((await worker.fetch(callback())).status).toBe(503);
+      await expect(worker.handleRunnerCallback(callback())).rejects.toThrow(
+        'temporary terminal write failure',
+      );
       const afterFailure = await stateStore.getRunOutcome(claimed.runId);
       expect(afterFailure).toMatchObject({ status: 'scheduled' });
       expect(afterFailure?.publicationClaimedAt).toBeUndefined();
 
-      expect((await worker.fetch(callback())).status).toBe(202);
+      expect((await worker.handleRunnerCallback(callback())).status).toBe(202);
       expect(await stateStore.getRunOutcome(claimed.runId)).toMatchObject({
         status: 'failed',
         cleanup: 'destroyed',
@@ -573,16 +575,15 @@ describe('Core callbacks and publication', () => {
     try {
       const callbackBody = await failedCallback(claimed.runId);
       const callback = () =>
-        new Request('https://core.internal/runner-results', {
+        new Request('https://reviews.test/runner-callback', {
           method: 'POST',
           headers: {
-            'x-compte-rendu-runner-callback': 'verified',
             'content-type': 'application/json',
           },
           body: callbackBody,
         });
-      expect((await worker.fetch(callback())).status).toBe(202);
-      expect((await worker.fetch(callback())).status).toBe(202);
+      expect((await worker.handleRunnerCallback(callback())).status).toBe(202);
+      expect((await worker.handleRunnerCallback(callback())).status).toBe(202);
       await expect(stateStore.getRunOutcome(claimed.runId)).resolves.toMatchObject({
         status: 'failed',
         commentId: 987654,
@@ -664,11 +665,10 @@ describe('Core callbacks and publication', () => {
       },
     );
     const callback = async (body: string) =>
-      worker.fetch(
-        new Request('https://core.internal/runner-results', {
+      worker.handleRunnerCallback(
+        new Request('https://reviews.test/runner-callback', {
           method: 'POST',
           headers: {
-            'x-compte-rendu-runner-callback': 'verified',
             'content-type': 'application/json',
           },
           body,
@@ -745,12 +745,11 @@ describe('Core callbacks and publication', () => {
     try {
       expect(
         (
-          await worker.fetch(
-            new Request('https://core.internal/runner-results', {
+          await worker.handleRunnerCallback(
+            new Request('https://reviews.test/runner-callback', {
               method: 'POST',
               headers: {
                 'content-type': 'application/json',
-                'x-compte-rendu-runner-callback': 'verified',
               },
               body: await failedCallback(claimed.runId),
             }),
@@ -808,18 +807,19 @@ describe('Core callbacks and publication', () => {
     );
     const callbackBody = await failedCallback(claimed.runId);
     const request = () =>
-      new Request('https://core.internal/runner-results', {
+      new Request('https://reviews.test/runner-callback', {
         method: 'POST',
         headers: {
-          'x-compte-rendu-runner-callback': 'verified',
           'content-type': 'application/json',
         },
         body: callbackBody,
       });
 
     try {
-      expect((await worker.fetch(request())).status).toBe(503);
-      expect((await worker.fetch(request())).status).toBe(202);
+      await expect(worker.handleRunnerCallback(request())).rejects.toThrow(
+        'GitHub unavailable before create',
+      );
+      expect((await worker.handleRunnerCallback(request())).status).toBe(202);
       expect(comments).toEqual([
         `Review job failed. Check the reviews on this commit before retrying with \`/ai-review\`.\n\n<!-- compte-rendu:failure:run:${claimed.runId} -->`,
       ]);
@@ -1031,11 +1031,10 @@ describe('Core callbacks and publication', () => {
     );
     try {
       const callback = JSON.parse(await successfulCallback(claimed.runId)) as unknown;
-      const response = await worker.fetch(
-        new Request('https://core.internal/runner-results', {
+      const response = await worker.handleRunnerCallback(
+        new Request('https://reviews.test/runner-callback', {
           method: 'POST',
           headers: {
-            'x-compte-rendu-runner-callback': 'verified',
             'content-type': 'application/json',
           },
           body: JSON.stringify(callback),
@@ -1077,14 +1076,7 @@ describe('Core callbacks and publication', () => {
       },
     );
     try {
-      expect(
-        await worker.fetch(
-          new Request('https://core.internal/review-events', {
-            method: 'POST',
-            body: JSON.stringify(eligibleEvent),
-          }),
-        ),
-      ).toMatchObject({ status: 202 });
+      expect(await worker.submitReviewEvent(eligibleEvent)).toBe('accepted');
       expect(runnerRequests).toHaveLength(0);
     } finally {
       database.close();
@@ -1108,13 +1100,8 @@ describe('Core callbacks and publication', () => {
     });
     try {
       expect(
-        await worker.fetch(
-          new Request('https://core.internal/review-events', {
-            method: 'POST',
-            body: JSON.stringify({ ...eligibleEvent, deliveryId: 'delivery\nunsafe' }),
-          }),
-        ),
-      ).toMatchObject({ status: 202 });
+        await worker.submitReviewEvent({ ...eligibleEvent, deliveryId: 'delivery\nunsafe' }),
+      ).toBe('accepted');
       expect(events).toEqual([
         { phase: 'core', outcome: 'scheduled', deliveryId: 'redacted', runId: expect.any(String) },
       ]);
@@ -1161,23 +1148,18 @@ describe('Core callbacks and publication', () => {
       }),
     });
     try {
-      const response = await worker.fetch(
-        new Request('https://core.internal/review-events', {
-          method: 'POST',
-          body: JSON.stringify({
-            deliveryId: 'delivery-core-worker-manual',
-            event: 'issue_comment',
-            action: 'created',
-            repositoryId: 11,
-            pullRequestNumber: 42,
-            installationId: 7,
-            commentId: 987654,
-            commenterLogin: 'alice',
-            command: '/ai-review',
-          }),
-        }),
-      );
-      expect(response.status).toBe(202);
+      const response = await worker.submitReviewEvent({
+        deliveryId: 'delivery-core-worker-manual',
+        event: 'issue_comment',
+        action: 'created',
+        repositoryId: 11,
+        pullRequestNumber: 42,
+        installationId: 7,
+        commentId: 987654,
+        commenterLogin: 'alice',
+        command: '/ai-review',
+      });
+      expect(response).toBe('accepted');
       expect(reactions).toEqual([{ content: 'eyes' }]);
     } finally {
       database.close();
@@ -1208,23 +1190,18 @@ describe('Core callbacks and publication', () => {
     );
     try {
       expect(
-        await worker.fetch(
-          new Request('https://core.internal/review-events', {
-            method: 'POST',
-            body: JSON.stringify({
-              deliveryId: 'delivery-core-worker-manual-missing',
-              event: 'issue_comment',
-              action: 'created',
-              repositoryId: 11,
-              pullRequestNumber: 42,
-              installationId: 7,
-              commentId: 987655,
-              commenterLogin: 'alice',
-              command: '/ai-review',
-            }),
-          }),
-        ),
-      ).toMatchObject({ status: 202 });
+        await worker.submitReviewEvent({
+          deliveryId: 'delivery-core-worker-manual-missing',
+          event: 'issue_comment',
+          action: 'created',
+          repositoryId: 11,
+          pullRequestNumber: 42,
+          installationId: 7,
+          commentId: 987655,
+          commenterLogin: 'alice',
+          command: '/ai-review',
+        }),
+      ).toBe('accepted');
       expect(submitted).toBe(false);
     } finally {
       database.close();
@@ -1263,30 +1240,25 @@ describe('Core callbacks and publication', () => {
     );
     try {
       expect(
-        await worker.fetch(
-          new Request('https://core.internal/review-events', {
-            method: 'POST',
-            body: JSON.stringify({
-              deliveryId: 'delivery-core-worker-permission-none',
-              event: 'issue_comment',
-              action: 'created',
-              repositoryId: 11,
-              pullRequestNumber: 42,
-              installationId: 7,
-              commentId: 987656,
-              commenterLogin: 'alice',
-              command: '/ai-review',
-            }),
-          }),
-        ),
-      ).toMatchObject({ status: 202 });
+        await worker.submitReviewEvent({
+          deliveryId: 'delivery-core-worker-permission-none',
+          event: 'issue_comment',
+          action: 'created',
+          repositoryId: 11,
+          pullRequestNumber: 42,
+          installationId: 7,
+          commentId: 987656,
+          commenterLogin: 'alice',
+          command: '/ai-review',
+        }),
+      ).toBe('accepted');
       expect(submitted).toBe(false);
     } finally {
       database.close();
     }
   });
 
-  it('returns 503 when manual GitHub facts remain uncertain', async () => {
+  it('reports failed when manual GitHub facts remain uncertain', async () => {
     const database = new SqliteD1Database();
     const events: OperationalLogEvent[] = [];
     const worker = createCoreWorker(coreEnv(database), {
@@ -1303,23 +1275,18 @@ describe('Core callbacks and publication', () => {
     });
     try {
       expect(
-        await worker.fetch(
-          new Request('https://core.internal/review-events', {
-            method: 'POST',
-            body: JSON.stringify({
-              deliveryId: 'delivery-core-worker-manual-uncertain',
-              event: 'issue_comment',
-              action: 'created',
-              repositoryId: 11,
-              pullRequestNumber: 42,
-              installationId: 7,
-              commentId: 987657,
-              commenterLogin: 'alice',
-              command: '/ai-review',
-            }),
-          }),
-        ),
-      ).toMatchObject({ status: 503 });
+        await worker.submitReviewEvent({
+          deliveryId: 'delivery-core-worker-manual-uncertain',
+          event: 'issue_comment',
+          action: 'created',
+          repositoryId: 11,
+          pullRequestNumber: 42,
+          installationId: 7,
+          commentId: 987657,
+          commenterLogin: 'alice',
+          command: '/ai-review',
+        }),
+      ).toBe('failed');
       expect(events).toEqual([
         {
           phase: 'core',
@@ -1333,7 +1300,7 @@ describe('Core callbacks and publication', () => {
     }
   });
 
-  it('returns 503 when manual commenter permission remains uncertain', async () => {
+  it('reports failed when manual commenter permission remains uncertain', async () => {
     const database = new SqliteD1Database();
     const events: OperationalLogEvent[] = [];
     const worker = createCoreWorker(coreEnv(database), {
@@ -1358,23 +1325,18 @@ describe('Core callbacks and publication', () => {
     });
     try {
       expect(
-        await worker.fetch(
-          new Request('https://core.internal/review-events', {
-            method: 'POST',
-            body: JSON.stringify({
-              deliveryId: 'delivery-core-worker-permission-uncertain',
-              event: 'issue_comment',
-              action: 'created',
-              repositoryId: 11,
-              pullRequestNumber: 42,
-              installationId: 7,
-              commentId: 987658,
-              commenterLogin: 'alice',
-              command: '/ai-review',
-            }),
-          }),
-        ),
-      ).toMatchObject({ status: 503 });
+        await worker.submitReviewEvent({
+          deliveryId: 'delivery-core-worker-permission-uncertain',
+          event: 'issue_comment',
+          action: 'created',
+          repositoryId: 11,
+          pullRequestNumber: 42,
+          installationId: 7,
+          commentId: 987658,
+          commenterLogin: 'alice',
+          command: '/ai-review',
+        }),
+      ).toBe('failed');
       expect(events).toEqual([
         {
           phase: 'core',
@@ -1410,16 +1372,11 @@ describe('Core callbacks and publication', () => {
     );
     try {
       expect(
-        await worker.fetch(
-          new Request('https://core.internal/review-events', {
-            method: 'POST',
-            body: JSON.stringify({
-              ...eligibleEvent,
-              deliveryId: 'delivery-core-worker-schedule-failed',
-            }),
-          }),
-        ),
-      ).toMatchObject({ status: 202 });
+        await worker.submitReviewEvent({
+          ...eligibleEvent,
+          deliveryId: 'delivery-core-worker-schedule-failed',
+        }),
+      ).toBe('accepted');
       expect(events).toEqual([
         {
           phase: 'core',
@@ -1433,7 +1390,7 @@ describe('Core callbacks and publication', () => {
     }
   });
 
-  it('returns 503 and records a retryable state failure when claiming fails', async () => {
+  it('reports failed and records a retryable state failure when claiming fails', async () => {
     const database = new SqliteD1Database();
     const events: OperationalLogEvent[] = [];
     const baseStateStore = createD1ReviewStateStore(database);
@@ -1452,14 +1409,7 @@ describe('Core callbacks and publication', () => {
       },
     });
     try {
-      expect(
-        await worker.fetch(
-          new Request('https://core.internal/review-events', {
-            method: 'POST',
-            body: JSON.stringify(eligibleEvent),
-          }),
-        ),
-      ).toMatchObject({ status: 503 });
+      expect(await worker.submitReviewEvent(eligibleEvent)).toBe('failed');
       expect(events).toEqual([
         {
           phase: 'core',

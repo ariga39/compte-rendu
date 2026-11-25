@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createCoreWorker } from './support/core-http-adapter';
+import { createCoreWorker } from '../apps/core/src/core-worker';
 import { createD1ReviewStateStore } from '../apps/core/src/index';
 import { SqliteD1Database } from './support/d1-database';
 import { claimRunnerJob } from './support/runner-claim';
@@ -31,10 +31,9 @@ const failedCallback = (
   });
 
 const callbackRequest = (body: string) =>
-  new Request('https://core.internal/runner-results', {
+  new Request('https://reviews.test/runner-callback', {
     method: 'POST',
     headers: {
-      'x-compte-rendu-runner-callback': 'verified',
       'content-type': 'application/json',
     },
     body,
@@ -122,9 +121,10 @@ describe('Core recovery callback boundaries', () => {
       await win(stateStore, run.runId);
       const before = await stateStore.getRunOutcome(run.runId);
 
-      expect((await worker.fetch(callbackRequest(failedCallback(job, 'destroyed')))).status).toBe(
-        409,
-      );
+      expect(
+        (await worker.handleRunnerCallback(callbackRequest(failedCallback(job, 'destroyed'))))
+          .status,
+      ).toBe(409);
       expect(await stateStore.getRunOutcome(run.runId)).toEqual(before);
       expect(captured.comments).toEqual([]);
       expect(captured.checks).toEqual([]);
@@ -150,7 +150,7 @@ describe('Core recovery callback boundaries', () => {
       const before = await stateStore.getRunOutcome(run.runId);
       expect(
         (
-          await worker.fetch(
+          await worker.handleRunnerCallback(
             callbackRequest(failedCallback(job, 'destroyed', { headSha: newHead })),
           )
         ).status,

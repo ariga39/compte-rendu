@@ -217,10 +217,6 @@ const cursorToRunCursor = (cursor: Cursor): PublicRunCursor => ({
   runId: cursor.r,
 });
 
-export interface DashboardDependencies {
-  readonly stateStore: ReviewPublicationStateStore;
-}
-
 export const getDashboardOverview = async (
   store: ReviewPublicationStateStore,
   now = nowIso(),
@@ -336,29 +332,6 @@ export const getPublicJobDetail = async (
         : [{ stage: 'publishing', startedAt: row.publicationStartedAt }]),
     ],
   });
-};
-
-export const handleDashboardRequest = async (
-  request: Request,
-  dependencies: DashboardDependencies,
-): Promise<Response | undefined> => {
-  if (request.method !== 'GET') return undefined;
-  const url = new URL(request.url);
-  const store = dependencies.stateStore;
-
-  if (url.pathname === '/api/dashboard' || url.pathname === '/dashboard')
-    return getDashboardOverview(store);
-
-  if (url.pathname === '/api/jobs' || url.pathname === '/jobs')
-    return listPublicJobs(store, url.searchParams);
-
-  const detailPrefix = '/api/jobs/';
-  if (url.pathname.startsWith(detailPrefix) || url.pathname.startsWith('/jobs/')) {
-    const prefix = url.pathname.startsWith(detailPrefix) ? detailPrefix : '/jobs/';
-    return getPublicJobDetail(store, url.pathname.slice(prefix.length));
-  }
-
-  return undefined;
 };
 
 const RepositoryMetadata = Schema.Struct({

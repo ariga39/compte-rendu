@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createCoreWorker } from './support/core-http-adapter';
+import { createCoreWorker } from '../apps/core/src/core-worker';
 import { createD1ReviewStateStore } from '../apps/core/src/index';
 import { createRunner } from '../apps/runner/src/runner';
 import { sandboxResourceName } from '../apps/runner/src/sandbox-resource-name';
@@ -48,10 +48,9 @@ const claimRun = async (
 };
 
 const callbackRequest = (body: string) =>
-  new Request('https://core.internal/runner-results', {
+  new Request('https://reviews.test/runner-callback', {
     method: 'POST',
     headers: {
-      'x-compte-rendu-runner-callback': 'verified',
       'content-type': 'application/json',
     },
     body,
@@ -100,7 +99,7 @@ describe('age cleanup and same-PR blocker release', () => {
       });
       const evidenceId = failed.terminal.evidenceId as string;
       const callbackBody = await readFile(join(evidenceRoot, evidenceId, 'callback.json'), 'utf8');
-      expect((await worker.fetch(callbackRequest(callbackBody))).status).toBe(202);
+      expect((await worker.handleRunnerCallback(callbackRequest(callbackBody))).status).toBe(202);
 
       const nextRun = await claimRun(stateStore, {
         deliveryId: 'delivery-age-cleanup-next',
@@ -153,18 +152,16 @@ describe('age cleanup and same-PR blocker release', () => {
         }),
         llmRelay: true,
         claimUrl: '',
-        callbackUrl: 'https://core.internal/runner-results',
+        callbackUrl: 'https://reviews.test/runner-callback',
         callbackToken: 'callback-token',
         callbackFetch: async (input, init) => {
           const request = new Request(input, init);
           if (new URL(request.url).pathname.startsWith('/runner-llm/'))
             return new Response(null, { status: 204 });
-          const headers = new Headers(request.headers);
-          headers.set('x-compte-rendu-runner-callback', 'verified');
-          const result = await worker.fetch(
+          const result = await worker.handleRunnerCallback(
             new Request(request.url, {
               method: request.method,
-              headers,
+              headers: request.headers,
               body: await request.text(),
             }),
           );

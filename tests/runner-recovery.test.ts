@@ -1507,7 +1507,12 @@ describe('Runner backend outage recovery', () => {
       GITHUB_APP_PRIVATE_KEY: 'test-private-key',
       EVIDENCE_BUCKET: { put: async () => undefined },
     };
-    const dispatch = (request: Request) =>
+    const context = {
+      waitUntil: (task: Promise<unknown>) => {
+        waitUntilTasks.push(task);
+      },
+    };
+    const createWorker = () =>
       createCoreWorker(env, {
         github: {
           getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
@@ -1527,32 +1532,28 @@ describe('Runner backend outage recovery', () => {
           token: 'repository-read-token',
           expiresAt: '2030-01-01T00:00:00.000Z',
         }),
-      }).fetch(request, env, {
-        waitUntil: (task) => {
-          waitUntilTasks.push(task);
-        },
       });
     const coreClaim = async () => {
-      const response = await dispatch(
-        new Request('https://core.internal/runner-claims', {
+      const response = await createWorker().claimRunnerJob(
+        new Request('https://reviews.test/runner-claim', {
           method: 'POST',
-          headers: { 'x-compte-rendu-runner-claim': 'verified' },
           body: '{}',
         }),
+        context,
       );
       await Promise.all(waitUntilTasks.splice(0));
       return response;
     };
     const postCoreCallback = async (body: string) => {
-      const response = await dispatch(
-        new Request('https://core.internal/runner-results', {
+      const response = await createWorker().handleRunnerCallback(
+        new Request('https://reviews.test/runner-callback', {
           method: 'POST',
           headers: {
             'content-type': 'application/json',
-            'x-compte-rendu-runner-callback': 'verified',
           },
           body,
         }),
+        context,
       );
       await Promise.all(waitUntilTasks.splice(0));
       return response;

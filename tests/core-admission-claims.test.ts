@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createRunner } from '../apps/runner/src/runner';
-import { createCoreWorker } from './support/core-http-adapter';
+import { createCoreWorker } from '../apps/core/src/core-worker';
 import { createD1ReviewStateStore } from '../apps/core/src/index';
 import type { ReviewEvent } from '../packages/contracts/src';
 import { SqliteD1Database } from './support/d1-database';
@@ -48,14 +48,12 @@ describe('Core admission, claims, and manual policy', () => {
     );
 
     try {
-      const response = await worker.fetch(
-        new Request('https://core.internal/review-events', {
-          method: 'POST',
-          body: JSON.stringify({ ...eligibleEvent, deliveryId: 'delivery-queued-only' }),
-        }),
-      );
+      const response = await worker.submitReviewEvent({
+        ...eligibleEvent,
+        deliveryId: 'delivery-queued-only',
+      });
 
-      expect(response.status).toBe(202);
+      expect(response).toBe('accepted');
       expect(runnerAdmissions).toBe(0);
       expect(tokenMints).toBe(0);
     } finally {
@@ -82,19 +80,16 @@ describe('Core admission, claims, and manual policy', () => {
     );
 
     try {
-      const scheduled = await worker.fetch(
-        new Request('https://core.internal/review-events', {
-          method: 'POST',
-          body: JSON.stringify({ ...eligibleEvent, deliveryId: 'delivery-claimable' }),
-        }),
-      );
-      expect(scheduled.status).toBe(202);
+      const scheduled = await worker.submitReviewEvent({
+        ...eligibleEvent,
+        deliveryId: 'delivery-claimable',
+      });
+      expect(scheduled).toBe('accepted');
       expect(tokenMints).toBe(0);
 
-      const claim = await worker.fetch(
-        new Request('https://core.internal/runner-claims', {
+      const claim = await worker.claimRunnerJob(
+        new Request('https://reviews.test/runner-claim', {
           method: 'POST',
-          headers: { 'x-compte-rendu-runner-claim': 'verified' },
         }),
       );
 
@@ -138,31 +133,20 @@ describe('Core admission, claims, and manual policy', () => {
           pullRequestNumber: 43,
         },
       ]) {
-        expect(
-          (
-            await worker.fetch(
-              new Request('https://core.internal/review-events', {
-                method: 'POST',
-                body: JSON.stringify(event),
-              }),
-            )
-          ).status,
-        ).toBe(202);
+        expect(await worker.submitReviewEvent(event)).toBe('accepted');
       }
 
-      const firstClaim = await worker.fetch(
-        new Request('https://core.internal/runner-claims', {
+      const firstClaim = await worker.claimRunnerJob(
+        new Request('https://reviews.test/runner-claim', {
           method: 'POST',
-          headers: { 'x-compte-rendu-runner-claim': 'verified' },
         }),
       );
       expect(firstClaim.status).toBe(200);
       expect(await firstClaim.json()).toMatchObject({ runId: expect.any(String) });
 
-      const restartedClaim = await worker.fetch(
-        new Request('https://core.internal/runner-claims', {
+      const restartedClaim = await worker.claimRunnerJob(
+        new Request('https://reviews.test/runner-claim', {
           method: 'POST',
-          headers: { 'x-compte-rendu-runner-claim': 'verified' },
         }),
       );
       expect(restartedClaim.status).toBe(200);
@@ -190,22 +174,16 @@ describe('Core admission, claims, and manual policy', () => {
 
     try {
       for (const deliveryId of ['delivery-concurrent-1', 'delivery-concurrent-2']) {
-        const response = await worker.fetch(
-          new Request('https://core.internal/review-events', {
-            method: 'POST',
-            body: JSON.stringify({ ...eligibleEvent, deliveryId }),
-          }),
-        );
-        expect(response.status).toBe(202);
+        const response = await worker.submitReviewEvent({ ...eligibleEvent, deliveryId });
+        expect(response).toBe('accepted');
       }
 
       const claims = await Promise.all(
         [1, 2].map(() =>
           Promise.resolve(
-            worker.fetch(
-              new Request('https://core.internal/runner-claims', {
+            worker.claimRunnerJob(
+              new Request('https://reviews.test/runner-claim', {
                 method: 'POST',
-                headers: { 'x-compte-rendu-runner-claim': 'verified' },
               }),
             ),
           ),
@@ -243,12 +221,11 @@ describe('Core admission, claims, and manual policy', () => {
             runnerRequests.push(request.clone());
             if (request.method === 'DELETE') {
               const jobId = new URL(request.url).pathname.split('/').pop();
-              await worker.fetch(
-                new Request('https://core.internal/runner-results', {
+              await worker.handleRunnerCallback(
+                new Request('https://reviews.test/runner-callback', {
                   method: 'POST',
                   headers: {
                     'content-type': 'application/json',
-                    'x-compte-rendu-runner-callback': 'verified',
                   },
                   body: await abortedCallback(oldRunId, jobId!),
                 }),
@@ -296,36 +273,17 @@ describe('Core admission, claims, and manual policy', () => {
         deliveryId: 'delivery-new-queued',
         headSha: '3333333333333333333333333333333333333333',
       };
-      expect(
-        (
-          await worker.fetch(
-            new Request('https://core.internal/review-events', {
-              method: 'POST',
-              body: JSON.stringify(oldEvent),
-            }),
-          )
-        ).status,
-      ).toBe(202);
-      const oldClaim = await worker.fetch(
-        new Request('https://core.internal/runner-claims', {
+      expect(await worker.submitReviewEvent(oldEvent)).toBe('accepted');
+      const oldClaim = await worker.claimRunnerJob(
+        new Request('https://reviews.test/runner-claim', {
           method: 'POST',
-          headers: { 'x-compte-rendu-runner-claim': 'verified' },
         }),
       );
       const oldJob = (await oldClaim.json()) as { id: string; runId: string };
       oldRunId = oldJob.runId;
       currentHead = newEvent.headSha;
 
-      expect(
-        (
-          await worker.fetch(
-            new Request('https://core.internal/review-events', {
-              method: 'POST',
-              body: JSON.stringify(newEvent),
-            }),
-          )
-        ).status,
-      ).toBe(202);
+      expect(await worker.submitReviewEvent(newEvent)).toBe('accepted');
       expect(runnerRequests).toHaveLength(1);
       expect(runnerRequests[0]?.method).toBe('DELETE');
       expect(runnerRequests[0]?.url).toBe(`http://runner.internal/jobs/${oldJob.id}`);
@@ -340,10 +298,9 @@ describe('Core admission, claims, and manual policy', () => {
         status: 'cancelled',
       });
 
-      const newClaim = await worker.fetch(
-        new Request('https://core.internal/runner-claims', {
+      const newClaim = await worker.claimRunnerJob(
+        new Request('https://reviews.test/runner-claim', {
           method: 'POST',
-          headers: { 'x-compte-rendu-runner-claim': 'verified' },
         }),
       );
       expect(newClaim.status).toBe(200);
@@ -376,16 +333,7 @@ describe('Core admission, claims, and manual policy', () => {
           headSha: '3333333333333333333333333333333333333333',
         },
       ]) {
-        expect(
-          (
-            await worker.fetch(
-              new Request('https://core.internal/review-events', {
-                method: 'POST',
-                body: JSON.stringify(event),
-              }),
-            )
-          ).status,
-        ).toBe(202);
+        expect(await worker.submitReviewEvent(event)).toBe('accepted');
       }
       expect(updates).toEqual([
         {
@@ -435,24 +383,16 @@ describe('Core admission, claims, and manual policy', () => {
 
     try {
       expect(
-        (
-          await worker.fetch(
-            new Request('https://core.internal/review-events', {
-              method: 'POST',
-              body: JSON.stringify({ ...eligibleEvent, deliveryId: 'delivery-cancel-fails-old' }),
-            }),
-            env,
-            context,
-          )
-        ).status,
-      ).toBe(202);
+        await worker.submitReviewEvent(
+          { ...eligibleEvent, deliveryId: 'delivery-cancel-fails-old' },
+          context,
+        ),
+      ).toBe('accepted');
       await Promise.all(waitUntilTasks.splice(0));
-      const oldClaim = await worker.fetch(
-        new Request('https://core.internal/runner-claims', {
+      const oldClaim = await worker.claimRunnerJob(
+        new Request('https://reviews.test/runner-claim', {
           method: 'POST',
-          headers: { 'x-compte-rendu-runner-claim': 'verified' },
         }),
-        env,
         context,
       );
       expect(oldClaim.status).toBe(200);
@@ -464,18 +404,7 @@ describe('Core admission, claims, and manual policy', () => {
         headSha: '3333333333333333333333333333333333333333',
       };
       currentHead = newEvent.headSha;
-      expect(
-        (
-          await worker.fetch(
-            new Request('https://core.internal/review-events', {
-              method: 'POST',
-              body: JSON.stringify(newEvent),
-            }),
-            env,
-            context,
-          )
-        ).status,
-      ).toBe(202);
+      expect(await worker.submitReviewEvent(newEvent, context)).toBe('accepted');
       await Promise.all(waitUntilTasks.splice(0));
       const scheduledEvents = (await postHogEvents(requests)).filter(
         (event) => (event as { event: string }).event === 'review scheduled',
@@ -485,52 +414,47 @@ describe('Core admission, claims, and manual policy', () => {
         eligibleEvent.headSha,
         newEvent.headSha,
       ]);
-      const replacementClaim = await worker.fetch(
-        new Request('https://core.internal/runner-claims', {
+      const replacementClaim = await worker.claimRunnerJob(
+        new Request('https://reviews.test/runner-claim', {
           method: 'POST',
-          headers: { 'x-compte-rendu-runner-claim': 'verified' },
         }),
       );
       expect(replacementClaim.status).toBe(204);
       expect(
         (
-          await worker.fetch(
-            new Request('https://core.internal/runner-results', {
+          await worker.handleRunnerCallback(
+            new Request('https://reviews.test/runner-callback', {
               method: 'POST',
               headers: {
                 'content-type': 'application/json',
-                'x-compte-rendu-runner-callback': 'verified',
               },
               body: await abortedCallback(oldJob.runId, oldJob.id, 1, 'failed'),
             }),
           )
         ).status,
       ).toBe(202);
-      const claimBeforeCleanup = await worker.fetch(
-        new Request('https://core.internal/runner-claims', {
+      const claimBeforeCleanup = await worker.claimRunnerJob(
+        new Request('https://reviews.test/runner-claim', {
           method: 'POST',
-          headers: { 'x-compte-rendu-runner-claim': 'verified' },
         }),
       );
       expect(claimBeforeCleanup.status).toBe(204);
       expect(
         (
-          await worker.fetch(
-            new Request('https://core.internal/runner-results', {
+          await worker.handleRunnerCallback(
+            new Request('https://reviews.test/runner-callback', {
               method: 'POST',
               headers: {
                 'content-type': 'application/json',
-                'x-compte-rendu-runner-callback': 'verified',
               },
               body: await abortedCallback(oldJob.runId, oldJob.id),
             }),
           )
         ).status,
       ).toBe(202);
-      const claimAfterCleanup = await worker.fetch(
-        new Request('https://core.internal/runner-claims', {
+      const claimAfterCleanup = await worker.claimRunnerJob(
+        new Request('https://reviews.test/runner-claim', {
           method: 'POST',
-          headers: { 'x-compte-rendu-runner-claim': 'verified' },
         }),
       );
       expect(claimAfterCleanup.status).toBe(200);
@@ -552,29 +476,22 @@ describe('Core admission, claims, and manual policy', () => {
       EVIDENCE_BUCKET: { put: async () => undefined },
     };
     const core = createCoreWorker(env, { stateStore, ...postHogTestDefaults.dependencies });
-    const schedule = (event: ReviewEvent) =>
-      core.fetch(
-        new Request('https://core.internal/review-events', {
-          method: 'POST',
-          body: JSON.stringify(event),
-        }),
-      );
+    const schedule = (event: ReviewEvent) => core.submitReviewEvent(event);
     await schedule(eligibleEvent);
     let polled = false;
     vi.stubEnv('MODEL_SECRET_COMMAND', 'secret-resolver get MODEL_API_KEY');
     const runner: ReturnType<typeof createRunner> = createRunner({
       authToken: 'runner-auth-token',
-      claimUrl: 'https://core.internal/runner-claims',
-      callbackUrl: 'https://core.internal/runner-results',
+      claimUrl: 'https://reviews.test/runner-claim',
+      callbackUrl: 'https://reviews.test/runner-callback',
       callbackToken: 'callback',
       claimIntervalMs: 1000,
       claimFetch: async () => {
         if (polled) return new Response(null, { status: 204 });
         polled = true;
-        const response = await core.fetch(
-          new Request('https://core.internal/runner-claims', {
+        const response = await core.claimRunnerJob(
+          new Request('https://reviews.test/runner-claim', {
             method: 'POST',
-            headers: { 'x-compte-rendu-runner-claim': 'verified' },
           }),
         );
         intercepted.resolve(await response.clone().json());
@@ -582,10 +499,9 @@ describe('Core admission, claims, and manual policy', () => {
         return response;
       },
       callbackFetch: async (_, init) => {
-        const req = new Request('https://core.internal/runner-results', init);
-        req.headers.set('x-compte-rendu-runner-callback', 'verified');
+        const req = new Request('https://reviews.test/runner-callback', init);
         const result = await req.clone().json();
-        const reply = await core.fetch(req);
+        const reply = await core.handleRunnerCallback(req);
         callback.resolve(result);
         return reply;
       },
@@ -662,19 +578,14 @@ describe('Core admission, claims, and manual policy', () => {
 
     try {
       expect(
-        (
-          await worker.fetch(
-            new Request('https://core.internal/review-events', {
-              method: 'POST',
-              body: JSON.stringify({ ...eligibleEvent, deliveryId: 'delivery-claim-race-old' }),
-            }),
-          )
-        ).status,
-      ).toBe(202);
-      const oldClaim = worker.fetch(
-        new Request('https://core.internal/runner-claims', {
+        await worker.submitReviewEvent({
+          ...eligibleEvent,
+          deliveryId: 'delivery-claim-race-old',
+        }),
+      ).toBe('accepted');
+      const oldClaim = worker.claimRunnerJob(
+        new Request('https://reviews.test/runner-claim', {
           method: 'POST',
-          headers: { 'x-compte-rendu-runner-claim': 'verified' },
         }),
       );
       await mintStarted;
@@ -682,26 +593,18 @@ describe('Core admission, claims, and manual policy', () => {
       const newHead = '3333333333333333333333333333333333333333';
       currentHead = newHead;
       expect(
-        (
-          await worker.fetch(
-            new Request('https://core.internal/review-events', {
-              method: 'POST',
-              body: JSON.stringify({
-                ...eligibleEvent,
-                deliveryId: 'delivery-claim-race-new',
-                headSha: newHead,
-              }),
-            }),
-          )
-        ).status,
-      ).toBe(202);
+        await worker.submitReviewEvent({
+          ...eligibleEvent,
+          deliveryId: 'delivery-claim-race-new',
+          headSha: newHead,
+        }),
+      ).toBe('accepted');
       releaseTokenMint();
 
       expect((await oldClaim).status).toBe(204);
-      const currentClaim = await worker.fetch(
-        new Request('https://core.internal/runner-claims', {
+      const currentClaim = await worker.claimRunnerJob(
+        new Request('https://reviews.test/runner-claim', {
           method: 'POST',
-          headers: { 'x-compte-rendu-runner-claim': 'verified' },
         }),
       );
       expect(currentClaim.status).toBe(200);
@@ -738,19 +641,13 @@ describe('Core admission, claims, and manual policy', () => {
     );
 
     try {
-      const response = await worker.fetch(
-        new Request('https://core.internal/review-events', {
-          method: 'POST',
-          body: JSON.stringify(eligibleEvent),
-        }),
-      );
+      const response = await worker.submitReviewEvent(eligibleEvent);
 
-      expect(response.status).toBe(202);
+      expect(response).toBe('accepted');
       expect(runnerRequests).toHaveLength(0);
-      const claim = await worker.fetch(
-        new Request('https://core.internal/runner-claims', {
+      const claim = await worker.claimRunnerJob(
+        new Request('https://reviews.test/runner-claim', {
           method: 'POST',
-          headers: { 'x-compte-rendu-runner-claim': 'verified' },
         }),
       );
       expect(claim.status).toBe(200);
@@ -800,28 +697,26 @@ describe('Core admission, claims, and manual policy', () => {
         }),
       };
       const request = () =>
-        new Request('https://core.internal/runner-claims', {
+        new Request('https://reviews.test/runner-claim', {
           method: 'POST',
-          headers: { 'x-compte-rendu-runner-claim': 'verified' },
           body: JSON.stringify({ requestId: '89a128bf-2bda-4e85-ab11-be00c22c0675' }),
         });
       try {
         const worker = createCoreWorker(env, dependencies);
-        await worker.fetch(
-          new Request('https://core.internal/review-events', {
-            method: 'POST',
-            body: JSON.stringify(eligibleEvent),
-          }),
-        );
-        const firstResponse = worker.fetch(request());
+        await worker.submitReviewEvent(eligibleEvent);
+        const firstResponse = worker.claimRunnerJob(request());
         await preparing;
-        expect((await createCoreWorker(env, dependencies).fetch(request())).status).toBe(503);
+        expect((await createCoreWorker(env, dependencies).claimRunnerJob(request())).status).toBe(
+          503,
+        );
         if (expires) {
           vi.setSystemTime(new Date('2026-09-01T01:31:00Z'));
-          expect((await createCoreWorker(env, dependencies).fetch(request())).status).toBe(204);
+          expect((await createCoreWorker(env, dependencies).claimRunnerJob(request())).status).toBe(
+            204,
+          );
           unblock();
           expect((await firstResponse).status).not.toBe(200);
-          expect((await worker.fetch(request())).status).toBe(204);
+          expect((await worker.claimRunnerJob(request())).status).toBe(204);
           expect(checks).toContain('failure');
           const unpreparedRun = database.database
             .prepare('SELECT run_id FROM review_runs')
@@ -838,14 +733,14 @@ describe('Core admission, claims, and manual policy', () => {
         const assigned = (await first.clone().json()) as { id: string; runId: string };
         // A prepared replay resends the same handoff even if the head moved.
         currentHead = '3333333333333333333333333333333333333333';
-        const replay = await createCoreWorker(env, dependencies).fetch(request());
+        const replay = await createCoreWorker(env, dependencies).claimRunnerJob(request());
         expect(replay.status).toBe(200);
         expect(replay.headers.get('cache-control')).toBe('no-store');
         expect(await replay.json()).toEqual(await first.json());
         lookupUnavailable = true;
-        expect((await worker.fetch(request())).status).toBe(503);
+        expect((await worker.claimRunnerJob(request())).status).toBe(503);
         vi.setSystemTime(new Date('2026-09-01T01:31:00Z'));
-        expect((await worker.fetch(request())).status).toBe(204);
+        expect((await worker.claimRunnerJob(request())).status).toBe(204);
         expect(checks).toContain('failure');
         const prepared = await stateStore.getRunOutcome(assigned.runId);
         expect(prepared?.status).toBe('failed');
@@ -887,26 +782,23 @@ describe('Core admission, claims, and manual policy', () => {
         }),
       });
       const preparedClaimRequest = () =>
-        new Request('https://core.internal/runner-claims', {
+        new Request('https://reviews.test/runner-claim', {
           method: 'POST',
-          headers: { 'x-compte-rendu-runner-claim': 'verified' },
           body: JSON.stringify({ requestId: '5b0f4f8e-6a1d-4f6e-9c2b-3d4e5f6a7b8c' }),
         });
       const callbackRequest = (body: string) =>
-        new Request('https://core.internal/runner-results', {
+        new Request('https://reviews.test/runner-callback', {
           method: 'POST',
           headers: {
             'content-type': 'application/json',
-            'x-compte-rendu-runner-callback': 'verified',
           },
           body,
         });
       try {
         expect(
-          (await scheduleEligibleReview(worker, eligibleEvent.headSha, 'delivery-liveness-old'))
-            .status,
-        ).toBe(202);
-        const claim = await worker.fetch(
+          await scheduleEligibleReview(worker, eligibleEvent.headSha, 'delivery-liveness-old'),
+        ).toBe('accepted');
+        const claim = await worker.claimRunnerJob(
           mode === 'legacy' ? runnerClaimRequest() : preparedClaimRequest(),
         );
         expect(claim.status).toBe(200);
@@ -918,11 +810,11 @@ describe('Core admission, claims, and manual policy', () => {
         // The original Runner neither polls again nor delivers a result.
         vi.setSystemTime(new Date('2026-09-01T01:31:00Z'));
         currentHead = '3333333333333333333333333333333333333333';
-        expect(
-          (await scheduleEligibleReview(worker, currentHead, 'delivery-liveness-new')).status,
-        ).toBe(202);
+        expect(await scheduleEligibleReview(worker, currentHead, 'delivery-liveness-new')).toBe(
+          'accepted',
+        );
 
-        const replacement = await worker.fetch(runnerClaimRequest());
+        const replacement = await worker.claimRunnerJob(runnerClaimRequest());
         expect(replacement.status).toBe(200);
         const fresh = (await replacement.json()) as {
           headSha: string;
@@ -960,7 +852,7 @@ describe('Core admission, claims, and manual policy', () => {
         // cannot complete over the replacement.
         expect(
           (
-            await worker.fetch(
+            await worker.handleRunnerCallback(
               callbackRequest(await successfulCallback(old.runId, old.id, old.attempt)),
             )
           ).status,
@@ -1000,10 +892,9 @@ describe('Core admission, claims, and manual policy', () => {
     });
     try {
       expect(
-        (await scheduleEligibleReview(worker, eligibleEvent.headSha, 'delivery-expiry-check'))
-          .status,
-      ).toBe(202);
-      const claim = await worker.fetch(runnerClaimRequest());
+        await scheduleEligibleReview(worker, eligibleEvent.headSha, 'delivery-expiry-check'),
+      ).toBe('accepted');
+      const claim = await worker.claimRunnerJob(runnerClaimRequest());
       expect(claim.status).toBe(200);
       const claimed = (await claim.json()) as { id: string; runId: string; attempt: number };
       await vi.waitFor(async () =>
@@ -1011,7 +902,7 @@ describe('Core admission, claims, and manual policy', () => {
       );
 
       vi.setSystemTime(new Date('2026-09-01T01:31:00Z'));
-      expect((await worker.fetch(runnerClaimRequest())).status).toBe(204);
+      expect((await worker.claimRunnerJob(runnerClaimRequest())).status).toBe(204);
       await expect(stateStore.getRunOutcome(claimed.runId)).resolves.toMatchObject({
         status: 'failed',
         runnerJobId: claimed.id,
@@ -1023,7 +914,7 @@ describe('Core admission, claims, and manual policy', () => {
         );
       expect(failedAttempts()).toHaveLength(1);
 
-      expect((await worker.fetch(runnerClaimRequest())).status).toBe(204);
+      expect((await worker.claimRunnerJob(runnerClaimRequest())).status).toBe(204);
       expect(failedAttempts()).toHaveLength(1);
     } finally {
       database.close();
@@ -1070,9 +961,9 @@ describe('Core admission, claims, and manual policy', () => {
       vi.setSystemTime(new Date('2026-09-01T01:31:00Z'));
       currentHead = '3333333333333333333333333333333333333333';
       expect(
-        (await scheduleEligibleReview(worker, currentHead, 'delivery-unprepared-successor')).status,
-      ).toBe(202);
-      const replacement = await worker.fetch(runnerClaimRequest());
+        await scheduleEligibleReview(worker, currentHead, 'delivery-unprepared-successor'),
+      ).toBe('accepted');
+      const replacement = await worker.claimRunnerJob(runnerClaimRequest());
       expect(replacement.status).toBe(200);
       expect(await replacement.json()).toMatchObject({ headSha: currentHead });
 
@@ -1214,10 +1105,9 @@ describe('Core admission, claims, and manual policy', () => {
       if (claimed.kind !== 'claimed') throw new Error('race claim was not assigned');
 
       vi.setSystemTime(new Date('2026-09-01T01:31:00Z'));
-      const response = await worker.fetch(
-        new Request('https://core.internal/runner-claims', {
+      const response = await worker.claimRunnerJob(
+        new Request('https://reviews.test/runner-claim', {
           method: 'POST',
-          headers: { 'x-compte-rendu-runner-claim': 'verified' },
           body: JSON.stringify({ requestId }),
         }),
       );
@@ -1453,15 +1343,9 @@ describe('Core admission, claims, and manual policy', () => {
       });
       try {
         expect(
-          (
-            await scheduleEligibleReview(
-              worker,
-              eligibleEvent.headSha,
-              `delivery-stale-${terminal}`,
-            )
-          ).status,
-        ).toBe(202);
-        const claim = await worker.fetch(runnerClaimRequest());
+          await scheduleEligibleReview(worker, eligibleEvent.headSha, `delivery-stale-${terminal}`),
+        ).toBe('accepted');
+        const claim = await worker.claimRunnerJob(runnerClaimRequest());
         expect(claim.status).toBe(200);
         const old = (await claim.json()) as { id: string; runId: string; attempt: number };
         if (terminal === 'cancelled') {
@@ -1480,13 +1364,12 @@ describe('Core admission, claims, and manual policy', () => {
         currentHead = '3333333333333333333333333333333333333333';
         vi.setSystemTime(new Date('2026-09-01T00:05:00Z'));
         expect(
-          (await scheduleEligibleReview(worker, currentHead, `delivery-stale-next-${terminal}`))
-            .status,
-        ).toBe(202);
-        expect((await worker.fetch(runnerClaimRequest())).status).toBe(204);
+          await scheduleEligibleReview(worker, currentHead, `delivery-stale-next-${terminal}`),
+        ).toBe('accepted');
+        expect((await worker.claimRunnerJob(runnerClaimRequest())).status).toBe(204);
 
         vi.setSystemTime(new Date('2026-09-01T01:31:00Z'));
-        const replacement = await worker.fetch(runnerClaimRequest());
+        const replacement = await worker.claimRunnerJob(runnerClaimRequest());
         expect(replacement.status).toBe(200);
         expect(await replacement.json()).toMatchObject({ headSha: currentHead });
         await expect(stateStore.getRunOutcome(old.runId)).resolves.toMatchObject({
@@ -1532,10 +1415,9 @@ describe('Core admission, claims, and manual policy', () => {
     };
     try {
       expect(
-        (await scheduleEligibleReview(worker, eligibleEvent.headSha, 'delivery-same-sha-old'))
-          .status,
-      ).toBe(202);
-      const claim = await worker.fetch(runnerClaimRequest());
+        await scheduleEligibleReview(worker, eligibleEvent.headSha, 'delivery-same-sha-old'),
+      ).toBe('accepted');
+      const claim = await worker.claimRunnerJob(runnerClaimRequest());
       expect(claim.status).toBe(200);
       const old = (await claim.json()) as { id: string; runId: string; attempt: number };
       vi.setSystemTime(new Date('2026-09-01T01:31:00Z'));
@@ -1558,7 +1440,7 @@ describe('Core admission, claims, and manual policy', () => {
       expect(manual.kind).toBe('claimed');
       if (manual.kind !== 'claimed') throw new Error('manual retry was not scheduled');
 
-      const rerun = await worker.fetch(runnerClaimRequest());
+      const rerun = await worker.claimRunnerJob(runnerClaimRequest());
       expect(rerun.status).toBe(200);
       expect(await rerun.json()).toMatchObject({ headSha: eligibleEvent.headSha });
       expect((await stateStore.getRunOutcome(manual.runId))?.status).toBe('scheduled');
@@ -1582,24 +1464,16 @@ describe('Core admission, claims, and manual policy', () => {
     try {
       vi.setSystemTime(new Date('2026-09-01T00:00:00.000Z'));
       expect(
-        (
-          await worker.fetch(
-            new Request('https://core.internal/review-events', {
-              method: 'POST',
-              body: JSON.stringify({
-                ...eligibleEvent,
-                deliveryId: 'delivery-claim-deadline',
-              }),
-            }),
-          )
-        ).status,
-      ).toBe(202);
+        await worker.submitReviewEvent({
+          ...eligibleEvent,
+          deliveryId: 'delivery-claim-deadline',
+        }),
+      ).toBe('accepted');
 
       vi.setSystemTime(new Date('2026-09-01T00:05:00.000Z'));
-      const claim = await worker.fetch(
-        new Request('https://core.internal/runner-claims', {
+      const claim = await worker.claimRunnerJob(
+        new Request('https://reviews.test/runner-claim', {
           method: 'POST',
-          headers: { 'x-compte-rendu-runner-claim': 'verified' },
         }),
       );
 
@@ -1626,20 +1500,14 @@ describe('Core admission, claims, and manual policy', () => {
     });
 
     try {
-      await worker.fetch(
-        new Request('https://core.internal/review-events', {
-          method: 'POST',
-          body: JSON.stringify({
-            ...eligibleEvent,
-            deliveryId: 'delivery-invalid-read-token-expiry',
-          }),
-        }),
-      );
+      await worker.submitReviewEvent({
+        ...eligibleEvent,
+        deliveryId: 'delivery-invalid-read-token-expiry',
+      });
 
-      const claim = await worker.fetch(
-        new Request('https://core.internal/runner-claims', {
+      const claim = await worker.claimRunnerJob(
+        new Request('https://reviews.test/runner-claim', {
           method: 'POST',
-          headers: { 'x-compte-rendu-runner-claim': 'verified' },
         }),
       );
 
@@ -1690,14 +1558,12 @@ describe('Core admission, claims, and manual policy', () => {
     );
 
     try {
-      const response = await worker.fetch(
-        new Request('https://core.internal/review-events', {
-          method: 'POST',
-          body: JSON.stringify({ ...eligibleEvent, deliveryId: 'delivery-admission-retry' }),
-        }),
-      );
+      const response = await worker.submitReviewEvent({
+        ...eligibleEvent,
+        deliveryId: 'delivery-admission-retry',
+      });
 
-      expect(response.status).toBe(202);
+      expect(response).toBe('accepted');
       expect(runnerRequests).toHaveLength(0);
     } finally {
       database.close();
@@ -1742,12 +1608,11 @@ describe('Core admission, claims, and manual policy', () => {
       );
       const callback = JSON.parse(await successfulCallback(claim.runId));
       callback.result = { version: 2, decision: 'request_changes', markdown };
-      const response = await worker.fetch(
-        new Request('https://core.internal/runner-results', {
+      const response = await worker.handleRunnerCallback(
+        new Request('https://reviews.test/runner-callback', {
           method: 'POST',
           headers: {
             'content-type': 'application/json',
-            'x-compte-rendu-runner-callback': 'verified',
           },
           body: JSON.stringify(callback),
         }),
@@ -1814,12 +1679,11 @@ describe('Core admission, claims, and manual policy', () => {
       );
       const callback = JSON.parse(await successfulCallback(claim.runId));
       callback.result = { ...callback.result, decision: 'request_changes' };
-      const response = await worker.fetch(
-        new Request('https://core.internal/runner-results', {
+      const response = await worker.handleRunnerCallback(
+        new Request('https://reviews.test/runner-callback', {
           method: 'POST',
           headers: {
             'content-type': 'application/json',
-            'x-compte-rendu-runner-callback': 'verified',
           },
           body: JSON.stringify(callback),
         }),
@@ -1827,9 +1691,7 @@ describe('Core admission, claims, and manual policy', () => {
       expect(response.status).toBe(scenario === 'publication-failed' ? 503 : 202);
       expect(reviews).toEqual([]);
       const fresh = createCoreWorker(coreEnv(database));
-      const detail = await fresh.fetch(
-        new Request(`https://core.internal/api/jobs/${claim.runId}`),
-      );
+      const detail = await fresh.getPublicJobDetail(claim.runId);
       expect(await detail.json()).toMatchObject({
         task: {
           status: scenario === 'superseded' ? 'superseded' : 'failed',
@@ -1923,12 +1785,11 @@ describe('Core admission, claims, and manual policy', () => {
           timestamps: Record<string, string>;
         };
         delete missingDecisiveTimestamp.timestamps.cleanupCompletedAt;
-        const incompleteResponse = await worker.fetch(
-          new Request('https://core.internal/runner-results', {
+        const incompleteResponse = await worker.handleRunnerCallback(
+          new Request('https://reviews.test/runner-callback', {
             method: 'POST',
             headers: {
               'content-type': 'application/json',
-              'x-compte-rendu-runner-callback': 'verified',
             },
             body: JSON.stringify(missingDecisiveTimestamp),
           }),
@@ -1936,34 +1797,31 @@ describe('Core admission, claims, and manual policy', () => {
         expect(incompleteResponse.status).toBe(400);
         expect(stored).toHaveLength(0);
         expect(reviews).toHaveLength(0);
-        const wrongIdResponse = await worker.fetch(
-          new Request('https://core.internal/runner-results', {
+        const wrongIdResponse = await worker.handleRunnerCallback(
+          new Request('https://reviews.test/runner-callback', {
             method: 'POST',
             headers: {
               'content-type': 'application/json',
-              'x-compte-rendu-runner-callback': 'verified',
             },
             body: callbackBody.replace('runner-job-1', 'wrong-runner-job'),
           }),
         );
         expect(wrongIdResponse.status).toBe(409);
-        const wrongAttemptResponse = await worker.fetch(
-          new Request('https://core.internal/runner-results', {
+        const wrongAttemptResponse = await worker.handleRunnerCallback(
+          new Request('https://reviews.test/runner-callback', {
             method: 'POST',
             headers: {
               'content-type': 'application/json',
-              'x-compte-rendu-runner-callback': 'verified',
             },
             body: callbackBody.replace('"attempt":1', '"attempt":999'),
           }),
         );
         expect(wrongAttemptResponse.status).toBe(409);
-        const response = await worker.fetch(
-          new Request('https://core.internal/runner-results', {
+        const response = await worker.handleRunnerCallback(
+          new Request('https://reviews.test/runner-callback', {
             method: 'POST',
             headers: {
               'content-type': 'application/json',
-              'x-compte-rendu-runner-callback': 'verified',
             },
             body: callbackBody,
           }),
@@ -1990,12 +1848,11 @@ describe('Core admission, claims, and manual policy', () => {
             decision: 'comment',
           },
         ]);
-        const replay = await worker.fetch(
-          new Request('https://core.internal/runner-results', {
+        const replay = await worker.handleRunnerCallback(
+          new Request('https://reviews.test/runner-callback', {
             method: 'POST',
             headers: {
               'content-type': 'application/json',
-              'x-compte-rendu-runner-callback': 'verified',
             },
             body: callbackBody,
           }),
@@ -2090,17 +1947,16 @@ describe('Core admission, claims, and manual policy', () => {
       const callback = JSON.parse(await successfulCallback(claimed.runId));
       callback.result = { ...callback.result, decision: 'request_changes' };
       const request = () =>
-        new Request('https://core.internal/runner-results', {
+        new Request('https://reviews.test/runner-callback', {
           method: 'POST',
           headers: {
-            'x-compte-rendu-runner-callback': 'verified',
             'content-type': 'application/json',
           },
           body: JSON.stringify(callback),
         });
       try {
         if (scheduled) {
-          expect((await worker.fetch(request())).status).toBe(503);
+          expect((await worker.handleRunnerCallback(request())).status).toBe(503);
           expect((await stateStore.getRunOutcome(claimed.runId))?.status).toBe('scheduled');
           const now = Date.now();
           await expect(worker.reconcilePublications(now)).rejects.toThrow();
@@ -2124,9 +1980,9 @@ describe('Core admission, claims, and manual policy', () => {
             published ? 'completed' : 'failed',
           );
         } else {
-          expect((await worker.fetch(request())).status).toBe(published ? 202 : 503);
+          expect((await worker.handleRunnerCallback(request())).status).toBe(published ? 202 : 503);
         }
-        expect((await worker.fetch(request())).status).toBe(202);
+        expect((await worker.handleRunnerCallback(request())).status).toBe(202);
         if (scheduled) {
           const finished = (await postHogEvents(requests)).filter(
             (event) =>

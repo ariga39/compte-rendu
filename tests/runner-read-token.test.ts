@@ -4,7 +4,7 @@ import {
   type ReviewEvent,
   type RunnerJobInput,
 } from '../packages/contracts/src';
-import { createCoreWorker } from './support/core-http-adapter';
+import { createCoreWorker } from '../apps/core/src/core-worker';
 import { createD1ReviewStateStore } from '../apps/core/src/index';
 import { SqliteD1Database } from './support/d1-database';
 
@@ -26,11 +26,10 @@ const event: ReviewEvent = {
 const claimedAt = '2026-09-01T00:00:00.000Z';
 
 const readTokenRequest = (body: { runId: string; jobId: string; attempt: number }) =>
-  new Request('https://core.internal/runner-read-token', {
+  new Request('https://reviews.test/runner-read-token', {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
-      'x-compte-rendu-runner-read-token': 'verified',
     },
     body: JSON.stringify(body),
   });
@@ -59,17 +58,11 @@ const createClaimedReview = async (
       },
     },
   );
-  const scheduled = await worker.fetch(
-    new Request('https://core.internal/review-events', {
+  const scheduled = await worker.submitReviewEvent(event);
+  expect(scheduled).toBe('accepted');
+  const claim = await worker.claimRunnerJob(
+    new Request('https://reviews.test/runner-claim', {
       method: 'POST',
-      body: JSON.stringify(event),
-    }),
-  );
-  expect(scheduled.status).toBe(202);
-  const claim = await worker.fetch(
-    new Request('https://core.internal/runner-claims', {
-      method: 'POST',
-      headers: { 'x-compte-rendu-runner-claim': 'verified' },
     }),
   );
   expect(claim.status).toBe(200);
@@ -92,7 +85,7 @@ describe('Runner read-token renewal', () => {
       vi.setSystemTime(new Date('2026-09-01T00:50:00.000Z'));
       token.current = 'renewed-read-token';
       token.expiresAt = '2026-09-01T01:50:00.000Z';
-      const response = await worker.fetch(
+      const response = await worker.renewRunnerReadToken(
         readTokenRequest({ runId: input.runId, jobId: input.id, attempt: input.attempt }),
       );
 
@@ -126,7 +119,7 @@ describe('Runner read-token renewal', () => {
         { runId: input.runId, jobId: 'forged-job', attempt: input.attempt },
         { runId: input.runId, jobId: input.id, attempt: input.attempt + 1 },
       ]) {
-        const response = await worker.fetch(readTokenRequest(body));
+        const response = await worker.renewRunnerReadToken(readTokenRequest(body));
         expect(response.status).toBe(409);
         expect(await response.text()).not.toContain('initial-read-token');
       }
@@ -165,7 +158,7 @@ describe('Runner read-token renewal', () => {
           await store.claimRunPublication({ runId: input.runId, occurredAt });
         }
 
-        const response = await worker.fetch(
+        const response = await worker.renewRunnerReadToken(
           readTokenRequest({ runId: input.runId, jobId: input.id, attempt: input.attempt }),
         );
         expect(response.status).toBe(409);
@@ -191,14 +184,14 @@ describe('Runner read-token renewal', () => {
       vi.setSystemTime(new Date(Date.parse(claimedAt) + REVIEW_ATTEMPT_BUDGET_MS - 1));
       expect(
         (
-          await worker.fetch(
+          await worker.renewRunnerReadToken(
             readTokenRequest({ runId: input.runId, jobId: input.id, attempt: input.attempt }),
           )
         ).status,
       ).toBe(200);
 
       vi.setSystemTime(new Date(Date.parse(claimedAt) + REVIEW_ATTEMPT_BUDGET_MS));
-      const expired = await worker.fetch(
+      const expired = await worker.renewRunnerReadToken(
         readTokenRequest({ runId: input.runId, jobId: input.id, attempt: input.attempt }),
       );
       expect(expired.status).toBe(409);
@@ -234,7 +227,7 @@ describe('Runner read-token renewal', () => {
 
       token.current = 'must-not-be-returned';
       token.expiresAt = '2026-09-01T01:50:00.000Z';
-      const renewal = worker.fetch(
+      const renewal = worker.renewRunnerReadToken(
         readTokenRequest({ runId: input.runId, jobId: input.id, attempt: input.attempt }),
       );
       await mintStarted;
@@ -282,16 +275,10 @@ describe('Runner read-token renewal', () => {
           },
         },
       );
-      await worker.fetch(
-        new Request('https://core.internal/review-events', {
+      await worker.submitReviewEvent(event);
+      const claim = await worker.claimRunnerJob(
+        new Request('https://reviews.test/runner-claim', {
           method: 'POST',
-          body: JSON.stringify(event),
-        }),
-      );
-      const claim = await worker.fetch(
-        new Request('https://core.internal/runner-claims', {
-          method: 'POST',
-          headers: { 'x-compte-rendu-runner-claim': 'verified' },
         }),
       );
       const input = (await claim.json()) as RunnerJobInput;
@@ -301,7 +288,7 @@ describe('Runner read-token renewal', () => {
         expiresAt: '2026-09-01T00:50:30.000Z',
       };
       vi.setSystemTime(new Date('2026-09-01T00:50:00.000Z'));
-      const response = await worker.fetch(
+      const response = await worker.renewRunnerReadToken(
         readTokenRequest({ runId: input.runId, jobId: input.id, attempt: input.attempt }),
       );
 
@@ -344,16 +331,10 @@ describe('Runner read-token renewal', () => {
           },
         },
       );
-      await worker.fetch(
-        new Request('https://core.internal/review-events', {
+      await worker.submitReviewEvent(event);
+      const claim = await worker.claimRunnerJob(
+        new Request('https://reviews.test/runner-claim', {
           method: 'POST',
-          body: JSON.stringify(event),
-        }),
-      );
-      const claim = await worker.fetch(
-        new Request('https://core.internal/runner-claims', {
-          method: 'POST',
-          headers: { 'x-compte-rendu-runner-claim': 'verified' },
         }),
       );
       const input = (await claim.json()) as RunnerJobInput;
@@ -363,7 +344,7 @@ describe('Runner read-token renewal', () => {
         expiresAt: '2026-09-01T00:52:00.000Z',
       };
       vi.setSystemTime(new Date('2026-09-01T00:50:00.000Z'));
-      const response = await worker.fetch(
+      const response = await worker.renewRunnerReadToken(
         readTokenRequest({ runId: input.runId, jobId: input.id, attempt: input.attempt }),
       );
 
