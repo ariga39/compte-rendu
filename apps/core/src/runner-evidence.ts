@@ -1,5 +1,5 @@
 import { Option, Schema } from 'effect';
-import { StructuredReviewResult, type RunnerResultCallback } from '@compte-rendu/contracts';
+import { StructuredReviewResult } from '@compte-rendu/contracts';
 
 export const RunnerManifest = Schema.Struct({
   result: Schema.optional(StructuredReviewResult),
@@ -19,14 +19,6 @@ export const RunnerManifest = Schema.Struct({
   cleanup: Schema.Struct({
     status: Schema.Literals(['destroyed', 'failed']),
   }),
-});
-export const RunnerSessionList = Schema.Union([
-  Schema.Array(Schema.Struct({ id: Schema.NonEmptyString })),
-  Schema.Struct({ sessions: Schema.Array(Schema.Struct({ id: Schema.NonEmptyString })) }),
-]);
-export const RunnerSessionExport = Schema.Struct({
-  info: Schema.Struct({ id: Schema.NonEmptyString }),
-  messages: Schema.Array(Schema.Unknown),
 });
 
 export const decodeArtifact = (content: string): Uint8Array | undefined => {
@@ -78,72 +70,6 @@ export const decodedJson = <A>(
     new TextDecoder().decode(bytes),
   );
   return Option.isSome(decoded) ? decoded.value : undefined;
-};
-
-export const completeCallbackEvidenceIsValid = async (
-  callback: Extract<typeof RunnerResultCallback.Type, { status: 'succeeded' }>,
-) => {
-  const { evidence } = callback;
-  const artifacts = [
-    evidence.manifest,
-    evidence.opencodeJsonl,
-    evidence.opencodeStderr,
-    evidence.validatedReview,
-    evidence.opencodeSessionList,
-    evidence.opencodeExport.content,
-  ];
-  if (
-    !(await Promise.all(artifacts.map(artifactMatchesMetadata)).then((values) =>
-      values.every(Boolean),
-    ))
-  ) {
-    return false;
-  }
-  const manifest = decodedJson(evidence.manifest.content, RunnerManifest);
-  const sessionList = decodedJson(evidence.opencodeSessionList.content, RunnerSessionList);
-  const sessionExport = decodedJson(evidence.opencodeExport.content.content, RunnerSessionExport);
-  if (manifest === undefined || sessionList === undefined || sessionExport === undefined)
-    return false;
-  const sessionIds = Array.isArray(sessionList)
-    ? sessionList.map((session) => session.id)
-    : 'sessions' in sessionList
-      ? sessionList.sessions.map((session) => session.id)
-      : [];
-  if (
-    sessionIds.length === 0 ||
-    manifest.sessionIds.length !== sessionIds.length ||
-    manifest.sessionIds.some((sessionId, index) => sessionId !== sessionIds[index]) ||
-    !sessionIds.includes(evidence.opencodeExport.sessionId) ||
-    sessionExport.info.id !== evidence.opencodeExport.sessionId ||
-    manifest.jobId !== callback.id ||
-    manifest.runId !== callback.runId ||
-    manifest.attempt !== callback.attempt ||
-    manifest.evidenceId !== evidence.id ||
-    manifest.evidence.id !== evidence.id ||
-    manifest.evidence.status !== 'complete' ||
-    manifest.terminal.status !== 'succeeded' ||
-    manifest.complete !== true ||
-    manifest.cleanup.status !== 'destroyed'
-  ) {
-    return false;
-  }
-  const reviewBytes = decodeArtifact(evidence.validatedReview.content);
-  if (typeof callback.result === 'string') {
-    if (manifest.result !== undefined) return false;
-  } else if (
-    manifest.result === undefined ||
-    manifest.result.decision !== callback.result.decision ||
-    manifest.result.markdown !== callback.result.markdown
-  )
-    return false;
-  const resultBytes = new TextEncoder().encode(
-    typeof callback.result === 'string' ? callback.result : callback.result.markdown,
-  );
-  return (
-    reviewBytes !== undefined &&
-    reviewBytes.byteLength === resultBytes.byteLength &&
-    reviewBytes.every((byte, index) => byte === resultBytes[index])
-  );
 };
 
 const sha256Hex = async (bytes: Uint8Array): Promise<string> => {

@@ -40,6 +40,7 @@ Idle Runner
     → internal coordinator atomic D1 claim
     → Runner Job execution and cleanup
     → <INSTANCE_NAME>-ingress `/runner-callback` (same token)
+    → <INSTANCE_NAME>-ingress `/runner-evidence` (same token, best effort)
 ```
 
 For a newer head that supersedes a reachable running old-head Job, Core uses

@@ -1,13 +1,16 @@
 import { DateTime, Effect, Option, Schema } from 'effect';
 import {
   MAX_RUNNER_CALLBACK_BYTES,
+  MAX_RUNNER_EVIDENCE_BYTES,
   MAX_WEBHOOK_BYTES,
   REVIEW_ATTEMPT_BUDGET_MS,
   MetadataInvalidationEvent,
   RunnerCleanupRecoveryReport,
+  RunnerEvidenceUpload,
   RunnerJobInput,
   RunnerProgressReport,
   RunnerResultCallback,
+  RunnerTerminalCallback,
   readBoundedRequestBody,
   type PublicTaskFailure,
 } from '@compte-rendu/contracts';
@@ -23,9 +26,8 @@ import {
   publishTerminalCheck,
   resetPreviousReviewVerdicts,
 } from './review-publication';
-import { completeCallbackEvidenceIsValid } from './runner-evidence';
+import { storePublicationRecord } from './publication-record';
 import type { createPostHogLifecycleLog } from './posthog';
-
 const MAX_PROGRESS_BYTES = 16 * 1024;
 const MAX_READ_TOKEN_REQUEST_BYTES = 16 * 1024;
 const READ_TOKEN_RENEWAL_MARGIN_MS = 60 * 1000;
@@ -83,7 +85,7 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
     lifecycleLog: ReturnType<typeof createPostHogLifecycleLog>,
     outcome: ReviewOutcome,
     terminal: 'completed' | 'failed' | 'superseded',
-    callback?: typeof RunnerResultCallback.Type,
+    callback?: typeof RunnerTerminalCallback.Type,
     failure?: {
       readonly phase: NonNullable<
         Extract<
@@ -293,9 +295,9 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
     }
     const body = await request.arrayBuffer();
     if (body.byteLength > MAX_RUNNER_CALLBACK_BYTES) return new Response(null, { status: 413 });
-    let callback: typeof RunnerResultCallback.Type;
+    let callback: typeof RunnerTerminalCallback.Type;
     try {
-      callback = await Schema.decodeUnknownPromise(Schema.fromJsonString(RunnerResultCallback))(
+      callback = await Schema.decodeUnknownPromise(Schema.fromJsonString(RunnerTerminalCallback))(
         new TextDecoder().decode(body),
       );
     } catch {
@@ -353,7 +355,7 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
           occurredAt: new Date().toISOString(),
         }).catch(() => undefined);
       }
-      return new Response(null, { status: outcome.evidence === undefined ? 409 : 202 });
+      return new Response(null, { status: 202 });
     }
     const markCallbackFailed = async () => {
       const occurredAt = new Date().toISOString();
@@ -387,56 +389,64 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
       if (callback.sandbox.cleanup !== 'destroyed') return;
       await stateStore.clearRunnerJob({ runId: callback.runId, jobId: callback.id });
     };
-    if (callback.status === 'succeeded') {
-      if (!(await completeCallbackEvidenceIsValid(callback))) {
-        const confirmed = await stateStore.confirmRunnerDestroyed({
-          runId: callback.runId,
-          jobId: callback.id,
-          attempt: callback.attempt,
-          occurredAt: callback.timestamps.cleanupCompletedAt,
-          expectedStatus: outcome.status,
-        });
-        if (!confirmed) return new Response(null, { status: 503 });
-        const latest = await stateStore.getRunOutcome(callback.runId).catch(() => undefined);
-        if (latest?.status === 'cancelled') return new Response(null, { status: 202 });
-        if (outcome.status !== 'scheduled') return new Response(null, { status: 409 });
-        const settled = await markCallbackFailed();
-        if (settled?.status !== 'failed') return new Response(null, { status: 202 });
-        await recordFinishedLifecycle(lifecycleLog, settled, 'failed', callback, {
-          phase: 'evidence',
-          reason: 'evidence',
-        });
-        return new Response(null, { status: 202 });
-      }
-    }
-
-    const evidenceObject = JSON.stringify({
-      version: 1,
+    await stateStore.recordRunnerTerminal({
       runId: callback.runId,
       jobId: callback.id,
-      evidenceId: callback.evidence.id,
-      evidence: callback.evidence,
+      attempt: callback.attempt,
+      cleanup: callback.sandbox.cleanup,
+      ...(callback.timestamps.executionStartedAt === undefined
+        ? {}
+        : { executionStartedAt: callback.timestamps.executionStartedAt }),
+      ...(callback.timestamps.submissionCompletedAt === undefined
+        ? {}
+        : { submissionCompletedAt: callback.timestamps.submissionCompletedAt }),
+      ...(callback.timestamps.cleanupCompletedAt === undefined
+        ? {}
+        : { cleanupCompletedAt: callback.timestamps.cleanupCompletedAt }),
     });
-    await env.EVIDENCE_BUCKET.put(`reviews/${callback.runId}`, evidenceObject);
-    const evidenceBytes = new TextEncoder().encode(evidenceObject);
-    const evidenceHash = await globalThis.crypto.subtle.digest('SHA-256', evidenceBytes);
-    const evidenceRecorded = await stateStore.recordEvidence({
-      runId: callback.runId,
-      sandboxCleanup: callback.sandbox.cleanup,
-      evidence: {
-        key: `reviews/${callback.runId}`,
-        status: callback.evidence.status,
-        size: evidenceBytes.byteLength,
-        sha256: Array.from(new Uint8Array(evidenceHash), (byte) =>
-          byte.toString(16).padStart(2, '0'),
-        ).join(''),
-        uploadedAt: new Date().toISOString(),
-        executionStartedAt: callback.timestamps.executionStartedAt,
-        submissionCompletedAt: callback.timestamps.submissionCompletedAt,
-        cleanupCompletedAt: callback.timestamps.cleanupCompletedAt,
-      },
-    });
-    if (!evidenceRecorded) return new Response(null, { status: 409 });
+
+    // Legacy Runner callbacks still carry their private archive inline. It is
+    // stored as-is for historical readability, but an archive failure never
+    // changes the publication outcome.
+    if (!('version' in callback)) {
+      const legacy = callback as typeof RunnerResultCallback.Type;
+      const evidenceObject = JSON.stringify({
+        version: 1,
+        runId: legacy.runId,
+        jobId: legacy.id,
+        evidenceId: legacy.evidence.id,
+        evidence: legacy.evidence,
+      });
+      try {
+        await env.EVIDENCE_BUCKET.put(`reviews/${legacy.runId}`, evidenceObject);
+        const evidenceBytes = new TextEncoder().encode(evidenceObject);
+        const evidenceHash = await globalThis.crypto.subtle.digest('SHA-256', evidenceBytes);
+        const evidenceRecorded = await stateStore.recordEvidence({
+          runId: legacy.runId,
+          sandboxCleanup: legacy.sandbox.cleanup,
+          evidence: {
+            key: `reviews/${legacy.runId}`,
+            status: legacy.evidence.status,
+            size: evidenceBytes.byteLength,
+            sha256: Array.from(new Uint8Array(evidenceHash), (byte) =>
+              byte.toString(16).padStart(2, '0'),
+            ).join(''),
+            uploadedAt: new Date().toISOString(),
+            executionStartedAt: legacy.timestamps.executionStartedAt,
+            submissionCompletedAt: legacy.timestamps.submissionCompletedAt,
+            cleanupCompletedAt: legacy.timestamps.cleanupCompletedAt,
+          },
+        });
+        if (!evidenceRecorded)
+          await Effect.runPromise(Effect.logWarning('legacy evidence metadata not recorded')).catch(
+            () => undefined,
+          );
+      } catch {
+        await Effect.runPromise(Effect.logWarning('legacy evidence archive unavailable')).catch(
+          () => undefined,
+        );
+      }
+    }
     if ((await stateStore.getRunOutcome(callback.runId))?.status === 'cancelled')
       return new Response(null, { status: 202 });
 
@@ -471,12 +481,20 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
         return new Response(null, { status: 202 });
       }
       if (outcome.status !== 'scheduled') return new Response(null, { status: 202 });
-      if (callback.evidence.status !== 'complete' || callback.result === undefined) {
-        return new Response(null, { status: 400 });
-      }
+      const publication = await storePublicationRecord(env.EVIDENCE_BUCKET, {
+        version: 2,
+        runId: callback.runId,
+        jobId: callback.id,
+        attempt: callback.attempt,
+        result: callback.result,
+      });
+      // The persisted attempt-specific result is the only publication basis.
+      // A failed necessary write stays retryable instead of claiming a run that
+      // reconciliation could never recover.
+      if (publication.kind === 'unavailable') return new Response(null, { status: 503 });
       const disposition = await createCoordinator(lifecycleLog).completeReview({
         runId: callback.runId,
-        output: callback.result,
+        output: publication.record.result,
       });
       const finalOutcome = await stateStore.getRunOutcome(callback.runId);
       if (finalOutcome === undefined || finalOutcome.status === 'scheduled') {
@@ -521,6 +539,67 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
     }
     await clearRunnerJob();
     return new Response(null, { status: 202 });
+  };
+
+  const handleRunnerEvidence = async (request: Request): Promise<Response> => {
+    if (request.headers.get('x-compte-rendu-runner-evidence') !== 'verified') {
+      return new Response(null, { status: 401 });
+    }
+    const body = await request.arrayBuffer();
+    if (body.byteLength > MAX_RUNNER_EVIDENCE_BYTES) return new Response(null, { status: 413 });
+    let upload: typeof RunnerEvidenceUpload.Type;
+    try {
+      upload = await Schema.decodeUnknownPromise(Schema.fromJsonString(RunnerEvidenceUpload), {
+        onExcessProperty: 'error',
+      })(new TextDecoder().decode(body));
+    } catch {
+      return new Response(null, { status: 400 });
+    }
+    if (env.EVIDENCE_BUCKET === undefined) return new Response(null, { status: 503 });
+    if (upload.evidence.id !== undefined && upload.evidence.id !== upload.evidenceId) {
+      return new Response(null, { status: 400 });
+    }
+    const outcome = await stateStore.getRunOutcome(upload.runId);
+    if (outcome === undefined) return new Response(null, { status: 404 });
+    if (outcome.runnerJobId !== upload.id || outcome.runnerAttempt !== upload.attempt) {
+      return new Response(null, { status: 409 });
+    }
+
+    // Private diagnostics are best effort. Their arrival never changes the
+    // publication state, and the content-addressed attempt key makes a late
+    // old-attempt write unable to replace a newer archive.
+    const object = JSON.stringify({
+      version: 2,
+      runId: upload.runId,
+      jobId: upload.id,
+      attempt: upload.attempt,
+      evidenceId: upload.evidenceId,
+      evidence: { id: upload.evidence.id ?? upload.evidenceId, ...upload.evidence },
+      ...(upload.timestamps === undefined ? {} : { timestamps: upload.timestamps }),
+    });
+    const bytes = new TextEncoder().encode(object);
+    const hash = await globalThis.crypto.subtle.digest('SHA-256', bytes);
+    const sha256 = Array.from(new Uint8Array(hash), (byte) =>
+      byte.toString(16).padStart(2, '0'),
+    ).join('');
+    const key = `reviews/${upload.runId}/diagnostics/${upload.id}/${upload.attempt}/${sha256}.json`;
+    await env.EVIDENCE_BUCKET.put(key, object);
+    // D1 selects only the current owner's archive. Terminal timestamps were
+    // already recorded from the authoritative callback and are not touched by
+    // this later, best-effort upload.
+    const recorded = await stateStore.recordEvidenceUpload({
+      runId: upload.runId,
+      jobId: upload.id,
+      attempt: upload.attempt,
+      evidence: {
+        key,
+        status: upload.evidence.status,
+        size: bytes.byteLength,
+        sha256,
+        uploadedAt: new Date().toISOString(),
+      },
+    });
+    return new Response(null, { status: recorded ? 202 : 409 });
   };
 
   const handleMetadataInvalidation = async (request: Request): Promise<Response> => {
@@ -963,6 +1042,7 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
     recordFinishedLifecycle,
     handleRunnerCleanupRecovery,
     handleRunnerResult,
+    handleRunnerEvidence,
     handleMetadataInvalidation,
     handleRunnerProgress,
     handleRunnerReadToken,

@@ -856,11 +856,11 @@ describe('Core callbacks and publication', () => {
     ]);
   });
 
-  it('fails a correlated successful callback with invalid evidence and gives manual feedback', async () => {
+  it('publishes a correlated successful callback even when its legacy evidence metadata is inconsistent', async () => {
     const database = new SqliteD1Database();
     const stateStore = createD1ReviewStateStore(database);
     const claimed = await stateStore.claimReview({
-      deliveryId: 'delivery-callback-invalid-evidence',
+      deliveryId: 'delivery-callback-inconsistent-evidence',
       job: {
         repositoryId: 11,
         pullRequestNumber: 42,
@@ -872,27 +872,33 @@ describe('Core callbacks and publication', () => {
       },
       occurredAt: '2026-09-01T00:00:00.000Z',
     });
-    if (claimed.kind !== 'claimed') throw new Error('invalid evidence run was not claimed');
+    if (claimed.kind !== 'claimed') throw new Error('inconsistent evidence run was not claimed');
     await stateStore.claimNextJob({
       jobId: 'runner-job-1',
       attempt: 1,
       occurredAt: '2026-09-01T00:01:00.000Z',
     });
 
-    const stored: unknown[] = [];
+    const stored: Array<{ key: string; value: ArrayBuffer | string }> = [];
     const reactions: unknown[] = [];
+    const reviews: unknown[] = [];
     const worker = createCoreWorker(
       {
         REVIEW_DB: database,
         GITHUB_APP_ID: '1234567',
         GITHUB_APP_PRIVATE_KEY: 'test-private-key',
-        EVIDENCE_BUCKET: { put: async (...args) => stored.push(args) },
+        EVIDENCE_BUCKET: { put: async (key, value) => stored.push({ key, value }) },
       },
       {
         stateStore,
         github: {
           addReaction: async (input) => {
             reactions.push(input);
+          },
+          loadReviewTarget: async () => ({ headSha: eligibleEvent.headSha }),
+          createReview: async ({ payload }) => {
+            reviews.push(payload);
+            return { kind: 'created', review: payload };
           },
         },
       },
@@ -914,24 +920,13 @@ describe('Core callbacks and publication', () => {
       );
       expect(response.status).toBe(202);
       await expect(stateStore.getRunOutcome(claimed.runId)).resolves.toMatchObject({
-        status: 'failed',
+        status: 'completed',
       });
-      const replacement = await stateStore.claimReview({
-        deliveryId: 'delivery-after-rejected-evidence',
-        job: { ...eligibleEvent, trigger: 'manual', commentId: 23 },
-        occurredAt: '2026-09-01T01:00:00.000Z',
-      });
-      if (replacement.kind !== 'claimed') throw new Error('replacement was not queued');
-      await expect(
-        stateStore.claimNextJob({
-          jobId: 'replacement-job',
-          attempt: 1,
-          occurredAt: '2026-09-01T01:01:00.000Z',
-        }),
-      ).resolves.toMatchObject({ kind: 'claimed', runId: replacement.runId });
-      expect(stored).toHaveLength(0);
-      expect(reactions).toEqual([
-        { repositoryId: 11, installationId: 7, commentId: 987654, content: '-1' },
+      expect(reactions).toEqual([]);
+      expect(reviews).toHaveLength(1);
+      expect(stored.map((entry) => entry.key)).toEqual([
+        `reviews/${claimed.runId}`,
+        `reviews/${claimed.runId}/publications/runner-job-1/1.json`,
       ]);
     } finally {
       database.close();

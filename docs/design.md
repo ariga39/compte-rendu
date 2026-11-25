@@ -125,14 +125,16 @@ evidence and publication lifecycle), `CheckRunStore` (Check setup/delivery
 leases), `CancellationStore` (stop and Check cancellation), and
 `DashboardMetadataStore` (public projection, progress and metadata refresh).
 `createD1ReviewStateStore` composes the four required ports for existing callers.
-`runner-evidence.ts` owns the shared manifest/artifact SHA-256 validation used by
-Runner callbacks and publication reconciliation; Core keeps one evidence trust
-decision rather than parallel copies.
+`runner-evidence.ts` still reads the legacy inline artifact format for historical
+publication records, but live callbacks are slim and their private diagnostics
+arrive through `POST /runner-evidence`. Core publication never depends on that
+diagnostic upload.
 
 ## Runner Job and pull interface
 
 `POST /runner-claim` returns an immutable `RunnerJobInput` or 204. Ingress
-protects claim, progress and callback with `RUNNER_CALLBACK_TOKEN`. Core atomically
+protects claim, progress, callback and private evidence upload with
+`RUNNER_CALLBACK_TOKEN`. Core atomically
 claims an eligible scheduled row, records job identity/attempt, then resolves the
 repository and mints a repository-scoped read token. Progress and callbacks must
 match that persisted owner. Core's VPC `DELETE /jobs/:id` cancels reachable jobs.
@@ -179,6 +181,21 @@ existing callback ownership, revision freshness and publication reconciliation
 remain authoritative. Acceptance is distinct from publication. There is no
 automatic replay queue; see [callback recovery](operations.md#replay-a-lost-terminal-callback).
 
+A slim `version: 2` terminal callback carries identity, attempt, status, stage,
+cleanup, timestamps, the validated structured result and only an evidence ID and
+status. It does not inline diagnostic artifacts. Core writes the small
+authoritative `reviews/<runId>/publications/<jobId>/<attempt>.json` record before
+publication; scheduled reconciliation reads that attempt-specific record and
+falls back to the legacy `reviews/<runId>` archive only when no record exists.
+Duplicate or non-current callbacks never replace the record used for an already
+claimed publication. Diagnostic uploads use an immutable content-addressed
+attempt key, and D1 only selects the current owner's key; a late old-attempt
+upload cannot replace a newer archive. The separate authenticated
+`POST /runner-evidence` upload is best-effort: a missing, late, malformed,
+oversized or failed private archive never changes the review result or
+publication state. Publication still depends on the shared `EVIDENCE_BUCKET` for
+its small publication record; a full bucket outage returns a retryable callback.
+
 Jobs for the same repository/PR remain serialized until the prior Sandbox is
 confirmed destroyed. Unrelated PRs may progress. Each job checks immutable base
 and head commits, derives a merge base, and performs GitHub-read preflight before
@@ -191,9 +208,10 @@ ended a timeout. Setup consumes the same remaining budget; there is no
 agent-start reset. One same-session correction gets at most two minutes of its
 remainder; it is not another attempt. Evidence archival, revocation,
 destruction and callback keep independent bounded finalization time. Callback
-delivery has a bounded timeout and one immediate retry. An oversized evidence
-bundle becomes a small terminal incomplete-evidence failure, not truncated
-successful evidence.
+delivery has a bounded timeout and one immediate retry. Private diagnostic
+artifacts travel separately from the terminal result, so an oversized or failed
+archive upload is logged and bounded instead of turning a valid review into a
+failure.
 
 Normal success, failure, timeout and cancellation finalize evidence and destroy
 the Sandbox before callback. A Runner crash can interrupt a review before it delivers a verdict.
@@ -309,9 +327,11 @@ this replaced the earlier topic-skill proposal.
 
 D1 stores product state, ownership, lifecycle timestamps, decision, frozen model
 selection, bounded per-model token summaries, repository disclosure metadata and evidence object metadata. It does
-not store raw repository contents, credentials or session transcripts. The bounded
-callback contains named manifest/JSONL/stderr/Markdown/root-session evidence;
-private R2 retains that bundle. The host retains fuller recovery evidence,
+not store raw repository contents, credentials or session transcripts. The slim
+terminal callback carries the validated result and an evidence reference; the
+private `POST /runner-evidence` upload retains named
+manifest/JSONL/stderr/Markdown/root-session diagnostics in R2. The host retains
+fuller recovery evidence,
 including child sessions and OpenCode state. Public dashboard APIs expose neither. After grant revocation, Runner collects native
 service usage and carries it through the owned terminal callback. Core stores the
 first summary once; dashboard details read it from D1. Unknown/partial statistics
@@ -357,7 +377,7 @@ owners instead of holding every execution object:
   are released when it finishes. Finalization order remains grant revocation,
   evidence archival/redaction, manifest finalization, cleanup, callback and
   finally job retirement.
-- `GrantLedger`, `ReadTokenLease`, `ProgressReporter`, the evidence store and the
+- `GrantRevoker`, `ReadTokenLease`, `ProgressReporter`, the evidence store and the
   host process port own their own state and timers. Claim scheduling and cleanup
   recovery depend on these narrow ports, never on the assembly module.
 

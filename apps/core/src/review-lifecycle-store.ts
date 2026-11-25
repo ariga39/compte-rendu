@@ -348,6 +348,27 @@ export interface ReviewLifecycleStore {
     evidence: ReviewEvidenceMetadata;
     sandboxCleanup?: import('./review-records').RunnerCleanupStatus;
   }): Promise<boolean>;
+  recordEvidenceUpload(input: {
+    runId: string;
+    jobId: string;
+    attempt: number;
+    evidence: {
+      key: string;
+      status: 'complete' | 'incomplete';
+      size: number;
+      sha256: string;
+      uploadedAt: string;
+    };
+  }): Promise<boolean>;
+  recordRunnerTerminal(input: {
+    runId: string;
+    jobId: string;
+    attempt: number;
+    cleanup: import('./review-records').RunnerCleanupStatus;
+    executionStartedAt?: string;
+    submissionCompletedAt?: string;
+    cleanupCompletedAt?: string;
+  }): Promise<boolean>;
   validateRunnerCleanupRecovery(
     input: ReviewCleanupRecovery,
   ): Promise<
@@ -931,6 +952,90 @@ export const createReviewLifecycleStore = (
     return result.meta.changes === 1;
   },
 
+  recordEvidenceUpload: async ({
+    runId,
+    jobId,
+    attempt,
+    evidence,
+  }: {
+    runId: string;
+    jobId: string;
+    attempt: number;
+    evidence: {
+      key: string;
+      status: 'complete' | 'incomplete';
+      size: number;
+      sha256: string;
+      uploadedAt: string;
+    };
+  }) => {
+    const result = await database
+      .prepare(
+        `UPDATE review_runs SET
+           evidence_key = ?, evidence_status = ?, evidence_size = ?,
+           evidence_sha256 = ?, evidence_uploaded_at = ?
+         WHERE run_id = ? AND runner_job_id = ? AND runner_attempt = ?`,
+      )
+      .bind(
+        evidence.key,
+        evidence.status,
+        evidence.size,
+        evidence.sha256,
+        evidence.uploadedAt,
+        runId,
+        jobId,
+        attempt,
+      )
+      .run();
+    return result.meta.changes === 1;
+  },
+
+  recordRunnerTerminal: async ({
+    runId,
+    jobId,
+    attempt,
+    cleanup,
+    executionStartedAt,
+    submissionCompletedAt,
+    cleanupCompletedAt,
+  }: {
+    runId: string;
+    jobId: string;
+    attempt: number;
+    cleanup: import('./review-records').RunnerCleanupStatus;
+    executionStartedAt?: string;
+    submissionCompletedAt?: string;
+    cleanupCompletedAt?: string;
+  }) => {
+    const result = await database
+      .prepare(
+        `UPDATE review_runs SET
+           execution_started_at = COALESCE(execution_started_at, ?),
+           submission_completed_at = COALESCE(submission_completed_at, ?),
+           runner_cleanup_status = CASE
+             WHEN runner_cleanup_status = 'destroyed' THEN 'destroyed'
+             ELSE ?
+           END,
+           cleanup_completed_at = CASE
+             WHEN runner_cleanup_status = 'destroyed' AND cleanup_completed_at IS NOT NULL
+               THEN cleanup_completed_at
+             ELSE COALESCE(cleanup_completed_at, ?)
+           END
+         WHERE run_id = ? AND runner_job_id = ? AND runner_attempt = ?`,
+      )
+      .bind(
+        executionStartedAt ?? null,
+        submissionCompletedAt ?? null,
+        cleanup,
+        cleanupCompletedAt ?? null,
+        runId,
+        jobId,
+        attempt,
+      )
+      .run();
+    return result.meta.changes === 1;
+  },
+
   validateRunnerCleanupRecovery: async ({ runId, jobId, attempt, baseSha, headSha }) => {
     const row = await database
       .prepare(
@@ -1033,7 +1138,7 @@ export const createReviewLifecycleStore = (
       .prepare(`UPDATE review_runs SET updated_at = ?
       WHERE run_id IN (SELECT run_id FROM review_runs
       WHERE status = 'scheduled' AND publication_started_at IS NOT NULL
-        AND publication_claimed_at <= ? AND evidence_status = 'complete' AND updated_at < ?
+        AND publication_claimed_at <= ? AND updated_at < ?
       ORDER BY updated_at, run_id LIMIT ?) RETURNING run_id`)
       .bind(now, before, now, limit)
       .all<{ run_id: string }>();

@@ -7,6 +7,7 @@ import {
   ReviewEvent,
   GitHubSha,
   MAX_RUNNER_CALLBACK_BYTES,
+  MAX_RUNNER_EVIDENCE_BYTES,
   MAX_WEBHOOK_BYTES,
   type CoreServiceBinding,
   type OperationalLog,
@@ -29,6 +30,7 @@ const supportedEvents = [
   'installation_repositories',
 ] as const;
 const runnerCallbackPath = '/runner-callback';
+const runnerEvidencePath = '/runner-evidence';
 const runnerClaimPath = '/runner-claim';
 const runnerReadTokenPath = '/runner-read-token';
 const runnerProgressPath = '/runner-progress';
@@ -759,6 +761,29 @@ const forwardRunnerCallback = async (request: Request, dependencies: IngressDepe
   return new Response(null, { status: forwarded.ok ? 202 : 503 });
 };
 
+const forwardRunnerEvidence = async (request: Request, dependencies: IngressDependencies) => {
+  if (
+    dependencies.runnerCallbackToken === undefined ||
+    request.headers.get('authorization') !== `Bearer ${dependencies.runnerCallbackToken}`
+  ) {
+    return new Response(null, { status: 401 });
+  }
+  const body = await readBoundedRequestBytes(request, MAX_RUNNER_EVIDENCE_BYTES);
+  if (body === undefined) return new Response(null, { status: 413 });
+  const forwarded = await dependencies.core.fetch(
+    new Request('https://core.internal/runner-evidence', {
+      method: 'POST',
+      headers: {
+        'content-type': request.headers.get('content-type') ?? 'application/json',
+        'x-compte-rendu-runner-evidence': 'verified',
+      },
+      body,
+    }),
+  );
+  await forwarded.body?.cancel().catch(() => undefined);
+  return new Response(null, { status: forwarded.ok ? 202 : 503 });
+};
+
 const forwardRunnerCleanupRecovery = async (
   request: Request,
   dependencies: IngressDependencies,
@@ -908,6 +933,14 @@ export function createIngressWorker(dependencies: IngressDependencies): WorkerEn
       if (new URL(request.url).pathname === runnerCallbackPath) {
         try {
           return await forwardRunnerCallback(request, dependencies);
+        } catch {
+          return new Response(null, { status: 503 });
+        }
+      }
+
+      if (new URL(request.url).pathname === runnerEvidencePath) {
+        try {
+          return await forwardRunnerEvidence(request, dependencies);
         } catch {
           return new Response(null, { status: 503 });
         }

@@ -1654,13 +1654,12 @@ describe('Core admission, claims, and manual policy', () => {
   });
 
   it.each([
-    { matching: true, markdown: '## Review:\nChange the boundary check.' },
-    { matching: false, markdown: '## Review:\nChange the boundary check.' },
-    { matching: true, markdown: 'TLDR: Request changes — the boundary excludes 100.' },
-    { matching: true, markdown: 'Request changes: the boundary excludes 100.' },
+    { markdown: '## Review:\nChange the boundary check.' },
+    { markdown: 'TLDR: Request changes — the boundary excludes 100.' },
+    { markdown: 'Request changes: the boundary excludes 100.' },
   ])(
-    'publishes a structured vote only when evidence agrees ($matching, $markdown)',
-    async ({ matching, markdown }) => {
+    'publishes the validated structured vote from the authenticated callback ($markdown)',
+    async ({ markdown }) => {
       const database = new SqliteD1Database();
       const store = createD1ReviewStateStore(database);
       const claim = await store.claimReview({
@@ -1692,16 +1691,6 @@ describe('Core admission, claims, and manual policy', () => {
       );
       const callback = JSON.parse(await successfulCallback(claim.runId));
       callback.result = { version: 2, decision: 'request_changes', markdown };
-      callback.evidence.validatedReview = await evidenceField(
-        Buffer.from(markdown).toString('base64'),
-      );
-      const manifest = JSON.parse(
-        Buffer.from(callback.evidence.manifest.content, 'base64').toString(),
-      );
-      manifest.result = { ...callback.result, decision: matching ? 'request_changes' : 'approve' };
-      callback.evidence.manifest = await evidenceField(
-        Buffer.from(JSON.stringify(manifest)).toString('base64'),
-      );
       const response = await worker.fetch(
         new Request('https://core.internal/runner-results', {
           method: 'POST',
@@ -1712,23 +1701,18 @@ describe('Core admission, claims, and manual policy', () => {
           body: JSON.stringify(callback),
         }),
       );
-      if (matching) {
-        expect(response.status).toBe(202);
-        expect(reviews).toEqual([
-          expect.objectContaining({
-            event: 'REQUEST_CHANGES',
-            commit_id: eligibleEvent.headSha,
-            body: expect.stringContaining(markdown),
-          }),
-        ]);
-        expect(await createD1ReviewStateStore(database).getRunOutcome(claim.runId)).toMatchObject({
-          status: 'completed',
-          decision: 'request_changes',
-        });
-      } else {
-        expect(reviews).toEqual([]);
-        expect(await store.getRunOutcome(claim.runId)).toMatchObject({ status: 'failed' });
-      }
+      expect(response.status).toBe(202);
+      expect(reviews).toEqual([
+        expect.objectContaining({
+          event: 'REQUEST_CHANGES',
+          commit_id: eligibleEvent.headSha,
+          body: expect.stringContaining(markdown),
+        }),
+      ]);
+      expect(await createD1ReviewStateStore(database).getRunOutcome(claim.runId)).toMatchObject({
+        status: 'completed',
+        decision: 'request_changes',
+      });
     },
   );
 
@@ -1947,9 +1931,13 @@ describe('Core admission, claims, and manual policy', () => {
         );
 
         expect(response.status).toBe(202);
-        expect(stored).toHaveLength(1);
-        expect(stored[0]?.key).toBe(`reviews/${claimed.runId}`);
-        const evidenceObject = JSON.parse(stored[0]?.value as string) as {
+        expect(stored.map((entry) => entry.key)).toEqual([
+          `reviews/${claimed.runId}`,
+          `reviews/${claimed.runId}/publications/runner-job-1/1.json`,
+        ]);
+        const evidenceObject = JSON.parse(
+          stored.find((entry) => entry.key === `reviews/${claimed.runId}`)?.value as string,
+        ) as {
           evidence: Record<string, unknown>;
         };
         expect(evidenceObject.evidence).toEqual({
@@ -1990,7 +1978,7 @@ describe('Core admission, claims, and manual policy', () => {
           }),
         );
         expect(replay.status).toBe(202);
-        expect(stored).toHaveLength(1);
+        expect(stored).toHaveLength(2);
         expect(reviews).toHaveLength(1);
         expect(checkUpdates).toHaveLength(1);
         await expect(stateStore.getRunOutcome(claimed.runId)).resolves.toMatchObject({
@@ -2106,19 +2094,8 @@ describe('Core admission, claims, and manual policy', () => {
           expect((await worker.fetch(request())).status).toBe(503);
           expect((await stateStore.getRunOutcome(claimed.runId))?.status).toBe('scheduled');
           const now = Date.now();
-          const key = `reviews/${claimed.runId}`;
-          const original = archive.get(key)!;
-          archive.set(key, original.replace('"version":1', '"version":2'));
           await expect(worker.reconcilePublications(now)).rejects.toThrow();
           expect((await stateStore.getRunOutcome(claimed.runId))?.status).toBe('scheduled');
-          expect(diagnostics).toContainEqual({
-            phase: 'publication',
-            outcome: 'reconciliation_incomplete',
-            runId: claimed.runId,
-            reason: 'evidence',
-          });
-          archive.set(key, original);
-          await expect(worker.reconcilePublications(now + 60_000)).rejects.toThrow();
           expect(diagnostics).toContainEqual({
             phase: 'publication',
             outcome: 'reconciliation_incomplete',
@@ -2126,7 +2103,7 @@ describe('Core admission, claims, and manual policy', () => {
             reason: 'publication',
           });
           markerAvailable = true;
-          await worker.reconcilePublications(now + 120_000);
+          await worker.reconcilePublications(now + 60_000);
           expect(await postHogEvents(requests)).toContainEqual(
             expect.objectContaining({
               event: 'review finished',
