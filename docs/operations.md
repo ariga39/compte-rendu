@@ -178,7 +178,9 @@ validated lifecycle event and registers each with `waitUntil()`.
 
 ## Update and rollback
 
-For a normal compatible release:
+Worker and Runner are upgraded together in a brief maintenance window. Drain or
+stop Runners before switching versions; mixed-version operation is not a default
+requirement. For a normal release:
 
 1. Run `corepack pnpm check`, `corepack pnpm test`, and
    `corepack pnpm build` against the immutable checkout being released.
@@ -349,9 +351,10 @@ For the first upgrade from a Runner without these endpoints, arrange a quiet
 window and wait for queued and claimed work to finish. Disabling webhooks alone
 does not remove queued work; zero concurrency is invalid.
 
-Back up artifacts/configuration before replacement. Deploy additive Core/contracts
-support before a Runner that emits a new result shape. Do not interrupt live jobs
-just to update documentation or the dashboard. Relay grants survive Worker restarts in D1. Runner revocation is bounded per job and grants expire after six hours; startup does not replay pending revocations. Interrupted agent jobs cannot resume.
+Back up artifacts/configuration before replacement. Within the maintenance
+window, deploy Core/contracts support before a Runner that emits a new result
+shape, with claims paused. Do not interrupt live jobs just to update
+documentation or the dashboard. Relay grants survive Worker restarts in D1. Runner revocation is bounded per job and grants expire after six hours; startup does not replay pending revocations. Interrupted agent jobs cannot resume.
 
 A hard crash can leave owned sbx resources. On startup Runner checks its private
 `sandbox-owners/<instanceId>/` records under the evidence root and removes only a
