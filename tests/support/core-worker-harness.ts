@@ -1,5 +1,5 @@
 import { vi } from 'vitest';
-import type { createCoreWorker } from '../../apps/core/src/core-worker';
+import type { createCoreWorker } from './core-http-adapter';
 import type { ReviewPublicationStateStore } from '../../apps/core/src/index';
 import type { ReviewEvent } from '../../packages/contracts/src';
 import type { SqliteD1Database } from './d1-database';

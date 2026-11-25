@@ -10,8 +10,8 @@ reviews. This document describes the implementation; historical proposals are in
 
 ### Admission
 
-Ingress verifies the webhook HMAC, body bounds and installation allowlist before
-forwarding a normalized event to Core. Automatic review accepts non-draft
+The application edge verifies the webhook HMAC, body bounds and installation
+allowlist before delivering a typed normalized event to Core. Automatic review accepts non-draft
 `opened`, `reopened`, `synchronize` and `ready_for_review` events when the base
 repository is private or the head belongs to the same repository. Bot authors
 are excluded unless their stable numeric ID is in `ALLOWED_BOT_AUTHOR_IDS`.
@@ -104,18 +104,23 @@ flowchart LR
   L --> P[Cloudflare AI Gateway BYOK]
 ```
 
-| Component               | Owns                                                                                                                       |
-| ----------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `apps/ingress`          | Webhook verification, installation filtering, request authentication and normalization, called inside the SvelteKit Worker |
-| `apps/core`             | Authorization, durable queue, GitHub App access/publication, lifecycle, public projection and metadata refresh             |
-| `apps/runner`           | Checkout, sandbox lifecycle, agent execution, evidence, grant revocation and terminal callback                             |
-| `apps/inference-worker` | Per-job grants, route authorization, cancellation and sanitized transport diagnostics                                      |
-| AI Gateway BYOK         | Upstream models, URLs, credentials and protocol adaptation                                                                 |
-| `apps/dashboard`        | Single Worker entry point, SSR SvelteKit/Carbon UI and self-hosted IBM Plex Mono                                           |
-| `packages/contracts`    | Shared Effect schemas and transport types                                                                                  |
+| Component               | Owns                                                                                                           |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `apps/ingress`          | GitHub webhook verification, installation filtering and normalization, called inside the SvelteKit Worker      |
+| `apps/core`             | Authorization, durable queue, GitHub App access/publication, lifecycle, public projection and metadata refresh |
+| `apps/runner`           | Checkout, sandbox lifecycle, agent execution, evidence, grant revocation and terminal callback                 |
+| `apps/inference-worker` | Per-job grants, route authorization, cancellation and sanitized transport diagnostics                          |
+| AI Gateway BYOK         | Upstream models, URLs, credentials and protocol adaptation                                                     |
+| `apps/dashboard`        | Single Worker entry point, SSR SvelteKit/Carbon UI and self-hosted IBM Plex Mono                               |
+| `packages/contracts`    | Shared Effect schemas and transport types                                                                      |
 
 Core and ingress are internal modules of one public SvelteKit Worker; only the
-allowlisted HTTP endpoints are exposed. Runner is private. The inference hostname accepts job grants; relay control uses a private Worker binding. Core validates an admitted job, writes the durable delivery/run in one D1 claim, and leaves it for the idle Runner to claim through `/runner-claim`; work is not submitted through the VPC binding.
+allowlisted HTTP endpoints are exposed. The application edge dispatches each
+machine or document request once: it authenticates Runner calls, calls typed Core
+reads and protocol handlers, and passes GitHub webhook payloads to the ingress
+module, which delivers typed events and metadata invalidations directly to Core.
+SSR loaders reach the same in-process application through SvelteKit `event.fetch`.
+Runner is private. The inference hostname accepts job grants; relay control uses a private Worker binding. Core validates an admitted job, writes the durable delivery/run in one D1 claim, and leaves it for the idle Runner to claim through `/runner-claim`; work is not submitted through the VPC binding.
 There is no Cloudflare Workflow or message queue. See [installation](installation.md)
 and [LLM service](llm-service.md) for configuration, grants and deployment order.
 
@@ -432,15 +437,16 @@ fixtures through `tests/support/runner-harness.ts`.
 
 Tests observe public behavior through these established seams:
 
-| Seam                              | Observable behavior                                                                                             |
-| --------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| Webhook ingress HTTP              | Signature/payload/installation checks, normalization and retry response                                         |
-| Core Worker HTTP with D1          | Durable admission/claim, callback/progress ownership, publication and public projection across Worker instances |
-| Review coordinator                | Policy, deduplication, freshness, terminal publication through external adapters                                |
-| Runner HTTP/process/runtime ports | Admission, capacity, agent result, evidence, deadlines and confirmed cleanup                                    |
-| LLM control/inference HTTP        | Grants, route authorization, native streaming, cancellation and sanitization                                    |
-| Core store ports                  | Persisted run/disclosure queries and atomic ownership transitions by transaction owner                          |
-| Built dashboard in browser        | Navigation, filters, privacy expiry, refresh and accessibility                                                  |
+| Seam                              | Observable behavior                                                                                                   |
+| --------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| GitHub webhook ingress            | Signature/payload/installation checks, normalization, typed delivery and retry response                               |
+| Application edge HTTP with D1     | Runner authentication and limits, public reads, durable admission/claim, callback/progress ownership across instances |
+| Core typed service                | Admission events, metadata invalidation, Runner protocol results, publication and public projection                   |
+| Review coordinator                | Policy, deduplication, freshness, terminal publication through external adapters                                      |
+| Runner HTTP/process/runtime ports | Admission, capacity, agent result, evidence, deadlines and confirmed cleanup                                          |
+| LLM control/inference HTTP        | Grants, route authorization, native streaming, cancellation and sanitization                                          |
+| Core store ports                  | Persisted run/disclosure queries and atomic ownership transitions by transaction owner                                |
+| Built dashboard in browser        | Navigation, filters, privacy expiry, refresh and accessibility                                                        |
 
 Use behavior-based TDD with narrow external adapters, not private-helper or
 internal-call-order assertions. Runtime code follows the pinned stable Effect 4 and

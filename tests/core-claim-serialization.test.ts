@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createCoreWorker } from '../apps/core/src/core-worker';
+import { createCoreWorker } from './support/core-http-adapter';
 import {
   createD1ReviewStateStore,
   type ReviewJob,

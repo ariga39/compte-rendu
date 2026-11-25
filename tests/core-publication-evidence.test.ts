@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createCoreWorker } from '../apps/core/src/core-worker';
+import { createCoreWorker } from './support/core-http-adapter';
 import { createD1ReviewStateStore } from '../apps/core/src/index';
 import { publicationRecordKey } from '../apps/core/src/publication-record';
 import { MAX_RUNNER_EVIDENCE_BYTES } from '../packages/contracts/src';
@@ -733,11 +733,6 @@ describe('private Runner evidence upload', () => {
       { stateStore: store },
     );
     try {
-      const unauthorized = new Request('https://core.internal/runner-evidence', {
-        method: 'POST',
-        body: '{}',
-      });
-      expect((await worker.fetch(unauthorized)).status).toBe(401);
       expect(
         (
           await worker.fetch(

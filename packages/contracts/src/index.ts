@@ -108,18 +108,6 @@ export const ReviewConfiguration = Schema.Struct({
 });
 export type ReviewConfiguration = typeof ReviewConfiguration.Type;
 
-export interface WorkerEntrypoint<Env = unknown> {
-  fetch(
-    request: Request,
-    env?: Env,
-    context?: { waitUntil(task: Promise<unknown>): void },
-  ): Response | Promise<Response>;
-}
-
-export interface CoreServiceBinding {
-  fetch(request: Request): Response | Promise<Response>;
-}
-
 export const GitHubSha = Schema.String.check(Schema.isPattern(/^[0-9a-f]{40}$/i));
 
 export const MAX_REVIEW_RESULT_BYTES = 8 * 1024 * 1024;

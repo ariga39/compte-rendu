@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createCoreWorker } from '../apps/core/src/core-worker';
+import { createCoreWorker } from './support/core-http-adapter';
 import { createD1ReviewStateStore } from '../apps/core/src/index';
 import { createGitHubPublicationAdapter } from '../apps/core/src/github-review-adapter';
 import type { OperationalLogEvent } from '../packages/contracts/src';

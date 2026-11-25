@@ -1,19 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import {
   MAX_WEBHOOK_BYTES,
-  createIngressWorker as createIngressWorkerWithConfig,
-  type IngressDependencies,
+  handleGitHubWebhook,
+  type WebhookCoreSink,
 } from '../apps/ingress/src/index';
-import { MAX_RUNNER_CALLBACK_BYTES, MAX_RUNNER_EVIDENCE_BYTES } from '../packages/contracts/src';
-import type { OperationalLogEvent } from '../packages/contracts/src';
+import type {
+  MetadataInvalidationEvent,
+  OperationalLog,
+  OperationalLogEvent,
+  ReviewEvent,
+} from '../packages/contracts/src';
 
 const secret = 'test-webhook-secret';
-
-type TestIngressDependencies = Omit<IngressDependencies, 'allowedInstallationIds'> &
-  Partial<Pick<IngressDependencies, 'allowedInstallationIds'>>;
-
-const createIngressWorker = (dependencies: TestIngressDependencies) =>
-  createIngressWorkerWithConfig({ allowedInstallationIds: '[7]', ...dependencies });
 
 const payload = {
   action: 'opened',
@@ -66,331 +64,228 @@ const collectingLog = () => {
   };
 };
 
+type WebhookHarnessOptions = {
+  readonly allowedInstallationIds?: unknown;
+  readonly allowedBotAuthorIds?: unknown;
+  readonly log?: OperationalLog;
+  readonly submitReviewEvent?: WebhookCoreSink['submitReviewEvent'];
+  readonly invalidateMetadata?: WebhookCoreSink['invalidateMetadata'];
+};
+
+const createWebhookHarness = (options: WebhookHarnessOptions = {}) => {
+  const reviews: ReviewEvent[] = [];
+  const metadata: MetadataInvalidationEvent[] = [];
+  return {
+    reviews,
+    metadata,
+    fetch: (request: Request) =>
+      handleGitHubWebhook(request, {
+        secret,
+        crypto: globalThis.crypto,
+        allowedInstallationIds:
+          'allowedInstallationIds' in options ? options.allowedInstallationIds : '[7]',
+        ...(options.allowedBotAuthorIds === undefined
+          ? {}
+          : { allowedBotAuthorIds: options.allowedBotAuthorIds }),
+        ...(options.log === undefined ? {} : { log: options.log }),
+        core: {
+          submitReviewEvent: async (event) => {
+            reviews.push(event);
+            return options.submitReviewEvent === undefined
+              ? 'accepted'
+              : options.submitReviewEvent(event);
+          },
+          invalidateMetadata: async (event) => {
+            metadata.push(event);
+            await options.invalidateMetadata?.(event);
+          },
+        },
+      }),
+  };
+};
+
 describe('Webhook ingress', () => {
-  it('forwards an authenticated Runner claim through the public ingress route', async () => {
-    const forwarded: Request[] = [];
-    const worker = createIngressWorker({
-      secret,
-      crypto: globalThis.crypto,
-      runnerCallbackToken: 'callback-token',
-      core: {
-        fetch: async (request) => {
-          forwarded.push(request.clone());
-          return new Response(JSON.stringify({ id: 'job-1' }), {
-            status: 200,
-            headers: { 'content-type': 'application/json' },
-          });
-        },
+  it('delivers one normalized supported pull request event and acknowledges it', async () => {
+    const { events, log } = collectingLog();
+    const worker = createWebhookHarness({ log });
+
+    const response = await worker.fetch(await signedRequest());
+
+    expect(response.status).toBe(202);
+    expect(events).toEqual([
+      {
+        phase: 'ingress',
+        outcome: 'accepted',
+        deliveryId: 'delivery-1',
+        event: 'metadata',
       },
-    });
-
-    const response = await worker.fetch(
-      new Request('https://ingress.internal/runner-claim', {
-        method: 'POST',
-        headers: { authorization: 'Bearer callback-token' },
-        body: JSON.stringify({ runnerInstanceId: 'runner-1' }),
-      }),
-    );
-
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ id: 'job-1' });
-    expect(forwarded).toHaveLength(1);
-    expect(forwarded[0]?.url).toBe('https://core.internal/runner-claims');
-    expect(forwarded[0]?.headers.get('x-compte-rendu-runner-claim')).toBe('verified');
+      {
+        phase: 'ingress',
+        outcome: 'accepted',
+        deliveryId: 'delivery-1',
+        event: 'pull_request',
+      },
+    ]);
+    expect(worker.metadata).toEqual([
+      {
+        deliveryId: 'delivery-1',
+        event: 'metadata',
+        reason: 'repository_private',
+        installationId: 7,
+        repositoryIds: [11],
+        visibility: 'private',
+      },
+    ]);
+    expect(worker.reviews).toEqual([
+      {
+        deliveryId: 'delivery-1',
+        event: 'pull_request',
+        action: 'opened',
+        repositoryId: 11,
+        pullRequestNumber: 42,
+        installationId: 7,
+        repositoryVisibility: 'private',
+        baseRepositoryId: 11,
+        headRepositoryId: 99,
+        draft: false,
+        baseSha: '1111111111111111111111111111111111111111',
+        headSha: '2222222222222222222222222222222222222222',
+      },
+    ]);
   });
 
-  it('forwards an empty Runner claim without creating a response body', async () => {
-    const worker = createIngressWorker({
-      secret,
-      crypto: globalThis.crypto,
-      runnerCallbackToken: 'callback-token',
-      core: { fetch: async () => new Response(null, { status: 204 }) },
-    });
-    const reply = await worker.fetch(
-      new Request('https://ingress.internal/runner-claim', {
-        method: 'POST',
-        headers: { authorization: 'Bearer callback-token' },
-        body: '{}',
-      }),
-    );
-    expect(reply.status).toBe(204);
-    expect(reply.body).toBeNull();
-  });
-
-  it('rejects an unauthenticated Runner claim without contacting core', async () => {
-    const forwarded: Request[] = [];
-    const worker = createIngressWorker({
-      secret,
-      crypto: globalThis.crypto,
-      runnerCallbackToken: 'callback-token',
-      core: {
-        fetch: async (request) => {
-          forwarded.push(request);
-          return new Response(null, { status: 200 });
-        },
-      },
-    });
+  it('delivers normalized branch refs when the webhook supplies them', async () => {
+    const worker = createWebhookHarness();
 
     const response = await worker.fetch(
-      new Request('https://ingress.internal/runner-claim', {
-        method: 'POST',
-        body: '{}',
-      }),
-    );
-
-    expect(response.status).toBe(401);
-    expect(forwarded).toHaveLength(0);
-  });
-
-  it('requires POST for the public Runner claim route', async () => {
-    const forwarded: Request[] = [];
-    const worker = createIngressWorker({
-      secret,
-      crypto: globalThis.crypto,
-      runnerCallbackToken: 'callback-token',
-      core: {
-        fetch: async (request) => {
-          forwarded.push(request);
-          return new Response(null, { status: 200 });
+      await signedRequest({
+        ...payload,
+        pull_request: {
+          ...payload.pull_request,
+          base: { ...payload.pull_request.base, ref: 'main' },
+          head: { ...payload.pull_request.head, ref: 'feature/drawer' },
         },
-      },
-    });
-
-    const response = await worker.fetch(
-      new Request('https://ingress.internal/runner-claim', {
-        method: 'GET',
-        headers: { authorization: 'Bearer callback-token' },
-      }),
-    );
-
-    expect(response.status).toBe(405);
-    expect(forwarded).toHaveLength(0);
-  });
-
-  it('forwards an authenticated runner callback through the public ingress route', async () => {
-    const forwarded: Request[] = [];
-    const callbackBody = JSON.stringify({ runId: 'run-callback-1', status: 'succeeded' });
-    const worker = createIngressWorker({
-      secret,
-      crypto: globalThis.crypto,
-      allowedInstallationIds: '[7]',
-      runnerCallbackToken: 'callback-token',
-      core: {
-        fetch: async (request) => {
-          forwarded.push(request.clone());
-          return new Response(null, { status: 202 });
-        },
-      },
-    });
-
-    const response = await worker.fetch(
-      new Request('https://ingress.internal/runner-callback', {
-        method: 'POST',
-        headers: {
-          authorization: 'Bearer callback-token',
-          'content-type': 'application/json',
-        },
-        body: callbackBody,
       }),
     );
 
     expect(response.status).toBe(202);
-    expect(forwarded).toHaveLength(1);
-    expect(await forwarded[0]?.text()).toBe(callbackBody);
-    expect(forwarded[0]?.url).toBe('https://core.internal/runner-results');
+    expect(worker.reviews[0]).toMatchObject({
+      event: 'pull_request',
+      baseRef: 'main',
+      headRef: 'feature/drawer',
+    });
   });
 
-  it('propagates Core callback status instead of mapping every rejection to 503', async () => {
-    const forwarded: Request[] = [];
-    const statuses = [409, 503];
-    const worker = createIngressWorker({
-      secret,
-      crypto: globalThis.crypto,
-      allowedInstallationIds: '[7]',
-      runnerCallbackToken: 'callback-token',
-      core: {
-        fetch: async (request) => {
-          forwarded.push(request.clone());
-          return new Response(null, { status: statuses[forwarded.length - 1] });
-        },
-      },
-    });
+  it('preserves human pull request handling when the author ID is explicitly null', async () => {
+    const worker = createWebhookHarness();
 
-    const send = () =>
-      worker.fetch(
-        new Request('https://ingress.internal/runner-callback', {
-          method: 'POST',
-          headers: {
-            authorization: 'Bearer callback-token',
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({ version: 2, runId: 'run-status' }),
+    const response = await worker.fetch(
+      await signedRequest({
+        ...payload,
+        pull_request: {
+          ...payload.pull_request,
+          user: { login: 'maintainer', type: 'User', id: null },
+        },
+      }),
+    );
+
+    expect(response.status).toBe(202);
+    expect(worker.metadata).toHaveLength(1);
+    expect(worker.reviews).toHaveLength(1);
+  });
+
+  it('ignores an automatic pull request authored by a GitHub Bot', async () => {
+    const { events, log } = collectingLog();
+    const worker = createWebhookHarness({ log });
+
+    const response = await worker.fetch(
+      await signedRequest({
+        ...payload,
+        pull_request: {
+          ...payload.pull_request,
+          user: { login: 'dependabot[bot]', type: 'Bot' },
+        },
+      }),
+    );
+
+    expect(response.status).toBe(204);
+    expect(worker.metadata).toHaveLength(1);
+    expect(worker.reviews).toHaveLength(0);
+    expect(events).toEqual([
+      {
+        phase: 'ingress',
+        outcome: 'accepted',
+        deliveryId: 'delivery-1',
+        event: 'metadata',
+      },
+      {
+        phase: 'ingress',
+        outcome: 'ignored',
+        deliveryId: 'delivery-1',
+        event: 'pull_request',
+        reason: 'bot_pull_request',
+      },
+    ]);
+  });
+
+  it('delivers an automatic pull request from an allowlisted Bot author', async () => {
+    const worker = createWebhookHarness({ allowedBotAuthorIds: '[12345]' });
+
+    const response = await worker.fetch(
+      await signedRequest({
+        ...payload,
+        pull_request: {
+          ...payload.pull_request,
+          user: { login: 'dependabot[bot]', id: 12345, type: 'Bot' },
+        },
+      }),
+    );
+
+    expect(response.status).toBe(202);
+    expect(worker.reviews).toHaveLength(1);
+  });
+
+  it('fails closed for Bot pull requests with null or missing author IDs', async () => {
+    const worker = createWebhookHarness({ allowedBotAuthorIds: '[12345]' });
+
+    for (const user of [
+      { login: 'bot-with-null-id[bot]', type: 'Bot', id: null },
+      { login: 'bot-without-id[bot]', type: 'Bot' },
+    ]) {
+      const response = await worker.fetch(
+        await signedRequest({
+          ...payload,
+          pull_request: { ...payload.pull_request, user },
         }),
       );
 
-    expect((await send()).status).toBe(409);
-    expect((await send()).status).toBe(503);
-    expect(forwarded).toHaveLength(2);
+      expect(response.status).toBe(204);
+    }
+
+    expect(worker.reviews).toHaveLength(0);
   });
 
-  it('rejects an unauthenticated runner callback without contacting core', async () => {
-    const forwarded: Request[] = [];
-    const worker = createIngressWorker({
-      secret,
-      crypto: globalThis.crypto,
-      allowedInstallationIds: '[7]',
-      runnerCallbackToken: 'callback-token',
-      core: {
-        fetch: async (request) => {
-          forwarded.push(request);
-          return new Response(null, { status: 202 });
-        },
-      },
-    });
+  it('ignores an allowlisted Bot author from an unapproved installation before reaching core', async () => {
+    const worker = createWebhookHarness({ allowedBotAuthorIds: '[12345]' });
 
     const response = await worker.fetch(
-      new Request('https://ingress.internal/runner-callback', {
-        method: 'POST',
-        body: '{}',
+      await signedRequest({
+        ...payload,
+        installation: { id: 99 },
+        pull_request: {
+          ...payload.pull_request,
+          user: { login: 'dependabot[bot]', id: 12345, type: 'Bot' },
+        },
       }),
     );
 
-    expect(response.status).toBe(401);
-    expect(forwarded).toHaveLength(0);
-  });
-
-  it('rejects a runner callback whose buffered body exceeds 32 MiB without contacting core', async () => {
-    const forwarded: Request[] = [];
-    const worker = createIngressWorker({
-      secret,
-      crypto: globalThis.crypto,
-      runnerCallbackToken: 'callback-token',
-      core: {
-        fetch: async (request) => {
-          forwarded.push(request);
-          return new Response(null, { status: 202 });
-        },
-      },
-    });
-
-    const response = await worker.fetch(
-      new Request('https://ingress.internal/runner-callback', {
-        method: 'POST',
-        headers: { authorization: 'Bearer callback-token' },
-        body: new Uint8Array(MAX_RUNNER_CALLBACK_BYTES + 1),
-      }),
-    );
-
-    expect(response.status).toBe(413);
-    expect(forwarded).toHaveLength(0);
-  });
-
-  it('forwards an authenticated private evidence upload without changing its body', async () => {
-    const forwarded: Request[] = [];
-    const worker = createIngressWorker({
-      secret,
-      crypto: globalThis.crypto,
-      runnerCallbackToken: 'callback-token',
-      core: {
-        fetch: async (request) => {
-          forwarded.push(request.clone());
-          return new Response(null, { status: 202 });
-        },
-      },
-    });
-    const body = JSON.stringify({ version: 2, runId: 'run-1', id: 'job-1', attempt: 1 });
-
-    const response = await worker.fetch(
-      new Request('https://ingress.internal/runner-evidence', {
-        method: 'POST',
-        headers: {
-          authorization: 'Bearer callback-token',
-          'content-type': 'application/json',
-        },
-        body,
-      }),
-    );
-
-    expect(response.status).toBe(202);
-    expect(forwarded).toHaveLength(1);
-    expect(new URL(forwarded[0]!.url).pathname).toBe('/runner-evidence');
-    expect(forwarded[0]!.headers.get('x-compte-rendu-runner-evidence')).toBe('verified');
-    expect(await forwarded[0]!.text()).toBe(body);
-  });
-
-  it('propagates the private evidence upload status for authentication and diagnosis', async () => {
-    const forwarded: Request[] = [];
-    const worker = createIngressWorker({
-      secret,
-      crypto: globalThis.crypto,
-      runnerCallbackToken: 'callback-token',
-      core: {
-        fetch: async (request) => {
-          forwarded.push(request.clone());
-          return new Response(null, { status: 409 });
-        },
-      },
-    });
-
-    const response = await worker.fetch(
-      new Request('https://ingress.internal/runner-evidence', {
-        method: 'POST',
-        headers: {
-          authorization: 'Bearer callback-token',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({ version: 2, runId: 'run-1', id: 'job-1', attempt: 1 }),
-      }),
-    );
-
-    expect(response.status).toBe(409);
-    expect(forwarded).toHaveLength(1);
-  });
-
-  it('rejects an unauthenticated or oversized private evidence upload without contacting core', async () => {
-    const forwarded: Request[] = [];
-    const worker = createIngressWorker({
-      secret,
-      crypto: globalThis.crypto,
-      runnerCallbackToken: 'callback-token',
-      core: {
-        fetch: async (request) => {
-          forwarded.push(request);
-          return new Response(null, { status: 202 });
-        },
-      },
-    });
-    const unauthenticated = await worker.fetch(
-      new Request('https://ingress.internal/runner-evidence', {
-        method: 'POST',
-        body: '{}',
-      }),
-    );
-    expect(unauthenticated.status).toBe(401);
-    const oversized = await worker.fetch(
-      new Request('https://ingress.internal/runner-evidence', {
-        method: 'POST',
-        headers: { authorization: 'Bearer callback-token' },
-        body: new Uint8Array(MAX_RUNNER_EVIDENCE_BYTES + 1),
-      }),
-    );
-    expect(oversized.status).toBe(413);
-    expect(forwarded).toHaveLength(0);
+    expect(response.status).toBe(204);
+    expect(worker.metadata).toHaveLength(0);
+    expect(worker.reviews).toHaveLength(0);
   });
 
   it('ignores eligible webhooks from an unapproved installation before reaching core', async () => {
-    const forwarded: Request[] = [];
-    const worker = createIngressWorker({
-      secret,
-      crypto: globalThis.crypto,
-      allowedInstallationIds: '[7]',
-      core: {
-        fetch: async (request) => {
-          forwarded.push(request);
-          return new Response(null, { status: 202 });
-        },
-      },
-    });
+    const worker = createWebhookHarness();
     const requests = [
       await signedRequest({ ...payload, installation: { id: 99 } }),
       await signedRequest({
@@ -412,293 +307,24 @@ describe('Webhook ingress', () => {
 
     expect((await worker.fetch(requests[0])).status).toBe(204);
     expect((await worker.fetch(requests[1])).status).toBe(204);
-    expect(forwarded).toHaveLength(0);
+    expect(worker.metadata).toHaveLength(0);
+    expect(worker.reviews).toHaveLength(0);
   });
 
-  it('fails closed without forwarding when the installation allowlist is missing or malformed', async () => {
+  it('fails closed without delivering an event when the installation allowlist is missing or malformed', async () => {
     for (const allowedInstallationIds of [undefined, 'not-json', '[]', '[0]']) {
-      const forwarded: Request[] = [];
-      const worker = createIngressWorkerWithConfig({
-        secret,
-        crypto: globalThis.crypto,
-        allowedInstallationIds,
-        core: {
-          fetch: async (request) => {
-            forwarded.push(request);
-            return new Response(null, { status: 202 });
-          },
-        },
-      });
+      const worker = createWebhookHarness({ allowedInstallationIds });
 
       const response = await worker.fetch(await signedRequest());
 
       expect(response.status).toBe(503);
-      expect(forwarded).toHaveLength(0);
+      expect(worker.metadata).toHaveLength(0);
+      expect(worker.reviews).toHaveLength(0);
     }
   });
 
-  it('forwards one normalized supported pull request event and acknowledges it', async () => {
-    const forwarded: Request[] = [];
-    const { events, log } = collectingLog();
-    const dependencies: IngressDependencies = {
-      secret,
-      crypto: globalThis.crypto,
-      allowedInstallationIds: '[7]',
-      log,
-      core: {
-        fetch: async (request) => {
-          forwarded.push(request);
-          return new Response(null, { status: 202 });
-        },
-      },
-    };
-    const worker = createIngressWorker(dependencies);
-
-    const response = await worker.fetch(await signedRequest());
-
-    expect(response.status).toBe(202);
-    expect(events).toEqual([
-      {
-        phase: 'ingress',
-        outcome: 'accepted',
-        deliveryId: 'delivery-1',
-        event: 'metadata',
-      },
-      {
-        phase: 'ingress',
-        outcome: 'accepted',
-        deliveryId: 'delivery-1',
-        event: 'pull_request',
-      },
-    ]);
-    expect(forwarded).toHaveLength(2);
-    expect(await forwarded[0].clone().json()).toEqual({
-      deliveryId: 'delivery-1',
-      event: 'metadata',
-      reason: 'repository_private',
-      installationId: 7,
-      repositoryIds: [11],
-      visibility: 'private',
-    });
-    expect(await forwarded[1].clone().json()).toEqual({
-      deliveryId: 'delivery-1',
-      event: 'pull_request',
-      action: 'opened',
-      repositoryId: 11,
-      pullRequestNumber: 42,
-      installationId: 7,
-      repositoryVisibility: 'private',
-      baseRepositoryId: 11,
-      headRepositoryId: 99,
-      draft: false,
-      baseSha: '1111111111111111111111111111111111111111',
-      headSha: '2222222222222222222222222222222222222222',
-    });
-  });
-  it('forwards normalized branch refs when the webhook supplies them', async () => {
-    const forwarded: Request[] = [];
-    const worker = createIngressWorker({
-      secret,
-      crypto: globalThis.crypto,
-      core: {
-        fetch: async (request) => {
-          forwarded.push(request);
-          return new Response(null, { status: 202 });
-        },
-      },
-    });
-
-    const response = await worker.fetch(
-      await signedRequest({
-        ...payload,
-        pull_request: {
-          ...payload.pull_request,
-          base: { ...payload.pull_request.base, ref: 'main' },
-          head: { ...payload.pull_request.head, ref: 'feature/drawer' },
-        },
-      }),
-    );
-
-    expect(response.status).toBe(202);
-    const event = await forwarded[forwarded.length - 1]!.clone().json();
-    expect(event).toMatchObject({
-      event: 'pull_request',
-      baseRef: 'main',
-      headRef: 'feature/drawer',
-    });
-  });
-  it('preserves human pull request handling when the author ID is explicitly null', async () => {
-    const forwarded: Request[] = [];
-    const worker = createIngressWorker({
-      secret,
-      crypto: globalThis.crypto,
-      core: {
-        fetch: async (request) => {
-          forwarded.push(request);
-          return new Response(null, { status: 202 });
-        },
-      },
-    });
-
-    const response = await worker.fetch(
-      await signedRequest({
-        ...payload,
-        pull_request: {
-          ...payload.pull_request,
-          user: { login: 'maintainer', type: 'User', id: null },
-        },
-      }),
-    );
-
-    expect(response.status).toBe(202);
-    expect(forwarded).toHaveLength(2);
-  });
-  it('ignores an automatic pull request authored by a GitHub Bot', async () => {
-    const forwarded: Request[] = [];
-    const { events, log } = collectingLog();
-    const worker = createIngressWorker({
-      secret,
-      crypto: globalThis.crypto,
-      log,
-      core: {
-        fetch: async (request) => {
-          forwarded.push(request);
-          return new Response(null, { status: 202 });
-        },
-      },
-    });
-
-    const response = await worker.fetch(
-      await signedRequest({
-        ...payload,
-        pull_request: {
-          ...payload.pull_request,
-          user: { login: 'dependabot[bot]', type: 'Bot' },
-        },
-      }),
-    );
-
-    expect(response.status).toBe(204);
-    expect(forwarded).toHaveLength(1);
-    expect(events).toEqual([
-      {
-        phase: 'ingress',
-        outcome: 'accepted',
-        deliveryId: 'delivery-1',
-        event: 'metadata',
-      },
-      {
-        phase: 'ingress',
-        outcome: 'ignored',
-        deliveryId: 'delivery-1',
-        event: 'pull_request',
-        reason: 'bot_pull_request',
-      },
-    ]);
-  });
-  it('forwards an automatic pull request from an allowlisted Bot author', async () => {
-    const forwarded: Request[] = [];
-    const workerDependencies: IngressDependencies = {
-      secret,
-      crypto: globalThis.crypto,
-      allowedInstallationIds: '[7]',
-      allowedBotAuthorIds: '[12345]',
-      core: {
-        fetch: async (request: Request) => {
-          forwarded.push(request);
-          return new Response(null, { status: 202 });
-        },
-      },
-    };
-    const worker = createIngressWorkerWithConfig(workerDependencies);
-
-    const response = await worker.fetch(
-      await signedRequest({
-        ...payload,
-        pull_request: {
-          ...payload.pull_request,
-          user: { login: 'dependabot[bot]', id: 12345, type: 'Bot' },
-        },
-      }),
-    );
-
-    expect(response.status).toBe(202);
-    expect(forwarded).toHaveLength(2);
-  });
-  it('fails closed for Bot pull requests with null or missing author IDs', async () => {
-    const forwarded: Request[] = [];
-    const worker = createIngressWorkerWithConfig({
-      secret,
-      crypto: globalThis.crypto,
-      allowedInstallationIds: '[7]',
-      allowedBotAuthorIds: '[12345]',
-      core: {
-        fetch: async (request) => {
-          forwarded.push(request);
-          return new Response(null, { status: 202 });
-        },
-      },
-    });
-
-    for (const user of [
-      { login: 'bot-with-null-id[bot]', type: 'Bot', id: null },
-      { login: 'bot-without-id[bot]', type: 'Bot' },
-    ]) {
-      const response = await worker.fetch(
-        await signedRequest({
-          ...payload,
-          pull_request: { ...payload.pull_request, user },
-        }),
-      );
-
-      expect(response.status).toBe(204);
-    }
-
-    expect(forwarded).toHaveLength(2);
-  });
-  it('ignores an allowlisted Bot author from an unapproved installation before contacting core', async () => {
-    const forwarded: Request[] = [];
-    const worker = createIngressWorkerWithConfig({
-      secret,
-      crypto: globalThis.crypto,
-      allowedInstallationIds: '[7]',
-      allowedBotAuthorIds: '[12345]',
-      core: {
-        fetch: async (request) => {
-          forwarded.push(request);
-          return new Response(null, { status: 202 });
-        },
-      },
-    });
-
-    const response = await worker.fetch(
-      await signedRequest({
-        ...payload,
-        installation: { id: 99 },
-        pull_request: {
-          ...payload.pull_request,
-          user: { login: 'dependabot[bot]', id: 12345, type: 'Bot' },
-        },
-      }),
-    );
-
-    expect(response.status).toBe(204);
-    expect(forwarded).toHaveLength(0);
-  });
-  it('forwards a manual review command when the Bot author allowlist is malformed', async () => {
-    const forwarded: Request[] = [];
-    const worker = createIngressWorkerWithConfig({
-      secret,
-      crypto: globalThis.crypto,
-      allowedInstallationIds: '[7]',
-      allowedBotAuthorIds: 'not-json',
-      core: {
-        fetch: async (request) => {
-          forwarded.push(request);
-          return new Response(null, { status: 202 });
-        },
-      },
-    });
+  it('delivers a manual review command when the Bot author allowlist is malformed', async () => {
+    const worker = createWebhookHarness({ allowedBotAuthorIds: 'not-json' });
     const request = await signedRequest({
       action: 'created',
       installation: { id: 7 },
@@ -718,30 +344,24 @@ describe('Webhook ingress', () => {
     const response = await worker.fetch(request);
 
     expect(response.status).toBe(202);
-    expect(forwarded).toHaveLength(1);
-    expect(await forwarded[0]?.clone().json()).toMatchObject({
-      event: 'issue_comment',
-      installationId: 7,
-      pullRequestNumber: 42,
-      commentId: 987654,
-      command: '/ai-review',
-    });
+    expect(worker.reviews).toEqual([
+      {
+        deliveryId: 'delivery-1',
+        event: 'issue_comment',
+        action: 'created',
+        repositoryId: 11,
+        pullRequestNumber: 42,
+        installationId: 7,
+        commentId: 987654,
+        commenterLogin: 'maintainer',
+        command: '/ai-review',
+      },
+    ]);
   });
+
   it('keeps non-allowlisted or malformed Bot events ignored without disabling humans', async () => {
     for (const allowedBotAuthorIds of ['[54321]', 'not-json']) {
-      const forwarded: Request[] = [];
-      const worker = createIngressWorkerWithConfig({
-        secret,
-        crypto: globalThis.crypto,
-        allowedInstallationIds: '[7]',
-        allowedBotAuthorIds,
-        core: {
-          fetch: async (request) => {
-            forwarded.push(request);
-            return new Response(null, { status: 202 });
-          },
-        },
-      });
+      const worker = createWebhookHarness({ allowedBotAuthorIds });
 
       const botResponse = await worker.fetch(
         await signedRequest({
@@ -756,23 +376,16 @@ describe('Webhook ingress', () => {
 
       expect(botResponse.status).toBe(204);
       expect(humanResponse.status).toBe(202);
-      expect(forwarded).toHaveLength(3);
+      expect(worker.metadata).toHaveLength(2);
+      expect(worker.reviews).toHaveLength(1);
     }
   });
+
   it('keeps the accepted response when operational logging fails', async () => {
-    let forwarded = false;
-    const worker = createIngressWorker({
-      secret,
-      crypto: globalThis.crypto,
+    const worker = createWebhookHarness({
       log: {
         record: () => {
           throw new Error('log sink unavailable');
-        },
-      },
-      core: {
-        fetch: async () => {
-          forwarded = true;
-          return new Response(null, { status: 202 });
         },
       },
     });
@@ -780,22 +393,12 @@ describe('Webhook ingress', () => {
     const response = await worker.fetch(await signedRequest());
 
     expect(response.status).toBe(202);
-    expect(forwarded).toBe(true);
+    expect(worker.reviews).toHaveLength(1);
   });
-  it('rejects an invalid signature without contacting core', async () => {
-    const forwarded: Request[] = [];
+
+  it('rejects an invalid signature without delivering events', async () => {
     const { events, log } = collectingLog();
-    const worker = createIngressWorker({
-      secret,
-      crypto: globalThis.crypto,
-      log,
-      core: {
-        fetch: async (request) => {
-          forwarded.push(request);
-          return new Response(null, { status: 202 });
-        },
-      },
-    });
+    const worker = createWebhookHarness({ log });
     const request = await signedRequest();
     request.headers.set('x-hub-signature-256', 'sha256=' + 'a'.repeat(64));
     const rawBody = await request.clone().text();
@@ -803,7 +406,8 @@ describe('Webhook ingress', () => {
     const response = await worker.fetch(request);
 
     expect(response.status).toBe(400);
-    expect(forwarded).toHaveLength(0);
+    expect(worker.metadata).toHaveLength(0);
+    expect(worker.reviews).toHaveLength(0);
     expect(events).toEqual([
       { phase: 'ingress', outcome: 'rejected', reason: 'invalid_signature' },
     ]);
@@ -811,18 +415,9 @@ describe('Webhook ingress', () => {
     expect(JSON.stringify(events)).not.toContain(request.headers.get('x-hub-signature-256'));
     expect(JSON.stringify(events)).not.toContain(rawBody);
   });
-  it('rejects a missing or empty delivery id without contacting core', async () => {
-    const forwarded: Request[] = [];
-    const worker = createIngressWorker({
-      secret,
-      crypto: globalThis.crypto,
-      core: {
-        fetch: async (request) => {
-          forwarded.push(request);
-          return new Response(null, { status: 202 });
-        },
-      },
-    });
+
+  it('rejects a missing or empty delivery id without delivering events', async () => {
+    const worker = createWebhookHarness();
 
     const missingRequest = await signedRequest();
     missingRequest.headers.delete('x-github-delivery');
@@ -833,39 +428,22 @@ describe('Webhook ingress', () => {
 
     expect(missingResponse.status).toBe(400);
     expect(emptyResponse.status).toBe(400);
-    expect(forwarded).toHaveLength(0);
+    expect(worker.metadata).toHaveLength(0);
+    expect(worker.reviews).toHaveLength(0);
   });
-  it('rejects a malformed supported payload without contacting core', async () => {
-    const forwarded: Request[] = [];
-    const worker = createIngressWorker({
-      secret,
-      crypto: globalThis.crypto,
-      core: {
-        fetch: async (request) => {
-          forwarded.push(request);
-          return new Response(null, { status: 202 });
-        },
-      },
-    });
+
+  it('rejects a malformed supported payload without delivering events', async () => {
+    const worker = createWebhookHarness();
 
     const response = await worker.fetch(await signedRequest({ action: 'opened' }));
 
     expect(response.status).toBe(400);
-    expect(forwarded).toHaveLength(0);
+    expect(worker.metadata).toHaveLength(0);
+    expect(worker.reviews).toHaveLength(0);
   });
 
   it('rejects a pull request with an empty or malformed SHA without scheduling a review', async () => {
-    const forwarded: Request[] = [];
-    const worker = createIngressWorker({
-      secret,
-      crypto: globalThis.crypto,
-      core: {
-        fetch: async (request) => {
-          forwarded.push(request);
-          return new Response(null, { status: 202 });
-        },
-      },
-    });
+    const worker = createWebhookHarness();
 
     for (const headSha of ['', 'not-a-github-sha']) {
       const request = await signedRequest({
@@ -881,29 +459,21 @@ describe('Webhook ingress', () => {
       expect(response.status).toBe(400);
     }
 
-    expect(forwarded).toHaveLength(2);
+    expect(worker.metadata).toHaveLength(2);
+    expect(worker.reviews).toHaveLength(0);
   });
-  it('ignores an unsupported GitHub event without contacting core', async () => {
-    const forwarded: Request[] = [];
+
+  it('ignores an unsupported GitHub event without delivering events', async () => {
     const { events, log } = collectingLog();
-    const worker = createIngressWorker({
-      secret,
-      crypto: globalThis.crypto,
-      log,
-      core: {
-        fetch: async (request) => {
-          forwarded.push(request);
-          return new Response(null, { status: 202 });
-        },
-      },
-    });
+    const worker = createWebhookHarness({ log });
     const request = await signedRequest();
     request.headers.set('x-github-event', 'issues');
 
     const response = await worker.fetch(request);
 
     expect(response.status).toBe(204);
-    expect(forwarded).toHaveLength(0);
+    expect(worker.metadata).toHaveLength(0);
+    expect(worker.reviews).toHaveLength(0);
     expect(events).toEqual([
       {
         phase: 'ingress',
@@ -914,25 +484,15 @@ describe('Webhook ingress', () => {
     ]);
   });
 
-  it('ignores an unsupported pull request action without contacting core', async () => {
-    const forwarded: Request[] = [];
+  it('ignores an unsupported pull request action without delivering a review', async () => {
     const { events, log } = collectingLog();
-    const worker = createIngressWorker({
-      secret,
-      crypto: globalThis.crypto,
-      log,
-      core: {
-        fetch: async (request) => {
-          forwarded.push(request);
-          return new Response(null, { status: 202 });
-        },
-      },
-    });
+    const worker = createWebhookHarness({ log });
 
     const response = await worker.fetch(await signedRequest({ ...payload, action: 'closed' }));
 
     expect(response.status).toBe(204);
-    expect(forwarded).toHaveLength(1);
+    expect(worker.metadata).toHaveLength(1);
+    expect(worker.reviews).toHaveLength(0);
     expect(events).toEqual([
       {
         phase: 'ingress',
@@ -951,202 +511,137 @@ describe('Webhook ingress', () => {
   });
 
   it('ignores an unsupported pull request action even without a delivery id', async () => {
-    const forwarded: Request[] = [];
-    const worker = createIngressWorker({
-      secret,
-      crypto: globalThis.crypto,
-      core: {
-        fetch: async (request) => {
-          forwarded.push(request);
-          return new Response(null, { status: 202 });
-        },
-      },
-    });
+    const worker = createWebhookHarness();
     const request = await signedRequest({ ...payload, action: 'closed' });
     request.headers.delete('x-github-delivery');
 
     const response = await worker.fetch(request);
 
     expect(response.status).toBe(204);
-    expect(forwarded).toHaveLength(0);
+    expect(worker.metadata).toHaveLength(0);
+    expect(worker.reviews).toHaveLength(0);
   });
-  it.each([
-    ['/webhooks/github', MAX_WEBHOOK_BYTES, 400],
-    ['/runner-progress', 16 * 1024, 413],
-  ] as const)(
-    'stops reading an oversized unknown-length request to %s',
-    async (path, limit, status) => {
-      let cancelled = false;
-      let sent = false;
-      const body = new ReadableStream<Uint8Array>(
-        {
-          pull(controller) {
-            if (sent) controller.close();
-            else controller.enqueue(new Uint8Array(limit + 1));
-            sent = true;
-          },
-          cancel() {
-            cancelled = true;
-          },
-        },
-        { highWaterMark: 0 },
-      );
-      const worker = createIngressWorker({
-        secret,
-        crypto: globalThis.crypto,
-        runnerCallbackToken: 'runner-secret',
-        core: {
-          fetch: async () => {
-            throw new Error('unexpected forward');
-          },
-        },
-      });
-      const response = await worker.fetch(
-        new Request('https://example.com' + path, {
-          method: 'POST',
-          headers: { authorization: 'Bearer runner-secret', 'x-github-event': 'pull_request' },
-          body,
-          duplex: 'half',
-        } as RequestInit & { duplex: 'half' }),
-      );
-      expect(response.status).toBe(status);
-      expect(cancelled).toBe(true);
-    },
-  );
-  it.each([
-    ['/webhooks/github', MAX_WEBHOOK_BYTES, 400],
-    ['/runner-callback', MAX_RUNNER_CALLBACK_BYTES, 413],
-  ] as const)(
-    'rejects oversized Content-Length before pulling from %s',
-    async (path, limit, status) => {
-      let pulled = false;
-      const body = new ReadableStream<Uint8Array>(
-        {
-          pull(controller) {
-            pulled = true;
-            controller.close();
-          },
-        },
-        { highWaterMark: 0 },
-      );
-      const worker = createIngressWorker({
-        secret,
-        crypto: globalThis.crypto,
-        runnerCallbackToken: 'callback-token',
-        core: { fetch: async () => new Response(null, { status: 202 }) },
-      });
-      const request = new Request('https://example.com' + path, {
-        method: 'POST',
-        headers: {
-          authorization: 'Bearer callback-token',
-          'content-length': String(limit + 1),
-          'x-github-event': 'pull_request',
-        },
-        body,
-        duplex: 'half',
-      } as RequestInit & { duplex: 'half' });
-      expect((await worker.fetch(request)).status).toBe(status);
-      expect(pulled).toBe(false);
-    },
-  );
 
-  it('forwards a signed webhook at exactly the byte limit', async () => {
-    const forwarded: unknown[] = [];
-    const worker = createIngressWorker({
-      secret,
-      crypto: globalThis.crypto,
-      core: {
-        fetch: async (request) => {
-          forwarded.push(await request.json());
-          return new Response(null, { status: 202 });
-        },
+  it('returns 503 when the Core sink rejects the event', async () => {
+    const { events, log } = collectingLog();
+    const worker = createWebhookHarness({
+      log,
+      submitReviewEvent: async () => 'failed',
+    });
+
+    const response = await worker.fetch(await signedRequest());
+
+    expect(response.status).toBe(503);
+    expect(worker.reviews).toHaveLength(1);
+    expect(events).toEqual([
+      {
+        phase: 'ingress',
+        outcome: 'accepted',
+        deliveryId: 'delivery-1',
+        event: 'metadata',
+      },
+      {
+        phase: 'ingress',
+        outcome: 'retryable',
+        deliveryId: 'delivery-1',
+        event: 'pull_request',
+        reason: 'core_unavailable',
+      },
+    ]);
+  });
+
+  it('does not acknowledge a Core failure and asks GitHub to retry', async () => {
+    let calls = 0;
+    const worker = createWebhookHarness({
+      invalidateMetadata: async () => {
+        calls += 1;
+        throw new Error('core unavailable');
       },
     });
+
+    const response = await worker.fetch(await signedRequest());
+
+    expect(response.status).toBe(503);
+    expect(calls).toBe(1);
+    expect(worker.reviews).toHaveLength(0);
+  });
+
+  it('accepts a signed webhook at exactly the byte limit', async () => {
+    const worker = createWebhookHarness();
     const value = { ...payload, padding: '界' };
     const byteLength = new TextEncoder().encode(JSON.stringify(value)).byteLength;
     value.padding += 'x'.repeat(MAX_WEBHOOK_BYTES - byteLength);
     expect((await worker.fetch(await signedRequest(value))).status).toBe(202);
-    expect(forwarded).toContainEqual(expect.objectContaining({ deliveryId: 'delivery-1' }));
+    expect(worker.reviews).toHaveLength(1);
   });
-  it('rejects a body above the ingress payload cap without contacting core', async () => {
-    const forwarded: Request[] = [];
-    const worker = createIngressWorker({
-      secret,
-      crypto: globalThis.crypto,
-      core: {
-        fetch: async (request) => {
-          forwarded.push(request);
-          return new Response(null, { status: 202 });
-        },
-      },
-    });
+
+  it('rejects a body above the ingress payload cap without delivering events', async () => {
+    const worker = createWebhookHarness();
     const oversizedPayload = { ...payload, padding: 'x'.repeat(MAX_WEBHOOK_BYTES) };
 
     const response = await worker.fetch(await signedRequest(oversizedPayload));
 
     expect(response.status).toBe(400);
-    expect(forwarded).toHaveLength(0);
+    expect(worker.metadata).toHaveLength(0);
+    expect(worker.reviews).toHaveLength(0);
   });
-  it('returns 503 when core responds with a non-2xx status', async () => {
-    let calls = 0;
-    const { events, log } = collectingLog();
-    const worker = createIngressWorker({
-      secret,
-      crypto: globalThis.crypto,
-      log,
-      core: {
-        fetch: async () => {
-          calls += 1;
-          return new Response(null, { status: 500 });
-        },
-      },
-    });
 
-    const response = await worker.fetch(await signedRequest());
-
-    expect(response.status).toBe(503);
-    expect(calls).toBe(1);
-    expect(events).toEqual([
+  it('stops reading an oversized unknown-length webhook request', async () => {
+    let cancelled = false;
+    let sent = false;
+    const body = new ReadableStream<Uint8Array>(
       {
-        phase: 'ingress',
-        outcome: 'retryable',
-        deliveryId: 'delivery-1',
-        event: 'metadata',
-        reason: 'core_unavailable',
-      },
-    ]);
-  });
-  it('does not acknowledge a core failure and asks GitHub to retry', async () => {
-    let calls = 0;
-    const worker = createIngressWorker({
-      secret,
-      crypto: globalThis.crypto,
-      core: {
-        fetch: async () => {
-          calls += 1;
-          throw new Error('core unavailable');
+        pull(controller) {
+          if (sent) controller.close();
+          else controller.enqueue(new Uint8Array(MAX_WEBHOOK_BYTES + 1));
+          sent = true;
+        },
+        cancel() {
+          cancelled = true;
         },
       },
-    });
-
-    const response = await worker.fetch(await signedRequest());
-
-    expect(response.status).toBe(503);
-    expect(calls).toBe(1);
+      { highWaterMark: 0 },
+    );
+    const worker = createWebhookHarness();
+    const response = await worker.fetch(
+      new Request('https://example.com/webhooks/github', {
+        method: 'POST',
+        headers: { 'x-github-event': 'pull_request' },
+        body,
+        duplex: 'half',
+      } as RequestInit & { duplex: 'half' }),
+    );
+    expect(response.status).toBe(400);
+    expect(cancelled).toBe(true);
   });
 
-  it('forwards a signed /ai-review issue comment as a normalized event', async () => {
-    const forwarded: Request[] = [];
-    const worker = createIngressWorker({
-      secret,
-      crypto: globalThis.crypto,
-      core: {
-        fetch: async (request) => {
-          forwarded.push(request);
-          return new Response(null, { status: 202 });
+  it('rejects oversized webhook Content-Length before pulling the body', async () => {
+    let pulled = false;
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull(controller) {
+          pulled = true;
+          controller.close();
         },
       },
-    });
+      { highWaterMark: 0 },
+    );
+    const worker = createWebhookHarness();
+    const request = new Request('https://example.com/webhooks/github', {
+      method: 'POST',
+      headers: {
+        'content-length': String(MAX_WEBHOOK_BYTES + 1),
+        'x-github-event': 'pull_request',
+      },
+      body,
+      duplex: 'half',
+    } as RequestInit & { duplex: 'half' });
+    expect((await worker.fetch(request)).status).toBe(400);
+    expect(pulled).toBe(false);
+  });
+
+  it('delivers a signed /ai-review issue comment as a normalized event', async () => {
+    const worker = createWebhookHarness();
 
     const request = await signedRequest({
       action: 'created',
@@ -1167,29 +662,24 @@ describe('Webhook ingress', () => {
     const response = await worker.fetch(request);
 
     expect(response.status).toBe(202);
-    expect(forwarded).toHaveLength(1);
-    expect(await forwarded[0].clone().json()).toEqual({
-      deliveryId: 'delivery-1',
-      event: 'issue_comment',
-      action: 'created',
-      repositoryId: 11,
-      pullRequestNumber: 42,
-      installationId: 7,
-      commentId: 987654,
-      commenterLogin: 'maintainer',
-      command: '/ai-review',
-    });
+    expect(worker.reviews).toEqual([
+      {
+        deliveryId: 'delivery-1',
+        event: 'issue_comment',
+        action: 'created',
+        repositoryId: 11,
+        pullRequestNumber: 42,
+        installationId: 7,
+        commentId: 987654,
+        commenterLogin: 'maintainer',
+        command: '/ai-review',
+      },
+    ]);
   });
+
   it('ignores an issue comment action other than created', async () => {
     const { events, log } = collectingLog();
-    const worker = createIngressWorker({
-      secret,
-      crypto: globalThis.crypto,
-      log,
-      core: {
-        fetch: async () => new Response(null, { status: 202 }),
-      },
-    });
+    const worker = createWebhookHarness({ log });
     const request = await signedRequest({
       action: 'edited',
       installation: { id: 7 },
@@ -1209,6 +699,7 @@ describe('Webhook ingress', () => {
     const response = await worker.fetch(request);
 
     expect(response.status).toBe(204);
+    expect(worker.reviews).toHaveLength(0);
     expect(events).toEqual([
       {
         phase: 'ingress',
@@ -1221,19 +712,8 @@ describe('Webhook ingress', () => {
   });
 
   it('ignores issue comments whose body is not exactly /ai-review', async () => {
-    const forwarded: Request[] = [];
     const { events, log } = collectingLog();
-    const worker = createIngressWorker({
-      secret,
-      crypto: globalThis.crypto,
-      log,
-      core: {
-        fetch: async (request) => {
-          forwarded.push(request);
-          return new Response(null, { status: 202 });
-        },
-      },
-    });
+    const worker = createWebhookHarness({ log });
 
     for (const body of [' /ai-review', '/ai-review ', '/ai-review\n']) {
       const request = await signedRequest({
@@ -1257,7 +737,7 @@ describe('Webhook ingress', () => {
       expect(response.status).toBe(204);
     }
 
-    expect(forwarded).toHaveLength(0);
+    expect(worker.reviews).toHaveLength(0);
     expect(events).toEqual([
       {
         phase: 'ingress',
@@ -1283,20 +763,9 @@ describe('Webhook ingress', () => {
     ]);
   });
 
-  it('ignores a signed command on a non-PR issue without contacting core', async () => {
-    const forwarded: Request[] = [];
+  it('ignores a signed command on a non-PR issue without delivering events', async () => {
     const { events, log } = collectingLog();
-    const worker = createIngressWorker({
-      secret,
-      crypto: globalThis.crypto,
-      log,
-      core: {
-        fetch: async (request) => {
-          forwarded.push(request);
-          return new Response(null, { status: 202 });
-        },
-      },
-    });
+    const worker = createWebhookHarness({ log });
     const request = await signedRequest({
       action: 'created',
       installation: { id: 7 },
@@ -1313,7 +782,7 @@ describe('Webhook ingress', () => {
     const response = await worker.fetch(request);
 
     expect(response.status).toBe(204);
-    expect(forwarded).toHaveLength(0);
+    expect(worker.reviews).toHaveLength(0);
     expect(events).toEqual([
       {
         phase: 'ingress',
@@ -1325,20 +794,9 @@ describe('Webhook ingress', () => {
     ]);
   });
 
-  it('forwards a signed check_run rerequested event for an approved installation', async () => {
-    const forwarded: Request[] = [];
+  it('delivers a signed check_run rerequested event for an approved installation', async () => {
     const { events, log } = collectingLog();
-    const worker = createIngressWorker({
-      secret,
-      crypto: globalThis.crypto,
-      log,
-      core: {
-        fetch: async (request) => {
-          forwarded.push(request);
-          return new Response(null, { status: 202 });
-        },
-      },
-    });
+    const worker = createWebhookHarness({ log });
     const request = await signedRequest({
       action: 'rerequested',
       installation: { id: 7 },
@@ -1351,16 +809,18 @@ describe('Webhook ingress', () => {
     const response = await worker.fetch(request);
 
     expect(response.status).toBe(202);
-    expect(await forwarded[0]?.clone().json()).toEqual({
-      deliveryId: 'delivery-1',
-      event: 'check_run',
-      action: 'rerequested',
-      repositoryId: 11,
-      installationId: 7,
-      checkRunId: 555,
-      externalRunId: 'run-ext-1',
-      senderLogin: 'maintainer',
-    });
+    expect(worker.reviews).toEqual([
+      {
+        deliveryId: 'delivery-1',
+        event: 'check_run',
+        action: 'rerequested',
+        repositoryId: 11,
+        installationId: 7,
+        checkRunId: 555,
+        externalRunId: 'run-ext-1',
+        senderLogin: 'maintainer',
+      },
+    ]);
     expect(events).toEqual([
       {
         phase: 'ingress',
@@ -1371,18 +831,8 @@ describe('Webhook ingress', () => {
     ]);
   });
 
-  it('forwards a signed check_suite rerequested event for an approved installation', async () => {
-    const forwarded: Request[] = [];
-    const worker = createIngressWorker({
-      secret,
-      crypto: globalThis.crypto,
-      core: {
-        fetch: async (request) => {
-          forwarded.push(request);
-          return new Response(null, { status: 202 });
-        },
-      },
-    });
+  it('delivers a signed check_suite rerequested event for an approved installation', async () => {
+    const worker = createWebhookHarness();
     const request = await signedRequest({
       action: 'rerequested',
       installation: { id: 7 },
@@ -1395,34 +845,25 @@ describe('Webhook ingress', () => {
     const response = await worker.fetch(request);
 
     expect(response.status).toBe(202);
-    expect(await forwarded[0]?.clone().json()).toEqual({
-      deliveryId: 'delivery-1',
-      event: 'check_suite',
-      action: 'rerequested',
-      repositoryId: 11,
-      installationId: 7,
-      checkSuiteId: 555,
-      senderLogin: 'maintainer',
-    });
+    expect(worker.reviews).toEqual([
+      {
+        deliveryId: 'delivery-1',
+        event: 'check_suite',
+        action: 'rerequested',
+        repositoryId: 11,
+        installationId: 7,
+        checkSuiteId: 555,
+        senderLogin: 'maintainer',
+      },
+    ]);
   });
 
   it.each([
     { action: 'completed' },
     { action: 'requested_action', requested_action: { identifier: 'other' } },
-  ])('ignores unsupported Check action $action without contacting core', async (action) => {
-    const forwarded: Request[] = [];
+  ])('ignores unsupported Check action $action without delivering events', async (action) => {
     const { events, log } = collectingLog();
-    const worker = createIngressWorker({
-      secret,
-      crypto: globalThis.crypto,
-      log,
-      core: {
-        fetch: async (request) => {
-          forwarded.push(request);
-          return new Response(null, { status: 202 });
-        },
-      },
-    });
+    const worker = createWebhookHarness({ log });
     const checkRun = await signedRequest({
       ...action,
       installation: { id: 7 },
@@ -1442,7 +883,7 @@ describe('Webhook ingress', () => {
 
     expect((await worker.fetch(checkRun)).status).toBe(204);
     expect((await worker.fetch(checkSuite)).status).toBe(204);
-    expect(forwarded).toHaveLength(0);
+    expect(worker.reviews).toHaveLength(0);
     expect(events).toEqual([
       {
         phase: 'ingress',
@@ -1462,17 +903,7 @@ describe('Webhook ingress', () => {
   });
 
   it('rejects a check re-request with a missing or null sender', async () => {
-    const forwarded: Request[] = [];
-    const worker = createIngressWorker({
-      secret,
-      crypto: globalThis.crypto,
-      core: {
-        fetch: async (request) => {
-          forwarded.push(request);
-          return new Response(null, { status: 202 });
-        },
-      },
-    });
+    const worker = createWebhookHarness();
 
     for (const sender of [undefined, null]) {
       const request = await signedRequest({
@@ -1487,21 +918,11 @@ describe('Webhook ingress', () => {
       expect((await worker.fetch(request)).status).toBe(400);
     }
 
-    expect(forwarded).toHaveLength(0);
+    expect(worker.reviews).toHaveLength(0);
   });
 
   it('ignores a check re-request from an unapproved installation before reaching core', async () => {
-    const forwarded: Request[] = [];
-    const worker = createIngressWorker({
-      secret,
-      crypto: globalThis.crypto,
-      core: {
-        fetch: async (request) => {
-          forwarded.push(request);
-          return new Response(null, { status: 202 });
-        },
-      },
-    });
+    const worker = createWebhookHarness();
     const request = await signedRequest({
       action: 'rerequested',
       installation: { id: 99 },
@@ -1512,6 +933,6 @@ describe('Webhook ingress', () => {
     request.headers.set('x-github-event', 'check_run');
 
     expect((await worker.fetch(request)).status).toBe(204);
-    expect(forwarded).toHaveLength(0);
+    expect(worker.reviews).toHaveLength(0);
   });
 });

@@ -4,6 +4,7 @@ import {
   DEFAULT_REVIEW_NAME,
   REVIEW_ATTEMPT_BUDGET_MS,
   ReviewEvent,
+  MetadataInvalidationEvent,
   EffortJobDetail,
   sanitizeOperationalLogEvent,
 } from '@compte-rendu/contracts';
@@ -16,14 +17,15 @@ import { createRunnerJobClient, type RunnerJobBinding } from './runner-job-clien
 import type { GitHubAdapter } from './github-adapter-contract';
 import type { ReviewPublicationStateStore } from './review-state-store';
 import { createJobControl } from './job-control';
-import type { WorkerEntrypoint } from '@compte-rendu/contracts';
 import { createPostHogLifecycleLog } from './posthog';
 import { handleReviewConfiguration } from './review-configuration';
 import type { OperationalLog } from '@compte-rendu/contracts';
 import { createRunnerProtocol } from './runner-protocol';
 import { readPublicationRecord } from './publication-record';
 import {
-  handleDashboardRequest,
+  getDashboardOverview,
+  getPublicJobDetail,
+  listPublicJobs,
   refreshRepositoryMetadata,
   validateProgressSnapshot,
   type RefreshSummary,
@@ -88,26 +90,33 @@ export interface CoreWorkerDependencies {
   }) => Promise<{ readonly token: string; readonly expiresAt: string }>;
 }
 
-const reviewEventsPath = '/review-events';
-const metadataEventsPath = '/metadata-events';
-const runnerClaimsPath = '/runner-claims';
-const runnerReadTokenPath = '/runner-read-token';
-const runnerResultsPath = '/runner-results';
-const runnerEvidencePath = '/runner-evidence';
-const runnerProgressPath = '/runner-progress';
-const responseForDisposition = (
-  disposition: Awaited<ReturnType<ReturnType<typeof createReviewCoordinator>['handleReviewEvent']>>,
-) => new Response(null, { status: disposition === 'failed' ? 503 : 202 });
+type WaitUntil = { waitUntil(task: Promise<unknown>): void };
+
+export type CoreWorker = ReturnType<typeof createJobControl> & {
+  reconcileRecoveries(now: number): Promise<void>;
+  reconcilePublications(now: number): Promise<void>;
+  effortDetail(runId: string, cursor?: string): Promise<Response>;
+  submitReviewEvent(
+    event: typeof ReviewEvent.Type,
+    context?: WaitUntil,
+  ): Promise<'accepted' | 'failed'>;
+  invalidateMetadata(event: typeof MetadataInvalidationEvent.Type): Promise<void>;
+  claimRunnerJob(request: Request, context?: WaitUntil): Promise<Response>;
+  renewRunnerReadToken(request: Request): Promise<Response>;
+  handleRunnerCallback(request: Request, context?: WaitUntil): Promise<Response>;
+  handleRunnerEvidence(request: Request): Promise<Response>;
+  handleRunnerProgress(request: Request): Promise<Response>;
+  getDashboardConfig(): Response;
+  getDashboardOverview(): Promise<Response>;
+  listPublicJobs(searchParams: URLSearchParams): Promise<Response>;
+  getPublicJobDetail(rawRunId: string): Promise<Response>;
+  handleReviewConfiguration(request: Request): Promise<Response>;
+};
 
 export const createCoreWorker = (
   env: CoreWorkerEnv,
   dependencies: CoreWorkerDependencies = {},
-): WorkerEntrypoint<CoreWorkerEnv> &
-  ReturnType<typeof createJobControl> & {
-    reconcileRecoveries(now: number): Promise<void>;
-    reconcilePublications(now: number): Promise<void>;
-    effortDetail(runId: string, cursor?: string): Promise<Response>;
-  } => {
+): CoreWorker => {
   const tokenProvider = createGitHubAppTokenProvider({
     appId: env.GITHUB_APP_ID,
     privateKey: env.GITHUB_APP_PRIVATE_KEY,
@@ -260,8 +269,36 @@ export const createCoreWorker = (
       );
   };
 
+  const submitReviewEvent = async (
+    event: typeof ReviewEvent.Type,
+    context?: WaitUntil,
+  ): Promise<'accepted' | 'failed'> => {
+    const lifecycleLog = createPostHogLifecycleLog(env, context);
+    if (event.event === 'pull_request' && event.repositoryVisibility === 'private') {
+      const observedAt = new Date().toISOString();
+      await stateStore
+        .invalidateRepositoryMetadata({
+          installationId: event.installationId,
+          repositoryId: event.repositoryId,
+          visibility: 'private',
+          updatedAt: observedAt,
+          nextRefreshAt: observedAt,
+        })
+        .catch(() => false);
+    }
+    try {
+      const eventCoordinator = createCoordinator(
+        lifecycleLog,
+        context === undefined ? undefined : (task) => context.waitUntil(task),
+      );
+      const disposition = await eventCoordinator.handleReviewEvent(event);
+      return disposition === 'failed' ? 'failed' : 'accepted';
+    } catch {
+      return 'failed';
+    }
+  };
+
   return {
-    ...protocol,
     ...jobControl,
     async effortDetail(runId, cursor) {
       const noStore = { 'cache-control': 'no-store' };
@@ -304,115 +341,30 @@ export const createCoreWorker = (
     },
     reconcilePublications,
     reconcileRecoveries,
-    fetch: async (request, _env, context) => {
-      if (
-        new URL(request.url).pathname === '/review-configuration' ||
-        new URL(request.url).pathname === '/review-configuration/efforts/reset'
-      ) {
-        return handleReviewConfiguration(
-          request,
-          env.REVIEW_DB,
-          env.REVIEW_CONFIGURATION_TOKEN,
-          env.INFERENCE_RELAY,
-        );
-      }
-      const lifecycleLog = createPostHogLifecycleLog(env, context);
-      if (request.method === 'POST' && new URL(request.url).pathname === runnerClaimsPath) {
-        try {
-          return await protocol.handleRunnerClaim(request, lifecycleLog);
-        } catch {
-          return new Response(null, { status: 503 });
-        }
-      }
-      if (request.method === 'POST' && new URL(request.url).pathname === runnerReadTokenPath) {
-        try {
-          return await protocol.handleRunnerReadToken(request);
-        } catch {
-          return new Response(null, { status: 503 });
-        }
-      }
-      if (request.method === 'POST' && new URL(request.url).pathname === runnerResultsPath) {
-        try {
-          return await protocol.handleRunnerResult(request, lifecycleLog);
-        } catch {
-          return new Response(null, { status: 503 });
-        }
-      }
-      if (request.method === 'POST' && new URL(request.url).pathname === runnerEvidencePath) {
-        try {
-          return await protocol.handleRunnerEvidence(request);
-        } catch {
-          return new Response(null, { status: 503 });
-        }
-      }
-      if (request.method === 'POST' && new URL(request.url).pathname === runnerProgressPath) {
-        try {
-          return await protocol.handleRunnerProgress(request);
-        } catch {
-          return new Response(null, { status: 503 });
-        }
-      }
-      if (request.method === 'POST' && new URL(request.url).pathname === metadataEventsPath) {
-        try {
-          return await protocol.handleMetadataInvalidation(request);
-        } catch {
-          return new Response(null, { status: 503 });
-        }
-      }
-      if (request.method === 'GET' && new URL(request.url).pathname === '/api/dashboard-config') {
-        return Response.json(
-          { name: env.GITHUB_CHECK_NAME?.trim() || DEFAULT_REVIEW_NAME },
-          { headers: { 'cache-control': 'no-store' } },
-        );
-      }
-      if (request.method === 'GET') {
-        try {
-          const dashboardResponse = await handleDashboardRequest(request, { stateStore });
-          if (dashboardResponse !== undefined) return dashboardResponse;
-        } catch {
-          const path = new URL(request.url).pathname;
-          if (path === '/api/dashboard' || path === '/api/jobs' || path.startsWith('/api/jobs/')) {
-            return new Response(null, {
-              status: 503,
-              headers: { 'cache-control': 'no-store' },
-            });
-          }
-        }
-      }
-      if (request.method !== 'POST' || new URL(request.url).pathname !== reviewEventsPath) {
-        return new Response(null, { status: 404 });
-      }
-
-      const body = await request.json().catch(() => undefined);
-      if (body === undefined) return new Response(null, { status: 400 });
-
-      const event = Option.getOrUndefined(Schema.decodeUnknownOption(ReviewEvent)(body));
-      if (event === undefined) return new Response(null, { status: 400 });
-
-      if (event.event === 'pull_request' && event.repositoryVisibility === 'private') {
-        const observedAt = new Date().toISOString();
-        await stateStore
-          .invalidateRepositoryMetadata({
-            installationId: event.installationId,
-            repositoryId: event.repositoryId,
-            visibility: 'private',
-            updatedAt: observedAt,
-            nextRefreshAt: observedAt,
-          })
-          .catch(() => false);
-      }
-
-      try {
-        const eventCoordinator = createCoordinator(
-          lifecycleLog,
-          context === undefined ? undefined : (task) => context.waitUntil(task),
-        );
-        const disposition = await eventCoordinator.handleReviewEvent(event);
-        return responseForDisposition(disposition);
-      } catch {
-        return new Response(null, { status: 503 });
-      }
-    },
+    submitReviewEvent,
+    invalidateMetadata: protocol.invalidateMetadata,
+    claimRunnerJob: (request, context) =>
+      protocol.handleRunnerClaim(request, createPostHogLifecycleLog(env, context)),
+    renewRunnerReadToken: (request) => protocol.handleRunnerReadToken(request),
+    handleRunnerCallback: (request, context) =>
+      protocol.handleRunnerResult(request, createPostHogLifecycleLog(env, context)),
+    handleRunnerEvidence: protocol.handleRunnerEvidence,
+    handleRunnerProgress: protocol.handleRunnerProgress,
+    getDashboardConfig: () =>
+      Response.json(
+        { name: env.GITHUB_CHECK_NAME?.trim() || DEFAULT_REVIEW_NAME },
+        { headers: { 'cache-control': 'no-store' } },
+      ),
+    getDashboardOverview: () => getDashboardOverview(stateStore),
+    listPublicJobs: (searchParams) => listPublicJobs(stateStore, searchParams),
+    getPublicJobDetail: (rawRunId) => getPublicJobDetail(stateStore, rawRunId),
+    handleReviewConfiguration: (request) =>
+      handleReviewConfiguration(
+        request,
+        env.REVIEW_DB,
+        env.REVIEW_CONFIGURATION_TOKEN,
+        env.INFERENCE_RELAY,
+      ),
   };
 };
 
