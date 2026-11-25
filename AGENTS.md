@@ -21,6 +21,10 @@
   logging, process and fetch ports. Keep Effect `Schema` for boundary validation,
   and do not add mid-stack `Effect.runPromise` bridges for clock reads, warning
   logs, retry sleeps or one-shot host calls.
+- Inference Worker SSE streaming uses plain `async/await` around its
+  `ReadableStream` relay, while Effect `Schema` stays at the validation boundary
+  and existing fetch/ledger Effect programs stay intact. Keep relay warnings and
+  fallback diagnostics on the host logger instead of launching the Effect runtime.
 - Tests observe public behavior. Do not test private functions, internal call
   counts/order, or implementation decomposition.
 - Fail closed for authorization, revision freshness, credential handling, agent

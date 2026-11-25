@@ -9,6 +9,7 @@ import { finalizeComplete, savePartial, type AuthenticatedGrant } from './ledger
 import type { D1DatabaseLike } from './grants.ts';
 import type { FrozenRoute } from './routes.ts';
 import { gatewayHeaders, gatewayUrl, type GatewayConfig, type GatewayPath } from './gateway.ts';
+import { logWarning } from './host-log.ts';
 
 export type { SseFrame } from './bounded-sse.ts';
 
@@ -111,7 +112,7 @@ export const relayProtocolStream = (options: ProtocolStreamOptions): Effect.Effe
         await savePartial(database, requestId, usage);
         return true;
       } catch {
-        await Effect.runPromise(Effect.logWarning('relay.accounting.failed'));
+        logWarning('relay.accounting.failed');
         return false;
       }
     };
@@ -124,7 +125,7 @@ export const relayProtocolStream = (options: ProtocolStreamOptions): Effect.Effe
         usage.complete = true;
         return true;
       } catch {
-        await Effect.runPromise(Effect.logWarning('relay.accounting.failed'));
+        logWarning('relay.accounting.failed');
         await persistPartial();
         return false;
       }
