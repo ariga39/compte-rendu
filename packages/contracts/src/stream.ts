@@ -1,48 +1,6 @@
 import { Option, Schema } from 'effect';
 import { ChatEffortControls } from './effort.ts';
 
-const optional = Schema.optionalKey(Schema.Unknown);
-const ChatFunction = Schema.StructWithRest(Schema.Struct({ name: Schema.String }), [
-  Schema.Record(Schema.String, Schema.Unknown),
-]);
-const ChatTool = Schema.StructWithRest(
-  Schema.Struct({ type: Schema.Literal('function'), function: ChatFunction }),
-  [Schema.Record(Schema.String, Schema.Unknown)],
-);
-export const ChatRequest = Schema.Struct({
-  model: Schema.String,
-  messages: Schema.Array(Schema.Unknown),
-  stream: optional,
-  store: optional,
-  tools: Schema.optionalKey(Schema.Array(ChatTool)),
-  tool_choice: optional,
-  parallel_tool_calls: optional,
-  temperature: optional,
-  top_p: optional,
-  n: optional,
-  max_tokens: optional,
-  max_completion_tokens: optional,
-  stop: optional,
-  frequency_penalty: optional,
-  presence_penalty: optional,
-  seed: optional,
-  stream_options: optional,
-  response_format: optional,
-  reasoning_effort: optional,
-  reasoning: optional,
-  verbosity: optional,
-  logprobs: optional,
-  top_logprobs: optional,
-  logit_bias: optional,
-  user: optional,
-  service_tier: optional,
-  prompt_cache_key: optional,
-  modalities: optional,
-  audio: optional,
-  prediction: optional,
-});
-export type ChatRequest = typeof ChatRequest.Type;
-
 const ChatChoice = Schema.Struct({
   finish_reason: Schema.optionalKey(Schema.NullOr(Schema.String)),
 });

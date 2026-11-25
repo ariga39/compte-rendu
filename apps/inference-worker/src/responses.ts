@@ -8,6 +8,17 @@ import type {
   StreamObservationDetails,
 } from './protocol-stream.ts';
 import { encodeSseFrame, relayProtocolStream } from './protocol-stream.ts';
+import {
+  COMMON_FORBIDDEN_KEYS,
+  hasAnyKey,
+  isFunctionRef,
+  isFunctionTool,
+  isLocalInputTextPart,
+  isLocalResponsesContentPart,
+  isLocalToolChoice,
+  isNonEmptyString,
+  isRecord,
+} from './request-boundary.ts';
 
 export const MAX_RESPONSES_OUTPUT_TOKENS = 256_000;
 // One terminal event repeats the full output. This is a policy ceiling, not a
@@ -18,142 +29,86 @@ export const MAX_RESPONSES_OUTPUT_TOKENS = 256_000;
 export const MAX_RESPONSES_TERMINAL_BYTES = 4 * 1024 * 1024;
 
 const MAX_INSTRUCTIONS_BYTES = 1024 * 1024;
-const MAX_PROMPT_CACHE_KEY = 128;
 const MAX_TOOLS = 128;
 const MAX_INPUT_ITEMS = 1024;
-const MAX_ITEM_ID = 256;
 const MAX_ENCRYPTED_REASONING = 2 * 1024 * 1024;
+const FORBIDDEN_RESPONSES_KEYS = [...COMMON_FORBIDDEN_KEYS, 'prompt'] as const;
+const withinBytes = (value: string, bytes: number) =>
+  new TextEncoder().encode(value).byteLength <= bytes;
 
-const BoundedString = (bytes: number) =>
-  Schema.String.check(
-    Schema.makeFilter((value) => new TextEncoder().encode(value).byteLength <= bytes, {
-      expected: `string no larger than ${bytes} bytes`,
-    }),
-  );
+const isMessageContent = (content: unknown): boolean =>
+  typeof content === 'string' ||
+  (Array.isArray(content) && content.every(isLocalResponsesContentPart));
 
-const ItemId = Schema.String.check(
-  Schema.isMaxLength(MAX_ITEM_ID),
-  Schema.isPattern(/^[A-Za-z0-9._:-]+$/),
-);
-const CallId = Schema.String.check(
-  Schema.isMaxLength(MAX_ITEM_ID),
-  Schema.isPattern(/^[A-Za-z0-9._:-]+$/),
-);
-const ToolName = Schema.String.check(Schema.isMaxLength(128));
-
-const EmptyArray = Schema.Array(Schema.Unknown).check(Schema.isMaxLength(0));
-const InputTextPart = Schema.Struct({ type: Schema.Literal('input_text'), text: Schema.String });
-const OutputTextPart = Schema.Struct({
-  type: Schema.Literal('output_text'),
-  text: Schema.String,
-  annotations: Schema.optionalKey(EmptyArray),
-});
-const ContentPart = Schema.Union([InputTextPart, OutputTextPart]);
-const MessageContent = Schema.Union([Schema.String, Schema.Array(ContentPart)]);
-
-const MessageFields = {
-  type: Schema.optionalKey(Schema.Literal('message')),
-  content: MessageContent,
-  id: Schema.optionalKey(ItemId),
-  status: Schema.optionalKey(Schema.Literal('completed')),
+const isInputItem = (item: unknown): boolean => {
+  if (!isRecord(item)) return false;
+  switch (item.type) {
+    case undefined:
+    case 'message':
+      return (
+        ['user', 'assistant', 'system', 'developer'].includes(item.role as string) &&
+        isMessageContent(item.content)
+      );
+    case 'function_call':
+      return (
+        isNonEmptyString(item.call_id) && isFunctionRef(item) && typeof item.arguments === 'string'
+      );
+    case 'function_call_output':
+      return (
+        isNonEmptyString(item.call_id) &&
+        (typeof item.output === 'string' ||
+          (Array.isArray(item.output) && item.output.every(isLocalInputTextPart)))
+      );
+    case 'reasoning':
+      return (
+        isNonEmptyString(item.id) &&
+        typeof item.encrypted_content === 'string' &&
+        withinBytes(item.encrypted_content, MAX_ENCRYPTED_REASONING)
+      );
+    default:
+      return false;
+  }
 };
-const AssistantMessageItem = Schema.Struct({
-  ...MessageFields,
-  role: Schema.Literal('assistant'),
-  phase: Schema.optionalKey(Schema.Literals(['commentary', 'final_answer'])),
-});
-const OtherMessageItem = Schema.Struct({
-  ...MessageFields,
-  role: Schema.Literals(['user', 'system', 'developer']),
-});
-const MessageItem = Schema.Union([AssistantMessageItem, OtherMessageItem]);
-
-const FunctionCallItem = Schema.Struct({
-  type: Schema.Literal('function_call'),
-  call_id: CallId,
-  name: ToolName,
-  arguments: Schema.String,
-  id: Schema.optionalKey(ItemId),
-  status: Schema.optionalKey(Schema.Literal('completed')),
-});
-
-const FunctionCallOutputItem = Schema.Struct({
-  type: Schema.Literal('function_call_output'),
-  call_id: CallId,
-  output: Schema.Union([Schema.String, Schema.Array(InputTextPart)]),
-});
-
-const ReasoningSummaryPart = Schema.Struct({
-  type: Schema.Literal('summary_text'),
-  text: Schema.String,
-});
-const ReasoningItem = Schema.Struct({
-  type: Schema.Literal('reasoning'),
-  id: ItemId,
-  encrypted_content: BoundedString(MAX_ENCRYPTED_REASONING),
-  summary: Schema.optionalKey(Schema.Array(ReasoningSummaryPart)),
-  status: Schema.optionalKey(Schema.Literal('completed')),
-});
-
-const InputItem = Schema.Union([
-  MessageItem,
-  FunctionCallItem,
-  FunctionCallOutputItem,
-  ReasoningItem,
-]);
-const ResponsesInput = Schema.Union([
-  Schema.String,
-  Schema.Array(InputItem).check(Schema.isMaxLength(MAX_INPUT_ITEMS)),
-]);
-
-const FunctionTool = Schema.Struct({
-  type: Schema.Literal('function'),
-  name: ToolName,
-  description: Schema.optionalKey(Schema.String),
-  parameters: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
-  strict: Schema.optionalKey(Schema.Boolean),
-});
-const ResponsesTools = Schema.Array(FunctionTool).check(Schema.isMaxLength(MAX_TOOLS));
-
-const ResponsesInclude = Schema.Array(Schema.Literal('reasoning.encrypted_content')).check(
-  Schema.isMaxLength(1),
-);
-const ResponsesText = Schema.Struct({
-  format: Schema.optionalKey(Schema.Struct({ type: Schema.Literal('text') })),
-  verbosity: Schema.optionalKey(Schema.Literals(['low', 'medium', 'high'])),
-});
-const ResponsesReasoning = Schema.Struct({
-  effort: Schema.Literals(['minimal', 'low', 'medium', 'high']),
-});
-const MaxOutputTokens = Schema.Int.check(
-  Schema.isGreaterThanOrEqualTo(1),
-  Schema.isLessThanOrEqualTo(MAX_RESPONSES_OUTPUT_TOKENS),
-);
-
-const ResponsesRequest = Schema.Struct({
-  model: Schema.NonEmptyString,
-  input: ResponsesInput,
-  instructions: Schema.optionalKey(BoundedString(MAX_INSTRUCTIONS_BYTES)),
-  tools: Schema.optionalKey(ResponsesTools),
-  include: Schema.optionalKey(ResponsesInclude),
-  text: Schema.optionalKey(ResponsesText),
-  prompt_cache_key: Schema.optionalKey(
-    Schema.String.check(Schema.isMaxLength(MAX_PROMPT_CACHE_KEY)),
-  ),
-  reasoning: Schema.optionalKey(ResponsesReasoning),
-  max_output_tokens: Schema.optionalKey(MaxOutputTokens),
-  stream: Schema.Literal(true),
-  store: Schema.optionalKey(Schema.Literal(false)),
-});
-
-const decodeResponsesRequest = Schema.decodeUnknownOption(ResponsesRequest, {
-  onExcessProperty: 'error',
-});
 
 export const validateResponsesBody = (raw: unknown): Record<string, unknown> | null => {
-  const decoded = decodeResponsesRequest(raw);
-  if (Option.isNone(decoded)) return null;
-  return raw as Record<string, unknown>;
+  if (!isRecord(raw)) return null;
+  if (!isNonEmptyString(raw.model) || raw.stream !== true) return null;
+  if (raw.store !== undefined && raw.store !== false) return null;
+  if (hasAnyKey(raw, FORBIDDEN_RESPONSES_KEYS)) return null;
+  if (
+    raw.instructions !== undefined &&
+    (typeof raw.instructions !== 'string' || !withinBytes(raw.instructions, MAX_INSTRUCTIONS_BYTES))
+  )
+    return null;
+  if (
+    raw.max_output_tokens !== undefined &&
+    (!Number.isInteger(raw.max_output_tokens) ||
+      (raw.max_output_tokens as number) < 1 ||
+      (raw.max_output_tokens as number) > MAX_RESPONSES_OUTPUT_TOKENS)
+  )
+    return null;
+  if (
+    raw.include !== undefined &&
+    (!Array.isArray(raw.include) ||
+      raw.include.length > 1 ||
+      !raw.include.every((item) => item === 'reasoning.encrypted_content'))
+  )
+    return null;
+  if (
+    raw.tools !== undefined &&
+    (!Array.isArray(raw.tools) ||
+      raw.tools.length > MAX_TOOLS ||
+      !raw.tools.every((tool) => isFunctionTool(tool, false)))
+  )
+    return null;
+  if (!isLocalToolChoice(raw.tool_choice, false)) return null;
+  const input = raw.input;
+  if (
+    typeof input !== 'string' &&
+    !(Array.isArray(input) && input.length <= MAX_INPUT_ITEMS && input.every(isInputItem))
+  )
+    return null;
+  return raw;
 };
 
 export const responsesUpstreamBody = (

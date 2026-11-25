@@ -441,8 +441,6 @@ describe('Inference Worker public streaming', () => {
     const response = await request(token, {
       model: 'deepseek-review',
       messages: [{ role: 'user', content: 'Review this change' }],
-      stream: false,
-      store: true,
       tools: [{ type: 'function', function: { name: 'submit_review', parameters: {} } }],
     });
 
@@ -491,6 +489,146 @@ describe('Inference Worker public streaming', () => {
     await expect(runtime.INFERENCE.usage({ jobId: 'runtime-success' })).resolves.toMatchObject({
       models: [{ requests: 1, incompleteRequests: 0 }],
     });
+  });
+
+  it('rejects hosted, remote and stateful Chat capabilities before upstream', async () => {
+    await control('success');
+    const token = await issue('runtime-chat-rejections', ['deepseek-review']);
+    const base = {
+      model: 'deepseek-review',
+      messages: [{ role: 'user', content: 'Review this change' }],
+    };
+    const invalid: readonly [string, Record<string, unknown>][] = [
+      ['hosted web search tool', { ...base, tools: [{ type: 'web_search_preview' }] }],
+      [
+        'non-function local tool',
+        { ...base, tools: [{ type: 'custom', custom: { name: 'submit_review' } }] },
+      ],
+      ['hosted tool selection', { ...base, tool_choice: { type: 'web_search_preview' } }],
+      [
+        'remote image content part',
+        {
+          ...base,
+          messages: [
+            {
+              role: 'user',
+              content: [{ type: 'image_url', image_url: { url: 'https://remote.example' } }],
+            },
+          ],
+        },
+      ],
+      [
+        'provider file content part',
+        {
+          ...base,
+          messages: [{ role: 'user', content: [{ type: 'file', file: { file_id: 'file_1' } }] }],
+        },
+      ],
+      [
+        'input audio content part',
+        {
+          ...base,
+          messages: [
+            {
+              role: 'user',
+              content: [{ type: 'input_audio', input_audio: { data: 'AAAA', format: 'wav' } }],
+            },
+          ],
+        },
+      ],
+      ['hosted web search options', { ...base, web_search_options: {} }],
+      ['previous response lookup', { ...base, previous_response_id: 'resp_1' }],
+      ['server conversation', { ...base, conversation: 'conv_1' }],
+      ['hosted MCP servers', { ...base, mcp_servers: [{ url: 'https://remote.example' }] }],
+      ['server container', { ...base, container: 'cntr_1' }],
+      ['provider content cache', { ...base, cachedContent: 'cached-content' }],
+      ['provider file ids', { ...base, file_ids: ['file_1'] }],
+      ['stored response', { ...base, store: true }],
+      ['non-streaming', { ...base, stream: false }],
+    ];
+
+    for (const [name, body] of invalid) {
+      const response = await request(token, body);
+      expect(response.status, name).toBe(400);
+    }
+    expect((await upstreamState()).requests).toHaveLength(0);
+  });
+
+  it('passes benign Chat fields and local tool definitions through', async () => {
+    await control('success');
+    const token = await issue('runtime-chat-benign-fields', ['deepseek-review']);
+    const messages = [
+      { role: 'system', content: 'Review this change' },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Review this change', cache_control: { type: 'ephemeral' } },
+        ],
+      },
+      {
+        role: 'assistant',
+        content: [{ type: 'refusal', refusal: 'I cannot help with that.' }],
+        audio: { id: 'audio_1' },
+      },
+      {
+        role: 'assistant',
+        content: null,
+        reasoning_content: 'previous reasoning',
+        tool_calls: [
+          {
+            id: 'call_1',
+            type: 'function',
+            function: { name: 'submit_review', arguments: '{"decision":"approve"}' },
+          },
+        ],
+      },
+      { role: 'tool', tool_call_id: 'call_1', content: 'done' },
+    ];
+    const tools = [
+      {
+        type: 'function',
+        function: {
+          name: 'submit_review',
+          description: 'Submit the completed review',
+          parameters: {
+            type: 'object',
+            properties: { image_url: { type: 'string' }, body: { type: 'string' } },
+            required: ['body'],
+            additionalProperties: false,
+          },
+          strict: true,
+        },
+        provider_extension: { hosted: true, remote: 'https://docs.example/tool' },
+      },
+    ];
+    const harmless = {
+      messages,
+      tools,
+      tool_choice: { type: 'function', function: { name: 'submit_review' } },
+      temperature: 0.2,
+      top_p: 0.9,
+      prompt_cache_retention: '24h',
+      verbosity: 'low',
+      reasoning_effort: 'max',
+      service_tier: 'auto',
+      modalities: ['text', 'audio'],
+      audio: { voice: 'alloy', format: 'wav' },
+      prediction: {
+        type: 'content',
+        content: [{ type: 'text', text: 'known review text' }],
+      },
+    };
+
+    const response = await request(token, { model: 'deepseek-review', ...harmless });
+    expect(response.status).toBe(200);
+    await response.text();
+
+    const [upstream] = (await upstreamState()).requests;
+    const body = JSON.parse(upstream!.body) as Record<string, unknown>;
+    for (const [key, value] of Object.entries(harmless)) expect(body[key], key).toEqual(value);
+    expect(body.model).toBe('deepseek-review-native');
+    expect(body.store).toBe(false);
+    expect(body.stream).toBe(true);
   });
 
   it('round-trips UTF-8 split inside a code point across upstream chunks', async () => {

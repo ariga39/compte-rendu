@@ -1,7 +1,6 @@
 import { Effect, Option, Schema } from 'effect';
 import {
   ChatEffortControls,
-  ChatRequest,
   decodeStreamFrame,
   streamEventIsError,
   streamFrameEffortReport,
@@ -26,6 +25,15 @@ import type { D1DatabaseLike } from './grants.ts';
 import type { FrozenRoute } from './routes.ts';
 import { gatewayHeaders, gatewayUrl, type GatewayConfig } from './gateway';
 import { logInfo, logWarning } from './host-log.ts';
+import {
+  COMMON_FORBIDDEN_KEYS,
+  hasAnyKey,
+  isFunctionTool,
+  isLocalChatContentPart,
+  isLocalToolChoice,
+  isNonEmptyString,
+  isRecord,
+} from './request-boundary.ts';
 export type { GatewayConfig } from './gateway';
 
 const GATEWAY_PATH = '/chat/completions';
@@ -509,8 +517,34 @@ export const relayInference = (options: InferenceRelayOptions): Effect.Effect<Re
     });
   });
 
+const MAX_CHAT_TOOLS = 128;
+const FORBIDDEN_CHAT_KEYS = [...COMMON_FORBIDDEN_KEYS, 'web_search_options', 'file_ids'] as const;
+
+const isLocalMessage = (message: unknown): boolean => {
+  if (!isRecord(message)) return false;
+  const content = message.content;
+  return (
+    content === undefined ||
+    content === null ||
+    typeof content === 'string' ||
+    (Array.isArray(content) && content.every(isLocalChatContentPart))
+  );
+};
+
 export const validateChatBody = (raw: unknown): Record<string, unknown> | null => {
-  const decoded = Schema.decodeUnknownOption(ChatRequest, { onExcessProperty: 'error' })(raw);
-  if (Option.isNone(decoded)) return null;
-  return raw as Record<string, unknown>;
+  if (!isRecord(raw)) return null;
+  if (!isNonEmptyString(raw.model) || !Array.isArray(raw.messages)) return null;
+  if (hasAnyKey(raw, FORBIDDEN_CHAT_KEYS)) return null;
+  if (raw.store !== undefined && raw.store !== false) return null;
+  if (raw.stream !== undefined && raw.stream !== true) return null;
+  if (!raw.messages.every(isLocalMessage)) return null;
+  if (
+    raw.tools !== undefined &&
+    (!Array.isArray(raw.tools) ||
+      raw.tools.length > MAX_CHAT_TOOLS ||
+      !raw.tools.every((tool) => isFunctionTool(tool, true)))
+  )
+    return null;
+  if (!isLocalToolChoice(raw.tool_choice, true)) return null;
+  return raw;
 };
