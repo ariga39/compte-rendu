@@ -1,12 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createCoreWorker } from './support/core-http-adapter';
+import { createCoreWorker } from '../apps/core/src/core-worker';
 import { createD1ReviewStateStore } from '../apps/core/src/review-state-store';
 import { createGitHubPublicationAdapter } from '../apps/core/src/github-review-adapter';
+import type { ReviewEvent } from '../packages/contracts/src';
 import { SqliteD1Database } from './support/d1-database';
 
 const baseSha = '1'.repeat(40);
 const headSha = '2'.repeat(40);
-const event = {
+const event: ReviewEvent = {
   deliveryId: 'reset-new-round',
   event: 'pull_request',
   action: 'synchronize',
@@ -99,16 +100,11 @@ describe('new review round resets prior GitHub verdicts', () => {
         }),
       });
       const tasks: Promise<unknown>[] = [];
-      const response = await worker.fetch(
-        new Request('https://core.internal/review-events', {
-          method: 'POST',
-          body: JSON.stringify(event),
-        }),
-        env,
-        { waitUntil: (task) => tasks.push(task) },
-      );
+      const response = await worker.submitReviewEvent(event, {
+        waitUntil: (task) => tasks.push(task),
+      });
       await Promise.all(tasks);
-      expect(response.status).toBe(202);
+      expect(response).toBe('accepted');
       expect(await store.getDeliveryOutcome(event.deliveryId)).toMatchObject({
         status: 'scheduled',
       });
@@ -287,21 +283,12 @@ const resetFixture = async (options: { firstRound?: boolean; lifecycle?: boolean
   });
   const tasks: Promise<unknown>[] = [];
   const send = (body = event) =>
-    worker.fetch(
-      new Request('https://core.internal/review-events', {
-        method: 'POST',
-        body: JSON.stringify(body),
-      }),
-      env,
-      { waitUntil: (task) => tasks.push(task) },
-    );
+    worker.submitReviewEvent(body, { waitUntil: (task) => tasks.push(task) });
   const claim = () =>
-    worker.fetch(
-      new Request('https://core.internal/runner-claims', {
+    worker.claimRunnerJob(
+      new Request('https://reviews.test/runner-claim', {
         method: 'POST',
-        headers: { 'x-compte-rendu-runner-claim': 'verified' },
       }),
-      env,
       { waitUntil: (task) => tasks.push(task) },
     );
   return {
@@ -328,7 +315,7 @@ describe('review reset failure and concurrency', () => {
     const f = await resetFixture();
     try {
       f.controls.deny = true;
-      expect((await f.send()).status).toBe(202);
+      expect(await f.send()).toBe('accepted');
       await f.settle();
       expect((await f.claim()).status).toBe(503);
       expect(f.reviews[0]!.state).toBe('APPROVED');
@@ -337,10 +324,7 @@ describe('review reset failure and concurrency', () => {
       const outcome = await f.store.getDeliveryOutcome(event.deliveryId);
       expect(outcome?.status).toBe('failed');
       const runId = f.checks[0]!.external_id;
-      const snapshot = await f.worker.fetch(
-        new Request(`https://core.internal/api/jobs/${runId}`),
-        f.env,
-      );
+      const snapshot = await f.worker.getPublicJobDetail(runId);
       expect(await snapshot.json()).toMatchObject({
         task: { failure: { phase: 'scheduling', reason: 'review_reset_failed' } },
       });
@@ -395,7 +379,7 @@ it('keeps overlapping admission and claim successful when both observed the old 
     await entered.promise;
     expect((await f.claim()).status).toBe(200);
     release.resolve();
-    expect((await admission).status).toBe(202);
+    expect(await admission).toBe('accepted');
     expect(await f.store.getDeliveryOutcome(event.deliveryId)).toMatchObject({
       status: 'scheduled',
     });
@@ -412,7 +396,7 @@ it('confirms the exact review after a lost dismissal response', async () => {
   const f = await resetFixture();
   try {
     f.controls.loseDismissal = true;
-    expect((await f.send()).status).toBe(202);
+    expect(await f.send()).toBe('accepted');
     expect(f.reviews[0]!.state).toBe('DISMISSED');
   } finally {
     await f.settle();
@@ -423,7 +407,7 @@ it('confirms the exact review after a lost dismissal response', async () => {
 it('does not clear this round or repeat the reset when a delivery is replayed', async () => {
   const f = await resetFixture();
   try {
-    expect((await f.send()).status).toBe(202);
+    expect(await f.send()).toBe('accepted');
     await f.settle();
     const runId = f.checks[0]!.external_id;
     f.reviews.push(review(2, runId, 'CHANGES_REQUESTED'));
@@ -434,7 +418,7 @@ it('does not clear this round or repeat the reset when a delivery is replayed', 
       occurredAt: new Date().toISOString(),
       decision: 'request_changes',
     });
-    expect((await f.send()).status).toBe(202);
+    expect(await f.send()).toBe('accepted');
     expect(f.reviews[1]!.state).toBe('CHANGES_REQUESTED');
     expect(await f.store.getRunOutcome(runId)).toMatchObject({
       status: 'completed',
@@ -452,7 +436,7 @@ it.each(['malformed', 'endless'] as const)(
     const f = await resetFixture();
     try {
       f.controls[mode] = true;
-      expect((await f.send()).status).toBe(202);
+      expect(await f.send()).toBe('accepted');
       expect(f.reviews[0]!.state).toBe('APPROVED');
       expect((await f.claim()).status).toBe(503);
     } finally {
@@ -483,7 +467,7 @@ it('does not dismiss votes belonging to a different installation or pull request
       if (prior.kind !== 'claimed') throw new Error('fixture admission failed');
       f.reviews.push(review(index + 2, prior.runId, 'APPROVED'));
     }
-    expect((await f.send()).status).toBe(202);
+    expect(await f.send()).toBe('accepted');
     expect(f.reviews.map((r) => r.state)).toEqual(['DISMISSED', 'APPROVED', 'APPROVED']);
   } finally {
     await f.settle();
@@ -525,7 +509,7 @@ it('does not fail an admitted Runner when a slower eager reset loses its listing
 it('supersedes a stale queued round without dismissing votes or reporting failure', async () => {
   const f = await resetFixture();
   try {
-    expect((await f.send()).status).toBe(202);
+    expect(await f.send()).toBe('accepted');
     await f.settle();
     f.reviews[0]!.state = 'CHANGES_REQUESTED';
     // Keep the claim-time lookup current, then move the head before the reset's
@@ -543,15 +527,11 @@ it('supersedes a stale queued round without dismissing votes or reporting failur
     expect((await f.claim()).status).toBe(204);
     const runId = f.checks[0]!.external_id;
     expect((await f.store.getRunOutcome(runId))?.runnerJobId).toBeUndefined();
-    const detail = await f.worker.fetch(
-      new Request(`https://core.internal/api/jobs/${runId}`),
-      f.env,
-    );
+    const detail = await f.worker.getPublicJobDetail(runId);
     expect(await detail.json()).toMatchObject({ task: { cleanup: 'unknown' } });
     expect(
-      (await f.send({ ...event, deliveryId: 'next-round', headSha: f.controls.currentHead }))
-        .status,
-    ).toBe(202);
+      await f.send({ ...event, deliveryId: 'next-round', headSha: f.controls.currentHead }),
+    ).toBe('accepted');
     await f.settle();
     expect((await f.claim()).status).toBe(200);
   } finally {
@@ -563,7 +543,7 @@ it('supersedes a stale queued round without dismissing votes or reporting failur
 it('supersedes a first-round queued run when the head changed before delivery', async () => {
   const f = await resetFixture({ firstRound: true });
   try {
-    expect((await f.send()).status).toBe(202);
+    expect(await f.send()).toBe('accepted');
     await f.settle();
     f.controls.currentHead = '4'.repeat(40);
     expect((await f.claim()).status).toBe(204);
@@ -575,15 +555,11 @@ it('supersedes a first-round queued run when the head changed before delivery', 
     expect(f.logs).not.toContainEqual(expect.objectContaining({ reason: 'review_reset_failed' }));
     const runId = f.checks[0]!.external_id;
     expect((await f.store.getRunOutcome(runId))?.runnerJobId).toBeUndefined();
-    const detail = await f.worker.fetch(
-      new Request(`https://core.internal/api/jobs/${runId}`),
-      f.env,
-    );
+    const detail = await f.worker.getPublicJobDetail(runId);
     expect(await detail.json()).toMatchObject({ task: { cleanup: 'unknown' } });
     expect(
-      (await f.send({ ...event, deliveryId: 'first-round-next', headSha: f.controls.currentHead }))
-        .status,
-    ).toBe(202);
+      await f.send({ ...event, deliveryId: 'first-round-next', headSha: f.controls.currentHead }),
+    ).toBe('accepted');
     await f.settle();
     expect((await f.claim()).status).toBe(200);
   } finally {
@@ -595,7 +571,7 @@ it('supersedes a first-round queued run when the head changed before delivery', 
 it('fails a first-round claim when the current PR head cannot be read', async () => {
   const f = await resetFixture({ firstRound: true, lifecycle: true });
   try {
-    expect((await f.send()).status).toBe(202);
+    expect(await f.send()).toBe('accepted');
     await f.settle();
     f.controls.headUnavailable = true;
     expect((await f.claim()).status).toBe(503);
@@ -605,10 +581,7 @@ it('fails a first-round claim when the current PR head cannot be read', async ()
     expect(f.checks[0]).toMatchObject({ status: 'completed', conclusion: 'failure' });
     expect(f.logs).not.toContainEqual(expect.objectContaining({ reason: 'review_reset_failed' }));
     const runId = f.checks[0]!.external_id;
-    const detail = await f.worker.fetch(
-      new Request(`https://core.internal/api/jobs/${runId}`),
-      f.env,
-    );
+    const detail = await f.worker.getPublicJobDetail(runId);
     expect(await detail.json()).toMatchObject({
       task: { failure: { phase: 'scheduling', reason: 'unknown' } },
     });
@@ -655,22 +628,12 @@ it('fails a first-round claim closed when the adapter cannot read the head', asy
   );
   const deliveryId = 'first-round-no-head-lookup';
   try {
+    expect(await worker.submitReviewEvent({ ...event, deliveryId })).toBe('accepted');
     expect(
       (
-        await worker.fetch(
-          new Request('https://core.internal/review-events', {
+        await worker.claimRunnerJob(
+          new Request('https://reviews.test/runner-claim', {
             method: 'POST',
-            body: JSON.stringify({ ...event, deliveryId }),
-          }),
-        )
-      ).status,
-    ).toBe(202);
-    expect(
-      (
-        await worker.fetch(
-          new Request('https://core.internal/runner-claims', {
-            method: 'POST',
-            headers: { 'x-compte-rendu-runner-claim': 'verified' },
           }),
         )
       ).status,
@@ -684,7 +647,7 @@ it('fails a first-round claim closed when the adapter cannot read the head', asy
 it('recovers a transient listing failure during the mandatory claim reset', async () => {
   const f = await resetFixture();
   try {
-    expect((await f.send()).status).toBe(202);
+    expect(await f.send()).toBe('accepted');
     await f.settle();
     f.reviews[0]!.state = 'CHANGES_REQUESTED';
     let unavailable = true;
@@ -709,11 +672,11 @@ it('keeps a prior Request changes dismissed when the replacement round fails', a
   const f = await resetFixture();
   try {
     f.reviews[0]!.state = 'CHANGES_REQUESTED';
-    expect((await f.send()).status).toBe(202);
+    expect(await f.send()).toBe('accepted');
     await f.settle();
     expect(f.reviews[0]!.state).toBe('DISMISSED');
     f.controls.repositoryUnavailable = true;
-    expect((await f.claim()).status).toBe(503);
+    await expect(f.claim()).rejects.toThrow();
     expect(await f.store.getDeliveryOutcome(event.deliveryId)).toMatchObject({ status: 'failed' });
     expect(f.reviews[0]!.state).toBe('DISMISSED');
     expect(f.reviews[0]!.body).toContain('Old review body');

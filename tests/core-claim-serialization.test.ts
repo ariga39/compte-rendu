@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createCoreWorker } from './support/core-http-adapter';
+import { createCoreWorker } from '../apps/core/src/core-worker';
 import {
   createD1ReviewStateStore,
   type ReviewJob,
@@ -182,21 +182,14 @@ describe('Runner claim serialization', () => {
   });
 
   const claimRequest = () =>
-    new Request('https://core.internal/runner-claims', {
+    new Request('https://reviews.test/runner-claim', {
       method: 'POST',
-      headers: { 'x-compte-rendu-runner-claim': 'verified' },
     });
   const scheduleReview = (
     worker: ReturnType<typeof createCoreWorker>,
     headSha: string,
     deliveryId: string,
-  ) =>
-    worker.fetch(
-      new Request('https://core.internal/review-events', {
-        method: 'POST',
-        body: JSON.stringify({ ...eligibleEvent, headSha, deliveryId }),
-      }),
-    );
+  ) => worker.submitReviewEvent({ ...eligibleEvent, headSha, deliveryId });
 
   it('releases an unhanded superseded same-pull-request claim so the replacement becomes claimable', async () => {
     const database = new SqliteD1Database();
@@ -215,15 +208,15 @@ describe('Runner claim serialization', () => {
     );
 
     try {
-      expect((await scheduleReview(worker, oldHead, 'delivery-unhanded-old')).status).toBe(202);
-      const oldClaim = worker.fetch(claimRequest());
+      expect(await scheduleReview(worker, oldHead, 'delivery-unhanded-old')).toBe('accepted');
+      const oldClaim = worker.claimRunnerJob(claimRequest());
       for (let attempt = 0; attempt < 50 && tokenCalls === 0; attempt += 1) {
         await new Promise((resolve) => setTimeout(resolve, 1));
       }
       expect(tokenCalls).toBe(1);
 
       currentHead = newHead;
-      expect((await scheduleReview(worker, newHead, 'delivery-unhanded-new')).status).toBe(202);
+      expect(await scheduleReview(worker, newHead, 'delivery-unhanded-new')).toBe('accepted');
       tokenMint.resolve({
         token: 'repository-read-token',
         expiresAt: '2026-09-01T01:00:00.000Z',
@@ -231,7 +224,7 @@ describe('Runner claim serialization', () => {
 
       expect((await oldClaim).status).toBe(204);
 
-      const replacementClaim = await worker.fetch(claimRequest());
+      const replacementClaim = await worker.claimRunnerJob(claimRequest());
       expect(replacementClaim.status).toBe(200);
       expect(await replacementClaim.json()).toMatchObject({
         pullRequestNumber: 42,
@@ -261,30 +254,23 @@ describe('Runner claim serialization', () => {
     });
 
     try {
-      expect((await scheduleReview(worker, oldHead, 'delivery-prehandoff-old')).status).toBe(202);
-      expect((await worker.fetch(claimRequest())).status).toBe(503);
+      expect(await scheduleReview(worker, oldHead, 'delivery-prehandoff-old')).toBe('accepted');
+      expect((await worker.claimRunnerJob(claimRequest())).status).toBe(503);
 
       currentHead = newHead;
-      expect((await scheduleReview(worker, newHead, 'delivery-prehandoff-new')).status).toBe(202);
-      const rerunClaim = await worker.fetch(claimRequest());
+      expect(await scheduleReview(worker, newHead, 'delivery-prehandoff-new')).toBe('accepted');
+      const rerunClaim = await worker.claimRunnerJob(claimRequest());
       expect(rerunClaim.status).toBe(200);
       expect(await rerunClaim.json()).toMatchObject({ pullRequestNumber: 42, headSha: newHead });
 
       expect(
-        (
-          await worker.fetch(
-            new Request('https://core.internal/review-events', {
-              method: 'POST',
-              body: JSON.stringify({
-                ...eligibleEvent,
-                pullRequestNumber: 43,
-                deliveryId: 'delivery-prehandoff-unrelated',
-              }),
-            }),
-          )
-        ).status,
-      ).toBe(202);
-      const unrelatedClaim = await worker.fetch(claimRequest());
+        await worker.submitReviewEvent({
+          ...eligibleEvent,
+          pullRequestNumber: 43,
+          deliveryId: 'delivery-prehandoff-unrelated',
+        }),
+      ).toBe('accepted');
+      const unrelatedClaim = await worker.claimRunnerJob(claimRequest());
       expect(unrelatedClaim.status).toBe(200);
       expect(await unrelatedClaim.json()).toMatchObject({ pullRequestNumber: 43 });
     } finally {
@@ -322,8 +308,8 @@ describe('Runner claim serialization', () => {
     });
 
     try {
-      expect((await scheduleReview(worker, oldHead, 'delivery-owner-change')).status).toBe(202);
-      const claimPromise = worker.fetch(claimRequest());
+      expect(await scheduleReview(worker, oldHead, 'delivery-owner-change')).toBe('accepted');
+      const claimPromise = worker.claimRunnerJob(claimRequest());
       await lookupStarted;
       database.database
         .prepare('UPDATE review_runs SET runner_job_id = ?, runner_attempt = ?')
@@ -362,45 +348,44 @@ describe('Runner claim serialization', () => {
       }),
     };
     const callbackRequest = (body: string) =>
-      new Request('https://core.internal/runner-results', {
+      new Request('https://reviews.test/runner-callback', {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          'x-compte-rendu-runner-callback': 'verified',
         },
         body,
       });
     const worker = createCoreWorker(env, dependencies);
 
     try {
-      expect((await scheduleReview(worker, oldHead, 'delivery-cleanup-block')).status).toBe(202);
-      const claim = await worker.fetch(claimRequest());
+      expect(await scheduleReview(worker, oldHead, 'delivery-cleanup-block')).toBe('accepted');
+      const claim = await worker.claimRunnerJob(claimRequest());
       expect(claim.status).toBe(200);
       const job = (await claim.json()) as { id: string; runId: string; attempt: number };
 
       expect(
         (
-          await worker.fetch(
+          await worker.handleRunnerCallback(
             callbackRequest(await abortedCallback(job.runId, job.id, job.attempt, 'failed')),
           )
         ).status,
       ).toBe(202);
 
       currentHead = newHead;
-      expect((await scheduleReview(worker, newHead, 'delivery-cleanup-replacement')).status).toBe(
-        202,
+      expect(await scheduleReview(worker, newHead, 'delivery-cleanup-replacement')).toBe(
+        'accepted',
       );
       const freshWorker = createCoreWorker(env, dependencies);
-      expect((await freshWorker.fetch(claimRequest())).status).toBe(204);
+      expect((await freshWorker.claimRunnerJob(claimRequest())).status).toBe(204);
 
       expect(
         (
-          await freshWorker.fetch(
+          await freshWorker.handleRunnerCallback(
             callbackRequest(await abortedCallback(job.runId, job.id, job.attempt, 'destroyed')),
           )
         ).status,
       ).toBe(202);
-      const released = await freshWorker.fetch(claimRequest());
+      const released = await freshWorker.claimRunnerJob(claimRequest());
       expect(released.status).toBe(200);
       expect(await released.json()).toMatchObject({ pullRequestNumber: 42, headSha: newHead });
     } finally {
@@ -418,16 +403,16 @@ describe('Runner claim serialization', () => {
       }),
     });
     try {
-      expect((await scheduleReview(worker, oldHead, 'delivery-running-blocker')).status).toBe(202);
-      expect((await worker.fetch(claimRequest())).status).toBe(200);
-      expect((await scheduleReview(worker, newHead, 'delivery-running-queued')).status).toBe(202);
+      expect(await scheduleReview(worker, oldHead, 'delivery-running-blocker')).toBe('accepted');
+      expect((await worker.claimRunnerJob(claimRequest())).status).toBe(200);
+      expect(await scheduleReview(worker, newHead, 'delivery-running-queued')).toBe('accepted');
       database.database
         .prepare(
           "UPDATE review_runs SET status = 'scheduled', terminal_at = NULL WHERE status = 'superseded'",
         )
         .run();
       const queued = (await (
-        await worker.fetch(new Request('https://core.internal/api/jobs?status=queued'))
+        await worker.listPublicJobs(new URLSearchParams('status=queued'))
       ).json()) as { tasks: Array<{ runId: string; queueBlockReason?: string | null }> };
       expect(queued.tasks).toHaveLength(1);
       expect(queued.tasks[0]?.queueBlockReason).toBeNull();

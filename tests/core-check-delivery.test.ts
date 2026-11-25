@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createCoreWorker } from './support/core-http-adapter';
+import { createCoreWorker } from '../apps/core/src/core-worker';
 import { createD1ReviewStateStore } from '../apps/core/src/index';
 import { SqliteD1Database } from './support/d1-database';
 import { claimRunnerJob } from './support/runner-claim';
@@ -78,18 +78,14 @@ describe('Core Check setup and delivery reconciliation', () => {
         expiresAt: '2026-09-01T01:00:00.000Z',
       }),
     });
-    const scheduling = worker.fetch(
-      new Request('https://core.internal/review-events', {
-        method: 'POST',
-        body: JSON.stringify({ ...eligibleEvent, deliveryId: 'delivery-check-gates-claim' }),
-      }),
-      undefined,
+    const scheduling = worker.submitReviewEvent(
+      { ...eligibleEvent, deliveryId: 'delivery-check-gates-claim' },
       { waitUntil: (task) => backgroundTasks.push(task) },
     );
     try {
       await checkStarted.promise;
-      expect((await scheduling).status).toBe(202);
-      const claim = await worker.fetch(runnerClaimRequest());
+      expect(await scheduling).toBe('accepted');
+      const claim = await worker.claimRunnerJob(runnerClaimRequest());
       expect(claim.status).toBe(200);
       expect(await claim.json()).toMatchObject({
         id: expect.stringMatching(/^[0-9a-f-]{36}$/),
@@ -147,36 +143,28 @@ describe('Core Check setup and delivery reconciliation', () => {
 
     try {
       expect(
-        (
-          await worker.fetch(
-            new Request('https://core.internal/review-events', {
-              method: 'POST',
-              body: JSON.stringify({
-                ...eligibleEvent,
-                deliveryId: 'delivery-check-after-completion',
-              }),
-            }),
-            undefined,
-            { waitUntil: (task) => backgroundTasks.push(task) },
-          )
-        ).status,
-      ).toBe(202);
-      const claim = await worker.fetch(
-        new Request('https://core.internal/runner-claims', {
+        await worker.submitReviewEvent(
+          {
+            ...eligibleEvent,
+            deliveryId: 'delivery-check-after-completion',
+          },
+          { waitUntil: (task) => backgroundTasks.push(task) },
+        ),
+      ).toBe('accepted');
+      const claim = await worker.claimRunnerJob(
+        new Request('https://reviews.test/runner-claim', {
           method: 'POST',
-          headers: { 'x-compte-rendu-runner-claim': 'verified' },
         }),
       );
       expect(claim.status).toBe(200);
       const claimed = (await claim.json()) as { id: string; runId: string };
       expect(
         (
-          await worker.fetch(
-            new Request('https://core.internal/runner-results', {
+          await worker.handleRunnerCallback(
+            new Request('https://reviews.test/runner-callback', {
               method: 'POST',
               headers: {
                 'content-type': 'application/json',
-                'x-compte-rendu-runner-callback': 'verified',
               },
               body: await successfulCallback(claimed.runId, claimed.id),
             }),
@@ -238,24 +226,17 @@ describe('Core Check setup and delivery reconciliation', () => {
 
     try {
       expect(
-        (
-          await worker.fetch(
-            new Request('https://core.internal/review-events', {
-              method: 'POST',
-              body: JSON.stringify({
-                ...eligibleEvent,
-                deliveryId: 'delivery-check-in-progress-race',
-              }),
-            }),
-            undefined,
-            { waitUntil: (task) => backgroundTasks.push(task) },
-          )
-        ).status,
-      ).toBe(202);
-      const claim = await worker.fetch(
-        new Request('https://core.internal/runner-claims', {
+        await worker.submitReviewEvent(
+          {
+            ...eligibleEvent,
+            deliveryId: 'delivery-check-in-progress-race',
+          },
+          { waitUntil: (task) => backgroundTasks.push(task) },
+        ),
+      ).toBe('accepted');
+      const claim = await worker.claimRunnerJob(
+        new Request('https://reviews.test/runner-claim', {
           method: 'POST',
-          headers: { 'x-compte-rendu-runner-claim': 'verified' },
         }),
       );
       expect(claim.status).toBe(200);
@@ -267,12 +248,11 @@ describe('Core Check setup and delivery reconciliation', () => {
 
       expect(
         (
-          await worker.fetch(
-            new Request('https://core.internal/runner-results', {
+          await worker.handleRunnerCallback(
+            new Request('https://reviews.test/runner-callback', {
               method: 'POST',
               headers: {
                 'content-type': 'application/json',
-                'x-compte-rendu-runner-callback': 'verified',
               },
               body: JSON.stringify(callback),
             }),
@@ -320,35 +300,27 @@ describe('Core Check setup and delivery reconciliation', () => {
 
     try {
       expect(
-        (
-          await worker.fetch(
-            new Request('https://core.internal/review-events', {
-              method: 'POST',
-              body: JSON.stringify({
-                ...eligibleEvent,
-                deliveryId: 'delivery-check-after-failure',
-              }),
-            }),
-            undefined,
-            { waitUntil: (task) => backgroundTasks.push(task) },
-          )
-        ).status,
-      ).toBe(202);
-      const claim = await worker.fetch(
-        new Request('https://core.internal/runner-claims', {
+        await worker.submitReviewEvent(
+          {
+            ...eligibleEvent,
+            deliveryId: 'delivery-check-after-failure',
+          },
+          { waitUntil: (task) => backgroundTasks.push(task) },
+        ),
+      ).toBe('accepted');
+      const claim = await worker.claimRunnerJob(
+        new Request('https://reviews.test/runner-claim', {
           method: 'POST',
-          headers: { 'x-compte-rendu-runner-claim': 'verified' },
         }),
       );
       const claimed = (await claim.json()) as { id: string; runId: string };
       expect(
         (
-          await worker.fetch(
-            new Request('https://core.internal/runner-results', {
+          await worker.handleRunnerCallback(
+            new Request('https://reviews.test/runner-callback', {
               method: 'POST',
               headers: {
                 'content-type': 'application/json',
-                'x-compte-rendu-runner-callback': 'verified',
               },
               body: await failedCallback(claimed.runId, claimed.id),
             }),
@@ -388,14 +360,9 @@ describe('Core Check setup and delivery reconciliation', () => {
       },
     });
     try {
-      await worker.fetch(
-        new Request('https://core.internal/review-events', {
-          method: 'POST',
-          body: JSON.stringify(eligibleEvent),
-        }),
-        undefined,
-        { waitUntil: (task) => background.push(task) },
-      );
+      await worker.submitReviewEvent(eligibleEvent, {
+        waitUntil: (task) => background.push(task),
+      });
       expect((await worker.cancelReview(await started.promise, 1)).status).toBe(200);
       check.resolve({ id: 324 });
       await Promise.all(background);
@@ -428,35 +395,22 @@ describe('Core Check setup and delivery reconciliation', () => {
 
     try {
       expect(
-        (
-          await worker.fetch(
-            new Request('https://core.internal/review-events', {
-              method: 'POST',
-              body: JSON.stringify({
-                ...eligibleEvent,
-                deliveryId: 'delivery-late-check-superseded-old',
-              }),
-            }),
-            undefined,
-            { waitUntil: (task) => backgroundTasks.push(task) },
-          )
-        ).status,
-      ).toBe(202);
+        await worker.submitReviewEvent(
+          {
+            ...eligibleEvent,
+            deliveryId: 'delivery-late-check-superseded-old',
+          },
+          { waitUntil: (task) => backgroundTasks.push(task) },
+        ),
+      ).toBe('accepted');
       expect(
-        (
-          await worker.fetch(
-            new Request('https://core.internal/review-events', {
-              method: 'POST',
-              body: JSON.stringify({
-                ...eligibleEvent,
-                deliveryId: 'delivery-late-check-superseded-new',
-                action: 'synchronize',
-                headSha: '3333333333333333333333333333333333333333',
-              }),
-            }),
-          )
-        ).status,
-      ).toBe(202);
+        await worker.submitReviewEvent({
+          ...eligibleEvent,
+          deliveryId: 'delivery-late-check-superseded-new',
+          action: 'synchronize',
+          headSha: '3333333333333333333333333333333333333333',
+        }),
+      ).toBe('accepted');
 
       oldCheck.resolve({ id: 324 });
       await Promise.all(backgroundTasks);
@@ -492,19 +446,11 @@ describe('Core Check setup and delivery reconciliation', () => {
 
     try {
       expect(
-        (
-          await worker.fetch(
-            new Request('https://core.internal/review-events', {
-              method: 'POST',
-              body: JSON.stringify({ ...eligibleEvent, deliveryId: 'delivery-check-fails' }),
-            }),
-          )
-        ).status,
-      ).toBe(202);
-      const claim = await worker.fetch(
-        new Request('https://core.internal/runner-claims', {
+        await worker.submitReviewEvent({ ...eligibleEvent, deliveryId: 'delivery-check-fails' }),
+      ).toBe('accepted');
+      const claim = await worker.claimRunnerJob(
+        new Request('https://reviews.test/runner-claim', {
           method: 'POST',
-          headers: { 'x-compte-rendu-runner-claim': 'verified' },
         }),
       );
       expect(claim.status).toBe(200);
@@ -525,15 +471,11 @@ describe('Core Check setup and delivery reconciliation', () => {
         },
       },
     });
-    const request = () =>
-      new Request('https://core.internal/review-events', {
-        method: 'POST',
-        body: JSON.stringify({ ...eligibleEvent, deliveryId: 'delivery-check-queued' }),
-      });
+    const request = () => ({ ...eligibleEvent, deliveryId: 'delivery-check-queued' });
 
     try {
-      expect((await worker.fetch(request())).status).toBe(202);
-      expect((await worker.fetch(request())).status).toBe(202);
+      expect(await worker.submitReviewEvent(request())).toBe('accepted');
+      expect(await worker.submitReviewEvent(request())).toBe('accepted');
       expect(checks).toEqual([
         {
           repositoryId: 11,
@@ -583,40 +525,34 @@ describe('Core Check setup and delivery reconciliation', () => {
         }),
       },
     );
-    const request = () =>
-      new Request('https://core.internal/review-events', {
-        method: 'POST',
-        body: JSON.stringify({
-          ...eligibleEvent,
-          deliveryId: 'delivery-check-interrupted-after-create',
-        }),
-      });
+    const request = () => ({
+      ...eligibleEvent,
+      deliveryId: 'delivery-check-interrupted-after-create',
+    });
     const context = { waitUntil: (task: Promise<unknown>) => backgroundTasks.push(task) };
 
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-09-04T00:00:00.000Z'));
     try {
-      expect((await worker.fetch(request(), undefined, context)).status).toBe(202);
+      expect(await worker.submitReviewEvent(request(), context)).toBe('accepted');
       await firstCheckCreated.promise;
-      expect((await worker.fetch(request(), undefined, context)).status).toBe(202);
+      expect(await worker.submitReviewEvent(request(), context)).toBe('accepted');
       expect(checkRequests).toHaveLength(1);
 
-      const claim = await worker.fetch(
-        new Request('https://core.internal/runner-claims', {
+      const claim = await worker.claimRunnerJob(
+        new Request('https://reviews.test/runner-claim', {
           method: 'POST',
-          headers: { 'x-compte-rendu-runner-claim': 'verified' },
         }),
       );
       expect(claim.status).toBe(200);
       const claimed = (await claim.json()) as { id: string; runId: string };
       expect(
         (
-          await worker.fetch(
-            new Request('https://core.internal/runner-results', {
+          await worker.handleRunnerCallback(
+            new Request('https://reviews.test/runner-callback', {
               method: 'POST',
               headers: {
                 'content-type': 'application/json',
-                'x-compte-rendu-runner-callback': 'verified',
               },
               body: await successfulCallback(claimed.runId, claimed.id),
             }),
@@ -625,7 +561,7 @@ describe('Core Check setup and delivery reconciliation', () => {
       ).toBe(202);
 
       vi.setSystemTime(new Date('2026-09-04T00:02:00.000Z'));
-      expect((await worker.fetch(request())).status).toBe(202);
+      expect(await worker.submitReviewEvent(request())).toBe('accepted');
       expect(remoteChecks).toHaveLength(1);
       expect(checkRequests).toHaveLength(2);
       expect(checkUpdates).toEqual([
@@ -695,17 +631,16 @@ describe('Core Check setup and delivery reconciliation', () => {
     );
     const callbackBody = await successfulCallback(claimed.runId);
     const callback = () =>
-      new Request('https://core.internal/runner-results', {
+      new Request('https://reviews.test/runner-callback', {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          'x-compte-rendu-runner-callback': 'verified',
         },
         body: callbackBody,
       });
 
     try {
-      expect((await firstWorker.fetch(callback())).status).toBe(202);
+      expect((await firstWorker.handleRunnerCallback(callback())).status).toBe(202);
       expect(await stateStore.getRunOutcome(claimed.runId)).toMatchObject({ status: 'completed' });
       expect(reviews).toHaveLength(1);
       expect(firstUpdates).toEqual([
@@ -749,7 +684,7 @@ describe('Core Check setup and delivery reconciliation', () => {
       expect(reviews).toHaveLength(1);
       expect(createChecks).toEqual([]);
 
-      expect((await freshWorker.fetch(callback())).status).toBe(202);
+      expect((await freshWorker.handleRunnerCallback(callback())).status).toBe(202);
       expect(retriedUpdates).toEqual([
         {
           runId: claimed.runId,
@@ -811,20 +746,19 @@ describe('Core Check setup and delivery reconciliation', () => {
     );
     const callbackBody = await successfulCallback(claimed.runId);
     const callback = () =>
-      new Request('https://core.internal/runner-results', {
+      new Request('https://reviews.test/runner-callback', {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          'x-compte-rendu-runner-callback': 'verified',
         },
         body: callbackBody,
       });
 
     try {
-      expect((await worker.fetch(callback())).status).toBe(202);
+      expect((await worker.handleRunnerCallback(callback())).status).toBe(202);
       expect(reviews).toHaveLength(1);
       checkAvailable = true;
-      expect((await worker.fetch(callback())).status).toBe(202);
+      expect((await worker.handleRunnerCallback(callback())).status).toBe(202);
       expect(reviews).toHaveLength(1);
       expect(updates).toEqual(['success']);
     } finally {
@@ -870,36 +804,28 @@ describe('Core Check setup and delivery reconciliation', () => {
 
     try {
       expect(
-        (
-          await worker.fetch(
-            new Request('https://core.internal/review-events', {
-              method: 'POST',
-              body: JSON.stringify({
-                ...eligibleEvent,
-                deliveryId: 'delivery-check-retry-late-setup',
-              }),
-            }),
-            undefined,
-            context,
-          )
-        ).status,
-      ).toBe(202);
-      const claim = await worker.fetch(
-        new Request('https://core.internal/runner-claims', {
+        await worker.submitReviewEvent(
+          {
+            ...eligibleEvent,
+            deliveryId: 'delivery-check-retry-late-setup',
+          },
+          context,
+        ),
+      ).toBe('accepted');
+      const claim = await worker.claimRunnerJob(
+        new Request('https://reviews.test/runner-claim', {
           method: 'POST',
-          headers: { 'x-compte-rendu-runner-claim': 'verified' },
         }),
       );
       expect(claim.status).toBe(200);
       const claimed = (await claim.json()) as { id: string; runId: string };
       expect(
         (
-          await worker.fetch(
-            new Request('https://core.internal/runner-results', {
+          await worker.handleRunnerCallback(
+            new Request('https://reviews.test/runner-callback', {
               method: 'POST',
               headers: {
                 'content-type': 'application/json',
-                'x-compte-rendu-runner-callback': 'verified',
               },
               body: await successfulCallback(claimed.runId, claimed.id),
             }),
@@ -977,23 +903,22 @@ describe('Core Check setup and delivery reconciliation', () => {
     );
     const callbackBody = await failedCallback(claimed.runId);
     const callback = () =>
-      new Request('https://core.internal/runner-results', {
+      new Request('https://reviews.test/runner-callback', {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          'x-compte-rendu-runner-callback': 'verified',
         },
         body: callbackBody,
       });
 
     try {
-      expect((await worker.fetch(callback())).status).toBe(202);
+      expect((await worker.handleRunnerCallback(callback())).status).toBe(202);
       expect(await stateStore.getRunOutcome(claimed.runId)).toMatchObject({ status: 'failed' });
       expect(reviews).toEqual([]);
       expect(firstUpdates).toEqual(['failure']);
 
       checkAvailable = true;
-      expect((await worker.fetch(callback())).status).toBe(202);
+      expect((await worker.handleRunnerCallback(callback())).status).toBe(202);
       expect(retriedUpdates).toEqual(['failure']);
       expect(reviews).toEqual([]);
     } finally {
@@ -1021,21 +946,16 @@ describe('Core Check setup and delivery reconciliation', () => {
 
     try {
       expect(
-        (
-          await worker.fetch(
-            new Request('https://core.internal/review-events', {
-              method: 'POST',
-              body: JSON.stringify({ ...eligibleEvent, deliveryId: 'delivery-check-claimed' }),
-            }),
-          )
-        ).status,
-      ).toBe(202);
+        await worker.submitReviewEvent({
+          ...eligibleEvent,
+          deliveryId: 'delivery-check-claimed',
+        }),
+      ).toBe('accepted');
       expect(
         (
-          await worker.fetch(
-            new Request('https://core.internal/runner-claims', {
+          await worker.claimRunnerJob(
+            new Request('https://reviews.test/runner-claim', {
               method: 'POST',
-              headers: { 'x-compte-rendu-runner-claim': 'verified' },
             }),
           )
         ).status,
@@ -1076,19 +996,14 @@ describe('Core Check setup and delivery reconciliation', () => {
 
     try {
       expect(
-        (
-          await worker.fetch(
-            new Request('https://core.internal/review-events', {
-              method: 'POST',
-              body: JSON.stringify({ ...eligibleEvent, deliveryId: 'delivery-claim-failure' }),
-            }),
-          )
-        ).status,
-      ).toBe(202);
-      const claim = await worker.fetch(
-        new Request('https://core.internal/runner-claims', {
+        await worker.submitReviewEvent({
+          ...eligibleEvent,
+          deliveryId: 'delivery-claim-failure',
+        }),
+      ).toBe('accepted');
+      const claim = await worker.claimRunnerJob(
+        new Request('https://reviews.test/runner-claim', {
           method: 'POST',
-          headers: { 'x-compte-rendu-runner-claim': 'verified' },
         }),
       );
 

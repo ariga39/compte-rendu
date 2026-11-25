@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createCoreWorker } from './support/core-http-adapter';
+import { createCoreWorker } from '../apps/core/src/core-worker';
 import { createD1ReviewStateStore } from '../apps/core/src/index';
-import type { OperationalLogEvent } from '../packages/contracts/src';
+import type { OperationalLogEvent, ReviewEvent } from '../packages/contracts/src';
 import { SqliteD1Database } from './support/d1-database';
 import { claimRunnerJob } from './support/runner-claim';
 import {
@@ -69,10 +69,9 @@ describe('Core lifecycle telemetry and terminal classification', () => {
         failure,
       };
       const post = (body: unknown) =>
-        worker.fetch(
-          new Request('https://core.internal/runner-results', {
+        worker.handleRunnerCallback(
+          new Request('https://reviews.test/runner-callback', {
             method: 'POST',
-            headers: { 'x-compte-rendu-runner-callback': 'verified' },
             body: JSON.stringify(body),
           }),
         );
@@ -82,15 +81,11 @@ describe('Core lifecycle telemetry and terminal classification', () => {
       );
       expect((await post(callback)).status).toBe(202);
       const reader = createCoreWorker(env);
-      const detail = await (
-        await reader.fetch(new Request(`https://core.internal/api/jobs/${review.runId}`))
-      ).json();
+      const detail = await (await reader.getPublicJobDetail(review.runId)).json();
       expect(detail).toMatchObject({
         task: { status: 'failed', identity: { kind: 'anonymous' }, failure: expected },
       });
-      const history = await (
-        await reader.fetch(new Request('https://core.internal/api/jobs'))
-      ).json();
+      const history = await (await reader.listPublicJobs(new URLSearchParams())).json();
       expect(history.tasks[0].failure).toEqual(expected);
       database.close();
     },
@@ -139,19 +134,14 @@ describe('Core lifecycle telemetry and terminal classification', () => {
     };
     const callback = { ...JSON.parse(await failedCallback(review.runId, 'usage-job')), usage };
     const post = (body: unknown) =>
-      worker.fetch(
-        new Request('https://core.internal/runner-results', {
+      worker.handleRunnerCallback(
+        new Request('https://reviews.test/runner-callback', {
           method: 'POST',
-          headers: { 'x-compte-rendu-runner-callback': 'verified' },
           body: JSON.stringify(body),
         }),
       );
     const detail = async () =>
-      (
-        await createCoreWorker(env).fetch(
-          new Request(`https://core.internal/api/jobs/${review.runId}`),
-        )
-      ).json();
+      (await createCoreWorker(env).getPublicJobDetail(review.runId)).json();
     expect((await post({ ...callback, id: 'foreign-job' })).status).toBe(409);
     expect(await detail()).toMatchObject({ usage: null });
     expect(
@@ -182,19 +172,15 @@ describe('Core lifecycle telemetry and terminal classification', () => {
     const worker = createCoreWorker(env, postHogTestDefaults.dependencies);
 
     try {
-      const response = await worker.fetch(
-        new Request('https://core.internal/review-events', {
-          method: 'POST',
-          body: JSON.stringify({
-            ...eligibleEvent,
-            freeFormAcceptanceNote142: 'must-not-reach-posthog-wire-payload',
-          }),
-        }),
-        env,
+      const response = await worker.submitReviewEvent(
+        {
+          ...eligibleEvent,
+          freeFormAcceptanceNote142: 'must-not-reach-posthog-wire-payload',
+        } as ReviewEvent,
         { waitUntil: (task) => waitUntilTasks.push(task) },
       );
 
-      expect(response.status).toBe(202);
+      expect(response).toBe('accepted');
       expect(waitUntilTasks).toHaveLength(2);
       await Promise.all(waitUntilTasks);
       expect(requests).toHaveLength(1);
@@ -252,19 +238,15 @@ describe('Core lifecycle telemetry and terminal classification', () => {
     const worker = createCoreWorker(env, postHogTestDefaults.dependencies);
 
     try {
-      const response = await worker.fetch(
-        new Request('https://core.internal/review-events', {
-          method: 'POST',
-          body: JSON.stringify({
-            ...eligibleEvent,
-            deliveryId: 'delivery-posthog-base-path',
-          }),
-        }),
-        env,
+      const response = await worker.submitReviewEvent(
+        {
+          ...eligibleEvent,
+          deliveryId: 'delivery-posthog-base-path',
+        },
         { waitUntil: (task) => waitUntilTasks.push(task) },
       );
 
-      expect(response.status).toBe(202);
+      expect(response).toBe('accepted');
       await Promise.all(waitUntilTasks);
       expect(requests).toHaveLength(1);
       expect(requests[0].url).toBe('https://posthog.example.test/ingest/batch/');
@@ -281,16 +263,12 @@ describe('Core lifecycle telemetry and terminal classification', () => {
     const worker = createCoreWorker(env, postHogTestDefaults.dependencies);
 
     try {
-      const response = await worker.fetch(
-        new Request('https://core.internal/review-events', {
-          method: 'POST',
-          body: JSON.stringify({ ...eligibleEvent, deliveryId: 'delivery-posthog-disabled' }),
-        }),
-        env,
+      const response = await worker.submitReviewEvent(
+        { ...eligibleEvent, deliveryId: 'delivery-posthog-disabled' },
         { waitUntil: (task) => waitUntilTasks.push(task) },
       );
 
-      expect(response.status).toBe(202);
+      expect(response).toBe('accepted');
       await Promise.all(waitUntilTasks);
       expect(requests).toHaveLength(0);
     } finally {
@@ -312,19 +290,15 @@ describe('Core lifecycle telemetry and terminal classification', () => {
     const worker = createCoreWorker(env, postHogTestDefaults.dependencies);
 
     try {
-      const response = await worker.fetch(
-        new Request('https://core.internal/review-events', {
-          method: 'POST',
-          body: JSON.stringify({
-            ...eligibleEvent,
-            deliveryId: 'delivery-posthog-invalid-configuration',
-          }),
-        }),
-        env,
+      const response = await worker.submitReviewEvent(
+        {
+          ...eligibleEvent,
+          deliveryId: 'delivery-posthog-invalid-configuration',
+        },
         { waitUntil: (task) => waitUntilTasks.push(task) },
       );
 
-      expect(response.status).toBe(202);
+      expect(response).toBe('accepted');
       await Promise.all(waitUntilTasks);
       expect(warning).toHaveBeenCalledTimes(1);
       expect(warning).toHaveBeenCalledWith('PostHog telemetry unavailable: configuration');
@@ -361,43 +335,35 @@ describe('Core lifecycle telemetry and terminal classification', () => {
     });
 
     try {
-      const response = await worker.fetch(
-        new Request('https://core.internal/review-events', {
-          method: 'POST',
-          body: JSON.stringify({
-            ...eligibleEvent,
-            deliveryId: 'delivery-posthog-capture-failure',
-          }),
-        }),
-        env,
+      const response = await worker.submitReviewEvent(
+        {
+          ...eligibleEvent,
+          deliveryId: 'delivery-posthog-capture-failure',
+        },
         { waitUntil: (task) => waitUntilTasks.push(task) },
       );
 
-      expect(response.status).toBe(202);
+      expect(response).toBe('accepted');
       await Promise.all(waitUntilTasks.splice(0));
 
-      const claim = await worker.fetch(
-        new Request('https://core.internal/runner-claims', {
+      const claim = await worker.claimRunnerJob(
+        new Request('https://reviews.test/runner-claim', {
           method: 'POST',
-          headers: { 'x-compte-rendu-runner-claim': 'verified' },
         }),
-        env,
         { waitUntil: (task) => waitUntilTasks.push(task) },
       );
       expect(claim.status).toBe(200);
       const claimed = (await claim.json()) as { id: string; runId: string; attempt: number };
       await Promise.all(waitUntilTasks.splice(0));
 
-      const callback = await worker.fetch(
-        new Request('https://core.internal/runner-results', {
+      const callback = await worker.handleRunnerCallback(
+        new Request('https://reviews.test/runner-callback', {
           method: 'POST',
           headers: {
-            'x-compte-rendu-runner-callback': 'verified',
             'content-type': 'application/json',
           },
           body: await successfulCallback(claimed.runId, claimed.id, claimed.attempt),
         }),
-        env,
         { waitUntil: (task) => waitUntilTasks.push(task) },
       );
       expect(callback.status).toBe(202);
@@ -427,35 +393,27 @@ describe('Core lifecycle telemetry and terminal classification', () => {
     const worker = createCoreWorker(env, postHogTestDefaults.dependencies);
 
     try {
-      const oldSchedule = await worker.fetch(
-        new Request('https://core.internal/review-events', {
-          method: 'POST',
-          body: JSON.stringify({
-            ...eligibleEvent,
-            deliveryId: 'delivery-old-head-no-runner-job',
-          }),
-        }),
-        env,
+      const oldSchedule = await worker.submitReviewEvent(
+        {
+          ...eligibleEvent,
+          deliveryId: 'delivery-old-head-no-runner-job',
+        },
         { waitUntil: (task) => waitUntilTasks.push(task) },
       );
-      expect(oldSchedule.status).toBe(202);
+      expect(oldSchedule).toBe('accepted');
       await Promise.all(waitUntilTasks.splice(0));
 
       vi.setSystemTime(1788480005000);
-      const newerSchedule = await worker.fetch(
-        new Request('https://core.internal/review-events', {
-          method: 'POST',
-          body: JSON.stringify({
-            ...eligibleEvent,
-            action: 'synchronize',
-            deliveryId: 'delivery-newer-head-admitted',
-            headSha: '3333333333333333333333333333333333333333',
-          }),
-        }),
-        env,
+      const newerSchedule = await worker.submitReviewEvent(
+        {
+          ...eligibleEvent,
+          action: 'synchronize',
+          deliveryId: 'delivery-newer-head-admitted',
+          headSha: '3333333333333333333333333333333333333333',
+        },
         { waitUntil: (task) => waitUntilTasks.push(task) },
       );
-      expect(newerSchedule.status).toBe(202);
+      expect(newerSchedule).toBe('accepted');
       await Promise.all(waitUntilTasks);
 
       const events = await postHogEvents(requests);
@@ -503,23 +461,17 @@ describe('Core lifecycle telemetry and terminal classification', () => {
     const worker = createCoreWorker(env, postHogTestDefaults.dependencies);
 
     try {
-      const scheduled = await worker.fetch(
-        new Request('https://core.internal/review-events', {
-          method: 'POST',
-          body: JSON.stringify({ ...eligibleEvent, deliveryId: 'delivery-claim-lifecycle' }),
-        }),
-        env,
+      const scheduled = await worker.submitReviewEvent(
+        { ...eligibleEvent, deliveryId: 'delivery-claim-lifecycle' },
         { waitUntil: (task) => waitUntilTasks.push(task) },
       );
-      expect(scheduled.status).toBe(202);
+      expect(scheduled).toBe('accepted');
       await Promise.all(waitUntilTasks.splice(0));
 
-      const claim = await worker.fetch(
-        new Request('https://core.internal/runner-claims', {
+      const claim = await worker.claimRunnerJob(
+        new Request('https://reviews.test/runner-claim', {
           method: 'POST',
-          headers: { 'x-compte-rendu-runner-claim': 'verified' },
         }),
-        env,
         { waitUntil: (task) => waitUntilTasks.push(task) },
       );
 
@@ -557,23 +509,17 @@ describe('Core lifecycle telemetry and terminal classification', () => {
     const worker = createCoreWorker(env, postHogTestDefaults.dependencies);
 
     try {
-      const scheduled = await worker.fetch(
-        new Request('https://core.internal/review-events', {
-          method: 'POST',
-          body: JSON.stringify({ ...eligibleEvent, deliveryId: 'delivery-finished-lifecycle' }),
-        }),
-        env,
+      const scheduled = await worker.submitReviewEvent(
+        { ...eligibleEvent, deliveryId: 'delivery-finished-lifecycle' },
         { waitUntil: (task) => waitUntilTasks.push(task) },
       );
-      expect(scheduled.status).toBe(202);
+      expect(scheduled).toBe('accepted');
       await Promise.all(waitUntilTasks.splice(0));
 
-      const claim = await worker.fetch(
-        new Request('https://core.internal/runner-claims', {
+      const claim = await worker.claimRunnerJob(
+        new Request('https://reviews.test/runner-claim', {
           method: 'POST',
-          headers: { 'x-compte-rendu-runner-claim': 'verified' },
         }),
-        env,
         { waitUntil: (task) => waitUntilTasks.push(task) },
       );
       expect(claim.status).toBe(200);
@@ -589,16 +535,14 @@ describe('Core lifecycle telemetry and terminal classification', () => {
         cleanupCompletedAt: '2026-09-04T00:00:06.000Z',
       };
 
-      const callback = await worker.fetch(
-        new Request('https://core.internal/runner-results', {
+      const callback = await worker.handleRunnerCallback(
+        new Request('https://reviews.test/runner-callback', {
           method: 'POST',
           headers: {
-            'x-compte-rendu-runner-callback': 'verified',
             'content-type': 'application/json',
           },
           body: JSON.stringify(callbackBody),
         }),
-        env,
         { waitUntil: (task) => waitUntilTasks.push(task) },
       );
 
@@ -667,16 +611,14 @@ describe('Core lifecycle telemetry and terminal classification', () => {
     });
 
     try {
-      const response = await worker.fetch(
-        new Request('https://core.internal/runner-results', {
+      const response = await worker.handleRunnerCallback(
+        new Request('https://reviews.test/runner-callback', {
           method: 'POST',
           headers: {
-            'x-compte-rendu-runner-callback': 'verified',
             'content-type': 'application/json',
           },
           body: await successfulCallback(claimed.runId),
         }),
-        env,
         { waitUntil: (task) => waitUntilTasks.push(task) },
       );
 
@@ -727,26 +669,20 @@ describe('Core lifecycle telemetry and terminal classification', () => {
     const context = { waitUntil: (task: Promise<unknown>) => waitUntilTasks.push(task) };
 
     try {
-      const scheduled = await worker.fetch(
-        new Request('https://core.internal/review-events', {
-          method: 'POST',
-          body: JSON.stringify({
-            ...eligibleEvent,
-            deliveryId: 'delivery-running-old-head-lifecycle',
-          }),
-        }),
-        env,
+      const scheduled = await worker.submitReviewEvent(
+        {
+          ...eligibleEvent,
+          deliveryId: 'delivery-running-old-head-lifecycle',
+        },
         context,
       );
-      expect(scheduled.status).toBe(202);
+      expect(scheduled).toBe('accepted');
       await Promise.all(waitUntilTasks.splice(0));
 
-      const claim = await worker.fetch(
-        new Request('https://core.internal/runner-claims', {
+      const claim = await worker.claimRunnerJob(
+        new Request('https://reviews.test/runner-claim', {
           method: 'POST',
-          headers: { 'x-compte-rendu-runner-claim': 'verified' },
         }),
-        env,
         context,
       );
       expect(claim.status).toBe(200);
@@ -754,20 +690,16 @@ describe('Core lifecycle telemetry and terminal classification', () => {
       await Promise.all(waitUntilTasks.splice(0));
 
       vi.setSystemTime(new Date('2026-09-04T00:00:05.000Z'));
-      const replacement = await worker.fetch(
-        new Request('https://core.internal/review-events', {
-          method: 'POST',
-          body: JSON.stringify({
-            ...eligibleEvent,
-            action: 'synchronize',
-            deliveryId: 'delivery-running-new-head-lifecycle',
-            headSha: '3333333333333333333333333333333333333333',
-          }),
-        }),
-        env,
+      const replacement = await worker.submitReviewEvent(
+        {
+          ...eligibleEvent,
+          action: 'synchronize',
+          deliveryId: 'delivery-running-new-head-lifecycle',
+          headSha: '3333333333333333333333333333333333333333',
+        },
         context,
       );
-      expect(replacement.status).toBe(202);
+      expect(replacement).toBe('accepted');
       await Promise.all(waitUntilTasks);
 
       const finished = (await postHogEvents(requests)).find(
@@ -811,26 +743,20 @@ describe('Core lifecycle telemetry and terminal classification', () => {
     });
 
     try {
-      const scheduled = await worker.fetch(
-        new Request('https://core.internal/review-events', {
-          method: 'POST',
-          body: JSON.stringify({
-            ...eligibleEvent,
-            deliveryId: 'delivery-finished-head-changed-lifecycle',
-          }),
-        }),
-        env,
+      const scheduled = await worker.submitReviewEvent(
+        {
+          ...eligibleEvent,
+          deliveryId: 'delivery-finished-head-changed-lifecycle',
+        },
         { waitUntil: (task) => waitUntilTasks.push(task) },
       );
-      expect(scheduled.status).toBe(202);
+      expect(scheduled).toBe('accepted');
       await Promise.all(waitUntilTasks.splice(0));
 
-      const claim = await worker.fetch(
-        new Request('https://core.internal/runner-claims', {
+      const claim = await worker.claimRunnerJob(
+        new Request('https://reviews.test/runner-claim', {
           method: 'POST',
-          headers: { 'x-compte-rendu-runner-claim': 'verified' },
         }),
-        env,
         { waitUntil: (task) => waitUntilTasks.push(task) },
       );
       expect(claim.status).toBe(200);
@@ -838,16 +764,14 @@ describe('Core lifecycle telemetry and terminal classification', () => {
       await Promise.all(waitUntilTasks.splice(0));
       currentHead = '3333333333333333333333333333333333333333';
 
-      const callback = await worker.fetch(
-        new Request('https://core.internal/runner-results', {
+      const callback = await worker.handleRunnerCallback(
+        new Request('https://reviews.test/runner-callback', {
           method: 'POST',
           headers: {
-            'x-compte-rendu-runner-callback': 'verified',
             'content-type': 'application/json',
           },
           body: await successfulCallback(claimed.runId, claimed.id, claimed.attempt),
         }),
-        env,
         { waitUntil: (task) => waitUntilTasks.push(task) },
       );
 
@@ -908,13 +832,11 @@ describe('Core lifecycle telemetry and terminal classification', () => {
           stateStore: state,
           github: { createReview, createIssueComment },
         });
-        const reply = await worker.fetch(
-          new Request('https://core.internal/runner-results', {
+        const reply = await worker.handleRunnerCallback(
+          new Request('https://reviews.test/runner-callback', {
             method: 'POST',
-            headers: { 'x-compte-rendu-runner-callback': 'verified' },
             body: await makeCallback(runId, jobId, 1),
           }),
-          env,
           { waitUntil: (task) => waitUntilTasks.push(task) },
         );
         expect(reply.status).toBe(202);
@@ -1009,16 +931,14 @@ describe('Core lifecycle telemetry and terminal classification', () => {
       });
       try {
         const callback = await successfulCallback(runId);
-        const response = await worker.fetch(
-          new Request('https://core.internal/runner-results', {
+        const response = await worker.handleRunnerCallback(
+          new Request('https://reviews.test/runner-callback', {
             method: 'POST',
             headers: {
-              'x-compte-rendu-runner-callback': 'verified',
               'content-type': 'application/json',
             },
             body: callback,
           }),
-          env,
           { waitUntil: (task) => waitUntilTasks.push(task) },
         );
         expect(response.status).toBe(expectedStatus === 'cancelled' ? 202 : 503);
@@ -1103,16 +1023,14 @@ describe('Core lifecycle telemetry and terminal classification', () => {
         },
       });
       try {
-        const response = await worker.fetch(
-          new Request('https://core.internal/runner-results', {
+        const response = await worker.handleRunnerCallback(
+          new Request('https://reviews.test/runner-callback', {
             method: 'POST',
             headers: {
-              'x-compte-rendu-runner-callback': 'verified',
               'content-type': 'application/json',
             },
             body: await successfulCallback(runId),
           }),
-          env,
         );
         expect(response.status).toBe(expectedStatus);
         expect(await state.getRunOutcome(runId)).toMatchObject({ status: settledStatus });
@@ -1167,16 +1085,14 @@ describe('Core lifecycle telemetry and terminal classification', () => {
     });
 
     try {
-      const response = await worker.fetch(
-        new Request('https://core.internal/runner-results', {
+      const response = await worker.handleRunnerCallback(
+        new Request('https://reviews.test/runner-callback', {
           method: 'POST',
           headers: {
-            'x-compte-rendu-runner-callback': 'verified',
             'content-type': 'application/json',
           },
           body: await successfulCallback(claimed.runId),
         }),
-        env,
         { waitUntil: (task) => waitUntilTasks.push(task) },
       );
 
@@ -1215,26 +1131,20 @@ describe('Core lifecycle telemetry and terminal classification', () => {
     });
 
     try {
-      const scheduled = await worker.fetch(
-        new Request('https://core.internal/review-events', {
-          method: 'POST',
-          body: JSON.stringify({
-            ...eligibleEvent,
-            deliveryId: 'delivery-claim-preparation-failure',
-          }),
-        }),
-        env,
+      const scheduled = await worker.submitReviewEvent(
+        {
+          ...eligibleEvent,
+          deliveryId: 'delivery-claim-preparation-failure',
+        },
         { waitUntil: (task) => waitUntilTasks.push(task) },
       );
-      expect(scheduled.status).toBe(202);
+      expect(scheduled).toBe('accepted');
       await Promise.all(waitUntilTasks.splice(0));
 
-      const claim = await worker.fetch(
-        new Request('https://core.internal/runner-claims', {
+      const claim = await worker.claimRunnerJob(
+        new Request('https://reviews.test/runner-claim', {
           method: 'POST',
-          headers: { 'x-compte-rendu-runner-claim': 'verified' },
         }),
-        env,
         { waitUntil: (task) => waitUntilTasks.push(task) },
       );
       expect(claim.status).toBe(503);

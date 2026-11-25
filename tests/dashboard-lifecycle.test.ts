@@ -1,5 +1,5 @@
 import { expect, it, vi } from 'vitest';
-import { createCoreWorker } from './support/core-http-adapter';
+import { createCoreWorker } from '../apps/core/src/core-worker';
 import { createD1ReviewStateStore, createReviewCoordinator } from '../apps/core/src/index';
 import { SqliteD1Database } from './support/d1-database';
 import { recordTestEvidence } from './support/core-worker-harness';
@@ -30,9 +30,7 @@ const fixture = async (claim = true) => {
       GITHUB_APP_PRIVATE_KEY: 'unused',
       RUNNER_AUTH_TOKEN: 'unused',
     });
-    return (
-      await worker.fetch(new Request(`https://core.internal/api/jobs/${review.runId}`))
-    ).json();
+    return (await worker.getPublicJobDetail(review.runId)).json();
   };
   return { database, store, identity, detail };
 };
@@ -153,10 +151,10 @@ it('projects an authenticated failed callback through a fresh dashboard worker',
     },
     { github: {} },
   );
-  const response = await worker.fetch(
-    new Request('https://core.internal/runner-results', {
+  const response = await worker.handleRunnerCallback(
+    new Request('https://reviews.test/runner-callback', {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-compte-rendu-runner-callback': 'verified' },
+      headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         version: 2,
         id: identity.jobId,
@@ -310,8 +308,11 @@ it('serves every public query without contacting GitHub or Runner', async () => 
       },
     },
   );
-  for (const path of ['/api/dashboard', '/api/jobs', `/api/jobs/${identity.runId}`]) {
-    const response = await worker.fetch(new Request(`https://core.internal${path}`));
+  for (const response of [
+    await worker.getDashboardOverview(),
+    await worker.listPublicJobs(new URLSearchParams()),
+    await worker.getPublicJobDetail(identity.runId),
+  ]) {
     expect(response.status).toBe(200);
     expect(response.headers.get('cache-control')).toBe('no-store');
     const body = await response.text();
@@ -340,10 +341,9 @@ it('records pre-handoff failure at the failure time rather than the earlier clai
     );
     expect(
       (
-        await worker.fetch(
-          new Request('https://core.internal/runner-claims', {
+        await worker.claimRunnerJob(
+          new Request('https://reviews.test/runner-claim', {
             method: 'POST',
-            headers: { 'x-compte-rendu-runner-claim': 'verified' },
           }),
         )
       ).status,

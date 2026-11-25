@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { createCoreWorker } from './support/core-http-adapter';
+import { createCoreWorker } from '../apps/core/src/core-worker';
 import { SqliteD1Database } from './support/d1-database';
 import { createApplication } from '../apps/dashboard/src/lib/server/application';
 import { createD1ReviewStateStore } from '../apps/core/src/index';
@@ -63,23 +63,26 @@ it('freezes model selection at admission even when a queued job is claimed after
       });
     const claim = async () => {
       const worker = createCoreWorker(environment(database), dependencies);
-      const response = await worker.fetch(
-        new Request('https://core.internal/runner-claims', {
+      const response = await worker.claimRunnerJob(
+        new Request('https://reviews.test/runner-claim', {
           method: 'POST',
-          headers: { 'x-compte-rendu-runner-claim': 'verified' },
         }),
       );
       expect(response.status).toBe(200);
       return response.json();
     };
-    await core.fetch(settingsRequest('PUT', { revision: 0, selection }));
+    await core.handleReviewConfiguration(settingsRequest('PUT', { revision: 0, selection }));
     await admit(42);
     const running = await claim();
     expect(running.reviewConfiguration).toEqual({ revision: 1, selection });
     await admit(43);
     const replacement = { reviewers: ['step-review', 'another-review'], synthesis: 'step-review' };
     expect(
-      (await core.fetch(settingsRequest('PUT', { revision: 1, selection: replacement }))).status,
+      (
+        await core.handleReviewConfiguration(
+          settingsRequest('PUT', { revision: 1, selection: replacement }),
+        )
+      ).status,
     ).toBe(200);
     await admit(44);
     const queued = await claim();
@@ -94,7 +97,7 @@ it('freezes model selection at admission even when a queued job is claimed after
   }
 });
 const settingsRequest = (method: string, body?: unknown, token = 'operator-token') =>
-  new Request('https://core.internal/review-configuration', {
+  new Request('https://reviews.test/api/review-configuration', {
     method,
     headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -104,13 +107,17 @@ it('persists operator-selected review models across fresh Core workers', async (
   const database = new SqliteD1Database();
   try {
     const worker = createCoreWorker(environment(database));
-    const initial = await worker.fetch(settingsRequest('GET'));
+    const initial = await worker.handleReviewConfiguration(settingsRequest('GET'));
     expect(initial.status).toBe(200);
     expect(await initial.json()).toEqual({ revision: 0, selection: null });
-    const saved = await worker.fetch(settingsRequest('PUT', { revision: 0, selection }));
+    const saved = await worker.handleReviewConfiguration(
+      settingsRequest('PUT', { revision: 0, selection }),
+    );
     expect(saved.status).toBe(200);
     expect(await saved.json()).toEqual({ revision: 1, selection });
-    const restored = await createCoreWorker(environment(database)).fetch(settingsRequest('GET'));
+    const restored = await createCoreWorker(environment(database)).handleReviewConfiguration(
+      settingsRequest('GET'),
+    );
     expect(restored.status).toBe(200);
     expect(await restored.json()).toEqual({ revision: 1, selection });
   } finally {
@@ -156,9 +163,13 @@ it('accepts one reviewer as a persisted review configuration', async () => {
   try {
     const chosen = { reviewers: ['deepseek-review'], synthesis: 'deepseek-review' };
     const core = createCoreWorker(environment(database));
-    const response = await core.fetch(settingsRequest('PUT', { revision: 0, selection: chosen }));
+    const response = await core.handleReviewConfiguration(
+      settingsRequest('PUT', { revision: 0, selection: chosen }),
+    );
     expect(response.status).toBe(200);
-    const restored = await createCoreWorker(environment(database)).fetch(settingsRequest('GET'));
+    const restored = await createCoreWorker(environment(database)).handleReviewConfiguration(
+      settingsRequest('GET'),
+    );
     expect(await restored.json()).toEqual({ revision: 1, selection: chosen });
   } finally {
     database.close();
@@ -173,9 +184,13 @@ it('persists native provider/model catalog IDs without renaming the selected mod
       synthesis: 'review-provider/deepseek-v4.1-flash',
     };
     const core = createCoreWorker(environment(database));
-    const response = await core.fetch(settingsRequest('PUT', { revision: 0, selection: chosen }));
+    const response = await core.handleReviewConfiguration(
+      settingsRequest('PUT', { revision: 0, selection: chosen }),
+    );
     expect(response.status).toBe(200);
-    const restored = await createCoreWorker(environment(database)).fetch(settingsRequest('GET'));
+    const restored = await createCoreWorker(environment(database)).handleReviewConfiguration(
+      settingsRequest('GET'),
+    );
     expect(await restored.json()).toEqual({ revision: 1, selection: chosen });
   } finally {
     database.close();

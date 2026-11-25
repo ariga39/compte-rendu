@@ -1,8 +1,10 @@
 import { vi } from 'vitest';
-import type { createCoreWorker } from './core-http-adapter';
+import type { CoreWorker } from '../../apps/core/src/core-worker';
 import type { ReviewPublicationStateStore } from '../../apps/core/src/index';
 import type { ReviewEvent } from '../../packages/contracts/src';
 import type { SqliteD1Database } from './d1-database';
+
+export type { CoreWorker };
 
 export const eligibleEvent: Extract<ReviewEvent, { event: 'pull_request' }> = {
   deliveryId: 'delivery-core-worker-1',
@@ -218,22 +220,10 @@ export const postHogTestDefaults = {
 } as const;
 
 export const runnerClaimRequest = () =>
-  new Request('https://core.internal/runner-claims', {
-    method: 'POST',
-    headers: { 'x-compte-rendu-runner-claim': 'verified' },
-  });
+  new Request('https://reviews.test/runner-claim', { method: 'POST' });
 
-export const scheduleEligibleReview = (
-  worker: ReturnType<typeof createCoreWorker>,
-  headSha: string,
-  deliveryId: string,
-) =>
-  worker.fetch(
-    new Request('https://core.internal/review-events', {
-      method: 'POST',
-      body: JSON.stringify({ ...eligibleEvent, headSha, deliveryId }),
-    }),
-  );
+export const scheduleEligibleReview = (worker: CoreWorker, headSha: string, deliveryId: string) =>
+  worker.submitReviewEvent({ ...eligibleEvent, headSha, deliveryId });
 
 export const claimGithub = (headSha: string | (() => string) = eligibleEvent.headSha) => ({
   getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',

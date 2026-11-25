@@ -1282,16 +1282,14 @@ describe('Runner multi-model review', () => {
         },
       });
 
-      const response = await worker.fetch(
-        new Request('https://core.internal/runner-results', {
+      const response = await worker.handleRunnerCallback(
+        new Request('https://reviews.test/runner-callback', {
           method: 'POST',
           headers: {
             'content-type': 'application/json',
-            'x-compte-rendu-runner-callback': 'verified',
           },
           body: await callback.clone().text(),
         }),
-        env,
         { waitUntil: () => undefined },
       );
 
@@ -1356,24 +1354,20 @@ describe('Runner multi-model review', () => {
         EVIDENCE_BUCKET: { put: async () => undefined },
       };
       const worker = createCoreWorker(env, { github: {} });
-      const response = await worker.fetch(
-        new Request('https://core.internal/runner-results', {
+      const response = await worker.handleRunnerCallback(
+        new Request('https://reviews.test/runner-callback', {
           method: 'POST',
           headers: {
             'content-type': 'application/json',
-            'x-compte-rendu-runner-callback': 'verified',
           },
           body: await callback.clone().text(),
         }),
-        env,
         { waitUntil: () => undefined },
       );
       expect(response.status).toBe(202);
 
       const reader = createCoreWorker(env, { github: {} });
-      const detail = await (
-        await reader.fetch(new Request(`https://core.internal/api/jobs/${claim.runId}`))
-      ).json();
+      const detail = await (await reader.getPublicJobDetail(claim.runId)).json();
       expect(detail).toMatchObject({
         task: {
           status: 'failed',

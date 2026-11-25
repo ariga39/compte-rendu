@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createCoreWorker } from './support/core-http-adapter';
+import { createCoreWorker } from '../apps/core/src/core-worker';
 import { createD1ReviewStateStore } from '../apps/core/src/index';
 import { publicationRecordKey } from '../apps/core/src/publication-record';
 import { MAX_RUNNER_EVIDENCE_BYTES } from '../packages/contracts/src';
@@ -119,21 +119,19 @@ const claimRun = async (store: ReturnType<typeof createD1ReviewStateStore>, deli
 };
 
 const callbackRequest = (body: string) =>
-  new Request('https://core.internal/runner-results', {
+  new Request('https://reviews.test/runner-callback', {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
-      'x-compte-rendu-runner-callback': 'verified',
     },
     body,
   });
 
 const evidenceRequest = (body: string) =>
-  new Request('https://core.internal/runner-evidence', {
+  new Request('https://reviews.test/runner-evidence', {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
-      'x-compte-rendu-runner-evidence': 'verified',
     },
     body,
   });
@@ -160,7 +158,9 @@ describe('slim Runner publication callbacks', () => {
       },
     );
     try {
-      expect((await worker.fetch(callbackRequest(slimCallback(claimed.runId)))).status).toBe(202);
+      expect(
+        (await worker.handleRunnerCallback(callbackRequest(slimCallback(claimed.runId)))).status,
+      ).toBe(202);
       expect(published).toEqual([
         expect.objectContaining({
           payload: expect.objectContaining({
@@ -224,7 +224,9 @@ describe('slim Runner publication callbacks', () => {
     const callback = JSON.parse(slimCallback(claimed.runId)) as Record<string, unknown>;
     mutate(callback);
     try {
-      expect((await worker.fetch(callbackRequest(JSON.stringify(callback)))).status).toBe(400);
+      expect(
+        (await worker.handleRunnerCallback(callbackRequest(JSON.stringify(callback)))).status,
+      ).toBe(400);
       expect(published).toEqual([]);
       expect(bucket.objects.size).toBe(0);
       await expect(store.getRunOutcome(claimed.runId)).resolves.toMatchObject({
@@ -266,9 +268,9 @@ describe('slim Runner publication callbacks', () => {
       },
     );
     try {
-      const first = worker.fetch(callbackRequest(slimCallback(claimed.runId)));
+      const first = worker.handleRunnerCallback(callbackRequest(slimCallback(claimed.runId)));
       await publicationStartedPromise;
-      const duplicate = await worker.fetch(
+      const duplicate = await worker.handleRunnerCallback(
         callbackRequest(
           slimCallback(claimed.runId, {
             result: { version: 2, decision: 'approve', markdown: 'Different duplicate body.' },
@@ -328,8 +330,10 @@ describe('slim Runner publication callbacks', () => {
     };
     try {
       const responses = await Promise.all([
-        worker.fetch(callbackRequest(slimCallback(claimed.runId))),
-        worker.fetch(callbackRequest(slimCallback(claimed.runId, { result: approve }))),
+        worker.handleRunnerCallback(callbackRequest(slimCallback(claimed.runId))),
+        worker.handleRunnerCallback(
+          callbackRequest(slimCallback(claimed.runId, { result: approve })),
+        ),
       ]);
       expect(publicationPuts).toBe(2);
       expect(responses.some((response) => response.status === 202)).toBe(true);
@@ -454,14 +458,14 @@ describe('slim Runner publication callbacks', () => {
     );
     try {
       const body = slimCallback(claimed.runId);
-      expect((await worker.fetch(callbackRequest(body))).status).toBe(503);
+      expect((await worker.handleRunnerCallback(callbackRequest(body))).status).toBe(503);
       expect(published).toEqual([]);
       expect(bucket.objects.size).toBe(0);
       await expect(store.getRunOutcome(claimed.runId)).resolves.toMatchObject({
         status: 'scheduled',
       });
       unavailable = false;
-      expect((await worker.fetch(callbackRequest(body))).status).toBe(202);
+      expect((await worker.handleRunnerCallback(callbackRequest(body))).status).toBe(202);
       expect(published).toHaveLength(1);
       expect(bucket.objects.has(publicationKey(claimed.runId))).toBe(true);
       await expect(store.getRunOutcome(claimed.runId)).resolves.toMatchObject({
@@ -605,13 +609,15 @@ describe('private Runner evidence upload', () => {
       },
     );
     try {
-      expect((await worker.fetch(callbackRequest(slimCallback(claimed.runId)))).status).toBe(202);
+      expect(
+        (await worker.handleRunnerCallback(callbackRequest(slimCallback(claimed.runId)))).status,
+      ).toBe(202);
       expect(published).toHaveLength(1);
       await expect(store.getRunOutcome(claimed.runId)).resolves.toMatchObject({
         status: 'completed',
       });
 
-      const response = await worker.fetch(
+      const response = await worker.handleRunnerEvidence(
         evidenceRequest(
           await evidenceUpload(claimed.runId, {
             timestamps: {
@@ -681,7 +687,9 @@ describe('private Runner evidence upload', () => {
       { stateStore: store },
     );
     try {
-      const oldUpload = worker.fetch(evidenceRequest(await evidenceUpload(claimed.runId)));
+      const oldUpload = worker.handleRunnerEvidence(
+        evidenceRequest(await evidenceUpload(claimed.runId)),
+      );
       await oldPutStarted;
 
       await database
@@ -696,7 +704,9 @@ describe('private Runner evidence upload', () => {
       newer.id = 'runner-job-2';
       newer.attempt = 2;
       newer.evidence.validatedReview = await evidenceField('new attempt review');
-      const newerResponse = await worker.fetch(evidenceRequest(JSON.stringify(newer)));
+      const newerResponse = await worker.handleRunnerEvidence(
+        evidenceRequest(JSON.stringify(newer)),
+      );
       expect(newerResponse.status).toBe(202);
       const current = await store.getRunOutcome(claimed.runId);
       const currentKey = current?.evidence?.key;
@@ -735,28 +745,31 @@ describe('private Runner evidence upload', () => {
     try {
       expect(
         (
-          await worker.fetch(
-            new Request('https://core.internal/runner-evidence', {
+          await worker.handleRunnerEvidence(
+            new Request('https://reviews.test/runner-evidence', {
               method: 'POST',
-              headers: { 'x-compte-rendu-runner-evidence': 'verified' },
               body: new Uint8Array(MAX_RUNNER_EVIDENCE_BYTES + 1),
             }),
           )
         ).status,
       ).toBe(413);
-      expect((await worker.fetch(evidenceRequest('{'))).status).toBe(400);
+      expect((await worker.handleRunnerEvidence(evidenceRequest('{'))).status).toBe(400);
       expect(
-        (await worker.fetch(evidenceRequest(await evidenceUpload(claimed.runId, { attempt: 2 }))))
-          .status,
+        (
+          await worker.handleRunnerEvidence(
+            evidenceRequest(await evidenceUpload(claimed.runId, { attempt: 2 })),
+          )
+        ).status,
       ).toBe(409);
       const missingIdentity = JSON.parse(await evidenceUpload(claimed.runId)) as Record<
         string,
         unknown
       >;
       delete missingIdentity.evidenceId;
-      expect((await worker.fetch(evidenceRequest(JSON.stringify(missingIdentity)))).status).toBe(
-        400,
-      );
+      expect(
+        (await worker.handleRunnerEvidence(evidenceRequest(JSON.stringify(missingIdentity))))
+          .status,
+      ).toBe(400);
       expect(bucket.objects.size).toBe(0);
       await expect(store.getRunOutcome(claimed.runId)).resolves.toMatchObject({
         status: 'scheduled',
@@ -787,10 +800,12 @@ describe('private Runner evidence upload', () => {
       },
     );
     try {
-      expect((await worker.fetch(callbackRequest(slimCallback(claimed.runId)))).status).toBe(202);
       expect(
-        (await worker.fetch(evidenceRequest(await evidenceUpload(claimed.runId)))).status,
-      ).toBe(503);
+        (await worker.handleRunnerCallback(callbackRequest(slimCallback(claimed.runId)))).status,
+      ).toBe(202);
+      await expect(
+        worker.handleRunnerEvidence(evidenceRequest(await evidenceUpload(claimed.runId))),
+      ).rejects.toThrow('R2 diagnostic write unavailable');
       await expect(store.getRunOutcome(claimed.runId)).resolves.toMatchObject({
         status: 'completed',
       });

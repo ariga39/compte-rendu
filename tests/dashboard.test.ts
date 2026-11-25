@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { runScheduledMetadataRefresh, type CoreWorkerEnv } from '../apps/core/src/core-worker';
-import { createCoreWorker } from './support/core-http-adapter';
+import { createCoreWorker } from '../apps/core/src/core-worker';
 import {
   createD1ReviewStateStore,
   createGitHubPublicationAdapter,
@@ -10,7 +10,7 @@ import {
 import { GitHubRequestError } from '../apps/core/src/github-review-adapter';
 import { createGitHubAppTokenProvider } from '../apps/core/src/github-app-token';
 import { refreshRepositoryMetadata } from '../apps/core/src/dashboard';
-import type { OperationalLogEvent } from '../packages/contracts/src';
+import type { OperationalLogEvent, ReviewEvent } from '../packages/contracts/src';
 import { handleGitHubWebhook } from '../apps/ingress/src/index';
 import { createApplication } from '../apps/dashboard/src/lib/server/application';
 import { SqliteD1Database } from './support/d1-database';
@@ -38,9 +38,6 @@ const job = (overrides: Record<string, unknown> = {}) => ({
   repositoryVisibility: 'public' as const,
   ...overrides,
 });
-
-const get = (worker: ReturnType<typeof createCoreWorker>, path: string) =>
-  worker.fetch(new Request(`https://core.internal${path}`));
 
 const verifyMetadata = async (
   store: D1ReviewStateStore,
@@ -90,14 +87,14 @@ describe('public dashboard reads are DB-only', () => {
     });
     if (claimed.kind !== 'claimed') throw new Error('not claimed');
     const worker = createCoreWorker(coreEnv(database));
-    const before = await (await get(worker, '/api/dashboard')).json();
+    const before = await (await worker.getDashboardOverview()).json();
     expect(before).toMatchObject({
       counts: { queued: 1 },
       tasks: [{ runId: claimed.runId, identity: { kind: 'anonymous' } }],
       nextCursor: null,
     });
     const [response] = await Promise.all([
-      get(worker, '/api/dashboard'),
+      worker.getDashboardOverview(),
       store.completeRunPublication({
         runId: claimed.runId,
         occurredAt: new Date().toISOString(),
@@ -111,7 +108,7 @@ describe('public dashboard reads are DB-only', () => {
       snapshot.tasks.filter((task) => task.status === 'scheduled' && task.dispatch === 'queued')
         .length,
     );
-    expect(await (await get(worker, '/api/dashboard')).json()).toMatchObject({
+    expect(await (await worker.getDashboardOverview()).json()).toMatchObject({
       counts: { queued: 0, publishedLast24h: 1 },
       tasks: [],
     });
@@ -133,19 +130,25 @@ describe('public dashboard reads are DB-only', () => {
       counts: { queued: number };
       tasks: { runId: string; identity: { kind: string } }[];
       nextCursor: string;
-    }>(await get(worker, '/api/dashboard'));
+    }>(await worker.getDashboardOverview());
     expect(first.counts.queued).toBe(26);
     expect(first.tasks).toHaveLength(25);
     expect(first.tasks.every((task) => task.identity.kind === 'anonymous')).toBe(true);
     expect(first.nextCursor).toEqual(expect.any(String));
     const second = await asJson<{ tasks: { runId: string }[]; nextCursor: null }>(
-      await get(worker, `/api/jobs?view=current&cursor=${encodeURIComponent(first.nextCursor)}`),
+      await worker.listPublicJobs(
+        new URLSearchParams(`view=current&cursor=${encodeURIComponent(first.nextCursor)}`),
+      ),
     );
     expect(second.tasks).toHaveLength(1);
     expect(second.nextCursor).toBeNull();
     expect(first.tasks.map((task) => task.runId)).not.toContain(second.tasks[0]?.runId);
     expect(
-      (await get(worker, `/api/jobs?cursor=${encodeURIComponent(first.nextCursor)}`)).status,
+      (
+        await worker.listPublicJobs(
+          new URLSearchParams(`cursor=${encodeURIComponent(first.nextCursor)}`),
+        )
+      ).status,
     ).toBe(400);
     database.close();
   });
@@ -160,7 +163,7 @@ describe('public dashboard reads are DB-only', () => {
     });
     if (claimed.kind !== 'claimed') throw new Error('not claimed');
     const worker = createCoreWorker(coreEnv(database));
-    expect(await (await get(worker, `/api/jobs/${claimed.runId}`)).json()).toMatchObject({
+    expect(await (await worker.getPublicJobDetail(claimed.runId)).json()).toMatchObject({
       task: { decision: null },
     });
     await store.completeRunPublication({
@@ -169,7 +172,7 @@ describe('public dashboard reads are DB-only', () => {
       decision: 'request_changes',
     });
     const fresh = createCoreWorker(coreEnv(database));
-    expect(await (await get(fresh, `/api/jobs/${claimed.runId}`)).json()).toMatchObject({
+    expect(await (await fresh.getPublicJobDetail(claimed.runId)).json()).toMatchObject({
       task: { status: 'completed', decision: 'request_changes', identity: { kind: 'anonymous' } },
     });
   });
@@ -193,7 +196,7 @@ describe('public dashboard reads are DB-only', () => {
     await verifyMetadata(store, 7, 12, 'public');
 
     const worker = createCoreWorker(coreEnv(database));
-    const response = await get(worker, '/api/jobs');
+    const response = await worker.listPublicJobs(new URLSearchParams());
     expect(response.status).toBe(200);
     const page = await asJson<{
       tasks: {
@@ -216,14 +219,7 @@ describe('public dashboard reads are DB-only', () => {
     const database = new SqliteD1Database();
     const store = createD1ReviewStateStore(database);
     const worker = createCoreWorker(coreEnv(database), { github: {} });
-    const post = (body: unknown) =>
-      worker.fetch(
-        new Request('https://core.internal/review-events', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(body),
-        }),
-      );
+    const post = (body: unknown) => worker.submitReviewEvent(body as ReviewEvent);
     const event = (overrides: Record<string, unknown>) => ({
       deliveryId: 'd-refs',
       event: 'pull_request',
@@ -238,33 +234,29 @@ describe('public dashboard reads are DB-only', () => {
       ...overrides,
     });
     expect(
-      (
-        await post(
-          event({
-            deliveryId: 'd-refs-public',
-            repositoryId: 500,
-            repositoryVisibility: 'public',
-            baseRepositoryId: 500,
-            headRepositoryId: 500,
-          }),
-        )
-      ).status,
-    ).toBe(202);
+      await post(
+        event({
+          deliveryId: 'd-refs-public',
+          repositoryId: 500,
+          repositoryVisibility: 'public',
+          baseRepositoryId: 500,
+          headRepositoryId: 500,
+        }),
+      ),
+    ).toBe('accepted');
     expect(
-      (
-        await post(
-          event({
-            deliveryId: 'd-refs-private',
-            pullRequestNumber: 43,
-            repositoryId: 501,
-            repositoryVisibility: 'private',
-            baseRepositoryId: 501,
-            headRepositoryId: 599,
-            headRef: 'feature/secret',
-          }),
-        )
-      ).status,
-    ).toBe(202);
+      await post(
+        event({
+          deliveryId: 'd-refs-private',
+          pullRequestNumber: 43,
+          repositoryId: 501,
+          repositoryVisibility: 'private',
+          baseRepositoryId: 501,
+          headRepositoryId: 599,
+          headRef: 'feature/secret',
+        }),
+      ),
+    ).toBe('accepted');
     const queue = createD1ReviewStateStore(database);
     const claims = [];
     for (const jobId of ['branch-claim-1', 'branch-claim-2']) {
@@ -286,7 +278,7 @@ describe('public dashboard reads are DB-only', () => {
     const reader = createCoreWorker(coreEnv(database));
     const page = await asJson<{
       tasks: { runId: string; identity: Record<string, unknown> }[];
-    }>(await get(reader, '/api/jobs'));
+    }>(await reader.listPublicJobs(new URLSearchParams()));
     const publicTask = page.tasks.find((task) => task.identity.kind === 'public');
     const privateTask = page.tasks.find((task) => task.identity.kind === 'anonymous');
     expect(publicTask?.identity).toMatchObject({
@@ -299,11 +291,11 @@ describe('public dashboard reads are DB-only', () => {
     expect(privateTask).toBeDefined();
 
     const detail = await asJson<{ task: { identity: Record<string, unknown> } }>(
-      await get(reader, `/api/jobs/${publicTask?.runId}`),
+      await reader.getPublicJobDetail(publicTask!.runId),
     );
     expect(detail.task.identity).toMatchObject({ headRef: 'feature/drawer' });
     const privateDetail = await asJson<{ task: { identity: Record<string, unknown> } }>(
-      await get(reader, `/api/jobs/${privateTask?.runId}`),
+      await reader.getPublicJobDetail(privateTask!.runId),
     );
     expect(privateDetail.task.identity).toEqual({ kind: 'anonymous' });
     expect(JSON.stringify(privateDetail)).not.toContain('feature/secret');
@@ -331,7 +323,7 @@ describe('public dashboard reads are DB-only', () => {
     });
 
     const worker = createCoreWorker(coreEnv(database));
-    const response = await get(worker, `/api/jobs/${review.runId}`);
+    const response = await worker.getPublicJobDetail(review.runId);
     expect(response.status).toBe(200);
     const detail = await asJson<{
       task: {
@@ -362,24 +354,24 @@ describe('public dashboard reads are DB-only', () => {
     const first = await asJson<{
       tasks: { runId: string; identity: { kind: string } }[];
       nextCursor: string | null;
-    }>(await get(worker, '/api/jobs?limit=2'));
+    }>(await worker.listPublicJobs(new URLSearchParams('limit=2')));
     expect(first.tasks).toHaveLength(2);
     expect(first.nextCursor).not.toBeNull();
     expect(first.tasks.every((task) => task.identity.kind === 'anonymous')).toBe(true);
     expect(JSON.stringify(first)).not.toContain('repositoryFullName');
     const second = await asJson<{ tasks: { runId: string }[]; nextCursor: string | null }>(
-      await get(
-        worker,
-        `/api/jobs?limit=2&cursor=${encodeURIComponent(first.nextCursor as string)}`,
+      await worker.listPublicJobs(
+        new URLSearchParams(`limit=2&cursor=${encodeURIComponent(first.nextCursor as string)}`),
       ),
     );
     expect(second.tasks).toHaveLength(1);
     expect(second.nextCursor).toBeNull();
     const seen = [...first.tasks, ...second.tasks].map((task) => task.runId);
     expect(new Set(seen).size).toBe(3);
-    const mismatch = await get(
-      worker,
-      `/api/jobs?limit=2&view=current&cursor=${encodeURIComponent(first.nextCursor as string)}`,
+    const mismatch = await worker.listPublicJobs(
+      new URLSearchParams(
+        `limit=2&view=current&cursor=${encodeURIComponent(first.nextCursor as string)}`,
+      ),
     );
     expect(mismatch.status).toBe(400);
   });
@@ -396,7 +388,7 @@ describe('public dashboard reads are DB-only', () => {
     }
     const worker = createCoreWorker(coreEnv(database));
     const list = async (query: string) => {
-      const response = await get(worker, `/api/jobs?${query}`);
+      const response = await worker.listPublicJobs(new URLSearchParams(query));
       expect(response.status).toBe(200);
       return asJson<{
         tasks: { runId: string; dispatch: string | null; status: string }[];
@@ -410,9 +402,10 @@ describe('public dashboard reads are DB-only', () => {
     expect((await list('status=in_progress')).tasks).toHaveLength(0);
     expect(
       (
-        await get(
-          worker,
-          `/api/jobs?status=in_progress&cursor=${encodeURIComponent(queued.nextCursor!)}`,
+        await worker.listPublicJobs(
+          new URLSearchParams(
+            `status=in_progress&cursor=${encodeURIComponent(queued.nextCursor!)}`,
+          ),
         )
       ).status,
     ).toBe(400);
@@ -460,11 +453,10 @@ describe('public dashboard reads are DB-only', () => {
     expect(claimed.kind).toBe('claimed');
     const worker = createCoreWorker(coreEnv(database));
     const post = (body: unknown) =>
-      worker.fetch(
-        new Request('https://core.internal/runner-progress', {
+      worker.handleRunnerProgress(
+        new Request('https://reviews.test/runner-progress', {
           method: 'POST',
           headers: {
-            'x-compte-rendu-runner-progress': 'verified',
             'content-type': 'application/json',
           },
           body: JSON.stringify(body),
@@ -517,7 +509,7 @@ describe('public dashboard reads are DB-only', () => {
     const detail = await asJson<{
       task: { stage: string | null; lastProgressAt: string | null };
       milestones: { stage: string }[];
-    }>(await get(worker, `/api/jobs/${review.runId}`));
+    }>(await worker.getPublicJobDetail(review.runId));
     expect(detail.task.stage).toBe('agent');
     expect(detail.task.lastProgressAt).not.toBeNull();
     expect(detail.milestones).toEqual([checkout, sandbox, agent]);
@@ -561,7 +553,7 @@ describe('public dashboard reads are DB-only', () => {
       const worker = createCoreWorker(coreEnv(database));
       const detail = await asJson<{
         milestones: { stage: string; runtime?: string }[];
-      }>(await get(worker, `/api/jobs/${review.runId}`));
+      }>(await worker.getPublicJobDetail(review.runId));
       expect(detail.milestones).toEqual([
         { stage: 'checkout', startedAt: '2026-01-01T00:00:11.000Z' },
         {
@@ -591,11 +583,10 @@ describe('public dashboard reads are DB-only', () => {
       });
       expect(claimed.kind).toBe('claimed');
       const worker = createCoreWorker(coreEnv(database));
-      const response = await worker.fetch(
-        new Request('https://core.internal/runner-progress', {
+      const response = await worker.handleRunnerProgress(
+        new Request('https://reviews.test/runner-progress', {
           method: 'POST',
           headers: {
-            'x-compte-rendu-runner-progress': 'verified',
             'content-type': 'application/json',
           },
           body: JSON.stringify({
@@ -648,12 +639,12 @@ describe('public dashboard reads are DB-only', () => {
       job: job({ repositoryId: 400 }),
       occurredAt: '2026-01-01T00:00:00.000Z',
     });
-    expect(review.kind).toBe('claimed');
+    if (review.kind !== 'claimed') throw new Error('expected claimed');
     await verifyMetadata(store, 7, 400, 'public');
     const worker = createCoreWorker(coreEnv(database));
     const identity = async () =>
       (
-        (await (await get(worker, `/api/jobs/${review.runId}`)).json()) as {
+        (await (await worker.getPublicJobDetail(review.runId)).json()) as {
           task: { identity: { kind: string } };
         }
       ).task.identity.kind;
@@ -778,8 +769,11 @@ describe('public dashboard reads are DB-only', () => {
         throw new Error('database unavailable');
       },
     } as unknown as SqliteD1Database;
-    const worker = createCoreWorker(coreEnv(outage));
-    const response = await get(worker, '/api/dashboard');
+    const app = createApplication({
+      ...applicationEnv(outage),
+      RUNNER_CALLBACK_TOKEN: 'unused',
+    });
+    const response = await app.fetch(new Request('https://reviews.test/api/dashboard'));
     expect(response.status).toBe(503);
     expect(response.headers.get('cache-control')).toBe('no-store');
     expect(await response.text()).toBe('');
@@ -1260,7 +1254,7 @@ describe('public dashboard reads are DB-only', () => {
   it('returns a neutral 404 for a malformed run id instead of a server error', async () => {
     const database = new SqliteD1Database();
     const worker = createCoreWorker(coreEnv(database));
-    const response = await worker.fetch(new Request('https://core.internal/api/jobs/%E0%A4%A'));
+    const response = await worker.getPublicJobDetail('%E0%A4%A');
     expect(response.status).toBe(404);
     expect(await response.text()).toBe('');
     database.close();
@@ -1292,7 +1286,9 @@ describe('public dashboard reads are DB-only', () => {
       .run();
     const worker = createCoreWorker(coreEnv(database));
     const list = async (query: string) =>
-      asJson<{ tasks: { runId: string }[] }>(await get(worker, `/api/jobs?${query}`));
+      asJson<{ tasks: { runId: string }[] }>(
+        await worker.listPublicJobs(new URLSearchParams(query)),
+      );
 
     expect((await list('view=current&status=failed')).tasks).toHaveLength(0);
     const current = await list('view=current');
@@ -1383,21 +1379,16 @@ describe('public dashboard reads are DB-only', () => {
         },
       } as unknown as ReviewPublicationStateStore,
     });
-    const response = await worker.fetch(
-      new Request('https://core.internal/metadata-events', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          deliveryId: 'd-revoke-error',
-          event: 'metadata',
-          reason: 'repository_private',
-          installationId: 7,
-          repositoryIds: [1],
-          visibility: 'private',
-        }),
+    await expect(
+      worker.invalidateMetadata({
+        deliveryId: 'd-revoke-error',
+        event: 'metadata',
+        reason: 'repository_private',
+        installationId: 7,
+        repositoryIds: [1],
+        visibility: 'private',
       }),
-    );
-    expect(response.status).toBe(503);
+    ).rejects.toThrow('database unavailable');
   });
 
   it('reaches later due repositories across refreshes without exposing a private task', async () => {
@@ -1417,7 +1408,7 @@ describe('public dashboard reads are DB-only', () => {
     const worker = createCoreWorker(coreEnv(database));
     const identity = async (repositoryId: number) =>
       (
-        (await (await get(worker, `/api/jobs/${runIds[repositoryId]}`)).json()) as {
+        (await (await worker.getPublicJobDetail(runIds[repositoryId])).json()) as {
           task: { identity: { kind: string } };
         }
       ).task.identity.kind;

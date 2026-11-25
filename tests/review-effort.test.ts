@@ -1,6 +1,7 @@
 import { expect, it, vi } from 'vitest';
 import type { EffortJobDetail } from '../packages/contracts/src';
-import { createCoreWorker } from './support/core-http-adapter';
+import { createCoreWorker } from '../apps/core/src/core-worker';
+import { resetReviewEffort } from '../apps/core/src/review-configuration';
 import { createD1ReviewStateStore } from '../apps/core/src/index';
 import { createApplication } from '../apps/dashboard/src/lib/server/application';
 import { SqliteD1Database } from './support/d1-database';
@@ -44,8 +45,8 @@ const environment = (database: SqliteD1Database, overrides: Record<string, unkno
   },
 });
 
-const settingsRequest = (method: string, body?: unknown, path = '/review-configuration') =>
-  new Request('https://core.internal' + path, {
+const settingsRequest = (method: string, body?: unknown, path = '/api/review-configuration') =>
+  new Request('https://reviews.test' + path, {
     method,
     headers: { authorization: 'Bearer operator-token', 'content-type': 'application/json' },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -55,7 +56,9 @@ it('resolves operator effort names against the trusted catalog without accepting
   const database = new SqliteD1Database();
   try {
     const core = createCoreWorker(environment(database));
-    const saved = await core.fetch(settingsRequest('PUT', { revision: 0, selection }));
+    const saved = await core.handleReviewConfiguration(
+      settingsRequest('PUT', { revision: 0, selection }),
+    );
     expect(saved.status).toBe(200);
     expect(await saved.json()).toEqual({ revision: 1, selection });
 
@@ -89,9 +92,11 @@ it('resolves operator effort names against the trusted catalog without accepting
         efforts: [{ routeId: deepseek, generation: 0, name: 'high', controls: deepseekControls }],
       },
     ]) {
-      expect((await core.fetch(settingsRequest('PUT', invalid))).status).toBe(400);
+      expect((await core.handleReviewConfiguration(settingsRequest('PUT', invalid))).status).toBe(
+        400,
+      );
     }
-    const restored = await core.fetch(settingsRequest('GET'));
+    const restored = await core.handleReviewConfiguration(settingsRequest('GET'));
     expect(await restored.json()).toEqual({ revision: 1, selection });
   } finally {
     database.close();
@@ -102,7 +107,10 @@ it('freezes effort controls and generations at admission and advances only on ex
   const database = new SqliteD1Database();
   try {
     const core = createCoreWorker(environment(database));
-    expect((await core.fetch(settingsRequest('PUT', { revision: 0, selection }))).status).toBe(200);
+    expect(
+      (await core.handleReviewConfiguration(settingsRequest('PUT', { revision: 0, selection })))
+        .status,
+    ).toBe(200);
     const store = createD1ReviewStateStore(database);
     const admit = (deliveryId: string, pullRequestNumber: number, occurredAt: string) =>
       store.claimReview({
@@ -119,7 +127,10 @@ it('freezes effort controls and generations at admission and advances only on ex
       });
     await admit('before-reset', 42, '2026-11-20T00:00:00.000Z');
 
-    expect((await core.fetch(settingsRequest('PUT', { revision: 1, selection }))).status).toBe(200);
+    expect(
+      (await core.handleReviewConfiguration(settingsRequest('PUT', { revision: 1, selection })))
+        .status,
+    ).toBe(200);
     const unchanged = await store.claimNextJob({
       jobId: 'job-before-reset',
       attempt: 1,
@@ -131,20 +142,14 @@ it('freezes effort controls and generations at admission and advances only on ex
       { routeId: mimo, generation: 0, name: 'off', controls: mimoControls },
     ]);
 
-    const stale = await core.fetch(
-      settingsRequest(
-        'POST',
-        { revision: 1, route: deepseek },
-        '/review-configuration/efforts/reset',
-      ),
+    const stale = await resetReviewEffort(
+      settingsRequest('POST', { revision: 1, route: deepseek }, '/api/model-settings/effort-reset'),
+      database,
     );
     expect(stale.status).toBe(409);
-    const reset = await core.fetch(
-      settingsRequest(
-        'POST',
-        { revision: 2, route: deepseek },
-        '/review-configuration/efforts/reset',
-      ),
+    const reset = await resetReviewEffort(
+      settingsRequest('POST', { revision: 2, route: deepseek }, '/api/model-settings/effort-reset'),
+      database,
     );
     expect(reset.status).toBe(200);
     expect(await reset.json()).toEqual({ revision: 3, selection });
@@ -165,7 +170,11 @@ it('freezes effort controls and generations at admission and advances only on ex
     // generation instead of freezing 0 and reactivating the old marker.
     const cleared = { reviewers: [deepseek, mimo], synthesis: deepseek };
     expect(
-      (await core.fetch(settingsRequest('PUT', { revision: 3, selection: cleared }))).status,
+      (
+        await core.handleReviewConfiguration(
+          settingsRequest('PUT', { revision: 3, selection: cleared }),
+        )
+      ).status,
     ).toBe(200);
     await admit('after-cleared-save', 44, '2026-11-20T00:04:00.000Z');
     const clearedClaim = await store.claimNextJob({
@@ -188,7 +197,7 @@ it('issues the frozen route efforts to the v2 grant and refuses v1 explicit effo
   const v2: unknown[] = [];
   try {
     const store = createD1ReviewStateStore(database);
-    const saved = await createCoreWorker(environment(database)).fetch(
+    const saved = await createCoreWorker(environment(database)).handleReviewConfiguration(
       settingsRequest('PUT', { revision: 0, selection }),
     );
     expect(saved.status).toBe(200);
@@ -283,7 +292,11 @@ it('does not freeze an unused synthesis route and drops old ungranted snapshot e
     };
     const core = createCoreWorker(environment(database));
     expect(
-      (await core.fetch(settingsRequest('PUT', { revision: 0, selection: single }))).status,
+      (
+        await core.handleReviewConfiguration(
+          settingsRequest('PUT', { revision: 0, selection: single }),
+        )
+      ).status,
     ).toBe(200);
     const saved = database.database
       .prepare('SELECT effort_snapshot FROM review_configuration WHERE id = 1')
@@ -396,7 +409,11 @@ it('omits default generation-only entries for a non-Chat reviewer and keeps rese
     };
     const core = createCoreWorker(environment(database));
     expect(
-      (await core.fetch(settingsRequest('PUT', { revision: 0, selection: multi }))).status,
+      (
+        await core.handleReviewConfiguration(
+          settingsRequest('PUT', { revision: 0, selection: multi }),
+        )
+      ).status,
     ).toBe(200);
     const store = createD1ReviewStateStore(database);
     const admit = (deliveryId: string, pullRequestNumber: number, occurredAt: string) =>
@@ -479,18 +496,19 @@ it('omits default generation-only entries for a non-Chat reviewer and keeps rese
 
     expect(
       (
-        await core.fetch(
+        await resetReviewEffort(
           settingsRequest(
             'POST',
             { revision: 1, route: deepseek },
-            '/review-configuration/efforts/reset',
+            '/api/model-settings/effort-reset',
           ),
+          database,
         )
       ).status,
     ).toBe(200);
     expect(
       (
-        await core.fetch(
+        await core.handleReviewConfiguration(
           settingsRequest('PUT', {
             revision: 2,
             selection: { reviewers: [deepseek, mimo], synthesis: deepseek },
@@ -521,7 +539,10 @@ it('projects the admission effort snapshot and terminal route summary in public 
   const database = new SqliteD1Database();
   try {
     const core = createCoreWorker(environment(database));
-    expect((await core.fetch(settingsRequest('PUT', { revision: 0, selection }))).status).toBe(200);
+    expect(
+      (await core.handleReviewConfiguration(settingsRequest('PUT', { revision: 0, selection })))
+        .status,
+    ).toBe(200);
     const store = createD1ReviewStateStore(database);
     const admitted = await store.claimReview({
       deliveryId: 'detail-efforts',
@@ -543,9 +564,7 @@ it('projects the admission effort snapshot and terminal route summary in public 
     });
     if (claimed.kind !== 'claimed') throw new Error('expected a claim');
 
-    const waiting = await core.fetch(
-      new Request('https://core.internal/api/jobs/' + admitted.runId),
-    );
+    const waiting = await core.getPublicJobDetail(admitted.runId);
     expect(await waiting.json()).toMatchObject({
       efforts: {
         selection: [
@@ -575,9 +594,7 @@ it('projects the admission effort snapshot and terminal route summary in public 
         ],
       },
     });
-    const terminal = await core.fetch(
-      new Request('https://core.internal/api/jobs/' + admitted.runId),
-    );
+    const terminal = await core.getPublicJobDetail(admitted.runId);
     expect(await terminal.json()).toMatchObject({
       efforts: {
         selection: expect.any(Array),
@@ -662,7 +679,18 @@ it('hides a relay fallback marker once an explicit reset advances the route gene
   stubGitHub({ id: 42, login: 'operator' });
   const core = createCoreWorker(environment(database));
   try {
-    expect((await core.fetch(settingsRequest('PUT', { revision: 0, selection }))).status).toBe(200);
+    expect(
+      (await core.handleReviewConfiguration(settingsRequest('PUT', { revision: 0, selection })))
+        .status,
+    ).toBe(200);
+    const unauthorizedReset = await app.fetch(
+      new Request(origin + '/api/model-settings/effort-reset', {
+        method: 'POST',
+        headers: { origin, 'content-type': 'application/json' },
+        body: JSON.stringify({ revision: 1, route: deepseek }),
+      }),
+    );
+    expect(unauthorizedReset.status).toBe(401);
     const cookie = await signIn(app);
     const before = await app.fetch(
       new Request(origin + '/api/model-settings', { headers: { cookie } }),
@@ -670,17 +698,14 @@ it('hides a relay fallback marker once an explicit reset advances the route gene
     expect(await before.json()).toMatchObject({
       effortStates: [{ routeId: deepseek, generation: 0 }],
     });
-    expect(
-      (
-        await core.fetch(
-          settingsRequest(
-            'POST',
-            { revision: 1, route: deepseek },
-            '/review-configuration/efforts/reset',
-          ),
-        )
-      ).status,
-    ).toBe(200);
+    const reset = await app.fetch(
+      new Request(origin + '/api/model-settings/effort-reset', {
+        method: 'POST',
+        headers: { cookie, origin, 'content-type': 'application/json' },
+        body: JSON.stringify({ revision: 1, route: deepseek }),
+      }),
+    );
+    expect(reset.status).toBe(200);
     const after = await app.fetch(
       new Request(origin + '/api/model-settings', { headers: { cookie } }),
     );

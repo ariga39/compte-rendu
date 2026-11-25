@@ -2,7 +2,6 @@ import { DateTime, Effect, Option, Schema } from 'effect';
 import {
   MAX_RUNNER_CALLBACK_BYTES,
   MAX_RUNNER_EVIDENCE_BYTES,
-  MAX_WEBHOOK_BYTES,
   REVIEW_ATTEMPT_BUDGET_MS,
   MetadataInvalidationEvent,
   RunnerEvidenceUpload,
@@ -528,21 +527,6 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
     });
   };
 
-  const handleMetadataInvalidation = async (request: Request): Promise<Response> => {
-    const body = await readBoundedRequestBytes(request, MAX_WEBHOOK_BYTES);
-    if (body === undefined) return new Response(null, { status: 413 });
-    let event: typeof MetadataInvalidationEvent.Type;
-    try {
-      event = await Schema.decodeUnknownPromise(Schema.fromJsonString(MetadataInvalidationEvent), {
-        onExcessProperty: 'error',
-      })(new TextDecoder().decode(body));
-    } catch {
-      return new Response(null, { status: 400 });
-    }
-    await invalidateMetadata(event);
-    return new Response(null, { status: 202 });
-  };
-
   const handleRunnerProgress = async (request: Request): Promise<Response> => {
     const body = await readBoundedRequestBytes(request, MAX_PROGRESS_BYTES);
     if (body === undefined) return new Response(null, { status: 413 });
@@ -942,7 +926,6 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
     recordFinishedLifecycle,
     handleRunnerResult,
     handleRunnerEvidence,
-    handleMetadataInvalidation,
     invalidateMetadata,
     handleRunnerProgress,
     handleRunnerReadToken,
