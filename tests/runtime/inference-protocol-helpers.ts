@@ -37,29 +37,6 @@ interface RuntimeEnv {
 
 export const runtime = env as unknown as RuntimeEnv;
 
-export const messagesRoute = {
-  routeId: 'review-provider/claude-x',
-  upstreamModel: 'claude-native',
-  providerSlug: 'review-provider',
-  credentialAlias: 'review-alias',
-  profile: 'messages',
-} as const;
-
-export const geminiRoute = {
-  routeId: 'review-provider/gemini-x',
-  upstreamModel: 'gemini-native',
-  providerSlug: 'review-provider',
-  credentialAlias: 'review-alias',
-  profile: 'gemini',
-} as const;
-
-export const legacyChatRoute = {
-  routeId: 'review-provider/chat-x',
-  upstreamModel: 'chat-native',
-  providerSlug: 'review-provider',
-  credentialAlias: 'review-alias',
-} as const;
-
 export const d1Now = async () => {
   const row = await runtime.RELAY_DB.prepare(
     "SELECT CAST(ROUND((julianday('now') - 2440587.5) * 86400000) AS INTEGER) AS now",

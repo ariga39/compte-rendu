@@ -15,7 +15,6 @@ import {
 } from './model-catalog-wire';
 import type { D1DatabaseLike } from './grants';
 import { gatewayHeaders, gatewayUrl, type GatewayConfig } from './gateway';
-import { isGeminiUpstreamModel } from './routes';
 import {
   sourceDefaultProfile,
   sourceProfiles,
@@ -63,7 +62,6 @@ const readSource = async (
     if (gateway === null) throw new Error('Gateway unavailable');
     url = gatewayUrl(gateway, source.providerSlug, '/models');
     Object.assign(headers, gatewayHeaders(gateway, source.credentialAlias));
-    if (source.providerSlug === 'native:anthropic') headers['anthropic-version'] = '2023-06-01';
   } else {
     const target = new URL(source.url);
     if (
@@ -81,7 +79,7 @@ const readSource = async (
   const models: Record<string, RouteModel> = {};
   const allowedProfiles = sourceProfiles(source);
   const preferredProfile = sourceDefaultProfile(source);
-  // Legacy sources default to Chat. Native Messages and Gemini sources use their protocol.
+  // Legacy sources default to Chat.
   const qualified =
     source.profiles !== undefined || source.profile !== undefined || preferredProfile !== 'chat';
   let rejected = 0;
@@ -89,11 +87,7 @@ const readSource = async (
   const signal = AbortSignal.timeout(CATALOG_TIMEOUT_MS);
   for (let page = 0; page < MAX_CATALOG_PAGES; page += 1) {
     const response = await fetch(url, { headers, redirect: 'manual', signal });
-    const result = await readModelCatalogPage(
-      response,
-      url,
-      'discovery' in source ? source.providerSlug : undefined,
-    );
+    const result = await readModelCatalogPage(response, url);
     rejected += result.rejected;
     const overrides = source.models;
     for (const entry of result.models) {
@@ -113,26 +107,32 @@ const readSource = async (
       const profile =
         override !== undefined
           ? override.profile
-          : !qualified
-            ? 'chat'
-            : entry.profiles === null
-              ? // An ID-only listing cannot verify a non-chat operation.
-                // Qualified sources may still expose a chat default, but
-                // Responses, Messages and Gemini require an explicit
-                // `models` override.
-                preferredProfile === 'chat'
-                ? 'chat'
-                : undefined
-              : (() => {
-                  const supported = allowedProfiles.filter((candidate) =>
-                    entry.profiles!.includes(candidate),
-                  );
-                  if (supported.length === 0) return undefined;
-                  if (entry.recommended !== null && supported.includes(entry.recommended))
-                    return entry.recommended;
-                  if (supported.includes(preferredProfile)) return preferredProfile;
-                  return supported[0];
-                })();
+          : entry.profiles === null
+            ? // An ID-only listing cannot verify a non-chat operation.
+              // Qualified sources may still expose a chat default, but
+              // Responses requires an explicit `models` override.
+              !qualified || preferredProfile === 'chat'
+              ? 'chat'
+              : undefined
+            : entry.profiles.length === 0
+              ? // A rich entry that advertises only retired protocols is
+                // omitted rather than defaulted to Chat.
+                undefined
+              : !qualified
+                ? // Unqualified legacy sources keep their historical chat
+                  // default for entries that still advertise a supported
+                  // protocol.
+                  'chat'
+                : (() => {
+                    const supported = allowedProfiles.filter((candidate) =>
+                      entry.profiles!.includes(candidate),
+                    );
+                    if (supported.length === 0) return undefined;
+                    if (entry.recommended !== null && supported.includes(entry.recommended))
+                      return entry.recommended;
+                    if (supported.includes(preferredProfile)) return preferredProfile;
+                    return supported[0];
+                  })();
       // A well-formed model that offers none of the configured protocols is
       // omitted rather than failing the source snapshot.
       if (profile === undefined) continue;
@@ -140,10 +140,6 @@ const readSource = async (
       // A declared Chat effort on a route whose effective profile is not Chat
       // invalidates the source refresh instead of silently dropping the menu.
       if (efforts.length > 0 && profile !== 'chat') {
-        rejected += 1;
-        continue;
-      }
-      if (profile === 'gemini' && !isGeminiUpstreamModel(entry.id)) {
         rejected += 1;
         continue;
       }
@@ -213,10 +209,7 @@ function candidateSources(sources: readonly Source[], gateway: GatewayConfig | n
           efforts: source.efforts?.[id] ?? [],
           metadata: null,
         };
-        if (
-          (resolved.efforts.length > 0 && resolved.profile !== 'chat') ||
-          (resolved.profile === 'gemini' && !isGeminiUpstreamModel(model))
-        ) {
+        if (resolved.efforts.length > 0 && resolved.profile !== 'chat') {
           group.invalid = true;
           continue;
         }

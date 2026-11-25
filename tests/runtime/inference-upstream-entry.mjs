@@ -1,6 +1,3 @@
-import { geminiProtocolStream } from './inference-gemini-upstream.mjs';
-import { messagesProtocolStream } from './inference-messages-upstream.mjs';
-
 const encoder = new TextEncoder();
 
 let scenario = 'success';
@@ -455,10 +452,6 @@ export default {
       body,
     });
 
-    const messages = messagesProtocolStream(scenario, body);
-    if (messages !== null) return streamResponse(messages);
-    const gemini = geminiProtocolStream(scenario, body);
-    if (gemini !== null) return streamResponse(gemini);
     if (scenario === 'effort-report') {
       return streamResponse(
         `data: {"model":"deepseek-native","choices":[],"reasoning_effort":"max"}\n\n` +

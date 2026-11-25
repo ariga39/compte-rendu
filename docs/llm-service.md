@@ -18,13 +18,13 @@ generation is required.
 
 Use the HTTPS callback origin and its Runner bearer for grant control. The inference hostname must be a separate HTTPS FQDN on port 443 with base path `/v1`. The Sandbox receives a job-scoped credential through the runtime’s secret injection mechanism. Supplier credentials and the Gateway Run token stay in Cloudflare.
 
-The Runner calls `/runner-llm/issue` with the run ID, job ID, attempt and routes. The profile-aware endpoint is `/runner-llm/issue-v2`; it returns only the grant token, expiry and one client descriptor per frozen route: `{ routeId, profile, limit?, metadata? }` where `profile` is `chat`, `responses`, `messages` or `gemini`. `metadata` carries only the OpenCode-supported model description, such as name, family, release date, capabilities and cost. The descriptor omits the upstream model, provider slug, credential alias and URL. v1 remains a Chat Completions-only contract and keeps its historical response shape. Grants expire after four review budgets (currently six hours); Sandbox resource lifetime stays pinned separately at two hours. The Runner revokes by job ID on completion or cancellation with a bounded retry. An unconfirmed revocation fails only that review and never blocks later admissions; the fixed expiry bounds a lost response or crash. See [maintenance drain](operations.md#drain-before-maintenance).
+The Runner calls `/runner-llm/issue` with the run ID, job ID, attempt and routes. The profile-aware endpoint is `/runner-llm/issue-v2`; it returns only the grant token, expiry and one client descriptor per frozen route: `{ routeId, profile, limit?, metadata? }` where `profile` is `chat` or `responses`. `metadata` carries only the OpenCode-supported model description, such as name, family, release date, capabilities and cost. The descriptor omits the upstream model, provider slug, credential alias and URL. v1 remains a Chat Completions-only contract and keeps its historical response shape. Grants expire after four review budgets (currently six hours); Sandbox resource lifetime stays pinned separately at two hours. The Runner revokes by job ID on completion or cancellation with a bounded retry. An unconfirmed revocation fails only that review and never blocks later admissions; the fixed expiry bounds a lost response or crash. See [maintenance drain](operations.md#drain-before-maintenance).
 
 ### Upgrading an installation with the former local service
 
 Use the previous Runner to finish any queued jobs without frozen selections and drain running work. Remove `RUNNER_LLM_SERVICE_SOCKET` from the effective Runner environment before starting the new binary. This release no longer reads `llm-grant-pending` markers or `RUNNER_LLM_RELAY_GENERATION`; leftovers are ignored. A rollback binary still needs its original configuration and credentials. Keep rollback binaries, configuration and credentials together.
 
-Managed grant v1 supports Chat Completions only. Use grant v2 for every roster containing a non-Chat route, including Responses and Messages, or a route with configured context or output limits. Check the [inference protocols](#inference-protocols) available in your deployed release. Installations using the former ChatGPT subscription backend need a provider credential supported by Gateway BYOK before migrating.
+Managed grant v1 supports Chat Completions only. Use grant v2 for every roster containing a non-Chat route, including Responses, or a route with configured context or output limits. Check the [inference protocols](#inference-protocols) available in your deployed release. Installations using the former ChatGPT subscription backend need a provider credential supported by Gateway BYOK before migrating.
 
 ### Change a review model without restarting
 
@@ -196,22 +196,13 @@ Only `response.completed` with a completed response and a durable usage update
 ends the stream successfully. Incomplete or failed turns keep partial usage.
 Responses terminal events are capped at 4 MiB; larger events fail the turn.
 
-Messages routes use `POST /v1/messages` with streaming, local function tools and
-signed thinking/tool continuations. The relay accepts inline tool results and
-rejects hosted tools, remote media, file ids and server-state references. Only a
-complete `message_stop` ends the turn successfully; `max_tokens` and `pause_turn`
-keep partial usage and fail the stream. A protocol refusal may finish the
-transport turn but is never accepted as a review result.
-
-Gemini routes use
-`POST /v1beta/models/<handle>:streamGenerateContent?alt=sse`, where the handle is
-`r-` plus the unpadded base64url route ID. Set the pinned Google provider's
-baseURL to `<relay>/v1beta`; a bare relay origin produces `/models/...` and is
-intentionally not accepted. The relay maps the handle to the frozen upstream
-model, accepts local function calls with thought signatures and function
-responses, and rejects hosted tools, file or inline media, cached server content
-and cross-protocol calls. Usage counts thoughts in output and reports them
-separately as reasoning.
+The former Messages (`POST /v1/messages`) and Gemini
+(`POST /v1beta/models/<handle>:streamGenerateContent`) wire protocols are
+retired. Those endpoints return 404, and the corresponding native
+`messages`/`gemini` profiles and `native:anthropic`/`native:google-ai-studio`
+destinations are removed. This is a deliberate breaking change. Models from
+those providers remain usable through an OpenAI-compatible Chat or Responses
+provider.
 
 ### Managed relay model catalog
 
@@ -220,26 +211,19 @@ Every source names a Gateway destination in `providerSlug` and its BYOK credenti
 Use `native:openai` for Cloudflare’s built-in OpenAI provider. Bare names continue
 to select custom providers, so `openai` and `custom-openai` both select
 `/custom-openai`. Use a new route ID when changing an existing route’s destination.
-For a provider account hosted directly by Anthropic or Google AI Studio, use
-`native:anthropic` or `native:google-ai-studio` with a BYOK alias for that
-provider. Their bundled adapters use the native `messages` or `gemini` profile.
-Deploy the corresponding inference endpoint before enabling its routes in a
-roster. Catalog discovery and grant issuance can succeed before the deployed
-Worker serves that protocol.
-Gateway discovery follows Anthropic’s `after_id` cursor or Google's
-`pageToken` cursor. Anthropic’s `max_input_tokens` and `max_tokens` fields
-become context and output limits; Google’s `inputTokenLimit` and
-`outputTokenLimit` do the same. Declare verified routes in `models` when the
-list supplies IDs without tool capability metadata, or use explicit aliases.
-The Gemini route uses the Google Generative Language v1beta endpoint.
+Direct native Anthropic and Google AI Studio destinations are not supported by
+this release; models from those providers remain usable through an
+OpenAI-compatible Chat or Responses provider.
+Gateway discovery reads the generic catalog envelope and pagination used by the
+destination. Declare verified routes in `models` when the list supplies IDs
+without tool capability metadata, or use explicit aliases.
 
 Choose discovery according to how that provider exposes its model list.
 
 - For a public list, set `url` to its credential-free HTTPS endpoint and
   `prefix` to the prefix for discovered review routes. Public lists use the
   generic catalog envelope (`data` with model IDs or capability metadata), even
-  when inference uses a native Gateway destination. Use Gateway discovery to
-  read the vendor's native list and cursor format.
+  when inference uses a native Gateway destination.
 - For a protected list, set `"discovery": "gateway"` and `prefix`. The relay
   calls the provider's `/models` endpoint through Gateway using its BYOK alias.
   Confirm this endpoint lists the selected models before cutover.
@@ -247,10 +231,9 @@ Choose discovery according to how that provider exposes its model list.
   upstream model ID. A source with only aliases makes no discovery request.
   A discovery source can also declare aliases for the same upstream.
 
-Custom and OpenAI destinations default to Chat Completions. Anthropic and
-Google AI Studio default to their native protocols as described above. Set
+Custom and OpenAI destinations default to Chat Completions. Set
 `profile` to a default profile or `profiles` to the distinct profiles a rich
-catalog may publish (`chat`, `responses`, `messages`, `gemini`). For custom and OpenAI destinations, ID-only entries and aliases use the default.
+catalog may publish (`chat`, `responses`). For custom and OpenAI destinations, ID-only entries and aliases use the default.
 The list independently filters rich entries, which prefer the default when it is eligible. Rich entries
 are filtered from their advertised `api` operations; models that advertise no
 configured protocol are omitted. `models` is an explicit allowlist keyed by
@@ -273,11 +256,12 @@ optional `limit`:
 ```
 
 For an ID-only listing, a non-chat profile is never inferred from the source
-default. Responses, Messages and Gemini routes require an explicit `models`
+default. Responses routes require an explicit `models`
 entry; a qualified source may still expose a chat default without one. An
 explicit `capabilities.tools.supported: false` always omits that model, even for
 a legacy unqualified source. Malformed rich capability metadata fails the source
-refresh and keeps the previous snapshot.
+refresh and keeps the previous snapshot. Rich entries that advertise only
+retired Messages or Gemini operations are omitted instead of defaulting to Chat.
 
 The route mapping and profile are immutable once published. The rest of the
 model description, including context and output limits, is ordinary refreshable
@@ -293,7 +277,7 @@ This keeps same-named models from different prefixes separately selectable while
 their requests continue through the job relay. Provider configuration uses that
 same first segment as `canonical`; it does not inherit a native provider endpoint
 or credential. Unqualified route IDs keep the historical `compte-rendu/<route>`
-identity. Gemini retains its opaque relay handle as the transport `modelID`.
+identity.
 
 Discovery retains each provider's complete model entry. The v2 grant maps only
 the OpenCode-supported model information at the client boundary: display name,

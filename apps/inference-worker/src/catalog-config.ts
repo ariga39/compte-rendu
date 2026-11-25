@@ -14,7 +14,7 @@ const profileFields = {
   profiles: Schema.optionalKey(
     Schema.Array(ModelProfile).check(
       Schema.isMinLength(1),
-      Schema.isMaxLength(4),
+      Schema.isMaxLength(2),
       Schema.makeFilter((profiles) => new Set(profiles).size === profiles.length, {
         expected: 'distinct profiles',
       }),
@@ -36,11 +36,6 @@ export const ModelRouteOverride = Schema.Struct({
 export type ModelRouteOverride = typeof ModelRouteOverride.Type;
 const routeOverrides = Schema.Record(RouteId, ModelRouteOverride);
 const sourceEfforts = { efforts: Schema.optionalKey(SourceEfforts) };
-function nativeProfile(slug: string): ModelProfile | undefined {
-  if (slug === 'native:anthropic') return 'messages';
-  if (slug === 'native:google-ai-studio') return 'gemini';
-  return undefined;
-}
 export const RelayCatalogSource = Schema.Union([
   Schema.Struct({
     ...providerFields,
@@ -74,23 +69,15 @@ export const RelayCatalogSource = Schema.Union([
 ]).check(
   Schema.makeFilter(
     (source) => {
-      const required = nativeProfile(source.providerSlug);
       const configuredProfiles = [
         ...(source.profile ? [source.profile] : []),
         ...(source.profiles ?? []),
       ];
-      const profiles = [
-        ...configuredProfiles,
-        ...Object.values(source.models ?? {}).map((m) => m.profile),
-      ];
-      if (required && !profiles.every((profile) => profile === required)) return false;
       // Reasoning effort injection is implemented for Chat only in this release.
       // An explicit alias/model profile is already knowable. Discovery routes are
       // revalidated against their effective profile during refresh.
       const choices =
-        configuredProfiles.length > 0
-          ? configuredProfiles
-          : [required ?? sourceDefaultProfile(source)];
+        configuredProfiles.length > 0 ? configuredProfiles : [sourceDefaultProfile(source)];
       for (const routeId of Object.keys(source.efforts ?? {})) {
         const override = source.models?.[routeId];
         if (override !== undefined) {
@@ -107,14 +94,14 @@ export const RelayCatalogSource = Schema.Union([
       }
       return true;
     },
-    { expected: 'profile supported by the native Gateway destination' },
+    { expected: 'profile supported by configured routes' },
   ),
 );
 export const RelayCatalogSources = Schema.Array(RelayCatalogSource).check(Schema.isMinLength(1));
 export type RelayCatalogSource = typeof RelayCatalogSource.Type;
 
 export const sourceProfiles = (source: RelayCatalogSource): readonly ModelProfile[] =>
-  source.profiles ?? [source.profile ?? nativeProfile(source.providerSlug) ?? 'chat'];
+  source.profiles ?? [source.profile ?? 'chat'];
 
 export const sourceDefaultProfile = (source: RelayCatalogSource): ModelProfile =>
   source.profile ?? sourceProfiles(source)[0] ?? 'chat';

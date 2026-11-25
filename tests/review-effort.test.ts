@@ -478,7 +478,7 @@ it('omits default generation-only entries for a non-Chat reviewer and keeps rese
             expiresAt: '2030-01-01T00:00:00Z',
             descriptors: [
               { routeId: deepseek, profile: 'chat' as const },
-              { routeId: mimo, profile: 'messages' as const },
+              { routeId: mimo, profile: 'responses' as const },
             ],
           };
         },

@@ -151,6 +151,22 @@ describe('Inference Worker runtime boundaries', () => {
     ).resolves.toMatchObject({ kind: 'issued' });
   });
 
+  it('does not serve retired Messages or Gemini wire protocols', async () => {
+    for (const path of [
+      '/v1/messages',
+      '/v1beta/models/r-Z2VtaW5pLW5hdGl2ZQ:streamGenerateContent?alt=sse',
+    ]) {
+      const response = await runtime.INFERENCE.fetch(
+        new Request(`https://inference.internal${path}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: 'Bearer retired' },
+          body: JSON.stringify({}),
+        }),
+      );
+      expect(response.status).toBe(404);
+    }
+  });
+
   it('freezes effort controls at admission instead of re-reading the mutable menu', async () => {
     const routeId = 'frozen/effort';
     await runtime.RELAY_DB.prepare(

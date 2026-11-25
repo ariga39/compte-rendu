@@ -757,97 +757,6 @@ it.each([
   },
 );
 
-it.each([
-  {
-    providerSlug: 'native:anthropic',
-    path: 'anthropic/v1',
-    cursor: 'after_id=claude-a',
-    pages: [
-      { data: [{ id: 'claude-a' }], has_more: true, last_id: 'claude-a' },
-      { data: [{ id: 'claude-b' }], has_more: false },
-    ],
-    models: ['p/claude-a', 'p/claude-b'],
-  },
-  {
-    providerSlug: 'native:google-ai-studio',
-    path: 'google-ai-studio/v1beta',
-    cursor: 'pageToken=more%2Bmodels',
-    pages: [
-      {
-        models: [{ name: 'models/gemini-a', supportedGenerationMethods: ['generateContent'] }],
-        nextPageToken: 'more+models',
-      },
-      {
-        models: [
-          { name: 'models/embed', supportedGenerationMethods: ['embedContent'] },
-          { name: 'models/gemini-b', supportedGenerationMethods: ['generateContent'] },
-        ],
-      },
-    ],
-    models: ['p/gemini-a', 'p/gemini-b'],
-  },
-])(
-  'discovers all native BYOK pages for $providerSlug',
-  async ({ providerSlug, path, cursor, pages, models }) => {
-    const db = database();
-    try {
-      const urls: string[] = [];
-      vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
-        urls.push(url);
-        if (
-          providerSlug === 'native:anthropic' &&
-          new Headers(init.headers).get('anthropic-version') !== '2023-06-01'
-        )
-          return new Response(null, { status: 400 });
-        return Response.json(pages[urls.length - 1]);
-      });
-      const sources = Schema.decodeUnknownSync(RelayCatalogSources)([
-        {
-          discovery: 'gateway',
-          prefix: 'p/',
-          providerSlug,
-          credentialAlias: 'review',
-          models: Object.fromEntries(
-            models.map((id) => [
-              id,
-              { profile: providerSlug === 'native:anthropic' ? 'messages' : 'gemini' },
-            ]),
-          ),
-        },
-      ]);
-      const catalog = createRelayCatalog(db, sources, {
-        accountId: 'account',
-        gatewayId: 'gateway',
-        runToken: 'test',
-      });
-      await catalog.refresh(60);
-      const first = `https://gateway.ai.cloudflare.com/v1/account/gateway/${path}/models`;
-      expect(await catalog.get()).toMatchObject({ routes: models, lastRefreshError: null });
-      expect(urls).toEqual([first, first + '?' + cursor]);
-    } finally {
-      db.close();
-    }
-  },
-);
-
-it.each([
-  ['native:anthropic', { models: { 'models/unsupported': { profile: 'chat' } } }],
-  ['native:google-ai-studio', { profile: 'chat' }],
-  ['native:anthropic', { profiles: ['messages', 'chat'] }],
-] as const)('rejects incompatible Chat configuration for %s', (providerSlug, settings) => {
-  expect(() =>
-    Schema.decodeUnknownSync(RelayCatalogSources)([
-      {
-        discovery: 'gateway',
-        prefix: 'models/',
-        providerSlug,
-        credentialAlias: 'review',
-        ...settings,
-      },
-    ]),
-  ).toThrow();
-});
-
 it.each(['custom-review', 'native:openai'])(
   'preserves independent ID-only and rich profiles for %s',
   async (providerSlug) => {
@@ -1147,7 +1056,7 @@ it('publishes only configured protocols from a rich catalog and freezes them in 
     prefix: 'go/',
     providerSlug: 'custom-go',
     credentialAlias: 'default',
-    profiles: ['chat', 'responses', 'messages', 'gemini'] as const,
+    profiles: ['chat', 'responses'] as const,
   };
   try {
     vi.stubGlobal('fetch', async () =>
@@ -1163,6 +1072,10 @@ it('publishes only configured protocols from a rich catalog and freezes them in 
           { id: 'gemini-model', api: { 'generate-content': {} }, recommended_api: 'interactions' },
           { id: 'interactions-model', api: { interactions: {} }, recommended_api: 'interactions' },
           {
+            id: 'mixed-model',
+            api: { 'chat-completions': {}, messages: {}, 'generate-content': {}, responses: {} },
+          },
+          {
             id: 'no-tools-model',
             api: { 'chat-completions': {} },
             capabilities: { tools: { supported: false } },
@@ -1174,13 +1087,8 @@ it('publishes only configured protocols from a rich catalog and freezes them in 
     const catalog = createRelayCatalog(db, [source]);
     await catalog.refresh(50);
     expect(await catalog.get()).toMatchObject({
-      routes: [
-        'go/both-model',
-        'go/chat-model',
-        'go/gemini-model',
-        'go/messages-model',
-        'go/responses-model',
-      ],
+      routes: ['go/both-model', 'go/chat-model', 'go/mixed-model', 'go/responses-model'],
+      rejected: 0,
       lastRefreshError: null,
     });
     const profiles = db.database
@@ -1192,8 +1100,7 @@ it('publishes only configured protocols from a rich catalog and freezes them in 
     expect(profiles).toEqual([
       { route_id: 'go/both-model', profile: 'chat' },
       { route_id: 'go/chat-model', profile: 'chat' },
-      { route_id: 'go/gemini-model', profile: 'gemini' },
-      { route_id: 'go/messages-model', profile: 'messages' },
+      { route_id: 'go/mixed-model', profile: 'chat' },
       { route_id: 'go/responses-model', profile: 'responses' },
     ]);
 
@@ -1210,8 +1117,7 @@ it('publishes only configured protocols from a rich catalog and freezes them in 
       expect.arrayContaining([
         { routeId: 'go/both-model', profile: 'chat' },
         { routeId: 'go/chat-model', profile: 'chat' },
-        { routeId: 'go/gemini-model', profile: 'gemini' },
-        { routeId: 'go/messages-model', profile: 'messages' },
+        { routeId: 'go/mixed-model', profile: 'chat' },
         { routeId: 'go/responses-model', profile: 'responses' },
       ]),
     );
@@ -1226,70 +1132,6 @@ it('publishes only configured protocols from a rich catalog and freezes them in 
       credentialAlias: 'default',
       profile: 'responses',
     });
-  } finally {
-    db.close();
-  }
-});
-
-it('rejects a Gemini alias whose upstream model is not one segment and keeps the healthy snapshot', async () => {
-  const db = database();
-  const configured = (model: string) =>
-    Schema.decodeUnknownSync(RelayCatalogSources)([
-      {
-        providerSlug: 'custom-review',
-        credentialAlias: 'default',
-        profile: 'chat',
-        aliases: { 'gemini-route': model },
-        models: { 'gemini-route': { profile: 'gemini' } },
-      },
-    ]);
-
-  try {
-    await createRelayCatalog(db, configured('gemini-pro')).refresh(100);
-    expect(await createRelayCatalog(db, configured('gemini-pro')).get()).toMatchObject({
-      routes: ['gemini-route'],
-      lastRefreshError: null,
-    });
-
-    await createRelayCatalog(db, configured('models/gemini-pro')).refresh(200);
-    expect(await createRelayCatalog(db, configured('gemini-pro')).get()).toMatchObject({
-      routes: ['gemini-route'],
-      lastRefreshError: 'refresh failed',
-      lastSuccessAt: new Date(100).toISOString(),
-    });
-
-    await createRelayCatalog(db, configured('gemini-pro')).refresh(300);
-    expect(await createRelayCatalog(db, configured('gemini-pro')).get()).toMatchObject({
-      routes: ['gemini-route'],
-      lastRefreshError: null,
-      lastSuccessAt: new Date(300).toISOString(),
-    });
-  } finally {
-    db.close();
-  }
-});
-
-it('rejects a discovered Gemini override whose model id is not one segment', async () => {
-  const db = database();
-  const source = Schema.decodeUnknownSync(RelayCatalogSources)([
-    {
-      url: 'https://models.example/v1/models',
-      prefix: 'go/',
-      providerSlug: 'custom-go',
-      credentialAlias: 'default',
-      profiles: ['gemini'],
-      models: { 'go/gemini/model': { profile: 'gemini' } },
-    },
-  ]);
-  try {
-    vi.stubGlobal('fetch', async () => Response.json({ data: [{ id: 'gemini/model' }] }));
-    await createRelayCatalog(db, source).refresh(50);
-    expect(await createRelayCatalog(db, source).get()).toMatchObject({
-      routes: [],
-      rejected: 1,
-      lastRefreshError: 'refresh failed',
-    });
-    expect(db.database.prepare('SELECT route_id FROM catalog_routes').all()).toEqual([]);
   } finally {
     db.close();
   }
@@ -1528,125 +1370,6 @@ it('refreshes an upstream model limit without changing the route', async () => {
           profile: 'chat',
           limit: { context: 2_000, output: 500 },
           metadata: { name: 'Model 2' },
-        },
-      ],
-    });
-  } finally {
-    db.close();
-  }
-});
-
-it('retains native Anthropic display names and token limits in v2 descriptors', async () => {
-  const db = database();
-  try {
-    vi.stubGlobal('fetch', async () =>
-      Response.json({
-        data: [
-          {
-            id: 'claude-a',
-            display_name: 'Claude A',
-            created_at: '2026-01-02T03:04:05Z',
-            max_input_tokens: 200_000,
-            max_tokens: 64_000,
-          },
-          {
-            id: 'claude-b',
-            display_name: 'Claude B',
-            max_input_tokens: null,
-            max_tokens: null,
-          },
-        ],
-        has_more: false,
-      }),
-    );
-    const sources = Schema.decodeUnknownSync(RelayCatalogSources)([
-      {
-        discovery: 'gateway',
-        prefix: 'p/',
-        providerSlug: 'native:anthropic',
-        credentialAlias: 'review',
-        models: {
-          'p/claude-a': { profile: 'messages' },
-          'p/claude-b': { profile: 'messages' },
-        },
-      },
-    ]);
-    await createRelayCatalog(db, sources, {
-      accountId: 'account',
-      gatewayId: 'gateway',
-      runToken: 'test',
-    }).refresh(60);
-    await expect(
-      createGrantControl(db).issueV2({
-        jobId: 'job-native-anthropic',
-        snapshot: { routes: ['p/claude-a', 'p/claude-b'] },
-        latestIssueDeadline: deadline(),
-      }),
-    ).resolves.toMatchObject({
-      kind: 'issued',
-      descriptors: [
-        {
-          routeId: 'p/claude-a',
-          profile: 'messages',
-          limit: { context: 200_000, output: 64_000 },
-          metadata: { name: 'Claude A' },
-        },
-        {
-          routeId: 'p/claude-b',
-          profile: 'messages',
-          metadata: { name: 'Claude B' },
-        },
-      ],
-    });
-  } finally {
-    db.close();
-  }
-});
-
-it('retains native Google display names and token limits in v2 descriptors', async () => {
-  const db = database();
-  try {
-    vi.stubGlobal('fetch', async () =>
-      Response.json({
-        models: [
-          {
-            name: 'models/gemini-a',
-            displayName: 'Gemini A',
-            inputTokenLimit: 1_000_000,
-            outputTokenLimit: 65_536,
-            supportedGenerationMethods: ['generateContent'],
-          },
-        ],
-      }),
-    );
-    const sources = Schema.decodeUnknownSync(RelayCatalogSources)([
-      {
-        discovery: 'gateway',
-        prefix: 'g/',
-        providerSlug: 'native:google-ai-studio',
-        credentialAlias: 'review',
-        models: { 'g/gemini-a': { profile: 'gemini' } },
-      },
-    ]);
-    await createRelayCatalog(db, sources, {
-      accountId: 'account',
-      gatewayId: 'gateway',
-      runToken: 'test',
-    }).refresh(60);
-    await expect(
-      createGrantControl(db).issueV2({
-        jobId: 'job-native-google',
-        snapshot: { routes: ['g/gemini-a'] },
-        latestIssueDeadline: deadline(),
-      }),
-    ).resolves.toMatchObject({
-      kind: 'issued',
-      descriptors: [
-        {
-          routeId: 'g/gemini-a',
-          profile: 'gemini',
-          limit: { context: 1_000_000, output: 65_536 },
-          metadata: { name: 'Gemini A' },
         },
       ],
     });
@@ -1991,6 +1714,44 @@ it('keeps an unqualified rich source on its historical chat-only semantics', asy
   }
 });
 
+it('omits rich entries that advertise only retired protocols without defaulting them to Chat', async () => {
+  const db = database();
+  try {
+    vi.stubGlobal('fetch', async () =>
+      Response.json({
+        data: [
+          { id: 'messages-only', api: { messages: {} }, recommended_api: 'messages' },
+          { id: 'gemini-only', api: { 'generate-content': {} }, recommended_api: 'interactions' },
+          { id: 'chat-entry', api: { 'chat-completions': {} } },
+          { id: 'mixed-entry', api: { messages: {}, 'chat-completions': {} } },
+        ],
+      }),
+    );
+    const catalog = createRelayCatalog(db, [
+      {
+        url: 'https://models.example/models',
+        prefix: 'p/',
+        providerSlug: 'custom-review',
+        credentialAlias: 'default',
+      },
+    ]);
+    await catalog.refresh(10);
+    expect(await catalog.get()).toMatchObject({
+      routes: ['p/chat-entry', 'p/mixed-entry'],
+      rejected: 0,
+      lastRefreshError: null,
+    });
+    expect(
+      db.database.prepare('SELECT route_id, profile FROM catalog_routes ORDER BY route_id').all(),
+    ).toEqual([
+      { route_id: 'p/chat-entry', profile: 'chat' },
+      { route_id: 'p/mixed-entry', profile: 'chat' },
+    ]);
+  } finally {
+    db.close();
+  }
+});
+
 it('honours recommended_api before the configured profile order', async () => {
   const db = database();
   try {
@@ -2059,10 +1820,10 @@ it('rejects duplicate or oversized configured profile lists', () => {
   };
   expect(() => decode([{ ...base, profiles: ['chat', 'chat'] }])).toThrow();
   expect(() => decode([{ ...base, profiles: [] }])).toThrow();
-  expect(() =>
-    decode([{ ...base, profiles: ['chat', 'responses', 'messages', 'gemini', 'chat'] }]),
-  ).toThrow();
+  expect(() => decode([{ ...base, profiles: ['chat', 'responses', 'chat'] }])).toThrow();
   expect(() => decode([{ ...base, profiles: ['unknown'] }])).toThrow();
+  expect(() => decode([{ ...base, profile: 'messages' }])).toThrow();
+  expect(() => decode([{ ...base, models: { review: { profile: 'messages' } } }])).toThrow();
   expect(
     decode([
       {
