@@ -738,7 +738,15 @@ const forwardEvent = (event: NormalizedReviewEvent, dependencies: IngressDepende
     return 'accepted' as const;
   });
 
-const forwardRunnerCallback = async (request: Request, dependencies: IngressDependencies) => {
+const forwardRunnerRequest = async (
+  request: Request,
+  dependencies: IngressDependencies,
+  target: {
+    readonly path: string;
+    readonly maxBytes: number;
+    readonly verificationHeader: string;
+  },
+) => {
   if (
     dependencies.runnerCallbackToken === undefined ||
     request.headers.get('authorization') !== `Bearer ${dependencies.runnerCallbackToken}`
@@ -746,43 +754,37 @@ const forwardRunnerCallback = async (request: Request, dependencies: IngressDepe
     return new Response(null, { status: 401 });
   }
 
-  const body = await readBoundedRequestBytes(request, MAX_RUNNER_CALLBACK_BYTES);
+  const body = await readBoundedRequestBytes(request, target.maxBytes);
   if (body === undefined) return new Response(null, { status: 413 });
   const forwarded = await dependencies.core.fetch(
-    new Request('https://core.internal/runner-results', {
+    new Request(`https://core.internal${target.path}`, {
       method: 'POST',
       headers: {
         'content-type': request.headers.get('content-type') ?? 'application/json',
-        'x-compte-rendu-runner-callback': 'verified',
-      },
-      body,
-    }),
-  );
-  return new Response(null, { status: forwarded.ok ? 202 : 503 });
-};
-
-const forwardRunnerEvidence = async (request: Request, dependencies: IngressDependencies) => {
-  if (
-    dependencies.runnerCallbackToken === undefined ||
-    request.headers.get('authorization') !== `Bearer ${dependencies.runnerCallbackToken}`
-  ) {
-    return new Response(null, { status: 401 });
-  }
-  const body = await readBoundedRequestBytes(request, MAX_RUNNER_EVIDENCE_BYTES);
-  if (body === undefined) return new Response(null, { status: 413 });
-  const forwarded = await dependencies.core.fetch(
-    new Request('https://core.internal/runner-evidence', {
-      method: 'POST',
-      headers: {
-        'content-type': request.headers.get('content-type') ?? 'application/json',
-        'x-compte-rendu-runner-evidence': 'verified',
+        [target.verificationHeader]: 'verified',
       },
       body,
     }),
   );
   await forwarded.body?.cancel().catch(() => undefined);
-  return new Response(null, { status: forwarded.ok ? 202 : 503 });
+  // Preserve Core's status (for example 409 for a stale attempt or 503 for a
+  // transient outage) without forwarding its private response body.
+  return new Response(null, { status: forwarded.status });
 };
+
+const forwardRunnerCallback = (request: Request, dependencies: IngressDependencies) =>
+  forwardRunnerRequest(request, dependencies, {
+    path: '/runner-results',
+    maxBytes: MAX_RUNNER_CALLBACK_BYTES,
+    verificationHeader: 'x-compte-rendu-runner-callback',
+  });
+
+const forwardRunnerEvidence = (request: Request, dependencies: IngressDependencies) =>
+  forwardRunnerRequest(request, dependencies, {
+    path: '/runner-evidence',
+    maxBytes: MAX_RUNNER_EVIDENCE_BYTES,
+    verificationHeader: 'x-compte-rendu-runner-evidence',
+  });
 
 const forwardRunnerCleanupRecovery = async (
   request: Request,
