@@ -1811,6 +1811,131 @@ it('treats a profile change for an existing route as an immutable conflict', asy
   }
 });
 
+it('retires a historical Messages route without blocking sibling discovery', async () => {
+  const db = database();
+  const source = {
+    url: 'https://models.example/v1/models',
+    prefix: 'go/',
+    providerSlug: 'custom-go',
+    credentialAlias: 'default',
+  };
+  try {
+    db.database
+      .prepare(
+        `INSERT INTO catalog_routes
+          (route_id, upstream_model, provider_slug, credential_alias, profile)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run('go/historical', 'historical-model', 'custom-go', 'default', 'messages');
+    vi.stubGlobal('fetch', async () =>
+      Response.json({
+        data: [
+          { id: 'historical', api: { 'chat-completions': {} } },
+          { id: 'sibling', api: { 'chat-completions': {} } },
+        ],
+      }),
+    );
+    const catalog = createRelayCatalog(db, [source]);
+    await catalog.refresh(50);
+    expect(await catalog.get()).toMatchObject({
+      routes: ['go/sibling'],
+      rejected: 0,
+      lastRefreshError: null,
+    });
+    expect(
+      db.database
+        .prepare('SELECT upstream_model, profile FROM catalog_routes WHERE route_id = ?')
+        .get('go/historical'),
+    ).toEqual({ upstream_model: 'historical-model', profile: 'messages' });
+
+    await expect(
+      createGrantControl(db).issueV2({
+        jobId: 'job-sibling',
+        snapshot: { routes: ['go/sibling'] },
+        latestIssueDeadline: deadline(),
+      }),
+    ).resolves.toMatchObject({
+      kind: 'issued',
+      descriptors: [{ routeId: 'go/sibling', profile: 'chat' }],
+    });
+    await expect(
+      createGrantControl(db).issue({
+        jobId: 'job-retired-v1',
+        snapshot: { routes: ['go/historical'] },
+        latestIssueDeadline: deadline(),
+      }),
+    ).resolves.toEqual({ kind: 'invalid' });
+    await expect(
+      createGrantControl(db).issueV2({
+        jobId: 'job-retired-v2',
+        snapshot: { routes: ['go/historical'] },
+        latestIssueDeadline: deadline(),
+      }),
+    ).resolves.toEqual({ kind: 'invalid' });
+
+    await catalog.refresh(100);
+    expect(await catalog.get()).toMatchObject({ routes: ['go/sibling'] });
+    expect(
+      db.database
+        .prepare('SELECT upstream_model, profile FROM catalog_routes WHERE route_id = ?')
+        .get('go/historical'),
+    ).toEqual({ upstream_model: 'historical-model', profile: 'messages' });
+  } finally {
+    db.close();
+  }
+});
+
+it('keeps a usable alias visible when its discovered canonical is retired', async () => {
+  const db = database();
+  const source = {
+    url: 'https://models.example/v1/models',
+    prefix: 'go/',
+    providerSlug: 'custom-go',
+    credentialAlias: 'default',
+    aliases: { 'go/alias': 'historical' },
+  };
+  try {
+    db.database
+      .prepare(
+        `INSERT INTO catalog_routes
+          (route_id, upstream_model, provider_slug, credential_alias, profile)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run('go/historical', 'historical', 'custom-go', 'default', 'messages');
+    vi.stubGlobal('fetch', async () =>
+      Response.json({
+        data: [{ id: 'historical', api: { 'chat-completions': {} } }],
+      }),
+    );
+    const catalog = createRelayCatalog(db, [source]);
+    await catalog.refresh(50);
+    expect(await catalog.get()).toMatchObject({
+      routes: ['go/alias'],
+      rejected: 0,
+      lastRefreshError: null,
+    });
+    await expect(
+      createGrantControl(db).issueV2({
+        jobId: 'job-alias',
+        snapshot: { routes: ['go/alias'] },
+        latestIssueDeadline: deadline(),
+      }),
+    ).resolves.toMatchObject({
+      kind: 'issued',
+      descriptors: [{ routeId: 'go/alias', profile: 'chat' }],
+    });
+    await expect(
+      createGrantControl(db).issueV2({
+        jobId: 'job-retired-canonical',
+        snapshot: { routes: ['go/historical'] },
+        latestIssueDeadline: deadline(),
+      }),
+    ).resolves.toEqual({ kind: 'invalid' });
+  } finally {
+    db.close();
+  }
+});
+
 it('rejects duplicate or oversized configured profile lists', () => {
   const decode = Schema.decodeUnknownSync(RelayCatalogSources, { onExcessProperty: 'error' });
   const base = {
