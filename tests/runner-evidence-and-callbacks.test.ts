@@ -156,7 +156,7 @@ describe('Runner Job HTTP interface', () => {
     expect(callbackRequests).toHaveLength(5);
     expect(performance.now() - startedAt).toBeLessThan(1000);
   });
-  it('keeps an oversized diagnostic artifact replayable without failing the verified result', async () => {
+  it('keeps an oversized diagnostic artifact bounded without failing the verified result', async () => {
     const evidenceRoot = await mkdtemp(`${tmpdir()}/compte-rendu-oversized-callback-`);
     const callbackRequests: Request[] = [];
     const evidenceRequests: Request[] = [];
@@ -172,7 +172,6 @@ describe('Runner Job HTTP interface', () => {
       });
       return JSON.stringify(exported);
     })();
-    let restarted: ReturnType<typeof createRunner> | undefined;
     try {
       const result = await runAgentScenario({
         runId: 'run-114-oversized-callback',
@@ -219,47 +218,7 @@ describe('Runner Job HTTP interface', () => {
       expect(upload.evidence.opencodeExport.content.size).toBeLessThan(
         Buffer.byteLength(sessionExport),
       );
-
-      const replayRequests: Request[] = [];
-      restarted = createRunner({
-        authToken: 'runner-test-token',
-        evidenceRoot,
-        claimUrl: '',
-        callbackUrl: 'https://ingress.test/runner-callback',
-        callbackToken: 'callback-token',
-        callbackFetch: async (input, init) => {
-          replayRequests.push(new Request(input, init));
-          return new Response(null, { status: 202 });
-        },
-      });
-      const replay = () =>
-        restarted!.handle(
-          new Request('http://runner/maintenance/replay-callback', {
-            method: 'POST',
-            headers: {
-              authorization: 'Bearer runner-test-token',
-              'content-type': 'application/json',
-            },
-            body: JSON.stringify({
-              evidenceId,
-              jobId: runnerJobFields.id,
-              runId: 'run-114-oversized-callback',
-              attempt: 1,
-              baseSha: result.manifest.baseSha,
-              headSha: result.manifest.headSha,
-            }),
-          }),
-        );
-      const recovered = await replay();
-      expect(recovered.status).toBe(202);
-      expect(await recovered.json()).toEqual({ accepted: true });
-      expect(replayRequests).toHaveLength(1);
-      expect(await replayRequests[0]!.clone().text()).toBe(callbackBody);
-      await writeFile(join(evidenceRoot, evidenceId, 'manifest.json'), '{}');
-      expect((await replay()).status).toBe(409);
-      expect(replayRequests).toHaveLength(1);
     } finally {
-      await restarted?.close();
       await rm(evidenceRoot, { recursive: true, force: true });
     }
   });

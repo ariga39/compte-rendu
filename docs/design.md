@@ -189,18 +189,13 @@ marker or startup gate is needed to bound it. Drain status includes work through
 cleanup and callback delivery; unconfirmed Sandbox cleanup or a halted claim loop
 prevents a drained report. This pause is in-memory and resets on process restart.
 
-Runner retains the final slim callback body privately before bounded delivery when
-the evidence directory is available. An
-explicit authenticated `POST /maintenance/replay-callback` replays it only after
-matching the operator's job/run/attempt, evidence ID and immutable SHAs against
-the local `manifest.json` and confirming that cleanup is `destroyed`. Replay does
-not decode or re-hash the six diagnostic attachments: an older local callback is
-re-read, tagged as v2 and sent in the current slim shape, preserving an old
-Markdown-string result as-is. This works across Runner restarts; it does not
-reconstruct missing callbacks or rerun agent work. Core's existing callback ownership, revision freshness and publication
-reconciliation remain authoritative. Acceptance is distinct from publication.
-There is no automatic replay queue; see
-[callback recovery](operations.md#replay-a-lost-terminal-callback).
+Runner retains the final slim callback body privately as `callback.json` before
+bounded delivery when the evidence directory is available. The retained callback
+and manifest support diagnosis and verified cleanup confirmation; they never
+resend a lost terminal callback. There is no manual replay endpoint and no
+automatic replay queue. Core's existing callback ownership, revision freshness
+and publication reconciliation remain authoritative, and a lost callback is
+recovered through a fresh review rather than reconstructed locally.
 
 Diagnostic material is uploaded separately from the terminal callback. The
 callback remains the publication authority, while a best-effort
@@ -242,10 +237,10 @@ agent-start reset. One same-session correction gets at most two minutes of its
 remainder; it is not another attempt. Evidence archival, revocation,
 destruction and callback keep independent bounded finalization time. Callback
 delivery uses a bounded timeout with exponential retry delays over five attempts,
-absorbing transient 5xx/429/408 responses before operator replay is needed. An
-oversized or failed private diagnostic upload is logged and bounded: an artifact
-that cannot fit the shared upload budget is truncated and marked as such, so the
-terminal result never turns into an evidence failure.
+absorbing transient 5xx/429/408 responses; a lost terminal callback is not
+replayed. An oversized or failed private diagnostic upload is logged and bounded:
+an artifact that cannot fit the shared upload budget is truncated and marked as
+such, so the terminal result never turns into an evidence failure.
 
 Normal success, failure, timeout and cancellation finalize evidence and destroy
 the Sandbox before callback. A known `cleanup=failed` blocks the same PR until an
@@ -409,7 +404,7 @@ owners instead of holding every execution object:
 - `ClaimScheduler` owns single-flight claiming, claim reservation IDs, queued
   stop replay, drain/resume, outage staging and the startup claim gate.
 - `CleanupReconciler` owns retained-evidence cleanup recovery, startup/orphan
-  reconciliation, deferred recovery and replay delivery.
+  reconciliation, deferred recovery and confirmed cleanup delivery.
 - `JobExecutor` owns one execution stack and only sequences phases. Its sandbox,
   child process, token lease, progress reporter, grant material,
   checkout/config/grant directories, sessions, usage and multi-review evidence

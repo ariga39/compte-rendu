@@ -12,7 +12,7 @@ const EvidenceId = Schema.String.check(
   Schema.isPattern(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i),
 );
 
-export const ReplayCallbackRequest = Schema.Struct({
+export const CleanupRecoveryRequest = Schema.Struct({
   evidenceId: EvidenceId,
   jobId: Schema.NonEmptyString,
   runId: Schema.NonEmptyString,
@@ -20,7 +20,7 @@ export const ReplayCallbackRequest = Schema.Struct({
   baseSha: GitHubSha,
   headSha: GitHubSha,
 });
-export type ReplayCallbackRequest = typeof ReplayCallbackRequest.Type;
+export type CleanupRecoveryRequest = typeof CleanupRecoveryRequest.Type;
 
 const RunnerManifest = Schema.Struct({
   jobId: Schema.NonEmptyString,
@@ -60,7 +60,6 @@ export const CallbackRecoveryReason = Schema.Literals([
   'invalid-manifest',
   'identity-mismatch',
   'integrity-mismatch',
-  'cleanup-not-confirmed',
   'result-mismatch',
   'unsupported-recovery',
 ]);
@@ -73,8 +72,6 @@ export class CallbackRecoveryError extends Schema.TaggedError<CallbackRecoveryEr
 
 export type RecoveredCallback = {
   readonly recoveryProof?: Readonly<Record<string, string>> | undefined;
-  /** The callback body normalized to the current v2 wire shape. */
-  readonly body: string;
   readonly callback: typeof RunnerTerminalCallback.Type;
   readonly manifest: RecoveredManifest;
 };
@@ -147,12 +144,8 @@ export const cleanupConfirmedCallbackBody = (
 
 export const recoverCallback = Effect.fn('recoverCallback')(function* (
   evidenceRoot: string,
-  request: ReplayCallbackRequest,
-  purpose:
-    | 'replay'
-    | {
-        readonly cleanupRuntime: string;
-      } = 'replay',
+  request: CleanupRecoveryRequest,
+  cleanupRuntime: string,
 ): Effect.fn.Return<RecoveredCallback, CallbackRecoveryError> {
   const directory = join(evidenceRoot, request.evidenceId);
   const directoryInfo = yield* readStat(directory, 'missing-evidence');
@@ -174,7 +167,7 @@ export const recoverCallback = Effect.fn('recoverCallback')(function* (
 
   // The local manifest is the retained ownership and cleanup record. Diagnostic
   // attachments are never decoded or hashed again: a legacy inline callback and
-  // the slim v2 callback both replay from the same local identity.
+  // the slim v2 callback both recover from the same local identity.
   const manifestPath = join(directory, 'manifest.json');
   const manifestInfo = yield* readStat(manifestPath, 'invalid-manifest');
   if (!manifestInfo.isFile() || manifestInfo.size > MAX_RUNNER_CALLBACK_BYTES) {
@@ -213,47 +206,20 @@ export const recoverCallback = Effect.fn('recoverCallback')(function* (
     return yield* fail('identity-mismatch');
   }
 
-  if (purpose !== 'replay') {
-    if (
-      callback.status !== 'failed' ||
-      manifest.runtime !== purpose.cleanupRuntime ||
-      manifest.sandboxName !== `compte-rendu-${request.jobId}` ||
-      manifest.cleanup.status !== 'failed' ||
-      callback.sandbox.cleanup !== 'failed'
-    ) {
-      return yield* fail('unsupported-recovery');
-    }
-    if (manifest.hostCleanupConfirmed !== true) return yield* fail('unsupported-recovery');
-  }
-
   if (
-    purpose === 'replay' &&
-    (manifest.cleanup.status !== 'destroyed' || callback.sandbox.cleanup !== 'destroyed')
+    callback.status !== 'failed' ||
+    manifest.runtime !== cleanupRuntime ||
+    manifest.sandboxName !== `compte-rendu-${request.jobId}` ||
+    manifest.cleanup.status !== 'failed' ||
+    callback.sandbox.cleanup !== 'failed'
   ) {
-    return yield* fail('cleanup-not-confirmed');
+    return yield* fail('unsupported-recovery');
   }
+  if (manifest.hostCleanupConfirmed !== true) return yield* fail('unsupported-recovery');
 
-  if (callback.status === 'succeeded') {
-    if (manifest.complete !== true) return yield* fail('result-mismatch');
-    const result = callback.result;
-    if (
-      typeof result === 'string'
-        ? manifest.result !== undefined
-        : manifest.result === undefined ||
-          manifest.result.decision !== result.decision ||
-          manifest.result.markdown !== result.markdown
-    ) {
-      return yield* fail('result-mismatch');
-    }
-  } else if (
-    manifest.result !== undefined ||
-    (callback.status === 'failed' && callback.failure === undefined)
-  ) {
+  if (manifest.result !== undefined || callback.failure === undefined) {
     return yield* fail('result-mismatch');
   }
 
-  const converted = encodeForManifest(callback, manifest);
-  if (converted === undefined) return yield* fail('invalid-callback');
-
-  return { body: converted, callback, recoveryProof: manifest.recoveryProof, manifest };
+  return { callback, recoveryProof: manifest.recoveryProof, manifest };
 });

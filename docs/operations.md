@@ -251,11 +251,9 @@ execution deadline.
 
 An old Runner's inline callback is rejected by a v2-only Core. During step 1
 of a breaking upgrade or rollback, use the still-running old Runner to resolve
-failed-cleanup jobs against the original backend. If an undelivered successful
-review must be preserved, replay it against the matching receiver now using
-`POST /maintenance/replay-callback` and verify the outcome on GitHub. An
-occasional lost review can instead be re-triggered once the same PR is eligible.
-Then continue with step 2. Verify publication on the next review.
+failed-cleanup jobs against the original backend. An undelivered terminal result
+may be lost during the switch. Re-trigger the review once the same PR is eligible.
+Continue with step 2 and verify publication on the next review.
 
 ### Migrating an existing two-Worker installation
 
@@ -289,13 +287,12 @@ Runner exposes authenticated maintenance endpoints on its private loopback HTTP
 service. Use the existing `RUNNER_AUTH_TOKEN`; these routes are not forwarded by
 the public dashboard Worker.
 
-| Request                             | Effect                                                   |
-| ----------------------------------- | -------------------------------------------------------- |
-| `POST /maintenance/drain`           | Pause new claims while admitted jobs finish.             |
-| `GET /maintenance`                  | Inspect current drain status.                            |
-| `POST /maintenance/resume`          | Reopen admission and wake the claim loop.                |
-| `POST /maintenance/replay-callback` | Replay a retained terminal callback; see recovery below. |
-| `POST /maintenance/recover-cleanup` | Confirm cleanup after exact Sandbox removal; see below.  |
+| Request                             | Effect                                                  |
+| ----------------------------------- | ------------------------------------------------------- |
+| `POST /maintenance/drain`           | Pause new claims while admitted jobs finish.            |
+| `GET /maintenance`                  | Inspect current drain status.                           |
+| `POST /maintenance/resume`          | Reopen admission and wake the claim loop.               |
+| `POST /maintenance/recover-cleanup` | Confirm cleanup after exact Sandbox removal; see below. |
 
 The drain, status and resume responses contain `draining`, `drained`, `activeJobs`, `claimInFlight`,
 `claimPollingHalted` and `cleanupBlockedJobs`. A claim already sent when drain
@@ -403,9 +400,10 @@ perform this removal for you.
 For microsandbox, confirm absence in the original Runner catalog as described in
 the [backend guide](microsandbox.md).
 
-Then use the correct instance's authenticated Runner maintenance endpoint. Prepare `recovery-request.json` with the same six
-identity fields shown in the callback replay section below, taken from the
-retained manifest. Then run:
+Then use the correct instance's authenticated Runner maintenance endpoint.
+Prepare `recovery-request.json` with the six identity fields taken from the
+retained manifest: evidence ID, job ID, run ID, attempt and immutable base/head
+SHAs. Then run:
 
 ```sh
 curl --fail-with-body --silent --show-error --config "$RUNNER_CURL_CONFIG" \
@@ -502,14 +500,14 @@ Those cases require separately verified operator recovery; this endpoint is not
 a general orphan-Sandbox sweep. Local host paths are deliberately not loaded from
 an archive and recursively deleted.
 
-### Replay a lost terminal callback
+### Retained terminal callback
 
 When the evidence directory is available, Runner retains the exact bounded
-terminal callback as `callback.json` there before attempting delivery. Like the other evidence,
-this file is private (mode 0600); it contains the review result, identities and an
-evidence reference but no callback credential or inline diagnostics. Keep it
-outside Sandbox mounts and do not upload it to an issue. Delivery still proceeds
-if retaining this extra recovery copy fails.
+terminal callback as `callback.json` there before attempting delivery. Like the
+other evidence, this file is private (mode 0600); it contains the review result,
+identities and an evidence reference but no callback credential or inline
+diagnostics. Keep it outside Sandbox mounts and do not upload it to an issue.
+Delivery still proceeds if retaining this extra recovery copy fails.
 
 Diagnostics travel separately through `POST /runner-evidence`. Runner first
 attempts the slim terminal callback, then uploads the readable evidence bundle
@@ -518,56 +516,14 @@ and validated review are preserved first, and only an artifact that cannot fit i
 truncated with `truncated: true`. A failed or partial upload does not affect the
 callback result or the full local evidence directory.
 
-On the correct Runner host and instance, match the local `manifest.json` with
-the run being recovered: evidence ID, job ID, run ID, attempt, and immutable
-base/head SHAs. Confirm the terminal cleanup is `destroyed`. Create a local
-request file containing these assertions, rather than the callback payload:
+Runner has no manual callback replay endpoint and no automatic replay queue. A
+terminal callback that Core did not accept is not resent; the retained callback
+and manifest remain local for diagnosis and for the verified failed-cleanup
+confirmation above. A lost terminal callback requires a fresh review through the
+usual GitHub trigger. Do not fabricate `callback.json`, edit retained evidence or
+clear database ownership.
 
-```json
-{
-  "evidenceId": "<evidence UUID>",
-  "jobId": "<job ID>",
-  "runId": "<run ID>",
-  "attempt": 1,
-  "baseSha": "<full base SHA>",
-  "headSha": "<full head SHA>"
-}
-```
-
-Using the same private curl configuration and loopback origin as maintenance:
-
-```sh
-curl --fail-with-body --silent --show-error --config "$RUNNER_CURL_CONFIG" \
-  --request POST --header 'content-type: application/json' \
-  --data-binary @recovery-request.json \
-  "$RUNNER_ORIGIN/maintenance/replay-callback"
-```
-
-Runner reads only its configured evidence directory, checks the local
-`manifest.json` for the requested identities, revisions and confirmed cleanup,
-then sends the retained callback in the current slim `v2` shape through its
-configured authenticated callback URL. A legacy local body without a version tag
-is normalized by adding `version: 2`; the real v2 schema drops the six inline
-attachments and preserves an old Markdown-string result verbatim. The verified
-manifest supplies base/head SHAs for archives issued before those fields existed.
-It does not start a Sandbox or rerun the model.
-Missing, inconsistent or unconfirmed evidence is rejected; archives from before
-callback retention was introduced cannot be reconstructed by this operation. The
-same limitation applies to failures before an evidence directory or valid manifest
-exists, and to local retention failures. Preserve the diagnostics and investigate
-those cases separately.
-
-Successful delivery returns HTTP 202 with `{"accepted": true}`. Rejections include
-a fixed `reason` without artifact contents: 400 for invalid assertions, 404 for
-an unknown evidence directory, 409 for an active job or unusable evidence, 413
-for an oversized callback, 502 for rejected/failed delivery and 504 for a delivery
-timeout. Missing callback configuration returns 503. An old archive without
-`callback.json` is reported as `missing-callback`; never fabricate that file.
-
-An accepted replay means Core accepted the callback, **not** that a review was
-published. Inspect the job's database-backed dashboard status and GitHub review.
-Core retains its existing ownership and revision checks: an obsolete revision
-may become superseded, and an already failed run is not reopened. For an
+Core retains its existing callback ownership and revision checks. For an
 interrupted publication, Core looks for the App-authored marker on the recorded
 commit with the expected verdict. A matching review completes the run. A
 transient lookup error leaves it pending. Once a publication claim has been
@@ -579,10 +535,9 @@ a new review.
 The application cron also reconciles up to four such publications per tick
 using the D1 ownership and the hash-verified R2 evidence already retained for
 the callback. Missing or inconsistent evidence leaves the run pending for
-investigation or authenticated callback replay. Repeating the operation uses the same run
-and cannot intentionally create a new review attempt. Retained evidence is not
-deleted after acceptance. If delivery remains uncertain, inspect the callback
-and Core diagnostics before retrying; do not edit the evidence or clear ownership.
+investigation. Retained evidence is not deleted after acceptance. If publication
+remains uncertain, inspect the callback and Core diagnostics before starting a
+new review; do not edit the evidence or clear ownership.
 
 Terminal Check delivery is independent of publication. If GitHub transiently
 rejects the final PATCH, D1 retains pending work for that run's exact Check. The
