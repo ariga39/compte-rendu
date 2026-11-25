@@ -605,6 +605,22 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
     return response;
   };
 
+  const readConcurrency = () =>
+    bestEffort(() => readDesiredRunnerConcurrency(env.REVIEW_DB), {
+      kind: 'unavailable' as const,
+    });
+
+  // HEAD is a read-only target read. It never allocates a claim ID, touches a
+  // queue row or prepares work, so a full Runner can poll it safely.
+  const handleRunnerClaimHead = () =>
+    Effect.gen(function* () {
+      const desiredConcurrency = yield* readConcurrency();
+      return attachRunnerConcurrency(
+        new Response(null, { status: 204, headers: { 'cache-control': 'no-store' } }),
+        desiredConcurrency,
+      );
+    });
+
   const handleRunnerClaim = (request: Request) =>
     Effect.gen(function* () {
       const occurredAt = new Date().toISOString();
@@ -614,26 +630,14 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
         Schema.fromJsonString(
           Schema.Struct({
             requestId: Schema.optional(Schema.String.check(Schema.isUUID(4))),
-            probeOnly: Schema.optional(Schema.Boolean),
           }),
         ),
       )(body.text || '{}');
       if (Option.isNone(parsed)) return new Response(null, { status: 400 });
       const requestId = parsed.value.requestId;
-      const desiredConcurrency = yield* bestEffort(
-        () => readDesiredRunnerConcurrency(env.REVIEW_DB),
-        { kind: 'unavailable' as const },
-      );
+      const desiredConcurrency = yield* readConcurrency();
       const noContent = () =>
         attachRunnerConcurrency(new Response(null, { status: 204 }), desiredConcurrency);
-      if (parsed.value.probeOnly === true) {
-        // A full Runner reads the deployment target without claiming work,
-        // allocating a claim ID, minting credentials or mutating D1.
-        return attachRunnerConcurrency(
-          new Response(null, { status: 204, headers: { 'cache-control': 'no-store' } }),
-          desiredConcurrency,
-        );
-      }
       const jobId = globalThis.crypto.randomUUID();
       const claim = yield* port(() =>
         stateStore.claimNextJob({
@@ -902,5 +906,6 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
     handleRunnerProgress,
     handleRunnerReadToken,
     handleRunnerClaim,
+    handleRunnerClaimHead,
   };
 };

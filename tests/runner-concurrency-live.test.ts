@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { createD1ReviewStateStore } from '../apps/core/src/index';
-import { createCoreWorker } from './support/core-worker-runtime';
+import { createApplication } from '../apps/dashboard/src/lib/server/application';
 import { SqliteD1Database } from './support/d1-database';
 import {
   createRunner,
@@ -32,24 +32,29 @@ describe('Runner live desired concurrency', () => {
     const evidenceRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-live-concurrency-'));
     const gates: Array<() => void> = [];
     const claimed: string[] = [];
-    const probeBodies: unknown[] = [];
+    const probeMethods: string[] = [];
     try {
-      const worker = createCoreWorker(environment(database), {
-        github: {
-          getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
-          loadReviewTarget: async () => ({ headSha: '2'.repeat(40) }),
+      const app = createApplication(
+        {
+          ...environment(database),
+          WEBHOOK_SECRET: 'test',
+          ALLOWED_INSTALLATION_IDS: '[7]',
+          RUNNER_CALLBACK_TOKEN: 'callback-token',
         },
-        getReadInstallationToken: async () => ({
-          token: 'read-token',
-          expiresAt: '2099-01-01T00:00:00Z',
-        }),
-      });
+        {
+          github: {
+            getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+            loadReviewTarget: async () => ({ headSha: '2'.repeat(40) }),
+          },
+          getReadInstallationToken: async () => ({
+            token: 'read-token',
+            expiresAt: '2099-01-01T00:00:00Z',
+          }),
+        },
+      );
       expect(
-        (
-          await worker.handleReviewConfiguration(
-            settingsRequest('PUT', { revision: 0, selection: null, concurrency: 1 }),
-          )
-        ).status,
+        (await app.fetch(settingsRequest('PUT', { revision: 0, selection: null, concurrency: 1 })))
+          .status,
       ).toBe(200);
       const store = createD1ReviewStateStore(database);
       for (const pullRequestNumber of [42, 43]) {
@@ -80,12 +85,8 @@ describe('Runner live desired concurrency', () => {
         callbackToken: 'callback-token',
         callbackFetch: async () => new Response(null, { status: 202 }),
         claimFetch: async (url, init) => {
-          const body =
-            typeof init?.body === 'string'
-              ? (JSON.parse(init.body) as { probeOnly?: boolean })
-              : {};
-          if (body.probeOnly === true) probeBodies.push(body);
-          const response = await worker.claimRunnerJob(new Request(url, init));
+          if (init?.method === 'HEAD') probeMethods.push(init.method);
+          const response = await app.fetch(new Request(url, init));
           if (response.status === 200) {
             claimed.push(((await response.clone().json()) as { id: string }).id);
           }
@@ -131,13 +132,13 @@ describe('Runner live desired concurrency', () => {
         // reads the D1 increase and immediately claims the queued review.
         expect(
           (
-            await worker.handleReviewConfiguration(
+            await app.fetch(
               settingsRequest('PUT', { revision: 1, selection: null, concurrency: 2 }),
             )
           ).status,
         ).toBe(200);
         await vi.waitFor(() => expect(claimed).toHaveLength(2), { timeout: 5000 });
-        expect(probeBodies).toContainEqual({ probeOnly: true });
+        expect(probeMethods).toContain('HEAD');
         await vi.waitFor(async () => {
           expect((await status(claimed[0]!)).status).toBe('running');
           expect((await status(claimed[1]!)).status).toBe('running');

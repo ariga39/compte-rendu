@@ -165,9 +165,7 @@ describe('Runner maintenance drain', () => {
       claimIntervalMs: 1_000_000_000,
       claimProbeIntervalMs: 5,
       claimFetch: async (_url, init) => {
-        const body =
-          typeof init?.body === 'string' ? (JSON.parse(init.body) as { probeOnly?: boolean }) : {};
-        if (body.probeOnly === true) {
+        if (init?.method === 'HEAD') {
           probes += 1;
           return new Response(null, { status: 204 });
         }

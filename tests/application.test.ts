@@ -480,12 +480,29 @@ it('enforces Runner method precedence, bearer authentication, limits and body bo
   try {
     expect((await app.fetch(new Request('https://reviews.test/runner-claim'))).status).toBe(405);
     expect(
+      (await app.fetch(new Request('https://reviews.test/runner-claim', { method: 'HEAD' })))
+        .status,
+    ).toBe(401);
+    expect(
       (
         await app.fetch(
           new Request('https://reviews.test/runner-claim', { method: 'POST', body: '{}' }),
         )
       ).status,
     ).toBe(401);
+    database.database
+      .prepare('UPDATE review_configuration SET runner_concurrency = 4 WHERE id = 1')
+      .run();
+    const head = await app.fetch(
+      new Request('https://reviews.test/runner-claim', {
+        method: 'HEAD',
+        headers: { authorization: 'Bearer runner-token' },
+      }),
+    );
+    expect(head.status).toBe(204);
+    expect(head.body).toBeNull();
+    expect(head.headers.get('cache-control')).toBe('no-store');
+    expect(head.headers.get('x-compte-rendu-concurrency')).toBe('4');
     expect(
       (
         await app.fetch(
@@ -757,6 +774,86 @@ it('completes check setup inline when no host context exists', async () => {
       status: 'scheduled',
       checkRunId: 321,
     });
+  } finally {
+    database.close();
+  }
+});
+
+it('serves the concurrency target to authenticated HEAD without reserving queued work', async () => {
+  const database = new SqliteD1Database();
+  const app = createApplication(
+    {
+      REVIEW_DB: database,
+      GITHUB_APP_ID: '1',
+      GITHUB_APP_PRIVATE_KEY: 'unused',
+      WEBHOOK_SECRET: 'unused',
+      ALLOWED_INSTALLATION_IDS: '[7]',
+      RUNNER_CALLBACK_TOKEN: 'runner-token',
+    },
+    {
+      github: {
+        getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+        loadReviewTarget: async () => ({ headSha: '2'.repeat(40) }),
+      },
+      getReadInstallationToken: async () => ({
+        token: 'read-token',
+        expiresAt: '2099-01-01T00:00:00Z',
+      }),
+    },
+  );
+  try {
+    database.database
+      .prepare('UPDATE review_configuration SET runner_concurrency = 3 WHERE id = 1')
+      .run();
+    const store = createD1ReviewStateStore(database);
+    await store.claimReview({
+      deliveryId: 'head-does-not-claim',
+      occurredAt: '2026-11-25T00:00:00Z',
+      job: {
+        repositoryId: 11,
+        installationId: 7,
+        pullRequestNumber: 42,
+        baseSha: '1'.repeat(40),
+        headSha: '2'.repeat(40),
+        trigger: 'automatic',
+      },
+    });
+    // The pre-change Worker rejects every non-POST method with 405 and cannot
+    // claim from that path, which is why HEAD is safe during rollout.
+    expect(
+      (
+        await app.fetch(
+          new Request('https://reviews.test/runner-claim', {
+            method: 'GET',
+            headers: { authorization: 'Bearer runner-token' },
+          }),
+        )
+      ).status,
+    ).toBe(405);
+    const head = await app.fetch(
+      new Request('https://reviews.test/runner-claim', {
+        method: 'HEAD',
+        headers: { authorization: 'Bearer runner-token' },
+      }),
+    );
+    expect(head.status).toBe(204);
+    expect(head.headers.get('x-compte-rendu-concurrency')).toBe('3');
+    expect(
+      database.database
+        .prepare('SELECT runner_job_id, runner_attempt FROM review_runs WHERE delivery_id = ?')
+        .get('head-does-not-claim'),
+    ).toEqual({ runner_job_id: null, runner_attempt: null });
+
+    const claim = await app.fetch(
+      new Request('https://reviews.test/runner-claim', {
+        method: 'POST',
+        headers: { authorization: 'Bearer runner-token' },
+        body: '{}',
+      }),
+    );
+    expect(claim.status).toBe(200);
+    expect(claim.headers.get('x-compte-rendu-concurrency')).toBe('3');
+    expect(await claim.json()).toMatchObject({ pullRequestNumber: 42 });
   } finally {
     database.close();
   }

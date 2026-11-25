@@ -139,11 +139,11 @@ export const createClaimScheduler = (deps: ClaimSchedulerDependencies): ClaimSch
     }, delayMs);
     if (typeof claimTimer === 'object' && claimTimer !== null) claimTimer.unref?.();
   };
-  const begin = (probeOnly: boolean) => {
+  const begin = (probe: boolean) => {
     if (deps.isClosed() || claimInFlight !== undefined || claiming) return;
     clearClaimTimer();
-    if (probeOnly) probeInFlight = true;
-    const run = probeOnly ? probeNextJob() : claimNextJob();
+    if (probe) probeInFlight = true;
+    const run = probe ? probeNextJob() : claimNextJob();
     claimInFlight = run;
     void run.finally(() => {
       if (claimInFlight === run) claimInFlight = undefined;
@@ -174,27 +174,40 @@ export const createClaimScheduler = (deps: ClaimSchedulerDependencies): ClaimSch
     deps.applyConcurrency(desired);
     return deps.concurrency() > previous;
   };
-  const postClaim = (body: unknown, controller: AbortController) =>
+  const claimRequest = (
+    controller: AbortController,
+    init: {
+      readonly method: 'POST' | 'HEAD';
+      readonly body?: string;
+      readonly headers?: Record<string, string>;
+    },
+  ) =>
     runWithHostDeadline({ timeoutMs: deps.claimTimeoutMs, signal: controller.signal }, (signal) =>
       deps.claimFetch(deps.claimUrl!, {
-        method: 'POST',
-        headers: {
-          authorization: `Bearer ${deps.callbackToken}`,
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify(body),
+        method: init.method,
+        headers: { authorization: `Bearer ${deps.callbackToken}`, ...init.headers },
+        ...(init.body === undefined ? {} : { body: init.body }),
         signal,
       }),
     );
+  const postClaim = (body: unknown, controller: AbortController) =>
+    claimRequest(controller, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  // HEAD shares the claim URL, auth and deadline but has no request body. An
+  // old Worker rejects it with 405 without claiming; it cannot be mistaken for
+  // a claim.
+  const headClaim = (controller: AbortController) => claimRequest(controller, { method: 'HEAD' });
   const probeNextJob = async () => {
     const controller = new AbortController();
     claimInFlightController = controller;
     try {
-      // No requestId: a probe can never impersonate a pending claim.
-      const response = await postClaim({ probeOnly: true }, controller);
+      const response = await headClaim(controller);
       if (response.status === 204) requestConcurrency(response);
       else {
-        // A probe never admits work even if a misconfigured peer returns a job.
+        // Old Worker 405 or any other outcome leaves the current target alone.
         await response.body?.cancel().catch(() => undefined);
       }
     } catch {

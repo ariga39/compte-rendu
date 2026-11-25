@@ -69,7 +69,7 @@ const dependencies = (calls: string[]) => ({
   },
 });
 
-it('returns the deployment desired concurrency on claim responses and probes', async () => {
+it('returns the deployment desired concurrency on claim responses and HEAD reads', async () => {
   const database = new SqliteD1Database();
   try {
     const calls: string[] = [];
@@ -84,7 +84,7 @@ it('returns the deployment desired concurrency on claim responses and probes', a
     const store = createD1ReviewStateStore(database);
     await admit(store, 42);
 
-    const probe = await worker.claimRunnerJob(claimRequest({ probeOnly: true }));
+    const probe = await worker.readRunnerConcurrency();
     expect(probe.status).toBe(204);
     expect(probe.headers.get('x-compte-rendu-concurrency')).toBe('3');
     expect(probe.headers.get('cache-control')).toBe('no-store');
@@ -110,30 +110,13 @@ it('signals an explicit default so a Runner can distinguish it from a transient 
   const database = new SqliteD1Database();
   try {
     const worker = createCoreWorker(environment(database));
-    const probe = await worker.claimRunnerJob(claimRequest({ probeOnly: true }));
+    const probe = await worker.readRunnerConcurrency();
     expect(probe.status).toBe(204);
     expect(probe.headers.get('x-compte-rendu-concurrency')).toBe('default');
 
     const claim = await worker.claimRunnerJob(claimRequest({}));
     expect(claim.status).toBe(204);
     expect(claim.headers.get('x-compte-rendu-concurrency')).toBe('default');
-  } finally {
-    database.close();
-  }
-});
-
-it('rejects a malformed probe request without touching queued work', async () => {
-  const database = new SqliteD1Database();
-  try {
-    const worker = createCoreWorker(environment(database));
-    const store = createD1ReviewStateStore(database);
-    await admit(store, 43);
-    const response = await worker.claimRunnerJob(claimRequest({ probeOnly: 'yes' }));
-    expect(response.status).toBe(400);
-    const row = database.database.prepare('SELECT runner_job_id FROM review_runs').all() as Array<{
-      runner_job_id: string | null;
-    }>;
-    expect(row).toEqual([{ runner_job_id: null }]);
   } finally {
     database.close();
   }
