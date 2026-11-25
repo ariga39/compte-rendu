@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import { Effect } from 'effect';
 import {
   MAX_WEBHOOK_BYTES,
-  handleGitHubWebhook,
+  handleGitHubWebhookEffect,
   type WebhookCoreSink,
 } from '../apps/ingress/src/index';
 import type {
@@ -79,28 +80,33 @@ const createWebhookHarness = (options: WebhookHarnessOptions = {}) => {
     reviews,
     metadata,
     fetch: (request: Request) =>
-      handleGitHubWebhook(request, {
-        secret,
-        crypto: globalThis.crypto,
-        allowedInstallationIds:
-          'allowedInstallationIds' in options ? options.allowedInstallationIds : '[7]',
-        ...(options.allowedBotAuthorIds === undefined
-          ? {}
-          : { allowedBotAuthorIds: options.allowedBotAuthorIds }),
-        ...(options.log === undefined ? {} : { log: options.log }),
-        core: {
-          submitReviewEvent: async (event) => {
-            reviews.push(event);
-            return options.submitReviewEvent === undefined
-              ? 'accepted'
-              : options.submitReviewEvent(event);
+      Effect.runPromise(
+        handleGitHubWebhookEffect(request, {
+          secret,
+          crypto: globalThis.crypto,
+          allowedInstallationIds:
+            'allowedInstallationIds' in options ? options.allowedInstallationIds : '[7]',
+          ...(options.allowedBotAuthorIds === undefined
+            ? {}
+            : { allowedBotAuthorIds: options.allowedBotAuthorIds }),
+          ...(options.log === undefined ? {} : { log: options.log }),
+          core: {
+            submitReviewEvent: (event) =>
+              Effect.gen(function* () {
+                reviews.push(event);
+                return options.submitReviewEvent === undefined
+                  ? ('accepted' as const)
+                  : yield* options.submitReviewEvent(event);
+              }),
+            invalidateMetadata: (event) =>
+              Effect.gen(function* () {
+                metadata.push(event);
+                if (options.invalidateMetadata !== undefined)
+                  yield* options.invalidateMetadata(event);
+              }),
           },
-          invalidateMetadata: async (event) => {
-            metadata.push(event);
-            await options.invalidateMetadata?.(event);
-          },
-        },
-      }),
+        }),
+      ),
   };
 };
 
@@ -526,7 +532,7 @@ describe('Webhook ingress', () => {
     const { events, log } = collectingLog();
     const worker = createWebhookHarness({
       log,
-      submitReviewEvent: async () => 'failed',
+      submitReviewEvent: () => Effect.succeed('failed'),
     });
 
     const response = await worker.fetch(await signedRequest());
@@ -553,10 +559,14 @@ describe('Webhook ingress', () => {
   it('does not acknowledge a Core failure and asks GitHub to retry', async () => {
     let calls = 0;
     const worker = createWebhookHarness({
-      invalidateMetadata: async () => {
-        calls += 1;
-        throw new Error('core unavailable');
-      },
+      invalidateMetadata: () =>
+        Effect.tryPromise({
+          try: async () => {
+            calls += 1;
+            throw new Error('core unavailable');
+          },
+          catch: (cause) => cause,
+        }),
     });
 
     const response = await worker.fetch(await signedRequest());

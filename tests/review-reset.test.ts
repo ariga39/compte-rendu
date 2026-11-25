@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
+import type { CoreWorkerDependencies } from '../apps/core/src/core-worker';
 import { createCoreWorker } from '../apps/core/src/core-worker';
 import { createD1ReviewStateStore } from '../apps/core/src/review-state-store';
 import { createGitHubPublicationAdapter } from '../apps/core/src/github-review-adapter';
 import type { ReviewEvent } from '../packages/contracts/src';
+import { scheduleReviewEvent } from './support/core-worker-harness';
 import { SqliteD1Database } from './support/d1-database';
 
 const baseSha = '1'.repeat(40);
@@ -91,16 +93,16 @@ describe('new review round resets prior GitHub verdicts', () => {
         return new Response(null, { status: 404 });
       };
       const env = { REVIEW_DB: database, GITHUB_APP_ID: '123', GITHUB_APP_PRIVATE_KEY: 'fixture' };
-      const worker = createCoreWorker(env, {
+      const dependencies: CoreWorkerDependencies = {
         stateStore: store,
         github: createGitHubPublicationAdapter({
           token: 'fixture',
           fetch: remote,
           getReviewAuthorLogin: async () => 'review-app[bot]',
         }),
-      });
+      };
       const tasks: Promise<unknown>[] = [];
-      const response = await worker.submitReviewEvent(event, {
+      const response = await scheduleReviewEvent(env, dependencies, event, {
         waitUntil: (task) => tasks.push(task),
       });
       await Promise.all(tasks);
@@ -264,7 +266,7 @@ const resetFixture = async (options: { firstRound?: boolean; lifecycle?: boolean
       : {}),
   };
   const logs: unknown[] = [];
-  const worker = createCoreWorker(env, {
+  const dependencies: CoreWorkerDependencies = {
     stateStore: store,
     log: {
       record: (entry) => {
@@ -280,10 +282,13 @@ const resetFixture = async (options: { firstRound?: boolean; lifecycle?: boolean
       fetch: remote,
       getReviewAuthorLogin: async () => 'review-app[bot]',
     }),
-  });
+  };
+  const worker = createCoreWorker(env, dependencies);
   const tasks: Promise<unknown>[] = [];
   const send = (body = event) =>
-    worker.submitReviewEvent(body, { waitUntil: (task) => tasks.push(task) });
+    scheduleReviewEvent(env, dependencies, body, {
+      waitUntil: (task) => tasks.push(task),
+    });
   const claim = () =>
     worker.claimRunnerJob(
       new Request('https://reviews.test/runner-claim', {
@@ -615,20 +620,19 @@ it('fails a first-round claim when the current PR head cannot be read', async ()
 it('fails a first-round claim closed when the adapter cannot read the head', async () => {
   const database = new SqliteD1Database();
   const store = createD1ReviewStateStore(database);
-  const worker = createCoreWorker(
-    { REVIEW_DB: database, GITHUB_APP_ID: '123', GITHUB_APP_PRIVATE_KEY: 'fixture' },
-    {
-      stateStore: store,
-      github: { getRepositoryUrl: async () => 'https://github.com/example/repo.git' },
-      getReadInstallationToken: async () => ({
-        token: 'read-only',
-        expiresAt: '2099-01-01T00:00:00Z',
-      }),
-    },
-  );
+  const env = { REVIEW_DB: database, GITHUB_APP_ID: '123', GITHUB_APP_PRIVATE_KEY: 'fixture' };
+  const dependencies: CoreWorkerDependencies = {
+    stateStore: store,
+    github: { getRepositoryUrl: async () => 'https://github.com/example/repo.git' },
+    getReadInstallationToken: async () => ({
+      token: 'read-only',
+      expiresAt: '2099-01-01T00:00:00Z',
+    }),
+  };
+  const worker = createCoreWorker(env, dependencies);
   const deliveryId = 'first-round-no-head-lookup';
   try {
-    expect(await worker.submitReviewEvent({ ...event, deliveryId })).toBe('accepted');
+    expect(await scheduleReviewEvent(env, dependencies, { ...event, deliveryId })).toBe('accepted');
     expect(
       (
         await worker.claimRunnerJob(

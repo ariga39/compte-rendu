@@ -639,11 +639,27 @@ const createReviewEventHandler = (dependencies: AdmissionDependencies) => {
   });
 };
 
-export function createReviewCoordinator(dependencies: AdmissionDependencies): ReviewCoordinator {
+export const createReviewAdmission = (dependencies: AdmissionDependencies) => {
   const handleReviewEvent = createReviewEventHandler(dependencies);
   return {
+    handleReviewEvent,
+    completeReview: (input: { runId: string; output: unknown; reconcileClaimedAt?: string }) =>
+      completeReviewEffect(input, dependencies.github, dependencies.stateStore, dependencies.log),
+  };
+};
+
+export type ReviewAdmission = ReturnType<typeof createReviewAdmission>;
+
+/**
+ * Promise facade kept for the remaining Core callers. The application webhook
+ * edge and the Worker API run `createReviewAdmission` directly so Effect stays
+ * composed through admission and check setup.
+ */
+export function createReviewCoordinator(dependencies: AdmissionDependencies): ReviewCoordinator {
+  const admission = createReviewAdmission(dependencies);
+  return {
     handleReviewEvent: async (event) =>
-      Effect.runPromise(handleReviewEvent(event)).catch((error) => {
+      Effect.runPromise(admission.handleReviewEvent(event)).catch((error) => {
         if (error instanceof InvalidReviewEvent) {
           return 'ignored' as const;
         }
@@ -651,8 +667,6 @@ export function createReviewCoordinator(dependencies: AdmissionDependencies): Re
         return 'failed' as const;
       }),
     completeReview: async (input) =>
-      Effect.runPromise(
-        completeReviewEffect(input, dependencies.github, dependencies.stateStore, dependencies.log),
-      ).catch(() => 'failed' as const),
+      Effect.runPromise(admission.completeReview(input)).catch(() => 'failed' as const),
   };
 }

@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createCoreWorker } from '../apps/core/src/core-worker';
 import { createD1ReviewStateStore } from '../apps/core/src/index';
 import { SqliteD1Database } from './support/d1-database';
 import { claimRunnerJob } from './support/runner-claim';
 import {
+  createTestCoreWorker as createCoreWorker,
   eligibleEvent,
   coreEnv,
   deferred,
@@ -78,7 +78,7 @@ describe('Core Check setup and delivery reconciliation', () => {
         expiresAt: '2026-09-01T01:00:00.000Z',
       }),
     });
-    const scheduling = worker.submitReviewEvent(
+    const scheduling = worker.schedule(
       { ...eligibleEvent, deliveryId: 'delivery-check-gates-claim' },
       { waitUntil: (task) => backgroundTasks.push(task) },
     );
@@ -143,7 +143,7 @@ describe('Core Check setup and delivery reconciliation', () => {
 
     try {
       expect(
-        await worker.submitReviewEvent(
+        await worker.schedule(
           {
             ...eligibleEvent,
             deliveryId: 'delivery-check-after-completion',
@@ -226,7 +226,7 @@ describe('Core Check setup and delivery reconciliation', () => {
 
     try {
       expect(
-        await worker.submitReviewEvent(
+        await worker.schedule(
           {
             ...eligibleEvent,
             deliveryId: 'delivery-check-in-progress-race',
@@ -300,7 +300,7 @@ describe('Core Check setup and delivery reconciliation', () => {
 
     try {
       expect(
-        await worker.submitReviewEvent(
+        await worker.schedule(
           {
             ...eligibleEvent,
             deliveryId: 'delivery-check-after-failure',
@@ -360,7 +360,7 @@ describe('Core Check setup and delivery reconciliation', () => {
       },
     });
     try {
-      await worker.submitReviewEvent(eligibleEvent, {
+      await worker.schedule(eligibleEvent, {
         waitUntil: (task) => background.push(task),
       });
       expect((await worker.cancelReview(await started.promise, 1)).status).toBe(200);
@@ -395,7 +395,7 @@ describe('Core Check setup and delivery reconciliation', () => {
 
     try {
       expect(
-        await worker.submitReviewEvent(
+        await worker.schedule(
           {
             ...eligibleEvent,
             deliveryId: 'delivery-late-check-superseded-old',
@@ -404,7 +404,7 @@ describe('Core Check setup and delivery reconciliation', () => {
         ),
       ).toBe('accepted');
       expect(
-        await worker.submitReviewEvent({
+        await worker.schedule({
           ...eligibleEvent,
           deliveryId: 'delivery-late-check-superseded-new',
           action: 'synchronize',
@@ -445,9 +445,9 @@ describe('Core Check setup and delivery reconciliation', () => {
     });
 
     try {
-      expect(
-        await worker.submitReviewEvent({ ...eligibleEvent, deliveryId: 'delivery-check-fails' }),
-      ).toBe('accepted');
+      expect(await worker.schedule({ ...eligibleEvent, deliveryId: 'delivery-check-fails' })).toBe(
+        'accepted',
+      );
       const claim = await worker.claimRunnerJob(
         new Request('https://reviews.test/runner-claim', {
           method: 'POST',
@@ -474,8 +474,8 @@ describe('Core Check setup and delivery reconciliation', () => {
     const request = () => ({ ...eligibleEvent, deliveryId: 'delivery-check-queued' });
 
     try {
-      expect(await worker.submitReviewEvent(request())).toBe('accepted');
-      expect(await worker.submitReviewEvent(request())).toBe('accepted');
+      expect(await worker.schedule(request())).toBe('accepted');
+      expect(await worker.schedule(request())).toBe('accepted');
       expect(checks).toEqual([
         {
           repositoryId: 11,
@@ -534,9 +534,9 @@ describe('Core Check setup and delivery reconciliation', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-09-04T00:00:00.000Z'));
     try {
-      expect(await worker.submitReviewEvent(request(), context)).toBe('accepted');
+      expect(await worker.schedule(request(), context)).toBe('accepted');
       await firstCheckCreated.promise;
-      expect(await worker.submitReviewEvent(request(), context)).toBe('accepted');
+      expect(await worker.schedule(request(), context)).toBe('accepted');
       expect(checkRequests).toHaveLength(1);
 
       const claim = await worker.claimRunnerJob(
@@ -561,7 +561,7 @@ describe('Core Check setup and delivery reconciliation', () => {
       ).toBe(202);
 
       vi.setSystemTime(new Date('2026-09-04T00:02:00.000Z'));
-      expect(await worker.submitReviewEvent(request())).toBe('accepted');
+      expect(await worker.schedule(request())).toBe('accepted');
       expect(remoteChecks).toHaveLength(1);
       expect(checkRequests).toHaveLength(2);
       expect(checkUpdates).toEqual([
@@ -804,7 +804,7 @@ describe('Core Check setup and delivery reconciliation', () => {
 
     try {
       expect(
-        await worker.submitReviewEvent(
+        await worker.schedule(
           {
             ...eligibleEvent,
             deliveryId: 'delivery-check-retry-late-setup',
@@ -946,7 +946,7 @@ describe('Core Check setup and delivery reconciliation', () => {
 
     try {
       expect(
-        await worker.submitReviewEvent({
+        await worker.schedule({
           ...eligibleEvent,
           deliveryId: 'delivery-check-claimed',
         }),
@@ -996,7 +996,7 @@ describe('Core Check setup and delivery reconciliation', () => {
 
     try {
       expect(
-        await worker.submitReviewEvent({
+        await worker.schedule({
           ...eligibleEvent,
           deliveryId: 'delivery-claim-failure',
         }),

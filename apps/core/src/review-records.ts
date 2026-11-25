@@ -1,4 +1,4 @@
-import { Schema } from 'effect';
+import { Schema, type Effect } from 'effect';
 import { GitHubSha, ReviewConfiguration, type ReviewDecision } from '@compte-rendu/contracts';
 
 type GitHubShaValue = typeof GitHubSha.Type;
@@ -96,4 +96,4 @@ export interface ActiveRunnerJob {
 
 export type CancelRunnerJob = (jobId: string, claimedAt?: string) => Promise<void | 'pending'>;
 
-export type ReviewCheckSetupDefer = (task: Promise<void>) => void;
+export type ReviewCheckSetupDefer = (task: Effect.Effect<void>) => void;

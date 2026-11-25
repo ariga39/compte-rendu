@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import type { CoreWorkerDependencies } from '../apps/core/src/core-worker';
 import { createCoreWorker } from '../apps/core/src/core-worker';
 import {
   createD1ReviewStateStore,
@@ -6,6 +7,7 @@ import {
   type ReviewPublicationStateStore,
 } from '../apps/core/src/index';
 import { SqliteD1Database } from './support/d1-database';
+import { scheduleReviewEvent } from './support/core-worker-harness';
 import {
   eligibleEvent,
   coreEnv,
@@ -186,29 +188,34 @@ describe('Runner claim serialization', () => {
       method: 'POST',
     });
   const scheduleReview = (
-    worker: ReturnType<typeof createCoreWorker>,
+    env: ReturnType<typeof coreEnv>,
+    dependencies: Parameters<typeof scheduleReviewEvent>[1],
     headSha: string,
     deliveryId: string,
-  ) => worker.submitReviewEvent({ ...eligibleEvent, headSha, deliveryId });
+  ) => scheduleReviewEvent(env, dependencies, { ...eligibleEvent, headSha, deliveryId });
 
   it('releases an unhanded superseded same-pull-request claim so the replacement becomes claimable', async () => {
     const database = new SqliteD1Database();
     const tokenMint = deferred<{ token: string; expiresAt: string }>();
     let tokenCalls = 0;
     let currentHead = oldHead;
-    const worker = createCoreWorker(
-      { ...coreEnv(database), RUNNER: { fetch: async () => new Response(null, { status: 503 }) } },
-      {
-        github: claimGithub(() => currentHead),
-        getReadInstallationToken: async () => {
-          tokenCalls += 1;
-          return tokenMint.promise;
-        },
+    const env = {
+      ...coreEnv(database),
+      RUNNER: { fetch: async () => new Response(null, { status: 503 }) },
+    };
+    const dependencies: CoreWorkerDependencies = {
+      github: claimGithub(() => currentHead),
+      getReadInstallationToken: async () => {
+        tokenCalls += 1;
+        return tokenMint.promise;
       },
-    );
+    };
+    const worker = createCoreWorker(env, dependencies);
 
     try {
-      expect(await scheduleReview(worker, oldHead, 'delivery-unhanded-old')).toBe('accepted');
+      expect(await scheduleReview(env, dependencies, oldHead, 'delivery-unhanded-old')).toBe(
+        'accepted',
+      );
       const oldClaim = worker.claimRunnerJob(claimRequest());
       for (let attempt = 0; attempt < 50 && tokenCalls === 0; attempt += 1) {
         await new Promise((resolve) => setTimeout(resolve, 1));
@@ -216,7 +223,9 @@ describe('Runner claim serialization', () => {
       expect(tokenCalls).toBe(1);
 
       currentHead = newHead;
-      expect(await scheduleReview(worker, newHead, 'delivery-unhanded-new')).toBe('accepted');
+      expect(await scheduleReview(env, dependencies, newHead, 'delivery-unhanded-new')).toBe(
+        'accepted',
+      );
       tokenMint.resolve({
         token: 'repository-read-token',
         expiresAt: '2026-09-01T01:00:00.000Z',
@@ -239,7 +248,8 @@ describe('Runner claim serialization', () => {
     const database = new SqliteD1Database();
     let mintAttempts = 0;
     let currentHead = oldHead;
-    const worker = createCoreWorker(coreEnv(database), {
+    const env = coreEnv(database);
+    const dependencies: CoreWorkerDependencies = {
       github: {
         getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
         loadReviewTarget: async ({ pullRequestNumber }) => ({
@@ -251,20 +261,25 @@ describe('Runner claim serialization', () => {
         if (mintAttempts === 1) throw new Error('token mint failed');
         return { token: 'repository-read-token', expiresAt: '2026-09-01T01:00:00.000Z' };
       },
-    });
+    };
+    const worker = createCoreWorker(env, dependencies);
 
     try {
-      expect(await scheduleReview(worker, oldHead, 'delivery-prehandoff-old')).toBe('accepted');
+      expect(await scheduleReview(env, dependencies, oldHead, 'delivery-prehandoff-old')).toBe(
+        'accepted',
+      );
       expect((await worker.claimRunnerJob(claimRequest())).status).toBe(503);
 
       currentHead = newHead;
-      expect(await scheduleReview(worker, newHead, 'delivery-prehandoff-new')).toBe('accepted');
+      expect(await scheduleReview(env, dependencies, newHead, 'delivery-prehandoff-new')).toBe(
+        'accepted',
+      );
       const rerunClaim = await worker.claimRunnerJob(claimRequest());
       expect(rerunClaim.status).toBe(200);
       expect(await rerunClaim.json()).toMatchObject({ pullRequestNumber: 42, headSha: newHead });
 
       expect(
-        await worker.submitReviewEvent({
+        await scheduleReviewEvent(env, dependencies, {
           ...eligibleEvent,
           pullRequestNumber: 43,
           deliveryId: 'delivery-prehandoff-unrelated',
@@ -289,7 +304,8 @@ describe('Runner claim serialization', () => {
       releaseLookup = resolve;
     });
     const issueComments: unknown[] = [];
-    const worker = createCoreWorker(coreEnv(database), {
+    const env = coreEnv(database);
+    const dependencies: CoreWorkerDependencies = {
       github: {
         getRepositoryUrl: async () => {
           repositoryLookupStarted();
@@ -305,10 +321,13 @@ describe('Runner claim serialization', () => {
         token: 'repository-read-token',
         expiresAt: '2026-09-01T01:00:00.000Z',
       }),
-    });
+    };
+    const worker = createCoreWorker(env, dependencies);
 
     try {
-      expect(await scheduleReview(worker, oldHead, 'delivery-owner-change')).toBe('accepted');
+      expect(await scheduleReview(env, dependencies, oldHead, 'delivery-owner-change')).toBe(
+        'accepted',
+      );
       const claimPromise = worker.claimRunnerJob(claimRequest());
       await lookupStarted;
       database.database
@@ -340,7 +359,7 @@ describe('Runner claim serialization', () => {
       EVIDENCE_BUCKET: { put: async () => undefined },
     };
     let currentHead = oldHead;
-    const dependencies = {
+    const dependencies: CoreWorkerDependencies = {
       github: claimGithub(() => currentHead),
       getReadInstallationToken: async () => ({
         token: 'repository-read-token',
@@ -358,7 +377,9 @@ describe('Runner claim serialization', () => {
     const worker = createCoreWorker(env, dependencies);
 
     try {
-      expect(await scheduleReview(worker, oldHead, 'delivery-cleanup-block')).toBe('accepted');
+      expect(await scheduleReview(env, dependencies, oldHead, 'delivery-cleanup-block')).toBe(
+        'accepted',
+      );
       const claim = await worker.claimRunnerJob(claimRequest());
       expect(claim.status).toBe(200);
       const job = (await claim.json()) as { id: string; runId: string; attempt: number };
@@ -372,7 +393,7 @@ describe('Runner claim serialization', () => {
       ).toBe(202);
 
       currentHead = newHead;
-      expect(await scheduleReview(worker, newHead, 'delivery-cleanup-replacement')).toBe(
+      expect(await scheduleReview(env, dependencies, newHead, 'delivery-cleanup-replacement')).toBe(
         'accepted',
       );
       const freshWorker = createCoreWorker(env, dependencies);
@@ -395,17 +416,23 @@ describe('Runner claim serialization', () => {
 
   it('does not label ordinary same-pull-request serialization as a cleanup block', async () => {
     const database = new SqliteD1Database();
-    const worker = createCoreWorker(coreEnv(database), {
+    const env = coreEnv(database);
+    const dependencies: CoreWorkerDependencies = {
       github: claimGithub(),
       getReadInstallationToken: async () => ({
         token: 'repository-read-token',
         expiresAt: '2026-09-01T01:00:00.000Z',
       }),
-    });
+    };
+    const worker = createCoreWorker(env, dependencies);
     try {
-      expect(await scheduleReview(worker, oldHead, 'delivery-running-blocker')).toBe('accepted');
+      expect(await scheduleReview(env, dependencies, oldHead, 'delivery-running-blocker')).toBe(
+        'accepted',
+      );
       expect((await worker.claimRunnerJob(claimRequest())).status).toBe(200);
-      expect(await scheduleReview(worker, newHead, 'delivery-running-queued')).toBe('accepted');
+      expect(await scheduleReview(env, dependencies, newHead, 'delivery-running-queued')).toBe(
+        'accepted',
+      );
       database.database
         .prepare(
           "UPDATE review_runs SET status = 'scheduled', terminal_at = NULL WHERE status = 'superseded'",

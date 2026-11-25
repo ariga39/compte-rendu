@@ -3,8 +3,6 @@ import {
   createCloudflareOperationalLog,
   DEFAULT_REVIEW_NAME,
   REVIEW_ATTEMPT_BUDGET_MS,
-  ReviewEvent,
-  MetadataInvalidationEvent,
   EffortJobDetail,
   sanitizeOperationalLogEvent,
 } from '@compte-rendu/contracts';
@@ -12,8 +10,9 @@ import { createD1ReviewStateStore, type D1DatabaseLike } from './review-state-st
 import { createGitHubPublicationAdapter } from './github-review-adapter';
 import { createGitHubAppTokenProvider } from './github-app-token';
 import { createReviewCoordinator } from './review-admission';
+import { createCoreInfrastructure } from './core-infrastructure';
 import { publishTerminalCheck } from './review-publication';
-import { createRunnerJobClient, type RunnerJobBinding } from './runner-job-client';
+import type { RunnerJobBinding } from './runner-job-client';
 import type { GitHubAdapter } from './github-adapter-contract';
 import type { ReviewPublicationStateStore } from './review-state-store';
 import { createJobControl } from './job-control';
@@ -96,11 +95,6 @@ export type CoreWorker = ReturnType<typeof createJobControl> & {
   reconcileRecoveries(now: number): Promise<void>;
   reconcilePublications(now: number): Promise<void>;
   effortDetail(runId: string, cursor?: string): Promise<Response>;
-  submitReviewEvent(
-    event: typeof ReviewEvent.Type,
-    context?: WaitUntil,
-  ): Promise<'accepted' | 'failed'>;
-  invalidateMetadata(event: typeof MetadataInvalidationEvent.Type): Promise<void>;
   claimRunnerJob(request: Request, context?: WaitUntil): Promise<Response>;
   renewRunnerReadToken(request: Request): Promise<Response>;
   handleRunnerCallback(request: Request, context?: WaitUntil): Promise<Response>;
@@ -117,46 +111,20 @@ export const createCoreWorker = (
   env: CoreWorkerEnv,
   dependencies: CoreWorkerDependencies = {},
 ): CoreWorker => {
-  const tokenProvider = createGitHubAppTokenProvider({
-    appId: env.GITHUB_APP_ID,
-    privateKey: env.GITHUB_APP_PRIVATE_KEY,
-    crypto: globalThis.crypto,
-  });
-  const github =
-    dependencies.github ??
-    createGitHubPublicationAdapter({
-      token: tokenProvider.getInstallationToken,
-      getReviewAuthorLogin: tokenProvider.getReviewAuthorLogin,
-      dashboardOrigin: env.DASHBOARD_ORIGIN,
-      checkName: env.GITHUB_CHECK_NAME,
-    });
-  const stateStore =
-    dependencies.stateStore ??
-    createD1ReviewStateStore(
-      env.REVIEW_DB,
-      env.INFERENCE_RELAY ? env.RELAY_DEFAULT_MODEL_ROUTE : undefined,
-    );
-  const runner =
-    env.RUNNER === undefined || env.RUNNER_AUTH_TOKEN === undefined
-      ? undefined
-      : createRunnerJobClient({ binding: env.RUNNER, authToken: env.RUNNER_AUTH_TOKEN });
-  const log = dependencies.log ?? createCloudflareOperationalLog();
+  const { tokenProvider, github, stateStore, log, runner } = createCoreInfrastructure(
+    env,
+    dependencies,
+  );
   const coordinatorDependencies = {
     github,
     stateStore,
     ...(runner === undefined ? {} : { cancelRunnerJob: runner.cancelJob }),
     log,
   } as const;
-  const createCoordinator = (
-    lifecycleLog: ReturnType<typeof createPostHogLifecycleLog>,
-    deferCheckSetup?: (task: Promise<unknown>) => void,
-  ) =>
+  const createCoordinator = (lifecycleLog: ReturnType<typeof createPostHogLifecycleLog>) =>
     createReviewCoordinator({
       ...coordinatorDependencies,
       lifecycleLog,
-      ...(deferCheckSetup === undefined
-        ? {}
-        : { deferCheckSetup: (task: Promise<void>) => deferCheckSetup(task) }),
     });
 
   const protocol = createRunnerProtocol({
@@ -269,35 +237,6 @@ export const createCoreWorker = (
       );
   };
 
-  const submitReviewEvent = async (
-    event: typeof ReviewEvent.Type,
-    context?: WaitUntil,
-  ): Promise<'accepted' | 'failed'> => {
-    const lifecycleLog = createPostHogLifecycleLog(env, context);
-    if (event.event === 'pull_request' && event.repositoryVisibility === 'private') {
-      const observedAt = new Date().toISOString();
-      await stateStore
-        .invalidateRepositoryMetadata({
-          installationId: event.installationId,
-          repositoryId: event.repositoryId,
-          visibility: 'private',
-          updatedAt: observedAt,
-          nextRefreshAt: observedAt,
-        })
-        .catch(() => false);
-    }
-    try {
-      const eventCoordinator = createCoordinator(
-        lifecycleLog,
-        context === undefined ? undefined : (task) => context.waitUntil(task),
-      );
-      const disposition = await eventCoordinator.handleReviewEvent(event);
-      return disposition === 'failed' ? 'failed' : 'accepted';
-    } catch {
-      return 'failed';
-    }
-  };
-
   return {
     ...jobControl,
     async effortDetail(runId, cursor) {
@@ -341,8 +280,6 @@ export const createCoreWorker = (
     },
     reconcilePublications,
     reconcileRecoveries,
-    submitReviewEvent,
-    invalidateMetadata: protocol.invalidateMetadata,
     claimRunnerJob: (request, context) =>
       protocol.handleRunnerClaim(request, createPostHogLifecycleLog(env, context)),
     renewRunnerReadToken: (request) => protocol.handleRunnerReadToken(request),

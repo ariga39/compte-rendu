@@ -1,4 +1,5 @@
 import { canonicalDashboardOrigin, createCloudflareOperationalLog } from '@compte-rendu/contracts';
+import { Effect } from 'effect';
 import { authRoute, noStore, requireOperator, sessionViewer } from './auth';
 import { modelSettings, type LoginEnv } from './model-settings';
 import { handleRunnerLlmControl } from '../../../../core/src/runner-llm-control';
@@ -8,7 +9,12 @@ import {
   type CoreWorkerDependencies,
   type CoreWorkerEnv,
 } from '../../../../core/src/core-worker';
-import { handleGitHubWebhook, type WebhookIngressEnv } from '../../../../ingress/src/index';
+import {
+  CoreRuntime,
+  makeCoreRuntimeHost,
+  type CoreRuntimeShape,
+} from '../../../../core/src/core-runtime';
+import { handleGitHubWebhookEffect, type WebhookIngressEnv } from '../../../../ingress/src/index';
 
 export type ApplicationEnv = LoginEnv &
   CoreWorkerEnv &
@@ -38,18 +44,29 @@ export function createApplication(env: ApplicationEnv, dependencies: CoreWorkerD
     '/runner-progress': (request) => getCore().handleRunnerProgress(request),
   };
 
-  const handleWebhook = (request: Request, context?: RequestContext) =>
-    handleGitHubWebhook(request, {
-      secret: env.WEBHOOK_SECRET,
-      crypto: globalThis.crypto,
-      allowedInstallationIds: env.ALLOWED_INSTALLATION_IDS,
-      allowedBotAuthorIds: env.ALLOWED_BOT_AUTHOR_IDS,
-      core: {
-        submitReviewEvent: (event) => getCore().submitReviewEvent(event, context),
-        invalidateMetadata: (event) => getCore().invalidateMetadata(event),
-      },
-      ...(dependencies.log === undefined ? {} : { log: dependencies.log }),
-    });
+  const handleWebhook = async (request: Request, context?: RequestContext) => {
+    const withCore = <A, E>(use: (core: CoreRuntimeShape) => Effect.Effect<A, E>) =>
+      Effect.suspend(() =>
+        Effect.gen(function* () {
+          const core = yield* CoreRuntime;
+          return yield* use(core);
+        }).pipe(Effect.provide(CoreRuntime.layer(env, dependencies, makeCoreRuntimeHost(context)))),
+      );
+
+    return Effect.runPromise(
+      handleGitHubWebhookEffect(request, {
+        secret: env.WEBHOOK_SECRET,
+        crypto: globalThis.crypto,
+        allowedInstallationIds: env.ALLOWED_INSTALLATION_IDS,
+        allowedBotAuthorIds: env.ALLOWED_BOT_AUTHOR_IDS,
+        core: {
+          submitReviewEvent: (event) => withCore((core) => core.submitReviewEvent(event)),
+          invalidateMetadata: (event) => withCore((core) => core.invalidateMetadata(event)),
+        },
+        ...(dependencies.log === undefined ? {} : { log: dependencies.log }),
+      }),
+    );
+  };
 
   const handle = async (request: Request, context?: RequestContext): Promise<Response | null> => {
     const url = new URL(request.url);

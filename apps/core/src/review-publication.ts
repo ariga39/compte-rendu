@@ -730,5 +730,5 @@ export const startCheckSetup = Effect.fn('startCheckSetup')(function* (
 ) {
   const task = setupCheck(github, stateStore, runId, job);
   if (defer === undefined) return yield* task;
-  yield* Effect.sync(() => defer(Effect.runPromise(task)));
+  yield* Effect.sync(() => defer(task));
 });
