@@ -1,5 +1,5 @@
 import { Effect } from 'effect';
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import type {
   D1DatabaseLike,
   D1PreparedStatementLike,
@@ -185,6 +185,7 @@ it('aborts upstream and rejects the terminal frame when an interrupt races durab
 });
 
 it('keeps a bounded partial write when completion fails after teardown started', async () => {
+  const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
   const abort = new AbortController();
   const jobId = 'job-native-fallback';
   const requestId = 'request-native-fallback';
@@ -257,7 +258,11 @@ it('keeps a bounded partial write when completion fails after teardown started',
         },
       ],
     });
+    expect(warning).toHaveBeenCalledWith(
+      JSON.stringify({ level: 'warn', message: 'relay.accounting.failed' }),
+    );
   } finally {
+    warning.mockRestore();
     sqlite.close();
   }
 });

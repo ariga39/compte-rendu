@@ -25,6 +25,7 @@ import {
 import type { D1DatabaseLike } from './grants.ts';
 import type { FrozenRoute } from './routes.ts';
 import { gatewayHeaders, gatewayUrl, type GatewayConfig } from './gateway';
+import { logInfo, logWarning } from './host-log.ts';
 export type { GatewayConfig } from './gateway';
 
 const GATEWAY_PATH = '/chat/completions';
@@ -232,7 +233,7 @@ export const relayInference = (options: InferenceRelayOptions): Effect.Effect<Re
         await savePartial(database, requestId, usage, effort);
         return { completed: true, switched: false };
       } catch {
-        await Effect.runPromise(Effect.logWarning('relay.accounting.failed'));
+        logWarning('relay.accounting.failed');
         return { completed: false, switched: false };
       }
     };
@@ -404,15 +405,11 @@ export const relayInference = (options: InferenceRelayOptions): Effect.Effect<Re
         return;
       }
       if (accounting.switched) {
-        waitUntil(
-          Effect.runPromise(
-            Effect.logInfo('relay.effort.fallback', {
-              routeId: route.routeId,
-              generation: route.effortGeneration ?? null,
-              reason: fallbackReason,
-            }),
-          ),
-        );
+        logInfo('relay.effort.fallback', {
+          routeId: route.routeId,
+          generation: route.effortGeneration ?? null,
+          reason: fallbackReason,
+        });
       }
       completed = true;
       cleanup();
