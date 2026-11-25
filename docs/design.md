@@ -80,8 +80,8 @@ schema checks. A different heading does not invalidate a structural result.
 Runner carries `{version: 2, decision, markdown}` in its callback and manifest;
 Core checks agreement with the exact Markdown artifact before mapping the vote to
 `APPROVE`, `REQUEST_CHANGES` or `COMMENT`. A delivered Request changes review is
-successful execution. Historical string results retain COMMENT behavior and an
-unknown decision; their text is not reclassified. A new round attempts to dismiss this
+successful execution. A callback carrying plain Markdown instead of the structured
+result is invalid. A new round attempts to dismiss this
 installation’s earlier GitHub approvals/change requests on the PR, with mandatory confirmation before Runner
 admission, preserving historical decisions and review discussion. A failed claim-time reset
 is recorded as `review_reset_failed` and cannot admit the new round. See [review decisions](review-decisions-design.md).
@@ -125,11 +125,10 @@ evidence and publication lifecycle), `CheckRunStore` (Check setup/delivery
 leases), `CancellationStore` (stop and Check cancellation), and
 `DashboardMetadataStore` (public projection, progress and metadata refresh).
 `createD1ReviewStateStore` composes the four required ports for existing callers.
-`runner-evidence.ts` still reads the legacy inline artifact format for historical
-publication records. Live callbacks are slim and authoritative through D1
-ownership and a small publication record; their private diagnostics arrive
-through `POST /runner-evidence`. Core publication never depends on that
-diagnostic upload.
+Live callbacks are slim and authoritative through D1 ownership and a small
+publication record; their private diagnostics arrive through
+`POST /runner-evidence`. Core publication never depends on that diagnostic
+upload.
 
 ### Deployment and compatibility
 
@@ -205,16 +204,14 @@ stays on the Runner host. Uploads share one real byte budget and prioritize the
 manifest and session metadata, truncating only an individual oversized artifact
 with an explicit marker.
 
-A slim `version: 2` terminal callback carries identity, attempt, status, stage,
-cleanup, timestamps, the validated result and only an evidence ID and status.
-New callbacks also carry immutable base/head SHAs, while older issued v2 archives
-may omit them and remain compatible. Core rejects any present SHA that differs
-from the current owner, and accepts a legacy Markdown-string result so an old
-review conclusion is preserved verbatim. The callback does not inline diagnostic
+A slim `version: 2` terminal callback carries identity, attempt, immutable
+base/head SHAs, status, stage, cleanup, timestamps, the validated structured
+result and only an evidence ID and status. Core rejects a callback whose SHAs do
+not match the current owner, and successful callbacks require the structured
+result; plain Markdown is not accepted. The callback does not inline diagnostic
 artifacts. Core writes the small
 authoritative `reviews/<runId>/publications/<jobId>/<attempt>.json` record before
-publication; scheduled reconciliation reads that attempt-specific record and
-falls back to the legacy `reviews/<runId>` archive only when no record exists.
+publication; scheduled reconciliation reads only that attempt-specific record.
 Duplicate or non-current callbacks never replace the record used for an already
 claimed publication. Diagnostic uploads use an immutable content-addressed
 attempt key, and D1 only selects the current owner's key; a late old-attempt

@@ -84,28 +84,12 @@ const readStat = (path: string, reason: CallbackRecoveryReason) =>
     catch: () => new CallbackRecoveryError({ reason }),
   });
 
-/**
- * A pre-v2 archive has the same terminal shape but no version tag. Adding the
- * tag and decoding through the real v2 schema drops the six legacy inline
- * attachments automatically while preserving an old Markdown/string result.
- */
-const decodeArchivedCallback = (text: string) => {
-  let value: unknown;
-  try {
-    value = JSON.parse(text);
-  } catch {
-    return undefined;
-  }
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
-  const tagged =
-    'version' in value ? value : { ...(value as Record<string, unknown>), version: 2 as const };
-  return Option.getOrUndefined(
-    Schema.decodeUnknownOption(Schema.fromJsonString(RunnerTerminalCallback))(
-      JSON.stringify(tagged),
-      { onExcessProperty: 'ignore' },
-    ),
+const decodeArchivedCallback = (text: string) =>
+  Option.getOrUndefined(
+    Schema.decodeUnknownOption(Schema.fromJsonString(RunnerTerminalCallback))(text, {
+      onExcessProperty: 'error',
+    }),
   );
-};
 
 const encodeForManifest = (
   callback: typeof RunnerTerminalCallback.Type,
@@ -165,9 +149,7 @@ export const recoverCallback = Effect.fn('recoverCallback')(function* (
   const callback = decodeArchivedCallback(new TextDecoder().decode(body));
   if (callback === undefined) return yield* fail('invalid-callback');
 
-  // The local manifest is the retained ownership and cleanup record. Diagnostic
-  // attachments are never decoded or hashed again: a legacy inline callback and
-  // the slim v2 callback both recover from the same local identity.
+  // The local manifest binds the failed callback to its cleanup evidence.
   const manifestPath = join(directory, 'manifest.json');
   const manifestInfo = yield* readStat(manifestPath, 'invalid-manifest');
   if (!manifestInfo.isFile() || manifestInfo.size > MAX_RUNNER_CALLBACK_BYTES) {
@@ -199,8 +181,8 @@ export const recoverCallback = Effect.fn('recoverCallback')(function* (
     callback.evidence.id !== request.evidenceId ||
     manifest.baseSha !== request.baseSha ||
     manifest.headSha !== request.headSha ||
-    (callback.baseSha !== undefined && callback.baseSha !== manifest.baseSha) ||
-    (callback.headSha !== undefined && callback.headSha !== manifest.headSha) ||
+    callback.baseSha !== manifest.baseSha ||
+    callback.headSha !== manifest.headSha ||
     manifest.terminal.status !== callback.status
   ) {
     return yield* fail('identity-mismatch');

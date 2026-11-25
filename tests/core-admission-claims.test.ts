@@ -1756,7 +1756,7 @@ describe('Core admission, claims, and manual policy', () => {
         },
       );
       const callback = JSON.parse(await successfulCallback(claim.runId));
-      callback.result = { version: 2, decision: 'request_changes', markdown: callback.result };
+      callback.result = { ...callback.result, decision: 'request_changes' };
       const response = await worker.fetch(
         new Request('https://core.internal/runner-results', {
           method: 'POST',
@@ -1844,6 +1844,8 @@ describe('Core admission, claims, and manual policy', () => {
           id: 'runner-job-1',
           runId: claimed.runId,
           attempt: 1,
+          baseSha: eligibleEvent.baseSha,
+          headSha: eligibleEvent.headSha,
           status: 'succeeded',
           usage: { version: 1, models: [] },
           stage: 'cleanup',
@@ -1854,7 +1856,11 @@ describe('Core admission, claims, and manual policy', () => {
             submissionCompletedAt: '2026-09-01T00:00:02.000Z',
             cleanupCompletedAt: '2026-09-01T00:00:03.000Z',
           },
-          result: '## Review:\n\nNo defects found.\n',
+          result: {
+            version: 2,
+            decision: 'comment',
+            markdown: '## Review:\n\nNo defects found.\n',
+          },
         });
         const missingDecisiveTimestamp = JSON.parse(callbackBody) as {
           timestamps: Record<string, string>;
@@ -1924,6 +1930,7 @@ describe('Core admission, claims, and manual policy', () => {
             installationId: 7,
             checkRunId: 321,
             status: 'success',
+            decision: 'comment',
           },
         ]);
         const replay = await worker.fetch(
@@ -2024,7 +2031,7 @@ describe('Core admission, claims, and manual policy', () => {
         },
       );
       const callback = JSON.parse(await successfulCallback(claimed.runId));
-      callback.result = { version: 2, decision: 'request_changes', markdown: callback.result };
+      callback.result = { ...callback.result, decision: 'request_changes' };
       const request = () =>
         new Request('https://core.internal/runner-results', {
           method: 'POST',

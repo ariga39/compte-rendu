@@ -48,7 +48,7 @@ describe('GitHub publication shim', () => {
     expect(
       await coordinator.completeReview({
         runId,
-        output: body,
+        output: { version: 2, decision: 'comment', markdown: body },
       }),
     ).toBe('completed');
 

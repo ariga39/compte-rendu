@@ -147,8 +147,6 @@ export const StructuredReviewResult = Schema.Struct({
   markdown: ReviewResult,
 });
 export type StructuredReviewResult = typeof StructuredReviewResult.Type;
-export const RunnerReviewResult = Schema.Union([ReviewResult, StructuredReviewResult]);
-export type RunnerReviewResult = typeof RunnerReviewResult.Type;
 
 export const RunnerFailureCause = Schema.Literals([
   'process-exit',
@@ -195,7 +193,7 @@ export const RunnerJobResponse = Schema.Struct({
   sandbox: Schema.Struct({
     cleanup: Schema.Literals(['pending', 'destroyed', 'failed']),
   }),
-  result: Schema.optional(RunnerReviewResult),
+  result: Schema.optional(StructuredReviewResult),
   failure: Schema.optional(
     Schema.Struct({
       reason: Schema.Literals([
@@ -316,10 +314,8 @@ const CompleteRunnerEvidenceReference = Schema.Struct({
 const V2CallbackIdentity = {
   version: Schema.Literal(2),
   ...CallbackIdentity,
-  // New callbacks carry the immutable revision; archives issued before this
-  // field existed can be read for cleanup recovery using the verified manifest.
-  baseSha: Schema.optionalKey(GitHubSha),
-  headSha: Schema.optionalKey(GitHubSha),
+  baseSha: GitHubSha,
+  headSha: GitHubSha,
 };
 const SuccessfulRunnerResultCallbackV2 = Schema.Struct({
   ...V2CallbackIdentity,
@@ -327,9 +323,7 @@ const SuccessfulRunnerResultCallbackV2 = Schema.Struct({
   evidence: CompleteRunnerEvidenceReference,
   timestamps: CallbackTimestamps,
   sandbox: Schema.Struct({ cleanup: Schema.Literal('destroyed') }),
-  // A retained pre-v2 Markdown result is accepted as-is and published as a
-  // comment. New Runner callbacks always carry the structured result.
-  result: RunnerReviewResult,
+  result: StructuredReviewResult,
   ...OptionalProgressSnapshot,
 });
 const FailedRunnerResultCallbackV2 = Schema.Struct({

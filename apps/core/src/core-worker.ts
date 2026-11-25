@@ -2,7 +2,6 @@ import { Option, Schema } from 'effect';
 import {
   createCloudflareOperationalLog,
   DEFAULT_REVIEW_NAME,
-  MAX_RUNNER_CALLBACK_BYTES,
   REVIEW_ATTEMPT_BUDGET_MS,
   ReviewEvent,
   EffortJobDetail,
@@ -22,7 +21,6 @@ import { createPostHogLifecycleLog } from './posthog';
 import { handleReviewConfiguration } from './review-configuration';
 import type { OperationalLog } from '@compte-rendu/contracts';
 import { createRunnerProtocol } from './runner-protocol';
-import { validatePublicationEvidence } from './runner-evidence';
 import { readPublicationRecord } from './publication-record';
 import {
   handleDashboardRequest,
@@ -249,29 +247,14 @@ export const createCoreWorker = (
             jobId: outcome.runnerJobId,
             attempt: outcome.runnerAttempt,
           });
-          if (publication.kind === 'valid') {
-            output = publication.record.result;
-          } else {
-            if (publication.kind === 'invalid') throw new Error('Invalid publication record');
-            // Historical runs have no small record. Their inline archive is
-            // still readable through the legacy evidence shape.
-            const evidence = outcome.evidence;
-            const key = `reviews/${runId}`;
-            if (!evidence || evidence.key !== key || evidence.size > MAX_RUNNER_CALLBACK_BYTES)
-              throw new Error('Invalid evidence metadata');
-            const record = await env.EVIDENCE_BUCKET?.get?.(key);
-            if (!record || record.size !== evidence.size) throw new Error('Invalid evidence size');
-            const legacy = await validatePublicationEvidence({
-              runId,
-              runnerJobId: outcome.runnerJobId,
-              runnerAttempt: outcome.runnerAttempt,
-              bytes: await record.arrayBuffer(),
-              size: evidence.size,
-              sha256: evidence.sha256,
-            });
-            if (legacy.kind !== 'valid') throw new Error('Invalid evidence identity');
-            output = legacy.output;
+          if (publication.kind !== 'valid') {
+            throw new Error(
+              publication.kind === 'invalid'
+                ? 'Invalid publication record'
+                : 'Publication record is unavailable',
+            );
           }
+          output = publication.record.result;
           reason = 'publication';
           const disposition = await createCoordinator(lifecycle).completeReview({
             runId,

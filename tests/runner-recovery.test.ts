@@ -502,6 +502,7 @@ describe('Runner confirmed cleanup recovery', () => {
     'unauthorized',
     'wrong-identity',
     'legacy-host-cleanup',
+    'legacy-untagged-callback',
     'present-sandbox',
     'auth-error',
     'truncated-inspect',
@@ -526,6 +527,11 @@ describe('Runner confirmed cleanup recovery', () => {
       const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
       delete manifest.hostCleanupConfirmed;
       await writeFile(manifestPath, JSON.stringify(manifest), { mode: 0o600 });
+    }
+    if (failure === 'legacy-untagged-callback') {
+      const callback = JSON.parse(await readFile(callbackPath, 'utf8'));
+      delete callback.version;
+      await writeFile(callbackPath, JSON.stringify(callback), { mode: 0o600 });
     }
     const original = await readFile(callbackPath, 'utf8');
     const manifest = scenario.manifest;
@@ -585,13 +591,20 @@ describe('Runner confirmed cleanup recovery', () => {
       expect(response.status).toBe(
         failure === 'unauthorized'
           ? 401
-          : ['wrong-identity', 'legacy-host-cleanup'].includes(failure)
+          : ['wrong-identity', 'legacy-host-cleanup', 'legacy-untagged-callback'].includes(failure)
             ? 409
             : 502,
       );
       expect(delivered).toHaveLength(failure === 'delivery-error' ? 1 : 0);
       expect(commands.some((args) => args[0] === 'rm')).toBe(false);
-      if (['unauthorized', 'wrong-identity', 'legacy-host-cleanup'].includes(failure))
+      if (
+        [
+          'unauthorized',
+          'wrong-identity',
+          'legacy-host-cleanup',
+          'legacy-untagged-callback',
+        ].includes(failure)
+      )
         expect(commands).toEqual([]);
       expect(await readFile(callbackPath, 'utf8')).toBe(original);
     } finally {

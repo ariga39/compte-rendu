@@ -78,7 +78,6 @@ export interface GitHubAdapter {
     pullRequestNumber: number;
     installationId: number;
     payload: ReviewPublicationPayload;
-    verifyPublication?: boolean;
   }): Promise<ReviewPublicationCreateResult>;
 }
 

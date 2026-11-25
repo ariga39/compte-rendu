@@ -12,6 +12,15 @@ import type { ReviewEvent } from '../packages/contracts/src';
 import { SqliteD1Database } from './support/d1-database';
 import { recordTestEvidence } from './support/core-worker-harness';
 
+const reviewOutput = (
+  markdown: string,
+  decision: 'approve' | 'request_changes' | 'comment' = 'comment',
+) => ({
+  version: 2 as const,
+  decision,
+  markdown,
+});
+
 const currentFacts = {
   repositoryVisibility: 'public',
   baseRepositoryId: 11,
@@ -163,11 +172,13 @@ describe('Review coordinator', () => {
     runId = await stateStore.runIdForDelivery(eligiblePrivatePullRequest.deliveryId);
     if (runId === undefined) throw new Error('run was not persisted');
     for (let delivery = 0; delivery < 2; delivery++)
-      expect(await coordinator.completeReview({ runId, output: 'No findings.' })).toBe('cancelled');
+      expect(
+        await coordinator.completeReview({ runId, output: reviewOutput('No findings.') }),
+      ).toBe('cancelled');
     expect(reviews).toEqual([]);
   });
 
-  it('publishes the Markdown output as a body-only COMMENT for the admitted head', async () => {
+  it('publishes a structured comment for the admitted head', async () => {
     const stateStore = createTestReviewStore();
     const reviews: ReviewPublicationPayload[] = [];
     const finalMarkdown = '## Review:\n\nUse `{body}` exactly.\n';
@@ -188,7 +199,9 @@ describe('Review coordinator', () => {
     expect(await coordinator.handleReviewEvent(eligiblePrivatePullRequest)).toBe('scheduled');
     const runId = await stateStore.runIdForDelivery(eligiblePrivatePullRequest.deliveryId);
     if (runId === undefined) throw new Error('run was not persisted');
-    expect(await coordinator.completeReview({ runId, output: finalMarkdown })).toBe('completed');
+    expect(await coordinator.completeReview({ runId, output: reviewOutput(finalMarkdown) })).toBe(
+      'completed',
+    );
     expect(reviews).toEqual([
       {
         event: 'COMMENT',
@@ -225,7 +238,7 @@ describe('Review coordinator', () => {
     expect(
       await coordinator.completeReview({
         runId,
-        output: '## Review:\n\nPublished review.',
+        output: reviewOutput('## Review:\n\nPublished review.'),
       }),
     ).toBe('completed');
     expect(events).toContainEqual({
@@ -254,7 +267,7 @@ describe('Review coordinator', () => {
     expect(
       await coordinator.completeReview({
         runId,
-        output: '',
+        output: reviewOutput(''),
       }),
     ).toBe('failed');
     expect(events).toContainEqual({
@@ -301,7 +314,9 @@ describe('Review coordinator', () => {
       stateStore,
     });
 
-    expect(await coordinator.completeReview({ runId: claimed.runId, output: '' })).toBe('failed');
+    expect(
+      await coordinator.completeReview({ runId: claimed.runId, output: reviewOutput('') }),
+    ).toBe('failed');
     expect(reactions).toEqual(['-1']);
     expect(comments).toEqual([
       `Review job failed. Check the reviews on this commit before retrying with \`/ai-review\`.\n\n<!-- compte-rendu:failure:run:${claimed.runId} -->`,
@@ -356,12 +371,16 @@ describe('Review coordinator', () => {
       stateStore: flakyStore,
     });
 
-    expect(await coordinator.completeReview({ runId: claimed.runId, output: '' })).toBe('failed');
+    expect(
+      await coordinator.completeReview({ runId: claimed.runId, output: reviewOutput('') }),
+    ).toBe('failed');
     const afterFailure = await stateStore.getRunOutcome(claimed.runId);
     expect(afterFailure).toMatchObject({ status: 'scheduled' });
     expect(afterFailure?.publicationClaimedAt).toBeUndefined();
 
-    expect(await coordinator.completeReview({ runId: claimed.runId, output: '' })).toBe('failed');
+    expect(
+      await coordinator.completeReview({ runId: claimed.runId, output: reviewOutput('') }),
+    ).toBe('failed');
     expect(await stateStore.getRunOutcome(claimed.runId)).toMatchObject({
       status: 'failed',
       publicationClaimedAt: expect.any(String),
@@ -402,8 +421,12 @@ describe('Review coordinator', () => {
       stateStore,
     });
 
-    expect(await coordinator.completeReview({ runId: claimed.runId, output: '' })).toBe('failed');
-    expect(await coordinator.completeReview({ runId: claimed.runId, output: '' })).toBe('failed');
+    expect(
+      await coordinator.completeReview({ runId: claimed.runId, output: reviewOutput('') }),
+    ).toBe('failed');
+    expect(
+      await coordinator.completeReview({ runId: claimed.runId, output: reviewOutput('') }),
+    ).toBe('failed');
     expect(comments).toEqual([
       `Review job failed. Check the reviews on this commit before retrying with \`/ai-review\`.\n\n<!-- compte-rendu:failure:run:${claimed.runId} -->`,
     ]);
@@ -442,7 +465,7 @@ describe('Review coordinator', () => {
     expect(
       await coordinator.completeReview({
         runId: claimed.runId,
-        output: '## Review:\n\nSuperseded.',
+        output: reviewOutput('## Review:\n\nSuperseded.'),
       }),
     ).toBe('ignored');
     expect(reactions).toEqual(['confused']);
@@ -494,7 +517,7 @@ describe('Review coordinator', () => {
     expect(
       await coordinator.completeReview({
         runId,
-        output: '## Review:\n\nTOCTOU review.',
+        output: reviewOutput('## Review:\n\nTOCTOU review.'),
       }),
     ).toBe('ignored');
     expect(reviews).toEqual([]);
@@ -583,12 +606,24 @@ describe('Review coordinator', () => {
           return new Response('{}', { status: 503 });
         }
         postedReviews.push(init?.body ?? null);
-        return new Response(JSON.stringify({ id: 1, body: `<!-- compte-rendu:run:${runId} -->` }));
+        return new Response(
+          JSON.stringify({
+            id: 1,
+            body: `<!-- compte-rendu:run:${runId} -->`,
+            user: { type: 'Bot', login: 'review[bot]' },
+            commit_id: eligiblePrivatePullRequest.headSha,
+            state: 'COMMENTED',
+          }),
+        );
       }
       return new Response('{}', { status: 404 });
     };
     const coordinator = createReviewCoordinator({
-      github: createGitHubPublicationAdapter({ token: 'installation-token', fetch: fetcher }),
+      github: createGitHubPublicationAdapter({
+        token: 'installation-token',
+        getReviewAuthorLogin: async () => 'review[bot]',
+        fetch: fetcher,
+      }),
       stateStore,
     });
 
@@ -597,7 +632,7 @@ describe('Review coordinator', () => {
     expect(
       await coordinator.completeReview({
         runId,
-        output: '## Review:\n\nRetryable publication.',
+        output: reviewOutput('## Review:\n\nRetryable publication.'),
       }),
     ).toBe('completed');
     expect(postedReviews).toHaveLength(1);
@@ -656,7 +691,7 @@ describe('Review coordinator', () => {
     expect(
       await coordinator.completeReview({
         runId,
-        output: '## Review:\n\nUncertain publication.',
+        output: reviewOutput('## Review:\n\nUncertain publication.'),
       }),
     ).toBe('failed');
     expect(remoteReviews).toHaveLength(1);
@@ -673,7 +708,7 @@ describe('Review coordinator', () => {
   });
 
   it.each([true, false])(
-    'recovers a legacy comment only when its App marker exists beyond the first page (%s)',
+    'recovers a review only when its App marker exists beyond the first page (%s)',
     async (ownMarker) => {
       const stateStore = createTestReviewStore();
       const postedPayloads: string[] = [];
@@ -742,7 +777,15 @@ describe('Review coordinator', () => {
           method === 'POST'
         ) {
           if (typeof init?.body === 'string') postedPayloads.push(init.body);
-          return new Response(JSON.stringify({ id: 200, body: '<!-- published -->' }));
+          return new Response(
+            JSON.stringify({
+              id: 200,
+              body: '<!-- published -->',
+              user: { type: 'Bot', login: 'review[bot]' },
+              commit_id: eligiblePrivatePullRequest.headSha,
+              state: 'COMMENTED',
+            }),
+          );
         }
         return new Response('{}', { status: 404 });
       };
@@ -765,7 +808,7 @@ describe('Review coordinator', () => {
       expect(
         await coordinator.completeReview({
           runId,
-          output: '## Review:\n\nAlready published.',
+          output: reviewOutput('## Review:\n\nAlready published.'),
         }),
       ).toBe('completed');
       expect(postedPayloads).toHaveLength(ownMarker ? 0 : 1);
@@ -800,7 +843,7 @@ describe('Review coordinator', () => {
       expect(
         await coordinator.completeReview({
           runId,
-          output: '## Review:\n\nD1 completion.',
+          output: reviewOutput('## Review:\n\nD1 completion.'),
         }),
       ).toBe('completed');
       expect(await coordinator.handleReviewEvent(event)).toBe('completed');
@@ -1031,7 +1074,7 @@ describe('Review coordinator', () => {
 
     const disposition = await coordinator.completeReview({
       runId,
-      output: '## Review:\n\nStale review.',
+      output: reviewOutput('## Review:\n\nStale review.'),
     });
 
     expect(disposition).toBe('ignored');
@@ -1068,7 +1111,7 @@ describe('Review coordinator', () => {
     expect(await coordinator.handleReviewEvent(eligiblePrivatePullRequest)).toBe('scheduled');
     runId = await runIdOf(stateStore, eligiblePrivatePullRequest.deliveryId);
 
-    const output = '## Review:\n\nRepeatable summary.';
+    const output = reviewOutput('## Review:\n\nRepeatable summary.');
     expect(await coordinator.completeReview({ runId, output })).toBe('completed');
     expect(await coordinator.completeReview({ runId, output })).toBe('completed');
     expect(reviews).toHaveLength(1);

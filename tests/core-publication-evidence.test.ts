@@ -5,7 +5,7 @@ import { publicationRecordKey } from '../apps/core/src/publication-record';
 import { MAX_RUNNER_EVIDENCE_BYTES } from '../packages/contracts/src';
 import { SqliteD1Database } from './support/d1-database';
 import { claimRunnerJob } from './support/runner-claim';
-import { coreEnv, eligibleEvent, successfulCallback } from './support/core-worker-harness';
+import { coreEnv, eligibleEvent } from './support/core-worker-harness';
 
 const result = {
   version: 2 as const,
@@ -19,6 +19,8 @@ const slimCallback = (runId: string, overrides: Record<string, unknown> = {}) =>
     id: 'runner-job-1',
     runId,
     attempt: 1,
+    baseSha: eligibleEvent.baseSha,
+    headSha: eligibleEvent.headSha,
     status: 'succeeded',
     stage: 'cleanup',
     sandbox: { cleanup: 'destroyed' },
@@ -185,6 +187,54 @@ describe('slim Runner publication callbacks', () => {
     }
   });
 
+  it.each([
+    ['missing base/head', (callback: Record<string, unknown>) => delete callback.baseSha],
+    ['missing head', (callback: Record<string, unknown>) => delete callback.headSha],
+    [
+      'a pre-v2 Markdown result',
+      (callback: Record<string, unknown>) => {
+        callback.result = '## Review:\n\nA legacy result.\n';
+      },
+    ],
+    [
+      'an untagged callback',
+      (callback: Record<string, unknown>) => {
+        delete callback.version;
+      },
+    ],
+  ])('rejects %s before publication', async (_label, mutate) => {
+    const database = new SqliteD1Database();
+    const store = createD1ReviewStateStore(database);
+    const claimed = await claimRun(store, 'delivery-strict-v2-callback');
+    const bucket = archiveBucket();
+    const published: unknown[] = [];
+    const worker = createCoreWorker(
+      { ...coreEnv(database), EVIDENCE_BUCKET: bucket.bucket },
+      {
+        stateStore: store,
+        github: {
+          loadReviewTarget: async () => ({ headSha: eligibleEvent.headSha }),
+          createReview: async (input) => {
+            published.push(input);
+            return { kind: 'created', review: input };
+          },
+        },
+      },
+    );
+    const callback = JSON.parse(slimCallback(claimed.runId)) as Record<string, unknown>;
+    mutate(callback);
+    try {
+      expect((await worker.fetch(callbackRequest(JSON.stringify(callback)))).status).toBe(400);
+      expect(published).toEqual([]);
+      expect(bucket.objects.size).toBe(0);
+      await expect(store.getRunOutcome(claimed.runId)).resolves.toMatchObject({
+        status: 'scheduled',
+      });
+    } finally {
+      database.close();
+    }
+  });
+
   it('does not let a duplicate callback replace the record claimed for publication', async () => {
     const database = new SqliteD1Database();
     const store = createD1ReviewStateStore(database);
@@ -297,38 +347,79 @@ describe('slim Runner publication callbacks', () => {
     }
   });
 
-  it('publishes a legacy callback when only its diagnostic archive write fails', async () => {
+  it('does not reconcile an interrupted publication from the legacy runId archive', async () => {
     const database = new SqliteD1Database();
     const store = createD1ReviewStateStore(database);
-    const claimed = await claimRun(store, 'delivery-archive-unavailable');
+    const claimed = await claimRun(store, 'delivery-legacy-archive');
+    await store.claimRunPublication({
+      runId: claimed.runId,
+      occurredAt: '2026-09-01T00:00:04.000Z',
+      publishing: true,
+    });
     const bucket = archiveBucket();
-    const publish = bucket.bucket.put;
-    bucket.bucket.put = async (key, value, options) => {
-      if (key === `reviews/${claimed.runId}`) throw new Error('diagnostic R2 unavailable');
-      return publish(key, value, options);
-    };
-    const published: unknown[] = [];
+    const manifest = await evidenceField(
+      JSON.stringify({
+        result,
+        jobId: 'runner-job-1',
+        runId: claimed.runId,
+        attempt: 1,
+        evidenceId: 'evidence-1',
+        sessionIds: [],
+        terminal: { status: 'succeeded' },
+        evidence: { id: 'evidence-1', status: 'complete' },
+        complete: true,
+        cleanup: { status: 'destroyed' },
+      }),
+    );
+    const validatedReview = await evidenceField(result.markdown);
+    const archive = JSON.stringify({
+      version: 1,
+      runId: claimed.runId,
+      jobId: 'runner-job-1',
+      evidence: { manifest, validatedReview },
+    });
+    const archiveField = await evidenceField(archive);
+    const legacyKey = `reviews/${claimed.runId}`;
+    bucket.objects.set(legacyKey, archive);
+    await store.recordEvidenceUpload({
+      runId: claimed.runId,
+      jobId: 'runner-job-1',
+      attempt: 1,
+      evidence: {
+        key: legacyKey,
+        status: 'complete',
+        size: archiveField.size,
+        sha256: archiveField.sha256,
+        uploadedAt: '2026-09-01T00:00:03.000Z',
+      },
+    });
+    const markerLookups: unknown[] = [];
+    const publications: unknown[] = [];
     const worker = createCoreWorker(
       { ...coreEnv(database), EVIDENCE_BUCKET: bucket.bucket },
       {
         stateStore: store,
         github: {
           loadReviewTarget: async () => ({ headSha: eligibleEvent.headSha }),
+          findReviewByMarker: async (input) => {
+            markerLookups.push(input);
+            return { id: 99 };
+          },
           createReview: async (input) => {
-            published.push(input);
+            publications.push(input);
             return { kind: 'created', review: input };
           },
         },
       },
     );
     try {
-      expect(
-        (await worker.fetch(callbackRequest(await successfulCallback(claimed.runId)))).status,
-      ).toBe(202);
-      expect(published).toHaveLength(1);
-      expect([...bucket.objects.keys()]).toEqual([publicationKey(claimed.runId)]);
+      await expect(
+        worker.reconcilePublications(Date.parse('2026-09-01T02:00:00.000Z')),
+      ).rejects.toThrow();
+      expect(markerLookups).toEqual([]);
+      expect(publications).toEqual([]);
       await expect(store.getRunOutcome(claimed.runId)).resolves.toMatchObject({
-        status: 'completed',
+        status: 'scheduled',
       });
     } finally {
       database.close();

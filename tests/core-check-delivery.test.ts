@@ -193,6 +193,7 @@ describe('Core Check setup and delivery reconciliation', () => {
           installationId: eligibleEvent.installationId,
           checkRunId: 322,
           status: 'success',
+          decision: 'comment',
         },
       ]);
     } finally {
@@ -262,7 +263,7 @@ describe('Core Check setup and delivery reconciliation', () => {
       check.resolve({ id: 321 });
       await inProgressStarted.promise;
       const callback = JSON.parse(await successfulCallback(claimed.runId, claimed.id));
-      callback.result = { version: 2, decision: 'request_changes', markdown: callback.result };
+      callback.result = { ...callback.result, decision: 'request_changes' };
 
       expect(
         (
@@ -634,6 +635,7 @@ describe('Core Check setup and delivery reconciliation', () => {
           installationId: eligibleEvent.installationId,
           checkRunId: 321,
           status: 'success',
+          decision: 'comment',
         },
       ]);
     } finally {
@@ -713,6 +715,7 @@ describe('Core Check setup and delivery reconciliation', () => {
           installationId: 7,
           checkRunId: 321,
           status: 'success',
+          decision: 'comment',
         },
       ]);
 
@@ -749,6 +752,7 @@ describe('Core Check setup and delivery reconciliation', () => {
           installationId: 7,
           checkRunId: 321,
           status: 'success',
+          decision: 'comment',
         },
       ]);
       expect(reviews).toHaveLength(1);
@@ -910,6 +914,7 @@ describe('Core Check setup and delivery reconciliation', () => {
           installationId: 7,
           checkRunId: 322,
           status: 'success',
+          decision: 'comment',
         },
       ]);
 
@@ -922,6 +927,7 @@ describe('Core Check setup and delivery reconciliation', () => {
           installationId: 7,
           checkRunId: 322,
           status: 'success',
+          decision: 'comment',
         },
       ]);
       expect(checkRequests).toHaveLength(1);

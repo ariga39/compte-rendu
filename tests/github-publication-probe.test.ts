@@ -34,7 +34,11 @@ const successfulCallback = {
     cleanupCompletedAt: '2026-09-02T00:00:03.000Z',
   },
   evidence: { id: 'probe-evidence-1', status: 'complete' as const },
-  result: '## Review:\n\nProbe result.\n',
+  result: {
+    version: 2 as const,
+    decision: 'comment' as const,
+    markdown: '## Review:\n\nProbe result.\n',
+  },
 };
 
 describe('GitHub publication probe', () => {
@@ -108,7 +112,7 @@ describe('GitHub publication probe', () => {
       payload: {
         event: 'COMMENT',
         commit_id: job.headSha,
-        body: `<!-- compte-rendu:run:${job.runId} -->\n${successfulCallback.result}`,
+        body: `<!-- compte-rendu:run:${job.runId} -->\n${successfulCallback.result.markdown}`,
       },
     });
     expect(`${rawCallback}\n${JSON.stringify(capturedReview)}`).not.toContain(
@@ -319,7 +323,11 @@ describe('GitHub publication probe', () => {
       ...successfulCallback,
       id: secondJob.id,
       runId: secondJob.runId,
-      result: '## Review:\n\nSecond probe result.\n',
+      result: {
+        version: 2,
+        decision: 'comment',
+        markdown: '## Review:\n\nSecond probe result.\n',
+      },
       evidence: { id: 'probe-evidence-2', status: 'complete' as const },
     };
     await writeFile(firstJobsPath, JSON.stringify([{ repositoryId: 11, installationId: 7, job }]), {
@@ -407,7 +415,7 @@ describe('GitHub publication probe', () => {
       payload: {
         event: 'COMMENT',
         commit_id: secondJob.headSha,
-        body: `<!-- compte-rendu:run:${secondJob.runId} -->\n${secondCallback.result}`,
+        body: `<!-- compte-rendu:run:${secondJob.runId} -->\n${secondCallback.result.markdown}`,
       },
     });
     for (const file of await readdir(evidenceRoot)) {
@@ -432,7 +440,11 @@ describe('GitHub publication probe', () => {
       ...successfulCallback,
       id: secondJob.id,
       runId: secondJob.runId,
-      result: '## Review:\n\nSecond concurrent result.\n',
+      result: {
+        version: 2,
+        decision: 'comment',
+        markdown: '## Review:\n\nSecond concurrent result.\n',
+      },
       evidence: { id: 'probe-evidence-2', status: 'complete' as const },
     };
     const preexisting = {

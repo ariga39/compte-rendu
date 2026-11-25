@@ -140,12 +140,13 @@ eligibility. Head checks narrow races; they cannot make a GitHub read and subseq
 mutation atomic. If the new round fails or publishes Comment after reset, the old vote stays dismissed;
 failure never restores an earlier approval or Request changes.
 
-Deploy Core/contracts support before restarting upgraded Runners. Existing
-in-flight legacy results retain their COMMENT behavior and do not acquire a
-decision retroactively. New-format results require a decision. Drain before
-changing a Runner's result format. Historical records and existing evidence must
-remain readable. No general plugin, policy engine, or per-repository voting
-framework is needed for this feature.
+Deploy Core/contracts support before restarting upgraded Runners. Every live
+callback requires immutable base/head SHAs and a structured result with a
+decision; pre-v2 plain Markdown callbacks are rejected. Historical rows without a
+recorded decision remain unknown and do not acquire one retroactively. Drain
+before changing a Runner's result format. Historical records and existing
+evidence must remain readable. No general plugin, policy engine, or
+per-repository voting framework is needed for this feature.
 
 ## Acceptance through existing public seams
 
@@ -158,7 +159,8 @@ framework is needed for this feature.
   recovery cannot accept another author, commit, or decision.
 - A published Request changes run completes successfully while displaying its
   decision; runtime failure publishes no vote.
-- Legacy callbacks retain Comment behavior; historical rows remain unknown.
+- Pre-v2 callbacks are rejected; historical rows without a decision remain
+  unknown.
 - Tests establish decision mapping/publication, not repository branch protection.
   Validate protection on the target repository before claiming a vote blocks or
   permits merging.
@@ -173,6 +175,5 @@ framework is needed for this feature.
 
 Current implementation anchors: `apps/runner/src/review-prompt.ts`,
 `packages/contracts/src/index.ts`, `apps/core/src/review-publication-format.ts`,
-and `apps/core/src/github-review-adapter.ts`. Legacy Markdown-only callbacks
-retain COMMENT publication; new structured results use the explicit decision
-and verify publication identity and state.
+and `apps/core/src/github-review-adapter.ts`. Structured results use the explicit
+decision and publication always verifies the review identity and state.

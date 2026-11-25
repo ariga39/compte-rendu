@@ -1,5 +1,5 @@
 import { Option, Schema } from 'effect';
-import { RunnerReviewResult } from '@compte-rendu/contracts';
+import { StructuredReviewResult } from '@compte-rendu/contracts';
 import type { R2BucketLike } from './core-worker';
 
 /**
@@ -11,7 +11,7 @@ export const RunnerPublicationRecord = Schema.Struct({
   runId: Schema.NonEmptyString,
   jobId: Schema.NonEmptyString,
   attempt: Schema.Int,
-  result: RunnerReviewResult,
+  result: StructuredReviewResult,
 });
 export type RunnerPublicationRecord = typeof RunnerPublicationRecord.Type;
 

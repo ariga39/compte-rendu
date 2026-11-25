@@ -308,7 +308,6 @@ it('recovers a lost vote response only from the matching App review without post
       installationId: 7,
       pullRequestNumber: 42,
       payload,
-      verifyPublication: true,
     }),
   ).toMatchObject({ kind: 'created', review: { id: 100, state: 'CHANGES_REQUESTED' } });
   expect(records).toHaveLength(1);
@@ -344,7 +343,6 @@ it('does not retry a vote whose returned author contradicts the authenticated Ap
       repositoryId: 11,
       installationId: 7,
       pullRequestNumber: 42,
-      verifyPublication: true,
       payload: {
         event: 'APPROVE',
         commit_id: headSha,
