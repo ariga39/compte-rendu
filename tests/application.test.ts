@@ -496,3 +496,171 @@ it('enforces Runner method precedence, bearer authentication, limits and body bo
     database.close();
   }
 });
+
+const webhookSecret = 'test-webhook-secret';
+
+const signedWebhookRequest = async (
+  event: string,
+  value: unknown,
+  deliveryId = 'delivery-effect-path',
+  secret = webhookSecret,
+) => {
+  const body = JSON.stringify(value);
+  const key = await globalThis.crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  const digest = new Uint8Array(
+    await globalThis.crypto.subtle.sign('HMAC', key, new TextEncoder().encode(body)),
+  );
+  return new Request('https://reviews.test/webhooks/github', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-github-event': event,
+      'x-github-delivery': deliveryId,
+      'x-hub-signature-256': `sha256=${Array.from(digest, (byte) =>
+        byte.toString(16).padStart(2, '0'),
+      ).join('')}`,
+    },
+    body,
+  });
+};
+
+const privatePullRequest = {
+  action: 'opened',
+  number: 42,
+  installation: { id: 7 },
+  repository: { id: 11, visibility: 'private' },
+  pull_request: {
+    draft: false,
+    user: { login: 'maintainer', type: 'User', id: 1 },
+    base: { sha: '1'.repeat(40), repo: { id: 11 } },
+    head: { sha: '2'.repeat(40), repo: { id: 99 } },
+  },
+};
+
+it('does not provision Core bindings for malformed, unauthorized or irrelevant webhooks', async () => {
+  const app = createApplication({
+    get REVIEW_DB(): never {
+      throw new Error('Core binding was provisioned before a typed Core call');
+    },
+    GITHUB_APP_ID: '1',
+    GITHUB_APP_PRIVATE_KEY: 'unused',
+    WEBHOOK_SECRET: webhookSecret,
+    ALLOWED_INSTALLATION_IDS: '[7]',
+  });
+
+  const malformed = await app.fetch(
+    await signedWebhookRequest('pull_request', { action: 'opened' }),
+  );
+  expect(malformed.status).toBe(400);
+
+  const unauthorized = await app.fetch(
+    await signedWebhookRequest('pull_request', {
+      ...privatePullRequest,
+      installation: { id: 99 },
+    }),
+  );
+  expect(unauthorized.status).toBe(204);
+
+  const irrelevant = await app.fetch(await signedWebhookRequest('issues', { action: 'opened' }));
+  expect(irrelevant.status).toBe(204);
+});
+
+it('runs webhook admission and deferred check setup through the application edge', async () => {
+  const database = new SqliteD1Database();
+  const checks: Array<{ headSha: string }> = [];
+  const app = createApplication(
+    {
+      REVIEW_DB: database,
+      GITHUB_APP_ID: '1',
+      GITHUB_APP_PRIVATE_KEY: 'unused',
+      WEBHOOK_SECRET: webhookSecret,
+      ALLOWED_INSTALLATION_IDS: '[7]',
+    },
+    {
+      github: {
+        loadReviewTarget: async () => ({ headSha: privatePullRequest.pull_request.head.sha }),
+        createCheckRun: async ({ headSha }) => {
+          checks.push({ headSha });
+          return { id: 321 };
+        },
+        updateCheckRun: async () => undefined,
+      },
+    },
+  );
+  try {
+    const background: Promise<unknown>[] = [];
+    const response = await app.fetch(
+      await signedWebhookRequest('pull_request', privatePullRequest, 'delivery-effect-background'),
+      { waitUntil: (task) => background.push(task) },
+    );
+
+    expect(response.status).toBe(202);
+    expect(background).toHaveLength(1);
+    await Promise.all(background);
+    expect(checks).toEqual([{ headSha: privatePullRequest.pull_request.head.sha }]);
+    const runId = (
+      await database
+        .prepare('SELECT run_id FROM review_runs WHERE delivery_id = ?')
+        .bind('delivery-effect-background')
+        .first<{ run_id: string }>()
+    )?.run_id;
+    expect(runId).toBeDefined();
+    expect(await createD1ReviewStateStore(database).getRunOutcome(runId!)).toMatchObject({
+      status: 'scheduled',
+      checkRunId: 321,
+      headSha: privatePullRequest.pull_request.head.sha,
+    });
+  } finally {
+    database.close();
+  }
+});
+
+it('completes check setup inline when no host context exists', async () => {
+  const database = new SqliteD1Database();
+  const checks: number[] = [];
+  const app = createApplication(
+    {
+      REVIEW_DB: database,
+      GITHUB_APP_ID: '1',
+      GITHUB_APP_PRIVATE_KEY: 'unused',
+      WEBHOOK_SECRET: webhookSecret,
+      ALLOWED_INSTALLATION_IDS: '[7]',
+    },
+    {
+      github: {
+        loadReviewTarget: async () => ({ headSha: privatePullRequest.pull_request.head.sha }),
+        createCheckRun: async () => {
+          checks.push(321);
+          return { id: 321 };
+        },
+        updateCheckRun: async () => undefined,
+      },
+    },
+  );
+  try {
+    const response = await app.fetch(
+      await signedWebhookRequest('pull_request', privatePullRequest, 'delivery-effect-inline'),
+    );
+
+    expect(response.status).toBe(202);
+    expect(checks).toEqual([321]);
+    const runId = (
+      await database
+        .prepare('SELECT run_id FROM review_runs WHERE delivery_id = ?')
+        .bind('delivery-effect-inline')
+        .first<{ run_id: string }>()
+    )?.run_id;
+    expect(await createD1ReviewStateStore(database).getRunOutcome(runId!)).toMatchObject({
+      status: 'scheduled',
+      checkRunId: 321,
+    });
+  } finally {
+    database.close();
+  }
+});

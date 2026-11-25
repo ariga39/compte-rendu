@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createRunner } from '../apps/runner/src/runner';
-import { createCoreWorker } from '../apps/core/src/core-worker';
 import { createD1ReviewStateStore } from '../apps/core/src/index';
 import type { ReviewEvent } from '../packages/contracts/src';
 import { SqliteD1Database } from './support/d1-database';
 import { claimRunnerJob } from './support/runner-claim';
 import {
+  createTestCoreWorker as createCoreWorker,
   eligibleEvent,
   runnerResponse,
   coreEnv,
@@ -48,7 +48,7 @@ describe('Core admission, claims, and manual policy', () => {
     );
 
     try {
-      const response = await worker.submitReviewEvent({
+      const response = await worker.schedule({
         ...eligibleEvent,
         deliveryId: 'delivery-queued-only',
       });
@@ -80,7 +80,7 @@ describe('Core admission, claims, and manual policy', () => {
     );
 
     try {
-      const scheduled = await worker.submitReviewEvent({
+      const scheduled = await worker.schedule({
         ...eligibleEvent,
         deliveryId: 'delivery-claimable',
       });
@@ -133,7 +133,7 @@ describe('Core admission, claims, and manual policy', () => {
           pullRequestNumber: 43,
         },
       ]) {
-        expect(await worker.submitReviewEvent(event)).toBe('accepted');
+        expect(await worker.schedule(event)).toBe('accepted');
       }
 
       const firstClaim = await worker.claimRunnerJob(
@@ -174,7 +174,7 @@ describe('Core admission, claims, and manual policy', () => {
 
     try {
       for (const deliveryId of ['delivery-concurrent-1', 'delivery-concurrent-2']) {
-        const response = await worker.submitReviewEvent({ ...eligibleEvent, deliveryId });
+        const response = await worker.schedule({ ...eligibleEvent, deliveryId });
         expect(response).toBe('accepted');
       }
 
@@ -273,7 +273,7 @@ describe('Core admission, claims, and manual policy', () => {
         deliveryId: 'delivery-new-queued',
         headSha: '3333333333333333333333333333333333333333',
       };
-      expect(await worker.submitReviewEvent(oldEvent)).toBe('accepted');
+      expect(await worker.schedule(oldEvent)).toBe('accepted');
       const oldClaim = await worker.claimRunnerJob(
         new Request('https://reviews.test/runner-claim', {
           method: 'POST',
@@ -283,7 +283,7 @@ describe('Core admission, claims, and manual policy', () => {
       oldRunId = oldJob.runId;
       currentHead = newEvent.headSha;
 
-      expect(await worker.submitReviewEvent(newEvent)).toBe('accepted');
+      expect(await worker.schedule(newEvent)).toBe('accepted');
       expect(runnerRequests).toHaveLength(1);
       expect(runnerRequests[0]?.method).toBe('DELETE');
       expect(runnerRequests[0]?.url).toBe(`http://runner.internal/jobs/${oldJob.id}`);
@@ -333,7 +333,7 @@ describe('Core admission, claims, and manual policy', () => {
           headSha: '3333333333333333333333333333333333333333',
         },
       ]) {
-        expect(await worker.submitReviewEvent(event)).toBe('accepted');
+        expect(await worker.schedule(event)).toBe('accepted');
       }
       expect(updates).toEqual([
         {
@@ -383,7 +383,7 @@ describe('Core admission, claims, and manual policy', () => {
 
     try {
       expect(
-        await worker.submitReviewEvent(
+        await worker.schedule(
           { ...eligibleEvent, deliveryId: 'delivery-cancel-fails-old' },
           context,
         ),
@@ -404,7 +404,7 @@ describe('Core admission, claims, and manual policy', () => {
         headSha: '3333333333333333333333333333333333333333',
       };
       currentHead = newEvent.headSha;
-      expect(await worker.submitReviewEvent(newEvent, context)).toBe('accepted');
+      expect(await worker.schedule(newEvent, context)).toBe('accepted');
       await Promise.all(waitUntilTasks.splice(0));
       const scheduledEvents = (await postHogEvents(requests)).filter(
         (event) => (event as { event: string }).event === 'review scheduled',
@@ -476,7 +476,7 @@ describe('Core admission, claims, and manual policy', () => {
       EVIDENCE_BUCKET: { put: async () => undefined },
     };
     const core = createCoreWorker(env, { stateStore, ...postHogTestDefaults.dependencies });
-    const schedule = (event: ReviewEvent) => core.submitReviewEvent(event);
+    const schedule = (event: ReviewEvent) => core.schedule(event);
     await schedule(eligibleEvent);
     let polled = false;
     vi.stubEnv('MODEL_SECRET_COMMAND', 'secret-resolver get MODEL_API_KEY');
@@ -578,7 +578,7 @@ describe('Core admission, claims, and manual policy', () => {
 
     try {
       expect(
-        await worker.submitReviewEvent({
+        await worker.schedule({
           ...eligibleEvent,
           deliveryId: 'delivery-claim-race-old',
         }),
@@ -593,7 +593,7 @@ describe('Core admission, claims, and manual policy', () => {
       const newHead = '3333333333333333333333333333333333333333';
       currentHead = newHead;
       expect(
-        await worker.submitReviewEvent({
+        await worker.schedule({
           ...eligibleEvent,
           deliveryId: 'delivery-claim-race-new',
           headSha: newHead,
@@ -641,7 +641,7 @@ describe('Core admission, claims, and manual policy', () => {
     );
 
     try {
-      const response = await worker.submitReviewEvent(eligibleEvent);
+      const response = await worker.schedule(eligibleEvent);
 
       expect(response).toBe('accepted');
       expect(runnerRequests).toHaveLength(0);
@@ -703,7 +703,7 @@ describe('Core admission, claims, and manual policy', () => {
         });
       try {
         const worker = createCoreWorker(env, dependencies);
-        await worker.submitReviewEvent(eligibleEvent);
+        await worker.schedule(eligibleEvent);
         const firstResponse = worker.claimRunnerJob(request());
         await preparing;
         expect((await createCoreWorker(env, dependencies).claimRunnerJob(request())).status).toBe(
@@ -1464,7 +1464,7 @@ describe('Core admission, claims, and manual policy', () => {
     try {
       vi.setSystemTime(new Date('2026-09-01T00:00:00.000Z'));
       expect(
-        await worker.submitReviewEvent({
+        await worker.schedule({
           ...eligibleEvent,
           deliveryId: 'delivery-claim-deadline',
         }),
@@ -1500,7 +1500,7 @@ describe('Core admission, claims, and manual policy', () => {
     });
 
     try {
-      await worker.submitReviewEvent({
+      await worker.schedule({
         ...eligibleEvent,
         deliveryId: 'delivery-invalid-read-token-expiry',
       });
@@ -1558,7 +1558,7 @@ describe('Core admission, claims, and manual policy', () => {
     );
 
     try {
-      const response = await worker.submitReviewEvent({
+      const response = await worker.schedule({
         ...eligibleEvent,
         deliveryId: 'delivery-admission-retry',
       });

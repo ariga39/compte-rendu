@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createCoreWorker } from '../apps/core/src/core-worker';
 import { createD1ReviewStateStore } from '../apps/core/src/index';
 import { createGitHubPublicationAdapter } from '../apps/core/src/github-review-adapter';
 import type { OperationalLogEvent } from '../packages/contracts/src';
 import { SqliteD1Database } from './support/d1-database';
 import { claimRunnerJob } from './support/runner-claim';
 import {
+  createTestCoreWorker as createCoreWorker,
   eligibleEvent,
   runnerResponse,
   coreEnv,
@@ -1076,7 +1076,7 @@ describe('Core callbacks and publication', () => {
       },
     );
     try {
-      expect(await worker.submitReviewEvent(eligibleEvent)).toBe('accepted');
+      expect(await worker.schedule(eligibleEvent)).toBe('accepted');
       expect(runnerRequests).toHaveLength(0);
     } finally {
       database.close();
@@ -1099,9 +1099,9 @@ describe('Core callbacks and publication', () => {
       },
     });
     try {
-      expect(
-        await worker.submitReviewEvent({ ...eligibleEvent, deliveryId: 'delivery\nunsafe' }),
-      ).toBe('accepted');
+      expect(await worker.schedule({ ...eligibleEvent, deliveryId: 'delivery\nunsafe' })).toBe(
+        'accepted',
+      );
       expect(events).toEqual([
         { phase: 'core', outcome: 'scheduled', deliveryId: 'redacted', runId: expect.any(String) },
       ]);
@@ -1148,7 +1148,7 @@ describe('Core callbacks and publication', () => {
       }),
     });
     try {
-      const response = await worker.submitReviewEvent({
+      const response = await worker.schedule({
         deliveryId: 'delivery-core-worker-manual',
         event: 'issue_comment',
         action: 'created',
@@ -1190,7 +1190,7 @@ describe('Core callbacks and publication', () => {
     );
     try {
       expect(
-        await worker.submitReviewEvent({
+        await worker.schedule({
           deliveryId: 'delivery-core-worker-manual-missing',
           event: 'issue_comment',
           action: 'created',
@@ -1240,7 +1240,7 @@ describe('Core callbacks and publication', () => {
     );
     try {
       expect(
-        await worker.submitReviewEvent({
+        await worker.schedule({
           deliveryId: 'delivery-core-worker-permission-none',
           event: 'issue_comment',
           action: 'created',
@@ -1275,7 +1275,7 @@ describe('Core callbacks and publication', () => {
     });
     try {
       expect(
-        await worker.submitReviewEvent({
+        await worker.schedule({
           deliveryId: 'delivery-core-worker-manual-uncertain',
           event: 'issue_comment',
           action: 'created',
@@ -1325,7 +1325,7 @@ describe('Core callbacks and publication', () => {
     });
     try {
       expect(
-        await worker.submitReviewEvent({
+        await worker.schedule({
           deliveryId: 'delivery-core-worker-permission-uncertain',
           event: 'issue_comment',
           action: 'created',
@@ -1372,7 +1372,7 @@ describe('Core callbacks and publication', () => {
     );
     try {
       expect(
-        await worker.submitReviewEvent({
+        await worker.schedule({
           ...eligibleEvent,
           deliveryId: 'delivery-core-worker-schedule-failed',
         }),
@@ -1409,7 +1409,7 @@ describe('Core callbacks and publication', () => {
       },
     });
     try {
-      expect(await worker.submitReviewEvent(eligibleEvent)).toBe('failed');
+      expect(await worker.schedule(eligibleEvent)).toBe('failed');
       expect(events).toEqual([
         {
           phase: 'core',

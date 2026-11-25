@@ -1,7 +1,14 @@
 import { vi } from 'vitest';
-import type { CoreWorker } from '../../apps/core/src/core-worker';
+import { Effect } from 'effect';
+import {
+  createCoreWorker,
+  type CoreWorker,
+  type CoreWorkerDependencies,
+  type CoreWorkerEnv,
+} from '../../apps/core/src/core-worker';
+import { makeCoreRuntime, makeCoreRuntimeHost } from '../../apps/core/src/core-runtime';
 import type { ReviewPublicationStateStore } from '../../apps/core/src/index';
-import type { ReviewEvent } from '../../packages/contracts/src';
+import type { MetadataInvalidationEvent, ReviewEvent } from '../../packages/contracts/src';
 import type { SqliteD1Database } from './d1-database';
 
 export type { CoreWorker };
@@ -47,6 +54,44 @@ export const coreEnv = (database: SqliteD1Database, runnerFetch = runnerResponse
   GITHUB_APP_ID: '1234567',
   GITHUB_APP_PRIVATE_KEY: 'test-private-key',
 });
+
+type WaitUntil = { waitUntil(task: Promise<unknown>): void };
+
+/**
+ * Runs the typed Core operation at the test edge, exactly as the application
+ * does for a webhook. Tests that also exercise Worker HTTP methods keep using
+ * `createCoreWorker` separately.
+ */
+export const scheduleReviewEvent = (
+  env: CoreWorkerEnv,
+  dependencies: CoreWorkerDependencies,
+  event: ReviewEvent,
+  context?: WaitUntil,
+) =>
+  Effect.runPromise(
+    makeCoreRuntime(env, dependencies, makeCoreRuntimeHost(context)).submitReviewEvent(event),
+  );
+
+export const invalidateCoreMetadata = (
+  env: CoreWorkerEnv,
+  dependencies: CoreWorkerDependencies,
+  event: MetadataInvalidationEvent,
+) => Effect.runPromise(makeCoreRuntime(env, dependencies).invalidateMetadata(event));
+
+/**
+ * Test fixture that keeps the Worker HTTP surface while running review
+ * admission through the same typed Core operation as the application edge.
+ */
+export const createTestCoreWorker = (
+  env: CoreWorkerEnv,
+  dependencies: CoreWorkerDependencies = {},
+) => {
+  const worker = createCoreWorker(env, dependencies);
+  return Object.assign(worker, {
+    schedule: (event: ReviewEvent, context?: WaitUntil) =>
+      scheduleReviewEvent(env, dependencies, event, context),
+  });
+};
 
 export const deferred = <A>() => {
   let resolve!: (value: A | PromiseLike<A>) => void;
@@ -222,8 +267,11 @@ export const postHogTestDefaults = {
 export const runnerClaimRequest = () =>
   new Request('https://reviews.test/runner-claim', { method: 'POST' });
 
-export const scheduleEligibleReview = (worker: CoreWorker, headSha: string, deliveryId: string) =>
-  worker.submitReviewEvent({ ...eligibleEvent, headSha, deliveryId });
+export const scheduleEligibleReview = (
+  worker: { schedule: (event: ReviewEvent) => Promise<'accepted' | 'failed'> },
+  headSha: string,
+  deliveryId: string,
+) => worker.schedule({ ...eligibleEvent, headSha, deliveryId });
 
 export const claimGithub = (headSha: string | (() => string) = eligibleEvent.headSha) => ({
   getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',

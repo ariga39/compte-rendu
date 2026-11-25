@@ -1,10 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createCoreWorker } from '../apps/core/src/core-worker';
 import { createD1ReviewStateStore } from '../apps/core/src/index';
 import { createGitHubPublicationAdapter } from '../apps/core/src/github-review-adapter';
 import { SqliteD1Database } from './support/d1-database';
 import { claimRunnerJob } from './support/runner-claim';
-import { eligibleEvent, coreEnv, recordTestEvidence } from './support/core-worker-harness';
+import {
+  createTestCoreWorker as createCoreWorker,
+  eligibleEvent,
+  coreEnv,
+  recordTestEvidence,
+} from './support/core-worker-harness';
 
 describe('Core cancelled Check retry feedback', () => {
   it('schedules a fresh run when a failed Check is rerequested through the Worker', async () => {
@@ -56,7 +60,7 @@ describe('Core cancelled Check retry feedback', () => {
     });
 
     try {
-      const response = await worker.submitReviewEvent({
+      const response = await worker.schedule({
         deliveryId: 'delivery-core-worker-check-rerequest',
         event: 'check_run',
         action: 'rerequested',
@@ -154,7 +158,7 @@ describe('Core cancelled Check retry feedback', () => {
           }),
         });
         const retry = (deliveryId: string) =>
-          worker.submitReviewEvent({
+          worker.schedule({
             deliveryId,
             event: 'check_run',
             action: 'rerequested',
@@ -295,7 +299,7 @@ describe('Core cancelled Check retry feedback', () => {
         }),
       });
 
-      const retry = await worker.submitReviewEvent({
+      const retry = await worker.schedule({
         deliveryId: 'retry-older-check',
         event: 'check_run',
         action: 'rerequested',
@@ -406,7 +410,7 @@ describe('Core cancelled Check retry feedback', () => {
         }),
       });
 
-      const retry = await worker.submitReviewEvent({
+      const retry = await worker.schedule({
         deliveryId: 'retry-stale-clear',
         event: 'check_run',
         action: 'rerequested',
@@ -510,7 +514,7 @@ describe('Core cancelled Check retry feedback', () => {
         }),
       });
 
-      const response = await worker.submitReviewEvent({
+      const response = await worker.schedule({
         deliveryId: 'retry-failed-check',
         event: 'check_run',
         action: 'rerequested',
@@ -602,7 +606,7 @@ describe('Core cancelled Check retry feedback', () => {
         });
 
         vi.setSystemTime(new Date(occurredAt));
-        const response = await worker.submitReviewEvent({
+        const response = await worker.schedule({
           deliveryId: 'comment-during-cleanup',
           event: 'issue_comment',
           action: 'created',
@@ -711,7 +715,7 @@ describe('Core cancelled Check retry feedback', () => {
         }),
       });
 
-      const response = await worker.submitReviewEvent({
+      const response = await worker.schedule({
         deliveryId: 'retry-feedback-failure',
         event: 'check_run',
         action: 'rerequested',
@@ -783,7 +787,7 @@ describe('Core cancelled Check retry feedback', () => {
         }),
       });
 
-      const response = await worker.submitReviewEvent({
+      const response = await worker.schedule({
         deliveryId: 'retry-never-dispatched',
         event: 'check_run',
         action: 'rerequested',

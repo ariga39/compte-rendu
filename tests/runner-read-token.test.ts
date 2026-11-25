@@ -6,6 +6,7 @@ import {
 } from '../packages/contracts/src';
 import { createCoreWorker } from '../apps/core/src/core-worker';
 import { createD1ReviewStateStore } from '../apps/core/src/index';
+import { scheduleReviewEvent } from './support/core-worker-harness';
 import { SqliteD1Database } from './support/d1-database';
 
 const event: ReviewEvent = {
@@ -40,25 +41,24 @@ const createClaimedReview = async (
   mint?: (input: { installationId: number; repositoryId: number }) => Promise<void>,
 ) => {
   const mintCalls: Array<{ installationId: number; repositoryId: number }> = [];
-  const worker = createCoreWorker(
-    {
-      REVIEW_DB: database,
-      GITHUB_APP_ID: '1234567',
-      GITHUB_APP_PRIVATE_KEY: 'test-private-key',
+  const env = {
+    REVIEW_DB: database,
+    GITHUB_APP_ID: '1234567',
+    GITHUB_APP_PRIVATE_KEY: 'test-private-key',
+  };
+  const dependencies = {
+    github: {
+      getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+      loadReviewTarget: async () => ({ headSha: event.headSha }),
     },
-    {
-      github: {
-        getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
-        loadReviewTarget: async () => ({ headSha: event.headSha }),
-      },
-      getReadInstallationToken: async (input) => {
-        mintCalls.push(input);
-        await mint?.(input);
-        return { token: token.current, expiresAt: token.expiresAt };
-      },
+    getReadInstallationToken: async (input: { installationId: number; repositoryId: number }) => {
+      mintCalls.push(input);
+      await mint?.(input);
+      return { token: token.current, expiresAt: token.expiresAt };
     },
-  );
-  const scheduled = await worker.submitReviewEvent(event);
+  };
+  const worker = createCoreWorker(env, dependencies);
+  const scheduled = await scheduleReviewEvent(env, dependencies, event);
   expect(scheduled).toBe('accepted');
   const claim = await worker.claimRunnerJob(
     new Request('https://reviews.test/runner-claim', {
@@ -258,24 +258,23 @@ describe('Runner read-token renewal', () => {
     };
     try {
       vi.setSystemTime(new Date(claimedAt));
-      const worker = createCoreWorker(
-        {
-          REVIEW_DB: database,
-          GITHUB_APP_ID: '1234567',
-          GITHUB_APP_PRIVATE_KEY: 'test-private-key',
+      const env = {
+        REVIEW_DB: database,
+        GITHUB_APP_ID: '1234567',
+        GITHUB_APP_PRIVATE_KEY: 'test-private-key',
+      };
+      const dependencies = {
+        github: {
+          getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+          loadReviewTarget: async () => ({ headSha: event.headSha }),
         },
-        {
-          github: {
-            getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
-            loadReviewTarget: async () => ({ headSha: event.headSha }),
-          },
-          getReadInstallationToken: async () => {
-            mintCount += 1;
-            return grant;
-          },
+        getReadInstallationToken: async () => {
+          mintCount += 1;
+          return grant;
         },
-      );
-      await worker.submitReviewEvent(event);
+      };
+      const worker = createCoreWorker(env, dependencies);
+      await scheduleReviewEvent(env, dependencies, event);
       const claim = await worker.claimRunnerJob(
         new Request('https://reviews.test/runner-claim', {
           method: 'POST',
@@ -311,27 +310,26 @@ describe('Runner read-token renewal', () => {
     };
     try {
       vi.setSystemTime(new Date(claimedAt));
-      const worker = createCoreWorker(
-        {
-          REVIEW_DB: database,
-          GITHUB_APP_ID: '1234567',
-          GITHUB_APP_PRIVATE_KEY: 'test-private-key',
+      const env = {
+        REVIEW_DB: database,
+        GITHUB_APP_ID: '1234567',
+        GITHUB_APP_PRIVATE_KEY: 'test-private-key',
+      };
+      const dependencies = {
+        github: {
+          getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+          loadReviewTarget: async () => ({ headSha: event.headSha }),
         },
-        {
-          github: {
-            getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
-            loadReviewTarget: async () => ({ headSha: event.headSha }),
-          },
-          getReadInstallationToken: async () => {
-            mintCount += 1;
-            if (mintCount === 2) {
-              vi.setSystemTime(new Date('2026-09-01T00:51:30.000Z'));
-            }
-            return grant;
-          },
+        getReadInstallationToken: async () => {
+          mintCount += 1;
+          if (mintCount === 2) {
+            vi.setSystemTime(new Date('2026-09-01T00:51:30.000Z'));
+          }
+          return grant;
         },
-      );
-      await worker.submitReviewEvent(event);
+      };
+      const worker = createCoreWorker(env, dependencies);
+      await scheduleReviewEvent(env, dependencies, event);
       const claim = await worker.claimRunnerJob(
         new Request('https://reviews.test/runner-claim', {
           method: 'POST',

@@ -11,7 +11,9 @@ import { GitHubRequestError } from '../apps/core/src/github-review-adapter';
 import { createGitHubAppTokenProvider } from '../apps/core/src/github-app-token';
 import { refreshRepositoryMetadata } from '../apps/core/src/dashboard';
 import type { OperationalLogEvent, ReviewEvent } from '../packages/contracts/src';
-import { handleGitHubWebhook } from '../apps/ingress/src/index';
+import { Effect } from 'effect';
+import { handleGitHubWebhookEffect } from '../apps/ingress/src/index';
+import { invalidateCoreMetadata, scheduleReviewEvent } from './support/core-worker-harness';
 import { createApplication } from '../apps/dashboard/src/lib/server/application';
 import { SqliteD1Database } from './support/d1-database';
 
@@ -218,8 +220,9 @@ describe('public dashboard reads are DB-only', () => {
   it('persists admission branch refs and exposes them only through public identity', async () => {
     const database = new SqliteD1Database();
     const store = createD1ReviewStateStore(database);
-    const worker = createCoreWorker(coreEnv(database), { github: {} });
-    const post = (body: unknown) => worker.submitReviewEvent(body as ReviewEvent);
+    const env = coreEnv(database);
+    const dependencies = { github: {} };
+    const post = (body: unknown) => scheduleReviewEvent(env, dependencies, body as ReviewEvent);
     const event = (overrides: Record<string, unknown>) => ({
       deliveryId: 'd-refs',
       event: 'pull_request',
@@ -1316,17 +1319,20 @@ describe('public dashboard reads are DB-only', () => {
     const invalidated: unknown[] = [];
     const ingress = {
       fetch: (request: Request) =>
-        handleGitHubWebhook(request, {
-          secret,
-          crypto: globalThis.crypto,
-          allowedInstallationIds: '[7]',
-          core: {
-            submitReviewEvent: async () => 'accepted',
-            invalidateMetadata: async (event) => {
-              invalidated.push(event);
+        Effect.runPromise(
+          handleGitHubWebhookEffect(request, {
+            secret,
+            crypto: globalThis.crypto,
+            allowedInstallationIds: '[7]',
+            core: {
+              submitReviewEvent: () => Effect.succeed('accepted' as const),
+              invalidateMetadata: (event) =>
+                Effect.sync(() => {
+                  invalidated.push(event);
+                }),
             },
-          },
-        }),
+          }),
+        ),
     };
     const send = async (event: string, value: unknown) => {
       const body = JSON.stringify(value);
@@ -1372,15 +1378,16 @@ describe('public dashboard reads are DB-only', () => {
   });
 
   it('fails closed when metadata revocation storage errors', async () => {
-    const worker = createCoreWorker(coreEnv(new SqliteD1Database()), {
+    const env = coreEnv(new SqliteD1Database());
+    const dependencies = {
       stateStore: {
         invalidateRepositoryMetadataBatch: async () => {
           throw new Error('database unavailable');
         },
       } as unknown as ReviewPublicationStateStore,
-    });
+    };
     await expect(
-      worker.invalidateMetadata({
+      invalidateCoreMetadata(env, dependencies, {
         deliveryId: 'd-revoke-error',
         event: 'metadata',
         reason: 'repository_private',

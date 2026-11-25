@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createCoreWorker } from '../apps/core/src/core-worker';
 import { createD1ReviewStateStore } from '../apps/core/src/index';
 import type { OperationalLogEvent, ReviewEvent } from '../packages/contracts/src';
 import { SqliteD1Database } from './support/d1-database';
 import { claimRunnerJob } from './support/runner-claim';
 import {
+  createTestCoreWorker as createCoreWorker,
   eligibleEvent,
   coreEnv,
   successfulCallback,
@@ -172,7 +172,7 @@ describe('Core lifecycle telemetry and terminal classification', () => {
     const worker = createCoreWorker(env, postHogTestDefaults.dependencies);
 
     try {
-      const response = await worker.submitReviewEvent(
+      const response = await worker.schedule(
         {
           ...eligibleEvent,
           freeFormAcceptanceNote142: 'must-not-reach-posthog-wire-payload',
@@ -238,7 +238,7 @@ describe('Core lifecycle telemetry and terminal classification', () => {
     const worker = createCoreWorker(env, postHogTestDefaults.dependencies);
 
     try {
-      const response = await worker.submitReviewEvent(
+      const response = await worker.schedule(
         {
           ...eligibleEvent,
           deliveryId: 'delivery-posthog-base-path',
@@ -263,7 +263,7 @@ describe('Core lifecycle telemetry and terminal classification', () => {
     const worker = createCoreWorker(env, postHogTestDefaults.dependencies);
 
     try {
-      const response = await worker.submitReviewEvent(
+      const response = await worker.schedule(
         { ...eligibleEvent, deliveryId: 'delivery-posthog-disabled' },
         { waitUntil: (task) => waitUntilTasks.push(task) },
       );
@@ -290,7 +290,7 @@ describe('Core lifecycle telemetry and terminal classification', () => {
     const worker = createCoreWorker(env, postHogTestDefaults.dependencies);
 
     try {
-      const response = await worker.submitReviewEvent(
+      const response = await worker.schedule(
         {
           ...eligibleEvent,
           deliveryId: 'delivery-posthog-invalid-configuration',
@@ -335,7 +335,7 @@ describe('Core lifecycle telemetry and terminal classification', () => {
     });
 
     try {
-      const response = await worker.submitReviewEvent(
+      const response = await worker.schedule(
         {
           ...eligibleEvent,
           deliveryId: 'delivery-posthog-capture-failure',
@@ -393,7 +393,7 @@ describe('Core lifecycle telemetry and terminal classification', () => {
     const worker = createCoreWorker(env, postHogTestDefaults.dependencies);
 
     try {
-      const oldSchedule = await worker.submitReviewEvent(
+      const oldSchedule = await worker.schedule(
         {
           ...eligibleEvent,
           deliveryId: 'delivery-old-head-no-runner-job',
@@ -404,7 +404,7 @@ describe('Core lifecycle telemetry and terminal classification', () => {
       await Promise.all(waitUntilTasks.splice(0));
 
       vi.setSystemTime(1788480005000);
-      const newerSchedule = await worker.submitReviewEvent(
+      const newerSchedule = await worker.schedule(
         {
           ...eligibleEvent,
           action: 'synchronize',
@@ -461,7 +461,7 @@ describe('Core lifecycle telemetry and terminal classification', () => {
     const worker = createCoreWorker(env, postHogTestDefaults.dependencies);
 
     try {
-      const scheduled = await worker.submitReviewEvent(
+      const scheduled = await worker.schedule(
         { ...eligibleEvent, deliveryId: 'delivery-claim-lifecycle' },
         { waitUntil: (task) => waitUntilTasks.push(task) },
       );
@@ -509,7 +509,7 @@ describe('Core lifecycle telemetry and terminal classification', () => {
     const worker = createCoreWorker(env, postHogTestDefaults.dependencies);
 
     try {
-      const scheduled = await worker.submitReviewEvent(
+      const scheduled = await worker.schedule(
         { ...eligibleEvent, deliveryId: 'delivery-finished-lifecycle' },
         { waitUntil: (task) => waitUntilTasks.push(task) },
       );
@@ -669,7 +669,7 @@ describe('Core lifecycle telemetry and terminal classification', () => {
     const context = { waitUntil: (task: Promise<unknown>) => waitUntilTasks.push(task) };
 
     try {
-      const scheduled = await worker.submitReviewEvent(
+      const scheduled = await worker.schedule(
         {
           ...eligibleEvent,
           deliveryId: 'delivery-running-old-head-lifecycle',
@@ -690,7 +690,7 @@ describe('Core lifecycle telemetry and terminal classification', () => {
       await Promise.all(waitUntilTasks.splice(0));
 
       vi.setSystemTime(new Date('2026-09-04T00:00:05.000Z'));
-      const replacement = await worker.submitReviewEvent(
+      const replacement = await worker.schedule(
         {
           ...eligibleEvent,
           action: 'synchronize',
@@ -743,7 +743,7 @@ describe('Core lifecycle telemetry and terminal classification', () => {
     });
 
     try {
-      const scheduled = await worker.submitReviewEvent(
+      const scheduled = await worker.schedule(
         {
           ...eligibleEvent,
           deliveryId: 'delivery-finished-head-changed-lifecycle',
@@ -1131,7 +1131,7 @@ describe('Core lifecycle telemetry and terminal classification', () => {
     });
 
     try {
-      const scheduled = await worker.submitReviewEvent(
+      const scheduled = await worker.schedule(
         {
           ...eligibleEvent,
           deliveryId: 'delivery-claim-preparation-failure',

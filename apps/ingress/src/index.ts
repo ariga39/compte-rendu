@@ -131,8 +131,12 @@ const InstallationWebhook = Schema.Struct({
 const Signature = Schema.String.check(Schema.isPattern(new RegExp('^sha256=[0-9a-f]{64}$', 'i')));
 
 export interface WebhookCoreSink {
-  readonly submitReviewEvent: (event: NormalizedReviewEvent) => Promise<'accepted' | 'failed'>;
-  readonly invalidateMetadata: (event: typeof MetadataInvalidationEvent.Type) => Promise<void>;
+  readonly submitReviewEvent: (
+    event: NormalizedReviewEvent,
+  ) => Effect.Effect<'accepted' | 'failed', unknown>;
+  readonly invalidateMetadata: (
+    event: typeof MetadataInvalidationEvent.Type,
+  ) => Effect.Effect<void, unknown>;
 }
 
 export interface WebhookIngressDependencies {
@@ -644,15 +648,16 @@ const forwardMetadataInvalidation = (
       ...event,
       event: 'metadata',
     }).pipe(Effect.mapError(() => invalidWebhook('Metadata invalidation is invalid')));
-    yield* Effect.tryPromise({
-      try: () => dependencies.core.invalidateMetadata(decoded),
-      catch: () =>
-        new CoreUnavailable({
-          message: 'Core service failed',
-          deliveryId: event.deliveryId,
-          event: 'metadata',
-        }),
-    });
+    yield* dependencies.core.invalidateMetadata(decoded).pipe(
+      Effect.mapError(
+        () =>
+          new CoreUnavailable({
+            message: 'Core service failed',
+            deliveryId: event.deliveryId,
+            event: 'metadata',
+          }),
+      ),
+    );
 
     yield* recordOperationalLog(dependencies.log ?? createCloudflareOperationalLog(), {
       phase: 'ingress',
@@ -669,15 +674,16 @@ const forwardEvent = (event: NormalizedReviewEvent, dependencies: WebhookIngress
     const decodedEvent = yield* Schema.decodeUnknownEffect(ReviewEvent)(event).pipe(
       Effect.mapError(() => invalidWebhook('Normalized webhook is invalid')),
     );
-    const disposition = yield* Effect.tryPromise({
-      try: () => dependencies.core.submitReviewEvent(decodedEvent),
-      catch: () =>
-        new CoreUnavailable({
-          message: 'Core service failed',
-          deliveryId: event.deliveryId,
-          event: event.event,
-        }),
-    });
+    const disposition = yield* dependencies.core.submitReviewEvent(decodedEvent).pipe(
+      Effect.mapError(
+        () =>
+          new CoreUnavailable({
+            message: 'Core service failed',
+            deliveryId: event.deliveryId,
+            event: event.event,
+          }),
+      ),
+    );
 
     if (disposition === 'failed') {
       return yield* new CoreUnavailable({
@@ -697,52 +703,44 @@ const forwardEvent = (event: NormalizedReviewEvent, dependencies: WebhookIngress
     return 'accepted' as const;
   });
 
-export const handleGitHubWebhook = async (
+export const handleGitHubWebhookEffect = (
   request: Request,
   dependencies: WebhookIngressDependencies,
-): Promise<Response> => {
+): Effect.Effect<Response> => {
+  const log = dependencies.log ?? createCloudflareOperationalLog();
   const eventName = request.headers.get('x-github-event');
   if (!supportedEvents.includes(eventName as (typeof supportedEvents)[number])) {
-    await Effect.runPromise(
-      recordOperationalLog(dependencies.log ?? createCloudflareOperationalLog(), {
-        phase: 'ingress',
-        outcome: 'ignored',
-        deliveryId: sanitizeOperationalLogIdentifier(
-          request.headers.get('x-github-delivery') ?? '',
-        ),
-        reason: 'unsupported_event',
-      }),
-    );
-    return new Response(null, { status: 204 });
+    return recordOperationalLog(log, {
+      phase: 'ingress',
+      outcome: 'ignored',
+      deliveryId: sanitizeOperationalLogIdentifier(request.headers.get('x-github-delivery') ?? ''),
+      reason: 'unsupported_event',
+    }).pipe(Effect.as(new Response(null, { status: 204 })));
   }
 
-  try {
-    const result = await Effect.runPromise(processWebhook(request, dependencies));
-    return new Response(null, { status: result === 'ignored' ? 204 : 202 });
-  } catch (error) {
-    if (error instanceof InvalidWebhook) {
-      await Effect.runPromise(
-        recordOperationalLog(dependencies.log ?? createCloudflareOperationalLog(), {
+  return processWebhook(request, dependencies).pipe(
+    Effect.map((result) => new Response(null, { status: result === 'ignored' ? 204 : 202 })),
+    Effect.catchIf(
+      (error): error is InvalidWebhook => error instanceof InvalidWebhook,
+      (error) =>
+        recordOperationalLog(log, {
           phase: 'ingress',
           outcome: 'rejected',
           reason: error.reason,
-        }),
-      );
-      return new Response(null, { status: 400 });
-    }
-
-    if (error instanceof CoreUnavailable) {
-      await Effect.runPromise(
-        recordOperationalLog(dependencies.log ?? createCloudflareOperationalLog(), {
+        }).pipe(Effect.as(new Response(null, { status: 400 }))),
+    ),
+    Effect.catchIf(
+      (error): error is CoreUnavailable => error instanceof CoreUnavailable,
+      (error) =>
+        recordOperationalLog(log, {
           phase: 'ingress',
           outcome: 'retryable',
           deliveryId: sanitizeOperationalLogIdentifier(error.deliveryId),
           event: error.event,
           reason: 'core_unavailable',
-        }),
-      );
-    }
-
-    return new Response(null, { status: 503 });
-  }
+        }).pipe(Effect.as(new Response(null, { status: 503 }))),
+    ),
+    Effect.catch(() => Effect.succeed(new Response(null, { status: 503 }))),
+    Effect.catchDefect(() => Effect.succeed(new Response(null, { status: 503 }))),
+  );
 };
