@@ -265,10 +265,16 @@ const active = `SELECT m.key AS id, m.value AS model, s.provider, s.credential,
   s.is_alias
   FROM catalog_sources s JOIN json_each(?) cfg ON cfg.key=s.source_key, json_each(s.models) m
   WHERE (s.is_alias=0 OR EXISTS (SELECT 1 FROM json_each(cfg.value) a WHERE a.key=m.key AND a.value=m.value))`;
-const visible = `SELECT DISTINCT id FROM (
-  SELECT id, is_alias, MIN(is_alias) OVER (PARTITION BY provider, credential, model, profile) AS preferred
-  FROM candidates
-) WHERE is_alias = preferred`;
+const activeProfilesSql = "('chat', 'responses')";
+// A historical route that no longer has an active profile is a permanent
+// tombstone: it keeps its identity, stays hidden, and is never reused by a
+// discovery candidate.
+const visible = `SELECT DISTINCT v.id FROM (
+  SELECT c.id, c.is_alias, MIN(c.is_alias) OVER (PARTITION BY c.provider, c.credential, c.model, c.profile) AS preferred
+  FROM candidates c
+  WHERE NOT EXISTS (SELECT 1 FROM catalog_routes r
+    WHERE r.route_id = c.id AND r.profile NOT IN ${activeProfilesSql})
+) v WHERE v.is_alias = v.preferred`;
 
 // Every statement in the D1 batch observes this watermark. Advance it last so
 // a slow fetch from an older cron invocation cannot undo a newer snapshot.
@@ -358,7 +364,7 @@ export function createRelayCatalog(
               WHEN ? IS NOT NULL THEN ?
               WHEN EXISTS (SELECT 1 FROM json_each(?) m
                 LEFT JOIN json_each(?) p ON p.key=m.key
-                JOIN catalog_routes r ON r.route_id=m.key
+                JOIN catalog_routes r ON r.route_id=m.key AND r.profile IN ${activeProfilesSql}
                 WHERE r.upstream_model IS NOT m.value
                   OR r.provider_slug IS NOT ?
                   OR r.credential_alias IS NOT ?
