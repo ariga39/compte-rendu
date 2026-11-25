@@ -170,8 +170,9 @@ allowance consumption. Consult the provider’s billing data for that amount.
 
 ### Runner grant version
 
-`RUNNER_LLM_GRANT_VERSION` defaults to `1`. Enable `2` only after Core and the
-inference Worker serve versioned grants. In v2 the Runner requests
+Set `RUNNER_LLM_GRANT_VERSION=2` for a current Runner, Core and inference
+Worker. Use `1` only for a rollback to a compatible older deployment. In v2 the
+Runner requests
 `/runner-llm/issue-v2` and configures each selected model from the returned
 route descriptor. The descriptor selects a bundled adapter and can specify
 context and output limits plus the OpenCode-supported model description. All

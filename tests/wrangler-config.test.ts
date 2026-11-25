@@ -150,10 +150,9 @@ describe('Wrangler deployment tooling', () => {
       }),
       { mode: 0o600 },
     );
-    const documentedCommand = readFileSync(
-      resolve(repositoryRoot, 'docs/installation.md'),
-      'utf8',
-    ).match(/^corepack pnpm render:wrangler.*$/m)?.[0];
+    const documentedCommand = readFileSync(resolve(repositoryRoot, 'docs/installation.md'), 'utf8')
+      .match(/^\s*corepack pnpm render:wrangler.*$/m)?.[0]
+      ?.trim();
 
     expect(documentedCommand).toBeDefined();
     expect(existsSync(outputPaths.application)).toBe(false);
