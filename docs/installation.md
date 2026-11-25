@@ -281,10 +281,9 @@ Configure the GitHub App with only these repository permissions:
 | Checks                | Write | Create one head-SHA-bound Check Run per review run and update its queued, in-progress, success, failure, or cancelled state.                                                                                                  |
 
 Before applying the D1 migration or deploying the application Worker, approve the
-GitHub App installation's **Checks: Write** permission. Existing installations
-must approve this permission change explicitly; an unapproved permission must
-block the rollout. After approval, verify one successful run transitions its
-Check from `queued` to `in_progress` to `success`, and one controlled failed
+GitHub App installation's **Checks: Write** permission. An unapproved permission
+blocks review admission. After approval, verify one successful run transitions
+its Check from `queued` to `in_progress` to `success`, and one controlled failed
 run transitions from `queued` to `in_progress` to `failure`, with the matching
 terminal Review or failure comment.
 
@@ -500,8 +499,7 @@ host default. The `shell` kit has no such default allow list, so the Runner's
 explicit per-job `policy allow` rules (the configured model host and
 `api.github.com:443`) are the only egress the review sandbox has — provided the
 host default is `deny-all` and no other global or organization-governance allow
-rules are active. This is long-standing shipped kit behavior, not a 0.48 change;
-the upgrade only made it worth verifying.
+rules are active.
 
 ### Runner configuration
 
@@ -520,12 +518,9 @@ service below on the host that also runs the remotely managed Tunnel connector.
 On a first installation, create its environment file with mode `0600` and put
 each required variable on one line in systemd `EnvironmentFile` syntax. Values
 are not shell-expanded, so do not use `export` or backslash continuations, and
-keep the JSON on one line. On a managed upgrade, keep the existing file and
-valid values, then apply the
-[managed Runner upgrade prerequisite](#managed-runner-upgrade-prerequisite).
-A direct-provider Runner must replace its managed fields as described in
-[Upgrading a direct-provider installation](#upgrading-a-direct-provider-installation);
-the `install` command truncates the destination:
+keep the JSON on one line. When updating an existing deployment, edit the file in place
+and check its settings against the startup requirements below. Use this command
+only when creating the file, as it truncates the destination:
 
 ```sh
 install -m 0600 /dev/null <ABSOLUTE_RUNNER_ENV_FILE>
@@ -543,6 +538,8 @@ RUNNER_CONCURRENCY=1
 
 Grant v2 is the only issuance path. Leave `RUNNER_LLM_GRANT_VERSION` unset, or
 set it to `2`; an explicit `1` fails startup instead of issuing a legacy grant.
+The retired TOML `RUNNER_SETTINGS_FILE` is rejected at startup; concurrency is
+stored in D1 and changed in Dashboard Settings.
 
 Confirm the file is still mode `0600` after editing; never commit it. The
 `RUNNER_AUTH_TOKEN` and `RUNNER_CALLBACK_TOKEN` values belong only in this file
@@ -607,8 +604,8 @@ Each deployment can store one desired concurrency in Core D1
 (`review_configuration.runner_concurrency`). Edit it in **Dashboard Settings →
 Runner concurrency**, or through the authenticated operator API described in
 [review configuration](review-configuration.md#operator-api). The value is any
-positive safe integer, matching the former TOML contract. There is no
-product-enforced concurrency cap or local maximum setting; size each host for
+positive safe integer. There is no product-enforced concurrency cap or local
+maximum setting; size each host for
 the value you set, and Core delivers the stored value to every Runner attached
 to the deployment.
 
@@ -623,45 +620,6 @@ naturally. Drain pauses HEAD reads as well as claims. A stored value is sent as 
 positive integer; an explicit D1 clear is sent as `default`, and the Runner
 returns to `RUNNER_CONCURRENCY`. A transiently missing or invalid header leaves
 the current target unchanged.
-
-#### Seed an existing installation
-
-The Runner fails closed if `RUNNER_SETTINGS_FILE` is still set. Before removing
-that file, apply migration `0020_runner_concurrency.sql` and seed the desired
-value so a restart keeps the currently effective concurrency. Use the
-deployment's installed value (for example 6 or 8); the update touches only
-`runner_concurrency`, never `selection` or `effort_snapshot`.
-
-```sh
-corepack pnpm dlx wrangler@4.124.0 d1 migrations apply REVIEW_DB --remote \
-  --config apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc
-corepack pnpm dlx wrangler@4.124.0 d1 execute REVIEW_DB --remote \
-  --config apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc \
-  --command "UPDATE review_configuration SET runner_concurrency = <CURRENT_EFFECTIVE_CONCURRENCY> WHERE id = 1;"
-```
-
-Read it back before restarting:
-
-```sh
-corepack pnpm dlx wrangler@4.124.0 d1 execute REVIEW_DB --remote \
-  --config apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc \
-  --command "SELECT revision, runner_concurrency FROM review_configuration WHERE id = 1;"
-```
-
-Then upgrade in this order. An old Runner remains compatible with the new
-Worker, but a new Runner must not read concurrency from an old Worker.
-
-1. Deploy the new Worker (Core and Dashboard) with migration `0020` applied.
-2. Verify the Worker before starting the new Runner. Send one authenticated
-   `HEAD /runner-claim` with the Runner callback bearer. A new Worker returns
-   `204` with `x-compte-rendu-concurrency`; an old Worker returns `405` and does
-   not claim or reserve anything. Only `204` is safe for the new Runner. Queue
-   state must be unchanged after this check.
-3. [Drain](operations.md#drain-before-maintenance) the old Runner.
-4. Remove `RUNNER_SETTINGS_FILE` from the Runner unit and start the upgraded
-   Runner.
-
-Do not change model rosters or thinking efforts as part of this seed.
 
 ### KVM permissions and the persistent Runner service
 
@@ -905,11 +863,8 @@ uses the temporary invocation described above.
    ```
 
    Apply **all** pending files from [the migration directory](../apps/core/migrations/)
-   in order. This is a fresh database, so the upgrade-only `0019` ordering does
-   not apply. Do not edit applied migrations or replace the database. Legacy
-   Durable Object migration history belongs only to the retired Core Worker;
-   the unified public Worker does not own those classes. See the
-   [existing-installation migration procedure](operations.md#update-and-rollback).
+   in order. Do not edit applied migrations or replace the database. For an
+   existing deployment, use [Update and rollback](operations.md#update-and-rollback).
 
 7. Enter the application Worker secrets. Each command prompts for the value; do
    not append a value to the command line, use `echo`, or redirect a secret from
@@ -1024,20 +979,27 @@ use the deployed acceptance gate below for that. See
 [`docs/local-runtime-tracer.md`](local-runtime-tracer.md) for the tracer's
 limits.
 
-### Multi-model review configuration
+For dashboard browser verification, install the pinned Playwright Chromium build
+with `corepack pnpm exec playwright install chromium`, then run
+`corepack pnpm build` and `corepack pnpm test:dashboard`. A preinstalled
+compatible Chromium may be selected with `PLAYWRIGHT_CHROMIUM_PATH`; it is only a
+test setting.
 
-Deploy Core migration `0012_review_configuration.sql` and the multi-model-capable
-Runner before enabling a selection. This execution path requires sbx or microsandbox, OpenCode 2,
-and the managed relay. A selection can contain one reviewer; it runs as a single reviewer with the same prompt
-and output contract used for multiple reviewers. Jobs retain the selection
-frozen when admitted.
+### Review model configuration
 
-Configure the [relay model catalog](llm-service.md#managed-relay-model-catalog) and verify it lists every selected route. Preserve old route IDs and their mappings while queued and running jobs reference them.
+Model selection is stored in Core D1 and frozen for each admitted job. The
+execution path requires sbx or microsandbox, OpenCode 2, and managed inference. A
+selection can contain one reviewer or several; one reviewer uses the same prompt
+and output contract as a multi-review job, and jobs retain the selection frozen
+when admitted.
 
-Set the installation default with `RELAY_DEFAULT_MODEL_ROUTE`. Sign in to
-`/settings` to select one reviewer for single-reviewer execution or multiple reviewers
-and a synthesis model. Changes apply to newly admitted jobs. For access setup,
-the bearer-protected API and revision conflicts, see [review configuration](review-configuration.md).
+Configure the [relay model catalog](llm-service.md#managed-relay-model-catalog)
+and verify it lists every selected route. Preserve route IDs and their mappings
+while queued and running jobs reference them. Set the installation default with
+`RELAY_DEFAULT_MODEL_ROUTE`. Sign in to `/settings` to select one reviewer for
+single-reviewer execution or multiple reviewers and a synthesis model. Changes
+apply to newly admitted jobs. For access setup, the bearer-protected API and
+revision conflicts, see [review configuration](review-configuration.md).
 
 ### First-deployment acceptance gate
 
@@ -1116,10 +1078,6 @@ on unrelated Actions jobs or other Apps' checks.
 
 ### Repository identity and background refresh
 
-Apply `0009_dashboard_lifecycle.sql` before deploying the updated Worker.
-Apply the additive `0010_review_branch_refs.sql` before or with the updated
-Core; older Ingress payloads without branch names still admit and record null
-refs. Existing runs keep null refs and display the recorded head commit only.
 Run `corepack pnpm build` before deploying the Worker: the Cloudflare adapter
 emits `apps/dashboard/.svelte-kit/cloudflare`, used by
 `apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc` and its `ASSETS` binding. Keep the `assets` block when updating an existing generated Wrangler
@@ -1143,47 +1101,13 @@ whose source visibility was private remain protected even if the repository
 later becomes public. Missing or expired identity appears as **Anonymous review**;
 counts, outcome, and recorded milestones remain visible.
 
-Before rollout, privately inventory repositories with retained runs and verify
-that background throughput and the installation's remaining GitHub quota can
-sustain the refresh interval. Do not put that inventory, repository names,
-installation IDs, quota samples, or production measurements in public repository
-documents. Keep operator evidence outside the checkout with restricted access.
-Cloudflare's [Worker limits](https://developers.cloudflare.com/workers/platform/limits/)
-apply to scheduled invocations too; account for token requests, metadata requests,
-and database operations when measuring capacity.
-
-For historical enrichment, verify each distinct retained repository through the
-correct GitHub App installation. Record currently verified public identity and
-legacy eligibility separately from the original source snapshot. Restrict this
-operation to missing legacy eligibility; never replace a known private snapshot
-or assume every historical repository was public. Unresolved repositories remain
-anonymous. Do not backfill missing lifecycle timestamps, stages, or outcomes.
-Repeatable enrichment must leave already recorded provenance and all review data
-intact. Retain only aggregate completion counts in private rollout records.
-
-### Compatible rollout and acceptance
-
-Deploy additive D1 migrations, then the public SvelteKit Worker, before updating the Runner.
-Older terminal callbacks remain accepted; their missing stage data is shown as
-not recorded. Drain active Runner work before its restart, preserving runtime,
-model, credentials, and configured concurrency. Runner stage reporting is bounded
-and best effort; terminal callbacks carry cumulative milestones for recovery.
-
-Verify overview, filtered history, pagination, an existing task deep link, neutral
-missing-task handling, and an unavailable database response. Inspect complete
-JSON responses as well as rendered HTML for anonymous tasks. Confirm that page
-refreshes cause no GitHub or Runner calls, and that the metadata Cron completes
-its refresh cycle. Check public identity expiry during refresh failure, browser
-resume, and offline operation. Validate a new product Check's own run URL when a
-normal review occurs; do not treat a browser screenshot as proof of lifecycle
-or publication correctness.
-
-For local browser verification, install the pinned Playwright Chromium build with
-`corepack pnpm exec playwright install chromium`, then run
-`corepack pnpm build` and `corepack pnpm test:dashboard`. The browser suite uses
-TypeScript and the Playwright test runner; `corepack pnpm check` includes its strict
-type check. CI runs the same suite. A preinstalled compatible
-Chromium may be selected with `PLAYWRIGHT_CHROMIUM_PATH`; it is only a test setting.
+Before enabling background refresh for an installation with retained runs, verify
+that scheduled throughput and the installation's remaining GitHub quota can
+sustain the refresh interval. Cloudflare's
+[Worker limits](https://developers.cloudflare.com/workers/platform/limits/) apply
+to scheduled invocations too; account for token requests, metadata requests and
+database operations. Keep repository inventories and capacity evidence private,
+outside the checkout.
 
 ## GitHub Check name
 
@@ -1220,129 +1144,3 @@ applies relay migrations, sets `AI_GATEWAY_RUN_TOKEN` and deploys the relay
 before the application Worker. Provider and catalog details remain in the
 [managed relay catalog](llm-service.md#managed-relay-model-catalog). There is
 no separate fresh-install procedure.
-
-### Managed Runner upgrade prerequisite
-
-For an already managed installation, keep the generated Worker configs and the
-existing Runner environment file with its valid values. Before restarting the
-upgraded Runner, remove `MODEL_SECRET_COMMAND` and any disabled
-`RUNNER_LLM_RELAY` value (`0`, `false`, `off`, `no`, or any other non-enabled
-value; only `1`, `true`, `yes`, `on`, or unset are accepted). Remove any old
-`RUNNER_LLM_GRANT_VERSION=1` setting. The retired `RUNNER_LLM_SERVICE_SOCKET` is
-ignored, so removing it is optional. This release issues v2 grants by default.
-The Runner rejects the removed command, disabled relay, and grant v1 at startup.
-
-Before a rollback across model protocols, pause admissions and finish every
-queued and running review with the current Runner. Once Core's queue is empty,
-drain and stop it. Before restoring a roster, verify against the target-version
-inference and application Workers that every reviewer, synthesis and default
-route plus the required provider credentials and configuration is supported;
-replace any unsupported path, including `native:openai` if the target lacks it.
-For a managed v1 target, save only a verified v1-compatible Chat roster and
-default route without effort or limit overrides, and restore the matching grant
-configuration from the historical Runner backup. For a direct-provider target, restore its
-original model and credential configuration. Restore that verified roster and
-default route before switching the matching Worker revisions, schema and Runner
-artifact, then restart and resume admissions.
-
-### Upgrading a direct-provider installation
-
-A direct-provider installation has an old Runner without a relay client. Prepare
-one target-release checkout and both configs first, outside the maintenance
-window, then drain and switch. Only these differences apply:
-
-1. Create a persistent clean worktree at the target revision and build there.
-   Create or reuse `<INSTANCE_NAME>-relay-grants` and prepare `$RELAY_CONFIG` as
-   in steps 3–4, using the existing instance IDs, then run the step 4 renderer
-   command in the worktree:
-
-   ```sh
-   INSTANCE_NAME=<INSTANCE_NAME>
-   MAIN_CHECKOUT=<ABSOLUTE_EXISTING_CHECKOUT>
-   TARGET_CHECKOUT=<ABSOLUTE_PERSISTENT_TARGET_REVISION_WORKTREE>
-   RELAY_CONFIG=<ABSOLUTE_RELAY_CONFIG_FILE>
-
-   git -C "$MAIN_CHECKOUT" worktree add --detach "$TARGET_CHECKOUT" <TARGET_REVISION>
-   cd "$TARGET_CHECKOUT"
-   corepack pnpm install --frozen-lockfile
-   # run the step 4 renderer command here with the existing IDs and "$RELAY_CONFIG"
-   corepack pnpm check
-   corepack pnpm test
-   corepack pnpm build
-   ```
-
-   Do not render in the retained checkout. Keep `MAIN_CHECKOUT` only as the
-   backup of the old config and artifact.
-
-2. Copy the retained application config into `TARGET_CHECKOUT`; leave the
-   generated inference config there unchanged:
-
-   ```sh
-   cp "$MAIN_CHECKOUT/apps/dashboard/wrangler.$INSTANCE_NAME.jsonc" \
-     "$TARGET_CHECKOUT/apps/dashboard/wrangler.$INSTANCE_NAME.jsonc"
-   ```
-
-   Manually add only these relay entries to that target-worktree application
-   config; keep its private routes, D1/R2 bindings, allowlists, origins, Check
-   name and secret references:
-   - add `{"binding":"INFERENCE_RELAY","service":"<INSTANCE_NAME>-inference","entrypoint":"InferenceWorker"}` to `services`; create this array if absent, or append to it while keeping existing entries. Leave `vpc_services` in place
-   - `vars.RELAY_DEFAULT_MODEL_ROUTE`: the relay config's `defaultRoute`
-   - `account_id`: only if the retained config has none
-
-   Confirm the app is `<INSTANCE_NAME>-ingress` with `INFERENCE_RELAY`, and the
-   inference Worker is `<INSTANCE_NAME>-inference` with `RELAY_DB` on
-   `<INSTANCE_NAME>-relay-grants` (the relay D1 ID) and required secret
-   `AI_GATEWAY_RUN_TOKEN`.
-
-3. Pause inbound admissions, for example by disabling the GitHub App webhook.
-4. Let the existing Core and old Runner finish all queued and running Jobs, then
-   confirm Core shows none remaining. Resolve failed cleanup with the
-   [maintenance procedure](operations.md#recover-failed-cleanup).
-5. Drain the old Runner and wait for `drained: true`, then stop it. Do not deploy
-   the managed Core before this point: a newly frozen selection would otherwise
-   be claimed by a Runner that cannot serve it.
-6. From `TARGET_CHECKOUT`, follow step 5 (relay) and then step 6
-   (`REVIEW_DB`) in order. The only difference is `0019`: if it is already
-   applied, use the normal step 6 migration; otherwise hold `0019` and every
-   later migration so the first apply stops before them:
-
-   ```sh
-   set -e
-   (
-     HOLD_DIR="$(mktemp -d "$TARGET_CHECKOUT/.migration-hold.XXXXXX")"
-     trap 'mv "$HOLD_DIR"/*.sql apps/core/migrations/ 2>/dev/null || true; rmdir "$HOLD_DIR"' EXIT
-     for migration in apps/core/migrations/*.sql; do
-       version=${migration##*/}
-       version=${version%%_*}
-       if [ "$version" -ge 19 ]; then mv "$migration" "$HOLD_DIR"/; fi
-     done
-     corepack pnpm dlx wrangler@4.124.0 d1 migrations apply REVIEW_DB --remote --config apps/dashboard/wrangler.$INSTANCE_NAME.jsonc
-   )
-   ```
-
-   Preserve the application secrets, adding any missing required secret
-   individually. Deploy the target application from its merged config:
-
-   ```sh
-   cd "$TARGET_CHECKOUT"
-   corepack pnpm dlx wrangler@4.124.0 deploy --config "apps/dashboard/wrangler.$INSTANCE_NAME.jsonc"
-   ```
-
-   Confirm the deployment lists `INFERENCE_RELAY` bound to this instance's
-   inference Worker. Verify the target application serves requests and completes
-   its scheduled handler, then apply remaining application migrations with the
-   step 6 `REVIEW_DB` command. Confirm the default route through the deployed
-   application as described in step 9 before admission resumes.
-
-7. Before starting the new Runner, apply the
-   [managed Runner upgrade prerequisite](#managed-runner-upgrade-prerequisite)
-   to `<ABSOLUTE_RUNNER_ENV_FILE>`, then set `RUNNER_LLM_RELAY=1`,
-   `RUNNER_CALLBACK_URL=https://<INGRESS_HOST>/runner-callback`,
-   `RUNNER_CALLBACK_TOKEN=<static-runner-callback-token>`, and replace
-   `REVIEW_MODEL_CONFIG` with the managed config whose `baseUrl` is
-   `https://<INFERENCE_FQDN>/v1`. Keep `RUNNER_AUTH_TOKEN` and concurrency.
-
-   Then continue with step 9 to wait for the catalog `defaultRoute`, point the
-   Runner unit's `<REPO_ROOT>` at `$TARGET_CHECKOUT` and start it as described
-   in [KVM permissions and the persistent Runner service](#kvm-permissions-and-the-persistent-runner-service).
-   Finish with step 10 to enable webhook delivery and run the acceptance review.

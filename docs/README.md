@@ -17,7 +17,7 @@ from experiments and proposals; a research recommendation is not a shipped featu
 | Sign in and grant operator access                                | [Dashboard authorization](review-configuration.md#dashboard-sign-in-and-model-settings) |
 | Stop a queued or running review                                  | [Operator cancellation](operations.md#operator-cancellation)                            |
 | Run reviews with the microsandbox backend                        | [microsandbox](microsandbox.md)                                                         |
-| Find older PoCs, source research and migration decisions         | [Archive](archive/README.md)                                                            |
+| Find older PoCs, source research and migration decisions         | Removed from `main`: [#406](https://github.com/ariga39/compte-rendu/issues/406) · [archive at e9ba46d](https://github.com/ariga39/compte-rendu/tree/e9ba46dd063c7775e8f86d7514acedc28ae8f40f/docs/archive) |
 
 For end users, the dashboard's `/help` page is rendered from
 [Help Markdown](../apps/dashboard/src/lib/content/help.md).
@@ -27,8 +27,9 @@ For end users, the dashboard's `/help` page is rendered from
 Update the guide that owns a behavior when its code changes. Keep operational
 commands in the installation/service guides, not duplicated in the architecture.
 Mark unimplemented requirements explicitly and link an issue. Do not turn old
-research alternatives or a historical experiment's limitations into current promises.
-Archive superseded plans with their dates, sources and results intact.
+research alternatives or a historical experiment's limitations into current
+promises. Keep superseded plans in the linked issue or the historical archive,
+with their dates, sources and results intact.
 
 ## Tracked gaps
 

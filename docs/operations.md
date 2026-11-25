@@ -192,100 +192,39 @@ service restart. Drain a Runner before replacing its running process.
 
 Use the following sequence for a breaking upgrade or rollback, per instance:
 
-1. Request a [drain](#drain-before-maintenance) on all Runners attached to the
+1. For an inference protocol change, pause admissions and let the current Runner
+   finish every queued and running job. Check that the target application and
+   relay support the reviewer, synthesis and default routes and their provider
+   credentials. Restore a roster and default supported by the target before
+   switching versions.
+2. Request a [drain](#drain-before-maintenance) on all Runners attached to the
    Worker. Leave the old Runner and its matching callback receiver running.
    Let active jobs finish and [resolve failed cleanup](#recover-failed-cleanup),
-   including blockers in Core that survived a Runner restart. Handle any
-   version-specific recovery described below while the old endpoints still work.
-2. Verify each Runner reports `drained: true` and Core shows no unresolved
+   including blockers in Core that survived a Runner restart.
+3. Verify each Runner reports `drained: true` and Core shows no unresolved
    cleanup blockers. Stop those Runner processes.
-3. Switch to the matching Worker and schema in the reviewed migration order.
+4. Switch to the matching Worker and schema in the reviewed migration order.
    Deploy with `apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc` and verify the
    Worker before starting the replacement Runner. For a one-step incompatible
    schema change, keep HTTP and scheduled writers quiesced during the switch.
-4. Start the replacement Runner only when the Worker is ready. The drain flag
+5. Start the replacement Runner only when the Worker is ready. The drain flag
    is in memory. The replacement enables claiming as soon as its startup scan
-   succeeds. Before starting a Runner that reads concurrency, verify the
-   upgraded Worker returns `204` to authenticated `HEAD /runner-claim`; an old
-   Worker returns `405` and does not claim or reserve work.
+   succeeds. Verify that authenticated `HEAD /runner-claim` returns `204`
+   with the desired concurrency. Set concurrency in Dashboard Settings;
+   `RUNNER_CONCURRENCY` supplies the startup fallback.
 
 For either release path, back up the existing Runner artifact before replacement
 and verify the installed artifact’s SHA256 against the tested build before
 starting it. After startup, verify service health, desired concurrency and
-Sandbox recovery status. Verify the behavior affected by the release. For
+Sandbox recovery status. Resume admissions if they were paused for the switch.
+Verify the behavior affected by the release. For
 publication changes, use the next controlled review to check the exact revision,
 review output and visible GitHub publication.
-
-### Check retry storage removal
-
-Migration `0019_remove_check_delivery_retries.sql` drops
-`review_check_deliveries` and the cancellation Check timestamps. Deploy the Worker that no longer
-uses these objects, verify that it serves requests and runs the scheduled handler,
-then apply the migration. Rolling back to an older Worker requires restoring
-its schema first. Terminal and cancellation Check updates are direct and best effort;
-Runner stop retries remain durable. Any terminal Check updates still queued in
-`review_check_deliveries` when the migration runs are not replayed and may leave
-those Checks unfinished; re-trigger the review if a Check needs to finish.
-
-### Review deadline rollout
-
-Core sets a 90-minute deadline at claim time. Deploy the application Worker with
-`POST /runner-read-token` before upgrading a Runner that rotates tokens. A successful refresh
-replaces the sbx token file or updates the active microsandbox VM's GitHub secret. If renewal fails,
-the Runner uses the earlier of the claim deadline and the current token's expiry
-minus one minute.
-The sbx backend rotates a mode-0600 token file inside the Runner's private
-per-job scratch root. Only the checkout and configuration directories are
-mounted in the guest. If removing the scratch root fails, the Runner logs the
-exact directory on the host for cleanup.
-
-The callback and evidence manifest identify the limiting clock for an exhausted
-attempt. The dashboard reports a timeout.
-
-Queued jobs receive their deadline when claimed after the replacement Runner
-starts. The inference Worker issues six-hour grants, independently of the
-execution deadline.
-
-### Slim v2 callback rollout
-
-An old Runner's inline callback is rejected by a v2-only Core. During step 1
-of a breaking upgrade or rollback, use the still-running old Runner to resolve
-failed-cleanup jobs against the original backend. An undelivered terminal result
-may be lost during the switch. Re-trigger the review once the same PR is eligible.
-Continue with step 2 and verify publication on the next review.
-
-### Grant v2-only cutover
-
-The inference Worker no longer serves `/runner-llm/issue`; `/runner-llm/issue-v2`
-is the sole grant path and always returns frozen route descriptors. Drain all
-Runners, deploy the inference Worker, the application Worker and the matching
-Runner in one window, then resume. Keep `RUNNER_LLM_GRANT_VERSION` unset or set
-to `2`; a Runner configured with `1` fails startup. Existing v1 grants are
-short-lived and drained work must finish before the cutover, so a rollback needs
-the previous binaries and their original configuration.
-
-### Migrating an existing two-Worker installation
-
-Keep the public Worker name/domain, D1 and R2 IDs, VPC service, allowlists,
-branding, `DASHBOARD_ORIGIN` and all existing credentials. Render the new dashboard
-configuration only when absent, then transfer those retained values. Put the
-GitHub App private key and Runner auth secret on the public Worker using secure
-operator input; never write them to its config. If model configuration is enabled,
-transfer the existing `REVIEW_CONFIGURATION_TOKEN` to the public Worker too; it
-is optional and must stay unset when that operator API is disabled. Build and deploy the merged
-SvelteKit Worker. Check SSR, webhook signatures, Runner authentication and Cron.
-
-Disable the old Core Worker's Cron when the unified Worker takes ownership of
-metadata refresh. Retain the previous deployments and private configuration for
-rollback until verification completes. The old Core's Durable Object retirement
-migration history belongs to that Worker; do not copy it into the public Worker.
-To roll back this migration, restore the previous ingress deployment and Core
-Cron together. Database and bucket contents remain in place.
 
 If a bad release is receiving new runs from webhooks, stop webhook delivery.
 For a compatible rollback, revert the affected Worker to its last known-good deployment in the
 Cloudflare Workers deployment controls, using the matching application build and
-compatible database schema. For a breaking rollback, follow the same four steps above using the prior
+compatible database schema. For a breaking rollback, follow the breaking release procedure above using the prior
 matching pair and a compatible schema. Do not delete D1 tables or edit the applied migration
 ledger to undo a release. A schema rollback is a separate, reviewed migration or
 an operator approved D1 recovery action.
@@ -365,10 +304,6 @@ removes only a verified expired resource. Historical review
 details remain available through Core even after the private Runner job endpoint
 returns 404. Archived evidence has its own retention policy.
 
-For the first upgrade from a Runner without these endpoints, arrange a quiet
-window and wait for queued and claimed work to finish. Disabling webhooks alone
-does not remove queued work; zero concurrency is invalid.
-
 Back up artifacts/configuration before replacement. A compatible Core/contracts
 addition that only prepares for a new Runner result shape may deploy Worker-first
 without draining; once callback or result-shape acceptance changes, use the
@@ -388,9 +323,7 @@ corroboration and absence in the original catalog. If two sweeps race, the loser
 nonzero `rm` is accepted only when final exact absence is confirmed in that same
 catalog; a present VM or invalid inspection remains a failure. A same-name lookup in another
 catalog reporting "not found" is never absence proof. An unresolved sweep keeps
-drain pending; restore backend access for transient failures. Pre-sweeper
-`compte-rendu-<jobId>` resources have no trustworthy age: drain and remove them
-manually before upgrading.
+drain pending; restore backend access for transient failures.
 
 ### Recover failed cleanup
 
@@ -568,12 +501,12 @@ that no review is in flight before proceeding.
 2. Uninstall the GitHub App from every selected repository. Confirm no new
    deliveries arrive, then delete the App registration if it is no longer
    needed and revoke its private key.
-3. Use the retained deployment-only configuration to delete the public Worker.
-   If an old Core Worker was retained after migration, remove it separately only
-   after confirming it has no active consumers. Do not use `--force`.
+3. Use the retained deployment-only configurations to delete the public Worker
+   and the inference Worker. Do not use `--force`.
 
    ```sh
    corepack pnpm dlx wrangler@4.124.0 delete --config apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc
+   corepack pnpm dlx wrangler@4.124.0 delete --config apps/inference-worker/wrangler.<INSTANCE_NAME>.jsonc
    ```
 
 4. Verify the exact VPC Service ID, delete it, and verify that exact ID is
@@ -617,6 +550,14 @@ that no review is in flight before proceeding.
    D1 deletion is irreversible for this deployment's live state; stop and
    confirm the database name at the prompt. Do not delete a different
    database, and never use a broad wildcard or guessed identifier.
+
+   The inference Worker uses the separate `<INSTANCE_NAME>-relay-grants`
+   database. Delete it after the inference Worker is gone only when its grant
+   history is no longer needed:
+
+   ```sh
+   corepack pnpm dlx wrangler@4.124.0 d1 delete <INSTANCE_NAME>-relay-grants
+   ```
 
 8. Decide separately whether to retain the private
    `<INSTANCE_NAME>-review-evidence` R2 bucket. Leaving it in place is valid:

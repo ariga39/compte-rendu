@@ -1,11 +1,11 @@
 # Review model configuration
 
-Multi-model execution is available through the sbx or microsandbox runtime with OpenCode and the managed
-inference relay. Deploy migration `0012_review_configuration.sql` and the compatible
-Core and Runner before enabling a non-null selection. Missing grant routes or an
-invalid final result fail without a vote; no fallback reviewer is substituted.
-Child-session evidence is best effort, not an extra publication gate.
-See [installation](installation.md#multi-model-review-configuration) for rollout.
+Multi-model execution is available through the sbx or microsandbox runtime with
+OpenCode and the managed inference relay. Missing grant routes or an invalid final
+result fail without a vote; no fallback reviewer is substituted. Child-session
+evidence is best effort, not an extra publication gate. See
+[installation](installation.md#review-model-configuration) for the current
+deployment procedure.
 
 ## Ownership
 
@@ -78,10 +78,9 @@ the relay resolves those IDs when issuing a grant. Upstream refusals follow the
 existing job failure path. Configuration revisions order editor writes only;
 the scheduled refresh time orders catalog updates independently.
 
-On migration, keep existing route mappings and start discovery memberships
-empty. Populate from an initial complete refresh before switching picker reads.
-If a source cannot refresh, expose its discovery failure, and never fill its
-list with unverified historical mappings. On a healthy refresh the picker should
+Keep existing route mappings while discovery memberships are populated from a
+complete refresh. If a source cannot refresh, expose its discovery failure, and
+never fill its list with unverified mappings. On a healthy refresh the picker should
 go from A and B to B and C without intervention, while a job queued with A can
 still resolve its original route. Also verify source removal, complete empty
 lists, partial and overlapping refreshes, and a saved synthesis model withdrawn
@@ -123,8 +122,8 @@ selection, and an optional desired Runner concurrency:
 }
 ```
 
-`concurrency` is any positive safe integer, the same contract as the former
-TOML settings file. Omit `selection` to change only concurrency: Core keeps the
+`concurrency` is any positive safe integer. Omit `selection` to change only
+concurrency: Core keeps the
 installed roster and frozen effort snapshot as-is and does not require the
 inference relay to be reachable. Omit `concurrency` to preserve the stored
 value during an ordinary selection update. Send `null` to clear the deployment
@@ -185,11 +184,10 @@ revision check and admission snapshots as the operator API.
 
 ## Admission snapshots
 
-Migration `0012_review_configuration.sql` initializes the selection to null and
-adds a snapshot column to review runs. Creation of a review run reads the active
-selection inside the same database statement that creates the run. Its revision
-and selection are frozen before the job is queued. Runner claim responses carry
-that snapshot as `reviewConfiguration`.
+Without an explicit saved selection, the deployment uses its installation
+default. Creation of a review run reads the active selection inside the same
+database statement that creates the run. Its revision and selection are frozen before the job is queued.
+Runner claim responses carry that snapshot as `reviewConfiguration`.
 
 Changing the selection needs no Core or Runner restart. For a new model on an
 already configured provider, select its discovered native `provider/model` ID using the
@@ -198,19 +196,17 @@ before saving the selection. Previously queued and
 running jobs retain their snapshots; new jobs use the new revision. Updating a
 selection does not create a job, restart a review or bypass the existing same-PR
 guard. A new explicit retry uses the configuration active at its own admission.
-Historical runs are not backfilled or relabeled. Finish legacy jobs without a frozen selection before enabling the managed relay.
-
-Deploy the migration before upgraded Core code, and upgrade Runner to understand
-the snapshot before enabling any selection. A one-reviewer selection runs directly. A larger selection uses independent
+Historical runs are not backfilled or relabeled. A one-reviewer selection runs
+directly. A larger selection uses independent
 reviewers and one synthesis inside a single Sandbox. It retains
 its frozen configuration and participant evidence, and publishes only after
 validation, grant revocation and confirmed Sandbox cleanup.
 
 ## Thinking effort
 
-Migration `0018_effort_configuration.sql` adds the internal effort snapshot and
-the per-route reset generations. The public selection may include an `efforts`
-object that maps a selected route ID to an operator-facing effort name:
+Core stores an internal effort snapshot and per-route reset generations. The
+public selection may include an `efforts` object that maps a selected route ID to
+an operator-facing effort name:
 
 ```json
 {
