@@ -8,7 +8,9 @@
   compatibility is not a default requirement. Breaking changes are deliberate,
   and a temporary compatibility path needs a concrete reason, a removal date and
   a cleanup issue. Losing a rare in-flight or undelivered review during an
-  upgrade or crash is acceptable: re-trigger it in a fresh Sandbox.
+  upgrade or crash is acceptable: re-trigger it in a fresh Sandbox once same-PR
+  admission is eligible (an expired pending claim, or confirmed destruction after
+  `cleanup=failed`; see [recovery](docs/operations.md#operations-and-troubleshooting)).
 - Use behavior-based TDD through the seams accepted in `docs/design.md`: one
   failing behavior, minimal implementation, then the next slice.
 - Use stable Effect 4 for runtime code. Before implementation, read the applicable
