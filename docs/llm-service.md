@@ -23,12 +23,6 @@ Use the HTTPS callback origin and its Runner bearer for grant control. The infer
 
 The Runner calls `/runner-llm/issue-v2` with the run ID, job ID, attempt and routes. It returns only the grant token, expiry and one client descriptor per frozen route: `{ routeId, profile, limit?, metadata? }` where `profile` is `chat` or `responses`. `metadata` carries only the OpenCode-supported model description, such as name, family, release date, capabilities and cost. The descriptor omits the upstream model, provider slug, credential alias and URL. This is the sole grant path; `/runner-llm/issue` is removed. Grants expire after four review budgets (currently six hours); Sandbox resource lifetime stays pinned separately at two hours. The Runner revokes by job ID on completion or cancellation with a bounded retry. An unconfirmed revocation fails only that review and never blocks later admissions; the fixed expiry bounds a lost response or crash. See [maintenance drain](operations.md#drain-before-maintenance).
 
-### Upgrading an installation with the former local service
-
-Use the previous Runner to finish any queued jobs without frozen selections and drain running work. This release ignores `RUNNER_LLM_SERVICE_SOCKET`, the retired `llm-grant-pending` markers and `RUNNER_LLM_RELAY_GENERATION`; leftovers are harmless. A rollback binary still needs its original configuration and credentials. Keep rollback binaries, configuration and credentials together.
-
-Grant v2 supports every configured route, including Chat Completions and Responses, plus context and output limits. Check the [inference protocols](#inference-protocols) available in your deployed release. Installations using the former ChatGPT subscription backend need a provider credential supported by Gateway BYOK before migrating.
-
 ### Change a review model without restarting
 
 Read the authenticated catalog after a successful refresh, then update the [review configuration](review-configuration.md) using its current revision. Each queued job keeps its admission snapshot. The relay freezes route mappings when issuing the job’s grant.
@@ -57,10 +51,8 @@ failures (`upstream`, phase `agent`), with an HTTP status when the event reports
 400–599. Core persists that status and the dashboard displays it separately from
 invalid review output (`invalid_output`, phase `output_validation`). Raw provider
 messages are not included in the public failure record. Existing historical
-classifications are unchanged. Apply migration `0014_failure_http_status.sql`
-before deploying Core/dashboard, then update Runner after
-draining active jobs. The nullable column preserves compatibility with older
-callbacks while the rollout completes.
+classifications are unchanged. The persisted status is optional on older
+callbacks.
 
 The original CLI exit code and error events remain in the evidence. A sanitized
 `Runner accepted recovered OpenCode session` log records the job/session identity
@@ -200,12 +192,16 @@ ends the stream successfully. Incomplete or failed turns keep partial usage.
 Responses terminal events are capped at 4 MiB; larger events fail the turn.
 
 Both protocols validate only the security boundary: the grant-bound model and
-route, local function tools and tool selection, local text/reasoning/function
-parts, and request size. Hosted tools, remote media or file references, prior
-provider-stored audio references and server-side state are rejected; other
-optional provider fields, including Chat audio output settings, are forwarded
-unchanged. The relay still forces the frozen model, `store: false` and
-`stream: true`.
+route, local function tools and tool selection, request size, and accepted
+content shapes. Message content accepts only local text and refusal parts;
+Responses input items are limited to local message text/refusal, function calls,
+function results and encrypted reasoning. Any image or other media part,
+including an inline `data:` URL, is rejected. Hosted tools, remote media or file
+references, prior provider-stored audio references and server-side state are also
+rejected. Other optional provider fields, including output settings such as Chat
+`modalities` and `audio`, are forwarded unchanged; bounding inputs does not
+narrow output configuration. The relay still forces the frozen model,
+`store: false` and `stream: true`.
 
 The former Messages (`POST /v1/messages`) and Gemini
 (`POST /v1beta/models/<handle>:streamGenerateContent`) wire protocols are
@@ -242,13 +238,17 @@ Choose discovery according to how that provider exposes its model list.
   upstream model ID. A source with only aliases makes no discovery request.
   A discovery source can also declare aliases for the same upstream.
 
-Custom and OpenAI destinations default to Chat Completions. Set
-`profile` to a default profile or `profiles` to the distinct profiles a rich
-catalog may publish (`chat`, `responses`). For custom and OpenAI destinations, ID-only entries and aliases use the default.
-The list independently filters rich entries, which prefer the default when it is eligible. Rich entries
-are filtered from their advertised `api` operations; models that advertise no
-configured protocol are omitted. `models` is an explicit allowlist keyed by
-review route ID. Use it for ID-only endpoints that list unrelated models: only
+A source that sets neither `profile` nor `profiles` is an explicit legacy Chat
+source: every reviewable entry and alias resolves to Chat, and advertised
+protocol metadata does not filter it. Set `profile` to a default profile or
+`profiles` to the distinct profiles the source may publish (`chat`, `responses`)
+to negotiate protocols. Only a negotiating source filters rich entries by their
+advertised `api` operations and publishes only configured protocols; an entry
+that advertises none of them is omitted. Rich entries prefer the default when it
+is eligible. Aliases use the source default profile; an ID-only discovered entry
+can use only a Chat default, because a non-Chat operation cannot be verified
+without explicit metadata. `models` is an explicit allowlist keyed by review
+route ID. Use it for ID-only endpoints that list unrelated models: only
 named routes become visible, and each entry declares its trusted profile and
 optional `limit`:
 
@@ -271,8 +271,10 @@ default. Responses routes require an explicit `models`
 entry; a qualified source may still expose a chat default without one. An
 explicit `capabilities.tools.supported: false` always omits that model, even for
 a legacy unqualified source. Malformed rich capability metadata fails the source
-refresh and keeps the previous snapshot. Rich entries that advertise only
-retired Messages or Gemini operations are omitted instead of defaulting to Chat.
+refresh and keeps the previous snapshot. For a negotiating source, rich entries
+that advertise only retired Messages or Gemini operations are omitted instead of
+defaulting to Chat; a legacy Chat source does not use advertised protocols to
+filter.
 
 The route mapping and profile are immutable once published. The rest of the
 model description, including context and output limits, is ordinary refreshable
@@ -324,6 +326,7 @@ empty list withdraws that source's candidates; a failed refresh preserves its
 last complete list. Existing reviews can still resolve their frozen route IDs.
 Add `?models=1` to the same authorized request to include the complete retained
 upstream record for each visible route. That detail is opt-in so the ordinary
-settings list does not carry every provider object. Apply the relay D1 migrations before deploying the inference Worker. Verify a
-successful scheduled refresh and the expected model IDs on this endpoint before
-rolling out the dashboard. See [model selection](review-configuration.md#selectable-model-catalog).
+settings list does not carry every provider object. Apply the relay D1 migrations
+before deploying the inference Worker. Verify a successful scheduled refresh and
+the expected model IDs on this endpoint before enabling model settings. See
+[model selection](review-configuration.md#selectable-model-catalog).

@@ -1,9 +1,12 @@
 # Security boundaries and limitations
 
 This describes controls in the current code, not a penetration test or a guarantee
-against platform vulnerabilities. The [archived FMEA](archive/security-fmea.md)
-and [early Sandbox threat model](archive/docker-sandbox-security-threat-model.md)
-record historical assumptions and observations, not current deployment policy.
+against platform vulnerabilities. Earlier assumptions and observations, including
+the FMEA and the early Sandbox threat model, are kept in the historical research
+archive, which is no longer on `main`: see
+[#406](https://github.com/ariga39/compte-rendu/issues/406) and the
+[archive at e9ba46d](https://github.com/ariga39/compte-rendu/tree/e9ba46dd063c7775e8f86d7514acedc28ae8f40f/docs/archive).
+They are not current deployment policy.
 
 ## Trust boundaries
 

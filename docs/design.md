@@ -1,94 +1,17 @@
-# Architecture and behavior
+# Architecture and invariants
 
-Compte rendu is a GitHub App for static pull-request review outside GitHub Actions.
-One admitted review is one durable Core run, one Runner job and one final GitHub
-review. Multiple models are participants within that job, not separate published
-reviews. This document describes the implementation; historical proposals are in
-[the archive](archive/README.md).
+Compte rendu is a self-hosted GitHub App for static pull-request review outside
+GitHub Actions. One admitted review is one durable Core run, one Runner job and
+one final GitHub review. Multiple models are participants within that job, not
+separate published reviews.
 
-## Product behaviour
+This guide covers the components, trust boundaries, public test seams and
+product invariants. Edge-case semantics live in behavior tests. Historical
+research and earlier proposals were removed from `main`; see
+[#406](https://github.com/ariga39/compte-rendu/issues/406) and the
+[archive at e9ba46d](https://github.com/ariga39/compte-rendu/tree/e9ba46dd063c7775e8f86d7514acedc28ae8f40f/docs/archive).
 
-### Admission
-
-The application edge verifies the webhook HMAC, body bounds and installation
-allowlist before delivering a typed normalized event to Core. Automatic review accepts non-draft
-`opened`, `reopened`, `synchronize` and `ready_for_review` events when the base
-repository is private or the head belongs to the same repository. Bot authors
-are excluded unless their stable numeric ID is in `ALLOWED_BOT_AUTHOR_IDS`.
-Human events and manual requests do not consult that Bot allowlist.
-
-Public fork PRs and non-allowlisted Bot PRs require `/ai-review` from a user with
-current `write`, `maintain` or `admin` permission. Approval binds to the observed
-head SHA; a new head needs new authorization. Manual feedback uses GitHub
-reactions: `eyes` for admission, `confused` for denial or a draft, and `-1`
-for an admitted run that fails. Supersession during completion also adds
-`confused`; a queued run superseded before execution can have only its Check updated. The published review is the success signal.
-
-`check_run.rerequested` and `check_suite.rerequested` can retry a failed or manually cancelled review
-under the same current maintainer checks. Manually cancelled Checks also offer
-**Run review again** through the App’s `check_run.requested_action` handler. A retry creates a fresh run and Sandbox.
-Duplicate deliveries and already active/completed same-revision reviews do not
-create another review. Unknown Checks or uncertain authorization never start work.
-
-### Checks and publication
-
-Check setup is best effort after durable admission, outside the webhook response
-path. Its D1 ownership lease prevents concurrent setup; late setup catches up to
-the persisted run. Check failure does not prevent execution or terminal feedback.
-A Check is queued until claim, in progress after claim, and successful only after
-publication. On failure, Core requests a failed Check. Supersession and manual
-cancellation send cancelled updates with distinct explanations.
-`details_url` points to that run's dashboard page. The configurable Check name
-also supplies the dashboard title. Terminal and cancellation Check updates are
-direct and best effort: a GitHub error can leave the Check showing an earlier
-state and is not retried from a durable queue. Late setup and later callbacks
-make a fresh direct attempt from the persisted run status and decision. Core
-never creates another Check or review for the same run and never regresses a
-terminal Check. Manual cancellation sends its Check update immediately; only its
-Runner stop keeps durable retry work.
-
-Core is the only GitHub publisher. It derives repository, PR and commit from the
-admitted run, rechecks the head, and uses a publication claim plus run marker to
-suppress duplicates. Marker recovery verifies the App author, commit and review
-state against the expected publication. A changed head is superseded without a
-stale vote. GitHub reads and the subsequent POST are not atomic; an ambiguous response
-is not proof that no review was published.
-
-### Review result
-
-OpenCode 2 returns one final assistant submission with a first line
-`DECISION: <decision>` (`approve`, `request_changes`, `comment`), one blank line,
-then the non-empty, bounded review as raw Markdown. Only this final text form is
-accepted for new reviews; the former `{decision, markdown}` JSON object is not a
-current wire format, and previously stored terminal results remain readable. Runner
-extracts the submission from the completed session export, checking exact
-session/model/agent identity, successful outcome, final assistant `stop` and final
-successful `idle`. Intermediate analysis and tools are not results. There is no
-custom submission tool.
-
-A normally completed session with a missing or invalid final submission can
-receive one correction in the same live Sandbox, session, model and agent. Both
-calls share the original deadline. Abort, timeout, truncation, abnormal completion
-or ambiguous session identity do not authorize correction. After any live
-correction, Runner revokes the model grant, exports and redacts evidence, and
-validates the archived final result before destruction. Unresolved invalid output
-publishes no vote; Runner does not repair malformed output or extract result
-substrings from prose, and never infers a decision.
-
-The shared prompt asks for concise, adversarial review of necessity, correctness
-and implementation cost, starting with `TLDR:`. These are instructions, not
-schema checks. A different heading does not invalidate a structural result.
-
-Runner carries `{version: 2, decision, markdown}` in its callback and manifest;
-Core checks agreement with the exact Markdown artifact before mapping the vote to
-`APPROVE`, `REQUEST_CHANGES` or `COMMENT`. A delivered Request changes review is
-successful execution. A callback carrying plain Markdown instead of the structured
-result is invalid. A new round attempts to dismiss this
-installation’s earlier GitHub approvals/change requests on the PR, with mandatory confirmation before Runner
-admission, preserving historical decisions and review discussion. A failed claim-time reset
-is recorded as `review_reset_failed` and cannot admit the new round. See [review decisions](review-decisions-design.md).
-
-## Deployment shape
+## Components
 
 ```mermaid
 flowchart LR
@@ -121,9 +44,13 @@ machine or document request once: it authenticates Runner calls, calls typed Cor
 reads and protocol handlers, and passes GitHub webhook payloads to the ingress
 module, which delivers typed events and metadata invalidations directly to Core.
 SSR loaders reach the same in-process application through SvelteKit `event.fetch`.
-Runner is private. The inference hostname accepts job grants; relay control uses a private Worker binding. Core validates an admitted job, writes the durable delivery/run in one D1 claim, and leaves it for the idle Runner to claim through `/runner-claim`; work is not submitted through the VPC binding.
-There is no Cloudflare Workflow or message queue. See [installation](installation.md)
-and [LLM service](llm-service.md) for configuration, grants and deployment order.
+
+Runner is private. The inference hostname accepts job grants; relay control uses
+a private Worker binding. Core validates an admitted job, writes the durable
+delivery/run in one D1 claim, and leaves it for the idle Runner to claim through
+`/runner-claim`; work is not submitted through the VPC binding. There is no
+Cloudflare Workflow or message queue. See [installation](installation.md) and
+[LLM service](llm-service.md) for configuration, grants and deployment order.
 
 Core is assembled from admission, Runner protocol, publication/Check update and
 public projection seams rather than one monolithic module. D1 access is split by
@@ -137,7 +64,178 @@ publication record; their private diagnostics arrive through
 `POST /runner-evidence`. Core publication never depends on that diagnostic
 upload.
 
-### Deployment and compatibility
+## Trust boundaries
+
+| Boundary                                | Control                                                                                             |
+| --------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| GitHub → public Worker                  | HMAC verification, bounded payload, installation allowlist and event policy                         |
+| Maintainer → review admission           | Current GitHub permission and immutable head checks                                                 |
+| Dashboard operator → application Worker | GitHub App user session, current GitHub identity, instance UID allowlist and same-origin mutations  |
+| Runner → public Worker                  | Authenticated claim, progress, read-token renewal and callback with persisted job/attempt ownership |
+| Agent → GitHub                          | Repository-scoped read token injected through the runtime proxy; no publication credential          |
+| Agent → model                           | Restricted expiring job grant to the managed inference Worker                                       |
+| Inference Worker → AI Gateway           | Account-scoped Gateway Run token and BYOK alias from the frozen grant mapping                       |
+| Runner → host resources                 | Per-job runtime ownership, bounded commands, deadlines, redaction and confirmed teardown            |
+| Core module → public dashboard          | DB-only projection; unknown/private/expired repository identity removed server-side                 |
+
+The public SvelteKit Worker holds the GitHub App private key and Runner secrets.
+Its Core module publishes reviews; it is an internal code boundary, not a separate
+private Worker. Only the allowlisted public API, authenticated Runner routes and
+signed webhook routes reach that module. The model's result cannot choose the
+target repository, commit, URL or publisher; Core checks freshness and agreement
+between callback, manifest and Markdown. Publication recovery verifies the App
+author, commit and expected review state. See [security](security.md) for the
+current controls and their limitations.
+
+## Product invariants
+
+### One admitted review, one durable run
+
+The application edge verifies the webhook HMAC, body bounds and installation
+allowlist before delivering a typed normalized event to Core. Automatic review
+accepts non-draft `opened`, `reopened`, `synchronize` and `ready_for_review`
+events when the base repository is private or the head belongs to the same
+repository. Bot authors are excluded unless their stable numeric ID is in
+`ALLOWED_BOT_AUTHOR_IDS`; human events and manual requests do not consult that
+allowlist.
+
+Public fork PRs and non-allowlisted Bot PRs require `/ai-review` from a user with
+current `write`, `maintain` or `admin` permission. Approval binds to the observed
+head SHA; a new head needs new authorization. Duplicate deliveries and already
+active or completed same-revision reviews do not create another review. Unknown
+Checks or uncertain authorization never start work. A retry or manual re-run
+creates a fresh run and Sandbox.
+
+### Frozen revision and selection
+
+Core freezes the operator's model selection and revision when admitting a run.
+Configuration changes affect new admissions, not queued or running jobs. The
+protected [configuration API](review-configuration.md) stores route IDs, not
+credentials or URLs; `selection: null` restores the installation default. For
+managed inference, Core snapshots `RELAY_DEFAULT_MODEL_ROUTE` as a single-reviewer
+selection at admission.
+
+One explicit reviewer runs directly; multiple reviewers use a supervisor and
+selected subagents in one Sandbox. Every participant receives the same review
+task and final output contract. The supervisor dispatches one independent review
+per participant and then synthesizes them; child exports are best-effort
+evidence, not extra result gates. The job retains its frozen selection and
+`multi-review.json`, with one callback and one publication. The LLM grant permits
+only the routes the job needs. Cancellation revokes that grant and destroys the
+shared Sandbox.
+
+### Single publisher and freshness
+
+Core is the only GitHub publisher. It derives the repository, PR and commit from
+the admitted run, rechecks the head, and uses a publication claim plus run marker
+to suppress duplicates. Marker recovery verifies the App author, commit and
+review state against the expected publication. A changed head is superseded
+without a stale vote. GitHub reads and the subsequent POST are not atomic; an
+ambiguous response is not proof that no review was published.
+
+Check setup and terminal Check updates are best effort. A GitHub error can leave
+a Check showing an earlier state; late setup and later callbacks make a fresh
+direct attempt from the persisted run status and decision. Core never creates
+another Check or review for the same run and never regresses a terminal Check.
+Manual cancellation sends its Check update immediately; only its Runner stop
+keeps durable retry work. Cancellation and publication compete for durable
+ownership of the same run: a cancelled run publishes no review and is not a
+failure.
+
+### Clean break per run
+
+Each run gets a fresh Sandbox and immutable base/head SHAs; work never resumes in
+a used Sandbox. A run ends in a terminal product state and eventual Sandbox
+destruction. A retry creates a fresh sandbox and uses immutable SHAs.
+
+A known cleanup failure blocks later reviews for the same PR until exact
+destruction is confirmed; elapsed time never releases it. An unknown pending
+cleanup follows the original claim budget so a lost Runner cannot deadlock the
+PR. Runner-owned resources are age-swept only after the attempt budget plus a
+finalization margin, using a reserved parseable name, complete inventory and
+post-removal absence verification; a physical sweep never changes Core state. A
+lost in-flight or undelivered review can be re-triggered in a fresh Sandbox once
+same-PR admission is eligible. See
+[troubleshooting recovery](operations.md#operations-and-troubleshooting).
+
+### Fail-closed boundaries, best-effort side channels
+
+Reject uncertain authorization, revision freshness, credential handling, agent
+output and cleanup. Invalid input cannot authorize publication or silently switch
+models. Check, progress, telemetry and diagnostic-evidence delivery are best
+effort and must not become execution or publication gates. Do not extend
+fail-closed into unrelated speculative controls.
+
+### Data ownership and privacy
+
+Core/D1 owns product state, ownership, lifecycle timestamps, decision, frozen
+model selection, bounded per-model token summaries, repository disclosure
+metadata and evidence object metadata. Runner owns observations about local
+execution. The terminal callback carries the validated result and an evidence
+reference; private R2 archives retain named manifest/JSONL/stderr/Markdown/root-
+session diagnostics, and the Runner host retains fuller recovery evidence. D1
+does not store raw repository contents, credentials or session transcripts.
+Public dashboard reads use D1 only and trigger no GitHub or Runner request; only
+currently verified public identity is disclosed, and private, unknown or expired
+identities stay anonymous. See [dashboard behavior](public-dashboard-design.md).
+
+## Runner job and sandbox boundary
+
+**Ownership and authorization.** Core/D1 owns the durable job: admitted
+revision, attempt, persisted owner, publication state and the record the next
+release depends on. Runner owns local execution: checkout, the sandbox backend,
+the agent process, observations and private evidence. Ingress authenticates
+claim, progress, read-token renewal, callback and private evidence upload with
+`RUNNER_CALLBACK_TOKEN`; every report must match the persisted job and attempt
+owner. `POST /runner-claim` returns an immutable `RunnerJobInput` only when Core
+has eligible work.
+
+**Isolation and destruction.** Runner selects one sandbox backend at startup.
+The backend implements the job-sandbox contract (`setup`, `exec`, `copyOut`,
+optional read-token refresh, `destroy`) and owns its executable/environment,
+credentials/egress and confirmed teardown; Runner retains budgets, aborts,
+redaction, diagnostics and product lifecycle. Unknown or retired kinds and
+incomplete configuration fail before claims; there is no silent fallback, and a
+new backend changes no Core or public contract. See [security](security.md) for
+backend assumptions and isolation limits.
+
+Repository text and GitHub context are untrusted evidence. The agent is
+read-only: no repository programs, builds/tests, edits, commits or publication.
+OpenCode loads the job configuration and bundled skills from a private read-only
+configuration directory. The Runner excludes repository configuration and host
+skills, MCP and SSH settings; budgets and egress are enforced outside the model,
+because a prompt is not a security boundary. The bundled `code-review` skill owns
+only the review method and cannot change scope, tool permissions, orchestration
+or the final output contract. Its credits, pinned sources and licenses are
+packaged with it; the decision to replace the earlier topic-skill proposal is in
+the [archived source comparison](https://github.com/ariga39/compte-rendu/blob/e9ba46dd063c7775e8f86d7514acedc28ae8f40f/docs/archive/review-oriented-skills-research.md)
+and [#406](https://github.com/ariga39/compte-rendu/issues/406).
+
+Core's VPC stop requests cancellation of a reachable job. A missing or retired
+job is not proof of destruction: only Runner can confirm destruction for a job it
+still tracks, or from a backend's exact absence proof. Core never releases a
+known failed cleanup from elapsed time or a stop response alone. Capacity and
+maintenance controls affect new claims only and never revoke admitted ownership.
+Core D1 owns the deployment's desired Runner concurrency, editable in Dashboard
+Settings; `RUNNER_CONCURRENCY` is the startup fallback. Runner reads the target
+through an authenticated `HEAD /runner-claim` probe that allocates no work.
+Increases wake claims, decreases preserve admitted jobs and reservations, and a
+missing or invalid value leaves the last target unchanged. Claims are
+single-flight, so an ambiguous response cannot create a second owner.
+A lost callback is not replayed or reconstructed locally; recovery is a fresh
+review. See [maintenance operations](operations.md#drain-before-maintenance) and
+[recovery](operations.md#operations-and-troubleshooting).
+
+**Evidence and publication.** The terminal callback (`POST /runner-callback`) is
+the publication authority and carries the validated result. Diagnostic evidence uploads through
+`POST /runner-evidence` are separate, bounded best effort: a missing, late,
+oversized or partial archive never changes a verified result or publication
+state. Core's small publication record still requires the shared bucket, so a
+bucket outage delays callback acceptance without turning diagnostic evidence into
+a gate. Upload bounds, retention and cleanup confirmation procedures are in
+[operations](operations.md#publication-and-private-diagnostics).
+
+## Deployment and compatibility
 
 Compte rendu is self-hosted for a single operator. Upgrade the Worker and Runner
 together in a maintenance window; mixed-version rolling compatibility is not a
@@ -148,302 +246,9 @@ issue.
 
 A rare lost in-flight or undelivered review during an upgrade or crash is
 acceptable. Re-trigger it in a fresh Sandbox once same-PR admission is eligible:
-an expired pending claim after its 90-minute budget, or confirmed destruction
-after `cleanup=failed` (see
-[troubleshooting recovery](operations.md#operations-and-troubleshooting)).
+an expired pending claim, or confirmed destruction after `cleanup=failed`.
 
-## Runner Job and pull interface
-
-`POST /runner-claim` returns an immutable `RunnerJobInput` or 204. Ingress
-protects claim, progress, callback and private evidence upload with
-`RUNNER_CALLBACK_TOKEN`. Core atomically
-claims an eligible scheduled row, records job identity/attempt, then resolves the
-repository and mints a repository-scoped read token. Progress and callbacks must
-match that persisted owner. Core's VPC `DELETE /jobs/:id` cancels reachable jobs.
-
-Core/D1 owns review history, including the accepted outcome, evidence reference
-and cleanup status. Read completed reviews through the dashboard API by run ID.
-The Runner owns observations about local execution. A cancellation request in
-D1 can win while sandbox destruction or callback delivery is still outstanding.
-A missing job on a Runner gives Core no proof of destruction. A stop received while Runner still tracks the job can confirm destruction for
-the exact job ID, run ID and attempt. After retirement, a stop returns 404 and
-cleanup remains unconfirmed. Later reviews can proceed when the claim budget expires.
-
-Runner reserves capacity for in-flight claims and holds slots through archival,
-cleanup and callback delivery. `RUNNER_CONCURRENCY` (positive integer, default 1)
-is its startup fallback; malformed startup configuration fails before admission.
-Core D1 stores one deployment desired concurrency, editable in Dashboard
-Settings under the existing configuration revision. Claim 200/204 responses
-carry it as `x-compte-rendu-concurrency`; an explicit clear is the `default`
-sentinel, and a transiently missing or invalid header leaves the Runner target
-unchanged. A full Runner reads the target with authenticated `HEAD /runner-claim`
-on its existing claim timer, so long active reviews do not hide increases. HEAD
-allocates no claim ID, reserves no work and runs no Sandbox readiness check; an
-old Worker rejects it with 405 without claiming. `POST` remains the only claim.
-Increases wake claims;
-decreases preserve admitted jobs and reserved claims. Both Sandbox backends use
-the same scheduler. Claims are single-flight; ambiguous claim responses halt
-polling rather than risk duplicate ownership.
-
-Authenticated private maintenance endpoints pause new claims
-without cancelling jobs or in-flight claim reservations. At startup Runner
-sweeps expired timestamped Sandboxes without delaying claims; it does not scan
-or replay grant markers from a previous release. Resume changes only the
-maintenance pause and may retry the Sandbox sweep. Exact cleanup recovery can resolve an eligible failed
-cleanup without a separate recovery channel: Runner verifies the retained failed
-callback and manifest, confirms the exact Sandbox is absent, and sends one real
-slim `failed` callback with cleanup `destroyed`. Core then applies that terminal
-failure and unlocks the same PR; see
-[maintenance operations](operations.md#drain-before-maintenance).
-A terminal revocation failure after bounded retries fails that job without a vote
-but does not close admission or claims in that process. Grants have a fixed lifetime
-of four review budgets: the token stops authenticating at expiry, and no on-disk
-marker or startup gate is needed to bound it. Drain status includes work through
-cleanup and callback delivery; unconfirmed Sandbox cleanup or a halted claim loop
-prevents a drained report. This pause is in-memory and resets on process restart.
-
-Runner retains the final slim callback body privately as `callback.json` before
-bounded delivery when the evidence directory is available. The retained callback
-and manifest support diagnosis and verified cleanup confirmation; they never
-resend a lost terminal callback. There is no manual replay endpoint and no
-automatic replay queue. Core's existing callback ownership, revision freshness
-and publication reconciliation remain authoritative, and a lost callback is
-recovered through a fresh review rather than reconstructed locally.
-
-Diagnostic material is uploaded separately from the terminal callback. The
-callback remains the publication authority, while a best-effort
-`POST /runner-evidence` carries the readable archive to private R2. A failed or
-slow upload never changes a verified result; the full private evidence directory
-stays on the Runner host. Uploads share one real byte budget and prioritize the
-manifest and session metadata, truncating only an individual oversized artifact
-with an explicit marker.
-
-A slim `version: 2` terminal callback carries identity, attempt, immutable
-base/head SHAs, status, stage, cleanup, timestamps, the validated structured
-result and only an evidence ID and status. Core rejects a callback whose SHAs do
-not match the current owner, and successful callbacks require the structured
-result; plain Markdown is not accepted. The callback does not inline diagnostic
-artifacts. Core writes the small
-authoritative `reviews/<runId>/publications/<jobId>/<attempt>.json` record before
-publication; scheduled reconciliation reads only that attempt-specific record.
-Duplicate or non-current callbacks never replace the record used for an already
-claimed publication. Diagnostic uploads use an immutable content-addressed
-attempt key, and D1 only selects the current owner's key; a late old-attempt
-upload cannot replace a newer archive. The separate authenticated
-`POST /runner-evidence` upload is best-effort: a missing, late, malformed,
-oversized or failed private archive never changes the review result or
-publication state. Publication still depends on the shared `EVIDENCE_BUCKET` for
-its small publication record; a full bucket outage returns a retryable callback.
-
-Jobs for the same repository/PR remain serialized until the prior Sandbox is
-confirmed destroyed. Unrelated PRs may progress. Each job checks immutable base
-and head commits, derives a merge base, and performs GitHub-read preflight before
-OpenCode starts. Checkout disables hooks, submodules and LFS smudge and removes
-the authenticated remote before agent execution.
-
-The shared review attempt budget is 90 minutes from Core's durable claim
-timestamp, including setup. Queue time is free. Runner receives the absolute deadline. The sbx and microsandbox backends refresh the GitHub read token for the same claimed job and repository before expiry. A failed refresh limits execution to the existing credential expiry minus one minute. It reports whether the claim deadline or the credential
-ended a timeout. Setup consumes the same remaining budget; there is no
-agent-start reset. One same-session correction gets at most two minutes of its
-remainder; it is not another attempt. Evidence archival, revocation,
-destruction and callback keep independent bounded finalization time. Callback
-delivery uses a bounded timeout with exponential retry delays over five attempts,
-absorbing transient 5xx/429/408 responses; a lost terminal callback is not
-replayed. An oversized or failed private diagnostic upload is logged and bounded:
-an artifact that cannot fit the shared upload budget is truncated and marked as
-such, so the terminal result never turns into an evidence failure.
-
-Normal success, failure, timeout and cancellation finalize evidence and destroy
-the Sandbox before callback. A known `cleanup=failed` blocks the same PR until an
-exact destruction confirmation arrives; it is never released by elapsed time.
-An unknown `cleanup=pending` still follows the original 90-minute claim budget so
-a lost Runner cannot deadlock the PR. A Runner crash can interrupt a review before
-it delivers a verdict. On a later admission or claim attempt, Core expires an
-abandoned claim after that budget. A fresh run for the same PR can then proceed.
-Runner reconciles owned sbx and microsandbox resources independently.
-
-## Multi-model review jobs
-
-Core freezes the operator's model selection and revision when admitting a run.
-Configuration changes affect new admissions, not queued/running jobs. The protected
-[configuration API](review-configuration.md) stores route IDs, not credentials or
-URLs. `selection: null` restores the installation default. For managed inference, Core snapshots `RELAY_DEFAULT_MODEL_ROUTE` as a single-reviewer selection at admission.
-
-One explicit reviewer runs directly; multiple reviewers use a supervisor and
-selected subagents in one Sandbox. The same Runner-owned review task and final
-output contract is supplied directly to one reviewer or through each
-multi-review child's agent system prompt. The compact supervisor prompt names
-the frozen roster and requests one independent review per participant, in
-parallel using foreground tasks with one fixed short instruction, followed by
-synthesis after all reviewers return. The supervisor keeps the final output
-contract but does not repeat the trusted task it dispatches. It forbids
-follow-up reviews and verification rounds. Runner does not impose an internal
-workflow, coverage ledger or child submission protocol. Child exports are
-best-effort evidence, not extra result gates. The job retains frozen selection
-and `multi-review.json`, with one callback and one publication.
-
-The LLM grant permits the routes actually needed by the job. One-reviewer jobs do
-not grant an unused synthesis route. Cancellation revokes that grant and destroys
-the shared Sandbox: closing an OpenCode client does not stop its server sessions.
-This selection/service path supports sbx and microsandbox.
-
-## Sandbox runtime modules
-
-Runner builds one instance-level sandbox backend once at startup. Each backend
-validates its own configuration, owns its executable/environment, readiness and
-outage state, age sweeping, orphan reconciliation and any cleanup-absence
-proof. Readiness and recovery hooks (`health`, `checkReady`, `reconcileOrphans`,
-`confirmCleanupAbsent`) are optional, so a backend with native expiry can omit
-no-op plumbing. The Runner treats an absent hook as ready/no-op and asks only for
-per-job sandboxes. sbx starts unready and the first claim runs its bounded `sbx
-ls` probe; cold-start unavailability holds queued work without waiting for the
-age sweep, and later healthy polls skip the probe. Adding a backend means
-adding one implementation and one registration; Runner, Core and the public
-contract stay unchanged.
-
-Each job gets a `JobSandbox` with `setup`, `exec`, `copyOut`, optional
-`updateGithubReadToken` and `destroy`. It owns backend commands,
-credentials/egress, host resources and confirmed teardown; Runner retains
-budgets, aborts, redaction, diagnostics and product lifecycle. Metadata is updated
-as resources are created so partial setup can still be archived and cleaned.
-
-- **sbx (default):** pinned custom image, `shell` launcher and cloned workspace.
-  The shell kit avoids the built-in OpenCode kit's implicit network allowances.
-  Explicit per-job rules rely on the host's deny-all policy and absence of other
-  global/organization allows. Direct-model mode uses host secret resolution;
-  service mode injects a short-lived job grant instead of an upstream key.
-- **microsandbox:** a local KVM microVM with read-only staging, per-job TLS credential injection and HTTPS-only destination rules. Cleanup sweeps timestamped VMs, protects recent `created_at` records and verifies absence in the original catalog. See the [microsandbox installation guide](microsandbox.md).
-
-Runtime selection is startup configuration. Unknown or retired kinds and
-incomplete runtime configuration fail before claims; no silent fallback to sbx
-occurs. Recorded milestones carry a bounded lowercase identifier, so a new
-backend does not require a Core contract deployment. See
-[security boundaries](security.md) for backend-specific assumptions.
-
-## Credentials and evidence
-
-The GitHub App private key stays in Core. Runner receives one short-lived token
-limited to the target repository and read permissions, used for checkout and the
-runtime's GitHub proxy. Sandbox agents see a proxy placeholder, not the real
-GitHub credential. Cleanup removes the job's credential sources and scoped rules.
-
-In LLM service mode, supplier credentials stay in the installation’s Cloudflare account; Sandbox inference uses
-a job grant valid for four review budgets, with no renewal. Grant revocation and
-Sandbox cleanup are independent. An unconfirmed revocation fails the job even
-when Sandbox destruction succeeds. Direct-model and managed service modes have
-the separate credential paths documented in the installation guide.
-
-Repository text and GitHub context are untrusted evidence. The agent is read-only:
-no repository programs, builds/tests, edits, commits or publication. Fresh
-standalone OpenCode configuration excludes repository config and host
-skills/MCP/SSH settings. Resource/time limits and egress are enforced outside the
-model; a prompt alone is not a security boundary.
-
-`apps/runner/src/review-prompt.ts` owns the task contract: exact revisions,
-GitHub context collection, static inspection limits, reviewer orchestration and
-final output. A single reviewer receives the full contract directly; every
-multi-review child receives the same contract through its configured system
-prompt, while the supervisor receives only the fixed dispatch instruction,
-synthesis rules and final output. The format-correction reminder reuses the
-same output requirements.
-
-The bundled `code-review` skill owns the review method: contextual reading,
-premise and simplicity challenges, broad inspection directions, and evidence-based
-finding criteria. It combines OpenCode's review command and Codex's review rubric, with boundary,
-interaction and test-assessment principles from Vercel and Sentry.
-There are no separate topic skills. Each independent reviewer is instructed to
-load it through OpenCode's native skill tool; the synthesizer only combines the
-supplied reviews and does not load skills or re-inspect code. The skill cannot
-change scope, tool permissions, orchestration or the final output contract.
-Repository and PR text remain untrusted evidence, not overriding instructions.
-If the skill cannot be loaded, the reviewer reports the limitation rather than
-claiming a complete review; it does not fetch or install a replacement.
-
-The standalone Runner embeds the skill's Markdown, license and attribution
-notice, and stages them under the job's isolated
-`XDG_CONFIG_HOME/opencode/skills/code-review/` before Sandbox setup. It writes the
-generated OpenCode config to `XDG_CONFIG_HOME/opencode/opencode.json`; every
-runtime receives both through its existing config mount/upload, so the config is
-not repeated as a command argument. No source checkout is required on the Runner
-host.
-
-`SKILL.md` credits the upstream authors, pins the source revisions and describes
-the adaptation. `LICENSE.md` preserves the OpenCode MIT and Codex Apache-2.0
-licenses, plus the Vercel MIT and Sentry Apache-2.0 licenses; `NOTICE.md` documents the modified synthesis. The adaptation is
-Apache-2.0 with the MIT notice retained; unrelated application code is unaffected.
-The [source comparison](archive/review-oriented-skills-research.md) records why
-this replaced the earlier topic-skill proposal.
-
-D1 stores product state, ownership, lifecycle timestamps, decision, frozen model
-selection, bounded per-model token summaries, repository disclosure metadata and evidence object metadata. It does
-not store raw repository contents, credentials or session transcripts. The slim
-terminal callback carries the validated result and an evidence reference; the
-private `POST /runner-evidence` upload retains named
-manifest/JSONL/stderr/Markdown/root-session diagnostics in R2. The host retains
-fuller recovery evidence,
-including child sessions and OpenCode state. Public dashboard APIs expose neither. After grant revocation, Runner collects native
-service usage and carries it through the owned terminal callback. Core stores the
-first summary once; dashboard details read it from D1. Unknown/partial statistics
-do not become zero and are not publication gates. See [usage semantics](llm-service.md#per-job-model-and-token-usage).
-
-## Public dashboard
-
-[Dashboard behavior](public-dashboard-design.md) defines overview, filtered history,
-detail drawers, privacy and refresh. Every public read uses D1 only and triggers
-no GitHub or Runner request. Core refreshes repository metadata independently via
-its scheduled handler. Signed-in operators can edit the review roster and cancel runs before publication starts. Cancellation and publication compete for durable ownership of the same run. Cancellation updates the GitHub Check immediately and durably retries only the Runner stop. One scheduled recovery entry queries Runner stops and stalled publications independently, so one unavailable source cannot starve the other. See [operator cancellation](operations.md#operator-cancellation). Only currently verified public identity is disclosed;
-private, unknown or expired identities are anonymous.
-
-Status is product state; assignment and stage timestamps are observations, not
-proof of process liveness. Review decision and cleanup remain separate. TanStack
-Svelte Query owns adaptive polling, focus/reconnect refresh and ephemeral cache;
-there is no websocket or persisted browser response cache.
-
-## Fail-closed rules
-
-Reject uncertain authorization, revision freshness, credential handling, agent
-output and cleanup. Invalid input cannot authorize publication or silently switch
-models. Cleanup failure keeps same-PR replacement blocked until destruction is
-confirmed. Check/analytics/progress delivery is best effort and must not become
-an execution gate. Do not extend fail-closed into unrelated speculative controls.
-
-## Runner state ownership
-
-`createRunner` is an assembly point and HTTP adapter. It delegates to focused
-owners instead of holding every execution object:
-
-- `JobRegistry` retains only the public state and small lifecycle handle for an
-  admitted job: identity, SHAs, cleanup state, `abort()` and `done`.
-  Sandboxes, child processes, token leases, sessions, grants and host temporary
-  directories are not stored there.
-- `ClaimScheduler` owns single-flight claiming, claim reservation IDs, queued
-  stop replay, drain/resume, outage staging and the first-claim readiness gate.
-- `CleanupReconciler` owns retained-evidence cleanup recovery, startup/orphan
-  reconciliation, deferred recovery and confirmed cleanup delivery.
-- `JobExecutor` owns one execution stack and only sequences phases. Its sandbox,
-  child process, token lease, progress reporter, grant material,
-  checkout/config/grant directories, sessions, usage and multi-review evidence
-  live only for that execution and are released when it finishes. `checkout.ts`
-  proves the admitted base/head revisions and merge base; `agent-runner.ts`
-  stages the OpenCode configuration and sandbox, runs the GitHub preflight,
-  agent and one bounded correction, then extracts the validated review;
-  `job-finalizer.ts` owns grant revocation, evidence archival/redaction,
-  bounded destroy retries, manifest finalization, callback delivery and the
-  independent evidence upload. Finalization order remains grant revocation,
-  evidence archival/redaction, manifest finalization, cleanup, callback and
-  finally job retirement. Stage modules use the host's plain timers and
-  best-effort logging, so the execution path adds no ad-hoc `Effect.runPromise`
-  bridge, and each sandbox, credential lease and host directory keeps its
-  existing bounded acquire/release owner.
-- `GrantRevoker`, `ReadTokenLease`, `ProgressReporter`, the evidence store and the
-  host process port own their own state and timers. Claim scheduling and cleanup
-  recovery depend on these narrow ports, never on the assembly module.
-
-A new backend still only implements the sandbox backend contract; these owners
-remain unchanged. Runner tests are split by public behavior domain and share
-fixtures through `tests/support/runner-harness.ts`.
-
-## Deep modules and test seams
+## Public test seams
 
 Tests observe public behavior through these established seams:
 
@@ -454,7 +259,7 @@ Tests observe public behavior through these established seams:
 | Core typed service                | Admission events, metadata invalidation, Runner protocol results, publication and public projection                   |
 | Review coordinator                | Policy, deduplication, freshness, terminal publication through external adapters                                      |
 | Runner HTTP/process/runtime ports | Admission, capacity, agent result, evidence, deadlines and confirmed cleanup                                          |
-| LLM control/inference HTTP        | Grants, route authorization, native streaming, cancellation and sanitization                                          |
+| LLM control/inference HTTP        | Grants, route authorization, native streaming, cancellation and sanitization                                         |
 | Core store ports                  | Persisted run/disclosure queries and atomic ownership transitions by transaction owner                                |
 | Built dashboard in browser        | Navigation, filters, privacy expiry, refresh and accessibility                                                        |
 
@@ -471,94 +276,7 @@ this compatibility check; a broken product review path cannot gate its own fix.
 `scripts/github-publication-probe.mts` capture writes locally for unpublished
 probes. Real GitHub publication is needed when publication behavior changes.
 
-A terminal state and eventual Sandbox destruction are the product objective,
-not proof of crash recovery. Keep missing behavior in issues rather than describing
+A terminal state and eventual Sandbox destruction are the product objective, not
+proof of crash recovery. Keep missing behavior in issues rather than describing
 it as delivered. Merge bounded changes when their main behavior is correct and
 reviewed; non-critical findings become follow-up issues.
-
-### Resource age sweeping and cleanup confirmation
-
-Every Runner-owned Sandbox name is reserved and parseable:
-`compte-rendu-<epoch-seconds>-<jobId>`. The epoch is captured before the resource
-is created. Runner sweeps its backends at startup and periodically, removing
-only names whose age exceeds the attempt budget plus a finalization margin:
-ninety minutes plus thirty minutes. Under a wall clock that advances
-continuously, a claimed review's last possible live use is its attempt deadline
-plus bounded archive and destroy retries, so the two-hour threshold is after
-that use. The guarantee does not cover arbitrary wall-clock jumps; the sweep
-also skips any job the local registry reports as live. Broad inventory sweeps
-accept only the exact generated UUID shape, so unrelated `compte-rendu-*` names
-are never candidates. Exact cleanup from a trusted retained manifest may still
-name a non-UUID direct claim.
-
-For sbx, the sweeper inventories `sbx ls -q`, native `sbx secret ls --json`
-scopes and network-policy `sandbox_id` values. It removes the exact named
-Sandbox with `sbx rm --force`; a normal create may install sandbox-scoped
-non-editable rules, so editing every rule is not a precondition. The sweep then
-verifies Sandbox absence, removes only an editable orphan rule, confirms policy
-and secret absence, and preserves any surviving unremovable attachment as a
-failure. Missing or truncated inventory authorizes no removal. Concurrent
-sweeps are idempotent because every candidate is re-verified after removal.
-Runner no longer keeps per-instance ownership records or workspace/config-path
-proofs.
-
-For microsandbox, `msb ls --format json` is decoded as an array of records and
-only each row's exact `name` is considered; malformed listings remove nothing.
-The original catalog identity, exact VM name and `created_at` corroborate age
-before removal, and absence is always re-checked in that same catalog. A lost
-`rm` race with another sweep is settled by that final exact absence; a present
-VM, catalog mismatch or invalid/truncated inspection still fails. A
-same-name lookup in a different catalog returning "not found" is not evidence of
-absence.
-
-The physical sweep does not update Core. A same-PR cleanup blocker is released
-only by the retained-evidence recovery path: it verifies the exact manifest name
-and job identity, proves backend absence, and sends one real `failed` callback
-with cleanup `destroyed`. `POST /maintenance/recover-cleanup` and
-`confirmCleanupAbsent` therefore remain the minimum confirmation path. Startup
-sweeping no longer gates new claims; an unresolved sweep keeps drain pending.
-Pre-sweeper `compte-rendu-<jobId>` leftovers have no trustworthy age: drain or
-dispose of them manually before upgrading, with no indefinite compatibility
-shim. Recovery diagnostics identify the job, step and command status and omit
-stderr.
-
-### Failed-cleanup reconciliation
-
-An authenticated Runner maintenance operation can reconcile a failed sbx or
-microsandbox run whose backend confirmed its own sandbox-scoped host resources and
-whose exact Sandbox is now absent. Runner scratch roots are tracked separately and
-do not gate same-PR eligibility. Runner reads the retained local `callback.json` and
-`manifest.json` without modifying either file, verifies the six identity fields,
-the backend runtime, the exact reserved Sandbox name and matching job identity,
-the failed terminal status, failed cleanup and the backend's own host-resource
-confirmation, then asks the backend for its absence proof. The same-name
-microsandbox proof is bound to the originating catalog. A Runner scratch-removal failure fails the job and logs
-the directory on the host. Backend proof remains valid. Runner makes a bounded
-grant revocation when the relay is configured and sends
-one real slim `version: 2` `failed` callback to `POST /runner-callback`. That
-callback preserves the original failure, usage, lifecycle, evidence and
-timestamps and changes only cleanup to `destroyed` and its completion time to the
-verification time. Core matches the current job/attempt and any present immutable
-SHAs, preserves the original failure and usage, updates cleanup monotonically and
-immediately releases the same-PR queue. There is no separate recovery report,
-local recovery file or R2 audit object.
-
-After an in-process sbx access outage, Runner pauses new claims and automatically
-repeats the same retained-evidence and exact-absence recovery without blocking
-unrelated claims. When access returns, affected jobs become immediately eligible.
-A transient verification or callback-delivery failure retries the expensive check
-no more than once every 30 seconds per pending job. A Core 409 or other permanent
-4xx is a terminal delivery rejection: Runner does not replay a second callback,
-and stops automatic delivery with a bounded job/run/status diagnostic. Only
-408/429/5xx or timeout/network failures remain retryable. When exact absence fails
-because the exact retained Sandbox still exists, Runner re-runs the exact-name
-reaper before the next attempt; other resources are skipped. The
-terminal verdict is unchanged and completed work never restarts.
-
-While the job is in memory, Runner can report verified cleanup using its retained
-manifest and callback. After a restart the age sweep removes verified orphan
-resources. A known failed cleanup blocks later reviews until this confirmation;
-unknown pending cleanup follows the original 90-minute claim budget, including
-when a restart loses an in-memory staged claim request ID. Legacy evidence lacking the
-backend's host confirmation, an unknown retired-backend identity and
-retired-backend recovery remain outside this operation; see the operations guide.
