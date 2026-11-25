@@ -1771,8 +1771,8 @@ describe('Runner backend outage recovery', () => {
         expect(reactions).toEqual([]);
         expect(checkUpdates).toEqual(['in_progress', 'failure']);
 
-        // A repeated real failure callback is idempotent and cannot regress the
-        // confirmed teardown or duplicate GitHub feedback.
+        // A repeated real failure callback cannot regress the confirmed teardown
+        // or duplicate comments; its terminal Check write stays best effort.
         expect((await postCoreCallback(recoveryBody)).status).toBe(202);
         const repeated = await stateStore.getPublicRun(old.runId);
         expect(repeated).toMatchObject({
@@ -1784,7 +1784,7 @@ describe('Runner backend outage recovery', () => {
         expect(repeated?.resultReceivedAt).toBe(recovered?.resultReceivedAt);
         expect(repeated?.terminalAt).toBe(recovered?.terminalAt);
         expect(comments).toHaveLength(1);
-        expect(checkUpdates).toEqual(['in_progress', 'failure']);
+        expect(checkUpdates).toEqual(['in_progress', 'failure', 'failure']);
 
         // The delayed original callback still reports the failed cleanup, but
         // the already-confirmed destruction wins monotonically.
@@ -1799,7 +1799,7 @@ describe('Runner backend outage recovery', () => {
         expect(delayed?.resultReceivedAt).toBe(recovered?.resultReceivedAt);
         expect(comments).toHaveLength(1);
         expect(reactions).toEqual([]);
-        expect(checkUpdates).toEqual(['in_progress', 'failure']);
+        expect(checkUpdates).toEqual(['in_progress', 'failure', 'failure', 'failure']);
 
         claimTargetHead = newHead;
         const replacement = await stateStore.claimReview({

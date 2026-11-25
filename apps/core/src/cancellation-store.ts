@@ -30,10 +30,7 @@ export interface ReviewCancellationWorkItem {
   readonly runnerAttempt: number | null;
   readonly runnerCleanupStatus: RunnerCleanupStatus | null;
   readonly runnerStopAttemptedAt: string | null;
-  readonly checkRunId: number | null;
-  readonly checkCancelAttemptedAt: string | null;
   readonly needsRunnerStop: boolean;
-  readonly needsCheckReconciliation: boolean;
   readonly cleanupBlocked: boolean;
   readonly recoveryRequired: boolean;
 }
@@ -58,9 +55,6 @@ export interface CancellationWorkRow {
   runner_attempt: number | null;
   runner_cleanup_status: RunnerCleanupStatus | null;
   runner_stop_attempted_at: string | null;
-  check_run_id: number | null;
-  check_cancel_attempted_at: string | null;
-  check_cancel_reconciled_at: string | null;
 }
 
 export const cancellationFromRow = (row: CancellationRow): ReviewCancellationState => ({
@@ -102,18 +96,6 @@ export interface CancellationStore {
     attempt: number;
     occurredAt: string;
   }): Promise<boolean>;
-  recordCheckCancellationAttempt(input: {
-    runId: string;
-    checkRunId: number;
-    occurredAt: string;
-    expectedLastAttempt: string | null;
-  }): Promise<boolean>;
-  confirmCheckCancelled(input: {
-    runId: string;
-    checkRunId: number;
-    occurredAt: string;
-  }): Promise<boolean>;
-  reopenCheckCancellation(input: { runId: string; checkRunId: number }): Promise<boolean>;
 }
 
 export const createCancellationStore = (database: D1DatabaseLike): CancellationStore => ({
@@ -160,15 +142,12 @@ export const createCancellationStore = (database: D1DatabaseLike): CancellationS
     const rows = await database
       .prepare(
         `SELECT run_id, cancelled_at, claimed_at, runner_job_id, runner_attempt,
-           runner_cleanup_status, runner_stop_attempted_at, check_run_id,
-           check_cancel_attempted_at, check_cancel_reconciled_at
+           runner_cleanup_status, runner_stop_attempted_at
          FROM review_runs
          WHERE status = 'cancelled' AND (? IS NULL OR run_id = ?) AND (
            (runner_job_id IS NOT NULL AND runner_cleanup_status IS NOT 'destroyed'
              AND cancelled_at >= ?
              AND (runner_stop_attempted_at IS NULL OR runner_stop_attempted_at <= ?))
-           OR (check_run_id IS NOT NULL AND check_cancel_reconciled_at IS NULL
-             AND (check_cancel_attempted_at IS NULL OR check_cancel_attempted_at <= ?))
            OR (runner_job_id IS NOT NULL AND runner_cleanup_status IS NOT 'destroyed'
              AND cancelled_at < ?)
          )
@@ -176,8 +155,6 @@ export const createCancellationStore = (database: D1DatabaseLike): CancellationS
            (runner_job_id IS NOT NULL AND runner_cleanup_status IS NOT 'destroyed'
              AND cancelled_at >= ?
              AND (runner_stop_attempted_at IS NULL OR runner_stop_attempted_at <= ?))
-           OR (check_run_id IS NOT NULL AND check_cancel_reconciled_at IS NULL
-             AND (check_cancel_attempted_at IS NULL OR check_cancel_attempted_at <= ?))
          THEN 0 ELSE 1 END,
          cancelled_at ASC, rowid ASC
          LIMIT ?`,
@@ -187,10 +164,8 @@ export const createCancellationStore = (database: D1DatabaseLike): CancellationS
         runId ?? null,
         recoveryBefore,
         retryBefore,
-        retryBefore,
         recoveryBefore,
         recoveryBefore,
-        retryBefore,
         retryBefore,
         limit,
       )
@@ -208,13 +183,7 @@ export const createCancellationStore = (database: D1DatabaseLike): CancellationS
         runnerAttempt: row.runner_attempt,
         runnerCleanupStatus: row.runner_cleanup_status,
         runnerStopAttemptedAt: row.runner_stop_attempted_at,
-        checkRunId: row.check_run_id,
-        checkCancelAttemptedAt: row.check_cancel_attempted_at,
         needsRunnerStop: cleanupBlocked && !recoveryRequired && due(row.runner_stop_attempted_at),
-        needsCheckReconciliation:
-          row.check_run_id !== null &&
-          row.check_cancel_reconciled_at === null &&
-          due(row.check_cancel_attempted_at),
         cleanupBlocked,
         recoveryRequired,
       };
@@ -248,47 +217,6 @@ export const createCancellationStore = (database: D1DatabaseLike): CancellationS
          WHERE run_id = ? AND status = ? AND runner_job_id = ? AND runner_attempt = ?`,
       )
       .bind(occurredAt, runId, expectedStatus, jobId, attempt)
-      .run();
-    return result.meta.changes === 1;
-  },
-
-  recordCheckCancellationAttempt: async ({
-    runId,
-    checkRunId,
-    occurredAt,
-    expectedLastAttempt,
-  }) => {
-    const result = await database
-      .prepare(
-        `UPDATE review_runs SET check_cancel_attempted_at = ?
-         WHERE run_id = ? AND status = 'cancelled' AND check_run_id = ?
-           AND check_cancel_reconciled_at IS NULL
-           AND check_cancel_attempted_at IS ?`,
-      )
-      .bind(occurredAt, runId, checkRunId, expectedLastAttempt)
-      .run();
-    return result.meta.changes === 1;
-  },
-
-  confirmCheckCancelled: async ({ runId, checkRunId, occurredAt }) => {
-    const result = await database
-      .prepare(
-        `UPDATE review_runs SET check_cancel_reconciled_at = COALESCE(check_cancel_reconciled_at, ?)
-         WHERE run_id = ? AND status = 'cancelled' AND check_run_id = ?
-           AND check_cancel_reconciled_at IS NULL`,
-      )
-      .bind(occurredAt, runId, checkRunId)
-      .run();
-    return result.meta.changes === 1;
-  },
-
-  reopenCheckCancellation: async ({ runId, checkRunId }) => {
-    const result = await database
-      .prepare(
-        `UPDATE review_runs SET check_cancel_reconciled_at = NULL, check_cancel_attempted_at = NULL
-         WHERE run_id = ? AND status = 'cancelled' AND check_run_id = ?`,
-      )
-      .bind(runId, checkRunId)
       .run();
     return result.meta.changes === 1;
   },

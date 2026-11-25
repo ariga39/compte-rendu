@@ -5,9 +5,9 @@ import { SqliteD1Database } from './support/d1-database';
 const baseSha = '1111111111111111111111111111111111111111';
 const headSha = '2222222222222222222222222222222222222222';
 
-describe('Check delivery migration', () => {
-  it('adds pending delivery work without sweeping historical completed Checks', async () => {
-    const database = new SqliteD1Database('core', '0016_runner_claim_handoff.sql');
+describe('Check delivery retry removal migration', () => {
+  it('drops durable Check work and cancellation retry state without losing runs', async () => {
+    const database = new SqliteD1Database('core', '0018_effort_configuration.sql');
     database.database.exec(`
       INSERT INTO deliveries (
         delivery_id, installation_id, repository_id, pull_request_number,
@@ -20,37 +20,46 @@ describe('Check delivery migration', () => {
       INSERT INTO review_runs (
         run_id, delivery_id, installation_id, repository_id,
         pull_request_number, base_sha, head_sha, trigger, status,
-        check_run_id, check_setup_status, created_at, updated_at
+        check_run_id, check_setup_status, check_cancel_attempted_at,
+        check_cancel_reconciled_at, created_at, updated_at
       ) VALUES (
         'historical-run', 'historical-delivery', 7, 11, 42,
         '${baseSha}', '${headSha}', 'automatic', 'completed',
-        321, 'ready', '2026-11-19T00:00:00.000Z', '2026-11-19T00:00:01.000Z'
+        321, 'ready', '2026-11-19T00:00:02.000Z',
+        '2026-11-19T00:00:03.000Z', '2026-11-19T00:00:00.000Z',
+        '2026-11-19T00:00:01.000Z'
+      );
+      INSERT INTO review_check_deliveries (
+        run_id, check_run_id, status, created_at, attempted_at, confirmed_at
+      ) VALUES (
+        'historical-run', 321, 'pending', '2026-11-19T00:00:02.000Z',
+        '2026-11-19T00:00:02.000Z', NULL
       );
     `);
 
     try {
-      database.migrateThrough('0017_review_check_delivery.sql');
-      const store = createD1ReviewStateStore(database);
-      await expect(store.listPendingCheckDeliveries({ limit: 10 })).resolves.toEqual([]);
+      database.migrateThrough('0019_remove_check_delivery_retries.sql');
+      const db = database.database;
+      expect(
+        db
+          .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+          .get('review_check_deliveries'),
+      ).toBeUndefined();
+      expect(
+        db
+          .prepare('PRAGMA table_info(review_runs)')
+          .all()
+          .map((column) => (column as { name: string }).name),
+      ).not.toEqual(
+        expect.arrayContaining(['check_cancel_attempted_at', 'check_cancel_reconciled_at']),
+      );
+      expect(db.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
 
-      await expect(
-        store.claimCheckDelivery({
-          runId: 'historical-run',
-          checkRunId: 321,
-          occurredAt: '2026-11-19T00:02:00.000Z',
-        }),
-      ).resolves.toBe(true);
-      await expect(store.listPendingCheckDeliveries({ limit: 10 })).resolves.toEqual([
-        { runId: 'historical-run', checkRunId: 321 },
-      ]);
-      await expect(
-        store.confirmCheckDelivery({
-          runId: 'historical-run',
-          checkRunId: 321,
-          occurredAt: '2026-11-19T00:03:00.000Z',
-        }),
-      ).resolves.toBe(true);
-      await expect(store.listPendingCheckDeliveries({ limit: 10 })).resolves.toEqual([]);
+      const store = createD1ReviewStateStore(database);
+      await expect(store.getRunOutcome('historical-run')).resolves.toMatchObject({
+        status: 'completed',
+        checkRunId: 321,
+      });
     } finally {
       database.close();
     }

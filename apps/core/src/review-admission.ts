@@ -160,7 +160,6 @@ const claimAndSchedule = (
                 github,
                 stateStore,
                 runId: supersededRunId,
-                occurredAt,
               }),
             catch: () => undefined,
           }).pipe(Effect.catch(() => Effect.succeed(undefined)));
@@ -213,7 +212,6 @@ const claimAndSchedule = (
               github,
               stateStore,
               runId: claim.activeRunnerJob!.runId,
-              occurredAt,
             }),
           catch: () => undefined,
         }).pipe(Effect.catch(() => Effect.succeed(undefined)));

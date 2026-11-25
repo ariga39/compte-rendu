@@ -871,15 +871,12 @@ describe('Core admission, claims, and manual policy', () => {
         EVIDENCE_BUCKET: { put: async () => undefined },
       };
       let currentHead = eligibleEvent.headSha;
-      const checkUpdates: Array<{ runId: string; status: string }> = [];
       const worker = createCoreWorker(env, {
         stateStore,
         github: {
           ...claimGithub(() => currentHead),
           createCheckRun: async () => ({ id: 321 }),
-          updateCheckRun: async ({ runId, status }: { runId: string; status: string }) => {
-            checkUpdates.push({ runId, status });
-          },
+          updateCheckRun: async () => {},
         },
         getReadInstallationToken: async () => ({
           token: 'repository-read-token',
@@ -948,10 +945,6 @@ describe('Core admission, claims, and manual policy', () => {
             })
           ).counts.cleanupAttention,
         ).toBe(1);
-
-        // The existing terminal Check delivery publishes the abandoned failure.
-        await worker.reconcileCheckDeliveries(Date.now());
-        expect(checkUpdates).toContainEqual({ runId: old.runId, status: 'failure' });
 
         // A late original result still matches ownership, but its terminal row
         // cannot complete over the replacement.
@@ -1946,7 +1939,7 @@ describe('Core admission, claims, and manual policy', () => {
         expect(replay.status).toBe(202);
         expect(stored).toHaveLength(1);
         expect(reviews).toHaveLength(1);
-        expect(checkUpdates).toHaveLength(1);
+        expect(checkUpdates).toHaveLength(2);
         await expect(stateStore.getRunOutcome(claimed.runId)).resolves.toMatchObject({
           status: 'completed',
           cleanup: 'destroyed',

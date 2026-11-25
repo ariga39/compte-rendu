@@ -36,7 +36,6 @@ export type {
   ReviewCancellationState,
   ReviewCancellationWorkItem,
 } from './cancellation-store';
-export type { ReviewCheckDeliveryWorkItem } from './check-run-store';
 export type {
   D1ReviewStateStore,
   ReviewPublicationStateStore,
