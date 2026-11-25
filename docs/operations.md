@@ -413,11 +413,11 @@ For microsandbox, confirm absence in the original Runner catalog as described in
 the [backend guide](microsandbox.md).
 
 Then use the correct instance's authenticated Runner maintenance endpoint.
-Prepare `recovery-request.json` with the six identity fields taken from the
-retained manifest: evidence ID, job ID, run ID, attempt and immutable base/head
-SHAs. Then run:
+From the retained job evidence directory, extract the request from its manifest
+and send it to the Runner:
 
 ```sh
+jq '{evidenceId, jobId, runId, attempt, baseSha, headSha}' manifest.json > recovery-request.json
 curl --fail-with-body --silent --show-error --config "$RUNNER_CURL_CONFIG" \
   --request POST --header 'content-type: application/json' \
   --data-binary @recovery-request.json \
