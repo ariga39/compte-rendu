@@ -518,11 +518,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
           reason: 'invalid-request',
         });
       }
-      const active = jobRegistry.findActiveMatch({
-        jobId: input.jobId,
-        runId: input.runId,
-        evidenceId: input.evidenceId,
-      });
+      const active = jobRegistry.findActiveMatch(input);
       if (active) {
         return jsonResponse(409, {
           accepted: false,

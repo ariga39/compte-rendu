@@ -84,13 +84,14 @@ export const createJobRegistry = () => {
     findActiveMatch(input: {
       readonly jobId: string;
       readonly runId: string;
+      readonly attempt: number;
       readonly evidenceId: string;
     }) {
       return values().some(
         (job) =>
           (job.state.status === 'queued' || job.state.status === 'running') &&
           (job.id === input.jobId ||
-            job.runId === input.runId ||
+            (job.runId === input.runId && job.attempt === input.attempt) ||
             job.state.evidenceId === input.evidenceId),
       );
     },

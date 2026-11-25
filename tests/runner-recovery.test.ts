@@ -294,8 +294,8 @@ describe('Runner callback recovery', () => {
     }
   });
 
-  it('rejects replay while the job is still active locally', async () => {
-    const evidenceRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-callback-recovery-'));
+  it('rejects the active attempt but delivers an older attempt from the same run', async () => {
+    const archive = await prepareArchive();
     const callbackRequests: Request[] = [];
     let releaseAgent: () => void = () => {};
     const agentGate = new Promise<void>((resolve) => {
@@ -309,8 +309,10 @@ describe('Runner callback recovery', () => {
     try {
       const scenario = runAgentScenario({
         runId: 'run-callback-retained',
+        jobId: 'active-attempt-job',
+        attempt: 2,
         output: finalMarkdownJsonl(),
-        evidenceRoot,
+        evidenceRoot: archive.evidenceRoot,
         callbackRequests,
         agentGate,
         onAgentStart: () => signalAgentStarted(),
@@ -319,22 +321,40 @@ describe('Runner callback recovery', () => {
         },
       });
       await agentStarted;
-      const response = await replay(
+
+      const active = await replay(
         activeRunner!,
-        replayIdentity('00000000-0000-4000-8000-000000000000'),
+        replayIdentity('00000000-0000-4000-8000-000000000000', {
+          jobId: 'other-job',
+          runId: 'run-callback-retained',
+          attempt: 2,
+        }),
       );
-      expect(response.status).toBe(409);
-      expect(await response.json()).toEqual({
+      expect(active.status).toBe(409);
+      expect(await active.json()).toEqual({
         accepted: false,
         error: 'job is active',
         reason: 'active-job',
       });
       expect(callbackRequests).toHaveLength(0);
+
+      const older = await replay(activeRunner!, replayIdentity(archive.evidenceId));
+      expect(older.status).toBe(202);
+      expect(await older.json()).toEqual({ accepted: true });
+      expect(callbackRequests).toHaveLength(1);
+      expect(await callbackRequests[0]!.clone().text()).toBe(archive.retained);
+
       releaseAgent();
       await scenario;
     } finally {
       releaseAgent();
-      await rm(evidenceRoot, { recursive: true, force: true });
+      await activeRunner?.close();
+      await rm(archive.evidenceRoot, {
+        recursive: true,
+        force: true,
+        maxRetries: 20,
+        retryDelay: 10,
+      });
     }
   });
 

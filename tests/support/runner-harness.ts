@@ -531,6 +531,8 @@ export const triggerAgentRefresh = async () => {
 export const runAgentScenario = async (scenario: {
   reviewConfiguration?: { revision: number; selection: { reviewers: string[]; synthesis: string } };
   runId: string;
+  jobId?: string;
+  attempt?: number;
   output: string;
   exitCode?: number;
   timedOut?: boolean;
@@ -581,12 +583,13 @@ export const runAgentScenario = async (scenario: {
         });
   const jobInput = {
     ...runnerJobFields,
+    id: scenario.jobId ?? runnerJobFields.id,
     ...(reviewConfiguration === undefined ? {} : { reviewConfiguration }),
     ...(scenario.repositoryReadToken === undefined
       ? {}
       : { repositoryReadToken: scenario.repositoryReadToken }),
     runId: scenario.runId,
-    attempt: 1,
+    attempt: scenario.attempt ?? 1,
     repositoryUrl: 'https://github.com/acme/reviewed.git',
     baseSha,
     headSha,
