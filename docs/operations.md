@@ -194,29 +194,32 @@ For every deployment:
    `DASHBOARD_ORIGIN`, domains, allowlists, branding and deliberate overrides; reconcile changed
    defaults rather than blindly replacing them. Render only when instance files
    are absent, then restore those instance settings from the backup.
-3. Review migration compatibility. Choose a backward-compatible or staged
-   migration where possible; a truly incompatible one-step migration requires
+3. Review migration compatibility. Choose a backward-compatible migration where
+   possible, or stage the change. A truly incompatible one-step migration requires
    quiescing Worker HTTP/webhooks and scheduled writers during the schema/code
    switch. Retire obsolete fields and tables only after the old Worker no longer
    uses them.
 
-For a compatible or documentation-only update, apply the compatible migrations
-the new Worker needs before switching to it, deploy the affected Worker using
-`apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc`, and verify the affected behavior.
-No Runner drain or version pairing is required.
+For compatible Worker changes, apply the required additive migrations, deploy the
+affected Worker, and verify its behavior. A documentation-only change needs no
+service restart. Drain a Runner before replacing its running process.
 
-For a breaking release:
+Use the following sequence for a breaking upgrade or rollback, per instance:
 
-1. Drain every old Runner served by the Worker and wait for `drained: true` with
-   `activeJobs: 0`, no in-flight claim and no unresolved cleanup obligation, then
-   stop it. See [drain before maintenance](#drain-before-maintenance).
-2. Deploy and verify the matching Worker and schema first, using
-   `apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc`. Apply the reviewed migration
-   after the old Runner is stopped.
-3. Start the replacement Runner only after the Worker and schema are ready, then
-   verify artifact hash, health, concurrency and Sandbox recovery. A newly
-   started Runner can claim immediately after its startup ownership scan;
-   maintenance drain is in-memory. Verify the artifact on disk before startup if it must be checked before the first claim.
+1. Request a [drain](#drain-before-maintenance) on all Runners attached to the
+   Worker. Leave the old Runner and its matching callback receiver running.
+   Let active jobs finish and [resolve failed cleanup](#recover-failed-cleanup),
+   including blockers in Core that survived a Runner restart. Handle any
+   version-specific recovery described below while the old endpoints still work.
+2. Verify each Runner reports `drained: true` and Core shows no unresolved
+   cleanup blockers. Stop those Runner processes.
+3. Switch to the matching Worker and schema in the reviewed migration order.
+   Deploy with `apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc` and verify the
+   Worker before starting the replacement Runner. For a one-step incompatible
+   schema change, keep HTTP and scheduled writers quiesced during the switch.
+4. Check the replacement artifact on disk, start it and verify service health,
+   concurrency and Sandbox recovery. The drain flag is in memory. Starting the
+   replacement enables claiming as soon as its startup scan succeeds.
 
 ### Review deadline rollout
 
@@ -239,19 +242,13 @@ execution deadline.
 
 ### Slim v2 callback rollout
 
-Removing legacy `v1` callback acceptance is a one-way, non-rolling change: an old
-Runner posting an inline `v1` callback to a v2-only Core is rejected, not queued.
-Use the breaking-release sequence above.
-
-Before deploying the v2-only Worker, resolve failed-cleanup jobs visible in the
-dashboard while the old Runner can still read the legacy microsandbox catalog
-identity. If a retained successful result has not been accepted by Core, replay
-it with `POST /maintenance/replay-callback`; acceptance is not publication, so
-verify the review outcome in the dashboard.
-
-After replacing the Runner, exercise one controlled review end to end. Rollback
-uses the same order and replays any undelivered successful result before
-reverting the callback receiver.
+An old Runner's inline callback is rejected by a v2-only Core. During step 1
+of a breaking upgrade or rollback, use the still-running old Runner to resolve
+failed-cleanup jobs against the original backend. If an undelivered successful
+review must be preserved, replay it against the matching receiver now using
+`POST /maintenance/replay-callback` and verify the outcome on GitHub. An
+occasional lost review can instead be re-triggered once the same PR is eligible.
+Then continue with step 2. Verify publication on the next review.
 
 ### Migrating an existing two-Worker installation
 
@@ -274,12 +271,8 @@ Cron together. Database and bucket contents remain in place.
 If a compatible release is bad, stop webhook delivery if it is generating new
 runs. Roll back the affected Worker to its last known-good deployment in the
 Cloudflare Workers deployment controls, using the matching application build and
-compatible database schema. For a breaking release, drain and stop the Runner,
-restore the matching Worker and schema first, then start the matching replacement
-Runner. The same claim rule applies: a started Runner can claim immediately, and
-drain is in-memory; keep it stopped until the Worker is ready if claims must
-remain stopped. An incompatible one-step rollback migration follows the same
-quiesce-or-stage rule. Do not delete D1 tables or edit the applied migration
+compatible database schema. For a breaking rollback, follow the same four steps above using the prior
+matching pair and a compatible schema. Do not delete D1 tables or edit the applied migration
 ledger to undo a release. A schema rollback is a separate, reviewed migration or
 an operator approved D1 recovery action.
 
