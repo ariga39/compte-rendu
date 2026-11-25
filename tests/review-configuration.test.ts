@@ -109,17 +109,17 @@ it('persists operator-selected review models across fresh Core workers', async (
     const worker = createCoreWorker(environment(database));
     const initial = await worker.handleReviewConfiguration(settingsRequest('GET'));
     expect(initial.status).toBe(200);
-    expect(await initial.json()).toEqual({ revision: 0, selection: null });
+    expect(await initial.json()).toEqual({ revision: 0, selection: null, concurrency: null });
     const saved = await worker.handleReviewConfiguration(
       settingsRequest('PUT', { revision: 0, selection }),
     );
     expect(saved.status).toBe(200);
-    expect(await saved.json()).toEqual({ revision: 1, selection });
+    expect(await saved.json()).toEqual({ revision: 1, selection, concurrency: null });
     const restored = await createCoreWorker(environment(database)).handleReviewConfiguration(
       settingsRequest('GET'),
     );
     expect(restored.status).toBe(200);
-    expect(await restored.json()).toEqual({ revision: 1, selection });
+    expect(await restored.json()).toEqual({ revision: 1, selection, concurrency: null });
   } finally {
     database.close();
   }
@@ -152,7 +152,7 @@ it('protects settings through ingress and preserves valid settings on invalid or
     expect((await request('PUT', { revision: 0, selection: null })).status).toBe(409);
     const current = await request('GET');
     expect(current.headers.get('cache-control')).toBe('no-store');
-    expect(await current.json()).toEqual({ revision: 1, selection });
+    expect(await current.json()).toEqual({ revision: 1, selection, concurrency: null });
   } finally {
     database.close();
   }
@@ -170,7 +170,7 @@ it('accepts one reviewer as a persisted review configuration', async () => {
     const restored = await createCoreWorker(environment(database)).handleReviewConfiguration(
       settingsRequest('GET'),
     );
-    expect(await restored.json()).toEqual({ revision: 1, selection: chosen });
+    expect(await restored.json()).toEqual({ revision: 1, selection: chosen, concurrency: null });
   } finally {
     database.close();
   }
@@ -191,7 +191,7 @@ it('persists native provider/model catalog IDs without renaming the selected mod
     const restored = await createCoreWorker(environment(database)).handleReviewConfiguration(
       settingsRequest('GET'),
     );
-    expect(await restored.json()).toEqual({ revision: 1, selection: chosen });
+    expect(await restored.json()).toEqual({ revision: 1, selection: chosen, concurrency: null });
   } finally {
     database.close();
   }
@@ -228,6 +228,170 @@ it('claims the relay default frozen at admission after the configured default ch
         },
       },
     });
+  } finally {
+    database.close();
+  }
+});
+
+it('persists desired runner concurrency independently of selection and preserves it when omitted', async () => {
+  const database = new SqliteD1Database();
+  try {
+    const worker = createCoreWorker(environment(database));
+    const initial = await worker.handleReviewConfiguration(settingsRequest('GET'));
+    expect(await initial.json()).toEqual({ revision: 0, selection: null, concurrency: null });
+
+    const targeted = await worker.handleReviewConfiguration(
+      settingsRequest('PUT', { revision: 0, selection: null, concurrency: 3 }),
+    );
+    expect(targeted.status).toBe(200);
+    expect(await targeted.json()).toEqual({ revision: 1, selection: null, concurrency: 3 });
+
+    const selectionUpdate = await worker.handleReviewConfiguration(
+      settingsRequest('PUT', { revision: 1, selection }),
+    );
+    expect(selectionUpdate.status).toBe(200);
+    expect(await selectionUpdate.json()).toEqual({
+      revision: 2,
+      selection,
+      concurrency: 3,
+    });
+
+    const restored = await createCoreWorker(environment(database)).handleReviewConfiguration(
+      settingsRequest('GET'),
+    );
+    expect(await restored.json()).toEqual({ revision: 2, selection, concurrency: 3 });
+
+    const reset = await worker.handleReviewConfiguration(
+      settingsRequest('PUT', { revision: 2, selection, concurrency: null }),
+    );
+    expect(reset.status).toBe(200);
+    expect(await reset.json()).toEqual({ revision: 3, selection, concurrency: null });
+    const after = await worker.handleReviewConfiguration(settingsRequest('GET'));
+    expect(await after.json()).toEqual({ revision: 3, selection, concurrency: null });
+  } finally {
+    database.close();
+  }
+});
+
+it('rejects invalid desired runner concurrency without advancing the revision', async () => {
+  const database = new SqliteD1Database();
+  try {
+    const worker = createCoreWorker(environment(database));
+    for (const concurrency of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, '3', true]) {
+      const response = await worker.handleReviewConfiguration(
+        settingsRequest('PUT', { revision: 0, selection: null, concurrency }),
+      );
+      expect(response.status).toBe(400);
+    }
+    const current = await worker.handleReviewConfiguration(settingsRequest('GET'));
+    expect(await current.json()).toEqual({ revision: 0, selection: null, concurrency: null });
+  } finally {
+    database.close();
+  }
+});
+
+it('accepts a concurrency-only update while the selection stays on the instance default', async () => {
+  const database = new SqliteD1Database();
+  try {
+    const worker = createCoreWorker(environment(database));
+    const saved = await worker.handleReviewConfiguration(
+      settingsRequest('PUT', { revision: 0, selection: null, concurrency: 2 }),
+    );
+    expect(saved.status).toBe(200);
+    expect(await saved.json()).toEqual({ revision: 1, selection: null, concurrency: 2 });
+  } finally {
+    database.close();
+  }
+});
+
+it('seeds runner concurrency without rewriting the installed roster or effort snapshot', async () => {
+  const database = new SqliteD1Database();
+  try {
+    const worker = createCoreWorker(environment(database));
+    expect(
+      (await worker.handleReviewConfiguration(settingsRequest('PUT', { revision: 0, selection })))
+        .status,
+    ).toBe(200);
+    const before = database.database
+      .prepare('SELECT selection, effort_snapshot FROM review_configuration WHERE id = 1')
+      .get() as { selection: string; effort_snapshot: string };
+    database.database
+      .prepare('UPDATE review_configuration SET runner_concurrency = 6 WHERE id = 1')
+      .run();
+    const after = database.database
+      .prepare(
+        'SELECT selection, effort_snapshot, runner_concurrency FROM review_configuration WHERE id = 1',
+      )
+      .get() as { selection: string; effort_snapshot: string; runner_concurrency: number };
+    expect(after.runner_concurrency).toBe(6);
+    expect(after.selection).toBe(before.selection);
+    expect(after.effort_snapshot).toBe(before.effort_snapshot);
+    const restored = await worker.handleReviewConfiguration(settingsRequest('GET'));
+    expect(await restored.json()).toEqual({ revision: 1, selection, concurrency: 6 });
+  } finally {
+    database.close();
+  }
+});
+
+it('changes only concurrency without relay access or rewriting the frozen effort snapshot', async () => {
+  const database = new SqliteD1Database();
+  try {
+    let relayAvailable = true;
+    const baseEnvironment = environment(database);
+    const listener = createCoreWorker({
+      ...baseEnvironment,
+      INFERENCE_RELAY: {
+        ...baseEnvironment.INFERENCE_RELAY,
+        catalog: async () => {
+          if (!relayAvailable) throw new Error('relay unavailable');
+          return baseEnvironment.INFERENCE_RELAY.catalog();
+        },
+      },
+    });
+    expect(
+      (await listener.handleReviewConfiguration(settingsRequest('PUT', { revision: 0, selection })))
+        .status,
+    ).toBe(200);
+    const before = database.database
+      .prepare('SELECT selection, effort_snapshot FROM review_configuration WHERE id = 1')
+      .get() as { selection: string; effort_snapshot: string };
+
+    relayAvailable = false;
+    const updated = await listener.handleReviewConfiguration(
+      settingsRequest('PUT', { revision: 1, concurrency: 5 }),
+    );
+    expect(updated.status).toBe(200);
+    expect(await updated.json()).toEqual({ revision: 2, selection, concurrency: 5 });
+    const afterSet = database.database
+      .prepare(
+        'SELECT selection, effort_snapshot, runner_concurrency FROM review_configuration WHERE id = 1',
+      )
+      .get() as {
+      selection: string;
+      effort_snapshot: string;
+      runner_concurrency: number;
+    };
+    expect(afterSet.runner_concurrency).toBe(5);
+    expect(afterSet.selection).toBe(before.selection);
+    expect(afterSet.effort_snapshot).toBe(before.effort_snapshot);
+
+    const cleared = await listener.handleReviewConfiguration(
+      settingsRequest('PUT', { revision: 2, concurrency: null }),
+    );
+    expect(cleared.status).toBe(200);
+    expect(await cleared.json()).toEqual({ revision: 3, selection, concurrency: null });
+    const afterClear = database.database
+      .prepare(
+        'SELECT selection, effort_snapshot, runner_concurrency FROM review_configuration WHERE id = 1',
+      )
+      .get() as {
+      selection: string;
+      effort_snapshot: string;
+      runner_concurrency: number | null;
+    };
+    expect(afterClear.runner_concurrency).toBeNull();
+    expect(afterClear.selection).toBe(before.selection);
+    expect(afterClear.effort_snapshot).toBe(before.effort_snapshot);
   } finally {
     database.close();
   }

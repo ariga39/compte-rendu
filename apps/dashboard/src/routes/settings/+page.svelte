@@ -11,12 +11,47 @@
   let stale = $state(false);
   let loadedRevision = $state<number | null>(null);
   let effortChoices = $state<Record<string, string>>({});
+  let loadedConcurrency = $state<number | null>(null);
+  let concurrencyDraft = $state('');
+  let loadedSelectionSignature = $state('');
+  type SelectionLike = {
+    reviewers: readonly string[];
+    synthesis: string;
+    efforts?: Record<string, string>;
+  };
+  const selectionSignature = (selection: SelectionLike | null) =>
+    JSON.stringify(
+      selection === null
+        ? null
+        : {
+            reviewers: [...selection.reviewers].sort(),
+            synthesis: selection.synthesis,
+            efforts: Object.fromEntries(
+              Object.entries(selection.efforts ?? {}).sort(([left], [right]) =>
+                left.localeCompare(right),
+              ),
+            ),
+          },
+    );
   $effect(() => {
     const revision = data.settings?.configuration.revision ?? null;
     if (revision === loadedRevision) return;
     loadedRevision = revision;
     effortChoices = { ...data.settings?.configuration.selection?.efforts };
+    loadedConcurrency = data.settings?.configuration.concurrency ?? null;
+    concurrencyDraft = loadedConcurrency === null ? '' : String(loadedConcurrency);
+    loadedSelectionSignature = selectionSignature(
+      data.settings?.configuration.selection ?? null,
+    );
   });
+  const parsedConcurrency = $derived(
+    concurrencyDraft.trim() === '' ? null : Number(concurrencyDraft),
+  );
+  const concurrencyInvalid = $derived(
+    parsedConcurrency !== null &&
+      (!Number.isSafeInteger(parsedConcurrency) || parsedConcurrency < 1),
+  );
+  const concurrencyDirty = $derived(parsedConcurrency !== loadedConcurrency);
   const effortOptions = (route: string) => data.settings?.efforts?.[route] ?? [];
   const selectedRoutes = $derived(
     reviewers.length > 1
@@ -54,13 +89,19 @@
           ([route, name]) => selectedRoutes.includes(route) && name !== '',
         ),
       );
+      const nextSelection = defaults
+        ? null
+        : { reviewers, synthesis, ...(Object.keys(efforts).length === 0 ? {} : { efforts }) };
+      // A concurrency-only save omits the selection so Core does not re-resolve
+      // effort controls or require the inference relay to be reachable.
+      const sendSelection =
+        !concurrencyDirty || selectionSignature(nextSelection) !== loadedSelectionSignature;
       const reply = await fetch('/api/model-settings', {
         method: 'PUT', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           revision: data.settings.configuration.revision,
-          selection: defaults
-            ? null
-            : { reviewers, synthesis, ...(Object.keys(efforts).length === 0 ? {} : { efforts }) },
+          ...(sendSelection ? { selection: nextSelection } : {}),
+          ...(concurrencyDirty ? { concurrency: parsedConcurrency } : {}),
         }),
       });
       if (reply.ok) {
@@ -212,7 +253,25 @@
             {/if}
           </fieldset>
         {/if}
-        <button class="bx--btn bx--btn--primary" disabled={stale || staleEfforts.length > 0 || (!defaults && (!reviewers.length || reviewers.some(r => !data.settings?.routes.includes(r)) || !data.settings.routes.includes(synthesis)))}>Save changes</button>
+        <label class="runner-concurrency">Runner concurrency
+          <input
+            type="number"
+            min="1"
+            step="1"
+            value={concurrencyDraft}
+            placeholder="Runner startup default"
+            oninput={(event) => (concurrencyDraft = event.currentTarget.value)}
+          />
+        </label>
+        <p class="muted">
+          Desired concurrent reviews for this deployment. Leave empty to use each Runner's
+          <code>RUNNER_CONCURRENCY</code> startup fallback. Existing reviews keep running when the
+          value decreases. Size hosts for the value you set.
+        </p>
+        {#if concurrencyInvalid}
+          <p role="alert">Enter a positive whole number, or leave it empty.</p>
+        {/if}
+        <button class="bx--btn bx--btn--primary" disabled={stale || staleEfforts.length > 0 || concurrencyInvalid || (!defaults && (!reviewers.length || reviewers.some(r => !data.settings?.routes.includes(r)) || !data.settings.routes.includes(synthesis)))}>Save changes</button>
       </fieldset>
     </form>
     {#if message}<p role={success ? 'status' : 'alert'}>{message}</p>{/if}
@@ -227,7 +286,8 @@
   fieldset fieldset { border-block: 1px solid #525252; width: 100%; padding-block: 0.75rem; }
   legend { font-weight: 600; }
   label { overflow-wrap: anywhere; }
-  select { display: block; margin-top: 0.5rem; max-width: 100%; background: #262626; color: #f4f4f4; padding: 0.5rem; font: inherit; }
+  select, input[type='number'] { display: block; margin-top: 0.5rem; max-width: 100%; background: #262626; color: #f4f4f4; padding: 0.5rem; font: inherit; }
+  .runner-concurrency input { width: 12rem; }
   .efforts { gap: 1rem; }
   .effort-row { display: grid; gap: 0.5rem; justify-items: start; border-top: 1px solid #393939; padding-top: 0.75rem; width: 100%; }
   .effort-row:first-of-type { border-top: 0; padding-top: 0; }

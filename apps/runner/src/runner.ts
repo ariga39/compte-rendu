@@ -21,11 +21,6 @@ import { createGrantRevoker } from './grant-revoker.js';
 import { createBoundedDelivery } from './evidence-store.js';
 import { CleanupRecoveryRequest } from './callback-recovery.js';
 import { decodeReviewModelConfig, trustedOpenCodeConfig } from './opencode-config.js';
-import {
-  readRunnerSettingsSync,
-  watchRunnerSettings,
-  type RunnerSettingsWatcher,
-} from './runner-settings.js';
 
 export type {
   RunnerDiagnostic,
@@ -107,8 +102,9 @@ export interface RunnerOptions {
   readonly claimFetch?: typeof fetch;
   readonly claimTimeoutMs?: number;
   readonly claimIntervalMs?: number;
+  /** Programmatic test tuning for the non-claiming capacity probe. */
+  readonly claimProbeIntervalMs?: number;
   readonly concurrency?: number;
-  readonly settingsFile?: string;
 }
 
 const authorized = (request: Request, token: string | undefined) => {
@@ -133,15 +129,17 @@ const readJson = async (request: Request) => {
 };
 
 export const createRunner = (options: RunnerOptions = {}) => {
-  const settingsFileRaw = options.settingsFile ?? process.env.RUNNER_SETTINGS_FILE;
-  const settingsFile =
-    settingsFileRaw === undefined || settingsFileRaw.trim().length === 0
-      ? undefined
-      : settingsFileRaw.trim();
-  let effectiveConcurrency =
-    settingsFile === undefined
-      ? resolveConcurrency(options.concurrency, process.env.RUNNER_CONCURRENCY)
-      : readRunnerSettingsSync(settingsFile).concurrency;
+  const legacySettingsFile = process.env.RUNNER_SETTINGS_FILE?.trim();
+  if (legacySettingsFile !== undefined && legacySettingsFile.length > 0) {
+    throw new Error(
+      'RUNNER_SETTINGS_FILE is no longer supported; set the desired concurrency in Dashboard Settings and keep RUNNER_CONCURRENCY as the startup fallback',
+    );
+  }
+  const startupConcurrency = resolveConcurrency(
+    options.concurrency,
+    process.env.RUNNER_CONCURRENCY,
+  );
+  let effectiveConcurrency = startupConcurrency;
   const llmServiceSocketRaw = process.env.RUNNER_LLM_SERVICE_SOCKET;
   if (llmServiceSocketRaw !== undefined && llmServiceSocketRaw.trim().length > 0) {
     throw new Error(
@@ -275,6 +273,9 @@ export const createRunner = (options: RunnerOptions = {}) => {
   const claimFetch = options.claimFetch ?? globalThis.fetch;
   const claimTimeoutMs = options.claimTimeoutMs ?? CLAIM_REQUEST_TIMEOUT_MS;
   const claimIntervalMs = options.claimIntervalMs ?? 1000;
+  // A full Runner still discovers D1 increases. Keep this gentle so an idle
+  // full host does not poll D1 at the claim cadence.
+  const claimProbeIntervalMs = options.claimProbeIntervalMs ?? Math.max(claimIntervalMs, 5_000);
   const readTokenUrl =
     callbackUrl === undefined
       ? undefined
@@ -445,11 +446,18 @@ export const createRunner = (options: RunnerOptions = {}) => {
     claimFetch,
     claimTimeoutMs,
     claimIntervalMs,
+    probeIntervalMs: claimProbeIntervalMs,
     authToken,
     callbackUrl,
     callbackToken,
     modelConfig,
     concurrency: () => effectiveConcurrency,
+    applyConcurrency: (value) => {
+      const next = value ?? startupConcurrency;
+      if (next === effectiveConcurrency) return;
+      effectiveConcurrency = next;
+      console.log(`runner desired concurrency=${next}`);
+    },
     admit: (input, claimed) => admitJob(input, claimed),
     log,
     isClosed: () => closed,
@@ -510,20 +518,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
     return jsonResponse(404, { error: 'not found' });
   };
 
-  let settingsWatcher: RunnerSettingsWatcher | undefined;
-  if (settingsFile !== undefined) {
-    settingsWatcher = watchRunnerSettings(settingsFile, {
-      onSettings: (next) => {
-        const previous = effectiveConcurrency;
-        effectiveConcurrency = next.concurrency;
-        console.log(`runner settings reloaded concurrency=${next.concurrency}`);
-        if (next.concurrency > previous && scheduler.hasCapacity()) scheduler.request();
-      },
-      onError: () => {
-        console.log('runner settings update ignored; keeping last valid settings');
-      },
-    });
-  }
   if (claimUrl !== undefined && claimUrl.length > 0) scheduler.start();
 
   return {
@@ -532,7 +526,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
       closed = true;
       scheduler.close();
       await cleanupReconciler.close();
-      await settingsWatcher?.close();
     },
   };
 };

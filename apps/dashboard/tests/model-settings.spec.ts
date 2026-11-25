@@ -27,6 +27,93 @@ test('changes the selected models and keeps a conflicting edit visible', async (
   await expect(page.getByLabel('review/b', { exact: true })).toBeChecked();
 });
 
+test('saves a desired Runner concurrency and omits an untouched field', async ({
+  page,
+  harness,
+  base,
+}) => {
+  harness.setHandler((url, req) => {
+    if (url.pathname !== '/api/model-settings') return { status: 404 };
+    if (req.method === 'PUT') return { status: 200, json: { revision: 3 } };
+    return {
+      status: 200,
+      json: {
+        routes: ['review/a'],
+        configuration: {
+          revision: 2,
+          selection: { reviewers: ['review/a'], synthesis: 'review/a' },
+          concurrency: 2,
+        },
+      },
+    };
+  });
+  await page.goto(base + '/settings');
+  await expect(page.getByLabel('Runner concurrency')).toHaveValue('2');
+
+  const untouched = page.waitForRequest((request) => request.method() === 'PUT');
+  await page.getByRole('button', { name: 'Save changes' }).click();
+  expect((await untouched).postDataJSON()).toEqual({
+    revision: 2,
+    selection: { reviewers: ['review/a'], synthesis: 'review/a' },
+  });
+
+  await page.getByLabel('Runner concurrency').fill('4');
+  const changed = page.waitForRequest((request) => request.method() === 'PUT');
+  await page.getByRole('button', { name: 'Save changes' }).click();
+  expect((await changed).postDataJSON()).toEqual({
+    revision: 2,
+    concurrency: 4,
+  });
+});
+
+test('clears the desired Runner concurrency back to the startup fallback', async ({
+  page,
+  harness,
+  base,
+}) => {
+  harness.setHandler((url, req) => {
+    if (url.pathname !== '/api/model-settings') return { status: 404 };
+    if (req.method === 'PUT') return { status: 200, json: { revision: 3 } };
+    return {
+      status: 200,
+      json: {
+        routes: ['review/a'],
+        configuration: {
+          revision: 2,
+          selection: { reviewers: ['review/a'], synthesis: 'review/a' },
+          concurrency: 3,
+        },
+      },
+    };
+  });
+  await page.goto(base + '/settings');
+  await page.getByLabel('Runner concurrency').fill('');
+  const saved = page.waitForRequest((request) => request.method() === 'PUT');
+  await page.getByRole('button', { name: 'Save changes' }).click();
+  expect((await saved).postDataJSON()).toEqual({
+    revision: 2,
+    concurrency: null,
+  });
+});
+
+test('rejects a non-integer desired Runner concurrency', async ({ page, harness, base }) => {
+  harness.setHandler(() => ({
+    status: 200,
+    json: {
+      routes: ['review/a'],
+      configuration: {
+        revision: 2,
+        selection: { reviewers: ['review/a'], synthesis: 'review/a' },
+        concurrency: 2,
+      },
+    },
+  }));
+  await page.goto(base + '/settings');
+  await page.getByLabel('Runner concurrency').fill('1.5');
+  await expect(page.getByRole('alert')).toContainText('positive whole number');
+  await expect(page.getByRole('button', { name: 'Save changes' })).toBeDisabled();
+});
+
 test('saves an explicit selection when switching from the instance default', async ({
   page,
   harness,

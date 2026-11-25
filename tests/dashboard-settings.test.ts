@@ -340,12 +340,26 @@ it('requires an allowlisted GitHub UID on every model change and preserves the p
     const read = await call('/api/model-settings', { headers: { cookie } });
     expect(read.status).toBe(200);
     expect(await read.json()).toMatchObject({
-      configuration: { revision: 1 },
+      configuration: { revision: 1, concurrency: null },
       catalogRefreshFailed: true,
       routes: ['model/a'],
     });
     profile = { id: 42, two_factor_authentication: false };
     expect((await write(1)).status).toBe(200);
+    const concurrencyWrite = await call('/api/model-settings', {
+      method: 'PUT',
+      headers: { cookie, origin, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        revision: 2,
+        selection: { reviewers: ['model/a'], synthesis: 'model/a' },
+        concurrency: 3,
+      }),
+    });
+    expect(concurrencyWrite.status).toBe(200);
+    const withConcurrency = await call('/api/model-settings', { headers: { cookie } });
+    expect(await withConcurrency.json()).toMatchObject({
+      configuration: { revision: 3, concurrency: 3 },
+    });
   } finally {
     db.close();
   }

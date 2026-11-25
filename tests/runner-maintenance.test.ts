@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -153,24 +153,24 @@ describe('Runner maintenance drain', () => {
     }
   });
 
-  it('does not claim while draining across a settings reload and resumes with one in-flight claim', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'compte-rendu-maintenance-'));
-    const file = join(dir, 'settings.toml');
-    await writeFile(file, 'concurrency = 1\n');
-    const logs: string[] = [];
-    const logSpy = vi
-      .spyOn(console, 'log')
-      .mockImplementation((...args: unknown[]) => void logs.push(args.map(String).join(' ')));
+  it('does not claim or probe while draining and resumes with one in-flight claim', async () => {
     let claims = 0;
+    let probes = 0;
     let pending = 0;
     let peak = 0;
     const heldClaims: Array<() => void> = [];
     const runner = createRunner({
       authToken: 'runner-test-token',
-      settingsFile: file,
       claimUrl: 'https://ingress.test/runner-claim',
       claimIntervalMs: 1_000_000_000,
-      claimFetch: async () => {
+      claimProbeIntervalMs: 5,
+      claimFetch: async (_url, init) => {
+        const body =
+          typeof init?.body === 'string' ? (JSON.parse(init.body) as { probeOnly?: boolean }) : {};
+        if (body.probeOnly === true) {
+          probes += 1;
+          return new Response(null, { status: 204 });
+        }
         claims += 1;
         if (claims === 1) return new Response(null, { status: 204 });
         pending += 1;
@@ -185,22 +185,10 @@ describe('Runner maintenance drain', () => {
     });
     try {
       await vi.waitFor(() => expect(claims).toBe(1));
-      await vi.waitFor(() =>
-        expect(logs.some((line) => line.includes('runner settings reloaded concurrency=1'))).toBe(
-          true,
-        ),
-      );
       expect((await status(runner, 'POST', '/maintenance/drain')).drained).toBe(true);
-
-      const temporary = join(dir, 'settings.next.toml');
-      await writeFile(temporary, 'concurrency = 2\n');
-      await rename(temporary, file);
-      await vi.waitFor(() =>
-        expect(logs.some((line) => line.includes('runner settings reloaded concurrency=2'))).toBe(
-          true,
-        ),
-      );
+      await new Promise((resolve) => setTimeout(resolve, 40));
       expect(claims).toBe(1);
+      expect(probes).toBe(0);
 
       const resumed = await Promise.all([
         status(runner, 'POST', '/maintenance/resume'),
@@ -212,10 +200,8 @@ describe('Runner maintenance drain', () => {
       for (const release of heldClaims.splice(0)) release();
       await vi.waitFor(async () => expect((await status(runner)).claimInFlight).toBe(false));
     } finally {
-      logSpy.mockRestore();
       for (const release of heldClaims.splice(0)) release();
       await runner.close();
-      await rm(dir, { recursive: true, force: true });
     }
   });
 

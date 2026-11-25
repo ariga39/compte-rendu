@@ -169,12 +169,17 @@ the exact job ID, run ID and attempt. After retirement, a stop returns 404 and
 cleanup remains unconfirmed. Later reviews can proceed when the claim budget expires.
 
 Runner reserves capacity for in-flight claims and holds slots through archival,
-cleanup and callback delivery. It fills `RUNNER_CONCURRENCY` (positive integer,
-default 1); malformed startup configuration fails before admission. An optional
-TOML `RUNNER_SETTINGS_FILE` overrides concurrency and reloads through smol-toml,
-chokidar and Effect Schema. Invalid updates retain the last good value; increases
-wake claims and decreases preserve admitted jobs/reserved claims. Other settings
-are not hot-reloaded. Claims are single-flight; ambiguous claim responses halt
+cleanup and callback delivery. `RUNNER_CONCURRENCY` (positive integer, default 1)
+is its startup fallback; malformed startup configuration fails before admission.
+Core D1 stores one deployment desired concurrency, editable in Dashboard
+Settings under the existing configuration revision. Claim 200/204 responses
+carry it as `x-compte-rendu-concurrency`; an explicit clear is the `default`
+sentinel, and a transiently missing or invalid header leaves the Runner target
+unchanged. A full Runner sends a non-claiming probe on its existing claim timer,
+so long active reviews do not hide increases. Probes allocate no claim ID,
+reserve no work and run no Sandbox readiness check. Increases wake claims;
+decreases preserve admitted jobs and reserved claims. Both Sandbox backends use
+the same scheduler. Claims are single-flight; ambiguous claim responses halt
 polling rather than risk duplicate ownership.
 
 Authenticated private maintenance endpoints pause new claims

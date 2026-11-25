@@ -12,6 +12,11 @@ interface ConfigurationRow {
   readonly revision: number;
   readonly selection: string | null;
   readonly effort_snapshot?: string | null;
+  readonly runner_concurrency?: number | null;
+}
+
+interface ConcurrencyRow {
+  readonly runner_concurrency: number | null;
 }
 
 interface GenerationRow {
@@ -48,12 +53,51 @@ const configuredRoutes = (selection: ReviewModelSelection): string[] => [
 const executionRoutes = (selection: ReviewModelSelection): string[] =>
   selection.reviewers.length > 1 ? configuredRoutes(selection) : [selection.reviewers[0]!];
 
+// Matches the predecessor TOML contract: any positive safe integer. Hardware
+// safety remains an operator sizing decision, not a product-enforced cap.
+const DesiredRunnerConcurrency = Schema.Int.check(Schema.isGreaterThan(0));
+
 const ConfigurationInput = Schema.fromJsonString(
   Schema.Struct({
     revision: Schema.Natural,
-    selection: Schema.NullOr(ReviewModelSelection),
+    // Omitted preserves the installed selection and effort snapshot. This is
+    // how a concurrency-only change avoids relay and effort re-resolution.
+    selection: Schema.optional(Schema.NullOr(ReviewModelSelection)),
+    // Omitted preserves the stored override. Explicit null clears it so each
+    // Runner returns to its RUNNER_CONCURRENCY startup fallback.
+    concurrency: Schema.optional(Schema.NullOr(DesiredRunnerConcurrency)),
   }),
 );
+
+export type DesiredRunnerConcurrencyState =
+  | { readonly kind: 'value'; readonly value: number }
+  | { readonly kind: 'default' }
+  | { readonly kind: 'unavailable' };
+
+/**
+ * Reads the deployment's desired Runner concurrency without claiming work.
+ * A successful NULL read is an explicit default; a failed read is unavailable
+ * so a Runner does not mistake a transient D1 problem for an operator clear.
+ */
+export const readDesiredRunnerConcurrency = async (
+  database: D1DatabaseLike,
+): Promise<DesiredRunnerConcurrencyState> => {
+  try {
+    const row = await database
+      .prepare('SELECT runner_concurrency FROM review_configuration WHERE id = 1')
+      .first<ConcurrencyRow>();
+    if (row === null) return { kind: 'unavailable' };
+    if (row.runner_concurrency == null) return { kind: 'default' };
+    const decoded = Schema.decodeUnknownOption(DesiredRunnerConcurrency)(row.runner_concurrency);
+    return Option.isSome(decoded)
+      ? { kind: 'value', value: decoded.value }
+      : { kind: 'unavailable' };
+  } catch {
+    return { kind: 'unavailable' };
+  }
+};
+
+const concurrencyOf = (row: ConfigurationRow): number | null => row.runner_concurrency ?? null;
 
 const readGenerations = async (database: D1DatabaseLike): Promise<Map<string, number>> => {
   const rows = await database
@@ -100,7 +144,10 @@ const parseSnapshot = (raw: string | null | undefined): readonly FrozenRouteEffo
 
 const readConfiguration = async (database: D1DatabaseLike) =>
   database
-    .prepare('SELECT revision, selection, effort_snapshot FROM review_configuration WHERE id = 1')
+    .prepare(
+      `SELECT revision, selection, effort_snapshot, runner_concurrency
+       FROM review_configuration WHERE id = 1`,
+    )
     .first<ConfigurationRow>();
 
 const decodeStoredSelection = (raw: string | null): ReviewModelSelection | null | undefined => {
@@ -133,7 +180,7 @@ export const applyReviewConfiguration = (
       if (row === null) return response({ error: 'configuration unavailable' }, 503);
       const selection = decodeStoredSelection(row.selection);
       if (selection === undefined) return response({ error: 'configuration unavailable' }, 503);
-      return response({ revision: row.revision, selection });
+      return response({ revision: row.revision, selection, concurrency: concurrencyOf(row) });
     }
     if (request.method !== 'PUT') return response({ error: 'method not allowed' }, 405);
     const body = yield* Effect.tryPromise(() => readBoundedRequestBody(request, 16 * 1024));
@@ -142,33 +189,59 @@ export const applyReviewConfiguration = (
       onExcessProperty: 'error',
     })(body.text);
     if (Option.isNone(configuration)) return response({ error: 'invalid configuration' }, 400);
-    const selected = configuration.value.selection;
+    const selectionInput = configuration.value.selection;
+    const concurrency = configuration.value.concurrency;
+    if (selectionInput === undefined && concurrency === undefined)
+      return response({ error: 'invalid configuration' }, 400);
     let snapshot: readonly FrozenRouteEffort[] | null = null;
-    if (selected !== null) {
+    if (selectionInput !== undefined && selectionInput !== null) {
       if (!relay) return response({ error: 'catalog unavailable' }, 503);
       const catalog = yield* Effect.tryPromise(() => relay.catalog());
       const generations = yield* Effect.tryPromise(() => readGenerations(database));
-      const built = buildSnapshot({ selection: selected, catalog, generations });
+      const built = buildSnapshot({ selection: selectionInput, catalog, generations });
       if (built === undefined) return response({ error: 'model effort unavailable' }, 400);
       snapshot = built;
     }
+    const selectionProvided = selectionInput === undefined ? 0 : 1;
+    const selectionValue =
+      selectionInput === undefined || selectionInput === null
+        ? null
+        : JSON.stringify(selectionInput);
+    const concurrencyProvided = concurrency === undefined ? 0 : 1;
+    // One revision CAS for every combination. Omitted columns are preserved in
+    // place, so a concurrency-only update never re-reads or rewrites the
+    // selection and frozen effort snapshot.
     const row = yield* Effect.tryPromise(() =>
       database
         .prepare(
-          `UPDATE review_configuration SET revision = revision + 1, selection = ?,
-             effort_snapshot = ?
-           WHERE id = 1 AND revision = ? RETURNING revision, selection`,
+          `UPDATE review_configuration
+           SET revision = revision + 1,
+               selection = CASE WHEN ? THEN ? ELSE selection END,
+               effort_snapshot = CASE WHEN ? THEN ? ELSE effort_snapshot END,
+               runner_concurrency = CASE WHEN ? THEN ? ELSE runner_concurrency END
+           WHERE id = 1 AND revision = ?
+           RETURNING revision, selection, runner_concurrency`,
         )
         .bind(
-          selected === null ? null : JSON.stringify(selected),
+          selectionProvided,
+          selectionValue,
+          selectionProvided,
           snapshot === null ? null : JSON.stringify(snapshot),
+          concurrencyProvided,
+          concurrency === undefined ? null : concurrency,
           configuration.value.revision,
         )
         .first<ConfigurationRow>(),
     );
     if (row === null)
       return response({ error: 'configuration changed; reload before saving' }, 409);
-    return response({ revision: row.revision, selection: selected });
+    const storedSelection = decodeStoredSelection(row.selection);
+    if (storedSelection === undefined) return response({ error: 'configuration unavailable' }, 503);
+    return response({
+      revision: row.revision,
+      selection: storedSelection,
+      concurrency: concurrencyOf(row),
+    });
   }).pipe(
     Effect.catch(() => Effect.succeed(response({ error: 'configuration unavailable' }, 503))),
   );
