@@ -3,6 +3,8 @@ import {
   MAX_RUNNER_CALLBACK_BYTES,
   MAX_RUNNER_EVIDENCE_BYTES,
   REVIEW_ATTEMPT_BUDGET_MS,
+  RUNNER_CONCURRENCY_DEFAULT,
+  RUNNER_CONCURRENCY_HEADER,
   RunnerEvidenceUpload,
   RunnerJobInput,
   RunnerProgressReport,
@@ -25,6 +27,10 @@ import {
   resetPreviousReviewVerdicts,
 } from './review-publication';
 import { storePublicationRecord } from './publication-record';
+import {
+  readDesiredRunnerConcurrency,
+  type DesiredRunnerConcurrencyState,
+} from './review-configuration';
 const MAX_PROGRESS_BYTES = 16 * 1024;
 const MAX_READ_TOKEN_REQUEST_BYTES = 16 * 1024;
 const READ_TOKEN_RENEWAL_MARGIN_MS = 60 * 1000;
@@ -585,6 +591,20 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
       );
     });
 
+  const attachRunnerConcurrency = (
+    response: Response,
+    concurrency: DesiredRunnerConcurrencyState,
+  ) => {
+    if (response.status !== 200 && response.status !== 204) return response;
+    if (concurrency.kind === 'value') {
+      response.headers.set(RUNNER_CONCURRENCY_HEADER, String(concurrency.value));
+    } else if (concurrency.kind === 'default') {
+      response.headers.set(RUNNER_CONCURRENCY_HEADER, RUNNER_CONCURRENCY_DEFAULT);
+    }
+    // unavailable: omit the header so Runners keep their current target.
+    return response;
+  };
+
   const handleRunnerClaim = (request: Request) =>
     Effect.gen(function* () {
       const occurredAt = new Date().toISOString();
@@ -594,11 +614,26 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
         Schema.fromJsonString(
           Schema.Struct({
             requestId: Schema.optional(Schema.String.check(Schema.isUUID(4))),
+            probeOnly: Schema.optional(Schema.Boolean),
           }),
         ),
       )(body.text || '{}');
       if (Option.isNone(parsed)) return new Response(null, { status: 400 });
       const requestId = parsed.value.requestId;
+      const desiredConcurrency = yield* bestEffort(
+        () => readDesiredRunnerConcurrency(env.REVIEW_DB),
+        { kind: 'unavailable' as const },
+      );
+      const noContent = () =>
+        attachRunnerConcurrency(new Response(null, { status: 204 }), desiredConcurrency);
+      if (parsed.value.probeOnly === true) {
+        // A full Runner reads the deployment target without claiming work,
+        // allocating a claim ID, minting credentials or mutating D1.
+        return attachRunnerConcurrency(
+          new Response(null, { status: 204, headers: { 'cache-control': 'no-store' } }),
+          desiredConcurrency,
+        );
+      }
       const jobId = globalThis.crypto.randomUUID();
       const claim = yield* port(() =>
         stateStore.claimNextJob({
@@ -609,12 +644,12 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
           onExpiredClaims: (claims) => publishExpiredClaimChecks(github, stateStore, claims),
         }),
       );
-      if (claim.kind === 'empty') return new Response(null, { status: 204 });
+      if (claim.kind === 'empty') return noContent();
       if (claim.kind === 'preparing' || claim.replay) {
         const start = epochMilliseconds(claim.claimedAt);
         if (start !== undefined && Date.parse(occurredAt) >= start + REVIEW_ATTEMPT_BUDGET_MS) {
           const outcome = yield* port(() => stateStore.getRunOutcome(claim.runId));
-          if (outcome?.status !== 'scheduled') return new Response(null, { status: 204 });
+          if (outcome?.status !== 'scheduled') return noContent();
           const failure = { phase: 'scheduling', reason: 'timeout' } as const;
           // claim_prepared=0 proves no handoff was prepared. A replay of a
           // prepared claim is not proof that it never reached a Runner.
@@ -623,7 +658,7 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
               ? { jobId: claim.jobId, attempt: 1, requireUnprepared: true }
               : undefined;
           yield* markRunFailed(outcome, claim.runId, occurredAt, release, failure);
-          return new Response(null, { status: 204 });
+          return noContent();
         }
         if (claim.kind === 'preparing') return new Response(null, { status: 503 });
       }
@@ -640,7 +675,7 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
               occurredAt: new Date().toISOString(),
             }),
           );
-          return new Response(null, { status: stopped ? 204 : 503 });
+          return stopped ? noContent() : new Response(null, { status: 503 });
         });
 
       const supersedeStaleClaim = () =>
@@ -667,7 +702,7 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
               undefined,
             );
           }
-          return new Response(null, { status: 204 });
+          return noContent();
         });
 
       let preparationFailure: PublicTaskFailure | undefined;
@@ -759,10 +794,10 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
               stateStore.clearRunnerJob({ runId: claim.runId, jobId: claim.jobId }),
             );
           }
-          return new Response(null, { status: 204 });
+          return noContent();
         }
         if (current.runnerJobId !== claim.jobId || current.runnerAttempt !== claim.attempt) {
-          return new Response(null, { status: 204 });
+          return noContent();
         }
         const wroteInProgress =
           !claim.replay && current.checkRunId !== undefined && github.updateCheckRun !== undefined;
@@ -826,13 +861,13 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
             current !== undefined &&
             (current.runnerJobId !== claim.jobId || current.runnerAttempt !== claim.attempt)
           ) {
-            return new Response(null, { status: 204 });
+            return noContent();
           }
           if (current?.status === 'cancelled') return yield* releaseUndeliveredCancellation();
           if (claim.replay)
-            return new Response(null, {
-              status: current && current.status !== 'scheduled' ? 204 : 503,
-            });
+            return current && current.status !== 'scheduled'
+              ? noContent()
+              : new Response(null, { status: 503 });
           const failedAt = new Date().toISOString();
           if (current === undefined) {
             yield* port(() =>
@@ -857,7 +892,8 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
           return new Response(null, { status: 503 });
         });
 
-      return yield* prepare.pipe(Effect.catchCause(handlePreparationFailure));
+      const result = yield* prepare.pipe(Effect.catchCause(handlePreparationFailure));
+      return attachRunnerConcurrency(result, desiredConcurrency);
     });
 
   return {

@@ -106,11 +106,11 @@ a private client configuration file rather than putting the secret in arguments.
 `GET /api/review-configuration` returns:
 
 ```json
-{ "revision": 0, "selection": null }
+{ "revision": 0, "selection": null, "concurrency": null }
 ```
 
-`PUT /api/review-configuration` accepts the revision just read and the whole new
-selection:
+`PUT /api/review-configuration` accepts the revision just read, the whole new
+selection, and an optional desired Runner concurrency:
 
 ```json
 {
@@ -118,9 +118,20 @@ selection:
   "selection": {
     "reviewers": ["review-provider/deepseek-v4.1-flash", "review-provider/glm-5.3-flash"],
     "synthesis": "review-provider/deepseek-v4.1-flash"
-  }
+  },
+  "concurrency": 3
 }
 ```
+
+`concurrency` is any positive safe integer, the same contract as the former
+TOML settings file. Omit `selection` to change only concurrency: Core keeps the
+installed roster and frozen effort snapshot as-is and does not require the
+inference relay to be reachable. Omit `concurrency` to preserve the stored
+value during an ordinary selection update. Send `null` to clear the deployment
+override so every Runner returns to its `RUNNER_CONCURRENCY` startup fallback.
+The value is independent of `selection`, so it can be set while the instance
+default is active. It does not modify a frozen job configuration or an effort
+snapshot.
 
 A successful write returns 200 with the incremented revision. A stale revision
 returns 409; reload before deciding whether to retry. Invalid data returns 400 and
@@ -131,6 +142,11 @@ reviewers. Synthesis may reuse a reviewer model. Unknown
 fields are rejected. Requests are limited to 16 KiB, matching the LLM grant-control
 payload budget rather than an inference or review-output limit. Responses are
 `Cache-Control: no-store`.
+
+Runner claim 200/204 responses carry the stored concurrency in
+`x-compte-rendu-concurrency`. An explicit clear sends `default`; a transient
+read failure omits the header. A full Runner discovers changes through the
+existing `/runner-claim` probe without claiming work.
 
 Use `selection: null` with the current revision to select the installation default.
 For the managed relay, set the application Worker's `RELAY_DEFAULT_MODEL_ROUTE`

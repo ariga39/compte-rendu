@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { Schema } from 'effect';
 import {
   REVIEW_ATTEMPT_BUDGET_MS,
+  RUNNER_CONCURRENCY_DEFAULT,
+  RUNNER_CONCURRENCY_HEADER,
   RunnerJobInput,
   sanitizeOperationalLogEvent,
   type OperationalLog,
@@ -15,6 +17,7 @@ import {
 import type { JobRegistry } from './job-registry.js';
 import type { CleanupReconciler } from './cleanup-reconciler.js';
 import type { JobExecutionInput } from './job-executor.js';
+import { HostRequestAbortError, runWithHostDeadline } from './host-request.js';
 
 const MAX_REQUEST_BYTES = 64 * 1024;
 
@@ -26,11 +29,15 @@ export interface ClaimSchedulerDependencies {
   readonly claimFetch: typeof fetch;
   readonly claimTimeoutMs: number;
   readonly claimIntervalMs: number;
+  /** Gentle cadence for non-claiming probes while the Runner is full. */
+  readonly probeIntervalMs: number;
   readonly authToken?: string | undefined;
   readonly callbackUrl?: string | undefined;
   readonly callbackToken?: string | undefined;
   readonly modelConfig?: unknown;
   readonly concurrency: () => number;
+  /** Applies a deployment value, or null for the Runner startup fallback. */
+  readonly applyConcurrency: (value: number | null) => void;
   readonly admit: (input: JobExecutionInput, claimed: boolean) => Promise<Response>;
   readonly log?: OperationalLog | undefined;
   readonly isClosed: () => boolean;
@@ -58,6 +65,20 @@ export interface ClaimScheduler {
   resetClaimGateFailure(): void;
 }
 
+/**
+ * undefined: no trustworthy header (transient failure or an older Core), so
+ * keep the current target. null: the operator explicitly cleared the D1
+ * override, so return to the startup fallback. number: a new target.
+ */
+const desiredFromResponse = (response: Response): number | null | undefined => {
+  const raw = response.headers.get(RUNNER_CONCURRENCY_HEADER);
+  if (raw === null) return undefined;
+  const trimmed = raw.trim().toLowerCase();
+  if (trimmed === RUNNER_CONCURRENCY_DEFAULT) return null;
+  const value = Number(trimmed);
+  return Number.isSafeInteger(value) && value > 0 ? value : undefined;
+};
+
 export const createClaimScheduler = (deps: ClaimSchedulerDependencies): ClaimScheduler => {
   let claiming = false;
   let stagedOutageLogged = false;
@@ -68,6 +89,7 @@ export const createClaimScheduler = (deps: ClaimSchedulerDependencies): ClaimSch
   let claimTimer: ReturnType<typeof setTimeout> | undefined;
   let claimInFlight: Promise<void> | undefined;
   let claimInFlightController: AbortController | undefined;
+  let probeInFlight = false;
   const stopsDuringClaim = new Map<
     string,
     { deadline: number; timer: ReturnType<typeof setTimeout> }
@@ -86,6 +108,16 @@ export const createClaimScheduler = (deps: ClaimSchedulerDependencies): ClaimSch
     stopsDuringClaim.clear();
   };
   const hasCapacity = () => deps.registry.hasCapacity(deps.concurrency(), claiming);
+  const prerequisitesReady = () =>
+    deps.claimUrl !== undefined &&
+    deps.claimUrl.length > 0 &&
+    deps.authToken !== undefined &&
+    deps.authToken.length > 0 &&
+    deps.callbackUrl !== undefined &&
+    deps.callbackUrl.length > 0 &&
+    deps.callbackToken !== undefined &&
+    deps.callbackToken.length > 0 &&
+    deps.modelConfig !== undefined;
   const recordClaimGateFailure = async (
     reason: 'sandbox-recovery-failed' | 'runtime-preflight-failed',
     pollingHalted = true,
@@ -94,25 +126,88 @@ export const createClaimScheduler = (deps: ClaimSchedulerDependencies): ClaimSch
     claimGateFailureLogged = true;
     await recordLog({ phase: 'runner', outcome: 'claim', reason, pollingHalted });
   };
-  const startClaim = () => {
-    if (deps.isClosed() || claimInFlight !== undefined) return;
-    if (claimTimer !== undefined) {
-      clearTimeout(claimTimer);
+  const clearClaimTimer = () => {
+    if (claimTimer !== undefined) clearTimeout(claimTimer);
+    claimTimer = undefined;
+  };
+  const scheduleNext = (delayMs: number) => {
+    if (deps.isClosed()) return;
+    clearClaimTimer();
+    claimTimer = setTimeout(() => {
       claimTimer = undefined;
-    }
-    const run = claimNextJob();
+      startNext();
+    }, delayMs);
+    if (typeof claimTimer === 'object' && claimTimer !== null) claimTimer.unref?.();
+  };
+  const begin = (probeOnly: boolean) => {
+    if (deps.isClosed() || claimInFlight !== undefined || claiming) return;
+    clearClaimTimer();
+    if (probeOnly) probeInFlight = true;
+    const run = probeOnly ? probeNextJob() : claimNextJob();
     claimInFlight = run;
     void run.finally(() => {
       if (claimInFlight === run) claimInFlight = undefined;
     });
   };
-  const scheduleClaim = () => {
-    if (deps.isClosed()) return;
-    claimTimer = setTimeout(() => {
-      claimTimer = undefined;
+  const startClaim = () => begin(false);
+  const startProbe = () => begin(true);
+  const startNext = () => {
+    if (deps.isClosed() || claimInFlight !== undefined) return;
+    if (claimRequestId !== undefined) {
       startClaim();
-    }, deps.claimIntervalMs);
-    if (typeof claimTimer === 'object' && claimTimer !== null) claimTimer.unref?.();
+      return;
+    }
+    if (draining || claimPollingHalted) return;
+    if (!prerequisitesReady()) return;
+    if (!hasCapacity()) {
+      startProbe();
+      return;
+    }
+    startClaim();
+  };
+  const requestConcurrency = (response: Response | undefined): boolean => {
+    if (response === undefined) return false;
+    const desired = desiredFromResponse(response);
+    if (desired === undefined) return false;
+    const previous = deps.concurrency();
+    if (desired === previous) return false;
+    deps.applyConcurrency(desired);
+    return deps.concurrency() > previous;
+  };
+  const postClaim = (body: unknown, controller: AbortController) =>
+    runWithHostDeadline({ timeoutMs: deps.claimTimeoutMs, signal: controller.signal }, (signal) =>
+      deps.claimFetch(deps.claimUrl!, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${deps.callbackToken}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify(body),
+        signal,
+      }),
+    );
+  const probeNextJob = async () => {
+    const controller = new AbortController();
+    claimInFlightController = controller;
+    try {
+      // No requestId: a probe can never impersonate a pending claim.
+      const response = await postClaim({ probeOnly: true }, controller);
+      if (response.status === 204) requestConcurrency(response);
+      else {
+        // A probe never admits work even if a misconfigured peer returns a job.
+        await response.body?.cancel().catch(() => undefined);
+      }
+    } catch {
+      // Timeout, abort, or transient transport failure: keep the current
+      // target and let the single claim timer try again.
+    } finally {
+      if (claimInFlightController === controller) claimInFlightController = undefined;
+      probeInFlight = false;
+      if (!deps.isClosed() && !draining && !claimPollingHalted) {
+        if (hasCapacity() || claimRequestId !== undefined) scheduleNext(0);
+        else scheduleNext(deps.probeIntervalMs);
+      }
+    }
   };
   const claimNextJob = async () => {
     if (deps.isClosed()) return;
@@ -123,7 +218,7 @@ export const createClaimScheduler = (deps: ClaimSchedulerDependencies): ClaimSch
     if (sandboxBackendHealth(deps.backend) === 'outage') {
       const ready = await sandboxBackendCheckReady(deps.backend);
       if (ready !== 'ready') {
-        scheduleClaim();
+        scheduleNext(deps.claimIntervalMs);
         return;
       }
       stagedOutageLogged = false;
@@ -150,15 +245,18 @@ export const createClaimScheduler = (deps: ClaimSchedulerDependencies): ClaimSch
       deps.callbackUrl.length === 0 ||
       deps.callbackToken === undefined ||
       deps.callbackToken.length === 0 ||
-      deps.modelConfig === undefined ||
-      !hasCapacity()
+      deps.modelConfig === undefined
     ) {
+      return;
+    }
+    if (!hasCapacity() && claimRequestId === undefined) {
+      scheduleNext(deps.probeIntervalMs);
       return;
     }
     const readiness = await sandboxBackendCheckReady(deps.backend);
     if (readiness !== 'ready') {
       await recordClaimGateFailure('runtime-preflight-failed', false);
-      scheduleClaim();
+      scheduleNext(deps.claimIntervalMs);
       return;
     }
     if (deps.isClosed()) return;
@@ -166,14 +264,19 @@ export const createClaimScheduler = (deps: ClaimSchedulerDependencies): ClaimSch
       claiming ||
       claimPollingHalted ||
       (draining && claimRequestId === undefined) ||
-      !hasCapacity()
-    )
+      (!hasCapacity() && claimRequestId === undefined)
+    ) {
+      if (!hasCapacity() && claimRequestId === undefined) {
+        scheduleNext(deps.probeIntervalMs);
+      }
       return;
+    }
 
     claiming = true;
     claimRequestId ??= randomUUID();
     let continuePolling = true;
     let admittedJob = false;
+    let concurrencyIncreased = false;
     let claimFailure:
       | {
           readonly reason:
@@ -189,27 +292,8 @@ export const createClaimScheduler = (deps: ClaimSchedulerDependencies): ClaimSch
       | undefined;
     const controller = new AbortController();
     claimInFlightController = controller;
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    let timedOut = false;
     try {
-      const response = await Promise.race([
-        deps.claimFetch(deps.claimUrl, {
-          method: 'POST',
-          headers: {
-            authorization: `Bearer ${deps.callbackToken}`,
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({ requestId: claimRequestId }),
-          signal: controller.signal,
-        }),
-        new Promise<Response>((_, reject) => {
-          timeout = setTimeout(() => {
-            timedOut = true;
-            controller.abort();
-            reject(new Error('Runner claim request timed out'));
-          }, deps.claimTimeoutMs);
-        }),
-      ]);
+      const response = await postClaim({ requestId: claimRequestId }, controller);
       if (response.status === 200) {
         continuePolling = false;
         claimPollingHalted = true;
@@ -256,16 +340,18 @@ export const createClaimScheduler = (deps: ClaimSchedulerDependencies): ClaimSch
         claimPollingHalted = false;
         admittedJob = true;
         claimRequestId = undefined;
+        concurrencyIncreased = requestConcurrency(response);
       } else if (response.status === 204) {
         claimRequestId = undefined;
+        concurrencyIncreased = requestConcurrency(response);
       } else {
         claimFailure = { reason: 'http-error', status: response.status };
       }
-    } catch {
+    } catch (error) {
+      const timedOut = error instanceof HostRequestAbortError && error.reason === 'timeout';
       claimFailure ??= { reason: timedOut ? 'timeout' : 'transport-error' };
     } finally {
       if (claimInFlightController === controller) claimInFlightController = undefined;
-      if (timeout !== undefined) clearTimeout(timeout);
       claiming = false;
       if (claimRequestId === undefined) forgetStops();
       if (claimFailure !== undefined) {
@@ -277,22 +363,35 @@ export const createClaimScheduler = (deps: ClaimSchedulerDependencies): ClaimSch
           pollingHalted: claimPollingHalted,
         });
       }
-      if ((continuePolling || admittedJob) && hasCapacity()) scheduleClaim();
+      if (continuePolling || admittedJob) {
+        // A reserved request ID must replay even when every execution slot is
+        // full. A delivered increase with an open slot wakes the claim loop
+        // immediately; otherwise a full Runner probes on the gentle cadence.
+        scheduleNext(
+          concurrencyIncreased && hasCapacity()
+            ? 0
+            : claimRequestId !== undefined || hasCapacity()
+              ? deps.claimIntervalMs
+              : deps.probeIntervalMs,
+        );
+      }
     }
   };
 
   return {
-    start: startClaim,
-    request: startClaim,
-    schedule: scheduleClaim,
+    start: startNext,
+    request: startNext,
+    schedule: () => scheduleNext(deps.claimIntervalMs),
     drain() {
       draining = true;
+      clearClaimTimer();
+      if (probeInFlight) claimInFlightController?.abort();
       if (claimRequestId !== undefined) startClaim();
     },
     resume() {
       if (!draining) return;
       draining = false;
-      startClaim();
+      startNext();
     },
     stageStop(jobId, deadline) {
       if (stopsDuringClaim.has(jobId)) return;
@@ -321,8 +420,7 @@ export const createClaimScheduler = (deps: ClaimSchedulerDependencies): ClaimSch
       claimGateFailureLogged = false;
     },
     close() {
-      if (claimTimer !== undefined) clearTimeout(claimTimer);
-      claimTimer = undefined;
+      clearClaimTimer();
       claimInFlightController?.abort();
       forgetStops();
     },

@@ -18,6 +18,18 @@ export const PublicDashboardConfig = Schema.Struct({ name: Schema.String });
 
 export const RUNNER_LLM_CONTROL_TIMEOUT_MS = 5000;
 export const REVIEW_ATTEMPT_BUDGET_MS = 90 * 60 * 1000;
+
+/**
+ * Claim responses carry the deployment's desired Runner concurrency here,
+ * or RUNNER_CONCURRENCY_DEFAULT for an explicit D1 clear. A missing header
+ * means the read was unavailable, so a Runner must keep its current target.
+ */
+export const RUNNER_CONCURRENCY_HEADER = 'x-compte-rendu-concurrency';
+/**
+ * An explicit D1 clear returns this sentinel so a Runner can distinguish it
+ * from a transient missing header, which must leave the current target alone.
+ */
+export const RUNNER_CONCURRENCY_DEFAULT = 'default';
 export const RunnerDeadline = Schema.Literals(['claim', 'credential']);
 export type RunnerDeadline = typeof RunnerDeadline.Type;
 

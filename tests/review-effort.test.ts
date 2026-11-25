@@ -61,7 +61,7 @@ it('resolves operator effort names against the trusted catalog without accepting
       settingsRequest('PUT', { revision: 0, selection }),
     );
     expect(saved.status).toBe(200);
-    expect(await saved.json()).toEqual({ revision: 1, selection });
+    expect(await saved.json()).toEqual({ revision: 1, selection, concurrency: null });
 
     const row = database.database
       .prepare('SELECT effort_snapshot FROM review_configuration WHERE id = 1')
@@ -98,7 +98,7 @@ it('resolves operator effort names against the trusted catalog without accepting
       );
     }
     const restored = await core.handleReviewConfiguration(settingsRequest('GET'));
-    expect(await restored.json()).toEqual({ revision: 1, selection });
+    expect(await restored.json()).toEqual({ revision: 1, selection, concurrency: null });
   } finally {
     database.close();
   }

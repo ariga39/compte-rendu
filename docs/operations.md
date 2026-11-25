@@ -209,7 +209,7 @@ Use the following sequence for a breaking upgrade or rollback, per instance:
 
 For either release path, back up the existing Runner artifact before replacement
 and verify the installed artifact’s SHA256 against the tested build before
-starting it. After startup, verify service health, configured concurrency and
+starting it. After startup, verify service health, desired concurrency and
 Sandbox recovery status. Verify the behavior affected by the release. For
 publication changes, use the next controlled review to check the exact revision,
 review output and visible GitHub publication.

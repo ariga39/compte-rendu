@@ -572,9 +572,9 @@ required in production. `RUNNER_CALLBACK_TOKEN` authenticates both public
 Runner routes; keep it identical to the ingress secret and do not create a
 second claim bearer.
 
-`RUNNER_CONCURRENCY` is an optional positive integer that bounds how many
-independent review Jobs the Runner executes at once; it defaults to `1`, which
-preserves the previous serialized behavior. Set it to `2` or higher to overlap
+`RUNNER_CONCURRENCY` is an optional positive integer that sets the startup
+fallback for how many independent review Jobs the Runner executes at once; it
+defaults to `1`, which preserves the previous serialized behavior. Set it to `2` or higher to overlap
 reviews for different pull requests. Same repository/PR work is always
 serialized until the prior Sandbox is confirmed destroyed, and a slot is held
 through evidence archival, Sandbox cleanup, and the terminal callback. An
@@ -584,60 +584,59 @@ concurrent review runs its own Sandbox with `--cpus 4` and `--memory 8g` plus
 one 90-minute review deadline, so `RUNNER_CONCURRENCY=2` needs roughly twice the
 CPU, memory, disk, and model throughput of the default. Prefer the smallest
 value that removes head-of-line blocking. This setting reuses the existing D1
-durable queue and adds no new queue, scheduler, or retry system. The Runner
-reads this environment variable once at startup. For changes without restarting,
-configure the TOML settings file below.
+durable queue and adds no new queue, scheduler, or retry system.
 
-### Reload concurrency without restarting
+`RUNNER_CONCURRENCY` is the startup fallback. It applies until Core delivers a
+deployment desired value, and whenever the D1 value is explicitly cleared.
 
-The optional `RUNNER_SETTINGS_FILE` selects one TOML file. Its `concurrency`
-value takes precedence over `RUNNER_CONCURRENCY` (and the programmatic
-concurrency option). Without a settings file, the environment/default behavior
-above is unchanged.
+### Change concurrency without restarting
 
-Create the file once, as the Runner user; keep it outside Sandbox writable
-mounts. Preserve an existing file when upgrading:
+Each deployment can store one desired concurrency in Core D1
+(`review_configuration.runner_concurrency`). Edit it in **Dashboard Settings →
+Runner concurrency**, or through the authenticated operator API described in
+[review configuration](review-configuration.md#operator-api). The value is any
+positive safe integer, matching the former TOML contract. There is no
+product-enforced concurrency cap or local maximum setting; size each host for
+the value you set, and Core delivers the stored value to every Runner attached
+to the deployment.
 
-```sh
-mkdir -p ~/.config/compte-rendu
-(umask 077; printf 'concurrency = 3\n' > ~/.config/compte-rendu/runner-settings.toml)
-```
+Every `POST /runner-claim` 200 and 204 response carries the value in
+`x-compte-rendu-concurrency`. When the Runner has no free slot, it sends a
+non-claiming probe (`{"probeOnly": true}`) on the existing claim timer. The probe
+does not reserve work, allocate a claim ID, prepare a job or run a Sandbox
+readiness check. An increase wakes the claim loop immediately; a decrease leaves
+active reviews and cleanup alone so slots drain naturally. Drain pauses probes
+as well as claims. A stored value is sent as a positive integer; an explicit D1
+clear is sent as `default`, and the Runner returns to `RUNNER_CONCURRENCY`. A
+transiently missing or invalid header leaves the current target unchanged.
 
-Add its absolute path to the existing Runner environment file:
+#### Seed an existing installation
 
-```ini
-RUNNER_SETTINGS_FILE=/home/<RUNNER_USER>/.config/compte-rendu/runner-settings.toml
-```
-
-Use the [maintenance drain](operations.md#drain-before-maintenance), then restart
-the Runner once to enable file loading.
-Subsequent edits to this TOML file reload automatically without a restart:
-
-```toml
-concurrency = 3
-```
-
-Use a positive integer; unsupported keys and invalid TOML are rejected. Save by
-atomic replacement (write a temporary file in the same directory, then rename
-it over the settings file) to avoid exposing a partially written configuration.
-The Runner uses `smol-toml` for parsing, `chokidar` for file events and editor
-replacement handling, and Effect Schema for validation.
-
-Increasing the limit wakes the claim loop. Decreasing it lets admitted Jobs and
-in-flight claims finish; new work waits until occupancy is below the new limit.
-Cleanup and terminal callbacks continue to hold their slots. A missing or
-invalid initial file prevents startup. A missing, unreadable, or invalid later
-update retains the last valid limit and records a warning; a subsequent valid
-save recovers automatically. Successful reload logs include the effective
-concurrency. Inspect them with:
+The Runner fails closed if `RUNNER_SETTINGS_FILE` is still set. Before removing
+that file, apply migration `0020_runner_concurrency.sql` and seed the desired
+value so a restart keeps the currently effective concurrency. Use the
+deployment's installed value (for example 6 or 8); the update touches only
+`runner_concurrency`, never `selection` or `effort_snapshot`.
 
 ```sh
-journalctl --user -u <RUNNER_UNIT> -f
+corepack pnpm dlx wrangler@4.124.0 d1 migrations apply REVIEW_DB --remote \
+  --config apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc
+corepack pnpm dlx wrangler@4.124.0 d1 execute REVIEW_DB --remote \
+  --config apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc \
+  --command "UPDATE review_configuration SET runner_concurrency = <CURRENT_EFFECTIVE_CONCURRENCY> WHERE id = 1;"
 ```
 
-Only concurrency reloads. Changing `RUNNER_SETTINGS_FILE` itself, model settings,
-credentials, or sandbox runtime still requires restarting the Runner. An
-invalid file retained on disk must be fixed before a later restart.
+Read it back before restarting:
+
+```sh
+corepack pnpm dlx wrangler@4.124.0 d1 execute REVIEW_DB --remote \
+  --config apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc \
+  --command "SELECT revision, runner_concurrency FROM review_configuration WHERE id = 1;"
+```
+
+Then [drain](operations.md#drain-before-maintenance), remove
+`RUNNER_SETTINGS_FILE` from the Runner unit, and start the upgraded Runner.
+Do not change model rosters or thinking efforts as part of this seed.
 
 ### KVM permissions and the persistent Runner service
 

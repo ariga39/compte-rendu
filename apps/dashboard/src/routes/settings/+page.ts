@@ -23,7 +23,7 @@ export const load: PageLoad = async ({ fetch, depends }) => {
     };
   }
   const settings = (await reply.json()) as {
-    configuration: ReviewConfiguration;
+    configuration: ReviewConfiguration & { concurrency?: number | null };
     routes: string[];
     efforts?: Record<string, readonly RouteEffortOption[]>;
     effortStates?: readonly EffortRouteState[];
