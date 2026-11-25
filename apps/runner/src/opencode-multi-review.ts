@@ -214,7 +214,11 @@ export const routeModelIdentity = (
       id: route.slice(slash + 1),
       reference: route,
     };
-  return { providerID: MULTI_PROVIDER_ID, id: route, reference: modelReference(route) };
+  let id = route;
+  if (descriptors !== undefined)
+    while (descriptors.some((descriptor) => descriptor.routeId === modelReference(id)))
+      id = modelReference(id);
+  return { providerID: MULTI_PROVIDER_ID, id, reference: modelReference(id) };
 };
 
 export const dedupedRoutes = (selection: MultiReviewSelection): readonly string[] => [

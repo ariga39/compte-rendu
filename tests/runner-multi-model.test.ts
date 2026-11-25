@@ -504,6 +504,105 @@ describe('Runner multi-model review', () => {
     });
   });
 
+  it('keeps a bare route distinct from a compte-rendu-qualified route in one roster', async () => {
+    const bare = 'foo';
+    const qualified = 'compte-rendu/foo';
+    const selectionWithCollision = {
+      revision: 3,
+      selection: {
+        reviewers: [bare, qualified],
+        synthesis: qualified,
+      },
+    };
+    const children = [
+      {
+        id: 'ses_multi_child_a',
+        parentID: rootSession,
+        agent: 'reviewer-0',
+        model: { providerID: 'compte-rendu', id: 'compte-rendu/foo' },
+        outcome: 'succeeded',
+      },
+      {
+        id: 'ses_multi_child_b',
+        parentID: rootSession,
+        agent: 'reviewer-1',
+        model: { providerID: 'compte-rendu', id: 'foo' },
+        outcome: 'succeeded',
+      },
+    ];
+    const qualifiedRoot = JSON.parse(rootExport) as {
+      info: { model: { providerID: string; id: string } };
+      messages: Array<{ model?: { providerID: string; id: string } }>;
+    };
+    qualifiedRoot.info.model = { providerID: 'compte-rendu', id: 'foo' };
+    for (const message of qualifiedRoot.messages)
+      if (message.model !== undefined) message.model = { providerID: 'compte-rendu', id: 'foo' };
+    const result = await runScenario({
+      selection: selectionWithCollision,
+      descriptors: [
+        { routeId: bare, profile: 'chat' },
+        { routeId: qualified, profile: 'chat' },
+      ],
+      children,
+      rootExport: JSON.stringify(qualifiedRoot),
+      exports: {
+        [rootSession]: JSON.stringify(qualifiedRoot),
+        ses_multi_child_a: multiChildExports('ses_multi_child_a', 'reviewer-0', 'compte-rendu/foo'),
+        ses_multi_child_b: multiChildExports('ses_multi_child_b', 'reviewer-1', 'foo'),
+      },
+    });
+    expect(result.terminal.status).toBe('succeeded');
+    const config = JSON.parse(
+      result
+        .createArgs!.find((x) => x.startsWith('OPENCODE_CONFIG_CONTENT='))!
+        .slice('OPENCODE_CONFIG_CONTENT='.length),
+    );
+    expect(config.agents['reviewer-0'].model).toBe('compte-rendu/compte-rendu/foo');
+    expect(config.agents['reviewer-1'].model).toBe('compte-rendu/foo');
+    expect(Object.keys(config.providers['compte-rendu'].models).sort()).toEqual([
+      'compte-rendu/foo',
+      'foo',
+    ]);
+    expect(config.providers['compte-rendu'].models['compte-rendu/foo']).toMatchObject({
+      modelID: bare,
+    });
+    expect(config.providers['compte-rendu'].models.foo).toMatchObject({
+      modelID: qualified,
+    });
+    expect(
+      (result.multiReviewDocument as { reviewers: Array<{ route: string }> }).reviewers.map(
+        (reviewer) => reviewer.route,
+      ),
+    ).toEqual([bare, qualified]);
+  });
+
+  it('avoids a secondary collision when a bare route shares a multi-slash provider route', () => {
+    const routes = ['foo', 'compte-rendu/foo', 'compte-rendu/compte-rendu/foo'];
+    const config = JSON.parse(
+      multiReviewConfig({
+        selection: { reviewers: routes, synthesis: routes[2]! },
+        serviceBaseUrl: 'https://inference.example/v1',
+        descriptors: routes.map((routeId) => ({ routeId, profile: 'chat' as const })),
+        shellPermissionRules: [],
+        reviewerTask: 'review task',
+      }),
+    );
+    const models = config.providers['compte-rendu'].models as Record<string, { modelID?: string }>;
+    expect(Object.keys(models).sort()).toEqual([
+      'compte-rendu/compte-rendu/foo',
+      'compte-rendu/foo',
+      'foo',
+    ]);
+    expect(
+      new Set(routes.map((_route, index) => config.agents[`reviewer-${index}`].model)).size,
+    ).toBe(3);
+    expect(models.foo).toMatchObject({ modelID: 'compte-rendu/foo' });
+    expect(models['compte-rendu/foo']).toMatchObject({
+      modelID: 'compte-rendu/compte-rendu/foo',
+    });
+    expect(models['compte-rendu/compte-rendu/foo']).toMatchObject({ modelID: 'foo' });
+  });
+
   it('restores qualified child evidence routes from the selected model identity', async () => {
     const qualifiedSelection = {
       revision: 3,
