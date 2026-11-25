@@ -56,8 +56,13 @@ there is no Worker-to-Worker `CORE` binding. From the repository root, render on
 deployment-only sibling configuration for the chosen instance:
 
 ```sh
-corepack pnpm render:wrangler <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '<GITHUB_BOT_AUTHOR_IDS_JSON>'
+corepack pnpm render:wrangler <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '<GITHUB_BOT_AUTHOR_IDS_JSON>' '<GITHUB_CHECK_NAME>' '<RELAY_CONFIG_FILE>'
 ```
+
+Managed inference is required, so a first render must include
+`<RELAY_CONFIG_FILE>` (see [Configure the managed inference relay](#configure-the-managed-inference-relay)).
+Prepare that file before rendering; the renderer refuses to overwrite an
+existing generated config and cannot add relay settings later.
 
 For example, instance `petit-chiba` produces
 `apps/dashboard/wrangler.petit-chiba.jsonc`, with names derived as
@@ -819,7 +824,7 @@ uses the temporary invocation described above.
 3. Render deployment-only configs from the repository root:
 
    ```sh
-   corepack pnpm render:wrangler <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '<GITHUB_BOT_AUTHOR_IDS_JSON>' ['<GITHUB_CHECK_NAME>'] ['<RELAY_CONFIG_FILE>']
+   corepack pnpm render:wrangler <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '<GITHUB_BOT_AUTHOR_IDS_JSON>' '<GITHUB_CHECK_NAME>' '<RELAY_CONFIG_FILE>'
    ```
 
    This writes `apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc`. Use these generated paths
@@ -1128,12 +1133,12 @@ For an existing deployment, edit `vars.GITHUB_CHECK_NAME` in its retained
 when merging template updates or restoring a rollback configuration; do not run
 the renderer over existing files.
 
-For the first render only, the renderer accepts the name as its final optional
-argument. Include the Bot allowlist argument when supplying it; use `[]` when
-that option is unused. For example:
+For the first render only, the renderer accepts the Check name as the seventh
+argument, before the eighth relay config file. Include the Bot allowlist
+argument when supplying it; use `[]` when that option is unused. For example:
 
 ```sh
-corepack pnpm render:wrangler ariga39-ai-reviewers <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '[]' 'Ariga39 AI Review'
+corepack pnpm render:wrangler ariga39-ai-reviewers <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '[]' 'Ariga39 AI Review' '<RELAY_CONFIG_FILE>'
 ```
 
 ### Configure the managed inference relay
@@ -1148,9 +1153,17 @@ matching BYOK alias in this gateway.
 The Run token belongs in the inference Worker's `AI_GATEWAY_RUN_TOKEN` secret.
 The Runner receives job grants through the existing authenticated callback origin.
 
-Append a relay configuration file path after the check name in the existing
-`render:wrangler` command. Use an empty quoted argument for a blank check name.
-The file contains deployment identifiers and catalog sources. The example below uses a public model list. Protected lists and fixed aliases are described in the [relay catalog configuration](llm-service.md#managed-relay-model-catalog).
+Create the separate relay D1 database and the untracked relay config file before
+the first render:
+
+```sh
+corepack pnpm dlx wrangler@4.124.0 d1 create <INSTANCE_NAME>-relay-grants
+```
+
+Copy only the returned database ID. Keep the relay config outside the repository;
+it contains deployment identifiers and catalog sources. The example below uses a
+public model list. Protected lists and fixed aliases are described in the
+[relay catalog configuration](llm-service.md#managed-relay-model-catalog).
 
 ```json
 {
@@ -1170,44 +1183,63 @@ The file contains deployment identifiers and catalog sources. The example below 
 }
 ```
 
-The command writes instance-specific files to `apps/dashboard` and
-`apps/inference-worker`. For an installation with custom application routes or
-bindings, compare the generated file to the live configuration and carry those
-settings forward.
+The first `render:wrangler` call must pass the Check name as the seventh
+positional argument and this file as the eighth. Use an empty quoted Check name
+when unused; positional arguments cannot be skipped. The renderer writes
+instance-specific files to `apps/dashboard` and `apps/inference-worker`. It
+refuses to overwrite existing generated files, so it cannot add relay settings
+to an installation that was rendered without them. Prepare the file before the
+first render. For an installation with custom application routes or bindings,
+compare the generated files to the live configuration and carry those settings
+forward.
 
-1. Apply the inference Worker's migrations against its relay D1 database.
-   Deploy the inference Worker on the dedicated hostname with its Run secret.
-2. Deploy the application Worker with the private `INFERENCE_RELAY` binding
-   and keep `RELAY_DEFAULT_MODEL_ROUTE` on a route the current Runner can serve.
-   For a v1 Runner, use a Chat route without required model limits. Core can
-   freeze the default into new jobs as soon as the application is deployed.
-   Confirm that the operator catalog endpoint
-   lists every selected reviewer and synthesis route after the scheduled refresh.
-3. Drain the Runner before changing its inference settings. Verify old grants have been
-   revoked and legacy null-snapshot jobs have finished. Configure the existing
-   callback URL and bearer and the HTTPS inference model base on port 443 ending
-   in `/v1`.
-   If the intended default, any reviewer, or the synthesis route uses a non-Chat protocol or declares
-   a context or output limit, set `RUNNER_LLM_GRANT_VERSION=2`
-   only after verifying that the installed Runner build can issue v2 grants and both
-   deployed Workers support v2. Upgrade any older component before enabling the roster.
-   Restart the drained Runner to load the setting and check its maintenance status. The Runner uses each
-   route's frozen profile to configure OpenCode. Before enabling another protocol,
-   verify the deployed inference Worker serves its endpoint and Gateway destination.
-4. Confirm the restarted Runner can obtain a grant on the existing roster using
-   the intended grant version. If changing the default, deploy the application
-   Worker with the new `RELAY_DEFAULT_MODEL_ROUTE` now. Save the new roster in
-   the dashboard. Keep the existing
-   synthesis route if you are only adding an independent reviewer. Run a fresh PR review. Verify the published
-   review is for the claimed revision and the Check terminates. In the archived
-   session exports, confirm that each selected reviewer completed its own review
-   and returned a conclusion. Check the per-model usage alongside those results,
-   verify grant reuse is denied after cleanup, and confirm the sandbox is gone.
-5. First restore a default and a roster that the target Runner and Workers can serve,
-   including every route's protocol, Gateway destination, credential and required
-   limits. Keep the current Runner accepting jobs until all queued or running
-   jobs with incompatible frozen routes have finished. This includes Chat
-   routes whose destination the target Worker cannot resolve. Drain and stop the Runner and resolve outstanding grants on their issuing backend.
-   If the target Runner or either target Worker lacks grant v2, remove
-   `RUNNER_LLM_GRANT_VERSION` or set it to `1`. Restore both Workers before
-   starting the Runner with its matching binary and configuration. See the [upgrade procedure](llm-service.md#upgrading-an-installation-with-the-former-local-service).
+#### Fresh installation
+
+1. Apply the inference Worker's migrations against its relay D1 database, then
+   deploy the inference Worker on the dedicated hostname with its Run secret.
+2. Deploy the application Worker with the private `INFERENCE_RELAY` binding and
+   keep `RELAY_DEFAULT_MODEL_ROUTE` on a route the new Runner can serve. Confirm
+   that the operator catalog endpoint lists every selected reviewer and
+   synthesis route after the scheduled refresh.
+3. Configure the Runner with its managed environment:
+   `RUNNER_CALLBACK_URL`, `RUNNER_CALLBACK_TOKEN`, and a `REVIEW_MODEL_CONFIG`
+   whose `baseUrl` is the dedicated HTTPS inference FQDN on port 443 ending in
+   `/v1`. Do not set `MODEL_SECRET_COMMAND`. If a selected route uses a non-Chat
+   protocol or declares a context or output limit, set
+   `RUNNER_LLM_GRANT_VERSION=2` only when the Runner and both Workers support
+   v2, and verify the inference Worker serves that protocol before enabling it.
+   Then start the Runner.
+4. Run a fresh PR review. Verify the published review is for the claimed
+   revision and the Check terminates. In the archived session exports, confirm
+   that each selected reviewer completed its own review and returned a
+   conclusion. Check the per-model usage, verify grant reuse is denied after
+   cleanup, and confirm the Sandbox is gone.
+
+#### Upgrading a direct-provider installation
+
+An already managed installation does not repeat this cutover. It also does not
+need to pause admissions, drain, or rerender merely for an ordinary update; use
+the normal [update procedure](operations.md#update-and-rollback) and keep its
+retained generated files.
+
+A direct-provider installation has an old Runner without a relay client. Newly
+frozen selections are unusable to that Runner, so cut over in this order:
+
+1. Pause inbound admissions first, for example by disabling the GitHub App
+   webhook, so no new reviews are admitted during the switch.
+2. Let the existing Core and old Runner finish all queued and running Jobs, then
+   confirm Core shows none remaining. Resolve any failed cleanup with the
+   [maintenance procedure](operations.md#recover-failed-cleanup).
+3. Drain the old Runner and wait for `drained: true`, then stop it. Do not deploy
+   the managed Core before this point: a newly frozen selection would otherwise
+   be claimed by a Runner that cannot serve it.
+4. Apply the inference Worker's migrations and deploy the inference Worker.
+5. Deploy the application Worker with the private `INFERENCE_RELAY` binding and
+   `RELAY_DEFAULT_MODEL_ROUTE` on a route the replacement Runner can serve.
+6. Replace the Runner binary and configuration with the managed settings from
+   the fresh installation sequence and start it.
+7. Re-enable the webhook. Confirm the catalog, then run a fresh PR review and
+   apply the same acceptance checks as a fresh installation. If a route uses a
+   non-Chat protocol or declares a context or output limit, set
+   `RUNNER_LLM_GRANT_VERSION=2` only after verifying that the Runner and both
+   Workers support v2.
