@@ -131,6 +131,22 @@ ownership and a small publication record; their private diagnostics arrive
 through `POST /runner-evidence`. Core publication never depends on that
 diagnostic upload.
 
+### Deployment and compatibility
+
+Compte rendu is self-hosted for a single operator. Worker and Runner are upgraded
+together in a brief maintenance window: drain or stop Runners before switching
+versions. Mixed-version rolling compatibility across the Worker and Runner is not
+a default requirement.
+
+Protocol, field and disk-format removals are deliberate breaking changes. Do not
+add an indefinite compatibility fallback unless the project explicitly accepts
+one. A temporary compatibility path needs a concrete reason, a recorded removal
+date and a cleanup issue.
+
+An upgrade or rare crash may lose an in-flight or undelivered review. Re-trigger
+the review and it runs again in a fresh Sandbox; the original run keeps its own
+outcome and cleanup state.
+
 ## Runner Job and pull interface
 
 `POST /runner-claim` returns an immutable `RunnerJobInput` or 204. Ingress
