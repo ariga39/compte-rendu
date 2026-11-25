@@ -2,6 +2,9 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import { createD1ReviewStateStore } from '../apps/core/src/index';
+import { createCoreWorker } from './support/core-worker-runtime';
+import { SqliteD1Database } from './support/d1-database';
 import {
   RunnerProcess,
   RunnerProcessResult,
@@ -369,56 +372,137 @@ describe('Runner maintenance drain', () => {
     }
   });
 
-  it('times out a stalled claim body so maintenance drain does not hang', async () => {
-    let claims = 0;
+  it('replays the same request after a claim body timeout, runs once and drains', async () => {
+    const database = new SqliteD1Database();
+    const evidenceRoot = await mkdtemp(join(tmpdir(), 'cr-claim-body-timeout-'));
+    const baseSha = '1'.repeat(40);
+    const headSha = '2'.repeat(40);
+    const result = finalMarkdownJsonl(undefined, 'claim-body-timeout-session');
+    const ok = { exitCode: 0, stdout: '', timedOut: false, truncated: false };
+    const requestIds: string[] = [];
+    let jobId: string | undefined;
+    let agentRuns = 0;
+    let callbacks = 0;
+    let first = true;
     let releaseBody!: () => void;
     const bodyGate = new Promise<void>((resolve) => {
       releaseBody = resolve;
     });
+    const worker = createCoreWorker(
+      {
+        REVIEW_DB: database,
+        GITHUB_APP_ID: '1',
+        GITHUB_APP_PRIVATE_KEY: 'test-private-key',
+        REVIEW_CONFIGURATION_TOKEN: 'operator-token',
+      },
+      {
+        github: {
+          getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+          loadReviewTarget: async () => ({ headSha }),
+        },
+        getReadInstallationToken: async () => ({
+          token: 'read-token',
+          expiresAt: '2099-01-01T00:00:00Z',
+        }),
+      },
+    );
+    const store = createD1ReviewStateStore(database);
+    await store.claimReview({
+      deliveryId: 'claim-body-timeout',
+      occurredAt: '2026-11-25T00:00:00Z',
+      job: {
+        repositoryId: 11,
+        installationId: 7,
+        pullRequestNumber: 79,
+        baseSha,
+        headSha,
+        trigger: 'automatic',
+      },
+    });
     const runner = createRunner({
       authToken: 'runner-test-token',
-      evidenceRoot: sharedEvidenceRoot,
+      evidenceRoot,
       claimUrl: 'https://ingress.test/runner-claim',
-      claimIntervalMs: 1_000_000_000,
-      claimTimeoutMs: 20,
-      claimFetch: async () => {
-        claims += 1;
+      claimIntervalMs: 20,
+      claimTimeoutMs: 200,
+      callbackUrl: 'https://ingress.test/runner-callback',
+      callbackToken: 'callback-token',
+      callbackFetch: async () => {
+        callbacks += 1;
+        return new Response(null, { status: 202 });
+      },
+      claimFetch: async (input, init) => {
+        const request = new Request(input, init);
+        requestIds.push(((await request.clone().json()) as { requestId: string }).requestId);
+        const coreResponse = await worker.claimRunnerJob(request);
+        if (!first) return coreResponse;
+        first = false;
+        const claimed = (await coreResponse.clone().json()) as { id: string };
+        jobId = claimed.id;
         return new Response(
           new ReadableStream<Uint8Array>({
             async pull(controller) {
               await bodyGate;
-              controller.enqueue(new TextEncoder().encode('{}'));
               controller.close();
             },
           }),
           { status: 200, headers: { 'content-type': 'application/json' } },
         );
       },
-      process: reviewProcess({}),
+      process: async (_command, args, options = {}) => {
+        if (args[0] === 'secret' && args[1] === 'ls')
+          return { ...ok, stdout: JSON.stringify({ secrets: [], custom_secrets: [] }) };
+        if (args[0] === 'inspect')
+          return { ...ok, exitCode: 1, stderr: `error: sandbox '${args[1]}' not found` };
+        if (args[0] === 'exec' && args.includes('--agent')) {
+          agentRuns += 1;
+          await writeEvidenceFixture(args, options, result);
+          return { ...ok, stdout: `${result}\n` };
+        }
+        await writeEvidenceFixture(args, options, result);
+        return {
+          ...ok,
+          stdout: args.includes('rev-parse')
+            ? `${baseSha}\n${headSha}\n`
+            : args.includes('session')
+              ? '[{"id":"claim-body-timeout-session"}]\n'
+              : options.captureStdout === true
+                ? `${result}\n`
+                : '',
+        };
+      },
     });
     try {
-      await vi.waitFor(() => expect(claims).toBe(1));
-      // The body deadline releases claiming while retaining the ambiguous
-      // request identity for a same-ID replay.
+      await vi.waitFor(() => expect(jobId).toBeDefined());
+      await vi.waitFor(() => expect(requestIds.length).toBeGreaterThanOrEqual(2), {
+        timeout: 2_000,
+      });
+      expect(requestIds[0]).toBe(requestIds[1]);
+      await expect(waitForTerminal(runner, jobId!)).resolves.toMatchObject({
+        status: 'succeeded',
+        sandbox: { cleanup: 'destroyed' },
+      });
+      expect(agentRuns).toBe(1);
+      expect(callbacks).toBe(1);
       await vi.waitFor(async () => {
         const state = await status(runner);
-        expect(state.claimInFlight).toBe(false);
-        expect(state.claimPollingHalted).toBe(true);
+        expect(state).toMatchObject({
+          activeJobs: 0,
+          claimPollingHalted: false,
+          cleanupBlockedJobs: 0,
+        });
       });
-      expect(await status(runner, 'POST', '/maintenance/drain')).toEqual({
+      expect(await status(runner, 'POST', '/maintenance/drain')).toMatchObject({
         draining: true,
-        drained: false,
-        activeJobs: 0,
-        claimInFlight: false,
-        claimPollingHalted: true,
-        cleanupBlockedJobs: 0,
+        drained: true,
       });
-      expect(claims).toBe(1);
     } finally {
       releaseBody();
       await runner.close();
+      await rm(evidenceRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 20 });
+      database.close();
     }
-  });
+  }, 20_000);
 
   it('replays a prepared claim through drain without a new request ID', async () => {
     const evidenceRoot = await mkdtemp(join(tmpdir(), 'cr-staged-drain-'));
