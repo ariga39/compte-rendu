@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { CoreWorkerDependencies } from '../apps/core/src/core-worker';
-import { createCoreWorker } from '../apps/core/src/core-worker';
+import type { CoreWorkerDependencies } from './support/core-worker-runtime';
+import { createCoreWorker } from './support/core-worker-runtime';
 import {
   createD1ReviewStateStore,
   type ReviewJob,

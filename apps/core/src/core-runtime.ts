@@ -1,13 +1,35 @@
-import { MetadataInvalidationEvent, ReviewEvent } from '@compte-rendu/contracts';
-import { Context, Effect, Layer, Schema } from 'effect';
+import {
+  DEFAULT_REVIEW_NAME,
+  EffortJobDetail,
+  MetadataInvalidationEvent,
+  REVIEW_ATTEMPT_BUDGET_MS,
+  ReviewEvent,
+} from '@compte-rendu/contracts';
+import { Cause, Context, Effect, Layer, Option, Result, Schema } from 'effect';
 import { createCoreInfrastructure } from './core-infrastructure';
-import { currentIso } from './core-observability';
+import { currentIso, recordOperationalLog } from './core-observability';
 import type { CoreWorkerDependencies, CoreWorkerEnv } from './core-worker';
+import { createJobControl } from './job-control';
 import { createPostHogLifecycleLog } from './posthog';
+import { readPublicationRecord } from './publication-record';
 import { createReviewAdmission } from './review-admission';
+import { publishTerminalCheck } from './review-publication';
+import { handleReviewConfiguration } from './review-configuration';
 import type { ReviewCheckSetupDefer } from './review-records';
+import { createRunnerProtocol } from './runner-protocol';
+import {
+  getDashboardOverview,
+  getPublicJobDetail,
+  listPublicJobs,
+  refreshRepositoryMetadata,
+  validateProgressSnapshot,
+  type RefreshSummary,
+} from './dashboard';
 
 type WaitUntil = { waitUntil(task: Promise<unknown>): void };
+
+const port = <A>(run: () => Promise<A>) =>
+  Effect.tryPromise({ try: run, catch: (error: unknown) => error });
 
 export interface CoreRuntimeHost {
   /** Host lifecycle used for best-effort PostHog delivery. */
@@ -34,6 +56,25 @@ export interface CoreRuntimeShape {
   readonly invalidateMetadata: (
     event: typeof MetadataInvalidationEvent.Type,
   ) => Effect.Effect<void, unknown>;
+  readonly claimRunnerJob: (request: Request) => Effect.Effect<Response, unknown>;
+  readonly renewRunnerReadToken: (request: Request) => Effect.Effect<Response, unknown>;
+  readonly handleRunnerCallback: (request: Request) => Effect.Effect<Response, unknown>;
+  readonly handleRunnerEvidence: (request: Request) => Effect.Effect<Response, unknown>;
+  readonly handleRunnerProgress: (request: Request) => Effect.Effect<Response, unknown>;
+  readonly cancelReview: (
+    runId: string,
+    requestedByUid: number,
+  ) => Effect.Effect<Response, unknown>;
+  readonly reconcileCancellations: (now: number, runId?: string) => Effect.Effect<void, unknown>;
+  readonly reconcilePublications: (now: number) => Effect.Effect<void, unknown>;
+  readonly reconcileRecoveries: (now: number) => Effect.Effect<void, unknown>;
+  readonly refreshMetadata: () => Effect.Effect<RefreshSummary, unknown>;
+  readonly effortDetail: (runId: string, cursor?: string) => Effect.Effect<Response, never>;
+  readonly dashboardConfig: () => Effect.Effect<Response, never>;
+  readonly dashboardOverview: () => Effect.Effect<Response, unknown>;
+  readonly listPublicJobs: (searchParams: URLSearchParams) => Effect.Effect<Response, unknown>;
+  readonly publicJobDetail: (runId: string) => Effect.Effect<Response, unknown>;
+  readonly reviewConfiguration: (request: Request) => Effect.Effect<Response, never>;
 }
 
 const makeSubmitReviewEvent = (
@@ -70,29 +111,31 @@ const makeInvalidateMetadata = (
   ) {
     const decoded = yield* Schema.decodeUnknownEffect(MetadataInvalidationEvent)(event);
     const observedAt = yield* currentIso;
-    yield* Effect.tryPromise({
-      try: () =>
-        stateStore.invalidateRepositoryMetadataBatch({
-          installationId: decoded.installationId,
-          repositoryIds: decoded.repositoryIds,
-          visibility: decoded.visibility,
-          updatedAt: observedAt,
-          nextRefreshAt: observedAt,
-        }),
-      catch: (cause) => cause,
-    });
+    yield* port(() =>
+      stateStore.invalidateRepositoryMetadataBatch({
+        installationId: decoded.installationId,
+        repositoryIds: decoded.repositoryIds,
+        visibility: decoded.visibility,
+        updatedAt: observedAt,
+        nextRefreshAt: observedAt,
+      }),
+    );
   });
 
 /**
  * Builds one typed Core operation set for a single request/host lifecycle.
- * The ports remain Promise-based; only the orchestration runs in Effect.
+ * Core and Ingress orchestration runs in Effect; D1, GitHub, Runner, R2 and
+ * host I/O remain ordinary Promise ports.
  */
 export const makeCoreRuntime = (
   env: CoreWorkerEnv,
   dependencies: CoreWorkerDependencies = {},
   host: CoreRuntimeHost = {},
 ): CoreRuntimeShape => {
-  const { github, stateStore, log, runner } = createCoreInfrastructure(env, dependencies);
+  const { tokenProvider, github, stateStore, log, runner } = createCoreInfrastructure(
+    env,
+    dependencies,
+  );
   const lifecycleLog = createPostHogLifecycleLog(env, host.context);
   const admission = createReviewAdmission({
     github,
@@ -102,17 +145,224 @@ export const makeCoreRuntime = (
     ...(runner === undefined ? {} : { cancelRunnerJob: runner.cancelJob }),
     ...(host.deferCheckSetup === undefined ? {} : { deferCheckSetup: host.deferCheckSetup }),
   });
+  const protocol = createRunnerProtocol({
+    env,
+    stateStore,
+    github,
+    tokenProvider,
+    completeReview: admission.completeReview,
+    validateProgressSnapshot,
+    ...(dependencies.getReadInstallationToken === undefined
+      ? {}
+      : { getReadInstallationToken: dependencies.getReadInstallationToken }),
+  });
+  const jobControl = createJobControl(stateStore, github, runner, log, (context) =>
+    createPostHogLifecycleLog(env, context ?? host.context),
+  );
+
+  const reconcilePublications = Effect.fn('CoreRuntime.reconcilePublications')(function* (
+    now: number,
+  ) {
+    const ids = yield* Effect.tryPromise({
+      try: () =>
+        stateStore.claimStalledPublications(
+          new Date(now - REVIEW_ATTEMPT_BUDGET_MS).toISOString(),
+          new Date(now).toISOString(),
+          4,
+        ),
+      catch: (error: unknown) => error,
+    });
+    const captures: Promise<unknown>[] = [];
+    const publicationLifecycle = createPostHogLifecycleLog(env, {
+      waitUntil: (task) => captures.push(task),
+    });
+    let incomplete = false;
+    for (const runId of ids) {
+      let reason: 'state' | 'evidence' | 'publication' | 'check' = 'state';
+      const settled = yield* Effect.gen(function* () {
+        const outcome = yield* port(() => stateStore.getRunOutcome(runId));
+        if (outcome?.status !== 'scheduled' || !outcome.publicationClaimedAt) return true;
+        if (outcome.runnerJobId === undefined || outcome.runnerAttempt === undefined) {
+          return yield* Effect.fail(new Error('Current Runner identity is unavailable'));
+        }
+        reason = 'evidence';
+        const publication = yield* port(() =>
+          readPublicationRecord(env.EVIDENCE_BUCKET, {
+            runId,
+            jobId: outcome.runnerJobId!,
+            attempt: outcome.runnerAttempt!,
+          }),
+        );
+        if (publication.kind !== 'valid') {
+          return yield* Effect.fail(
+            new Error(
+              publication.kind === 'invalid'
+                ? 'Invalid publication record'
+                : 'Publication record is unavailable',
+            ),
+          );
+        }
+        reason = 'publication';
+        const disposition = yield* admission.completeReview({
+          runId,
+          output: publication.record.result,
+          reconcileClaimedAt: outcome.publicationClaimedAt,
+        });
+        const terminal = yield* port(() => stateStore.getRunOutcome(runId));
+        if (!terminal || terminal.status === 'scheduled') {
+          return yield* Effect.fail(new Error('Publication still pending'));
+        }
+        if (
+          (terminal.status === 'completed' || terminal.status === 'failed') &&
+          disposition === terminal.status
+        ) {
+          protocol.recordFinishedLifecycle(
+            publicationLifecycle,
+            terminal,
+            terminal.status,
+            undefined,
+            terminal.status === 'failed' ? { phase: 'publication', reason: 'unknown' } : undefined,
+            runId,
+          );
+        }
+        if (terminal.status === 'completed' && terminal.checkRunId !== undefined) {
+          reason = 'check';
+          yield* Effect.tryPromise(() => publishTerminalCheck({ github, stateStore, runId })).pipe(
+            Effect.catch(() => Effect.succeed(false)),
+          );
+        }
+        return true;
+      }).pipe(
+        Effect.catchCause((cause) =>
+          Cause.hasInterruptsOnly(cause)
+            ? Effect.failCause(cause)
+            : Effect.gen(function* () {
+                yield* recordOperationalLog(log, {
+                  phase: 'publication',
+                  outcome: 'reconciliation_incomplete',
+                  runId,
+                  reason,
+                });
+                return false;
+              }),
+        ),
+      );
+      if (!settled) incomplete = true;
+    }
+    yield* Effect.promise(() => Promise.allSettled(captures));
+    if (incomplete) return yield* Effect.fail(new Error('Publication reconciliation incomplete'));
+  });
+
+  const reconcileRecoveries = Effect.fn('CoreRuntime.reconcileRecoveries')(function* (now: number) {
+    const results = yield* Effect.all(
+      [
+        Effect.tryPromise({
+          try: () => jobControl.reconcileCancellations(now),
+          catch: (error: unknown) => error,
+        }).pipe(Effect.catchDefect((defect) => Effect.fail(defect))),
+        reconcilePublications(now).pipe(Effect.catchDefect((defect) => Effect.fail(defect))),
+      ],
+      { mode: 'result', concurrency: 'unbounded' },
+    );
+    const failures = results.flatMap((result) =>
+      Result.isFailure(result) ? [result.failure] : [],
+    );
+    if (failures.length === 1) return yield* Effect.fail(failures[0]);
+    if (failures.length > 1) {
+      return yield* Effect.fail(
+        new AggregateError(failures, 'Scheduled recovery failed: review cancellation, publication'),
+      );
+    }
+  });
+
+  const refreshMetadata = Effect.fn('CoreRuntime.refreshMetadata')(function* () {
+    const summary = yield* port(() => refreshRepositoryMetadata({ stateStore, github }));
+    yield* recordOperationalLog(log, { phase: 'core', outcome: 'metadata_refresh', ...summary });
+    return summary;
+  });
+
+  const effortDetail = (runId: string, cursor?: string) =>
+    Effect.gen(function* () {
+      const noStore = { 'cache-control': 'no-store' };
+      if (env.INFERENCE_RELAY?.effortDetails === undefined)
+        return Response.json(
+          { error: 'effort details unavailable' },
+          { status: 503, headers: noStore },
+        );
+      const outcome = yield* port(() => stateStore.getRunOutcome(runId));
+      if (outcome?.runnerJobId === undefined)
+        return Response.json(
+          { error: 'effort details unavailable' },
+          { status: 404, headers: noStore },
+        );
+      const detail = yield* port(() =>
+        env.INFERENCE_RELAY!.effortDetails!({
+          jobId: outcome.runnerJobId!,
+          ...(cursor === undefined || cursor === '' ? {} : { cursor }),
+        }),
+      );
+      if (detail === null)
+        return Response.json(
+          { error: 'Effort request details are no longer retained.' },
+          { status: 404, headers: noStore },
+        );
+      const decoded = Schema.decodeUnknownOption(EffortJobDetail, {
+        onExcessProperty: 'error',
+      })(detail);
+      return Option.isSome(decoded)
+        ? Response.json(decoded.value, { headers: noStore })
+        : Response.json({ error: 'effort details unavailable' }, { status: 503, headers: noStore });
+    }).pipe(
+      Effect.catch(() =>
+        Effect.succeed(
+          Response.json(
+            { error: 'effort details unavailable' },
+            { status: 503, headers: { 'cache-control': 'no-store' } },
+          ),
+        ),
+      ),
+    );
 
   return {
     submitReviewEvent: makeSubmitReviewEvent(stateStore, admission),
     invalidateMetadata: makeInvalidateMetadata(stateStore),
+    claimRunnerJob: (request) => protocol.handleRunnerClaim(request, lifecycleLog),
+    renewRunnerReadToken: (request) => protocol.handleRunnerReadToken(request),
+    handleRunnerCallback: (request) => protocol.handleRunnerResult(request, lifecycleLog),
+    handleRunnerEvidence: (request) => protocol.handleRunnerEvidence(request),
+    handleRunnerProgress: (request) => protocol.handleRunnerProgress(request),
+    cancelReview: (runId, requestedByUid) =>
+      port(() => jobControl.cancelReview(runId, requestedByUid, host.context)),
+    reconcileCancellations: (now, runId) =>
+      port(() => jobControl.reconcileCancellations(now, runId)),
+    reconcilePublications,
+    reconcileRecoveries,
+    refreshMetadata,
+    effortDetail,
+    dashboardConfig: () =>
+      Effect.succeed(
+        Response.json(
+          { name: env.GITHUB_CHECK_NAME?.trim() || DEFAULT_REVIEW_NAME },
+          { headers: { 'cache-control': 'no-store' } },
+        ),
+      ),
+    dashboardOverview: () => port(() => getDashboardOverview(stateStore)),
+    listPublicJobs: (searchParams) => port(() => listPublicJobs(stateStore, searchParams)),
+    publicJobDetail: (runId) => port(() => getPublicJobDetail(stateStore, runId)),
+    reviewConfiguration: (request) =>
+      handleReviewConfiguration(
+        request,
+        env.REVIEW_DB,
+        env.REVIEW_CONFIGURATION_TOKEN,
+        env.INFERENCE_RELAY,
+      ),
   };
 };
 
 /**
- * Shared Core infrastructure for the webhook -> admission -> check setup path.
- * Later Runner protocol, settings and scheduled slices can extend this service
- * instead of constructing their own Effect runtime.
+ * Shared Core infrastructure for every application and Worker operation.
+ * The application supplies this service at its fetch/scheduled boundary and
+ * runs the resulting Effect program once there.
  */
 export class CoreRuntime extends Context.Service<CoreRuntime, CoreRuntimeShape>()(
   '@compte-rendu/core/CoreRuntime',

@@ -571,6 +571,33 @@ it('does not provision Core bindings for malformed, unauthorized or irrelevant w
   expect(irrelevant.status).toBe(204);
 });
 
+it('returns the public 503 when a Core binding cannot be read after dispatch', async () => {
+  const app = createApplication({
+    get REVIEW_DB(): never {
+      throw new Error('binding unavailable');
+    },
+    GITHUB_APP_ID: '1',
+    GITHUB_APP_PRIVATE_KEY: 'unused',
+    WEBHOOK_SECRET: 'unused',
+    ALLOWED_INSTALLATION_IDS: '[7]',
+    RUNNER_CALLBACK_TOKEN: 'runner-token',
+  });
+
+  const claim = await app.fetch(
+    new Request('https://reviews.test/runner-claim', {
+      method: 'POST',
+      headers: { authorization: 'Bearer runner-token' },
+    }),
+  );
+  expect(claim.status).toBe(503);
+  expect(claim.body).toBeNull();
+
+  const dashboard = await app.fetch(new Request('https://reviews.test/api/dashboard'));
+  expect(dashboard.status).toBe(503);
+  expect(dashboard.headers.get('cache-control')).toBe('no-store');
+  expect(dashboard.body).toBeNull();
+});
+
 it('runs webhook admission and deferred check setup through the application edge', async () => {
   const database = new SqliteD1Database();
   const checks: Array<{ headSha: string }> = [];

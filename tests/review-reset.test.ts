@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { CoreWorkerDependencies } from '../apps/core/src/core-worker';
-import { createCoreWorker } from '../apps/core/src/core-worker';
+import type { CoreWorkerDependencies } from './support/core-worker-runtime';
+import { createCoreWorker } from './support/core-worker-runtime';
 import { createD1ReviewStateStore } from '../apps/core/src/review-state-store';
 import { createGitHubPublicationAdapter } from '../apps/core/src/github-review-adapter';
 import type { ReviewEvent } from '../packages/contracts/src';

@@ -48,23 +48,23 @@ export interface RelayControl {
   effortDetails?(input: { jobId: string; cursor?: string }): Promise<EffortJobDetail | null>;
 }
 
-export async function handleRunnerLlmControl(
+export function handleRunnerLlmControl(
   request: Request,
   env: CoreWorkerEnv,
   callbackToken?: string,
-) {
+): Effect.Effect<Response> {
   const path = new URL(request.url).pathname;
   const issuePath = path === '/runner-llm/issue-v2' ? 2 : path === '/runner-llm/issue' ? 1 : null;
   if (issuePath === null && !['/runner-llm/usage', '/runner-llm/revoke'].includes(path))
-    return new Response(null, { status: 404 });
-  if (request.method !== 'POST') return new Response(null, { status: 405 });
+    return Effect.succeed(new Response(null, { status: 404 }));
+  if (request.method !== 'POST') return Effect.succeed(new Response(null, { status: 405 }));
   if (!callbackToken || request.headers.get('authorization') !== 'Bearer ' + callbackToken)
-    return new Response(null, { status: 401 });
-  if (!env.INFERENCE_RELAY) return new Response(null, { status: 503 });
+    return Effect.succeed(new Response(null, { status: 401 }));
+  if (!env.INFERENCE_RELAY) return Effect.succeed(new Response(null, { status: 503 }));
   if (issuePath === 2 && env.INFERENCE_RELAY.issueV2 === undefined)
-    return new Response(null, { status: 503 });
-  try {
-    const payload = await readBoundedRequestBody(request, 16 * 1024);
+    return Effect.succeed(new Response(null, { status: 503 }));
+  return Effect.gen(function* () {
+    const payload = yield* Effect.tryPromise(() => readBoundedRequestBody(request, 16 * 1024));
     if (payload.kind !== 'ok') return new Response(null, { status: 413 });
     const body = payload.text;
     if (issuePath === null) {
@@ -74,10 +74,10 @@ export async function handleRunnerLlmControl(
       )(body);
       if (Option.isNone(job)) return new Response(null, { status: 400 });
       if (path === '/runner-llm/revoke') {
-        const result = await env.INFERENCE_RELAY.revoke(job.value);
+        const result = yield* Effect.tryPromise(() => env.INFERENCE_RELAY!.revoke(job.value));
         return new Response(null, { status: result.kind === 'revoked' ? 204 : 503 });
       }
-      const summary = await env.INFERENCE_RELAY.usage(job.value);
+      const summary = yield* Effect.tryPromise(() => env.INFERENCE_RELAY!.usage(job.value));
       return summary === null
         ? new Response(null, { status: 404 })
         : Response.json(summary, { headers: { 'cache-control': 'no-store' } });
@@ -87,12 +87,14 @@ export async function handleRunnerLlmControl(
     })(body);
     if (Option.isNone(input)) return new Response(null, { status: 400 });
     const { runId, jobId, attempt, routes } = input.value;
-    const now = await Effect.runPromise(DateTime.now.pipe(Effect.map(DateTime.toEpochMillis)));
-    const row = await env.REVIEW_DB.prepare(
-      "SELECT review_configuration FROM review_runs WHERE run_id = ? AND runner_job_id = ? AND runner_attempt = ? AND status = 'scheduled'",
-    )
-      .bind(runId, jobId, attempt)
-      .first<{ review_configuration: string | null }>();
+    const now = yield* DateTime.now.pipe(Effect.map(DateTime.toEpochMillis));
+    const row = yield* Effect.tryPromise(() =>
+      env.REVIEW_DB.prepare(
+        "SELECT review_configuration FROM review_runs WHERE run_id = ? AND runner_job_id = ? AND runner_attempt = ? AND status = 'scheduled'",
+      )
+        .bind(runId, jobId, attempt)
+        .first<{ review_configuration: string | null }>(),
+    );
     if (!row?.review_configuration) return new Response(null, { status: 409 });
     const configuration = Schema.decodeUnknownSync(Schema.fromJsonString(ReviewConfiguration))(
       row.review_configuration,
@@ -125,11 +127,13 @@ export async function handleRunnerLlmControl(
         : { routes: [...allowed] };
     const latestIssueDeadline = now + RUNNER_LLM_CONTROL_TIMEOUT_MS;
     if (issuePath === 2) {
-      const reply = await env.INFERENCE_RELAY.issueV2!({
-        jobId,
-        snapshot,
-        latestIssueDeadline,
-      });
+      const reply = yield* Effect.tryPromise(() =>
+        env.INFERENCE_RELAY!.issueV2!({
+          jobId,
+          snapshot,
+          latestIssueDeadline,
+        }),
+      );
       if (reply.kind !== 'issued')
         return new Response(null, { status: reply.kind === 'duplicate' ? 409 : 503 });
       return Response.json(
@@ -141,18 +145,18 @@ export async function handleRunnerLlmControl(
         { status: 201, headers: { 'cache-control': 'no-store' } },
       );
     }
-    const reply = await env.INFERENCE_RELAY.issue({
-      jobId,
-      snapshot,
-      latestIssueDeadline,
-    });
+    const reply = yield* Effect.tryPromise(() =>
+      env.INFERENCE_RELAY!.issue({
+        jobId,
+        snapshot,
+        latestIssueDeadline,
+      }),
+    );
     if (reply.kind !== 'issued')
       return new Response(null, { status: reply.kind === 'duplicate' ? 409 : 503 });
     return Response.json(
       { token: reply.token, expiresAt: reply.expiresAt },
       { status: 201, headers: { 'cache-control': 'no-store' } },
     );
-  } catch {
-    return new Response(null, { status: 503 });
-  }
+  }).pipe(Effect.catch(() => Effect.succeed(new Response(null, { status: 503 }))));
 }

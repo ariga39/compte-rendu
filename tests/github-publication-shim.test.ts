@@ -1,6 +1,7 @@
 import { createTestReviewStore } from './support/review-store';
 import { describe, expect, it } from 'vitest';
-import { createReviewCoordinator, type GitHubAdapter } from '../apps/core/src/index';
+import type { GitHubAdapter } from '../apps/core/src/index';
+import { createReviewCoordinator } from './support/review-coordinator';
 import type { ReviewEvent } from '../packages/contracts/src';
 import { createGitHubPublicationShim } from './support/github-publication-shim';
 

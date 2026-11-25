@@ -1,5 +1,6 @@
 import { canonicalDashboardOrigin } from '@compte-rendu/contracts';
 import type { EffortRouteState, RouteEffortOption } from '@compte-rendu/contracts';
+import { Effect } from 'effect';
 import {
   applyReviewConfiguration,
   resetReviewEffort,
@@ -55,54 +56,56 @@ const catalogDrift = (
     })
     .map((entry) => entry.routeId);
 
-export async function modelSettings(request: Request, env: ApplicationEnv): Promise<Response> {
+export function modelSettings(request: Request, env: ApplicationEnv): Effect.Effect<Response> {
   const url = new URL(request.url);
   const origin = canonicalDashboardOrigin(env.DASHBOARD_ORIGIN);
   const id = env.DASHBOARD_GITHUB_CLIENT_ID;
   const secret = env.DASHBOARD_GITHUB_CLIENT_SECRET;
   if (!origin || url.origin !== origin || !id || !secret)
-    return noStore(503, { error: 'Login is unavailable.' });
-  let unavailable = 'Model settings are temporarily unavailable.';
+    return Effect.succeed(noStore(503, { error: 'Login is unavailable.' }));
   const sameOrigin = request.headers.get('origin') === origin;
   const resetPath = url.pathname === '/api/model-settings/effort-reset';
-  try {
-    if (url.pathname !== '/api/model-settings' && !resetPath) return noStore(404);
-    if (resetPath ? request.method !== 'POST' : !['GET', 'PUT'].includes(request.method))
-      return noStore(405);
-    if (request.method !== 'GET' && !sameOrigin) return noStore(403);
-    const operator = await requireOperator(
-      request,
-      env,
-      'This GitHub account is not authorized to edit review models.',
+  if (url.pathname !== '/api/model-settings' && !resetPath) return Effect.succeed(noStore(404));
+  if (resetPath ? request.method !== 'POST' : !['GET', 'PUT'].includes(request.method))
+    return Effect.succeed(noStore(405));
+  if (request.method !== 'GET' && !sameOrigin) return Effect.succeed(noStore(403));
+  let unavailable = 'Model settings are temporarily unavailable.';
+  return Effect.gen(function* () {
+    const operator = yield* Effect.tryPromise(() =>
+      requireOperator(request, env, 'This GitHub account is not authorized to edit review models.'),
     );
     if (operator instanceof Response) return operator;
     unavailable = 'Could not load the model catalog.';
     if (!env.INFERENCE_RELAY) return noStore(503, { error: unavailable });
-    if (resetPath) return resetReviewEffort(request, env.REVIEW_DB);
+    if (resetPath) return yield* resetReviewEffort(request, env.REVIEW_DB);
     if (request.method === 'PUT')
-      return applyReviewConfiguration(request, env.REVIEW_DB, env.INFERENCE_RELAY);
-    const { routes, efforts, lastAttemptAt, lastRefreshError } =
-      await env.INFERENCE_RELAY.catalog();
-    const saved = await readSavedEfforts(env);
+      return yield* applyReviewConfiguration(request, env.REVIEW_DB, env.INFERENCE_RELAY);
+    const { routes, efforts, lastAttemptAt, lastRefreshError } = yield* Effect.tryPromise(() =>
+      env.INFERENCE_RELAY!.catalog(),
+    );
+    const saved = yield* Effect.tryPromise(() => readSavedEfforts(env));
     const generations = new Map(saved.map((entry) => [entry.routeId, entry.generation]));
     let effortStates: readonly EffortRouteState[] = [];
     let effortStateUnavailable = false;
     if (env.INFERENCE_RELAY.effortStates !== undefined) {
-      try {
-        // A reset advances Core's generation without clearing the relay row.
-        // A state from an older generation no longer applies to new requests.
-        effortStates = (await env.INFERENCE_RELAY.effortStates()).routes.filter(
+      // A reset advances Core's generation without clearing the relay row.
+      // A state from an older generation no longer applies to new requests.
+      const states = yield* Effect.promise(() =>
+        env.INFERENCE_RELAY!.effortStates!()
+          .then((value) => ({ kind: 'ok' as const, value }))
+          .catch(() => ({ kind: 'failed' as const })),
+      );
+      if (states.kind === 'failed') effortStateUnavailable = true;
+      else
+        effortStates = states.value.routes.filter(
           (state) => state.generation >= (generations.get(state.routeId) ?? 0),
         );
-      } catch {
-        effortStateUnavailable = true;
-      }
     }
     unavailable = 'Could not read the saved model configuration.';
-    const config = await applyReviewConfiguration(request, env.REVIEW_DB);
+    const config = yield* applyReviewConfiguration(request, env.REVIEW_DB);
     return config.ok
       ? noStore(200, {
-          configuration: await config.json(),
+          configuration: yield* Effect.tryPromise(() => config.json()),
           routes,
           efforts: (efforts ?? {}) satisfies Readonly<Record<string, readonly RouteEffortOption[]>>,
           effortStates,
@@ -112,7 +115,5 @@ export async function modelSettings(request: Request, env: ApplicationEnv): Prom
           lastAttemptAt,
         })
       : config;
-  } catch {
-    return noStore(503, { error: unavailable });
-  }
+  }).pipe(Effect.catch(() => Effect.succeed(noStore(503, { error: unavailable }))));
 }

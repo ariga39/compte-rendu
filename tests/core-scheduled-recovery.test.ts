@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createCoreWorker } from '../apps/core/src/core-worker';
+import { createCoreWorker } from './support/core-worker-runtime';
 import { createD1ReviewStateStore } from '../apps/core/src/index';
 import { publicationRecordKey } from '../apps/core/src/publication-record';
 import { SqliteD1Database } from './support/d1-database';

@@ -1,6 +1,7 @@
 import { expect, it, vi } from 'vitest';
-import { createCoreWorker } from '../apps/core/src/core-worker';
-import { createD1ReviewStateStore, createReviewCoordinator } from '../apps/core/src/index';
+import { createCoreWorker } from './support/core-worker-runtime';
+import { createD1ReviewStateStore } from '../apps/core/src/index';
+import { createReviewCoordinator } from './support/review-coordinator';
 import { SqliteD1Database } from './support/d1-database';
 import { recordTestEvidence } from './support/core-worker-harness';
 

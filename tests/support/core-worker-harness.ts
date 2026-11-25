@@ -5,7 +5,7 @@ import {
   type CoreWorker,
   type CoreWorkerDependencies,
   type CoreWorkerEnv,
-} from '../../apps/core/src/core-worker';
+} from './core-worker-runtime';
 import { makeCoreRuntime, makeCoreRuntimeHost } from '../../apps/core/src/core-runtime';
 import type { ReviewPublicationStateStore } from '../../apps/core/src/index';
 import type { MetadataInvalidationEvent, ReviewEvent } from '../../packages/contracts/src';

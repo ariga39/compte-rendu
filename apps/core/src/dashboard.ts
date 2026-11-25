@@ -1,4 +1,4 @@
-import { DateTime, Effect, Option, Schema } from 'effect';
+import { DateTime, Option, Schema } from 'effect';
 import {
   ModelUsageSummary,
   PublicTaskFailure,
@@ -32,6 +32,24 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 const nowIso = () => new Date().toISOString();
 const isoFromMs = (ms: number): string => DateTime.formatIso(DateTime.makeUnsafe(ms));
+const withAbortTimeout = async <A>(
+  run: (signal: AbortSignal) => Promise<A>,
+  timeoutMs: number,
+): Promise<A> => {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error('Repository metadata request timed out'));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([run(controller.signal), deadline]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+};
 
 export const IsoTimestamp = Schema.String.check(
   Schema.makeFilter((value) => Option.isSome(DateTime.make(value)), { expected: 'ISO timestamp' }),
@@ -412,16 +430,14 @@ export const refreshRepositoryMetadata = async (
     if (dependencies.github.getRepositoryMetadata === undefined) return;
     try {
       const metadata = await Schema.decodeUnknownPromise(RepositoryMetadata)(
-        await Effect.runPromise(
-          Effect.tryPromise({
-            try: (signal) =>
-              dependencies.github.getRepositoryMetadata!({
-                repositoryId: row.repositoryId,
-                installationId: row.installationId,
-                signal,
-              }),
-            catch: (error) => error,
-          }).pipe(Effect.timeout(timeoutMs)),
+        await withAbortTimeout(
+          (signal) =>
+            dependencies.github.getRepositoryMetadata!({
+              repositoryId: row.repositoryId,
+              installationId: row.installationId,
+              signal,
+            }),
+          timeoutMs,
         ),
       );
       const identityExpiresAt =

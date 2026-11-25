@@ -1,4 +1,4 @@
-import { DateTime, Effect, Schema } from 'effect';
+import { Schema } from 'effect';
 import { GitHubRequestError, parseRetryAfterMs } from './github-http';
 
 const InstallationTokenResponse = Schema.Struct({
@@ -159,9 +159,7 @@ export const createGitHubAppTokenProvider = (
     if (!Number.isSafeInteger(appId) || appId < 1) {
       throw new Error('GitHub App ID is invalid');
     }
-    const nowSeconds = Math.floor(
-      (await Effect.runPromise(DateTime.now.pipe(Effect.map(DateTime.toEpochMillis)))) / 1000,
-    );
+    const nowSeconds = Math.floor(Date.now() / 1000);
     const header = encodedJson({ alg: 'RS256', typ: 'JWT' });
     const payload = encodedJson({
       iss: appId,
