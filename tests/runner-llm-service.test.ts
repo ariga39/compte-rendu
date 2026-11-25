@@ -1155,8 +1155,12 @@ describe('Runner transport diagnostics', () => {
         callbacks += 1;
         return new Response(null, { status: 202 });
       },
-      process: async () => {
-        commands += 1;
+      process: async (_command, args) => {
+        const readOnly =
+          args[0] === 'ls' ||
+          (args[0] === 'policy' && args[1] === 'ls') ||
+          (args[0] === 'secret' && args[1] === 'ls');
+        if (!readOnly) commands += 1;
         return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
       },
     });

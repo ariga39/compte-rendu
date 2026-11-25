@@ -373,6 +373,12 @@ describe('Runner relay admission and recovery', () => {
       claimIntervalMs: 1,
       claimFetch: execution.claimFetch,
       callbackFetch: execution.callbackFetch,
+      process: async (_command, args) => ({
+        exitCode: args[0] === 'ls' ? 0 : 1,
+        stdout: '',
+        timedOut: false,
+        truncated: false,
+      }),
       log: {
         record: async (event) => {
           events.push(event as Record<string, unknown>);
@@ -423,7 +429,7 @@ describe('Runner relay admission and recovery', () => {
       expect(
         commands.filter(
           (command) =>
-            !command.startsWith('ls -q') &&
+            !command.startsWith('ls') &&
             !command.startsWith('policy ls') &&
             !command.startsWith('secret ls'),
         ),
@@ -662,6 +668,12 @@ describe('Runner relay admission and recovery', () => {
       claimUrl: 'https://ingress.test/runner-claim',
       claimIntervalMs: 10,
       claimFetch: execution.claimFetch,
+      process: async (_command, args) => ({
+        exitCode: args[0] === 'ls' ? 0 : 1,
+        stdout: '',
+        timedOut: false,
+        truncated: false,
+      }),
     });
     try {
       await vi.waitFor(() => expect(execution.claimRequests.length).toBeGreaterThan(0));

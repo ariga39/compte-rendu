@@ -357,7 +357,12 @@ export const withClaimSubmission = (
 export const createRunner = (options: TestRunnerOptions = {}) => {
   const { mergeBase: mergeBaseOverride, ...productionOptions } = withTestDestroyDefaults(options);
   const { options: optionsWithCallback, execution, cleanupRoot } = withAutoClaim(productionOptions);
-  const originalProcess = productionOptions.process ?? runProcess;
+  const originalProcess =
+    productionOptions.process ??
+    (async (command, args, options) =>
+      args[0] === 'ls'
+        ? { exitCode: 0, stdout: '', timedOut: false, truncated: false }
+        : runProcess(command, args, options));
   const mergeBaseProcess = withMergeBaseFixture(originalProcess, mergeBaseOverride);
   const removedSandboxes = new Set<string>();
   const rules: Array<Record<string, unknown>> = [

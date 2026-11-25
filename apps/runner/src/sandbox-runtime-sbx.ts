@@ -714,7 +714,9 @@ export const createSbxSandboxBackend = (context: SandboxBackendContext): Sandbox
       if (!(await probeAccess())) health = 'outage';
     },
   };
-  let health: SandboxHealth = 'ready';
+  // A fresh process has not proved sbx access yet. The first claim readiness
+  // probe establishes ready/outage without waiting for the broad age sweep.
+  let health: SandboxHealth = 'unready';
   const command: SbxCommand = async (args, diagnostic, processOptions) =>
     redactSbxStderr(
       runtimeOptions,
@@ -743,8 +745,8 @@ export const createSbxSandboxBackend = (context: SandboxBackendContext): Sandbox
     kind: 'sbx',
     health: () => health,
     async checkReady(): Promise<SandboxHealth> {
-      if (health !== 'outage') return health;
-      if (!(await probeAccess())) return 'outage';
+      if (health === 'ready') return 'ready';
+      if (!(await probeAccess())) return health;
       health = 'ready';
       return 'ready';
     },

@@ -240,7 +240,12 @@ describe('Runner maintenance drain', () => {
         claimRequested();
         return claimResponse;
       },
-      process: async () => ({ exitCode: 1, stdout: '', timedOut: false, truncated: false }),
+      process: async (_command, args) => ({
+        exitCode: args[0] === 'ls' ? 0 : 1,
+        stdout: '',
+        timedOut: false,
+        truncated: false,
+      }),
     });
     try {
       await requested;
