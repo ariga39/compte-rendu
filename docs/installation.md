@@ -1223,60 +1223,105 @@ the normal [update procedure](operations.md#update-and-rollback) and keep its
 retained generated files.
 
 A direct-provider installation has an old Runner without a relay client. Prepare
-the configs first, outside the maintenance window, then drain and switch:
+one target-release checkout and both configs first, outside the maintenance
+window, then drain and switch:
 
-1. In a clean, independent checkout at the target revision, render candidate
-   configs with the existing instance IDs. The renderer refuses to run where a
-   generated config exists, so do not use the retained checkout. Read the App
-   ID, D1 ID, VPC Service ID, allowlists and Check name from the retained
-   `apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc`:
+1. Create a persistent clean worktree at the target revision and render
+   candidate configs with the existing instance IDs. The renderer refuses to run
+   where a generated config exists, so do not use the retained checkout. Read
+   the App ID, D1 ID, VPC Service ID, allowlists and Check name from the
+   retained `apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc`:
 
    ```sh
    INSTANCE_NAME=<INSTANCE_NAME>
    MAIN_CHECKOUT=<ABSOLUTE_EXISTING_CHECKOUT>
-   RENDER_CHECKOUT=/tmp/compte-rendu-render-$INSTANCE_NAME
+   TARGET_CHECKOUT=<ABSOLUTE_PERSISTENT_TARGET_REVISION_WORKTREE>
    RELAY_CONFIG=<ABSOLUTE_RELAY_CONFIG_FILE>
 
-   git -C "$MAIN_CHECKOUT" worktree add --detach "$RENDER_CHECKOUT" <TARGET_REVISION>
-   cd "$RENDER_CHECKOUT"
+   git -C "$MAIN_CHECKOUT" worktree add --detach "$TARGET_CHECKOUT" <TARGET_REVISION>
+   cd "$TARGET_CHECKOUT"
    corepack pnpm install --frozen-lockfile
    corepack pnpm render:wrangler "$INSTANCE_NAME" <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '<GITHUB_BOT_AUTHOR_IDS_JSON>' '<GITHUB_CHECK_NAME>' "$RELAY_CONFIG"
    ```
 
-2. Copy the generated inference config to the retained deployment location and
-   use it unchanged for the relay Worker:
+2. Keep `MAIN_CHECKOUT` only as the backup of the old config and artifact.
+   Copy its application config into `TARGET_CHECKOUT`; leave the generated
+   inference config there unchanged:
 
    ```sh
-   cp "$RENDER_CHECKOUT/apps/inference-worker/wrangler.$INSTANCE_NAME.jsonc" \
-     "$MAIN_CHECKOUT/apps/inference-worker/"
+   cp "$MAIN_CHECKOUT/apps/dashboard/wrangler.$INSTANCE_NAME.jsonc" \
+     "$TARGET_CHECKOUT/apps/dashboard/wrangler.$INSTANCE_NAME.jsonc"
    ```
 
-3. Manually add only these relay entries to the retained application config;
-   keep its private routes, D1/R2 bindings, allowlists, origins, Check name and
-   secret references:
+3. Manually add only these relay entries to that target-worktree application
+   config; keep its private routes, D1/R2 bindings, allowlists, origins, Check
+   name and secret references:
    - `services`: `{"binding":"INFERENCE_RELAY","service":"<INSTANCE_NAME>-inference","entrypoint":"InferenceWorker"}`
    - `vars.RELAY_DEFAULT_MODEL_ROUTE`: the relay config's `defaultRoute`
    - `account_id`: only if the retained config has none
 
-   Confirm the retained app is `<INSTANCE_NAME>-ingress` with `INFERENCE_RELAY`,
-   and the generated inference Worker is `<INSTANCE_NAME>-inference` with
-   `RELAY_DB` on `<INSTANCE_NAME>-relay-grants` (the relay D1 ID) and required
-   secret `AI_GATEWAY_RUN_TOKEN`.
+   Confirm the app is `<INSTANCE_NAME>-ingress` with `INFERENCE_RELAY`, and the
+   inference Worker is `<INSTANCE_NAME>-inference` with `RELAY_DB` on
+   `<INSTANCE_NAME>-relay-grants` (the relay D1 ID) and required secret
+   `AI_GATEWAY_RUN_TOKEN`.
 
-4. Pause inbound admissions, for example by disabling the GitHub App webhook.
-5. Let the existing Core and old Runner finish all queued and running Jobs, then
+4. From `TARGET_CHECKOUT`, run the release checks and build both Workers and
+   the Runner:
+
+   ```sh
+   corepack pnpm check
+   corepack pnpm test
+   corepack pnpm build
+   ```
+
+5. Pause inbound admissions, for example by disabling the GitHub App webhook.
+6. Let the existing Core and old Runner finish all queued and running Jobs, then
    confirm Core shows none remaining. Resolve failed cleanup with the
    [maintenance procedure](operations.md#recover-failed-cleanup).
-6. Drain the old Runner and wait for `drained: true`, then stop it. Do not deploy
+7. Drain the old Runner and wait for `drained: true`, then stop it. Do not deploy
    the managed Core before this point: a newly frozen selection would otherwise
    be claimed by a Runner that cannot serve it.
-7. Apply the inference Worker's migrations and deploy the relay Worker from its
-   generated config.
-8. Deploy the application Worker from the retained config with the merged
-   `INFERENCE_RELAY` binding and `RELAY_DEFAULT_MODEL_ROUTE`.
-9. Replace the Runner binary and configuration with the managed settings from
-   the fresh installation sequence and start it.
-10. Re-enable the webhook. Confirm the catalog, then run a fresh PR review and
+8. From `TARGET_CHECKOUT`, apply pending `REVIEW_DB` migrations before `0019`,
+   then apply the relay migrations and deploy both Workers. If `0019` is
+   already applied, skip the subshell and run the normal `REVIEW_DB` migration
+   now (the command in step 9). If it is pending, hold `0019` and any later
+   migrations in a private directory inside this target worktree; the subshell
+   restores them on success or failure:
+
+   ```sh
+   set -e
+   (
+     HOLD_DIR="$(mktemp -d "$TARGET_CHECKOUT/.migration-hold.XXXXXX")"
+     trap 'mv "$HOLD_DIR"/*.sql apps/core/migrations/ 2>/dev/null || true; rmdir "$HOLD_DIR"' EXIT
+     for migration in apps/core/migrations/*.sql; do
+       version=${migration##*/}
+       version=${version%%_*}
+       if [ "$version" -ge 19 ]; then mv "$migration" "$HOLD_DIR"/; fi
+     done
+     corepack pnpm dlx wrangler@4.124.0 d1 migrations apply REVIEW_DB --remote --config apps/dashboard/wrangler.$INSTANCE_NAME.jsonc
+   )
+   corepack pnpm dlx wrangler@4.124.0 d1 migrations apply RELAY_DB --remote --config apps/inference-worker/wrangler.$INSTANCE_NAME.jsonc
+   corepack pnpm dlx wrangler@4.124.0 secret put AI_GATEWAY_RUN_TOKEN --config apps/inference-worker/wrangler.$INSTANCE_NAME.jsonc
+   corepack pnpm dlx wrangler@4.124.0 deploy --config apps/inference-worker/wrangler.$INSTANCE_NAME.jsonc
+   corepack pnpm dlx wrangler@4.124.0 deploy --config apps/dashboard/wrangler.$INSTANCE_NAME.jsonc
+   ```
+
+9. Verify the deployed application Worker serves requests and completes a
+   scheduled run, then run the normal `REVIEW_DB` migration in the required
+   [check retry storage order](operations.md#check-retry-storage-removal). It
+   applies `0019` and any later pending migrations:
+
+   ```sh
+   corepack pnpm dlx wrangler@4.124.0 d1 migrations apply REVIEW_DB --remote --config apps/dashboard/wrangler.$INSTANCE_NAME.jsonc
+   ```
+
+10. Enable the verified build from `TARGET_CHECKOUT` as the new Runner. Back up
+    the old artifact and environment file, update the unit's `<REPO_ROOT>` to
+    `$TARGET_CHECKOUT` as described in
+    [KVM permissions and the persistent Runner service](#kvm-permissions-and-the-persistent-runner-service),
+    verify `apps/runner/dist/runner.js`, and start it with the managed
+    environment from the fresh installation sequence.
+11. Re-enable the webhook. Confirm the catalog, then run a fresh PR review and
     apply the same acceptance checks as a fresh installation. If a route uses a
     non-Chat protocol or declares a context or output limit, set
     `RUNNER_LLM_GRANT_VERSION=2` only after verifying that the Runner and both
