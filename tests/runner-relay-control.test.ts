@@ -213,6 +213,19 @@ describe('Runner relay control client', () => {
       'invalid-response',
     ],
     [
+      'an oversized successful issue',
+      () =>
+        new Response(
+          JSON.stringify({
+            token: 'oversized-token',
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            descriptors: [{ routeId: 'reviewer-a', profile: 'chat' }],
+          }) + ' '.repeat(384 * 1024),
+          { status: 201, headers: { 'content-type': 'application/json' } },
+        ),
+      'invalid-response',
+    ],
+    [
       'an HTTP-rejected issue',
       () => new Response('http-body-canary', { status: 503 }),
       'http-error',

@@ -20,6 +20,10 @@ const ProfiledGrant = Schema.fromJsonString(
 
 const CONTROL_MAX_BYTES = 16 * 1024;
 const USAGE_MAX_BYTES = 64 * 1024;
+// One descriptor can carry four metadata lists of up to 64 x 128 UTF-16 units.
+// At the worst-case six bytes per JSON-escaped unit that is about 200 KiB, so
+// budget 256 KiB per requested route while keeping the control envelope bounded.
+const ISSUE_V2_MAX_BYTES_PER_ROUTE = 256 * 1024;
 
 const ControlFailureReason = Schema.Literals([
   'invalid-response',
@@ -137,7 +141,12 @@ export const createRelayLlmServiceClient = (
         attempt: job.attempt,
         routes,
       };
-      const body = await post('/runner-llm/issue-v2', payload, 201);
+      const body = await post(
+        '/runner-llm/issue-v2',
+        payload,
+        201,
+        CONTROL_MAX_BYTES + routes.length * ISSUE_V2_MAX_BYTES_PER_ROUTE,
+      );
       const grant = await Schema.decodeUnknownPromise(ProfiledGrant, {
         onExcessProperty: 'error',
       })(body).catch(() => {
