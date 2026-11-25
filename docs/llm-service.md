@@ -196,6 +196,13 @@ Only `response.completed` with a completed response and a durable usage update
 ends the stream successfully. Incomplete or failed turns keep partial usage.
 Responses terminal events are capped at 4 MiB; larger events fail the turn.
 
+Both protocols validate only the security boundary: the grant-bound model and
+route, local function tools and tool selection, local text/reasoning/function
+parts, and request size. Hosted tools, remote media or file references and
+server-side state are rejected; other optional provider fields are forwarded
+unchanged. The relay still forces the frozen model, `store: false` and
+`stream: true`.
+
 The former Messages (`POST /v1/messages`) and Gemini
 (`POST /v1beta/models/<handle>:streamGenerateContent`) wire protocols are
 retired. Those endpoints return 404, and the corresponding native

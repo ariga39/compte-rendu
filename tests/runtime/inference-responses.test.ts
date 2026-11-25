@@ -151,31 +151,108 @@ describe('Responses route authentication and native streaming', () => {
     expect(JSON.parse(upstream!.body).text).toEqual(text);
   });
 
+  it('passes benign optional fields through while forcing model, stream and store', async () => {
+    await control('responses-success');
+    const token = await issueGrant('responses-benign-fields', [questions.responses]);
+    const tools = [
+      {
+        type: 'function',
+        name: 'read_file',
+        description: 'Read a repository file',
+        parameters: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'https://docs.example/path' },
+            image_url: { type: 'string' },
+          },
+        },
+        strict: false,
+        provider_extension: { hosted: true, remote: 'https://docs.example/tool' },
+      },
+    ];
+    const input = [
+      {
+        role: 'user',
+        phase: 'opening',
+        content: [{ type: 'input_text', text: 'Review this change' }],
+      },
+      {
+        type: 'message',
+        role: 'assistant',
+        phase: 'thinking',
+        status: 'completed',
+        content: [
+          {
+            type: 'output_text',
+            text: 'I will read it',
+            annotations: [{ type: 'url_citation', url: 'https://docs.example/citation' }],
+          },
+        ],
+      },
+      {
+        type: 'message',
+        role: 'assistant',
+        status: 'completed',
+        content: [{ type: 'refusal', refusal: 'I cannot share that.' }],
+      },
+      { type: 'function_call', call_id: 'call_1', name: 'read_file', arguments: '{}' },
+      { type: 'function_call_output', call_id: 'call_1', output: 'file contents' },
+    ];
+    const harmless = {
+      temperature: 0.2,
+      top_p: 0.9,
+      truncation: 'auto',
+      text: {
+        format: { type: 'json_schema', name: 'review', schema: { type: 'object' } },
+        verbosity: 'verbose',
+      },
+      reasoning: { effort: 'extreme', summary: 'auto' },
+      prompt_cache_retention: '24h',
+      metadata: { trace: 'fixture' },
+      service_tier: 'auto',
+      parallel_tool_calls: true,
+      tool_choice: { type: 'function', name: 'read_file' },
+      input,
+      tools,
+    };
+
+    const response = await post(token, '/v1/responses', {
+      ...responsesBody(),
+      ...harmless,
+    });
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('event: response.completed');
+
+    const [upstream] = (await upstreamState()).requests;
+    const body = JSON.parse(upstream!.body) as Record<string, unknown>;
+    for (const [key, value] of Object.entries(harmless)) expect(body[key], key).toEqual(value);
+    expect(body.model).toBe('gpt-sol-native');
+    expect(body.store).toBe(false);
+    expect(body.stream).toBe(true);
+  });
+
   it('rejects unsupported Responses state, hosted tools and transport shapes at admission', async () => {
     await control('responses-success');
     const token = await issueGrant('responses-rejections', [questions.responses]);
     const base = responsesBody();
     const invalid: readonly [string, Record<string, unknown>][] = [
-      ['unknown field', { ...base, temperature: 0.2 }],
-      ['unknown verbosity', { ...base, text: { verbosity: 'verbose' } }],
       ['previous response lookup', { ...base, previous_response_id: 'resp_1' }],
       ['server conversation', { ...base, conversation: 'conv_1' }],
       ['background work', { ...base, background: true }],
-      ['automatic truncation', { ...base, truncation: 'auto' }],
+      ['prompt template', { ...base, prompt: { id: 'pmpt_1' } }],
+      ['hosted MCP servers', { ...base, mcp_servers: [{ url: 'https://remote.example' }] }],
+      ['server container', { ...base, container: 'cntr_1' }],
+      ['provider content cache', { ...base, cachedContent: 'cached-content' }],
       ['non-streaming', { ...base, stream: false }],
       ['stored response', { ...base, store: true }],
       ['unsupported include', { ...base, include: ['message.output_text.logprobs'] }],
-      [
-        'structured text format',
-        { ...base, text: { format: { type: 'json_schema', name: 'review', schema: {} } } },
-      ],
-      ['unsupported reasoning effort', { ...base, reasoning: { effort: 'extreme' } }],
       ['oversized output cap', { ...base, max_output_tokens: 256_001 }],
       ['hosted web search', { ...base, tools: [{ type: 'web_search_preview' }] }],
       [
         'hosted file search',
         { ...base, tools: [{ type: 'file_search', vector_store_ids: ['vs_1'] }] },
       ],
+      ['hosted tool selection', { ...base, tool_choice: { type: 'web_search_preview' } }],
       ['item reference', { ...base, input: [{ type: 'item_reference', id: 'msg_1' }] }],
       [
         'hosted computer call',
@@ -248,27 +325,6 @@ describe('Responses route authentication and native streaming', () => {
         },
       ],
       [
-        'phase on user message',
-        {
-          ...base,
-          input: [{ role: 'user', phase: 'commentary', content: 'Review this change' }],
-        },
-      ],
-      [
-        'unsupported assistant phase',
-        {
-          ...base,
-          input: [
-            {
-              role: 'assistant',
-              phase: 'thinking',
-              content: [{ type: 'output_text', text: 'Reviewing' }],
-            },
-          ],
-        },
-      ],
-
-      [
         'reasoning replay without id',
         {
           ...base,
@@ -276,7 +332,7 @@ describe('Responses route authentication and native streaming', () => {
         },
       ],
       [
-        'unknown nested message field',
+        'remote reference on a text part',
         {
           ...base,
           input: [
@@ -285,13 +341,6 @@ describe('Responses route authentication and native streaming', () => {
               content: [{ type: 'input_text', text: 'review', image_url: 'https://remote' }],
             },
           ],
-        },
-      ],
-      [
-        'unknown nested tool field',
-        {
-          ...base,
-          tools: [{ type: 'function', name: 'read_file', parameters: {}, hosted: true }],
         },
       ],
     ];
