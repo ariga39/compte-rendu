@@ -50,8 +50,8 @@ Runner stop keeps durable retry work.
 Core is the only GitHub publisher. It derives repository, PR and commit from the
 admitted run, rechecks the head, and uses a publication claim plus run marker to
 suppress duplicates. Marker recovery verifies the App author, commit and review
-state for both structured results and legacy comment-only reviews. A changed head is superseded without a stale
-vote. GitHub reads and the subsequent POST are not atomic; an ambiguous response
+state against the expected publication. A changed head is superseded without a
+stale vote. GitHub reads and the subsequent POST are not atomic; an ambiguous response
 is not proof that no review was published.
 
 ### Review result
