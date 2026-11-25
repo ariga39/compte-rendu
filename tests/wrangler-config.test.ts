@@ -218,6 +218,22 @@ describe('Wrangler deployment tooling', () => {
     });
   });
 
+  it('rejects the retired seventh PostHog JSON argument before writing output', () => {
+    withDeploymentFixture(({ runWithCheckName: run, outputs }) => {
+      let error: unknown;
+      try {
+        run('legacy-posthog', '{"enabled":false}');
+      } catch (cause) {
+        error = cause;
+      }
+      expect(error).toBeInstanceOf(Error);
+      const stderr = (error as { stderr?: Buffer | string }).stderr;
+      const diagnosis = stderr?.toString() ?? (error as Error).message;
+      expect(diagnosis).toContain('GitHub Check name and must not be a JSON object');
+      expect(existsSync(outputs('legacy-posthog').application)).toBe(false);
+    });
+  });
+
   it('rejects empty, unsafe, or overlong instances before creating output', () => {
     withDeploymentFixture(({ run, outputs }) => {
       for (const instanceName of ['', 'unsafe/name', 'a'.repeat(51)]) {

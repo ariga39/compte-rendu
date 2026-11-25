@@ -914,9 +914,9 @@ uses the temporary invocation described above.
 
 The application Worker needs the following base settings. Add the [dashboard login configuration](review-configuration.md#dashboard-sign-in-and-model-settings) for operator access and the [relay bindings](#configure-the-managed-inference-relay) for managed inference.
 
-| Worker                    | Plain variable                                               | Secrets                                                                                  | Non-secret bindings                                |
-| ------------------------- | ------------------------------------------------------------ | ---------------------------------------------------------------------------------------- | -------------------------------------------------- |
-| `<INSTANCE_NAME>-ingress` | `GITHUB_APP_ID`, allowlists, branding and telemetry settings | `GITHUB_APP_PRIVATE_KEY`, `RUNNER_AUTH_TOKEN`, `WEBHOOK_SECRET`, `RUNNER_CALLBACK_TOKEN` | `REVIEW_DB`, `EVIDENCE_BUCKET`, `RUNNER`, `ASSETS` |
+| Worker                    | Plain variable                                 | Secrets                                                                                  | Non-secret bindings                                |
+| ------------------------- | ---------------------------------------------- | ---------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| `<INSTANCE_NAME>-ingress` | `GITHUB_APP_ID`, allowlists, branding settings | `GITHUB_APP_PRIVATE_KEY`, `RUNNER_AUTH_TOKEN`, `WEBHOOK_SECRET`, `RUNNER_CALLBACK_TOKEN` | `REVIEW_DB`, `EVIDENCE_BUCKET`, `RUNNER`, `ASSETS` |
 
 `GITHUB_APP_ID`, `ALLOWED_INSTALLATION_IDS`, and `ALLOWED_BOT_AUTHOR_IDS` are
 deployment configuration, not secrets. Supply them only through the renderer:

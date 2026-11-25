@@ -183,6 +183,12 @@ const renderDeploymentConfigs = (
 };
 
 const main = (args: readonly string[]) => {
+  const checkName = args[6]?.trim();
+  if (checkName?.startsWith('{') && checkName.endsWith('}')) {
+    throw new Error(
+      'the seventh argument is the GitHub Check name and must not be a JSON object; remove the retired PostHog argument and pass a plain name or an empty string.',
+    );
+  }
   if (args.length < 5 || args.length > 8) {
     throw new Error(
       'usage: render-wrangler-config <instance-name> <github-app-id> <d1-uuid> <runner-vpc-service-uuid> <github-installation-ids-json> [github-bot-author-ids-json] [github-check-name] [relay-config-file]',
