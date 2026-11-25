@@ -146,24 +146,10 @@ Interpret the boundaries separately:
   cleanup follows the 90-minute claim budget. Other PRs continue normally.
 
 The dashboard remains a projection of Core's persisted state, not a live Runner
-probe. PostHog is lifecycle telemetry, not the diagnostic source for command or
-transport failures. Preserve a failed run's identifiers and local evidence before
-restarting services; a restart cannot recreate error output that was never kept.
-
-When enabled, Core also sends only three personless PostHog events:
-`review scheduled`, `review claimed`, and `review finished`. Each event uses
-the existing opaque `run_id` as `distinct_id` and disables person profiles.
-The allowlisted properties contain only lifecycle state, bounded durations,
-deployment/environment, trigger, publication/evidence/cleanup status, and
-closed failure codes. `total_duration_ms` covers durable scheduling through the
-Core terminal/publication boundary. The bounded sender adds only a timestamp, a
-random event UUID, a server marker, and a geolocation-disable flag. It POSTs one
-event to the configured host's `/batch/` endpoint with a three-second timeout,
-no retry, and redirects rejected; it receives no repository, PR thread, review
-body, or session content. PostHog is a lossy secondary surface: its
-request, configuration, or transport failure is locally diagnosable and cannot
-change D1/GitHub/R2 outcomes. Core uses one immediate workerd capture per
-validated lifecycle event and registers each with `waitUntil()`.
+probe. D1 remains the product state and diagnostic source for lifecycle
+transitions, command and transport failures, and cleanup outcomes. Preserve a
+failed run's identifiers and local evidence before restarting services; a
+restart cannot recreate error output that was never kept.
 
 | Symptom                            | Check first                                                                                                    | Safe action                                                                                                                                            |
 | ---------------------------------- | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |

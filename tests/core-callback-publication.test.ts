@@ -14,6 +14,7 @@ import {
   failedCallback,
   abortedCallback,
   claimGithub,
+  failReadAfterSchedulingWrite,
 } from './support/core-worker-harness';
 
 describe('Core callbacks and publication', () => {
@@ -1492,4 +1493,373 @@ describe('Core callbacks and publication', () => {
       database.close();
     }
   });
+
+  it.each([
+    {
+      failure: { reason: 'upstream', cause: 'upstream-error', httpStatus: 400 },
+      expected: { phase: 'agent', reason: 'upstream', httpStatus: 400 },
+    },
+    {
+      failure: { reason: 'upstream', cause: 'upstream-error', httpStatus: 429 },
+      expected: { phase: 'agent', reason: 'upstream', httpStatus: 429 },
+    },
+    {
+      failure: { reason: 'upstream', cause: 'upstream-error', httpStatus: 503 },
+      expected: { phase: 'agent', reason: 'upstream', httpStatus: 503 },
+    },
+    {
+      failure: { reason: 'upstream', cause: 'upstream-error' },
+      expected: { phase: 'agent', reason: 'upstream' },
+    },
+    {
+      failure: { reason: 'invalid-output', cause: 'result-schema-failure' },
+      expected: { phase: 'output_validation', reason: 'invalid_output' },
+    },
+  ])(
+    'persists callback failure $failure as a distinct dashboard failure after worker recreation',
+    async ({ failure, expected }) => {
+      const database = new SqliteD1Database();
+      const store = createD1ReviewStateStore(database);
+      const review = await store.claimReview({
+        deliveryId: 'failure-classification-run',
+        job: {
+          repositoryId: 11,
+          pullRequestNumber: 42,
+          installationId: 7,
+          baseSha: '1'.repeat(40),
+          headSha: '2'.repeat(40),
+          trigger: 'automatic',
+          repositoryVisibility: 'private',
+        },
+        occurredAt: '2026-10-19T00:00:00.000Z',
+      });
+      if (review.kind !== 'claimed') throw new Error('not admitted');
+      await store.claimNextJob({
+        jobId: 'failure-job',
+        attempt: 1,
+        occurredAt: '2026-10-19T00:00:01.000Z',
+      });
+      const env = { ...coreEnv(database), EVIDENCE_BUCKET: { put: async () => undefined } };
+      const worker = createCoreWorker(env, { stateStore: store, github: {} });
+      const callback = {
+        ...JSON.parse(await failedCallback(review.runId, 'failure-job')),
+        failure,
+      };
+      const post = (body: unknown) =>
+        worker.handleRunnerCallback(
+          new Request('https://reviews.test/runner-callback', {
+            method: 'POST',
+            body: JSON.stringify(body),
+          }),
+        );
+      expect((await post({ ...callback, id: 'foreign-job' })).status).toBe(409);
+      expect((await post({ ...callback, failure: { ...failure, httpStatus: 999 } })).status).toBe(
+        400,
+      );
+      expect((await post(callback)).status).toBe(202);
+      const reader = createCoreWorker(env);
+      const detail = await (await reader.getPublicJobDetail(review.runId)).json();
+      expect(detail).toMatchObject({
+        task: { status: 'failed', identity: { kind: 'anonymous' }, failure: expected },
+      });
+      const history = await (await reader.listPublicJobs(new URLSearchParams())).json();
+      expect(history.tasks[0].failure).toEqual(expected);
+      database.close();
+    },
+  );
+
+  it('persists job model usage from an owned failed callback without exposing private repository identity', async () => {
+    const database = new SqliteD1Database();
+    const store = createD1ReviewStateStore(database);
+    const review = await store.claimReview({
+      deliveryId: 'usage-run',
+      job: {
+        repositoryId: 11,
+        pullRequestNumber: 42,
+        installationId: 7,
+        baseSha: '1'.repeat(40),
+        headSha: '2'.repeat(40),
+        trigger: 'automatic',
+        repositoryVisibility: 'private',
+      },
+      occurredAt: '2026-10-19T00:00:00.000Z',
+    });
+    if (review.kind !== 'claimed') throw new Error('not admitted');
+    await store.claimNextJob({
+      jobId: 'usage-job',
+      attempt: 1,
+      occurredAt: '2026-10-19T00:00:01.000Z',
+    });
+    const env = { ...coreEnv(database), EVIDENCE_BUCKET: { put: async () => undefined } };
+    const worker = createCoreWorker(env, { stateStore: store, github: {} });
+    const usage = {
+      version: 1,
+      models: [
+        {
+          route: 'reviewer',
+          model: 'deepseek-v4.1-flash',
+          requests: 2,
+          incompleteRequests: 1,
+          inputTokens: { total: 1200, reportedRequests: 2 },
+          uncachedInputTokens: { total: 300, reportedRequests: 2 },
+          cacheReadTokens: { total: 900, reportedRequests: 2 },
+          cacheWriteTokens: null,
+          outputTokens: { total: 80, reportedRequests: 1 },
+          reasoningTokens: { total: 30, reportedRequests: 1 },
+        },
+      ],
+    };
+    const callback = { ...JSON.parse(await failedCallback(review.runId, 'usage-job')), usage };
+    const post = (body: unknown) =>
+      worker.handleRunnerCallback(
+        new Request('https://reviews.test/runner-callback', {
+          method: 'POST',
+          body: JSON.stringify(body),
+        }),
+      );
+    const detail = async () =>
+      (await createCoreWorker(env).getPublicJobDetail(review.runId)).json();
+    expect((await post({ ...callback, id: 'foreign-job' })).status).toBe(409);
+    expect(await detail()).toMatchObject({ usage: null });
+    expect(
+      (
+        await post({
+          ...callback,
+          usage: { ...usage, models: [{ ...usage.models[0], requests: -1 }] },
+        })
+      ).status,
+    ).toBe(400);
+    expect((await post(callback)).status).toBe(202);
+    expect((await post({ ...callback, usage: { version: 1, models: [] } })).status).toBe(202);
+    expect(await detail()).toMatchObject({
+      usage,
+      task: { identity: { kind: 'anonymous' }, status: 'failed' },
+    });
+    expect(JSON.stringify(await detail())).not.toContain('repositoryId');
+    database.close();
+  });
+
+  it.each([successfulCallback, failedCallback, abortedCallback])(
+    'keeps a cancelled claim when a late %s arrives',
+    async (makeCallback) => {
+      const database = new SqliteD1Database();
+      try {
+        const state = createD1ReviewStateStore(database);
+        const queued = await state.claimReview({
+          deliveryId: 'cancelled-before-callback',
+          job: {
+            repositoryId: 11,
+            pullRequestNumber: 42,
+            installationId: 7,
+            baseSha: eligibleEvent.baseSha,
+            headSha: eligibleEvent.headSha,
+            trigger: 'automatic',
+          },
+          occurredAt: '2026-09-01T00:00:00.000Z',
+        });
+        if (queued.kind !== 'claimed') throw new Error('expected scheduled run');
+        const { runId } = queued;
+        const jobId = 'runner-job-1';
+        await state.claimNextJob({ jobId, attempt: 1, occurredAt: '2026-09-01T00:01:00.000Z' });
+        await state.cancelRun({ runId, requestedByUid: 1, occurredAt: '2026-09-01T00:02:00.000Z' });
+        const env = {
+          ...coreEnv(database),
+          EVIDENCE_BUCKET: { put: async () => undefined },
+        };
+        const createReview = vi.fn();
+        const createIssueComment = vi.fn();
+        const worker = createCoreWorker(env, {
+          stateStore: state,
+          github: { createReview, createIssueComment },
+        });
+        const reply = await worker.handleRunnerCallback(
+          new Request('https://reviews.test/runner-callback', {
+            method: 'POST',
+            body: await makeCallback(runId, jobId, 1),
+          }),
+        );
+        expect(reply.status).toBe(202);
+        expect(await state.getRunOutcome(runId)).toMatchObject({
+          status: 'cancelled',
+          runnerJobId: jobId,
+          runnerAttempt: 1,
+        });
+        expect(createReview).not.toHaveBeenCalled();
+        expect(createIssueComment).not.toHaveBeenCalled();
+      } finally {
+        database.close();
+      }
+    },
+  );
+
+  it.each([
+    ['cancellation wins at the failure-notification claim', 'cancel', 'cancelled', false],
+    ['the post-write read fails after owning publication', 'owned', 'failed', true],
+    ['the post-write read fails without publication ownership', 'unowned', 'scheduled', false],
+  ] as const)(
+    'handles publication failure when %s',
+    async (_name, kind, expectedStatus, expectReaction) => {
+      const database = new SqliteD1Database();
+      const state = createD1ReviewStateStore(database);
+      const claimed = await state.claimReview({
+        deliveryId: `late-invalid-evidence-${kind}`,
+        job: {
+          repositoryId: 11,
+          pullRequestNumber: 42,
+          installationId: 7,
+          baseSha: eligibleEvent.baseSha,
+          headSha: eligibleEvent.headSha,
+          trigger: 'manual',
+          commentId: 987654,
+        },
+        occurredAt: '2026-09-01T00:00:00.000Z',
+      });
+      if (claimed.kind !== 'claimed') throw new Error('manual run was not claimed');
+      const { runId } = claimed;
+      await state.claimNextJob({
+        jobId: 'runner-job-1',
+        attempt: 1,
+        occurredAt: '2026-09-01T00:01:00.000Z',
+      });
+      const reactions: unknown[] = [];
+      const env = {
+        ...coreEnv(database),
+        EVIDENCE_BUCKET: { put: async () => undefined },
+      };
+      const stateStore =
+        kind === 'cancel'
+          ? {
+              ...state,
+              claimRunPublication: async (
+                input: Parameters<NonNullable<typeof state.claimRunPublication>>[0],
+              ) => {
+                await state.cancelRun({
+                  runId,
+                  requestedByUid: 1,
+                  occurredAt: new Date().toISOString(),
+                });
+                return state.claimRunPublication(input);
+              },
+            }
+          : failReadAfterSchedulingWrite(state, kind);
+      const worker = createCoreWorker(env, {
+        stateStore,
+        github: {
+          addReaction: async (input) => void reactions.push(input),
+          loadReviewTarget: async () => ({ headSha: eligibleEvent.headSha }),
+          createReview: async () => {
+            throw new Error('GitHub publication unavailable');
+          },
+        },
+      });
+      try {
+        const callback = await successfulCallback(runId);
+        const response = await worker.handleRunnerCallback(
+          new Request('https://reviews.test/runner-callback', {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+            },
+            body: callback,
+          }),
+        );
+        expect(response.status).toBe(expectedStatus === 'cancelled' ? 202 : 503);
+        expect(await state.getRunOutcome(runId)).toMatchObject({ status: expectedStatus });
+        expect(reactions).toEqual(
+          expectReaction
+            ? [{ repositoryId: 11, installationId: 7, commentId: 987654, content: '-1' }]
+            : [],
+        );
+      } finally {
+        database.close();
+      }
+    },
+  );
+
+  it.each([
+    ['cancellation wins at the failure claim', 'cancel', 202, 'cancelled', false],
+    ['the post-write read fails after owning publication', 'owned', 503, 'failed', true],
+  ] as const)(
+    'handles completion failure when %s',
+    async (_name, kind, expectedStatus, settledStatus, expectFeedback) => {
+      const database = new SqliteD1Database();
+      const state = createD1ReviewStateStore(database);
+      const claimed = await state.claimReview({
+        deliveryId: `late-target-lookup-${kind}`,
+        job: {
+          repositoryId: 11,
+          pullRequestNumber: 42,
+          installationId: 7,
+          baseSha: eligibleEvent.baseSha,
+          headSha: eligibleEvent.headSha,
+          trigger: 'manual',
+          commentId: 987654,
+        },
+        occurredAt: '2026-09-01T00:00:00.000Z',
+      });
+      if (claimed.kind !== 'claimed') throw new Error('manual run was not claimed');
+      const { runId } = claimed;
+      await state.claimNextJob({
+        jobId: 'runner-job-1',
+        attempt: 1,
+        occurredAt: '2026-09-01T00:01:00.000Z',
+      });
+      const reactions: unknown[] = [];
+      const logs: OperationalLogEvent[] = [];
+      const createReview = vi.fn();
+      const env = {
+        ...coreEnv(database),
+        EVIDENCE_BUCKET: { put: async () => undefined },
+      };
+      const stateStore =
+        kind === 'cancel'
+          ? {
+              ...state,
+              markSchedulingFailed: async (
+                input: Parameters<NonNullable<typeof state.markSchedulingFailed>>[0],
+              ) => {
+                await state.cancelRun({
+                  runId,
+                  requestedByUid: 1,
+                  occurredAt: new Date().toISOString(),
+                });
+                return state.markSchedulingFailed(input);
+              },
+            }
+          : failReadAfterSchedulingWrite(state, kind);
+      const worker = createCoreWorker(env, {
+        stateStore,
+        log: { record: (event) => void logs.push(event) },
+        github: {
+          addReaction: async (input) => void reactions.push(input),
+          loadReviewTarget: async () => undefined,
+          createReview,
+        },
+      });
+      try {
+        const response = await worker.handleRunnerCallback(
+          new Request('https://reviews.test/runner-callback', {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+            },
+            body: await successfulCallback(runId),
+          }),
+        );
+        expect(response.status).toBe(expectedStatus);
+        expect(await state.getRunOutcome(runId)).toMatchObject({ status: settledStatus });
+        expect(createReview).not.toHaveBeenCalled();
+        expect(reactions).toEqual(
+          expectFeedback
+            ? [{ repositoryId: 11, installationId: 7, commentId: 987654, content: '-1' }]
+            : [],
+        );
+        expect(
+          logs.filter((event) => event.phase === 'publication' && event.outcome === 'failed'),
+        ).toHaveLength(expectFeedback ? 1 : 0);
+      } finally {
+        database.close();
+      }
+    },
+  );
 });

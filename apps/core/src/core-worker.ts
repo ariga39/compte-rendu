@@ -35,11 +35,6 @@ export interface CoreWorkerEnv extends Partial<CoreEnv> {
   readonly REVIEW_CONFIGURATION_TOKEN?: string;
   readonly RELAY_DEFAULT_MODEL_ROUTE?: string;
   readonly EVIDENCE_BUCKET?: R2BucketLike;
-  readonly POSTHOG_ENABLED?: string;
-  readonly POSTHOG_PROJECT_API_KEY?: string;
-  readonly POSTHOG_HOST?: string;
-  readonly POSTHOG_DEPLOYMENT?: string;
-  readonly POSTHOG_ENVIRONMENT?: string;
   readonly [key: string]: unknown;
 }
 

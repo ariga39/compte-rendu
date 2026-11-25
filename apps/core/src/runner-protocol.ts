@@ -11,7 +11,6 @@ import {
   readBoundedRequestBody,
   type PublicTaskFailure,
 } from '@compte-rendu/contracts';
-import type { CoreLifecycleFailureReason, CoreLifecycleLog } from './core-observability';
 import { currentIso } from './core-observability';
 import type { GitHubAdapter } from './github-adapter-contract';
 import type { CoreWorkerEnv } from './core-worker';
@@ -26,7 +25,6 @@ import {
   resetPreviousReviewVerdicts,
 } from './review-publication';
 import { storePublicationRecord } from './publication-record';
-import type { createPostHogLifecycleLog } from './posthog';
 const MAX_PROGRESS_BYTES = 16 * 1024;
 const MAX_READ_TOKEN_REQUEST_BYTES = 16 * 1024;
 const READ_TOKEN_RENEWAL_MARGIN_MS = 60 * 1000;
@@ -72,81 +70,6 @@ export interface RunnerProtocolDependencies {
 export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) => {
   const { env, stateStore, github, tokenProvider, completeReview, validateProgressSnapshot } =
     dependencies;
-  const recordLifecycle = (
-    lifecycleLog: ReturnType<typeof createPostHogLifecycleLog>,
-    event: Parameters<ReturnType<typeof createPostHogLifecycleLog>['record']>[0],
-  ) => {
-    try {
-      lifecycleLog.record(event);
-    } catch {
-      // Lifecycle capture is strictly best effort and cannot affect product behavior.
-    }
-  };
-
-  const recordFinishedLifecycle = (
-    lifecycleLog: ReturnType<typeof createPostHogLifecycleLog>,
-    outcome: ReviewOutcome,
-    terminal: 'completed' | 'failed' | 'superseded',
-    callback?: typeof RunnerTerminalCallback.Type,
-    failure?: {
-      readonly phase: NonNullable<
-        Extract<
-          Parameters<CoreLifecycleLog['record']>[0],
-          { event: 'review finished'; outcome: 'failed' }
-        >['failurePhase']
-      >;
-      readonly reason: CoreLifecycleFailureReason;
-    },
-    runId?: string,
-  ) => {
-    const occurredAt = new Date().toISOString();
-    const created = epochMilliseconds(outcome.createdAt);
-    const finishedAt = epochMilliseconds(occurredAt);
-    const totalDurationMs =
-      created !== undefined && finishedAt !== undefined ? Math.max(0, finishedAt - created) : 0;
-    const failedCallback = callback?.status === 'failed' ? callback : undefined;
-    const failureReason =
-      terminal !== 'failed'
-        ? undefined
-        : (failure?.reason ??
-          (failedCallback?.failure === undefined
-            ? 'unknown'
-            : failedCallback.failure.reason === 'invalid-output'
-              ? 'invalid_output'
-              : failedCallback.failure.reason));
-    const common = {
-      event: 'review finished',
-      runId: callback?.runId ?? runId ?? outcome.deliveryId,
-      trigger: outcome.trigger,
-      totalDurationMs,
-      cleanupStatus:
-        callback?.sandbox.cleanup === 'destroyed' || callback?.sandbox.cleanup === 'failed'
-          ? callback.sandbox.cleanup
-          : 'unknown',
-      evidenceStatus: callback?.evidence.status ?? outcome.evidence?.status ?? 'unknown',
-    } as const;
-    if (terminal === 'completed') {
-      recordLifecycle(lifecycleLog, { ...common, outcome: terminal, published: true });
-    } else if (terminal === 'superseded') {
-      recordLifecycle(lifecycleLog, { ...common, outcome: terminal, published: false });
-    } else {
-      recordLifecycle(lifecycleLog, {
-        ...common,
-        outcome: terminal,
-        published: false,
-        failurePhase:
-          failure?.phase ??
-          (failedCallback?.stage === 'admission' ||
-          failedCallback?.stage === 'checkout' ||
-          failedCallback?.stage === 'sandbox' ||
-          failedCallback?.stage === 'agent' ||
-          failedCallback?.stage === 'cleanup'
-            ? failedCallback.stage
-            : 'unknown'),
-        failureReason: failureReason ?? 'unknown',
-      });
-    }
-  };
 
   const markRunFailed = (
     outcome: ReviewOutcome,
@@ -252,10 +175,7 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
       return winner;
     });
 
-  const handleRunnerResult = (
-    request: Request,
-    lifecycleLog: ReturnType<typeof createPostHogLifecycleLog>,
-  ) =>
+  const handleRunnerResult = (request: Request) =>
     Effect.gen(function* () {
       const body = yield* port(() => readBoundedRequestBytes(request, MAX_RUNNER_CALLBACK_BYTES));
       if (body === undefined) return new Response(null, { status: 413 });
@@ -432,7 +352,6 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
               undefined,
             );
           }
-          recordFinishedLifecycle(lifecycleLog, outcome, 'superseded', callback);
           return new Response(null, { status: 202 });
         }
         if (outcome.status === 'failed') {
@@ -462,19 +381,6 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
           return new Response(null, { status: 503 });
         }
         if (finalOutcome.status === 'cancelled') return new Response(null, { status: 202 });
-        recordFinishedLifecycle(
-          lifecycleLog,
-          finalOutcome,
-          finalOutcome.status === 'completed'
-            ? 'completed'
-            : finalOutcome.status === 'superseded'
-              ? 'superseded'
-              : 'failed',
-          callback,
-          finalOutcome.status === 'failed'
-            ? { phase: 'publication', reason: 'unknown' }
-            : undefined,
-        );
         if (
           disposition === 'completed' &&
           finalOutcome.status === 'completed' &&
@@ -494,15 +400,7 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
         return new Response(null, { status: finalOutcome.status === 'failed' ? 503 : 202 });
       }
 
-      const settled = yield* markCallbackFailed();
-      if (settled?.status === 'failed' || settled?.status === 'superseded') {
-        recordFinishedLifecycle(
-          lifecycleLog,
-          settled,
-          settled.status === 'superseded' ? 'superseded' : 'failed',
-          callback,
-        );
-      }
+      yield* markCallbackFailed();
       return new Response(null, { status: 202 });
     });
 
@@ -687,10 +585,7 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
       );
     });
 
-  const handleRunnerClaim = (
-    request: Request,
-    lifecycleLog: ReturnType<typeof createPostHogLifecycleLog>,
-  ) =>
+  const handleRunnerClaim = (request: Request) =>
     Effect.gen(function* () {
       const occurredAt = new Date().toISOString();
       const body = yield* port(() => readBoundedRequestBody(request, 64 * 1024));
@@ -727,40 +622,13 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
             claim.kind === 'preparing'
               ? { jobId: claim.jobId, attempt: 1, requireUnprepared: true }
               : undefined;
-          const failed = yield* markRunFailed(outcome, claim.runId, occurredAt, release, failure);
-          if (failed?.status === 'failed')
-            recordFinishedLifecycle(
-              lifecycleLog,
-              failed,
-              'failed',
-              undefined,
-              failure,
-              claim.runId,
-            );
+          yield* markRunFailed(outcome, claim.runId, occurredAt, release, failure);
           return new Response(null, { status: 204 });
         }
         if (claim.kind === 'preparing') return new Response(null, { status: 503 });
       }
 
       const claimedAt = claim.claimedAt;
-      const claimedOutcome = yield* bestEffort(
-        () => stateStore.getRunOutcome(claim.runId),
-        undefined,
-      );
-      const createdAt = claimedOutcome?.createdAt;
-      const parsedCreatedAt = createdAt === undefined ? undefined : epochMilliseconds(createdAt);
-      const parsedClaimedAt = epochMilliseconds(claimedAt);
-      const queueWaitMs =
-        parsedCreatedAt !== undefined && parsedClaimedAt !== undefined
-          ? Math.max(0, parsedClaimedAt - parsedCreatedAt)
-          : 0;
-      if (!claim.replay)
-        recordLifecycle(lifecycleLog, {
-          event: 'review claimed',
-          runId: claim.runId,
-          trigger: claim.job.trigger,
-          queueWaitMs,
-        });
 
       const releaseUndeliveredCancellation = () =>
         Effect.gen(function* () {
@@ -799,14 +667,6 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
               undefined,
             );
           }
-          recordFinishedLifecycle(
-            lifecycleLog,
-            superseded,
-            'superseded',
-            undefined,
-            undefined,
-            claim.runId,
-          );
           return new Response(null, { status: 204 });
         });
 
@@ -994,20 +854,6 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
               preparationFailure,
             );
           }
-          const failedOutcome = yield* port(() => stateStore.getRunOutcome(claim.runId));
-          if (failedOutcome?.status === 'failed') {
-            recordFinishedLifecycle(
-              lifecycleLog,
-              failedOutcome,
-              'failed',
-              undefined,
-              preparationFailure ?? {
-                phase: 'unknown',
-                reason: 'unknown',
-              },
-              claim.runId,
-            );
-          }
           return new Response(null, { status: 503 });
         });
 
@@ -1015,7 +861,6 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
     });
 
   return {
-    recordFinishedLifecycle,
     handleRunnerResult,
     handleRunnerEvidence,
     handleRunnerProgress,

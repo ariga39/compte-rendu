@@ -48,11 +48,6 @@ export {
   type D1PreparedStatementLike,
   type D1ResultLike,
 } from './review-state-store';
-export {
-  CoreLifecycleEvent,
-  CoreLifecycleFailureReason,
-  type CoreLifecycleLog,
-} from './core-observability';
 export type {
   GitHubAdapter,
   ReviewPublicationCreateResult,

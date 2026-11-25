@@ -30,7 +30,7 @@ export type CoreWorker = {
   listPublicJobs(searchParams: URLSearchParams): Promise<Response>;
   getPublicJobDetail(rawRunId: string): Promise<Response>;
   handleReviewConfiguration(request: Request): Promise<Response>;
-  cancelReview(runId: string, requestedByUid: number, context?: WaitUntil): Promise<Response>;
+  cancelReview(runId: string, requestedByUid: number): Promise<Response>;
   reconcileCancellations(now: number, runId?: string): Promise<void>;
 };
 
@@ -64,8 +64,8 @@ export const createCoreWorker = (
     listPublicJobs: (searchParams) => run((core) => core.listPublicJobs(searchParams)),
     getPublicJobDetail: (rawRunId) => run((core) => core.publicJobDetail(rawRunId)),
     handleReviewConfiguration: (request) => run((core) => core.reviewConfiguration(request)),
-    cancelReview: (runId, requestedByUid, context) =>
-      run((core) => core.cancelReview(runId, requestedByUid), context),
+    cancelReview: (runId, requestedByUid) =>
+      run((core) => core.cancelReview(runId, requestedByUid)),
     reconcileCancellations: (now, runId) => run((core) => core.reconcileCancellations(now, runId)),
   };
 };

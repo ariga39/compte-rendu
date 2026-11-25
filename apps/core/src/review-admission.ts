@@ -7,13 +7,7 @@ import {
 import { Effect, Schema } from 'effect';
 import type { CancellationStore } from './cancellation-store';
 import type { CheckRunStore } from './check-run-store';
-import {
-  currentIso,
-  recordLifecycleLog,
-  recordOperationalLog,
-  recordSupersededLifecycle,
-  type CoreLifecycleLog,
-} from './core-observability';
+import { currentIso, recordOperationalLog } from './core-observability';
 import type { GitHubAdapter } from './github-adapter-contract';
 import {
   completeReviewEffect,
@@ -80,7 +74,6 @@ interface AdmissionDependencies {
   readonly cancelRunnerJob?: CancelRunnerJob;
   readonly log?: OperationalLog;
   readonly deferCheckSetup?: ReviewCheckSetupDefer;
-  readonly lifecycleLog?: CoreLifecycleLog;
 }
 
 const claimAndSchedule = (
@@ -90,8 +83,7 @@ const claimAndSchedule = (
   approval?: ReviewApproval,
 ) =>
   Effect.gen(function* () {
-    const { github, stateStore, cancelRunnerJob, log, deferCheckSetup, lifecycleLog } =
-      dependencies;
+    const { github, stateStore, cancelRunnerJob, log, deferCheckSetup } = dependencies;
     const occurredAt = yield* currentIso;
     const validatedJob = yield* Schema.decodeUnknownEffect(ReviewJob)(job).pipe(
       Effect.mapError(() => new SchedulingFailed({ message: 'Review job is invalid' })),
@@ -136,12 +128,6 @@ const claimAndSchedule = (
         ? {}
         : { blockingCleanupStatus: claim.blockingCleanupStatus };
 
-    yield* recordLifecycleLog(lifecycleLog, {
-      event: 'review scheduled',
-      runId: claim.runId,
-      trigger: job.trigger,
-    });
-
     if (claim.supersededRunIds !== undefined) {
       for (const supersededRunId of claim.supersededRunIds) {
         const supersededOutcome = yield* Effect.tryPromise({
@@ -158,15 +144,6 @@ const claimAndSchedule = (
               }),
             catch: () => undefined,
           }).pipe(Effect.catch(() => Effect.succeed(undefined)));
-        }
-        if (supersededOutcome?.status === 'superseded') {
-          yield* recordSupersededLifecycle(
-            lifecycleLog,
-            supersededRunId,
-            supersededOutcome,
-            occurredAt,
-            'unknown',
-          );
         }
       }
     }
@@ -228,15 +205,6 @@ const claimAndSchedule = (
         catch: () => false,
       }).pipe(Effect.catch(() => Effect.succeed(false)));
       if (!cleared) return { disposition: 'scheduled' as const, ...admission };
-      if (supersededOutcome !== undefined) {
-        yield* recordSupersededLifecycle(
-          lifecycleLog,
-          claim.activeRunnerJob.runId,
-          supersededOutcome,
-          yield* currentIso,
-          'destroyed',
-        );
-      }
     }
 
     yield* recordOperationalLog(log, {

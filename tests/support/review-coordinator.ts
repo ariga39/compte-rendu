@@ -5,7 +5,6 @@ import {
 } from '../../apps/core/src/review-admission';
 import type { GitHubAdapter } from '../../apps/core/src/github-adapter-contract';
 import type { OperationalLog } from '../../packages/contracts/src';
-import type { CoreLifecycleLog } from '../../apps/core/src/core-observability';
 import type {
   CancelRunnerJob,
   ReviewCheckSetupDefer,
@@ -23,7 +22,6 @@ export const createReviewCoordinator = (dependencies: {
   readonly cancelRunnerJob?: CancelRunnerJob;
   readonly deferCheckSetup?: ReviewCheckSetupDefer;
   readonly log?: OperationalLog;
-  readonly lifecycleLog?: CoreLifecycleLog;
 }) => {
   const admission = createReviewAdmission(dependencies);
   return {

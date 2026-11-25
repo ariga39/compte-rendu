@@ -23,11 +23,6 @@ type WranglerConfig = {
     DASHBOARD_ORIGIN?: string;
     ALLOWED_INSTALLATION_IDS?: string;
     ALLOWED_BOT_AUTHOR_IDS?: string;
-    POSTHOG_ENABLED?: string;
-    POSTHOG_PROJECT_API_KEY?: string;
-    POSTHOG_HOST?: string;
-    POSTHOG_DEPLOYMENT?: string;
-    POSTHOG_ENVIRONMENT?: string;
   };
   secrets?: { required?: readonly string[] };
   d1_databases?: readonly { database_id?: string }[];
@@ -55,7 +50,6 @@ type DeploymentFixture = {
   runWithInstallationIds: (instanceName: string, installationIds: string) => string;
   runWithBotAuthorIds: (instanceName: string, botAuthorIds: string) => string;
   runWithCheckName: (instanceName: string, name: string) => string;
-  runWithPostHog: (instanceName: string, posthog: string) => string;
   outputs: (instanceName: string) => { application: string };
   read: (instanceName: string) => { application: string };
 };
@@ -76,7 +70,6 @@ const withDeploymentFixture = <T>(callback: (fixture: DeploymentFixture) => T): 
     runnerId?: string,
     configuredInstallationIds: string | null = allowedInstallationIds,
     configuredBotAuthorIds?: string,
-    posthog?: string,
     checkName?: string,
   ) =>
     execFileSync(
@@ -90,7 +83,6 @@ const withDeploymentFixture = <T>(callback: (fixture: DeploymentFixture) => T): 
         ...(runnerId === undefined ? [] : [runnerId]),
         ...(configuredInstallationIds === null ? [] : [configuredInstallationIds]),
         ...(configuredBotAuthorIds === undefined ? [] : [configuredBotAuthorIds]),
-        ...(posthog === undefined ? [] : [posthog]),
         ...(checkName === undefined ? [] : [checkName]),
       ],
       { cwd: root, encoding: 'utf8', stdio: 'pipe' },
@@ -113,16 +105,7 @@ const withDeploymentFixture = <T>(callback: (fixture: DeploymentFixture) => T): 
       runWithBotAuthorIds: (instanceName, botAuthorIds) =>
         invoke(instanceName, runnerVpcServiceId, allowedInstallationIds, botAuthorIds),
       runWithCheckName: (instanceName, name) =>
-        invoke(
-          instanceName,
-          runnerVpcServiceId,
-          allowedInstallationIds,
-          '[]',
-          '{"enabled":false}',
-          name,
-        ),
-      runWithPostHog: (instanceName, posthog) =>
-        invoke(instanceName, runnerVpcServiceId, allowedInstallationIds, '[]', posthog),
+        invoke(instanceName, runnerVpcServiceId, allowedInstallationIds, '[]', name),
       outputs,
       read,
     });
@@ -232,31 +215,6 @@ describe('Wrangler deployment tooling', () => {
       expect(parseConfigText(read('named-review').application).vars?.GITHUB_CHECK_NAME).toBe(
         'Ariga39 "AI" Review $$ $&',
       );
-    });
-  });
-
-  it('renders an optional per-installation PostHog capture configuration', () => {
-    withDeploymentFixture(({ runWithPostHog: run, read }) => {
-      run(
-        'posthog-instance',
-        JSON.stringify({
-          enabled: true,
-          projectApiKey: 'phc_instance_key',
-          host: 'https://eu.i.posthog.com',
-          deployment: 'posthog-instance',
-          environment: 'production',
-        }),
-      );
-
-      const config = parseConfigText(read('posthog-instance').application);
-      expect(config.vars).toMatchObject({
-        POSTHOG_ENABLED: 'true',
-        POSTHOG_PROJECT_API_KEY: 'phc_instance_key',
-        POSTHOG_HOST: 'https://eu.i.posthog.com',
-        POSTHOG_DEPLOYMENT: 'posthog-instance',
-        POSTHOG_ENVIRONMENT: 'production',
-      });
-      expect(read('posthog-instance').application).not.toContain('PERSONAL_API_KEY');
     });
   });
 

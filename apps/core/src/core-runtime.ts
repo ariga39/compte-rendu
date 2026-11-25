@@ -10,7 +10,6 @@ import { createCoreInfrastructure } from './core-infrastructure';
 import { currentIso, recordOperationalLog } from './core-observability';
 import type { CoreWorkerDependencies, CoreWorkerEnv } from './core-worker';
 import { createJobControl } from './job-control';
-import { createPostHogLifecycleLog } from './posthog';
 import { readPublicationRecord } from './publication-record';
 import { createReviewAdmission } from './review-admission';
 import { publishTerminalCheck } from './review-publication';
@@ -32,8 +31,6 @@ const port = <A>(run: () => Promise<A>) =>
   Effect.tryPromise({ try: run, catch: (error: unknown) => error });
 
 export interface CoreRuntimeHost {
-  /** Host lifecycle used for best-effort PostHog delivery. */
-  readonly context?: WaitUntil;
   /**
    * Defers durable check setup. With a request context this stays background
    * work; without one admission completes inline at its original point.
@@ -45,7 +42,6 @@ export const makeCoreRuntimeHost = (context?: WaitUntil): CoreRuntimeHost =>
   context === undefined
     ? {}
     : {
-        context,
         deferCheckSetup: (task) => context.waitUntil(Effect.runPromise(task)),
       };
 
@@ -136,12 +132,10 @@ export const makeCoreRuntime = (
     env,
     dependencies,
   );
-  const lifecycleLog = createPostHogLifecycleLog(env, host.context);
   const admission = createReviewAdmission({
     github,
     stateStore,
     log,
-    lifecycleLog,
     ...(runner === undefined ? {} : { cancelRunnerJob: runner.cancelJob }),
     ...(host.deferCheckSetup === undefined ? {} : { deferCheckSetup: host.deferCheckSetup }),
   });
@@ -156,9 +150,7 @@ export const makeCoreRuntime = (
       ? {}
       : { getReadInstallationToken: dependencies.getReadInstallationToken }),
   });
-  const jobControl = createJobControl(stateStore, github, runner, log, (context) =>
-    createPostHogLifecycleLog(env, context ?? host.context),
-  );
+  const jobControl = createJobControl(stateStore, github, runner, log);
 
   const reconcilePublications = Effect.fn('CoreRuntime.reconcilePublications')(function* (
     now: number,
@@ -171,10 +163,6 @@ export const makeCoreRuntime = (
           4,
         ),
       catch: (error: unknown) => error,
-    });
-    const captures: Promise<unknown>[] = [];
-    const publicationLifecycle = createPostHogLifecycleLog(env, {
-      waitUntil: (task) => captures.push(task),
     });
     let incomplete = false;
     for (const runId of ids) {
@@ -203,7 +191,7 @@ export const makeCoreRuntime = (
           );
         }
         reason = 'publication';
-        const disposition = yield* admission.completeReview({
+        yield* admission.completeReview({
           runId,
           output: publication.record.result,
           reconcileClaimedAt: outcome.publicationClaimedAt,
@@ -211,19 +199,6 @@ export const makeCoreRuntime = (
         const terminal = yield* port(() => stateStore.getRunOutcome(runId));
         if (!terminal || terminal.status === 'scheduled') {
           return yield* Effect.fail(new Error('Publication still pending'));
-        }
-        if (
-          (terminal.status === 'completed' || terminal.status === 'failed') &&
-          disposition === terminal.status
-        ) {
-          protocol.recordFinishedLifecycle(
-            publicationLifecycle,
-            terminal,
-            terminal.status,
-            undefined,
-            terminal.status === 'failed' ? { phase: 'publication', reason: 'unknown' } : undefined,
-            runId,
-          );
         }
         if (terminal.status === 'completed' && terminal.checkRunId !== undefined) {
           reason = 'check';
@@ -249,7 +224,6 @@ export const makeCoreRuntime = (
       );
       if (!settled) incomplete = true;
     }
-    yield* Effect.promise(() => Promise.allSettled(captures));
     if (incomplete) return yield* Effect.fail(new Error('Publication reconciliation incomplete'));
   });
 
@@ -326,13 +300,13 @@ export const makeCoreRuntime = (
   return {
     submitReviewEvent: makeSubmitReviewEvent(stateStore, admission),
     invalidateMetadata: makeInvalidateMetadata(stateStore),
-    claimRunnerJob: (request) => protocol.handleRunnerClaim(request, lifecycleLog),
+    claimRunnerJob: (request) => protocol.handleRunnerClaim(request),
     renewRunnerReadToken: (request) => protocol.handleRunnerReadToken(request),
-    handleRunnerCallback: (request) => protocol.handleRunnerResult(request, lifecycleLog),
+    handleRunnerCallback: (request) => protocol.handleRunnerResult(request),
     handleRunnerEvidence: (request) => protocol.handleRunnerEvidence(request),
     handleRunnerProgress: (request) => protocol.handleRunnerProgress(request),
     cancelReview: (runId, requestedByUid) =>
-      port(() => jobControl.cancelReview(runId, requestedByUid, host.context)),
+      port(() => jobControl.cancelReview(runId, requestedByUid)),
     reconcileCancellations: (now, runId) =>
       port(() => jobControl.reconcileCancellations(now, runId)),
     reconcilePublications,

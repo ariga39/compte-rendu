@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import type { CoreWorkerDependencies } from './support/core-worker-runtime';
 import { createCoreWorker } from './support/core-worker-runtime';
 import { createD1ReviewStateStore } from '../apps/core/src/review-state-store';
@@ -135,7 +135,7 @@ const gate = () => {
   return { promise, resolve };
 };
 
-const resetFixture = async (options: { firstRound?: boolean; lifecycle?: boolean } = {}) => {
+const resetFixture = async (options: { firstRound?: boolean } = {}) => {
   const database = new SqliteD1Database();
   const store = createD1ReviewStateStore(database);
   let reviews: ReturnType<typeof review>[] = [];
@@ -243,27 +243,10 @@ const resetFixture = async (options: { firstRound?: boolean; lifecycle?: boolean
       return Response.json(reviews.find((r) => r.id === Number(exact[1])));
     return new Response(null, { status: 404 });
   };
-  const lifecycleRequests: Request[] = [];
-  const lifecycleFetch =
-    options.lifecycle === true
-      ? vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
-          lifecycleRequests.push(new Request(input, init));
-          return new Response('{}', { status: 200 });
-        })
-      : undefined;
   const env = {
     REVIEW_DB: database,
     GITHUB_APP_ID: '123',
     GITHUB_APP_PRIVATE_KEY: 'fixture',
-    ...(options.lifecycle === true
-      ? {
-          POSTHOG_ENABLED: 'true',
-          POSTHOG_PROJECT_API_KEY: 'phc_fixture_project_key',
-          POSTHOG_HOST: 'https://posthog.example.test',
-          POSTHOG_DEPLOYMENT: 'fixture',
-          POSTHOG_ENVIRONMENT: 'staging',
-        }
-      : {}),
   };
   const logs: unknown[] = [];
   const dependencies: CoreWorkerDependencies = {
@@ -303,7 +286,6 @@ const resetFixture = async (options: { firstRound?: boolean; lifecycle?: boolean
     checks,
     controls,
     logs,
-    lifecycleRequests,
     send,
     claim,
     worker,
@@ -311,7 +293,6 @@ const resetFixture = async (options: { firstRound?: boolean; lifecycle?: boolean
     settle: async () => {
       await Promise.all(tasks.splice(0));
     },
-    restoreLifecycle: () => lifecycleFetch?.mockRestore(),
   };
 };
 
@@ -574,7 +555,7 @@ it('supersedes a first-round queued run when the head changed before delivery', 
 });
 
 it('fails a first-round claim when the current PR head cannot be read', async () => {
-  const f = await resetFixture({ firstRound: true, lifecycle: true });
+  const f = await resetFixture({ firstRound: true });
   try {
     expect(await f.send()).toBe('accepted');
     await f.settle();
@@ -590,29 +571,8 @@ it('fails a first-round claim when the current PR head cannot be read', async ()
     expect(await detail.json()).toMatchObject({
       task: { failure: { phase: 'scheduling', reason: 'unknown' } },
     });
-    await f.settle();
-    const lifecycle = (
-      await Promise.all(
-        f.lifecycleRequests.map(async (request) => {
-          const payload = JSON.parse(await request.clone().text()) as {
-            batch: ReadonlyArray<{ event: string; properties: Record<string, unknown> }>;
-          };
-          return payload.batch;
-        }),
-      )
-    ).flat();
-    expect(lifecycle.find((entry) => entry.event === 'review finished')).toMatchObject({
-      event: 'review finished',
-      properties: {
-        outcome: 'failed',
-        published: false,
-        failure_phase: 'scheduling',
-        failure_reason: 'unknown',
-      },
-    });
   } finally {
     await f.settle();
-    f.restoreLifecycle();
     f.database.close();
   }
 });

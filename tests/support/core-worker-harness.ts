@@ -1,4 +1,3 @@
-import { vi } from 'vitest';
 import { Effect } from 'effect';
 import {
   createCoreWorker,
@@ -234,36 +233,6 @@ export const recordTestEvidence = async (
   return written;
 };
 
-export const postHogEvents = async (requests: readonly Request[]) =>
-  Promise.all(
-    requests.map(async (request) => {
-      const payload = JSON.parse(await request.clone().text()) as {
-        batch: readonly unknown[];
-      };
-      return payload.batch;
-    }),
-  ).then((batches) => batches.flat());
-
-export const postHogTestDefaults = {
-  environment: {
-    POSTHOG_ENABLED: 'true',
-    POSTHOG_PROJECT_API_KEY: 'phc_test_project_key',
-    POSTHOG_HOST: 'https://posthog.example.test',
-    POSTHOG_DEPLOYMENT: 'test-installation',
-    POSTHOG_ENVIRONMENT: 'staging',
-  },
-  dependencies: {
-    github: {
-      getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
-      loadReviewTarget: async () => ({ headSha: eligibleEvent.headSha }),
-    },
-    getReadInstallationToken: async () => ({
-      token: 'read-token',
-      expiresAt: '2026-09-01T01:00:00.000Z',
-    }),
-  },
-} as const;
-
 export const runnerClaimRequest = () =>
   new Request('https://reviews.test/runner-claim', { method: 'POST' });
 
@@ -279,16 +248,6 @@ export const claimGithub = (headSha: string | (() => string) = eligibleEvent.hea
     headSha: typeof headSha === 'function' ? headSha() : headSha,
   }),
 });
-
-export const capturePostHogTransport = (status = 200) => {
-  const requests: Request[] = [];
-  const waitUntilTasks: Promise<unknown>[] = [];
-  const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
-    requests.push(new Request(input, init));
-    return new Response('{}', { status });
-  });
-  return { fetcher, requests, waitUntilTasks };
-};
 
 export const failReadAfterSchedulingWrite = (
   state: ReviewPublicationStateStore,
