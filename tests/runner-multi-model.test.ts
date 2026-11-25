@@ -687,6 +687,35 @@ describe('Runner multi-model review', () => {
     ).toEqual(routes);
   });
 
+  it('accepts a legal issue-v2 roster larger than 16 KiB', async () => {
+    const metadataItems = Array.from(
+      { length: 64 },
+      (_, index) => `${String(index).padStart(2, '0')}${'x'.repeat(126)}`,
+    );
+    const descriptors = [
+      {
+        routeId: 'deepseek-v4.1-flash',
+        profile: 'chat',
+        metadata: {
+          name: 'DeepSeek',
+          capabilities: { input: metadataItems, output: metadataItems },
+        },
+      },
+      {
+        routeId: 'step-5-preview',
+        profile: 'responses',
+        metadata: {
+          name: 'Step 5',
+          capabilities: { input: metadataItems, output: metadataItems },
+        },
+      },
+    ];
+    expect(JSON.stringify(descriptors).length).toBeGreaterThan(16 * 1024);
+    const result = await runScenario({ descriptors });
+    expect(result.terminal.status).toBe('succeeded');
+    expect(result.issued).toHaveLength(1);
+  });
+
   it('restores qualified child evidence routes from the selected model identity', async () => {
     const qualifiedSelection = {
       revision: 3,
