@@ -531,6 +531,10 @@ export const createJobExecutor = (deps: JobExecutorDependencies) => {
 
   const cleanup = async (job: ExecutionJob) => {
     job.progress?.stage('cleanup');
+    // Sandbox destruction and host scratch-directory removal are different
+    // outcomes. Only an unconfirmed real Sandbox may block the same PR or need
+    // recovery; a host path failure still fails this task without claiming the
+    // VM survived.
     let sandboxClean = true;
     if (job.sandboxAttempted) update(job, { stage: 'cleanup' });
     const cleanupPort: SandboxExecPort = {
@@ -583,7 +587,7 @@ export const createJobExecutor = (deps: JobExecutorDependencies) => {
     if (job.handle.cleanupRecoveryPending) job.handle.cleanupRecoveryRetryAt = Date.now();
     job.hostCleanupConfirmed =
       hostClean && (!job.sandboxAttempted || job.sandbox?.metadata.hostCleanupConfirmed === true);
-    update(job, { sandbox: { cleanup: clean ? 'destroyed' : 'failed' } });
+    update(job, { sandbox: { cleanup: sandboxClean ? 'destroyed' : 'failed' } });
     if (job.handle.cleanupRecoveryPending) scheduleCleanupRecovery();
     return clean;
   };
@@ -1545,7 +1549,9 @@ export const createJobExecutor = (deps: JobExecutorDependencies) => {
           evidence: { id: evidenceId, status: evidenceStatus },
           complete: evidenceComplete && evidenceFailure === undefined,
           evidenceFailure,
-          cleanup: { status: cleaned ? 'destroyed' : 'failed' },
+          cleanup: {
+            status: job.state.sandbox.cleanup === 'destroyed' ? 'destroyed' : 'failed',
+          },
           hostCleanupConfirmed: job.hostCleanupConfirmed === true,
           files: await evidenceFiles(evidencePath),
         });
