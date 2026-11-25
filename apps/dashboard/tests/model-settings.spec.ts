@@ -114,6 +114,76 @@ test('rejects a non-integer desired Runner concurrency', async ({ page, harness,
   await expect(page.getByRole('button', { name: 'Save changes' })).toBeDisabled();
 });
 
+test('changes only concurrency when the catalog is unavailable', async ({
+  page,
+  harness,
+  base,
+}) => {
+  harness.setHandler((url, req) => {
+    if (url.pathname !== '/api/model-settings') return { status: 404 };
+    if (req.method === 'PUT') return { status: 200, json: { revision: 2 } };
+    return {
+      status: 200,
+      json: {
+        routes: [],
+        catalogUnavailable: true,
+        catalogRefreshFailed: false,
+        lastAttemptAt: null,
+        configuration: {
+          revision: 1,
+          selection: { reviewers: ['review/a'], synthesis: 'review/a' },
+          concurrency: 2,
+        },
+      },
+    };
+  });
+  await page.goto(base + '/settings');
+  await expect(page.getByText('The model catalog is unavailable')).toBeVisible();
+  await expect(page.getByLabel('Runner concurrency')).toHaveValue('2');
+  await page.getByLabel('Runner concurrency').fill('3');
+  await expect(page.getByTestId('concurrency-only')).toBeVisible();
+  const saved = page.waitForRequest((request) => request.method() === 'PUT');
+  await page.getByRole('button', { name: 'Save changes' }).click();
+  expect((await saved).postDataJSON()).toEqual({ revision: 1, concurrency: 3 });
+});
+
+test('changes only concurrency when the saved selection is no longer in the catalog', async ({
+  page,
+  harness,
+  base,
+}) => {
+  harness.setHandler((url, req) => {
+    if (url.pathname !== '/api/model-settings') return { status: 404 };
+    if (req.method === 'PUT') return { status: 200, json: { revision: 2 } };
+    return {
+      status: 200,
+      json: {
+        routes: ['review/a'],
+        efforts: { 'review/a': [{ name: 'high', controls: { reasoning_effort: 'high' } }] },
+        lastAttemptAt: new Date(100).toISOString(),
+        catalogRefreshFailed: false,
+        configuration: {
+          revision: 1,
+          selection: {
+            reviewers: ['review/a', 'review/retired'],
+            synthesis: 'review/retired',
+            efforts: { 'review/retired': 'removed' },
+          },
+          concurrency: 2,
+        },
+      },
+    };
+  });
+  await page.goto(base + '/settings');
+  await expect(page.getByRole('button', { name: 'Save changes' })).toBeDisabled();
+  await page.getByLabel('Runner concurrency').fill('4');
+  await expect(page.getByTestId('concurrency-only')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Save changes' })).toBeEnabled();
+  const saved = page.waitForRequest((request) => request.method() === 'PUT');
+  await page.getByRole('button', { name: 'Save changes' }).click();
+  expect((await saved).postDataJSON()).toEqual({ revision: 1, concurrency: 4 });
+});
+
 test('saves an explicit selection when switching from the instance default', async ({
   page,
   harness,

@@ -30,6 +30,7 @@ export const load: PageLoad = async ({ fetch, depends }) => {
     effortStateUnavailable?: boolean;
     effortDrift?: readonly string[];
     catalogRefreshFailed: boolean;
+    catalogUnavailable?: boolean;
     lastAttemptAt: string | null;
   };
   return { settings, status: reply.status, error: null };

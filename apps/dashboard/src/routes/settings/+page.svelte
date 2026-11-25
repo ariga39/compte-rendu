@@ -69,6 +69,33 @@
   const driftingEfforts = $derived(
     (data.settings?.effortDrift ?? []).filter((route) => selectedRoutes.includes(route)),
   );
+  const currentEfforts = $derived(
+    Object.fromEntries(
+      Object.entries(effortChoices).filter(
+        ([route, name]) => selectedRoutes.includes(route) && name !== '',
+      ),
+    ),
+  );
+  const nextSelection = $derived(
+    defaults
+      ? null
+      : {
+          reviewers,
+          synthesis,
+          ...(Object.keys(currentEfforts).length === 0 ? {} : { efforts: currentEfforts }),
+        },
+  );
+  const selectionDirty = $derived(
+    selectionSignature(nextSelection) !== loadedSelectionSignature,
+  );
+  const concurrencyOnly = $derived(concurrencyDirty && !selectionDirty);
+  const selectionUnavailable = $derived(
+    staleEfforts.length > 0 ||
+      (!defaults &&
+        (!reviewers.length ||
+          reviewers.some((route) => !data.settings?.routes.includes(route)) ||
+          !data.settings?.routes.includes(synthesis))),
+  );
   async function reload() {
     busy = true;
     try {
@@ -84,18 +111,9 @@
     success = false;
     message = '';
     try {
-      const efforts = Object.fromEntries(
-        Object.entries(effortChoices).filter(
-          ([route, name]) => selectedRoutes.includes(route) && name !== '',
-        ),
-      );
-      const nextSelection = defaults
-        ? null
-        : { reviewers, synthesis, ...(Object.keys(efforts).length === 0 ? {} : { efforts }) };
       // A concurrency-only save omits the selection so Core does not re-resolve
       // effort controls or require the inference relay to be reachable.
-      const sendSelection =
-        !concurrencyDirty || selectionSignature(nextSelection) !== loadedSelectionSignature;
+      const sendSelection = !concurrencyDirty || selectionDirty;
       const reply = await fetch('/api/model-settings', {
         method: 'PUT', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
@@ -159,7 +177,9 @@
     <p>{data.error ?? 'Model settings are temporarily unavailable.'}</p>
   {:else}
     <p>Changes apply to newly admitted reviews.</p>
-    {#if data.settings.catalogRefreshFailed}
+    {#if data.settings.catalogUnavailable}
+      <p role="status">The model catalog is unavailable. Runner concurrency can still be changed.</p>
+    {:else if data.settings.catalogRefreshFailed}
       <p role="status">The model list could not fully refresh. Some choices may be out of date.</p>
     {:else if data.settings.lastAttemptAt === null}
       <p role="status">Waiting for the first model list refresh.</p>
@@ -245,7 +265,7 @@
                 form; saving adopts the current catalog mapping.
               </p>
             {/if}
-            {#if staleEfforts.length > 0}
+            {#if staleEfforts.length > 0 && !concurrencyOnly}
               <p role="alert">
                 A saved thinking effort is no longer available. Choose a current effort or
                 return the route to the default before saving.
@@ -271,7 +291,12 @@
         {#if concurrencyInvalid}
           <p role="alert">Enter a positive whole number, or leave it empty.</p>
         {/if}
-        <button class="bx--btn bx--btn--primary" disabled={stale || staleEfforts.length > 0 || concurrencyInvalid || (!defaults && (!reviewers.length || reviewers.some(r => !data.settings?.routes.includes(r)) || !data.settings.routes.includes(synthesis)))}>Save changes</button>
+        {#if concurrencyOnly && selectionUnavailable}
+          <p role="status" data-testid="concurrency-only">
+            Only Runner concurrency will be saved; the saved model selection stays unchanged.
+          </p>
+        {/if}
+        <button class="bx--btn bx--btn--primary" disabled={stale || concurrencyInvalid || (!concurrencyOnly && selectionUnavailable)}>Save changes</button>
       </fieldset>
     </form>
     {#if message}<p role={success ? 'status' : 'alert'}>{message}</p>{/if}
