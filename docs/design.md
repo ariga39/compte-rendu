@@ -470,12 +470,15 @@ Recovery diagnostics identify the job, step and command status and omit stderr.
 ### Failed-cleanup reconciliation
 
 An authenticated Runner maintenance operation can reconcile a failed sbx or
-microsandbox run whose original host-directory cleanup was confirmed and whose
-exact Sandbox is now absent. Runner reads the retained local `callback.json` and
+microsandbox run whose backend confirmed its own sandbox-scoped host resources and
+whose exact Sandbox is now absent. Runner scratch roots are tracked separately and
+do not gate same-PR eligibility. Runner reads the retained local `callback.json` and
 `manifest.json` without modifying either file, verifies the six identity fields,
 the backend runtime, the exact Sandbox name, the failed terminal status, failed
-cleanup and host-cleanup confirmation, then asks the backend for its absence
-proof. It makes a bounded grant revocation when the relay is configured and sends
+cleanup and the backend's own host-resource confirmation, then asks the backend
+for its absence proof. A Runner scratch-removal failure fails the job and logs
+the directory on the host. Backend proof remains valid. Runner makes a bounded
+grant revocation when the relay is configured and sends
 one real slim `version: 2` `failed` callback to `POST /runner-callback`. That
 callback preserves the original failure, usage, lifecycle, evidence and
 timestamps and changes only cleanup to `destroyed` and its completion time to the
@@ -500,6 +503,6 @@ While the job is in memory, Runner can report verified cleanup using its retaine
 manifest and callback. After a restart the ownership scan removes verified orphan
 resources. A known failed cleanup blocks later reviews until this confirmation;
 unknown pending cleanup follows the original 90-minute claim budget, including
-when a restart loses an in-memory staged claim request ID. Legacy evidence lacking
-host confirmation, an unknown retired-backend identity and retired-backend
-recovery remain outside this operation; see the operations guide.
+when a restart loses an in-memory staged claim request ID. Legacy evidence lacking the
+backend's host confirmation, an unknown retired-backend identity and
+retired-backend recovery remain outside this operation; see the operations guide.

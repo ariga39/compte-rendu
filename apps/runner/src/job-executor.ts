@@ -521,9 +521,24 @@ export const createJobExecutor = (deps: JobExecutorDependencies) => {
     for (const directory of [job.checkoutRoot, job.configRoot, job.grantRoot]) {
       if (directory === undefined) continue;
       try {
-        await rm(directory, { recursive: true, force: true });
+        await rm(directory, {
+          recursive: true,
+          force: true,
+          maxRetries: 2,
+          retryDelay: 100,
+        });
       } catch {
         clean = false;
+        // Keep this on the Runner host only. Paths can identify the repository
+        // checkout, so they must not enter the injectable operational log.
+        console.warn(
+          JSON.stringify({
+            phase: 'runner',
+            outcome: 'host-cleanup',
+            jobId: job.id,
+            directory,
+          }),
+        );
       }
     }
     return clean;
@@ -585,8 +600,11 @@ export const createJobExecutor = (deps: JobExecutorDependencies) => {
     const clean = sandboxClean && hostClean;
     job.handle.cleanupRecoveryPending = !sandboxClean;
     if (job.handle.cleanupRecoveryPending) job.handle.cleanupRecoveryRetryAt = Date.now();
+    // Backend proof is about the Sandbox and its own host resources, never the
+    // Runner scratch roots. A scratch failure is reported separately and cannot
+    // turn a confirmed VM destruction into an unrecoverable cleanup failure.
     job.hostCleanupConfirmed =
-      hostClean && (!job.sandboxAttempted || job.sandbox?.metadata.hostCleanupConfirmed === true);
+      !job.sandboxAttempted || job.sandbox?.metadata.hostCleanupConfirmed === true;
     update(job, { sandbox: { cleanup: sandboxClean ? 'destroyed' : 'failed' } });
     if (job.handle.cleanupRecoveryPending) scheduleCleanupRecovery();
     return clean;
