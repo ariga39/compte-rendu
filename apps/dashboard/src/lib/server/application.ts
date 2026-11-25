@@ -186,10 +186,15 @@ export function createApplication(env: ApplicationEnv, dependencies: CoreWorkerD
         );
       const runnerOperation = runnerOperations[path];
       if (runnerOperation !== undefined) {
-        if (request.method !== 'POST') return Effect.succeed(new Response(null, { status: 405 }));
+        const isClaimHead = path === '/runner-claim' && request.method === 'HEAD';
+        if (request.method !== 'POST' && !isClaimHead)
+          return Effect.succeed(new Response(null, { status: 405 }));
         if (!runnerAuthorized(request, env))
           return Effect.succeed(new Response(null, { status: 401 }));
-        return withCore((core) => runnerOperation(core, request), context).pipe(
+        return withCore(
+          (core) => (isClaimHead ? core.readRunnerConcurrency() : runnerOperation(core, request)),
+          context,
+        ).pipe(
           Effect.catch(() => Effect.succeed(new Response(null, { status: 503 }))),
           Effect.catchDefect(() => Effect.succeed(new Response(null, { status: 503 }))),
         );

@@ -175,9 +175,11 @@ Core D1 stores one deployment desired concurrency, editable in Dashboard
 Settings under the existing configuration revision. Claim 200/204 responses
 carry it as `x-compte-rendu-concurrency`; an explicit clear is the `default`
 sentinel, and a transiently missing or invalid header leaves the Runner target
-unchanged. A full Runner sends a non-claiming probe on its existing claim timer,
-so long active reviews do not hide increases. Probes allocate no claim ID,
-reserve no work and run no Sandbox readiness check. Increases wake claims;
+unchanged. A full Runner reads the target with authenticated `HEAD /runner-claim`
+on its existing claim timer, so long active reviews do not hide increases. HEAD
+allocates no claim ID, reserves no work and runs no Sandbox readiness check; an
+old Worker rejects it with 405 without claiming. `POST` remains the only claim.
+Increases wake claims;
 decreases preserve admitted jobs and reserved claims. Both Sandbox backends use
 the same scheduler. Claims are single-flight; ambiguous claim responses halt
 polling rather than risk duplicate ownership.

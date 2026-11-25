@@ -21,6 +21,7 @@ export type CoreWorker = {
   reconcilePublications(now: number): Promise<void>;
   effortDetail(runId: string, cursor?: string): Promise<Response>;
   claimRunnerJob(request: Request, context?: WaitUntil): Promise<Response>;
+  readRunnerConcurrency(): Promise<Response>;
   renewRunnerReadToken(request: Request): Promise<Response>;
   handleRunnerCallback(request: Request, context?: WaitUntil): Promise<Response>;
   handleRunnerEvidence(request: Request): Promise<Response>;
@@ -54,6 +55,7 @@ export const createCoreWorker = (
     reconcilePublications: (now) => run((core) => core.reconcilePublications(now)),
     effortDetail: (runId, cursor) => run((core) => core.effortDetail(runId, cursor)),
     claimRunnerJob: (request, context) => run((core) => core.claimRunnerJob(request), context),
+    readRunnerConcurrency: () => run((core) => core.readRunnerConcurrency()),
     renewRunnerReadToken: (request) => run((core) => core.renewRunnerReadToken(request)),
     handleRunnerCallback: (request, context) =>
       run((core) => core.handleRunnerCallback(request), context),

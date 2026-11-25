@@ -20,7 +20,7 @@ export const RUNNER_LLM_CONTROL_TIMEOUT_MS = 5000;
 export const REVIEW_ATTEMPT_BUDGET_MS = 90 * 60 * 1000;
 
 /**
- * Claim responses carry the deployment's desired Runner concurrency here,
+ * Claim and HEAD responses carry the deployment's desired Runner concurrency here,
  * or RUNNER_CONCURRENCY_DEFAULT for an explicit D1 clear. A missing header
  * means the read was unavailable, so a Runner must keep its current target.
  */

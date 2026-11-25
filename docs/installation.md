@@ -601,14 +601,16 @@ the value you set, and Core delivers the stored value to every Runner attached
 to the deployment.
 
 Every `POST /runner-claim` 200 and 204 response carries the value in
-`x-compte-rendu-concurrency`. When the Runner has no free slot, it sends a
-non-claiming probe (`{"probeOnly": true}`) on the existing claim timer. The probe
-does not reserve work, allocate a claim ID, prepare a job or run a Sandbox
-readiness check. An increase wakes the claim loop immediately; a decrease leaves
-active reviews and cleanup alone so slots drain naturally. Drain pauses probes
-as well as claims. A stored value is sent as a positive integer; an explicit D1
-clear is sent as `default`, and the Runner returns to `RUNNER_CONCURRENCY`. A
-transiently missing or invalid header leaves the current target unchanged.
+`x-compte-rendu-concurrency`. When the Runner has no free slot, it reads the
+target with an authenticated `HEAD /runner-claim` on the existing claim timer.
+That response has an empty body and `Cache-Control: no-store`, and it never
+reserves work, allocates a claim ID, prepares a job or runs a Sandbox readiness
+check. `POST` remains the only claiming method. An increase wakes the claim loop
+immediately; a decrease leaves active reviews and cleanup alone so slots drain
+naturally. Drain pauses HEAD reads as well as claims. A stored value is sent as a
+positive integer; an explicit D1 clear is sent as `default`, and the Runner
+returns to `RUNNER_CONCURRENCY`. A transiently missing or invalid header leaves
+the current target unchanged.
 
 #### Seed an existing installation
 
@@ -635,15 +637,14 @@ corepack pnpm dlx wrangler@4.124.0 d1 execute REVIEW_DB --remote \
 ```
 
 Then upgrade in this order. An old Runner remains compatible with the new
-Worker, but a new Runner must not probe an old Worker.
+Worker, but a new Runner must not read concurrency from an old Worker.
 
 1. Deploy the new Worker (Core and Dashboard) with migration `0020` applied.
-2. Verify `probeOnly` before starting the new Runner. Send one
-   `POST /runner-claim` with the Runner callback bearer and body
-   `{"probeOnly":true}`. Expect `204` and no queued review acquiring a
-   `runner_job_id`. A `200` with a job body means the old Worker is still serving
-   that route and interpreted the probe as a normal claim; keep the old Runner
-   running, finish the Worker rollout, and do not start the new Runner yet.
+2. Verify the Worker before starting the new Runner. Send one authenticated
+   `HEAD /runner-claim` with the Runner callback bearer. A new Worker returns
+   `204` with `x-compte-rendu-concurrency`; an old Worker returns `405` and does
+   not claim or reserve anything. Only `204` is safe for the new Runner. Queue
+   state must be unchanged after this check.
 3. [Drain](operations.md#drain-before-maintenance) the old Runner.
 4. Remove `RUNNER_SETTINGS_FILE` from the Runner unit and start the upgraded
    Runner.

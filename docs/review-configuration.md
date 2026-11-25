@@ -145,8 +145,9 @@ payload budget rather than an inference or review-output limit. Responses are
 
 Runner claim 200/204 responses carry the stored concurrency in
 `x-compte-rendu-concurrency`. An explicit clear sends `default`; a transient
-read failure omits the header. A full Runner discovers changes through the
-existing `/runner-claim` probe without claiming work.
+read failure omits the header. A full Runner discovers changes with an
+authenticated `HEAD /runner-claim`, which returns the header with an empty body
+and never claims. `POST` remains the only claiming method.
 
 Use `selection: null` with the current revision to select the installation default.
 For the managed relay, set the application Worker's `RELAY_DEFAULT_MODEL_ROUTE`

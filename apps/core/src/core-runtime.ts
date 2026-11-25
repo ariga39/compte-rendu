@@ -53,6 +53,7 @@ export interface CoreRuntimeShape {
     event: typeof MetadataInvalidationEvent.Type,
   ) => Effect.Effect<void, unknown>;
   readonly claimRunnerJob: (request: Request) => Effect.Effect<Response, unknown>;
+  readonly readRunnerConcurrency: () => Effect.Effect<Response, unknown>;
   readonly renewRunnerReadToken: (request: Request) => Effect.Effect<Response, unknown>;
   readonly handleRunnerCallback: (request: Request) => Effect.Effect<Response, unknown>;
   readonly handleRunnerEvidence: (request: Request) => Effect.Effect<Response, unknown>;
@@ -301,6 +302,7 @@ export const makeCoreRuntime = (
     submitReviewEvent: makeSubmitReviewEvent(stateStore, admission),
     invalidateMetadata: makeInvalidateMetadata(stateStore),
     claimRunnerJob: (request) => protocol.handleRunnerClaim(request),
+    readRunnerConcurrency: () => protocol.handleRunnerClaimHead(),
     renewRunnerReadToken: (request) => protocol.handleRunnerReadToken(request),
     handleRunnerCallback: (request) => protocol.handleRunnerResult(request),
     handleRunnerEvidence: (request) => protocol.handleRunnerEvidence(request),

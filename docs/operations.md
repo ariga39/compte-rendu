@@ -205,9 +205,9 @@ Use the following sequence for a breaking upgrade or rollback, per instance:
    schema change, keep HTTP and scheduled writers quiesced during the switch.
 4. Start the replacement Runner only when the Worker is ready. The drain flag
    is in memory. The replacement enables claiming as soon as its startup scan
-   succeeds. Before starting a Runner that sends concurrency probes, verify the
-   upgraded Worker returns `204` for `{"probeOnly":true}` on `/runner-claim`; an
-   old Worker can treat that body as a normal claim and reserve the returned job.
+   succeeds. Before starting a Runner that reads concurrency, verify the
+   upgraded Worker returns `204` to authenticated `HEAD /runner-claim`; an old
+   Worker returns `405` and does not claim or reserve work.
 
 For either release path, back up the existing Runner artifact before replacement
 and verify the installed artifact’s SHA256 against the tested build before

@@ -116,10 +116,6 @@ describe('Runner desired concurrency', () => {
     };
     return { runner, releaseOne, releaseAll };
   };
-  const parseBody = (init?: RequestInit) =>
-    typeof init?.body === 'string'
-      ? (JSON.parse(init.body) as { requestId?: string; probeOnly?: boolean })
-      : {};
 
   it('rejects RUNNER_SETTINGS_FILE at startup with the D1 migration message', () => {
     const previous = process.env.RUNNER_SETTINGS_FILE;
@@ -141,14 +137,13 @@ describe('Runner desired concurrency', () => {
   it('uses a non-claiming probe to raise capacity while a long review keeps the runner full', async () => {
     const logs = captureLogs();
     const bodies = [jobBody('probe-raise-a'), jobBody('probe-raise-b')];
-    const probes: Array<{ requestId?: string; probeOnly?: boolean }> = [];
+    const probes: Array<{ method?: string; body?: unknown }> = [];
     let claims = 0;
     const h = startFixture({
       concurrency: 1,
       claimFetch: async (_url, init) => {
-        const body = parseBody(init);
-        if (body.probeOnly === true) {
-          probes.push(body);
+        if (init?.method === 'HEAD') {
+          probes.push({ method: init?.method, body: init?.body });
           return new Response(null, {
             status: 204,
             headers: { [concurrencyHeader]: '2' },
@@ -165,8 +160,8 @@ describe('Runner desired concurrency', () => {
         expect((await get(h.runner, 'probe-raise-a')).status).toBe('running');
       });
       await vi.waitFor(() => expect(probes.length).toBeGreaterThan(0));
-      expect(probes[0]).toEqual({ probeOnly: true });
-      expect(probes[0]?.requestId).toBeUndefined();
+      expect(probes[0]).toEqual({ method: 'HEAD', body: undefined });
+      expect(probes[0]?.body).toBeUndefined();
       expect((await maintenance(h.runner)).claimInFlight).toBe(false);
       await vi.waitFor(async () => {
         expect((await get(h.runner, 'probe-raise-b')).status).toBe('running');
@@ -183,7 +178,7 @@ describe('Runner desired concurrency', () => {
   });
 
   it('probes without a claim ID and stops probing while drained', async () => {
-    const probes: Array<{ requestId?: string; probeOnly?: boolean }> = [];
+    const probes: Array<{ method?: string; body?: unknown }> = [];
     let releaseProbe: (() => void) | undefined;
     let probeStarted!: () => void;
     const started = new Promise<void>((resolve) => {
@@ -194,9 +189,8 @@ describe('Runner desired concurrency', () => {
       concurrency: 1,
       claimProbeIntervalMs: 10,
       claimFetch: async (_url, init) => {
-        const body = parseBody(init);
-        if (body.probeOnly === true) {
-          probes.push(body);
+        if (init?.method === 'HEAD') {
+          probes.push({ method: init?.method, body: init?.body });
           probeStarted();
           return new Promise<Response>((resolve) => {
             releaseProbe = () => resolve(new Response(null, { status: 204 }));
@@ -213,7 +207,7 @@ describe('Runner desired concurrency', () => {
         expect((await get(h.runner, 'probe-held-a')).status).toBe('running');
       });
       await started;
-      expect(probes).toEqual([{ probeOnly: true }]);
+      expect(probes).toEqual([{ method: 'HEAD', body: undefined }]);
 
       const drain = await h.runner.handle(
         new Request('http://runner/maintenance/drain', { method: 'POST', headers: auth }),
@@ -228,9 +222,9 @@ describe('Runner desired concurrency', () => {
       );
       expect(await resume.json()).toMatchObject({ draining: false });
       await vi.waitFor(() => expect(probes.length).toBeGreaterThanOrEqual(2));
-      expect(
-        probes.every((probe) => probe.probeOnly === true && probe.requestId === undefined),
-      ).toBe(true);
+      expect(probes.every((probe) => probe.method === 'HEAD' && probe.body === undefined)).toBe(
+        true,
+      );
       expect(claims).toBe(1);
     } finally {
       h.releaseAll();
@@ -239,16 +233,15 @@ describe('Runner desired concurrency', () => {
   });
 
   it('honors a decrease without aborting active reviews and waits before claiming more', async () => {
-    const probes: Array<{ probeOnly?: boolean }> = [];
+    const probes: Array<{ method?: string; body?: unknown }> = [];
     let claims = 0;
     const h = startFixture({
       concurrency: 2,
       claimIntervalMs: 5,
       claimProbeIntervalMs: 10,
       claimFetch: async (_url, init) => {
-        const body = parseBody(init);
-        if (body.probeOnly === true) {
-          probes.push(body);
+        if (init?.method === 'HEAD') {
+          probes.push({ method: init?.method, body: init?.body });
           return new Response(null, {
             status: 204,
             headers: { [concurrencyHeader]: '1' },
@@ -300,8 +293,7 @@ describe('Runner desired concurrency', () => {
       claimIntervalMs: 5,
       claimProbeIntervalMs: 10,
       claimFetch: async (_url, init) => {
-        const body = parseBody(init);
-        if (body.probeOnly === true) {
+        if (init?.method === 'HEAD') {
           probes += 1;
           if (probes === 1) return new Response(null, { status: 204 });
           if (probes === 2)
@@ -351,16 +343,15 @@ describe('Runner desired concurrency', () => {
   });
 
   it('keeps probing after a transient probe error and never replays it as a claim', async () => {
-    const probes: Array<{ requestId?: string; probeOnly?: boolean }> = [];
+    const probes: Array<{ method?: string; body?: unknown }> = [];
     let probeAttempts = 0;
     let claims = 0;
     const h = startFixture({
       concurrency: 1,
       claimProbeIntervalMs: 10,
       claimFetch: async (_url, init) => {
-        const body = parseBody(init);
-        if (body.probeOnly === true) {
-          probes.push(body);
+        if (init?.method === 'HEAD') {
+          probes.push({ method: init?.method, body: init?.body });
           probeAttempts += 1;
           if (probeAttempts === 1) throw new Error('transient probe failure');
           return new Response(null, {
@@ -383,9 +374,9 @@ describe('Runner desired concurrency', () => {
         expect((await get(h.runner, 'probe-retry-b')).status).toBe('running');
       });
       expect(probes.length).toBeGreaterThanOrEqual(2);
-      expect(
-        probes.every((probe) => probe.probeOnly === true && probe.requestId === undefined),
-      ).toBe(true);
+      expect(probes.every((probe) => probe.method === 'HEAD' && probe.body === undefined)).toBe(
+        true,
+      );
     } finally {
       h.releaseAll();
       await h.runner.close();
