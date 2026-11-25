@@ -4,13 +4,14 @@
   beyond its issue's primary behaviour.
 - Manage dependent pull requests as a stack following [GitHub’s stacked PR guidance](https://docs.github.com/en/pull-requests/get-started/about-stacked-prs).
 - Treat this as a self-hosted, single-operator product. Upgrade the Worker and
-  Runner together in a brief maintenance window; mixed-version rolling
-  compatibility is not a default requirement. Breaking changes are deliberate,
-  and a temporary compatibility path needs a concrete reason, a removal date and
-  a cleanup issue. Losing a rare in-flight or undelivered review during an
-  upgrade or crash is acceptable: re-trigger it in a fresh Sandbox once same-PR
-  admission is eligible (an expired pending claim, or confirmed destruction after
-  `cleanup=failed`; see [recovery](docs/operations.md#operations-and-troubleshooting)).
+  Runner together in a maintenance window; mixed-version rolling compatibility
+  is not a default requirement. Breaking changes are deliberate; a temporary
+  compatibility path needs a concrete reason, removal date and cleanup issue.
+  A rare lost in-flight or undelivered review during an upgrade or crash is
+  acceptable: re-trigger it in a fresh Sandbox once same-PR admission is
+  eligible (an expired pending claim, or confirmed destruction after
+  `cleanup=failed`; see
+  [recovery](docs/operations.md#operations-and-troubleshooting)).
 - Use behavior-based TDD through the seams accepted in `docs/design.md`: one
   failing behavior, minimal implementation, then the next slice.
 - Use stable Effect 4 for runtime code. Before implementation, read the applicable

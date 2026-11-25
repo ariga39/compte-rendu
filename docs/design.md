@@ -133,22 +133,18 @@ diagnostic upload.
 
 ### Deployment and compatibility
 
-Compte rendu is self-hosted for a single operator. Worker and Runner are upgraded
-together in a brief maintenance window: drain or stop Runners before switching
-versions. Mixed-version rolling compatibility across the Worker and Runner is not
-a default requirement.
+Compte rendu is self-hosted for a single operator. Upgrade the Worker and Runner
+together in a maintenance window; mixed-version rolling compatibility is not a
+default requirement. Protocol, field and disk-format removals are deliberate
+breaking changes. Do not add an indefinite fallback unless explicitly accepted; a
+temporary compatibility path needs a concrete reason, removal date and cleanup
+issue.
 
-Protocol, field and disk-format removals are deliberate breaking changes. Do not
-add an indefinite compatibility fallback unless the project explicitly accepts
-one. A temporary compatibility path needs a concrete reason, a recorded removal
-date and a cleanup issue.
-
-An upgrade or rare crash may lose an in-flight or undelivered review. Re-trigger
-it in a fresh Sandbox once same-PR admission is eligible: an expired pending
-claim becomes eligible after its 90-minute budget, while a known `cleanup=failed`
-requires confirmed destruction. See
-[troubleshooting recovery](operations.md#operations-and-troubleshooting). The
-original run keeps its own outcome and cleanup state.
+A rare lost in-flight or undelivered review during an upgrade or crash is
+acceptable. Re-trigger it in a fresh Sandbox once same-PR admission is eligible:
+an expired pending claim after its 90-minute budget, or confirmed destruction
+after `cleanup=failed` (see
+[troubleshooting recovery](operations.md#operations-and-troubleshooting)).
 
 ## Runner Job and pull interface
 
