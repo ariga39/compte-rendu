@@ -1222,24 +1222,62 @@ need to pause admissions, drain, or rerender merely for an ordinary update; use
 the normal [update procedure](operations.md#update-and-rollback) and keep its
 retained generated files.
 
-A direct-provider installation has an old Runner without a relay client. Newly
-frozen selections are unusable to that Runner, so cut over in this order:
+A direct-provider installation has an old Runner without a relay client. Prepare
+the configs first, outside the maintenance window, then drain and switch:
 
-1. Pause inbound admissions first, for example by disabling the GitHub App
-   webhook, so no new reviews are admitted during the switch.
-2. Let the existing Core and old Runner finish all queued and running Jobs, then
-   confirm Core shows none remaining. Resolve any failed cleanup with the
+1. In a clean, independent checkout at the target revision, render candidate
+   configs with the existing instance IDs. The renderer refuses to run where a
+   generated config exists, so do not use the retained checkout. Read the App
+   ID, D1 ID, VPC Service ID, allowlists and Check name from the retained
+   `apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc`:
+
+   ```sh
+   INSTANCE_NAME=<INSTANCE_NAME>
+   MAIN_CHECKOUT=<ABSOLUTE_EXISTING_CHECKOUT>
+   RENDER_CHECKOUT=/tmp/compte-rendu-render-$INSTANCE_NAME
+   RELAY_CONFIG=<ABSOLUTE_RELAY_CONFIG_FILE>
+
+   git -C "$MAIN_CHECKOUT" worktree add --detach "$RENDER_CHECKOUT" <TARGET_REVISION>
+   cd "$RENDER_CHECKOUT"
+   corepack pnpm install --frozen-lockfile
+   corepack pnpm render:wrangler "$INSTANCE_NAME" <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '<GITHUB_BOT_AUTHOR_IDS_JSON>' '<GITHUB_CHECK_NAME>' "$RELAY_CONFIG"
+   ```
+
+2. Copy the generated inference config to the retained deployment location and
+   use it unchanged for the relay Worker:
+
+   ```sh
+   cp "$RENDER_CHECKOUT/apps/inference-worker/wrangler.$INSTANCE_NAME.jsonc" \
+     "$MAIN_CHECKOUT/apps/inference-worker/"
+   ```
+
+3. Manually add only these relay entries to the retained application config;
+   keep its private routes, D1/R2 bindings, allowlists, origins, Check name and
+   secret references:
+   - `services`: `{"binding":"INFERENCE_RELAY","service":"<INSTANCE_NAME>-inference","entrypoint":"InferenceWorker"}`
+   - `vars.RELAY_DEFAULT_MODEL_ROUTE`: the relay config's `defaultRoute`
+   - `account_id`: only if the retained config has none
+
+   Confirm the retained app is `<INSTANCE_NAME>-ingress` with `INFERENCE_RELAY`,
+   and the generated inference Worker is `<INSTANCE_NAME>-inference` with
+   `RELAY_DB` on `<INSTANCE_NAME>-relay-grants` (the relay D1 ID) and required
+   secret `AI_GATEWAY_RUN_TOKEN`.
+
+4. Pause inbound admissions, for example by disabling the GitHub App webhook.
+5. Let the existing Core and old Runner finish all queued and running Jobs, then
+   confirm Core shows none remaining. Resolve failed cleanup with the
    [maintenance procedure](operations.md#recover-failed-cleanup).
-3. Drain the old Runner and wait for `drained: true`, then stop it. Do not deploy
+6. Drain the old Runner and wait for `drained: true`, then stop it. Do not deploy
    the managed Core before this point: a newly frozen selection would otherwise
    be claimed by a Runner that cannot serve it.
-4. Apply the inference Worker's migrations and deploy the inference Worker.
-5. Deploy the application Worker with the private `INFERENCE_RELAY` binding and
-   `RELAY_DEFAULT_MODEL_ROUTE` on a route the replacement Runner can serve.
-6. Replace the Runner binary and configuration with the managed settings from
+7. Apply the inference Worker's migrations and deploy the relay Worker from its
+   generated config.
+8. Deploy the application Worker from the retained config with the merged
+   `INFERENCE_RELAY` binding and `RELAY_DEFAULT_MODEL_ROUTE`.
+9. Replace the Runner binary and configuration with the managed settings from
    the fresh installation sequence and start it.
-7. Re-enable the webhook. Confirm the catalog, then run a fresh PR review and
-   apply the same acceptance checks as a fresh installation. If a route uses a
-   non-Chat protocol or declares a context or output limit, set
-   `RUNNER_LLM_GRANT_VERSION=2` only after verifying that the Runner and both
-   Workers support v2.
+10. Re-enable the webhook. Confirm the catalog, then run a fresh PR review and
+    apply the same acceptance checks as a fresh installation. If a route uses a
+    non-Chat protocol or declares a context or output limit, set
+    `RUNNER_LLM_GRANT_VERSION=2` only after verifying that the Runner and both
+    Workers support v2.
