@@ -281,9 +281,11 @@ export const completeReviewEffect = Effect.fn('completeReview')(function* (
   ) {
     if (yield* cancellationWon) return { result: 'cancelled' as const, settled: false };
     const failedAt = yield* currentIso;
-    if (!ownsPublication) {
-      ownsPublication = yield* claimFailureNotification();
-    }
+    // Without a real publishing claim, first write the failed terminal state
+    // while preserving any concurrent publisher. A failed terminal write must
+    // not leave a failure-notification claim behind for the retry to trip over.
+    // A true publishing owner already holds the claim and keeps the original
+    // finalization path.
     const statusWriteSucceeded = yield* Effect.tryPromise({
       try: () =>
         stateStore.markSchedulingFailed({
@@ -293,24 +295,27 @@ export const completeReviewEffect = Effect.fn('completeReview')(function* (
             phase: reason === 'invalid_output' ? 'output_validation' : 'publication',
             reason,
           },
+          ...(ownsPublication ? {} : { requireUnpublished: true }),
         }),
       catch: () => false,
     }).pipe(Effect.catch(() => Effect.succeed(false)));
-    // Cancellation can overtake the pre-check and win before the claim and
-    // status CAS. The durable outcome is the winner; only a failed winner may
-    // emit failure feedback, a failure Check or comment, or failed telemetry.
+    // Cancellation or a concurrent publisher can win before the status CAS.
+    // The durable outcome is the winner; only a failed winner may emit failure
+    // feedback, a failure Check or comment, or failed telemetry.
     const settled = yield* latestOutcome;
     // A failed post-write read must not hide failure feedback once this attempt
-    // provably owns publication and wrote the failed status.
-    const fallbackFailed = settled === undefined && ownsPublication && statusWriteSucceeded;
+    // wrote the failed status.
+    const fallbackFailed = settled === undefined && statusWriteSucceeded;
     if (settled?.status !== 'failed' && !fallbackFailed) {
       return {
         result: settled?.status === 'cancelled' ? ('cancelled' as const) : ('failed' as const),
         settled: false,
       };
     }
+    // Take notification ownership only after the failed state is durable.
+    const notificationClaimed = ownsPublication || (yield* claimFailureNotification());
     yield* manualReaction('-1');
-    yield* publishFailureNotification(ownsPublication);
+    yield* publishFailureNotification(notificationClaimed);
     return { result: 'failed' as const, settled: true };
   });
 

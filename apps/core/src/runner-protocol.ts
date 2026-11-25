@@ -154,7 +154,6 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
       requireUnprepared?: boolean;
     },
     failure?: PublicTaskFailure,
-    requireUnpublished = false,
   ): Promise<ReviewOutcome | undefined> => {
     // Write the terminal state before taking the failure-notification claim.
     // A transient terminal write failure must leave no publication claim behind
@@ -164,7 +163,9 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
       occurredAt,
       ...(releaseRunnerClaim === undefined ? {} : { releaseRunnerClaim }),
       ...(failure === undefined ? {} : { failure }),
-      ...(requireUnpublished ? { requireUnpublished: true } : {}),
+      // This is never a publishing owner: never overwrite a concurrent
+      // successful publication that has already started.
+      requireUnpublished: true,
     });
     // Cancellation can win after the caller read the run but before the
     // terminal write. The durable outcome is the winner; only the failed (or
@@ -349,7 +350,7 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
                   ? 'unknown'
                   : reason,
       };
-      return markRunFailed(outcome, callback.runId, occurredAt, undefined, failure, true);
+      return markRunFailed(outcome, callback.runId, occurredAt, undefined, failure);
     };
     await stateStore.recordRunnerTerminal({
       runId: callback.runId,

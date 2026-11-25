@@ -1081,15 +1081,15 @@ describe('Core lifecycle telemetry and terminal classification', () => {
         kind === 'cancel'
           ? {
               ...state,
-              claimRunPublication: async (
-                input: Parameters<NonNullable<typeof state.claimRunPublication>>[0],
+              markSchedulingFailed: async (
+                input: Parameters<NonNullable<typeof state.markSchedulingFailed>>[0],
               ) => {
                 await state.cancelRun({
                   runId,
                   requestedByUid: 1,
                   occurredAt: new Date().toISOString(),
                 });
-                return state.claimRunPublication(input);
+                return state.markSchedulingFailed(input);
               },
             }
           : failReadAfterSchedulingWrite(state, kind);
