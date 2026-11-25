@@ -1,7 +1,11 @@
-import { chmod, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { Effect, Option, Result, Schema } from 'effect';
-import { MAX_RUNNER_CALLBACK_BYTES, RunnerResultCallback } from '@compte-rendu/contracts';
+import { Duration, Effect, Option, Result, Schema } from 'effect';
+import {
+  MAX_RUNNER_EVIDENCE_BYTES,
+  RunnerEvidenceUpload,
+  RunnerResultCallbackV2,
+} from '@compte-rendu/contracts';
 import type { JobSandbox, RunnerProcessResult, SandboxExecPort } from './sandbox-runtime.js';
 import {
   MAX_AGENT_OUTPUT_BYTES,
@@ -105,7 +109,6 @@ export const evidenceFiles = async (root: string, prefix = ''): Promise<string[]
 };
 
 const MAX_CHILD_SESSION_PAGES = 100;
-const EMPTY_EVIDENCE_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 
 export const archiveEvidence = async (input: {
   readonly evidencePath: string;
@@ -325,57 +328,134 @@ export const archiveEvidence = async (input: {
   return { complete, terminal };
 };
 
-const callbackEvidence = async (input: {
+const EMPTY_EVIDENCE_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+const EVIDENCE_JSON_OVERHEAD_BYTES = 64 * 1024;
+
+type UploadedEvidenceField = {
+  readonly content: string;
+  readonly size: number;
+  readonly sha256: string;
+  readonly truncated?: boolean;
+};
+
+type EvidenceArtifactSpec = {
+  readonly key:
+    | 'manifest'
+    | 'opencodeSessionList'
+    | 'validatedReview'
+    | 'opencodeStderr'
+    | 'opencodeJsonl'
+    | 'opencodeExport';
+  readonly name: string;
+  readonly required: boolean;
+};
+
+const sha256Hex = async (bytes: Uint8Array): Promise<string> => {
+  const hash = await globalThis.crypto.subtle.digest('SHA-256', bytes as unknown as BufferSource);
+  return Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, '0')).join('');
+};
+
+const emptyEvidenceField = (): UploadedEvidenceField => ({
+  content: '',
+  size: 0,
+  sha256: EMPTY_EVIDENCE_SHA256,
+});
+
+// Read no more than the bytes this artifact is allowed to upload. A very large
+// local log must never allocate its full size just to discover it cannot fit.
+const readBoundedArtifact = async (
+  path: string,
+  limit: number,
+): Promise<{ readonly bytes: Buffer; readonly total: number } | undefined> => {
+  let info: Awaited<ReturnType<typeof stat>>;
+  try {
+    info = await stat(path);
+  } catch {
+    return undefined;
+  }
+  if (!info.isFile()) return undefined;
+  const readable = Math.max(0, Math.min(info.size, limit));
+  if (readable === 0) return { bytes: Buffer.alloc(0), total: info.size };
+  const handle = await open(path, 'r');
+  try {
+    const buffer = Buffer.alloc(readable);
+    const { bytesRead } = await handle.read(buffer, 0, readable, 0);
+    return { bytes: buffer.subarray(0, bytesRead), total: info.size };
+  } finally {
+    await handle.close();
+  }
+};
+
+const uploadedEvidenceField = async (
+  evidencePath: string,
+  spec: EvidenceArtifactSpec,
+  limit: number,
+): Promise<UploadedEvidenceField | undefined> => {
+  const artifact = await readBoundedArtifact(join(evidencePath, spec.name), limit);
+  if (artifact === undefined) return spec.required ? emptyEvidenceField() : undefined;
+  return {
+    content: artifact.bytes.toString('base64'),
+    size: artifact.bytes.byteLength,
+    sha256: await sha256Hex(artifact.bytes),
+    ...(artifact.total > artifact.bytes.byteLength ? { truncated: true } : {}),
+  };
+};
+
+const uploadedEvidence = async (input: {
   readonly evidencePath: string;
   readonly evidence: {
     readonly id: string;
     readonly status: 'pending' | 'complete' | 'incomplete';
   };
   readonly sessionIds: readonly string[];
-  readonly includeValidatedReview: boolean;
 }) => {
-  const { evidencePath, evidence, sessionIds, includeValidatedReview } = input;
-  const encoded = async (name: string) => {
-    try {
-      const bytes = await readFile(join(evidencePath, name));
-      const hash = await globalThis.crypto.subtle.digest('SHA-256', bytes);
-      return {
-        content: bytes.toString('base64'),
-        size: bytes.byteLength,
-        sha256: Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, '0')).join(
-          '',
-        ),
-      };
-    } catch {
-      const hash = await globalThis.crypto.subtle.digest('SHA-256', new Uint8Array());
-      return {
-        content: '',
-        size: 0,
-        sha256: Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, '0')).join(
-          '',
-        ),
-      };
-    }
-  };
+  const { evidencePath, evidence, sessionIds } = input;
   const sessionId = sessionIds[0];
+  // Preserve small readable metadata first. Large logs consume what remains so
+  // a single oversized export cannot make the rest of the archive unreadable.
+  const specs: EvidenceArtifactSpec[] = [
+    { key: 'manifest', name: 'manifest.json', required: true },
+    { key: 'opencodeSessionList', name: 'opencode-session-list.json', required: false },
+    { key: 'validatedReview', name: 'validated-review.md', required: false },
+    { key: 'opencodeStderr', name: 'opencode.stderr', required: true },
+    { key: 'opencodeJsonl', name: 'opencode.jsonl', required: true },
+    ...(sessionId === undefined
+      ? []
+      : [
+          {
+            key: 'opencodeExport' as const,
+            name: `opencode-export-${sessionId}.json`,
+            required: false,
+          },
+        ]),
+  ];
+  let remaining = MAX_RUNNER_EVIDENCE_BYTES - EVIDENCE_JSON_OVERHEAD_BYTES;
+  const fields = new Map<EvidenceArtifactSpec['key'], UploadedEvidenceField>();
+  for (const spec of specs) {
+    // Base64 expands three source bytes into four upload bytes.
+    const rawLimit = Math.max(0, Math.floor((remaining * 3) / 4));
+    const field = await uploadedEvidenceField(evidencePath, spec, rawLimit);
+    if (field === undefined) continue;
+    fields.set(spec.key, field);
+    remaining -= field.content.length;
+  }
+  const required = (key: EvidenceArtifactSpec['key']) => fields.get(key) ?? emptyEvidenceField();
+  const exported = fields.get('opencodeExport');
   return {
     id: evidence.id,
-    status: evidence.status,
-    manifest: await encoded('manifest.json'),
-    opencodeJsonl: await encoded('opencode.jsonl'),
-    opencodeStderr: await encoded('opencode.stderr'),
-    ...(includeValidatedReview === false
+    status: evidence.status === 'pending' ? 'incomplete' : evidence.status,
+    manifest: required('manifest'),
+    opencodeJsonl: required('opencodeJsonl'),
+    opencodeStderr: required('opencodeStderr'),
+    ...(fields.get('validatedReview') === undefined
       ? {}
-      : { validatedReview: await encoded('validated-review.md') }),
-    opencodeSessionList: await encoded('opencode-session-list.json'),
-    ...(sessionId === undefined
+      : { validatedReview: fields.get('validatedReview') }),
+    ...(fields.get('opencodeSessionList') === undefined
       ? {}
-      : {
-          opencodeExport: {
-            sessionId,
-            content: await encoded(`opencode-export-${sessionId}.json`),
-          },
-        }),
+      : { opencodeSessionList: fields.get('opencodeSessionList') }),
+    ...(sessionId === undefined || exported === undefined
+      ? {}
+      : { opencodeExport: { sessionId, content: exported } }),
   };
 };
 
@@ -384,6 +464,7 @@ export interface CallbackSenderOptions {
   readonly token?: string | undefined;
   readonly fetch: typeof fetch;
   readonly timeoutMs: number;
+  readonly retryDelaysMs?: readonly number[] | undefined;
   readonly recordLog: (
     event: import('@compte-rendu/contracts').OperationalLogEvent,
   ) => Promise<void>;
@@ -411,12 +492,29 @@ export interface CallbackDeliveryInput {
   };
 }
 
+export interface EvidenceUploadSenderOptions {
+  readonly url?: string | undefined;
+  readonly token?: string | undefined;
+  readonly fetch: typeof fetch;
+  readonly timeoutMs: number;
+}
+
+export interface EvidenceUploadDeliveryInput {
+  readonly evidencePath: string;
+  readonly identity: { readonly id: string; readonly runId: string; readonly attempt: number };
+  readonly evidence: {
+    readonly id: string;
+    readonly status: 'pending' | 'complete' | 'incomplete';
+  };
+  readonly sessionIds: readonly string[];
+  readonly timestamps: CallbackDeliveryInput['timestamps'];
+}
+
 const sendCallback = async (
   options: CallbackSenderOptions,
   input: CallbackDeliveryInput,
-): Promise<boolean> => {
+): Promise<void> => {
   const {
-    evidencePath,
     identity,
     status,
     stage,
@@ -426,12 +524,12 @@ const sendCallback = async (
     usage,
     sandbox,
     evidence,
-    sessionIds,
     timestamps,
   } = input;
-  if (options.url === undefined || options.token === undefined) return false;
-  if (status !== 'succeeded' && status !== 'failed' && status !== 'aborted') return false;
+  if (options.url === undefined || options.token === undefined) return;
+  if (status !== 'succeeded' && status !== 'failed' && status !== 'aborted') return;
   const callback = {
+    version: 2,
     id: identity.id,
     runId: identity.runId,
     attempt: identity.attempt,
@@ -440,121 +538,56 @@ const sendCallback = async (
     lifecycle,
     ...(usage === undefined ? {} : { usage }),
     sandbox,
-    evidence: await callbackEvidence({
-      evidencePath,
-      evidence,
-      sessionIds,
-      includeValidatedReview: result !== undefined,
-    }),
+    evidence: {
+      id: evidence.id,
+      status: evidence.status === 'pending' ? 'incomplete' : evidence.status,
+    },
     timestamps,
     ...(result === undefined ? {} : { result }),
     ...(failure === undefined ? {} : { failure }),
   };
-  const decoded = await Schema.decodeUnknownPromise(RunnerResultCallback)(callback);
-  const completeBody = JSON.stringify(decoded);
-  const callbackTooLarge =
-    new TextEncoder().encode(completeBody).byteLength > MAX_RUNNER_CALLBACK_BYTES;
-  if (callbackTooLarge) {
-    try {
-      const manifest = JSON.parse(
-        await readFile(join(evidencePath, 'manifest.json'), 'utf8'),
-      ) as Record<string, unknown>;
-      manifest.execution = { status: 'failed', reason: 'evidence' };
-      manifest.terminal = { status: 'failed', reason: 'evidence' };
-      manifest.evidence = { id: callback.evidence.id, status: 'incomplete' };
-      manifest.complete = false;
-      manifest.evidenceFailure = 'callback-too-large';
-      // A reconciled terminal failure must not retain a validated result.
-      delete manifest.result;
-      await writeManifestAtomically(join(evidencePath, 'manifest.json'), manifest);
-    } catch {
-      // The original local evidence remains available if reconciliation fails.
-    }
-  }
-  const body = callbackTooLarge
-    ? JSON.stringify(
-        await Schema.decodeUnknownPromise(RunnerResultCallback)({
-          id: callback.id,
-          runId: callback.runId,
-          attempt: callback.attempt,
-          status: 'failed',
-          stage: callback.stage,
-          sandbox: callback.sandbox,
-          evidence: {
-            id: callback.evidence.id,
-            status: 'incomplete',
-            manifest: { content: '', size: 0, sha256: EMPTY_EVIDENCE_SHA256 },
-            opencodeJsonl: { content: '', size: 0, sha256: EMPTY_EVIDENCE_SHA256 },
-            opencodeStderr: { content: '', size: 0, sha256: EMPTY_EVIDENCE_SHA256 },
-          },
-          timestamps: callback.timestamps,
-          lifecycle: callback.lifecycle,
-          failure: { reason: 'evidence' },
-        }),
-      )
-    : completeBody;
-  await persistCallbackBody(evidencePath, body);
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const controller = new AbortController();
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    let timedOut = false;
-    try {
-      const response = await Promise.race([
-        options.fetch(options.url, {
-          method: 'POST',
-          headers: {
-            authorization: `Bearer ${options.token}`,
-            'content-type': 'application/json',
-          },
-          body,
-          signal: controller.signal,
-        }),
-        new Promise<Response>((_, reject) => {
-          timeout = setTimeout(() => {
-            timedOut = true;
-            controller.abort();
-            reject(new Error('runner callback request timed out'));
-          }, options.timeoutMs);
-        }),
-      ]);
-      if (response.ok) {
-        await options.recordLog({
-          phase: 'runner',
-          outcome: 'callback',
-          runId: identity.runId,
-          jobId: identity.id,
-          attempt: attempt + 1,
-          result: 'accepted',
-          status: response.status,
-        });
-        return callbackTooLarge;
-      }
-      await options.recordLog({
-        phase: 'runner',
-        outcome: 'callback',
-        runId: identity.runId,
-        jobId: identity.id,
-        attempt: attempt + 1,
-        result: 'http-error',
-        status: response.status,
-      });
-    } catch {
-      // The local evidence remains the recovery copy when callback delivery is lost.
-      await options.recordLog({
-        phase: 'runner',
-        outcome: 'callback',
-        runId: identity.runId,
-        jobId: identity.id,
-        attempt: attempt + 1,
-        result: timedOut ? 'timeout' : 'transport-error',
-      });
-    } finally {
-      if (timeout !== undefined) clearTimeout(timeout);
-    }
-    if (attempt === 0) {
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    }
-  }
+  const decoded = await Schema.decodeUnknownPromise(RunnerResultCallbackV2)(callback);
+  const body = JSON.stringify(decoded);
+  await persistCallbackBody(input.evidencePath, body);
+  const delivered = await createBoundedDelivery({
+    token: options.token,
+    fetch: options.fetch,
+    timeoutMs: options.timeoutMs,
+    retryDelaysMs: options.retryDelaysMs,
+    onAttempt: async (attempt, delivery) => {
+      await options.recordLog(
+        delivery.ok
+          ? {
+              phase: 'runner',
+              outcome: 'callback',
+              runId: identity.runId,
+              jobId: identity.id,
+              attempt,
+              result: 'accepted',
+              status: delivery.status,
+            }
+          : delivery.reason === 'http-error'
+            ? {
+                phase: 'runner',
+                outcome: 'callback',
+                runId: identity.runId,
+                jobId: identity.id,
+                attempt,
+                result: 'http-error',
+                status: delivery.status,
+              }
+            : {
+                phase: 'runner',
+                outcome: 'callback',
+                runId: identity.runId,
+                jobId: identity.id,
+                attempt,
+                result: delivery.reason,
+              },
+      );
+    },
+  })(options.url, body);
+  if (delivered.ok) return;
   // Local terminal state is not Core delivery: make the exhausted delivery explicit.
   await options.recordLog({
     phase: 'runner',
@@ -562,12 +595,49 @@ const sendCallback = async (
     runId: identity.runId,
     jobId: identity.id,
   });
-  return callbackTooLarge;
+};
+
+const sendEvidence = async (
+  options: EvidenceUploadSenderOptions,
+  input: EvidenceUploadDeliveryInput,
+): Promise<void> => {
+  if (options.url === undefined || options.token === undefined) return;
+  const upload = {
+    version: 2,
+    id: input.identity.id,
+    runId: input.identity.runId,
+    attempt: input.identity.attempt,
+    evidenceId: input.evidence.id,
+    evidence: await uploadedEvidence({
+      evidencePath: input.evidencePath,
+      evidence: input.evidence,
+      sessionIds: input.sessionIds,
+    }),
+    timestamps: input.timestamps,
+  };
+  const decoded = await Schema.decodeUnknownPromise(RunnerEvidenceUpload)(upload);
+  const body = JSON.stringify(decoded);
+  const delivered = await createBoundedDelivery({
+    token: options.token,
+    fetch: options.fetch,
+    timeoutMs: options.timeoutMs,
+    retryDelaysMs: [0],
+  })(options.url, body);
+  if (!delivered.ok) {
+    // The complete local evidence directory remains the recovery copy.
+    await Effect.runPromise(Effect.logWarning('runner evidence upload unavailable')).catch(
+      () => undefined,
+    );
+  }
 };
 
 export const createCallbackSender =
   (options: CallbackSenderOptions) => (input: CallbackDeliveryInput) =>
     sendCallback(options, input);
+
+export const createEvidenceUploader =
+  (options: EvidenceUploadSenderOptions) => (input: EvidenceUploadDeliveryInput) =>
+    sendEvidence(options, input);
 
 export type BoundedDelivery =
   | { readonly ok: true; readonly status: 202 }
@@ -584,6 +654,11 @@ export interface BoundedDeliveryOptions {
   readonly token?: string | undefined;
   readonly fetch: typeof fetch;
   readonly timeoutMs: number;
+  /** Delay before each attempt. The first entry is normally zero. */
+  readonly retryDelaysMs?: readonly number[] | undefined;
+  readonly onAttempt?:
+    | ((attempt: number, delivery: BoundedDelivery) => void | Promise<void>)
+    | undefined;
 }
 
 class BoundedDeliveryError extends Schema.TaggedError<BoundedDeliveryError>()(
@@ -610,8 +685,7 @@ export const createBoundedDelivery = (options: BoundedDeliveryOptions) => {
       catch: () => new BoundedDeliveryError(),
     }).pipe(Effect.timeout(options.timeoutMs));
   });
-  return async (url: string, body: string): Promise<BoundedDelivery> => {
-    if (options.token === undefined) return { ok: false, reason: 'transport-error' };
+  const attemptDelivery = async (url: string, body: string): Promise<BoundedDelivery> => {
     const result = await Effect.runPromise(Effect.result(deliver(url, body)));
     if (Result.isFailure(result)) {
       return {
@@ -624,5 +698,21 @@ export const createBoundedDelivery = (options: BoundedDeliveryOptions) => {
     return result.success === 202
       ? { ok: true, status: 202 }
       : { ok: false, reason: 'http-error', status: result.success };
+  };
+  return async (url: string, body: string): Promise<BoundedDelivery> => {
+    if (options.token === undefined) return { ok: false, reason: 'transport-error' };
+    const delays =
+      options.retryDelaysMs === undefined || options.retryDelaysMs.length === 0
+        ? [0]
+        : options.retryDelaysMs;
+    let result: BoundedDelivery = { ok: false, reason: 'transport-error' };
+    for (const [index, delay] of delays.entries()) {
+      if (delay > 0) await Effect.runPromise(Effect.sleep(Duration.millis(delay)));
+      result = await attemptDelivery(url, body);
+      await options.onAttempt?.(index + 1, result);
+      if (result.ok) return result;
+      if (result.reason === 'http-error' && !deliveryStatusRetryable(result.status)) return result;
+    }
+    return result;
   };
 };

@@ -126,8 +126,9 @@ leases), `CancellationStore` (stop and Check cancellation), and
 `DashboardMetadataStore` (public projection, progress and metadata refresh).
 `createD1ReviewStateStore` composes the four required ports for existing callers.
 `runner-evidence.ts` still reads the legacy inline artifact format for historical
-publication records, but live callbacks are slim and their private diagnostics
-arrive through `POST /runner-evidence`. Core publication never depends on that
+publication records. Live callbacks are slim and authoritative through D1
+ownership and a small publication record; their private diagnostics arrive
+through `POST /runner-evidence`. Core publication never depends on that
 diagnostic upload.
 
 ## Runner Job and pull interface
@@ -171,15 +172,26 @@ marker or startup gate is needed to bound it. Drain status includes work through
 cleanup and callback delivery; unconfirmed Sandbox cleanup or a halted claim loop
 prevents a drained report. This pause is in-memory and resets on process restart.
 
-Runner retains the final callback body privately before bounded delivery when
+Runner retains the final slim callback body privately before bounded delivery when
 the evidence directory is available. An
 explicit authenticated `POST /maintenance/replay-callback` replays it only after
-matching the operator's job/run/attempt, evidence ID and immutable SHAs and
-validating artifact integrity and confirmed cleanup. This works across Runner
-restarts; it does not reconstruct old callbacks or rerun agent work. Core's
-existing callback ownership, revision freshness and publication reconciliation
-remain authoritative. Acceptance is distinct from publication. There is no
-automatic replay queue; see [callback recovery](operations.md#replay-a-lost-terminal-callback).
+matching the operator's job/run/attempt, evidence ID and immutable SHAs against
+the local `manifest.json` and confirming that cleanup is `destroyed`. Replay does
+not decode or re-hash the six diagnostic attachments: both the current slim
+callback and a legacy inline callback remain recoverable after a rolling upgrade.
+This works across Runner restarts; it does not reconstruct old callbacks or rerun
+agent work. Core's existing callback ownership, revision freshness and publication
+reconciliation remain authoritative. Acceptance is distinct from publication.
+There is no automatic replay queue; see
+[callback recovery](operations.md#replay-a-lost-terminal-callback).
+
+Diagnostic material is uploaded separately from the terminal callback. The
+callback remains the publication authority, while a best-effort
+`POST /runner-evidence` carries the readable archive to private R2. A failed or
+slow upload never changes a verified result; the full private evidence directory
+stays on the Runner host. Uploads share one real byte budget and prioritize the
+manifest and session metadata, truncating only an individual oversized artifact
+with an explicit marker.
 
 A slim `version: 2` terminal callback carries identity, attempt, status, stage,
 cleanup, timestamps, the validated structured result and only an evidence ID and
@@ -208,10 +220,11 @@ ended a timeout. Setup consumes the same remaining budget; there is no
 agent-start reset. One same-session correction gets at most two minutes of its
 remainder; it is not another attempt. Evidence archival, revocation,
 destruction and callback keep independent bounded finalization time. Callback
-delivery has a bounded timeout and one immediate retry. Private diagnostic
-artifacts travel separately from the terminal result, so an oversized or failed
-archive upload is logged and bounded instead of turning a valid review into a
-failure.
+delivery uses a bounded timeout with exponential retry delays over five attempts,
+absorbing transient 5xx/429/408 responses before operator replay is needed. An
+oversized or failed private diagnostic upload is logged and bounded: an artifact
+that cannot fit the shared upload budget is truncated and marked as such, so the
+terminal result never turns into an evidence failure.
 
 Normal success, failure, timeout and cancellation finalize evidence and destroy
 the Sandbox before callback. A Runner crash can interrupt a review before it delivers a verdict.

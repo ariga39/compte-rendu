@@ -148,6 +148,7 @@ describe('Runner LLM token output', () => {
     const token = 'unexpected-host-grant-value';
     const relay = createRelayControl({ token });
     const callbacks: Request[] = [];
+    const evidenceRequests: Request[] = [];
     const scenario = await runAgentScenario({
       runId: 'run-llm-leaked-review',
       output: finalMarkdownJsonl(`## Review:\n${token}`),
@@ -156,6 +157,7 @@ describe('Runner LLM token output', () => {
         diagnostic: token,
       }),
       callbackRequests: callbacks,
+      evidenceRequests,
       modelConfig: relayInferenceModelConfig(),
       relayControl: relay,
     });
@@ -169,9 +171,8 @@ describe('Runner LLM token output', () => {
     expect(callback).toMatchObject({ status: 'failed' });
     expect(callback.result).toBeUndefined();
     expect(JSON.stringify(callback)).not.toContain(token);
-    expect(
-      Buffer.from(callback.evidence.opencodeExport.content.content, 'base64').toString('utf8'),
-    ).not.toContain(token);
+    expect(evidenceRequests).toHaveLength(1);
+    expect(await evidenceRequests[0]!.clone().text()).not.toContain(token);
     expect(
       await readTextTree(join(sharedEvidenceRoot, scenario.terminal.evidenceId as string)),
     ).not.toContain(token);
@@ -686,13 +687,14 @@ describe('Runner transport diagnostics', () => {
       output: finalMarkdownJsonl(),
       callbackRequests: [],
       callbackStatuses: options.callbackStatuses,
+      callbackRetryDelaysMs: [0, 0, 0, 0, 0],
       callbackThrows: options.callbackThrows,
       callbackHangs: options.callbackHangs,
       callbackTimeoutMs: options.callbackTimeoutMs,
       logEvents: events,
     });
     if (options.callbackHangs === true || options.callbackThrows !== undefined) {
-      for (let attempt = 0; attempt < 200; attempt += 1) {
+      for (let attempt = 0; attempt < 500; attempt += 1) {
         if (events.some((event) => event.outcome === 'callback-delivery-failed')) break;
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
@@ -733,7 +735,7 @@ describe('Runner transport diagnostics', () => {
     const runId = 'run-callback-log-http';
     const { terminal, events } = await runCallbackLogScenario({
       runId,
-      callbackStatuses: [503, 503],
+      callbackStatuses: [503, 503, 503, 503, 503],
     });
 
     expect(terminal.status).toBe('succeeded');
@@ -749,6 +751,14 @@ describe('Runner transport diagnostics', () => {
       expect.objectContaining({
         outcome: 'callback',
         attempt: 2,
+        result: 'http-error',
+        status: 503,
+      }),
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        outcome: 'callback',
+        attempt: 5,
         result: 'http-error',
         status: 503,
       }),
@@ -777,6 +787,9 @@ describe('Runner transport diagnostics', () => {
     );
     expect(events).toContainEqual(
       expect.objectContaining({ outcome: 'callback', attempt: 2, result: 'timeout' }),
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({ outcome: 'callback', attempt: 5, result: 'timeout' }),
     );
     expect(events).toContainEqual(
       expect.objectContaining({ outcome: 'callback-delivery-failed', runId }),

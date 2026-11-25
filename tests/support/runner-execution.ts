@@ -1,7 +1,7 @@
 import type {
   RunnerJobInput,
   RunnerJobResponse,
-  RunnerResultCallback,
+  RunnerTerminalCallback,
 } from '../../packages/contracts/src';
 
 export interface ClaimExecutionOptions {
@@ -16,7 +16,7 @@ const terminalStatuses = new Set(['succeeded', 'failed', 'aborted']);
 
 const nextTick = () => new Promise((resolve) => setTimeout(resolve, 10));
 
-const stateFromCallback = (callback: RunnerResultCallback): RunnerJobResponse => ({
+const stateFromCallback = (callback: RunnerTerminalCallback): RunnerJobResponse => ({
   id: callback.id,
   runId: callback.runId,
   attempt: callback.attempt,
@@ -42,7 +42,7 @@ export const createClaimExecution = (options: ClaimExecutionOptions = {}) => {
   let readCallback = 0;
   let wakeClaim: (() => void) | undefined;
   const pendingTerminals: Array<{
-    readonly callback: RunnerResultCallback;
+    readonly callback: RunnerTerminalCallback;
     readonly terminal: RunnerJobResponse;
     readonly request: Request;
   }> = [];
@@ -83,7 +83,7 @@ export const createClaimExecution = (options: ClaimExecutionOptions = {}) => {
       while (readCallback < callbackRequests.length) {
         const request = callbackRequests[readCallback]!;
         readCallback += 1;
-        const callback = (await request.clone().json()) as RunnerResultCallback;
+        const callback = (await request.clone().json()) as RunnerTerminalCallback;
         if (!terminalStatuses.has(callback.status)) continue;
         pendingTerminals.push({
           callback,

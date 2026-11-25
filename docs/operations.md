@@ -414,9 +414,17 @@ an archive and recursively deleted.
 
 When the evidence directory is available, Runner retains the exact bounded
 terminal callback as `callback.json` there before attempting delivery. Like the other evidence,
-this file is private (mode 0600); it contains review/session evidence but no
-callback credential. Keep it outside Sandbox mounts and do not upload it to an
-issue. Delivery still proceeds if retaining this extra recovery copy fails.
+this file is private (mode 0600); it contains the review result, identities and an
+evidence reference but no callback credential or inline diagnostics. Keep it
+outside Sandbox mounts and do not upload it to an issue. Delivery still proceeds
+if retaining this extra recovery copy fails.
+
+Diagnostics travel separately through `POST /runner-evidence`. Runner first
+attempts the slim terminal callback, then uploads the readable evidence bundle
+best-effort. The upload shares the 32 MiB contract budget: manifest, session list
+and validated review are preserved first, and only an artifact that cannot fit is
+truncated with `truncated: true`. A failed or partial upload does not affect the
+callback result or the full local evidence directory.
 
 On the correct Runner host and instance, match the local `manifest.json` with
 the run being recovered: evidence ID, job ID, run ID, attempt, and immutable
@@ -443,17 +451,17 @@ curl --fail-with-body --silent --show-error --config "$RUNNER_CURL_CONFIG" \
   "$RUNNER_ORIGIN/maintenance/replay-callback"
 ```
 
-Runner reads only its configured evidence directory, validates the retained
-callback, artifact sizes/hashes, identities, revisions and confirmed cleanup,
-then sends one bounded request through its configured authenticated callback
-URL. For the size-limited failure callback, which omits embedded artifacts,
-recovery requires the rewritten local manifest marked `callback-too-large` and
-applies the same identity, revision and cleanup checks. It does not start a Sandbox
-or rerun the model. Missing, inconsistent or
-unconfirmed evidence is rejected; archives from before callback retention was
-introduced cannot be reconstructed by this operation. The same limitation applies
-to failures before an evidence directory or valid manifest exists, and to local
-retention failures. Preserve the diagnostics and investigate those cases separately.
+Runner reads only its configured evidence directory, checks the local
+`manifest.json` for the requested identities, revisions and confirmed cleanup,
+then sends the retained callback body as-is through its configured authenticated
+callback URL. It does not decode or re-hash the six diagnostic attachments, so a
+current slim callback and an inline callback retained from before a rolling
+upgrade are both recoverable. It does not start a Sandbox or rerun the model.
+Missing, inconsistent or unconfirmed evidence is rejected; archives from before
+callback retention was introduced cannot be reconstructed by this operation. The
+same limitation applies to failures before an evidence directory or valid manifest
+exists, and to local retention failures. Preserve the diagnostics and investigate
+those cases separately.
 
 Successful delivery returns HTTP 202 with `{"accepted": true}`. Rejections include
 a fixed `reason` without artifact contents: 400 for invalid assertions, 404 for

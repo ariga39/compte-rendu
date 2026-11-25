@@ -1,11 +1,10 @@
-import { createHash } from 'node:crypto';
 import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Effect, Option, Schema } from 'effect';
 import {
   GitHubSha,
   MAX_RUNNER_CALLBACK_BYTES,
-  RunnerResultCallback,
+  RunnerTerminalCallback,
   StructuredReviewResult,
 } from '@compte-rendu/contracts';
 
@@ -77,7 +76,7 @@ export class CallbackRecoveryError extends Schema.TaggedError<CallbackRecoveryEr
 export type RecoveredCallback = {
   readonly recoveryProof?: Readonly<Record<string, string>> | undefined;
   readonly body: string;
-  readonly callback: typeof RunnerResultCallback.Type;
+  readonly callback: typeof RunnerTerminalCallback.Type;
   readonly manifest: RecoveredManifest;
 };
 
@@ -88,20 +87,6 @@ const readStat = (path: string, reason: CallbackRecoveryReason) =>
     try: () => stat(path),
     catch: () => new CallbackRecoveryError({ reason }),
   });
-
-const artifactBytes = (artifact: {
-  readonly content: string;
-  readonly size: number;
-  readonly sha256: string;
-}): Buffer | undefined => {
-  const decoded = Schema.decodeUnknownOption(Schema.Uint8ArrayFromBase64)(artifact.content);
-  if (Option.isNone(decoded)) return undefined;
-  const bytes = Buffer.from(decoded.value);
-  if (bytes.byteLength !== artifact.size) return undefined;
-  return createHash('sha256').update(bytes).digest('hex') === artifact.sha256.toLowerCase()
-    ? bytes
-    : undefined;
-};
 
 export const recoverCallback = Effect.fn('recoverCallback')(function* (
   evidenceRoot: string,
@@ -129,59 +114,31 @@ export const recoverCallback = Effect.fn('recoverCallback')(function* (
 
   const text = new TextDecoder().decode(body);
   const callback = Option.getOrUndefined(
-    Schema.decodeUnknownOption(Schema.fromJsonString(RunnerResultCallback))(text),
+    Schema.decodeUnknownOption(Schema.fromJsonString(RunnerTerminalCallback))(text),
   );
   if (callback === undefined) return yield* fail('invalid-callback');
 
-  const included = [
-    callback.evidence.manifest,
-    callback.evidence.opencodeJsonl,
-    callback.evidence.opencodeStderr,
-    ...(callback.evidence.validatedReview === undefined ? [] : [callback.evidence.validatedReview]),
-    ...(callback.evidence.opencodeSessionList === undefined
-      ? []
-      : [callback.evidence.opencodeSessionList]),
-    ...(callback.evidence.opencodeExport === undefined
-      ? []
-      : [callback.evidence.opencodeExport.content]),
-  ];
-  if (included.some((artifact) => artifactBytes(artifact) === undefined)) {
-    return yield* fail('integrity-mismatch');
+  // The local manifest is the retained ownership and cleanup record. Diagnostic
+  // attachments are never decoded or hashed again: a legacy inline callback and
+  // the slim v2 callback both replay from the same local identity.
+  const manifestPath = join(directory, 'manifest.json');
+  const manifestInfo = yield* readStat(manifestPath, 'invalid-manifest');
+  if (!manifestInfo.isFile() || manifestInfo.size > MAX_RUNNER_CALLBACK_BYTES) {
+    return yield* fail('invalid-manifest');
   }
-
-  let manifestBytes = artifactBytes(callback.evidence.manifest);
-  const oversizedFallback =
-    callback.status === 'failed' &&
-    callback.failure.reason === 'evidence' &&
-    manifestBytes?.byteLength === 0;
-  if (oversizedFallback) {
-    // The size-limited failure callback intentionally omits all artifacts.
-    // Its rewritten local manifest is the retained ownership/cleanup record.
-    const manifestPath = join(directory, 'manifest.json');
-    const info = yield* readStat(manifestPath, 'invalid-manifest');
-    if (!info.isFile() || info.size > MAX_RUNNER_CALLBACK_BYTES) {
-      return yield* fail('invalid-manifest');
-    }
-    manifestBytes = yield* Effect.tryPromise({
-      try: () => readFile(manifestPath),
-      catch: () => new CallbackRecoveryError({ reason: 'invalid-manifest' }),
-    });
-    if (manifestBytes.byteLength > MAX_RUNNER_CALLBACK_BYTES) {
-      return yield* fail('invalid-manifest');
-    }
+  const manifestBytes = yield* Effect.tryPromise({
+    try: () => readFile(manifestPath),
+    catch: () => new CallbackRecoveryError({ reason: 'invalid-manifest' }),
+  });
+  if (manifestBytes.byteLength > MAX_RUNNER_CALLBACK_BYTES) {
+    return yield* fail('invalid-manifest');
   }
-  if (manifestBytes === undefined) return yield* fail('integrity-mismatch');
   const manifest = Option.getOrUndefined(
     Schema.decodeUnknownOption(Schema.fromJsonString(RunnerManifest))(
       new TextDecoder().decode(manifestBytes),
     ),
   );
-  if (
-    manifest === undefined ||
-    (oversizedFallback && manifest.evidenceFailure !== 'callback-too-large')
-  ) {
-    return yield* fail('invalid-manifest');
-  }
+  if (manifest === undefined) return yield* fail('invalid-manifest');
 
   if (
     manifest.jobId !== request.jobId ||
@@ -195,8 +152,7 @@ export const recoverCallback = Effect.fn('recoverCallback')(function* (
     callback.evidence.id !== request.evidenceId ||
     manifest.baseSha !== request.baseSha ||
     manifest.headSha !== request.headSha ||
-    manifest.terminal.status !== callback.status ||
-    manifest.evidence.status !== callback.evidence.status
+    manifest.terminal.status !== callback.status
   ) {
     return yield* fail('identity-mismatch');
   }
@@ -223,17 +179,13 @@ export const recoverCallback = Effect.fn('recoverCallback')(function* (
 
   if (callback.status === 'succeeded') {
     if (manifest.complete !== true) return yield* fail('result-mismatch');
-    const reviewBytes = artifactBytes(callback.evidence.validatedReview);
     const result = callback.result;
-    const markdown = typeof result === 'string' ? result : result.markdown;
     if (
-      reviewBytes === undefined ||
-      !reviewBytes.equals(Buffer.from(markdown)) ||
-      (typeof result === 'string'
+      typeof result === 'string'
         ? manifest.result !== undefined
         : manifest.result === undefined ||
           manifest.result.decision !== result.decision ||
-          manifest.result.markdown !== result.markdown)
+          manifest.result.markdown !== result.markdown
     ) {
       return yield* fail('result-mismatch');
     }
