@@ -299,9 +299,11 @@ export const withAutoClaim = (
             (claimed as { reviewConfiguration?: unknown }).reviewConfiguration !== undefined
           )
             return response;
+          const headers = new Headers(response.headers);
+          headers.delete('content-length');
           return Response.json(
             { ...(claimed as object), reviewConfiguration: defaultReviewSelection },
-            { status: 200 },
+            { status: 200, headers },
           );
         };
   const relayAware =
