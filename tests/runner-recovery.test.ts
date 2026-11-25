@@ -381,6 +381,12 @@ describe('Runner callback recovery', () => {
         upstreamStatus: 500,
       },
       {
+        fetch: async () => new Response(null, { status: 409 }),
+        expectedStatus: 502,
+        result: 'http-error',
+        upstreamStatus: 409,
+      },
+      {
         fetch: async () => {
           throw new Error('token callback-token');
         },
