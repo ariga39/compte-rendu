@@ -499,8 +499,13 @@ describe('Runner Job HTTP interface', () => {
       expect(result.githubSecretArgs).toContain('on-demand');
       const githubSecretArgs = result.githubSecretArgs!;
       expect(githubSecretArgs[githubSecretArgs.indexOf('--command') + 1]).toBe(
-        `cat ${result.githubTokenPath}`,
+        `cat '${result.githubTokenPath}'`,
       );
+      // The real Runner creates the token in its per-job host scratch root,
+      // outside the guest-mounted checkout/config directories.
+      expect(result.githubTokenPath).toMatch(/\/compte-rendu-review-[^/]+\/github-read-token$/);
+      expect(result.githubTokenPath).not.toContain('/checkout');
+      expect(result.githubTokenPath).not.toContain('opencode-config');
       expect(result.githubTokenSnapshots.at(-1)).toBe('rotated-github-read-token');
       expect(result.terminal).toMatchObject({
         status: 'succeeded',
@@ -742,9 +747,9 @@ describe('Runner Job HTTP interface', () => {
         if (_command === 'git' && args.includes('clone')) checkoutEnvironment = options.env;
         if (args[0] === 'secret' && args[1] === 'set' && args[2] === 'github') {
           const command = args[args.indexOf('--command') + 1];
-          if (command?.startsWith('cat ')) {
-            githubTokenPath = command.slice(4);
-            resolvedGithubToken = await readFile(command.slice(4), 'utf8');
+          if (command?.startsWith("cat '")) {
+            githubTokenPath = command.slice("cat '".length, -1);
+            resolvedGithubToken = await readFile(githubTokenPath, 'utf8');
           }
         }
         return {

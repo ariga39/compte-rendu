@@ -37,6 +37,7 @@ const jobSpec = (root: string, id: string): SandboxJobSpec => ({
   cpu: '1',
   memoryGib: 2,
   env: [],
+  hostScratchRoot: root,
   checkoutRoot: join(root, 'checkout'),
   configRoot: join(root, 'config'),
   modelResource: 'llm.example.test:443',
