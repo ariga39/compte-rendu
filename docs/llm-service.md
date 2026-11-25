@@ -8,19 +8,21 @@ Set the following variables on an sbx or microsandbox Runner:
 
 ```dotenv
 RUNNER_LLM_RELAY=1
-RUNNER_LLM_RELAY_GENERATION=<RELAY_BACKEND_GENERATION>
 RUNNER_CALLBACK_URL=https://<INGRESS_HOST>/runner-callback
 RUNNER_CALLBACK_TOKEN=<static-runner-callback-token>
 REVIEW_MODEL_CONFIG={"id":"opencode-go/deepseek-review","baseUrl":"https://<INFERENCE_FQDN>/v1","definition":{"name":"DeepSeek review"}}
 ```
 
+An existing `RUNNER_LLM_RELAY_GENERATION` setting is ignored; no issuer
+generation is required.
+
 Use the HTTPS callback origin and its Runner bearer for grant control. The inference hostname must be a separate HTTPS FQDN on port 443 with base path `/v1`. The Sandbox receives a job-scoped credential through the runtime’s secret injection mechanism. Supplier credentials and the Gateway Run token stay in Cloudflare.
 
-The Runner calls `/runner-llm/issue` with the run ID, job ID, attempt and routes. The profile-aware endpoint is `/runner-llm/issue-v2`; it returns only the grant token, expiry and one client descriptor per frozen route: `{ routeId, profile, limit?, metadata? }` where `profile` is `chat`, `responses`, `messages` or `gemini`. `metadata` carries only the OpenCode-supported model description, such as name, family, release date, capabilities and cost. The descriptor omits the upstream model, provider slug, credential alias and URL. v1 remains a Chat Completions-only contract and keeps its historical response shape. Grants expire after four review budgets (currently six hours); Sandbox resource lifetime stays pinned separately at two hours. The Runner records the issuer origin and backend generation before issuance and revokes by job ID on completion or cancellation. Keep the generation stable for the corresponding relay D1 database. An unreachable issuer or unrecognized marker blocks further admission until recovery. See [maintenance drain](operations.md#drain-before-maintenance).
+The Runner calls `/runner-llm/issue` with the run ID, job ID, attempt and routes. The profile-aware endpoint is `/runner-llm/issue-v2`; it returns only the grant token, expiry and one client descriptor per frozen route: `{ routeId, profile, limit?, metadata? }` where `profile` is `chat`, `responses`, `messages` or `gemini`. `metadata` carries only the OpenCode-supported model description, such as name, family, release date, capabilities and cost. The descriptor omits the upstream model, provider slug, credential alias and URL. v1 remains a Chat Completions-only contract and keeps its historical response shape. Grants expire after four review budgets (currently six hours); Sandbox resource lifetime stays pinned separately at two hours. The Runner revokes by job ID on completion or cancellation with a bounded retry. An unconfirmed revocation fails only that review and never blocks later admissions; the fixed expiry bounds a lost response or crash. See [maintenance drain](operations.md#drain-before-maintenance).
 
 ### Upgrading an installation with the former local service
 
-Use the previous Runner to finish any queued jobs without frozen selections, drain running work and resolve every pending grant against its original issuer. Check that the instance’s `llm-grant-pending` directory has no entries. Remove `RUNNER_LLM_SERVICE_SOCKET` from the effective Runner environment before starting the new binary. A legacy marker requires the previous software and its issuing service for recovery. Keep rollback binaries, configuration and credentials together; never rewrite markers to point at a different issuer.
+Use the previous Runner to finish any queued jobs without frozen selections and drain running work. Remove `RUNNER_LLM_SERVICE_SOCKET` from the effective Runner environment before starting the new binary. This release no longer reads `llm-grant-pending` markers or `RUNNER_LLM_RELAY_GENERATION`; leftovers are ignored. A rollback binary still needs its original configuration and credentials. Keep rollback binaries, configuration and credentials together.
 
 Managed grant v1 supports Chat Completions only. Use grant v2 for every roster containing a non-Chat route, including Responses and Messages, or a route with configured context or output limits. Check the [inference protocols](#inference-protocols) available in your deployed release. Installations using the former ChatGPT subscription backend need a provider credential supported by Gateway BYOK before migrating.
 

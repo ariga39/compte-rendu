@@ -679,7 +679,6 @@ describe('Runner confirmed cleanup recovery', () => {
           claimUrl: '',
           modelConfig,
           llmRelay: true,
-          llmRelayGeneration: 'generation-a',
           callbackFetch: routeRelayControl(relay, async (input, init) => {
             reports.push(new Request(input, init));
             return new Response(null, { status: 202 });
@@ -757,7 +756,6 @@ describe('Runner confirmed cleanup recovery', () => {
         claimUrl: '',
         modelConfig,
         llmRelay: true,
-        llmRelayGeneration: 'generation-a',
         callbackFetch: routeRelayControl(relay, async (input, init) => {
           reports.push(new Request(input, init));
           return new Response(null, { status: 202 });

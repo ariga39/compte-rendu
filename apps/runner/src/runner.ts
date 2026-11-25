@@ -21,7 +21,7 @@ import { createCleanupReconciler } from './cleanup-reconciler.js';
 import { createClaimScheduler, type ClaimScheduler } from './claim-scheduler.js';
 import { createJobExecutor, type JobExecutionInput } from './job-executor.js';
 import { createReadTokenClient, type ReadTokenClient } from './read-token-client.js';
-import { createGrantLedger, type GrantIssuer } from './grant-ledger.js';
+import { createGrantRevoker } from './grant-revoker.js';
 import { createBoundedDelivery } from './evidence-store.js';
 import { recoverCallback, ReplayCallbackRequest } from './callback-recovery.js';
 import { decodeReviewModelConfig, trustedOpenCodeConfig } from './opencode-config.js';
@@ -88,7 +88,6 @@ export interface RunnerOptions {
   /** Opt in to the remote relay control plane over the callback origin. */
   readonly llmRelay?: boolean;
   readonly llmGrantVersion?: 1 | 2;
-  readonly llmRelayGeneration?: string;
   readonly authToken?: string;
   readonly modelConfig?: string;
   readonly evidenceRoot?: string;
@@ -152,17 +151,13 @@ export const createRunner = (options: RunnerOptions = {}) => {
   const relayEnabled = isEnabled(relayFlag);
   const relayCallbackUrl = nonEmpty(options.callbackUrl ?? process.env.RUNNER_CALLBACK_URL);
   const relayCallbackToken = nonEmpty(options.callbackToken ?? process.env.RUNNER_CALLBACK_TOKEN);
-  const relayGeneration = nonEmpty(
-    options.llmRelayGeneration ?? process.env.RUNNER_LLM_RELAY_GENERATION,
-  );
+  // RUNNER_LLM_RELAY_GENERATION from an existing deployment is intentionally
+  // ignored: grants are revoked by job identity and expire on their own.
   let relayOrigin: string | undefined;
   let relayToken: string | undefined;
   if (relayEnabled) {
     if (relayCallbackUrl === undefined || relayCallbackToken === undefined) {
       throw new Error('RUNNER_LLM_RELAY requires RUNNER_CALLBACK_URL and RUNNER_CALLBACK_TOKEN');
-    }
-    if (relayGeneration === undefined) {
-      throw new Error('RUNNER_LLM_RELAY requires RUNNER_LLM_RELAY_GENERATION');
     }
     const controlUrl = new URL(relayCallbackUrl);
     if (
@@ -237,18 +232,12 @@ export const createRunner = (options: RunnerOptions = {}) => {
           fetch: relayFetch,
         })
       : undefined;
-  const activeGrantIssuer: GrantIssuer | undefined =
-    relayEnabled && relayOrigin !== undefined && relayGeneration !== undefined
-      ? { transport: 'relay', origin: relayOrigin, generation: relayGeneration }
-      : undefined;
   const modelId = modelConfig?.id;
   const serviceBaseUrl = modelConfig?.baseUrl;
   const modelResource = `${serviceBaseUrl?.hostname ?? MODEL_HOST}:${serviceBaseUrl?.port || MODEL_PORT}`;
   const openCodeConfig = modelConfig === undefined ? undefined : trustedOpenCodeConfig(modelConfig);
-  const grantLedger = createGrantLedger({
-    root: join(evidenceRoot, 'llm-grant-pending'),
+  const grantRevoker = createGrantRevoker({
     client: llmServiceClient,
-    activeIssuer: activeGrantIssuer,
     attempts: GRANT_REVOKE_ATTEMPTS,
     budgetMs: GRANT_REVOKE_BUDGET_MS,
   });
@@ -306,13 +295,9 @@ export const createRunner = (options: RunnerOptions = {}) => {
   const jobRegistry = createJobRegistry();
   let scheduler: ClaimScheduler;
   let closed = false;
-  // Admission and claim stay gated until startup recovery has resolved every
-  // own pending grant marker; an unresolved or foreign issuer keeps the gate
-  // closed and is never cleared through another backend's success.
-  void grantLedger.startRecovery();
   // Shared by the operator endpoint and automatic post-outage reconciliation.
-  // Retained callback/manifest identity, exact backend absence and grant state
-  // must all be confirmed before Core receives a recovery report.
+  // Retained callback/manifest identity and exact backend absence must both be
+  // confirmed before Core receives a recovery report.
   const maintenanceStatus = (): MaintenanceStatus => {
     const activeJobs = jobRegistry.activeCount();
     const cleanupBlockedJobs = jobRegistry.cleanupBlockedCount();
@@ -322,7 +307,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
       draining: claim.draining,
       drained:
         claim.draining &&
-        grantLedger.status() === true &&
         cleanupReconciler.recovered() === true &&
         activeJobs === 0 &&
         !claim.claiming &&
@@ -335,16 +319,15 @@ export const createRunner = (options: RunnerOptions = {}) => {
       claimInFlight:
         claim.claiming ||
         (!claim.claimPollingHalted && !outage && claim.claimRequestId !== undefined),
-      claimPollingHalted: claim.claimPollingHalted || outage || grantLedger.status() === false,
+      claimPollingHalted: claim.claimPollingHalted || outage,
       cleanupBlockedJobs,
     };
   };
   const cleanupReconciler = createCleanupReconciler({
     backend: sandboxBackend,
     registry: jobRegistry,
-    grants: grantLedger,
+    grants: grantRevoker,
     llmServiceClient,
-    activeGrantIssuer,
     evidenceRoot,
     callbackUrl,
     callbackToken,
@@ -365,7 +348,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
     callbackFetch,
     callbackTimeoutMs,
     progressFetch,
-    grants: grantLedger,
+    grants: grantRevoker,
     llmServiceClient,
     readTokenClient,
     relayEnabled,
@@ -451,7 +434,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
   scheduler = createClaimScheduler({
     backend: sandboxBackend,
     registry: jobRegistry,
-    grants: grantLedger,
     cleanup: cleanupReconciler,
     claimUrl,
     claimFetch,

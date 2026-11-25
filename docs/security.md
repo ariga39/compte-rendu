@@ -68,9 +68,9 @@ Managed inference permits the configured HTTPS inference hostname. Grant control
   cleanup. It does not currently revoke the GitHub installation token upstream.
 - Service-mode grants expire after four review budgets (currently six hours)
   and cannot be renewed.
-  Revocation rejects later admissions and seals usage for open requests. Unconfirmed revocation fails the review and
-  leaves a recovery marker; Sandbox cleanup is still attempted independently.
-- Relay D1 persists grants and revocations across Worker restarts. Runner startup retries pending revocations against the issuer recorded on disk.
+  Revocation rejects later admissions and seals usage for open requests. Unconfirmed revocation fails the review with
+  bounded retries; the fixed expiry bounds the credential, and Sandbox cleanup is still attempted independently.
+- Relay D1 persists grants and revocations across Worker restarts. Runner revokes each job with bounded retries and relies on the grant's fixed expiry after a crash.
 - The upstream credential belongs to the account’s AI Gateway BYOK configuration.
 - A stopped OpenCode client is not proof its server sessions stopped. Confirmed
   Sandbox destruction and grant revocation end job capabilities.

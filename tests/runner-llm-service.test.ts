@@ -1,5 +1,4 @@
-import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -45,7 +44,6 @@ describe('Runner LLM service mode', () => {
     expect(() =>
       createRunner({
         llmRelay: true,
-        llmRelayGeneration: 'generation-a',
         modelConfig: JSON.stringify({
           id: 'opencode-go/review',
           baseUrl,
@@ -183,7 +181,9 @@ describe('Runner LLM token output', () => {
 
 describe('Runner LLM lifecycle failures', () => {
   const modelConfig = relayInferenceModelConfig();
-  const fixture = async (issue: 'normal' | 'malformed' | 'short' = 'normal') => {
+  const fixture = async (
+    issue: 'normal' | 'malformed' | 'short' | 'http' | 'transport' = 'normal',
+  ) => {
     const root = await mkdtemp(join(tmpdir(), 'cr-llm-life-'));
     const token = 'lifecycle-test-grant';
     const relay = createRelayControl({ issuance: issue, token });
@@ -199,10 +199,9 @@ describe('Runner LLM lifecycle failures', () => {
   const relayOptions = (relay: RelayControl) => ({
     modelConfig,
     llmRelay: true,
-    llmRelayGeneration: 'generation-a',
     callbackFetch: routeRelayControl(relay, async () => new Response(null, { status: 202 })),
   });
-  it.each(['malformed', 'short'] as const)(
+  it.each(['malformed', 'short', 'http', 'transport'] as const)(
     'revokes an unusable %s issuance without starting the agent',
     async (issue) => {
       const f = await fixture(issue);
@@ -252,7 +251,7 @@ describe('Runner LLM lifecycle failures', () => {
       await f.close();
     }
   });
-  it('fails without a vote when revocation is unavailable, then recovers before a fresh Runner can claim', async () => {
+  it('fails without a vote when revocation is unavailable, then a fresh Runner still claims', async () => {
     const f = await fixture();
     f.relay.setRejectRevoke(true);
     const evidenceRoot = join(f.root, 'evidence');
@@ -279,9 +278,11 @@ describe('Runner LLM lifecycle failures', () => {
       expect((await callbacks[0].json()).result).toBeUndefined();
       expect(f.relay.revoked).toEqual([]);
       expect(f.relay.activeTokens.size).toBe(1);
-      // A failed terminal revocation leaves a startup marker, but confirmed
-      // Sandbox destruction still lets this process drain. The next startup
-      // resolves the marker before accepting work.
+      // A failed terminal revocation revokes with bounded retries and fails only
+      // this job. Confirmed Sandbox destruction still lets this process drain.
+      expect(
+        f.relay.requests.filter((request) => request.path === '/runner-llm/revoke'),
+      ).toHaveLength(2);
       const drain = await activeRunner!.handle(
         new Request('http://runner/maintenance/drain', {
           method: 'POST',
@@ -294,37 +295,21 @@ describe('Runner LLM lifecycle failures', () => {
         cleanupBlockedJobs: 0,
         claimPollingHalted: false,
       });
-      let unexpectedClaim = false;
-      const blocked = createRunner({
-        ...relayOptions(f.relay),
-        authToken: 'runner-test-token',
-        evidenceRoot,
-        claimIntervalMs: 1,
-        claimFetch: async () => {
-          unexpectedClaim = true;
-          return new Response(null, { status: 204 });
-        },
-      });
-      try {
-        await new Promise((resolve) => setTimeout(resolve, 50));
-        expect(unexpectedClaim).toBe(false);
-        expect(f.relay.activeTokens.size).toBe(1);
-      } finally {
-        await blocked.close();
-      }
-      f.relay.setRejectRevoke(false);
-      let claimedWithRevokedGrant = false;
+      // No startup marker gate: a fresh process claims while the old grant is
+      // still unrevoked and expires on its own fixed TTL.
+      let claims = 0;
       restarted = createRunner({
         ...relayOptions(f.relay),
         authToken: 'runner-test-token',
         evidenceRoot,
         claimIntervalMs: 60000,
         claimFetch: async () => {
-          claimedWithRevokedGrant = f.relay.activeTokens.size === 0;
+          claims += 1;
           return new Response(null, { status: 204 });
         },
       });
-      await vi.waitFor(() => expect(claimedWithRevokedGrant).toBe(true));
+      await vi.waitFor(() => expect(claims).toBeGreaterThan(0));
+      expect(f.relay.activeTokens.size).toBe(1);
     } finally {
       await restarted?.close();
       await f.close();
@@ -353,7 +338,7 @@ describe('Runner LLM lifecycle failures', () => {
       await f.close();
     }
   });
-  it('resumes claiming after explicit cleanup recovery resolves a failed startup grant gate', async () => {
+  it('claims without a startup grant gate and still revokes through explicit cleanup recovery', async () => {
     const f = await fixture();
     f.relay.setRejectRevoke(true);
     const evidenceRoot = join(f.root, 'evidence');
@@ -367,10 +352,9 @@ describe('Runner LLM lifecycle failures', () => {
         evidenceRoot,
         cleanupFailure: true,
       });
-      // Preserve this test's grant-recovery focus; startup sbx reconciliation
-      // is covered separately through retained ownership records.
+      // Startup sbx reconciliation is covered separately through retained
+      // ownership records.
       await rm(join(evidenceRoot, 'sandbox-owners'), { recursive: true, force: true });
-      let blocked = false;
       let claims = 0;
       restarted = createProductionRunnerWithMergeBase({
         ...relayOptions(f.relay),
@@ -378,12 +362,6 @@ describe('Runner LLM lifecycle failures', () => {
         evidenceRoot,
         claimUrl: 'https://ingress.test/runner-claim',
         claimIntervalMs: 60000,
-        log: {
-          record: (event) => {
-            if (event.outcome === 'claim' && event.reason === 'grant-recovery-failed')
-              blocked = true;
-          },
-        },
         claimFetch: async () => {
           claims += 1;
           return new Response(null, { status: 204 });
@@ -404,8 +382,9 @@ describe('Runner LLM lifecycle failures', () => {
                 truncated: false,
               },
       });
-      await vi.waitFor(() => expect(blocked).toBe(true));
-      expect(claims).toBe(0);
+      // A fresh process claims immediately even while the previous grant is
+      // still unrevoked; no on-disk marker gate survives the restart.
+      await vi.waitFor(() => expect(claims).toBeGreaterThan(0));
       expect(f.relay.activeTokens.size).toBe(1);
       const maintenanceRequest = (path: string) =>
         new Request(`http://runner/maintenance/${path}`, {
@@ -413,27 +392,12 @@ describe('Runner LLM lifecycle failures', () => {
           headers: { authorization: 'Bearer runner-test-token' },
         });
       expect(await (await restarted.handle(maintenanceRequest('drain'))).json()).toMatchObject({
-        drained: false,
-        claimPollingHalted: true,
+        drained: true,
+        claimPollingHalted: false,
       });
-      // Enable revocation before resume so a resume-triggered scan would
-      // succeed if it ran at all. Resume only clears the pause; the failed
-      // startup gate, its marker and the claim halt must remain.
-      const revokedBeforeResume = f.relay.revoked.length;
+      // Explicit cleanup recovery still performs the bounded revocation for the
+      // retained job once the control plane accepts it.
       f.relay.setRejectRevoke(false);
-      expect(await (await restarted.handle(maintenanceRequest('resume'))).json()).toMatchObject({
-        draining: false,
-        drained: false,
-        claimPollingHalted: true,
-      });
-      expect(claims).toBe(0);
-      expect(f.relay.revoked).toHaveLength(revokedBeforeResume);
-      expect(f.relay.activeTokens.size).toBe(1);
-      expect(await (await restarted.handle(maintenanceRequest('drain'))).json()).toMatchObject({
-        draining: true,
-        drained: false,
-        claimPollingHalted: true,
-      });
       const manifest = failed.manifest;
       const recovery = await restarted.handle(
         new Request('http://runner/maintenance/recover-cleanup', {
@@ -454,14 +418,6 @@ describe('Runner LLM lifecycle failures', () => {
       );
       expect(recovery.status).toBe(202);
       expect(f.relay.activeTokens.size).toBe(0);
-      await vi.waitFor(async () => {
-        expect(await (await restarted!.handle(maintenanceRequest('drain'))).json()).toMatchObject({
-          drained: true,
-          claimPollingHalted: false,
-        });
-      });
-      await restarted.handle(maintenanceRequest('resume'));
-      await vi.waitFor(() => expect(claims).toBeGreaterThan(0));
     } finally {
       await restarted?.close();
       await f.close();
@@ -1040,65 +996,6 @@ describe('Runner transport diagnostics', () => {
     }
   });
 
-  it('records a one-time grant recovery failure and preserves the claim gate', async () => {
-    const evidenceRoot = await mkdtemp(join(tmpdir(), 'cr-claim-grant-'));
-    const jobId = 'job-grant-gate';
-    await mkdir(join(evidenceRoot, 'llm-grant-pending'), { recursive: true, mode: 0o700 });
-    await writeFile(
-      join(
-        evidenceRoot,
-        'llm-grant-pending',
-        `${createHash('sha256').update(jobId).digest('hex')}.marker`,
-      ),
-      JSON.stringify({
-        version: 1,
-        jobId,
-        issuer: {
-          transport: 'relay',
-          origin: 'https://ingress.test',
-          generation: 'generation-a',
-        },
-      }),
-      { mode: 0o600 },
-    );
-    const relay = createRelayControl({ rejectRevoke: true });
-    const events: LogEvent[] = [];
-    let claims = 0;
-    const runner = createRunner({
-      evidenceRoot,
-      authToken: 'runner-test-token',
-      modelConfig: relayInferenceModelConfig('review'),
-      llmRelay: true,
-      llmRelayGeneration: 'generation-a',
-      callbackFetch: relay.fetch,
-      claimUrl: 'https://ingress.test/runner-claim',
-      claimIntervalMs: 1,
-      claimFetch: async () => {
-        claims += 1;
-        return new Response(null, { status: 204 });
-      },
-      log: {
-        record: async (event) => {
-          events.push(event as LogEvent);
-        },
-      },
-    });
-    try {
-      await new Promise((resolve) => setTimeout(resolve, 40));
-
-      expect(events.filter((event) => event.outcome === 'claim')).toEqual([
-        expect.objectContaining({ reason: 'grant-recovery-failed', pollingHalted: true }),
-      ]);
-      expect(claims).toBe(0);
-      expect(relay.requests).toContainEqual(
-        expect.objectContaining({ path: '/runner-llm/revoke' }),
-      );
-    } finally {
-      await runner.close();
-      await rm(evidenceRoot, { recursive: true, force: true });
-    }
-  });
-
   it.each(['exit failure', 'rejection'] as const)(
     'retries a transient microsandbox preflight (%s) and caches success',
     async (failure) => {
@@ -1114,7 +1011,6 @@ describe('Runner transport diagnostics', () => {
       const runner = createRunner({
         authToken: 'runner-test-token',
         llmRelay: true,
-        llmRelayGeneration: 'generation-a',
         modelConfig: relayInferenceModelConfig('review'),
         claimUrl: 'https://ingress.test/runner-claim',
         claimIntervalMs: 1,
@@ -1184,7 +1080,6 @@ describe('Runner transport diagnostics', () => {
     const runner = createRunner({
       authToken: 'runner-test-token',
       llmRelay: true,
-      llmRelayGeneration: 'generation-a',
       modelConfig: relayInferenceModelConfig('review'),
       claimUrl: 'https://ingress.test/runner-claim',
       claimIntervalMs: 1,

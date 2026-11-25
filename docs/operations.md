@@ -153,7 +153,7 @@ For a normal compatible release:
    `apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc`.
 4. If Runner changed, finish the drain procedure below, back up its artifact,
    install the tested merged build and restart it. Verify the artifact hash,
-   service health, configured concurrency and grant recovery status.
+   service health, configured concurrency and Sandbox recovery status.
 5. Verify the behavior affected by the release. For publication changes, inspect
    a controlled review's exact revision, output and visible GitHub publication;
    do not create reviews solely for screenshots.
@@ -232,42 +232,28 @@ curl --fail --silent --show-error --config "$RUNNER_CURL_CONFIG" \
 ```
 
 Wait for `drained: true` before restarting. It requires maintenance mode, a
-successful startup grant and Sandbox ownership scans, no active jobs or in-flight claim, no
-halted claim loop and no terminal job with unconfirmed cleanup. The startup scan
-keeps the claim gate closed when any pending marker is invalid, unreadable, or
-bound to another issuer/generation. Inspect failures rather than forcing a
-restart to clear these conditions. Resume only clears the maintenance pause. It
-may retry the Sandbox ownership scan, but it never retries or clears the startup
-grant scan, an ownership-related claim halt or failed cleanup. If maintenance is
-cancelled, send `POST /maintenance/resume` with the same curl configuration.
-Drain is in-memory: a restarted Runner begins normal claiming automatically only
-after its startup scan succeeds.
+successful Sandbox ownership scan, no active jobs or in-flight claim, no halted
+claim loop and no terminal job with unconfirmed cleanup. Inspect an ownership
+failure rather than forcing a restart to clear it. Resume only clears the
+maintenance pause and may retry the Sandbox ownership scan; it never clears an
+ownership-related claim halt or failed cleanup. If maintenance is cancelled,
+send `POST /maintenance/resume` with the same curl configuration. Drain is
+in-memory: a restarted Runner begins normal claiming automatically after its
+startup ownership scan.
 
-The explicit cleanup recovery is not a general repair for invalid or foreign
-markers. It accepts only a retained failed-cleanup job for the active sbx or
-microsandbox runtime where the request and evidence match the exact
+The explicit cleanup recovery accepts only a retained failed-cleanup job for the
+active sbx or microsandbox runtime where the request and evidence match the exact
 job/run/attempt/evidence/SHAs, host cleanup was confirmed, and both the retained
-manifest and callback still record failed cleanup. Any marker it uses must match
-the active issuer/generation; an invalid marker or any mismatch is rejected. On
-success it revokes the recorded grant, removes its marker and retries the startup
-scan in the same process.
+manifest and callback still record failed cleanup. On success it makes a bounded
+grant revocation for that job and retries the Sandbox ownership scan in the same
+process. Leftover `llm-grant-pending` files from an older Runner are ignored.
 
-For a foreign issuer/generation marker, restore the original issuer origin,
-generation, catalog and credentials, then restart to retry the startup scan. Use
-the matching recovery only if that job also has eligible retained failed cleanup.
-Do not delete the marker or repoint it to another backend. For an invalid marker,
-first verify the associated grant has expired or has been revoked, and that no
-Sandbox or cleanup obligation remains. Remove that marker only after those
-obligations are confirmed; otherwise keep the claim gate closed and investigate
-instead of deleting it. A restart does not repair an invalid marker.
-
-A successful startup scan is not a continuous scan of all grants. A terminal
-revocation failure after startup fails that job without a vote and leaves its
-marker. Admission and claims stay open in the running process. Drain remains
-blocked if Sandbox destruction is unconfirmed. Grants have a fixed lifetime
-of four review budgets: the token stops authenticating at expiry, but the marker
-is not resolved by expiry and a subsequent startup scan must still
-confirm revocation through the original issuer and clear the marker.
+A terminal grant revocation failure after bounded retries fails that job without
+a vote; admission and claims stay open, and later same-PR work is governed by the
+confirmed cleanup state rather than grant state. Grants have a fixed lifetime of
+four review budgets: the token stops authenticating at expiry, and no marker or
+startup scan is required to bound it. Drain remains blocked only if Sandbox
+destruction is unconfirmed.
 
 Drained means local work and callback attempts finished, not that Core accepted
 every callback. Check terminal callback failures and the dashboard before
@@ -290,7 +276,7 @@ does not remove queued work; zero concurrency is invalid.
 
 Back up artifacts/configuration before replacement. Deploy additive Core/contracts
 support before a Runner that emits a new result shape. Do not interrupt live jobs
-just to update documentation or the dashboard. Relay grants survive Worker restarts in D1. On startup the Runner resolves pending revocations before accepting work. Interrupted agent jobs cannot resume.
+just to update documentation or the dashboard. Relay grants survive Worker restarts in D1. Runner revocation is bounded per job and grants expire after six hours; startup does not replay pending revocations. Interrupted agent jobs cannot resume.
 
 A hard crash can leave owned sbx resources. On startup Runner checks its private
 `sandbox-owners/<instanceId>/` records under the evidence root and removes only a

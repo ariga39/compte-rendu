@@ -283,7 +283,6 @@ describe('Runner multi-model review', () => {
       modelConfig: multiModelConfig,
       llmRelay: true,
       llmGrantVersion: overrides.descriptors ? 2 : 1,
-      llmRelayGeneration: 'generation-a',
       callbackUrl: 'https://ingress.test/runner-callback',
       callbackToken: 'callback-token',
       log: {

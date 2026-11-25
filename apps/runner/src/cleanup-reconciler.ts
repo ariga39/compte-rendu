@@ -1,7 +1,7 @@
 import { join } from 'node:path';
 import { Option, Effect } from 'effect';
 import type { SandboxBackend } from './sandbox-runtime.js';
-import type { GrantIssuer, GrantLedger } from './grant-ledger.js';
+import type { GrantRevoker } from './grant-revoker.js';
 import type { JobRegistry } from './job-registry.js';
 import { recoverCallback, ReplayCallbackRequest } from './callback-recovery.js';
 import {
@@ -29,9 +29,8 @@ type CleanupRecoveryResult = {
 export interface CleanupReconcilerDependencies {
   readonly backend: SandboxBackend;
   readonly registry: JobRegistry;
-  readonly grants: GrantLedger;
+  readonly grants: GrantRevoker;
   readonly llmServiceClient: { revoke(jobId: string): Promise<void> } | undefined;
-  readonly activeGrantIssuer: GrantIssuer | undefined;
   readonly evidenceRoot: string;
   readonly callbackUrl?: string | undefined;
   readonly callbackToken?: string | undefined;
@@ -48,9 +47,8 @@ export const createCleanupReconciler = (deps: CleanupReconcilerDependencies) => 
   const {
     backend: sandboxBackend,
     registry: jobRegistry,
-    grants: grantLedger,
+    grants: grantRevoker,
     llmServiceClient,
-    activeGrantIssuer,
     evidenceRoot,
     callbackUrl,
     callbackToken,
@@ -118,22 +116,8 @@ export const createCleanupReconciler = (deps: CleanupReconcilerDependencies) => 
         verificationFailed = true;
         throw error;
       }
-      const marker = await grantLedger.read(input.jobId);
-      if (marker.kind === 'invalid') throw new Error('grant recovery marker invalid');
-      if (marker.kind === 'present' || llmServiceClient !== undefined) {
-        const recordedJobId = marker.kind === 'present' ? marker.jobId : input.jobId;
-        const issuer = marker.kind === 'present' ? marker.issuer : activeGrantIssuer;
-        if (!(await grantLedger.revokeRecorded(recordedJobId, issuer)))
-          throw new Error('grant revocation not confirmed');
-        const previousRecovery = grantLedger.recovery();
-        if (
-          previousRecovery !== undefined &&
-          !(await previousRecovery) &&
-          grantLedger.recovery() === previousRecovery
-        ) {
-          void grantLedger.startRecovery();
-        }
-      }
+      if (llmServiceClient !== undefined && !(await grantRevoker.revoke(input.jobId, true)))
+        throw new Error('grant revocation not confirmed');
       const report = { ...input, sandboxName, confirmedAt: currentIso() };
       await writeManifestAtomically(
         join(evidenceRoot, input.evidenceId, 'cleanup-recovery.json'),

@@ -214,7 +214,6 @@ exit 0
       authToken: 'runner-test-token',
       claimUrl: '',
       llmRelay: true,
-      llmRelayGeneration: 'generation-1',
       callbackUrl: 'https://ingress.test/runner-callback',
       callbackToken: 'callback-token',
       modelConfig: JSON.stringify({

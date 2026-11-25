@@ -155,24 +155,19 @@ are not hot-reloaded. Claims are single-flight; ambiguous claim responses halt
 polling rather than risk duplicate ownership.
 
 Authenticated private maintenance endpoints pause new claims
-without cancelling jobs or in-flight claim reservations. At startup Runner scans
-its pending grant markers and revokes each recorded grant through the marker's
-original issuer/generation. The admission and claim gate stays closed, and drain
-cannot report complete, while that startup scan has any failed, invalid or
-foreign marker. Resume changes only the maintenance pause. It may retry the
-Sandbox ownership scan but never retries or clears the startup grant scan. Exact
-cleanup recovery can resolve an eligible failed cleanup and retry the sandbox
-scan, but it rejects invalid and foreign markers and is limited to sbx or
-microsandbox jobs whose retained evidence and callback still show
-matching failed cleanup; see [maintenance operations](operations.md#drain-before-maintenance).
-A successful startup scan is not continuous. A terminal revocation failure after
-startup fails that job without a vote and leaves its marker without closing
-admission or claims in that process. The marker remains for the next startup scan
-or matching recovery. Grants have a fixed lifetime of four review budgets: the
-token stops authenticating at expiry, but expiry alone does not resolve the
-marker or the next startup gate. Drain status includes work through cleanup and
-callback delivery; unconfirmed Sandbox cleanup or a halted claim loop prevents a
-drained report. This pause is in-memory and resets on process restart.
+without cancelling jobs or in-flight claim reservations. At startup Runner
+reconciles Sandbox ownership records; it does not scan or replay grant markers
+from a previous release. Resume changes only the maintenance pause and may retry
+the Sandbox ownership scan. Exact cleanup recovery can resolve an eligible failed
+cleanup and retry the sandbox scan; it is limited to sbx or microsandbox jobs whose
+retained evidence and callback still show matching failed cleanup; see
+[maintenance operations](operations.md#drain-before-maintenance).
+A terminal revocation failure after bounded retries fails that job without a vote
+but does not close admission or claims in that process. Grants have a fixed lifetime
+of four review budgets: the token stops authenticating at expiry, and no on-disk
+marker or startup gate is needed to bound it. Drain status includes work through
+cleanup and callback delivery; unconfirmed Sandbox cleanup or a halted claim loop
+prevents a drained report. This pause is in-memory and resets on process restart.
 
 Runner retains the final callback body privately before bounded delivery when
 the evidence directory is available. An
