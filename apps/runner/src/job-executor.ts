@@ -113,6 +113,7 @@ export const createJobExecutor = (deps: JobExecutorDependencies) => {
     url: evidenceUrl,
     token: callbackToken,
     fetch: evidenceFetch,
+    warn: operationalLog.warn,
     timeoutMs: evidenceTimeoutMs,
   });
   const grantLifecycle = {

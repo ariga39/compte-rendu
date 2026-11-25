@@ -4,7 +4,8 @@ import {
   ModelRouteDescriptor,
   RUNNER_LLM_CONTROL_TIMEOUT_MS,
 } from '@compte-rendu/contracts';
-import { Effect, Schema } from 'effect';
+import { Schema } from 'effect';
+import { HostRequestAbortError, runWithHostDeadline } from './host-request.js';
 
 const grantFields = {
   token: Schema.NonEmptyString.check(Schema.isPattern(/^[A-Za-z0-9_-]+$/)),
@@ -71,45 +72,46 @@ export interface LlmServiceClient {
   readonly usage: (jobId: string) => Promise<ModelUsageSummary>;
 }
 
-const relayPost = (options: RelayLlmServiceClientOptions) =>
-  Effect.fn('RunnerLlmRelayControl.post')(function* (
+const relayPost =
+  (options: RelayLlmServiceClientOptions) =>
+  async (
     path: string,
     payload: unknown,
     expectedStatus: number,
     maxBytes = CONTROL_MAX_BYTES,
-  ) {
+  ): Promise<string> => {
     const origin = options.origin.toString().replace(/\/+$/, '');
-    return yield* Effect.tryPromise({
-      try: async (signal) => {
-        const response = await (options.fetch ?? globalThis.fetch)(`${origin}${path}`, {
-          method: 'POST',
-          headers: {
-            authorization: `Bearer ${options.token}`,
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify(payload),
-          redirect: 'error',
-          signal,
-        });
-        if (response.status !== expectedStatus) {
-          await response.body?.cancel().catch(() => undefined);
-          throw new RelayControlError({ reason: 'http-error', status: response.status });
-        }
-        const body = await readBoundedBody(response.body, maxBytes);
-        if (body.kind === 'too-large') throw new RelayControlError({ reason: 'invalid-response' });
-        return body.text;
-      },
-      catch: (error) =>
-        error instanceof RelayControlError
-          ? error
-          : new RelayControlError({ reason: 'transport-error' }),
-    }).pipe(
-      Effect.timeout(RUNNER_LLM_CONTROL_TIMEOUT_MS),
-      Effect.catchTag('TimeoutError', () =>
-        Effect.fail(new RelayControlError({ reason: 'timeout' })),
-      ),
-    );
-  });
+    try {
+      return await runWithHostDeadline(
+        { timeoutMs: RUNNER_LLM_CONTROL_TIMEOUT_MS },
+        async (signal) => {
+          const response = await (options.fetch ?? globalThis.fetch)(`${origin}${path}`, {
+            method: 'POST',
+            headers: {
+              authorization: `Bearer ${options.token}`,
+              'content-type': 'application/json',
+            },
+            body: JSON.stringify(payload),
+            redirect: 'error',
+            signal,
+          });
+          if (response.status !== expectedStatus) {
+            await response.body?.cancel().catch(() => undefined);
+            throw new RelayControlError({ reason: 'http-error', status: response.status });
+          }
+          const body = await readBoundedBody(response.body, maxBytes);
+          if (body.kind === 'too-large')
+            throw new RelayControlError({ reason: 'invalid-response' });
+          return body.text;
+        },
+      );
+    } catch (error) {
+      if (error instanceof HostRequestAbortError && error.reason === 'timeout')
+        throw new RelayControlError({ reason: 'timeout' });
+      if (error instanceof RelayControlError) throw error;
+      throw new RelayControlError({ reason: 'transport-error' });
+    }
+  };
 
 const grantUnavailable = (reason: LlmGrantIssueFailure, status?: number) =>
   new LlmGrantIssueError({
@@ -129,8 +131,8 @@ export const createRelayLlmServiceClient = (
   options: RelayLlmServiceClientOptions,
 ): LlmServiceClient => {
   const post = relayPost(options);
-  const issue = Effect.fn('RunnerLlmRelayControl.issue')(
-    function* (job: LlmGrantIdentity, routes: readonly string[]) {
+  const issue = async (job: LlmGrantIdentity, routes: readonly string[]) => {
+    try {
       const payload = {
         runId: job.runId,
         jobId: job.jobId,
@@ -138,50 +140,54 @@ export const createRelayLlmServiceClient = (
         routes,
       };
       if (options.grantVersion === 2) {
-        const body = yield* post('/runner-llm/issue-v2', payload, 201);
-        const grant = yield* Schema.decodeUnknownEffect(ProfiledGrant, {
+        const body = await post('/runner-llm/issue-v2', payload, 201);
+        const grant = await Schema.decodeUnknownPromise(ProfiledGrant, {
           onExcessProperty: 'error',
-        })(body).pipe(Effect.mapError(() => grantUnavailable('invalid-response')));
+        })(body).catch(() => {
+          throw grantUnavailable('invalid-response');
+        });
         const ids = new Set(grant.descriptors.map((d) => d.routeId));
         if (
           routes.length !== grant.descriptors.length ||
           ids.size !== routes.length ||
           routes.some((id) => !ids.has(id))
         )
-          return yield* Effect.fail(grantUnavailable('invalid-response'));
+          throw grantUnavailable('invalid-response');
         return {
           token: grant.token,
           expiresAt: grant.expiresAt.getTime(),
           descriptors: grant.descriptors,
         };
       }
-      const body = yield* post('/runner-llm/issue', payload, 201);
-      const grant = yield* Schema.decodeUnknownEffect(Grant, { onExcessProperty: 'error' })(
-        body,
-      ).pipe(Effect.mapError(() => grantUnavailable('invalid-response')));
-      return { token: grant.token, expiresAt: grant.expiresAt.getTime() };
-    },
-    Effect.catch((error) => Effect.fail(issueFailure(error))),
-  );
-  const usage = Effect.fn('RunnerLlmRelayControl.usage')(
-    function* (jobId: string) {
-      const body = yield* post('/runner-llm/usage', { jobId }, 200, USAGE_MAX_BYTES);
-      return yield* Schema.decodeUnknownEffect(Schema.fromJsonString(ModelUsageSummary), {
+      const body = await post('/runner-llm/issue', payload, 201);
+      const grant = await Schema.decodeUnknownPromise(Grant, {
         onExcessProperty: 'error',
-      })(body);
-    },
-    Effect.catch(() => Effect.fail(new Error('LLM usage unavailable'))),
-  );
+      })(body).catch(() => {
+        throw grantUnavailable('invalid-response');
+      });
+      return { token: grant.token, expiresAt: grant.expiresAt.getTime() };
+    } catch (error) {
+      throw issueFailure(error);
+    }
+  };
   return {
-    usage: (jobId: string) => Effect.runPromise(usage(jobId)),
-    issue: (job: LlmGrantIdentity, routes: readonly string[]) =>
-      Effect.runPromise(issue(job, routes)),
+    usage: async (jobId: string) => {
+      try {
+        const body = await post('/runner-llm/usage', { jobId }, 200, USAGE_MAX_BYTES);
+        return await Schema.decodeUnknownPromise(Schema.fromJsonString(ModelUsageSummary), {
+          onExcessProperty: 'error',
+        })(body);
+      } catch {
+        throw new Error('LLM usage unavailable');
+      }
+    },
+    issue,
     revoke: async (jobId: string): Promise<void> => {
-      await Effect.runPromise(
-        post('/runner-llm/revoke', { jobId }, 204).pipe(
-          Effect.mapError(() => new Error('LLM service control request failed')),
-        ),
-      );
+      try {
+        await post('/runner-llm/revoke', { jobId }, 204);
+      } catch {
+        throw new Error('LLM service control request failed');
+      }
     },
   };
 };

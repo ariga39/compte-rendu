@@ -1,6 +1,6 @@
 import { chmod, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { Effect, Option, Schema } from 'effect';
+import { Option, Schema } from 'effect';
 import type {
   JobSandbox,
   OrphanReconcileResult,
@@ -679,24 +679,6 @@ const createSbxJobSandbox = (options: SbxRuntimeOptions, spec: SandboxJobSpec): 
   return { metadata, setup, exec, copyOut, updateGithubReadToken, destroy };
 };
 
-class CleanupRecoveryError extends Schema.TaggedError<CleanupRecoveryError>()(
-  'CleanupRecoveryError',
-  {},
-) {}
-
-const confirmSbxCleanup = Effect.fn('confirmSbxCleanup')(function* (
-  sandboxName: string,
-  command: SbxCommand,
-) {
-  const failure = yield* Effect.tryPromise({
-    try: () => confirmExactSbxResourcesAbsent(sandboxName, command),
-    catch: () => new CleanupRecoveryError(),
-  });
-  if (failure !== undefined) {
-    return yield* new CleanupRecoveryError();
-  }
-});
-
 export const createSbxSandboxBackend = (context: SandboxBackendContext): SandboxBackend => {
   const program = process.env.RUNNER_SANDBOX_CLI ?? process.env.SBX_BIN ?? 'sbx';
   const modelSecretCommand = context.relayEnabled
@@ -757,7 +739,12 @@ export const createSbxSandboxBackend = (context: SandboxBackendContext): Sandbox
       return reconcileSbxResources(command, isLiveJob, only);
     },
     async confirmCleanupAbsent(input: SandboxCleanupConfirmation): Promise<void> {
-      await Effect.runPromise(confirmSbxCleanup(input.sandboxName, command));
+      try {
+        const failure = await confirmExactSbxResourcesAbsent(input.sandboxName, command);
+        if (failure !== undefined) throw new Error();
+      } catch {
+        throw new Error('sbx sandbox cleanup was not confirmed');
+      }
     },
     createJob(spec: SandboxJobSpec): JobSandbox {
       return createSbxJobSandbox(runtimeOptions, spec);
