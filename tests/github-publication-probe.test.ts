@@ -323,6 +323,8 @@ describe('GitHub publication probe', () => {
       ...successfulCallback,
       id: secondJob.id,
       runId: secondJob.runId,
+      baseSha: secondJob.baseSha,
+      headSha: secondJob.headSha,
       result: {
         version: 2,
         decision: 'comment',
@@ -440,6 +442,8 @@ describe('GitHub publication probe', () => {
       ...successfulCallback,
       id: secondJob.id,
       runId: secondJob.runId,
+      baseSha: secondJob.baseSha,
+      headSha: secondJob.headSha,
       result: {
         version: 2,
         decision: 'comment',
@@ -597,6 +601,39 @@ describe('GitHub publication probe', () => {
     );
 
     expect(response.status).toBe(404);
+    await expect(readdir(join(root, 'evidence'))).resolves.toEqual([]);
+  });
+
+  it('rejects a callback whose base or head does not match the claimed job', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'compte-rendu-publication-probe-'));
+    const jobsPath = join(root, 'jobs.json');
+    await writeFile(jobsPath, JSON.stringify([{ repositoryId: 11, installationId: 7, job }]), {
+      mode: 0o600,
+    });
+    await chmod(jobsPath, 0o600);
+    const probe = await createGitHubPublicationProbe({
+      jobsPath,
+      evidenceRoot: join(root, 'evidence'),
+      callbackToken: 'probe-token',
+    });
+    const claim = () =>
+      new Request('http://127.0.0.1/runner-claim', {
+        method: 'POST',
+        headers: { authorization: 'Bearer probe-token' },
+      });
+    expect((await probe.fetch(claim())).status).toBe(200);
+    const callbackRequest = (overrides: Record<string, unknown>) =>
+      new Request('http://127.0.0.1/runner-callback', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer probe-token',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ ...successfulCallback, ...overrides }),
+      });
+
+    expect((await probe.fetch(callbackRequest({ baseSha: '3'.repeat(40) }))).status).toBe(409);
+    expect((await probe.fetch(callbackRequest({ headSha: '4'.repeat(40) }))).status).toBe(409);
     await expect(readdir(join(root, 'evidence'))).resolves.toEqual([]);
   });
 });

@@ -533,11 +533,12 @@ issues another review POST for that claim. Inspect the GitHub PR before starting
 a new review.
 
 The application cron also reconciles up to four such publications per tick
-using the D1 ownership and the hash-verified R2 evidence already retained for
-the callback. Missing or inconsistent evidence leaves the run pending for
-investigation. Retained evidence is not deleted after acceptance. If publication
-remains uncertain, inspect the callback and Core diagnostics before starting a
-new review; do not edit the evidence or clear ownership.
+using the D1 ownership and the exact attempt publication record
+`reviews/<runId>/publications/<jobId>/<attempt>.json`. An absent or invalid
+record leaves the run pending for investigation; diagnostic evidence is not a
+publication source. Retained evidence is not deleted after acceptance. If
+publication remains uncertain, inspect the callback and Core diagnostics before
+starting a new review; do not edit the evidence or clear ownership.
 
 Terminal Check delivery is independent of publication. If GitHub transiently
 rejects the final PATCH, D1 retains pending work for that run's exact Check. The
