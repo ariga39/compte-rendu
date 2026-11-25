@@ -271,12 +271,14 @@ describe('Core callbacks and publication', () => {
         installationId: 7,
         baseSha: eligibleEvent.baseSha,
         headSha: eligibleEvent.headSha,
-        trigger: 'automatic',
+        trigger: 'manual',
+        commentId: 987654,
       },
       occurredAt: '2026-09-01T00:00:00.000Z',
     });
     if (superseded.kind !== 'claimed') throw new Error('superseded test run was not claimed');
     await claimRunnerJob(stateStore, { runId: superseded.runId, jobId: 'superseded-job' });
+    await stateStore.recordCheckRun({ runId: superseded.runId, checkRunId: 321 });
     const replacement = await stateStore.claimReview({
       deliveryId: 'delivery-callback-superseded-new',
       job: {
@@ -296,6 +298,8 @@ describe('Core callbacks and publication', () => {
     });
     const stored: unknown[] = [];
     const published: unknown[] = [];
+    const reactions: unknown[] = [];
+    const checkUpdates: unknown[] = [];
     const worker = createCoreWorker(
       {
         REVIEW_DB: database,
@@ -315,6 +319,12 @@ describe('Core callbacks and publication', () => {
             published.push(input);
             return { kind: 'created', review: input };
           },
+          addReaction: async (input) => {
+            reactions.push(input);
+          },
+          updateCheckRun: async (input) => {
+            checkUpdates.push(input);
+          },
         },
       },
     );
@@ -333,6 +343,11 @@ describe('Core callbacks and publication', () => {
       expect((await worker.fetch(await callback(superseded.runId, 'superseded-job'))).status).toBe(
         202,
       );
+      expect((await worker.fetch(await callback(superseded.runId, 'superseded-job'))).status).toBe(
+        202,
+      );
+      expect(reactions).toHaveLength(1);
+      expect(checkUpdates).toHaveLength(1);
       await claimRunnerJob(stateStore, {
         runId: replacement.runId,
         jobId: 'replacement-job',
@@ -418,6 +433,93 @@ describe('Core callbacks and publication', () => {
       await expect(stateStore.getRunOutcome(claimed.runId)).resolves.toMatchObject({
         status: 'completed',
       });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('does not leave a publication claim behind when the terminal write fails before committing', async () => {
+    const database = new SqliteD1Database();
+    const stateStore = createD1ReviewStateStore(database);
+    const claimed = await stateStore.claimReview({
+      deliveryId: 'delivery-terminal-write-retry',
+      job: {
+        repositoryId: 11,
+        pullRequestNumber: 42,
+        installationId: 7,
+        baseSha: eligibleEvent.baseSha,
+        headSha: eligibleEvent.headSha,
+        trigger: 'manual',
+        commentId: 987654,
+      },
+      occurredAt: '2026-09-01T00:00:00.000Z',
+    });
+    if (claimed.kind !== 'claimed') throw new Error('retry run was not claimed');
+    await claimRunnerJob(stateStore, { runId: claimed.runId, jobId: 'runner-job-1' });
+    await stateStore.recordCheckRun({ runId: claimed.runId, checkRunId: 321 });
+    let failTerminalWrite = true;
+    const flakyStore: typeof stateStore = {
+      ...stateStore,
+      markSchedulingFailed: async (input) => {
+        if (failTerminalWrite) {
+          failTerminalWrite = false;
+          throw new Error('temporary terminal write failure');
+        }
+        return stateStore.markSchedulingFailed(input);
+      },
+    };
+    const reactions: unknown[] = [];
+    const comments: unknown[] = [];
+    const checkUpdates: unknown[] = [];
+    const worker = createCoreWorker(
+      {
+        REVIEW_DB: database,
+        GITHUB_APP_ID: '1234567',
+        GITHUB_APP_PRIVATE_KEY: 'test-private-key',
+        EVIDENCE_BUCKET: { put: async () => undefined },
+      },
+      {
+        stateStore: flakyStore,
+        github: {
+          addReaction: async (input) => {
+            reactions.push(input);
+          },
+          createIssueComment: async (input) => {
+            comments.push(input);
+            return input;
+          },
+          updateCheckRun: async (input) => {
+            checkUpdates.push(input);
+          },
+        },
+      },
+    );
+    const callbackBody = await failedCallback(claimed.runId);
+    const callback = () =>
+      new Request('https://core.internal/runner-results', {
+        method: 'POST',
+        headers: {
+          'x-compte-rendu-runner-callback': 'verified',
+          'content-type': 'application/json',
+        },
+        body: callbackBody,
+      });
+
+    try {
+      expect((await worker.fetch(callback())).status).toBe(503);
+      const afterFailure = await stateStore.getRunOutcome(claimed.runId);
+      expect(afterFailure).toMatchObject({ status: 'scheduled' });
+      expect(afterFailure?.publicationClaimedAt).toBeUndefined();
+
+      expect((await worker.fetch(callback())).status).toBe(202);
+      expect(await stateStore.getRunOutcome(claimed.runId)).toMatchObject({
+        status: 'failed',
+        cleanup: 'destroyed',
+        publicationClaimedAt: expect.any(String),
+      });
+      expect(reactions).toHaveLength(1);
+      expect(comments).toHaveLength(1);
+      expect(checkUpdates).toHaveLength(1);
     } finally {
       database.close();
     }
@@ -510,7 +612,7 @@ describe('Core callbacks and publication', () => {
     }
   });
 
-  it('keeps manual supersession feedback when an aborted callback arrives late', async () => {
+  it('keeps one manual supersession feedback across redelivery and cleanup-only failure', async () => {
     const database = new SqliteD1Database();
     const stateStore = createD1ReviewStateStore(database);
     const claimed = await stateStore.claimReview({
@@ -528,11 +630,13 @@ describe('Core callbacks and publication', () => {
     });
     if (claimed.kind !== 'claimed') throw new Error('manual superseded run was not claimed');
     await claimRunnerJob(stateStore, { runId: claimed.runId, jobId: 'runner-job-1' });
+    await stateStore.recordCheckRun({ runId: claimed.runId, checkRunId: 321 });
     await stateStore.markRunSuperseded({
       runId: claimed.runId,
       occurredAt: '2026-09-01T00:00:01.000Z',
     });
     const reactions: unknown[] = [];
+    const checkUpdates: unknown[] = [];
     const worker = createCoreWorker(
       {
         REVIEW_DB: database,
@@ -546,26 +650,41 @@ describe('Core callbacks and publication', () => {
           addReaction: async (input) => {
             reactions.push(input);
           },
+          updateCheckRun: async (input) => {
+            checkUpdates.push(input);
+          },
         },
       },
     );
-
-    try {
-      const response = await worker.fetch(
+    const callback = async (body: string) =>
+      worker.fetch(
         new Request('https://core.internal/runner-results', {
           method: 'POST',
           headers: {
             'x-compte-rendu-runner-callback': 'verified',
             'content-type': 'application/json',
           },
-          body: await abortedCallback(claimed.runId, 'runner-job-1'),
+          body,
         }),
       );
 
-      expect(response.status).toBe(202);
+    try {
+      const aborted = await abortedCallback(claimed.runId, 'runner-job-1', 1, 'pending');
+      expect((await callback(aborted)).status).toBe(202);
+      expect((await callback(aborted)).status).toBe(202);
+      expect(
+        (await callback(await failedCallback(claimed.runId, 'runner-job-1', 1, 'destroyed')))
+          .status,
+      ).toBe(202);
+
       expect(reactions).toEqual([
         { repositoryId: 11, installationId: 7, commentId: 987654, content: 'confused' },
       ]);
+      expect(checkUpdates).toEqual([]);
+      expect(await stateStore.getRunOutcome(claimed.runId)).toMatchObject({
+        status: 'superseded',
+        cleanup: 'destroyed',
+      });
     } finally {
       database.close();
     }

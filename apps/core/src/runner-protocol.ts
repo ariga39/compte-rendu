@@ -156,10 +156,9 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
     failure?: PublicTaskFailure,
     requireUnpublished = false,
   ): Promise<ReviewOutcome | undefined> => {
-    const notificationClaimed =
-      outcome.status === 'scheduled' || outcome.status === 'failed'
-        ? await stateStore.claimRunPublication({ runId, occurredAt })
-        : false;
+    // Write the terminal state before taking the failure-notification claim.
+    // A transient terminal write failure must leave no publication claim behind
+    // for the next callback retry to trip over.
     const statusWriteSucceeded = await stateStore.markSchedulingFailed({
       runId,
       occurredAt,
@@ -167,25 +166,31 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
       ...(failure === undefined ? {} : { failure }),
       ...(requireUnpublished ? { requireUnpublished: true } : {}),
     });
-    // Cancellation can win after the caller read the run but before the claim
-    // and status write above. The durable outcome is the winner; only the
-    // failed (or superseded) winner gets external failure feedback.
+    // Cancellation can win after the caller read the run but before the
+    // terminal write. The durable outcome is the winner; only the failed (or
+    // superseded) winner gets external feedback.
     const settled = await stateStore.getRunOutcome(runId).catch(() => undefined);
     // A failed post-write read must not hide feedback when this attempt
-    // provably owns publication and wrote the failed status. Known
-    // cancelled/superseded outcomes still take precedence.
+    // provably wrote the failed status. Known cancelled/superseded outcomes
+    // still take precedence.
     const failed =
       settled?.status === 'failed' ||
-      (settled === undefined &&
-        notificationClaimed &&
-        (statusWriteSucceeded || outcome.status === 'failed'));
+      (settled === undefined && (statusWriteSucceeded || outcome.status === 'failed'));
     const superseded = settled?.status === 'superseded';
     const winner =
       settled ??
       (failed ? { ...outcome, status: 'failed' as const, updatedAt: occurredAt } : undefined);
     if (winner === undefined) return undefined;
-    const failureTransitioned = failed && outcome.status === 'scheduled';
-    const supersessionRetained = superseded && outcome.status === 'superseded';
+    // Only a durably failed run may claim failure-notification ownership.
+    // claimRunPublication accepts status=failed without publishing, so this
+    // remains race-safe after the terminal write. A comment failure releases
+    // the claim for a later retry.
+    const notificationClaimed = failed
+      ? await stateStore.claimRunPublication({ runId, occurredAt })
+      : false;
+    const failureTransitioned = failed && notificationClaimed && outcome.status === 'scheduled';
+    const supersessionRetained =
+      superseded && outcome.status === 'superseded' && outcome.resultReceivedAt === undefined;
     if (
       (failureTransitioned || supersessionRetained) &&
       winner.trigger === 'manual' &&
@@ -367,17 +372,24 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
 
     if (callback.status === 'succeeded') {
       if (outcome.status === 'superseded') {
+        // The terminal cleanup write above still applies, but a settled
+        // superseded result must not repeat its reaction, Check or telemetry.
+        if (outcome.resultReceivedAt !== undefined) {
+          return new Response(null, { status: 202 });
+        }
         if (
           outcome.trigger === 'manual' &&
           outcome.commentId !== undefined &&
           github.addReaction !== undefined
         ) {
-          await github.addReaction({
-            repositoryId: outcome.repositoryId,
-            installationId: outcome.installationId,
-            commentId: outcome.commentId,
-            content: 'confused',
-          });
+          await github
+            .addReaction({
+              repositoryId: outcome.repositoryId,
+              installationId: outcome.installationId,
+              commentId: outcome.commentId,
+              content: 'confused',
+            })
+            .catch(() => undefined);
         }
         if (outcome.checkRunId !== undefined && github.updateCheckRun !== undefined) {
           await publishTerminalCheck({
