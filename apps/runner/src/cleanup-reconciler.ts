@@ -10,7 +10,7 @@ import type { JobRegistry } from './job-registry.js';
 import {
   cleanupConfirmedCallbackBody,
   recoverCallback,
-  ReplayCallbackRequest,
+  CleanupRecoveryRequest,
 } from './callback-recovery.js';
 import { deliveryStatusRetryable, type BoundedDelivery } from './evidence-store.js';
 import { currentIso } from './runner-clock.js';
@@ -75,7 +75,7 @@ export const createCleanupReconciler = (deps: CleanupReconcilerDependencies) => 
     }
   };
   const recoverRetainedCleanup = async (
-    input: ReplayCallbackRequest,
+    input: CleanupRecoveryRequest,
   ): Promise<CleanupRecoveryResult> => {
     if (callbackUrl === undefined || callbackToken === undefined)
       return {
@@ -100,9 +100,7 @@ export const createCleanupReconciler = (deps: CleanupReconcilerDependencies) => 
     let verificationFailed = false;
     try {
       const recovered = await Effect.runPromise(
-        recoverCallback(evidenceRoot, input, { cleanupRuntime: sandboxBackend.kind }).pipe(
-          Effect.option,
-        ),
+        recoverCallback(evidenceRoot, input, sandboxBackend.kind).pipe(Effect.option),
       );
       if (Option.isNone(recovered))
         return { accepted: false, status: 409, error: 'cleanup recovery rejected' };

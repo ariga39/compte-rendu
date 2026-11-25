@@ -1,13 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { Effect, Option, Schema } from 'effect';
-import {
-  REVIEW_ATTEMPT_BUDGET_MS,
-  sanitizeOperationalLogEvent,
-  type OperationalLog,
-  type OperationalLogEvent,
-} from '@compte-rendu/contracts';
+import { Option, Schema } from 'effect';
+import { REVIEW_ATTEMPT_BUDGET_MS, type OperationalLog } from '@compte-rendu/contracts';
 import {
   createSandboxBackend,
   sandboxBackendHealth,
@@ -24,7 +19,7 @@ import { createJobExecutor, type JobExecutionInput } from './job-executor.js';
 import { createReadTokenClient, type ReadTokenClient } from './read-token-client.js';
 import { createGrantRevoker } from './grant-revoker.js';
 import { createBoundedDelivery } from './evidence-store.js';
-import { recoverCallback, ReplayCallbackRequest } from './callback-recovery.js';
+import { CleanupRecoveryRequest } from './callback-recovery.js';
 import { decodeReviewModelConfig, trustedOpenCodeConfig } from './opencode-config.js';
 import {
   readRunnerSettingsSync,
@@ -251,14 +246,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
     budgetMs: GRANT_REVOKE_BUDGET_MS,
   });
   const log = options.log;
-  const recordLog = async (event: OperationalLogEvent) => {
-    if (log === undefined) return;
-    try {
-      await log.record(sanitizeOperationalLogEvent(event));
-    } catch {
-      // Diagnostics must not change the product outcome.
-    }
-  };
   const callbackUrl = options.callbackUrl ?? process.env.RUNNER_CALLBACK_URL;
   const callbackToken = options.callbackToken ?? process.env.RUNNER_CALLBACK_TOKEN;
   const callbackFetch = options.callbackFetch ?? globalThis.fetch;
@@ -494,7 +481,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
     if (request.method === 'POST' && path === '/maintenance/recover-cleanup') {
       if (!callbackUrl || !callbackToken)
         return jsonResponse(503, { error: 'callback unavailable' });
-      const input = await Schema.decodeUnknownPromise(ReplayCallbackRequest)(
+      const input = await Schema.decodeUnknownPromise(CleanupRecoveryRequest)(
         await readJson(request),
       ).catch(() => undefined);
       if (input === undefined) return jsonResponse(400, { error: 'invalid recovery request' });
@@ -503,106 +490,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
       scheduler.request();
       cleanupReconciler.retry();
       return jsonResponse(202, { accepted: true });
-    }
-    if (request.method === 'POST' && path === '/maintenance/replay-callback') {
-      if (
-        callbackUrl === undefined ||
-        callbackUrl.length === 0 ||
-        callbackToken === undefined ||
-        callbackToken.length === 0
-      ) {
-        return jsonResponse(503, {
-          accepted: false,
-          error: 'callback unavailable',
-          reason: 'callback-unavailable',
-        });
-      }
-      const input = await Schema.decodeUnknownPromise(ReplayCallbackRequest)(
-        await readJson(request),
-      ).catch(() => undefined);
-      if (input === undefined) {
-        return jsonResponse(400, {
-          accepted: false,
-          error: 'invalid replay request',
-          reason: 'invalid-request',
-        });
-      }
-      const active = jobRegistry.findActiveMatch(input);
-      if (active) {
-        return jsonResponse(409, {
-          accepted: false,
-          error: 'job is active',
-          reason: 'active-job',
-        });
-      }
-
-      const recovered = await Effect.runPromise(
-        recoverCallback(evidenceRoot, input).pipe(
-          Effect.match({
-            onFailure: (error) => ({ ok: false as const, reason: error.reason }),
-            onSuccess: (value) => ({ ok: true as const, value }),
-          }),
-        ),
-      );
-      if (!recovered.ok) {
-        const status =
-          recovered.reason === 'missing-evidence'
-            ? 404
-            : recovered.reason === 'oversized-callback'
-              ? 413
-              : 409;
-        return jsonResponse(status, {
-          accepted: false,
-          error: 'callback recovery rejected',
-          reason: recovered.reason,
-        });
-      }
-
-      const delivered = await postBounded(callbackUrl, recovered.value.body);
-      if (delivered.ok) {
-        await recordLog({
-          phase: 'runner',
-          outcome: 'callback',
-          runId: input.runId,
-          jobId: input.jobId,
-          attempt: 1,
-          result: 'accepted',
-          status: delivered.status,
-        });
-        return jsonResponse(202, { accepted: true });
-      }
-      if (delivered.reason === 'http-error') {
-        await recordLog({
-          phase: 'runner',
-          outcome: 'callback',
-          runId: input.runId,
-          jobId: input.jobId,
-          attempt: 1,
-          result: 'http-error',
-          status: delivered.status,
-        });
-        return jsonResponse(502, {
-          accepted: false,
-          error: 'callback delivery rejected',
-          reason: 'http-error',
-        });
-      }
-      await recordLog({
-        phase: 'runner',
-        outcome: 'callback',
-        runId: input.runId,
-        jobId: input.jobId,
-        attempt: 1,
-        result: delivered.reason,
-      });
-      return jsonResponse(delivered.reason === 'timeout' ? 504 : 502, {
-        accepted: false,
-        error:
-          delivered.reason === 'timeout'
-            ? 'callback delivery timed out'
-            : 'callback delivery failed',
-        reason: delivered.reason,
-      });
     }
     const match = /^\/jobs\/([^/]+)$/.exec(path);
     if (match === null) return jsonResponse(404, { error: 'not found' });

@@ -85,7 +85,8 @@ export const writeManifestAtomically = async (path: string, value: unknown) => {
 };
 
 // Persist the exact final callback body before transmission. A local write
-// failure must not suppress delivery; the archive is the recovery copy.
+// failure must not suppress delivery; the archive supports diagnosis and
+// verified cleanup confirmation, not callback replay.
 export const persistCallbackBody = async (evidencePath: string, body: string) => {
   try {
     const path = join(evidencePath, 'callback.json');
