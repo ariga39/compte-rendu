@@ -369,6 +369,57 @@ describe('Runner maintenance drain', () => {
     }
   });
 
+  it('times out a stalled claim body so maintenance drain does not hang', async () => {
+    let claims = 0;
+    let releaseBody!: () => void;
+    const bodyGate = new Promise<void>((resolve) => {
+      releaseBody = resolve;
+    });
+    const runner = createRunner({
+      authToken: 'runner-test-token',
+      evidenceRoot: sharedEvidenceRoot,
+      claimUrl: 'https://ingress.test/runner-claim',
+      claimIntervalMs: 1_000_000_000,
+      claimTimeoutMs: 20,
+      claimFetch: async () => {
+        claims += 1;
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            async pull(controller) {
+              await bodyGate;
+              controller.enqueue(new TextEncoder().encode('{}'));
+              controller.close();
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      },
+      process: reviewProcess({}),
+    });
+    try {
+      await vi.waitFor(() => expect(claims).toBe(1));
+      // The body deadline releases claiming while retaining the ambiguous
+      // request identity for a same-ID replay.
+      await vi.waitFor(async () => {
+        const state = await status(runner);
+        expect(state.claimInFlight).toBe(false);
+        expect(state.claimPollingHalted).toBe(true);
+      });
+      expect(await status(runner, 'POST', '/maintenance/drain')).toEqual({
+        draining: true,
+        drained: false,
+        activeJobs: 0,
+        claimInFlight: false,
+        claimPollingHalted: true,
+        cleanupBlockedJobs: 0,
+      });
+      expect(claims).toBe(1);
+    } finally {
+      releaseBody();
+      await runner.close();
+    }
+  });
+
   it('replays a prepared claim through drain without a new request ID', async () => {
     const evidenceRoot = await mkdtemp(join(tmpdir(), 'cr-staged-drain-'));
     const baseSha = '1'.repeat(40);
