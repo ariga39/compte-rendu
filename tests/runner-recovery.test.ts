@@ -286,22 +286,6 @@ describe('Runner confirmed cleanup recovery', () => {
         status: 'failed',
         sandbox: { cleanup: 'failed' },
       });
-      const reports = async () =>
-        (
-          await Promise.all(
-            callbacks.map(async (request) => ({
-              request,
-              body: (await request.clone().json()) as {
-                sandbox?: { cleanup?: string };
-                failure?: unknown;
-                baseSha?: string;
-                headSha?: string;
-              },
-            })),
-          )
-        )
-          .filter((entry) => entry.body.sandbox?.cleanup === 'destroyed')
-          .map((entry) => entry.request);
       const maintenance = async () =>
         (await (
           await runner!.handle(
@@ -336,25 +320,34 @@ describe('Runner confirmed cleanup recovery', () => {
       const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
       try {
         now += 31_000;
-        await vi.waitFor(async () => expect(await reports()).toHaveLength(1), { timeout: 5_000 });
-        expect(await maintenance()).toMatchObject({ activeJobs: 0, cleanupBlockedJobs: 1 });
+        await vi.waitFor(
+          async () => {
+            expect(callbacks).toHaveLength(2);
+            expect(await maintenance()).toMatchObject({ activeJobs: 0, cleanupBlockedJobs: 1 });
+          },
+          { timeout: 5_000 },
+        );
         now += 31_000;
-        await vi.waitFor(async () => expect(await reports()).toHaveLength(2), { timeout: 5_000 });
+        await vi.waitFor(() => expect(callbacks).toHaveLength(3), { timeout: 5_000 });
       } finally {
         clock.mockRestore();
       }
-      const recoveredCallbacks = await reports();
-      expect(await recoveredCallbacks[1]!.json()).toMatchObject({
-        version: 2,
-        id: scenario.manifest.jobId,
-        runId: scenario.manifest.runId,
-        attempt: scenario.manifest.attempt,
-        status: 'failed',
-        baseSha: scenario.manifest.baseSha,
-        headSha: scenario.manifest.headSha,
-        sandbox: { cleanup: 'destroyed' },
-        failure: { reason: expect.any(String) },
-      });
+      // The initial terminal callback was consumed by terminal polling. Read the
+      // two cleanup confirmations once after they have all settled; never clone
+      // their retained request streams during an assertion retry loop.
+      for (const callback of [callbacks[1]!, callbacks[2]!]) {
+        expect(await callback.json()).toMatchObject({
+          version: 2,
+          id: scenario.manifest.jobId,
+          runId: scenario.manifest.runId,
+          attempt: scenario.manifest.attempt,
+          status: 'failed',
+          baseSha: scenario.manifest.baseSha,
+          headSha: scenario.manifest.headSha,
+          sandbox: { cleanup: 'destroyed' },
+          failure: { reason: expect.any(String) },
+        });
+      }
       await vi.waitFor(async () =>
         expect(await maintenance()).toMatchObject({ activeJobs: 0, cleanupBlockedJobs: 0 }),
       );
