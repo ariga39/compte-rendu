@@ -986,24 +986,25 @@ describe('Runner confirmed cleanup recovery', () => {
         },
       });
       try {
-        const recoveryRequest = new Request('http://runner/maintenance/recover-cleanup', {
-          method: 'POST',
-          headers: {
-            authorization: 'Bearer runner-test-token',
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({
-            evidenceId,
-            jobId: manifest.jobId,
-            runId: manifest.runId,
-            attempt: manifest.attempt,
-            baseSha: manifest.baseSha,
-            headSha: manifest.headSha,
-          }),
-        });
-        const pending = runner.handle(recoveryRequest.clone());
+        const recoveryRequest = () =>
+          new Request('http://runner/maintenance/recover-cleanup', {
+            method: 'POST',
+            headers: {
+              authorization: 'Bearer runner-test-token',
+              'content-type': 'application/json',
+            },
+            body: JSON.stringify({
+              evidenceId,
+              jobId: manifest.jobId,
+              runId: manifest.runId,
+              attempt: manifest.attempt,
+              baseSha: manifest.baseSha,
+              headSha: manifest.headSha,
+            }),
+          });
+        const pending = runner.handle(recoveryRequest());
         await inspecting;
-        expect((await runner.handle(recoveryRequest.clone())).status).toBe(409);
+        expect((await runner.handle(recoveryRequest())).status).toBe(409);
         const draining = await runner.handle(
           new Request('http://runner/maintenance/drain', {
             method: 'POST',
@@ -1033,7 +1034,7 @@ describe('Runner confirmed cleanup recovery', () => {
         expect(await readFile(join(evidenceRoot, evidenceId, 'manifest.json'), 'utf8')).toBe(
           JSON.stringify(manifest, null, 2) + '\n',
         );
-        expect((await runner.handle(recoveryRequest.clone())).status).toBe(202);
+        expect((await runner.handle(recoveryRequest())).status).toBe(202);
         expect(reports).toHaveLength(2);
       } finally {
         releaseInspect();
