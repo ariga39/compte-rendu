@@ -280,12 +280,14 @@ Configure the GitHub App with only these repository permissions:
 | Issues                | Write | Make the `issue_comment` webhook available for PR comments, create command reactions, and publish one ordinary PR comment when a Review fails. The handler accepts only a created comment whose body is exactly `/ai-review`. |
 | Checks                | Write | Create one head-SHA-bound Check Run per review run and update its queued, in-progress, success, failure, or cancelled state.                                                                                                  |
 
-Before applying the D1 migration or deploying the application Worker, approve the
-GitHub App installation's **Checks: Write** permission. An unapproved permission
-blocks review admission. After approval, verify one successful run transitions
-its Check from `queued` to `in_progress` to `success`, and one controlled failed
-run transitions from `queued` to `in_progress` to `failure`, with the matching
-terminal Review or failure comment.
+Before rolling out the Worker or enabling review admission, the GitHub App
+installation must approve **Checks: Write**. Product Check creation and updates
+are best effort: without this permission a job still runs and publishes, but it
+has no Check status and no Check-based retry entry. After approval, verify one
+successful run transitions its Check from `queued` to `in_progress` to
+`success`, and one controlled failed run transitions from `queued` to
+`in_progress` to `failure`, with the matching terminal Review or failure
+comment.
 
 The endpoint-to-permission mapping should be checked against GitHub's
 [permission-to-endpoint reference](https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps)
@@ -917,11 +919,16 @@ uses the temporary invocation described above.
      listed in `DASHBOARD_MODEL_EDITOR_IDS` and open the catalog.
 
    Confirm the `defaultRoute` from the relay config is present and its source
-   refresh succeeded. Then start or restart the Runner with the managed
-   environment from [Runner configuration](#runner-configuration) and verify its
-   maintenance status per
+   refresh succeeded. Before starting or restarting the Runner, send an
+   authenticated `HEAD /runner-claim` with the Runner callback bearer and
+   require `204` plus a present `x-compte-rendu-concurrency` value that is a
+   positive integer or the `default` sentinel. A fresh installation normally
+   returns `default`, so the Runner uses `RUNNER_CONCURRENCY` until Dashboard
+   Settings sets the deployment value. Then start or restart the Runner with the
+   managed environment from [Runner configuration](#runner-configuration) and
+   verify its maintenance status per
    [drain and status](operations.md#drain-before-maintenance). Do not send
-   webhook deliveries before both checks pass.
+   webhook deliveries until the catalog, HEAD check and maintenance status pass.
 
 10. Only now enable webhook delivery. Set the webhook URL to `<INGRESS_URL>`,
     use the same high-entropy value as the ingress `WEBHOOK_SECRET`, confirm the
