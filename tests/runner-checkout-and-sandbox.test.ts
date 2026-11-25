@@ -859,6 +859,7 @@ describe('Runner Job HTTP interface', () => {
     let fetchArgs: readonly string[] | undefined;
     let agentArgs: readonly string[] | undefined;
     let configRootAtSandboxBoundary: string | undefined;
+    let openCodeConfig: string | undefined;
     const deliveredSkills = new Map<string, { body: string; license: string; notice: string }>();
     let sandboxEnvironment: NodeJS.ProcessEnv | undefined;
     const process = async (
@@ -878,6 +879,10 @@ describe('Runner Job HTTP interface', () => {
         const config = args.find((value) => value.startsWith('XDG_CONFIG_HOME='));
         if (config !== undefined) {
           configRootAtSandboxBoundary = config.slice('XDG_CONFIG_HOME='.length);
+          openCodeConfig = await readFile(
+            join(configRootAtSandboxBoundary, 'opencode', 'opencode.json'),
+            'utf8',
+          );
           const skillsRoot = join(configRootAtSandboxBoundary, 'opencode', 'skills');
           for (const name of await readdir(skillsRoot).catch(() => [])) {
             deliveredSkills.set(name, {
@@ -1041,9 +1046,10 @@ describe('Runner Job HTTP interface', () => {
     expect(deliveredPrompt).toContain(
       'Do not probe the environment, auth, or token state, and do not broaden the allowed permissions',
     );
-    const configContent = createArgs?.find((value) => value.startsWith('OPENCODE_CONFIG_CONTENT='));
-    expect(configContent).toBeDefined();
-    const config = JSON.parse(configContent!.slice('OPENCODE_CONFIG_CONTENT='.length)) as {
+    expect(createArgs).not.toEqual(
+      expect.arrayContaining([expect.stringMatching(/^OPENCODE_CONFIG_CONTENT=/)]),
+    );
+    const config = JSON.parse(openCodeConfig!) as {
       model: string;
       providers: Record<
         string,
@@ -1144,10 +1150,10 @@ describe('Runner Job HTTP interface', () => {
     expect(
       result.removedRuleIds.some((id) => id.endsWith('-runner-job-test-inference.example:443')),
     ).toBe(true);
-    const configContent = result.createArgs?.find((value) =>
-      value.startsWith('OPENCODE_CONFIG_CONTENT='),
+    expect(result.createArgs).not.toEqual(
+      expect.arrayContaining([expect.stringMatching(/^OPENCODE_CONFIG_CONTENT=/)]),
     );
-    const config = JSON.parse(configContent!.slice('OPENCODE_CONFIG_CONTENT='.length)) as {
+    const config = JSON.parse(result.configContent!) as {
       model: string;
       providers: Record<
         string,

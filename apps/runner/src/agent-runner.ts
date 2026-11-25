@@ -93,8 +93,10 @@ export const runAgentStage = async (
   const agentPrompt = reviewPrompt(promptInput);
   const configRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-opencode-config-'));
   job.configRoot = configRoot;
+  const configDirectory = join(configRoot, 'opencode');
+  await mkdir(configDirectory, { recursive: true });
   for (const skill of reviewSkills) {
-    const directory = join(configRoot, 'opencode', 'skills', skill.name);
+    const directory = join(configDirectory, 'skills', skill.name);
     await mkdir(directory, { recursive: true });
     await writeFile(join(directory, 'SKILL.md'), skill.body);
     await writeFile(join(directory, 'LICENSE.md'), skill.license);
@@ -107,13 +109,14 @@ export const runAgentStage = async (
     shellPermissionRules,
     reviewerTask: reviewerSystemPrompt(promptInput),
   });
+  await writeFile(join(configDirectory, 'opencode.json'), activeOpenCodeConfig, { mode: 0o644 });
 
   const sandbox = sandboxBackend.createJob({
     id: job.id,
     name: job.sandboxName,
     cpu: '4',
     memoryGib: 8,
-    env: [`OPENCODE_CONFIG_CONTENT=${activeOpenCodeConfig}`, 'OPENCODE_DISABLE_PROJECT_CONFIG=1'],
+    env: ['OPENCODE_DISABLE_PROJECT_CONFIG=1'],
     hostScratchRoot: job.checkoutRoot!,
     checkoutRoot: join(job.checkoutRoot!, 'checkout'),
     configRoot,

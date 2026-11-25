@@ -718,6 +718,7 @@ export const runAgentScenario = async (scenario: {
   const headSha = '2222222222222222222222222222222222222222';
   let agentInvoked = false;
   let createArgs: readonly string[] | undefined;
+  let configContent: string | undefined;
   let agentArgs: readonly string[] | undefined;
   let secretArgs: readonly string[] | undefined;
   const allowedResources: string[] = [];
@@ -846,6 +847,11 @@ export const runAgentScenario = async (scenario: {
         }
         if (args[0] === 'create') {
           createArgs = args;
+          const configRoot = args
+            .find((value) => value.startsWith('XDG_CONFIG_HOME='))
+            ?.slice('XDG_CONFIG_HOME='.length);
+          if (configRoot !== undefined)
+            configContent = await readFile(join(configRoot, 'opencode', 'opencode.json'), 'utf8');
         }
         if (args[0] === 'secret' && args[1] === 'set-custom') {
           secretArgs = args;
@@ -935,6 +941,7 @@ export const runAgentScenario = async (scenario: {
     agentInvoked,
     terminalDurationMs,
     createArgs,
+    configContent,
     agentArgs,
     secretArgs,
     allowedResources,

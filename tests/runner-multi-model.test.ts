@@ -273,6 +273,7 @@ describe('Runner multi-model review', () => {
     });
 
     let createArgs: readonly string[] | undefined;
+    let configContent: string | undefined;
     let agentArgs: readonly string[] | undefined;
     const agentCommands: string[][] = [];
     const callbacks: Request[] = [];
@@ -295,6 +296,11 @@ describe('Runner multi-model review', () => {
       process: async (_command, args, options = {}) => {
         if (args[0] === 'create') {
           createArgs = args;
+          const configRoot = args
+            .find((value) => value.startsWith('XDG_CONFIG_HOME='))
+            ?.slice('XDG_CONFIG_HOME='.length);
+          if (configRoot !== undefined)
+            configContent = await readFile(join(configRoot, 'opencode', 'opencode.json'), 'utf8');
         }
         const isAgent = args[0] === 'exec' && args.includes('--agent');
         if (isAgent) {
@@ -429,6 +435,7 @@ describe('Runner multi-model review', () => {
         issued: relay.issued,
         revoked: relay.revoked,
         createArgs,
+        configContent,
         agentArgs,
         agentCommands,
         events,
@@ -552,11 +559,7 @@ describe('Runner multi-model review', () => {
       },
     });
     expect(result.terminal.status).toBe('succeeded');
-    const config = JSON.parse(
-      result
-        .createArgs!.find((x) => x.startsWith('OPENCODE_CONFIG_CONTENT='))!
-        .slice('OPENCODE_CONFIG_CONTENT='.length),
-    );
+    const config = JSON.parse(result.configContent!);
     expect(config.agents['reviewer-0'].model).toBe('compte-rendu/compte-rendu/foo');
     expect(config.agents['reviewer-1'].model).toBe('compte-rendu/foo');
     expect(Object.keys(config.providers['compte-rendu'].models).sort()).toEqual([
@@ -669,11 +672,7 @@ describe('Runner multi-model review', () => {
       },
     });
     expect(result.terminal.status).toBe('succeeded');
-    const config = JSON.parse(
-      result
-        .createArgs!.find((x) => x.startsWith('OPENCODE_CONFIG_CONTENT='))!
-        .slice('OPENCODE_CONFIG_CONTENT='.length),
-    );
+    const config = JSON.parse(result.configContent!);
     expect(config.agents['reviewer-0'].model).toBe('provider/~__proto__');
     expect(config.agents['reviewer-1'].model).toBe('~__proto__/normal');
     expect(config.agents['reviewer-2'].model).toBe('provider/normal');
@@ -687,33 +686,59 @@ describe('Runner multi-model review', () => {
     ).toEqual(routes);
   });
 
-  it('accepts a legal issue-v2 roster larger than 16 KiB', async () => {
-    const metadataItems = Array.from(
-      { length: 64 },
-      (_, index) => `${String(index).padStart(2, '0')}${'x'.repeat(126)}`,
+  it('keeps a legal larger roster on the mounted OpenCode config above 128 KiB', async () => {
+    const routes = Array.from(
+      { length: 60 },
+      (_, index) => `review-${String(index).padStart(2, '0')}`,
     );
-    const descriptors = [
-      {
-        routeId: 'deepseek-v4.1-flash',
-        profile: 'chat',
-        metadata: {
-          name: 'DeepSeek',
-          capabilities: { input: metadataItems, output: metadataItems },
-        },
+    const selectionLarge = {
+      revision: 3,
+      selection: { reviewers: routes, synthesis: routes[0]! },
+    };
+    const descriptors = routes.map((routeId, index) => ({
+      routeId,
+      profile: 'chat' as const,
+      metadata: {
+        name: `Review model ${index} ${'n'.repeat(180)}`.slice(0, 200),
+        family: 'review-family',
       },
-      {
-        routeId: 'step-5-preview',
-        profile: 'responses',
-        metadata: {
-          name: 'Step 5',
-          capabilities: { input: metadataItems, output: metadataItems },
-        },
-      },
-    ];
+    }));
+    const children = routes.map((route, index) => ({
+      id: `ses_multi_child_${index}`,
+      parentID: rootSession,
+      agent: `reviewer-${index}`,
+      model: { providerID: 'compte-rendu', id: route },
+      outcome: 'succeeded',
+    }));
+    const exports = Object.fromEntries(
+      children.map((child) => [child.id, multiChildExports(child.id, child.agent, child.model.id)]),
+    );
+    const largeRoot = JSON.parse(rootExport) as {
+      info: { model: { providerID: string; id: string } };
+      messages: Array<{ model?: { providerID: string; id: string } }>;
+    };
+    largeRoot.info.model = { providerID: 'compte-rendu', id: routes[0]! };
+    for (const message of largeRoot.messages)
+      if (message.model !== undefined)
+        message.model = { providerID: 'compte-rendu', id: routes[0]! };
     expect(JSON.stringify(descriptors).length).toBeGreaterThan(16 * 1024);
-    const result = await runScenario({ descriptors });
+    const result = await runScenario({
+      selection: selectionLarge,
+      descriptors,
+      children,
+      rootExport: JSON.stringify(largeRoot),
+      exports: { [rootSession]: JSON.stringify(largeRoot), ...exports },
+    });
     expect(result.terminal.status).toBe('succeeded');
     expect(result.issued).toHaveLength(1);
+    expect(result.configContent!.length).toBeGreaterThan(128 * 1024);
+    expect(JSON.parse(result.configContent!).providers['compte-rendu'].models).toHaveProperty(
+      routes[0]!,
+    );
+    expect(result.createArgs).not.toEqual(
+      expect.arrayContaining([expect.stringMatching(/^OPENCODE_CONFIG_CONTENT=/)]),
+    );
+    expect(Math.max(...(result.createArgs ?? []).map((value) => value.length))).toBeLessThan(4096);
   });
 
   it('restores qualified child evidence routes from the selected model identity', async () => {
@@ -793,11 +818,7 @@ describe('Runner multi-model review', () => {
       ],
     });
     expect(result.terminal.status).toBe('succeeded');
-    const config = JSON.parse(
-      result
-        .createArgs!.find((x) => x.startsWith('OPENCODE_CONFIG_CONTENT='))!
-        .slice('OPENCODE_CONFIG_CONTENT='.length),
-    );
+    const config = JSON.parse(result.configContent!);
     expect(config.providers['compte-rendu'].models['step-5-preview'].package).toBe(
       '@opencode/ai/providers/openai',
     );
@@ -832,11 +853,7 @@ describe('Runner multi-model review', () => {
       ],
     });
     expect(result.terminal.status).toBe('succeeded');
-    const config = JSON.parse(
-      result
-        .createArgs!.find((x) => x.startsWith('OPENCODE_CONFIG_CONTENT='))!
-        .slice('OPENCODE_CONFIG_CONTENT='.length),
-    );
+    const config = JSON.parse(result.configContent!);
     const provider = config.providers['compte-rendu'];
     expect(provider.settings.baseURL).toBe('https://inference.example/v1');
     expect(provider.models['step-5-preview']).toMatchObject({
@@ -978,10 +995,7 @@ describe('Runner multi-model review', () => {
         'multi-review-supervisor',
       ]),
     );
-    const create = result.createArgs ?? [];
-    const configEnv = create.find((value) => value.startsWith('OPENCODE_CONFIG_CONTENT='));
-    expect(configEnv).toBeDefined();
-    const config = JSON.parse(configEnv!.slice('OPENCODE_CONFIG_CONTENT='.length));
+    const config = JSON.parse(result.configContent!);
     expect(config.model).toBe('compte-rendu/deepseek-v4.1-flash');
     expect(config.providers['compte-rendu']).toMatchObject({
       canonical: 'opencode-go',
@@ -1248,11 +1262,7 @@ describe('Runner multi-model review', () => {
     const multi = await runScenario({ runId: 'run-shared-prompt-multi' });
     const singlePrompt = single.agentArgs?.join(' ') ?? '';
     const multiSupervisorPrompt = multi.agentArgs?.join(' ') ?? '';
-    const multiConfig = JSON.parse(
-      multi
-        .createArgs!.find((value) => value.startsWith('OPENCODE_CONFIG_CONTENT='))!
-        .slice('OPENCODE_CONFIG_CONTENT='.length),
-    );
+    const multiConfig = JSON.parse(multi.configContent!);
     const reviewerPrompts = ['reviewer-0', 'reviewer-1'].map(
       (participant) => multiConfig.agents[participant].system as string,
     );
@@ -1353,9 +1363,7 @@ describe('Runner multi-model review', () => {
     expect((result.multiReviewDocument as { synthesis: { model: string } }).synthesis.model).toBe(
       `compte-rendu/${reviewer}`,
     );
-    const create = result.createArgs ?? [];
-    const configEnv = create.find((value) => value.startsWith('OPENCODE_CONFIG_CONTENT='));
-    const config = JSON.parse(configEnv!.slice('OPENCODE_CONFIG_CONTENT='.length));
+    const config = JSON.parse(result.configContent!);
     expect(config.agents.review).toMatchObject({
       mode: 'primary',
       model: `compte-rendu/${reviewer}`,
