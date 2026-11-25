@@ -68,10 +68,6 @@ export {
   type ClaimHeadStatus,
   type ReviewCompletionStateStore,
 } from './review-publication';
-export {
-  createReviewCoordinator,
-  type ReviewAdmissionStore,
-  type ReviewCoordinator,
-} from './review-admission';
+export { createReviewAdmission, type ReviewAdmissionStore } from './review-admission';
 
 export type { CoreEnv } from './core-worker';

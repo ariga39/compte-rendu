@@ -14,9 +14,14 @@
   [recovery](docs/operations.md#operations-and-troubleshooting)).
 - Use behavior-based TDD through the seams accepted in `docs/design.md`: one
   failing behavior, minimal implementation, then the next slice.
-- Use stable Effect 4 for Core and Ingress runtime code. Before implementation,
-  read the applicable guidance in <https://github.com/Effect-TS/skills> and follow
-  its Effect 4 conventions.
+- Use stable Effect 4 for Core and Ingress orchestration. Compose those programs
+  through `CoreRuntime` and run them once at the application/Worker `fetch` and
+  `scheduled` entries, or in a host `waitUntil` callback. Keep D1, GitHub,
+  Runner, R2, auth and host I/O as ordinary Promise ports; do not launch the
+  Effect runtime mid-stack for clock reads, logs, sleeps or one-shot calls.
+  Follow the installed Effect 4 guidance
+  (`node_modules/effect/AGENTS.md`) and <https://github.com/Effect-TS/skills>.
+  Worker tests may use a compact service runner at the test edge.
 - Runner execution and finalization use plain `async/await` behind its host clock,
   logging, process and fetch ports. Keep Effect `Schema` for boundary validation,
   and do not add mid-stack `Effect.runPromise` bridges for clock reads, warning

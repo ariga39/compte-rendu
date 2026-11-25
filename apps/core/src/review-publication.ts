@@ -360,11 +360,12 @@ export const completeReviewEffect = Effect.fn('completeReview')(function* (
     );
 
     if (target !== undefined && target.headSha !== outcome.headSha) {
+      const supersededAt = yield* currentIso;
       const superseded = yield* Effect.tryPromise({
-        try: async () =>
+        try: () =>
           stateStore.markRunSuperseded({
             runId: input.runId,
-            occurredAt: await Effect.runPromise(currentIso),
+            occurredAt: supersededAt,
           }),
         catch: () => undefined,
       }).pipe(Effect.catch(() => Effect.succeed(false)));
@@ -490,11 +491,12 @@ export const completeReviewEffect = Effect.fn('completeReview')(function* (
     Effect.catch(() => Effect.succeed(false)),
   );
   if (typeof publication === 'object' && publication !== null && publication.kind === 'stale') {
+    const supersededAt = yield* currentIso;
     const superseded = yield* Effect.tryPromise({
-      try: async () =>
+      try: () =>
         stateStore.markRunSuperseded({
           runId: input.runId,
-          occurredAt: await Effect.runPromise(currentIso),
+          occurredAt: supersededAt,
         }),
       catch: () => undefined,
     }).pipe(Effect.catch(() => Effect.succeed(false)));

@@ -1,6 +1,7 @@
 import { expect, it, vi } from 'vitest';
+import { Effect } from 'effect';
 import type { EffortJobDetail } from '../packages/contracts/src';
-import { createCoreWorker } from '../apps/core/src/core-worker';
+import { createCoreWorker } from './support/core-worker-runtime';
 import { resetReviewEffort } from '../apps/core/src/review-configuration';
 import { createD1ReviewStateStore } from '../apps/core/src/index';
 import { createApplication } from '../apps/dashboard/src/lib/server/application';
@@ -142,14 +143,26 @@ it('freezes effort controls and generations at admission and advances only on ex
       { routeId: mimo, generation: 0, name: 'off', controls: mimoControls },
     ]);
 
-    const stale = await resetReviewEffort(
-      settingsRequest('POST', { revision: 1, route: deepseek }, '/api/model-settings/effort-reset'),
-      database,
+    const stale = await Effect.runPromise(
+      resetReviewEffort(
+        settingsRequest(
+          'POST',
+          { revision: 1, route: deepseek },
+          '/api/model-settings/effort-reset',
+        ),
+        database,
+      ),
     );
     expect(stale.status).toBe(409);
-    const reset = await resetReviewEffort(
-      settingsRequest('POST', { revision: 2, route: deepseek }, '/api/model-settings/effort-reset'),
-      database,
+    const reset = await Effect.runPromise(
+      resetReviewEffort(
+        settingsRequest(
+          'POST',
+          { revision: 2, route: deepseek },
+          '/api/model-settings/effort-reset',
+        ),
+        database,
+      ),
     );
     expect(reset.status).toBe(200);
     expect(await reset.json()).toEqual({ revision: 3, selection });
@@ -496,13 +509,15 @@ it('omits default generation-only entries for a non-Chat reviewer and keeps rese
 
     expect(
       (
-        await resetReviewEffort(
-          settingsRequest(
-            'POST',
-            { revision: 1, route: deepseek },
-            '/api/model-settings/effort-reset',
+        await Effect.runPromise(
+          resetReviewEffort(
+            settingsRequest(
+              'POST',
+              { revision: 1, route: deepseek },
+              '/api/model-settings/effort-reset',
+            ),
+            database,
           ),
-          database,
         )
       ).status,
     ).toBe(200);

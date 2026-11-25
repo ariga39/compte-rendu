@@ -4,7 +4,7 @@ import {
   type ReviewEvent,
   type RunnerJobInput,
 } from '../packages/contracts/src';
-import { createCoreWorker } from '../apps/core/src/core-worker';
+import { createCoreWorker } from './support/core-worker-runtime';
 import { createD1ReviewStateStore } from '../apps/core/src/index';
 import { scheduleReviewEvent } from './support/core-worker-harness';
 import { SqliteD1Database } from './support/d1-database';

@@ -29,24 +29,17 @@ import {
   type ReviewApproval,
   type ReviewCheckSetupDefer,
   type ReviewDeliveryRecord,
-  type ReviewDisposition,
 } from './review-records';
 import type { ReviewLifecycleStore } from './review-lifecycle-store';
 
 export type ReviewAdmissionStore = ReviewLifecycleStore & CheckRunStore & CancellationStore;
 
-export interface ReviewCoordinator {
-  handleReviewEvent(event: unknown): Promise<ReviewDisposition>;
-  completeReview(input: {
-    runId: string;
-    output: unknown;
-    reconcileClaimedAt?: string;
-  }): Promise<ReviewDisposition>;
-}
-
-class InvalidReviewEvent extends Schema.TaggedError<InvalidReviewEvent>()('InvalidReviewEvent', {
-  message: Schema.String,
-}) {}
+export class InvalidReviewEvent extends Schema.TaggedError<InvalidReviewEvent>()(
+  'InvalidReviewEvent',
+  {
+    message: Schema.String,
+  },
+) {}
 
 class SchedulingFailed extends Schema.TaggedError<SchedulingFailed>()('SchedulingFailed', {
   message: Schema.String,
@@ -642,31 +635,17 @@ const createReviewEventHandler = (dependencies: AdmissionDependencies) => {
 export const createReviewAdmission = (dependencies: AdmissionDependencies) => {
   const handleReviewEvent = createReviewEventHandler(dependencies);
   return {
-    handleReviewEvent,
+    // A malformed direct event is ignored; other typed scheduling failures are
+    // reported as a retryable failed disposition, matching the old Worker edge.
+    // Ingress validates before this point, so these only apply to direct calls.
+    handleReviewEvent: (event: unknown) =>
+      handleReviewEvent(event).pipe(
+        Effect.catchTag('InvalidReviewEvent', () => Effect.succeed('ignored' as const)),
+        Effect.catch(() => Effect.succeed('failed' as const)),
+      ),
     completeReview: (input: { runId: string; output: unknown; reconcileClaimedAt?: string }) =>
       completeReviewEffect(input, dependencies.github, dependencies.stateStore, dependencies.log),
   };
 };
 
 export type ReviewAdmission = ReturnType<typeof createReviewAdmission>;
-
-/**
- * Promise facade kept for the remaining Core callers. The application webhook
- * edge and the Worker API run `createReviewAdmission` directly so Effect stays
- * composed through admission and check setup.
- */
-export function createReviewCoordinator(dependencies: AdmissionDependencies): ReviewCoordinator {
-  const admission = createReviewAdmission(dependencies);
-  return {
-    handleReviewEvent: async (event) =>
-      Effect.runPromise(admission.handleReviewEvent(event)).catch((error) => {
-        if (error instanceof InvalidReviewEvent) {
-          return 'ignored' as const;
-        }
-
-        return 'failed' as const;
-      }),
-    completeReview: async (input) =>
-      Effect.runPromise(admission.completeReview(input)).catch(() => 'failed' as const),
-  };
-}

@@ -12,7 +12,7 @@ import {
   type RunnerProcessResult,
 } from '../../apps/runner/src/runner';
 import { multiReviewConfig } from '../../apps/runner/src/opencode-multi-review';
-import { createCoreWorker } from '../../apps/core/src/core-worker';
+import { createCoreWorker } from './core-worker-runtime';
 import type { SandboxBackend, SandboxHealth } from '../../apps/runner/src/sandbox-runtime';
 import { createD1ReviewStateStore } from '../../apps/core/src/index';
 import { SqliteD1Database } from './d1-database';

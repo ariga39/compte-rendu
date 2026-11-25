@@ -1,13 +1,13 @@
 import { createTestReviewStore, runIdForDelivery } from './support/review-store';
 import { describe, expect, it } from 'vitest';
 import {
-  createReviewCoordinator,
   createD1ReviewStateStore,
   createGitHubPublicationAdapter,
   type ReviewJob,
   type ReviewPublicationCreateResult,
   type ReviewPublicationPayload,
 } from '../apps/core/src/index';
+import { createReviewCoordinator } from './support/review-coordinator';
 import type { ReviewEvent } from '../packages/contracts/src';
 import { SqliteD1Database } from './support/d1-database';
 import { recordTestEvidence } from './support/core-worker-harness';

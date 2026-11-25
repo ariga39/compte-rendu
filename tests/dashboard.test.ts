@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { runScheduledMetadataRefresh, type CoreWorkerEnv } from '../apps/core/src/core-worker';
-import { createCoreWorker } from '../apps/core/src/core-worker';
+import { runScheduledMetadataRefresh, type CoreWorkerEnv } from './support/core-worker-runtime';
+import { createCoreWorker } from './support/core-worker-runtime';
 import {
   createD1ReviewStateStore,
   createGitHubPublicationAdapter,

@@ -1,7 +1,7 @@
 import { expect, it, vi } from 'vitest';
 
 import { runApplicationScheduled } from '../apps/dashboard/src/lib/server/application';
-import type { CoreWorkerEnv } from '../apps/core/src/core-worker';
+import type { CoreWorkerEnv } from './support/core-worker-runtime';
 import { createD1ReviewStateStore } from '../apps/core/src/review-state-store';
 import { SqliteD1Database } from './support/d1-database';
 
@@ -68,6 +68,34 @@ it('keeps a metadata refresh failure visible when the relay refresh is rejected'
     expect(String(failure)).not.toContain('private relay detail');
     expect(events).toEqual(expect.arrayContaining([{ phase: 'relay', outcome: 'refresh_failed' }]));
     expect(JSON.stringify(events)).not.toContain('private relay detail');
+  } finally {
+    database.database.exec(
+      'ALTER TABLE unavailable_repository_metadata RENAME TO repository_metadata',
+    );
+    spy.mockRestore();
+    database.close();
+  }
+});
+
+it('keeps metadata failure reporting when the relay log sink throws', async () => {
+  const database = new SqliteD1Database();
+  const spy = vi.spyOn(console, 'log').mockImplementation(() => {
+    throw new Error('log sink unavailable');
+  });
+  database.database.exec(
+    'ALTER TABLE repository_metadata RENAME TO unavailable_repository_metadata',
+  );
+  try {
+    const failure = await runApplicationScheduled(
+      { scheduledTime: Date.now() },
+      env(database),
+    ).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(Error);
+    expect(String(failure)).not.toContain('log sink unavailable');
+    expect(String(failure)).not.toContain('private relay detail');
   } finally {
     database.database.exec(
       'ALTER TABLE unavailable_repository_metadata RENAME TO repository_metadata',
