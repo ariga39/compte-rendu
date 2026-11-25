@@ -17,6 +17,7 @@ import {
 import type { GitHubAdapter } from './github-adapter-contract';
 import {
   completeReviewEffect,
+  publishExpiredClaimChecks,
   publishTerminalCheck,
   resetPreviousReviewVerdicts,
   startCheckSetup,
@@ -109,6 +110,7 @@ const claimAndSchedule = (
           job: validatedJob,
           occurredAt,
           approval,
+          onExpiredClaims: (claims) => publishExpiredClaimChecks(github, stateStore, claims),
         }),
       catch: () => new SchedulingFailed({ message: 'Review state could not be claimed' }),
     }).pipe(

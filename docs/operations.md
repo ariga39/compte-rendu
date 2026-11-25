@@ -235,7 +235,9 @@ Migration `0019_remove_check_delivery_retries.sql` drops
 uses these objects, verify that it serves requests and runs the scheduled handler,
 then apply the migration. Rolling back to an older Worker requires restoring
 its schema first. Terminal and cancellation Check updates are direct and best effort;
-Runner stop retries remain durable.
+Runner stop retries remain durable. Any terminal Check updates still queued in
+`review_check_deliveries` when the migration runs are not replayed and may leave
+those Checks unfinished; re-trigger the review if a Check needs to finish.
 
 ### Review deadline rollout
 
