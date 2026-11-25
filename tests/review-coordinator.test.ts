@@ -309,6 +309,68 @@ describe('Review coordinator', () => {
     expect(checks).toEqual(['failure']);
   });
 
+  it('writes the failed terminal state before taking a failure notification claim', async () => {
+    const stateStore = createTestReviewStore();
+    const claimed = await stateStore.claimReview({
+      deliveryId: 'completion-failure-terminal-write-retry',
+      job: {
+        repositoryId: 11,
+        pullRequestNumber: 42,
+        installationId: 7,
+        baseSha: eligiblePrivatePullRequest.baseSha,
+        headSha: eligiblePrivatePullRequest.headSha,
+        trigger: 'manual',
+        commentId: 987654,
+      },
+      occurredAt: '2026-08-25T00:00:00.000Z',
+    });
+    if (claimed.kind !== 'claimed') throw new Error('completion was not claimed');
+    await stateStore.recordCheckRun({ runId: claimed.runId, checkRunId: 321 });
+    let failTerminalWrite = true;
+    const flakyStore: typeof stateStore = {
+      ...stateStore,
+      markSchedulingFailed: async (input) => {
+        if (failTerminalWrite) {
+          failTerminalWrite = false;
+          throw new Error('temporary terminal write failure');
+        }
+        return stateStore.markSchedulingFailed(input);
+      },
+    };
+    const comments: string[] = [];
+    const checks: string[] = [];
+    const reactions: string[] = [];
+    const coordinator = createReviewCoordinator({
+      github: {
+        addReaction: async ({ content }) => {
+          reactions.push(content);
+        },
+        createIssueComment: async ({ body }) => {
+          comments.push(body);
+          return { id: 123, body };
+        },
+        updateCheckRun: async ({ status }) => {
+          checks.push(status);
+        },
+      },
+      stateStore: flakyStore,
+    });
+
+    expect(await coordinator.completeReview({ runId: claimed.runId, output: '' })).toBe('failed');
+    const afterFailure = await stateStore.getRunOutcome(claimed.runId);
+    expect(afterFailure).toMatchObject({ status: 'scheduled' });
+    expect(afterFailure?.publicationClaimedAt).toBeUndefined();
+
+    expect(await coordinator.completeReview({ runId: claimed.runId, output: '' })).toBe('failed');
+    expect(await stateStore.getRunOutcome(claimed.runId)).toMatchObject({
+      status: 'failed',
+      publicationClaimedAt: expect.any(String),
+    });
+    expect(reactions).toEqual(['-1']);
+    expect(comments).toHaveLength(1);
+    expect(checks).toEqual(['failure']);
+  });
+
   it('retries a terminal failure notification that GitHub did not create', async () => {
     const stateStore = createTestReviewStore();
     const claimed = await stateStore.claimReview({
