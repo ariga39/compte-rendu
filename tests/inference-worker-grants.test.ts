@@ -264,6 +264,31 @@ describe('Inference Worker grant issue', () => {
     }
   });
 
+  it('rejects a persisted retired profile instead of defaulting it to chat', async () => {
+    const { database, control } = setup();
+    try {
+      database.database
+        .prepare(`UPDATE catalog_routes SET profile = ? WHERE route_id = ?`)
+        .run('messages', 'other-review');
+      await expect(
+        control.issue({
+          jobId: 'job-retired-profile',
+          snapshot: { routes: ['other-review'] },
+          latestIssueDeadline: (await d1Now(database)) + 60_000,
+        }),
+      ).resolves.toEqual({ kind: 'invalid' });
+      await expect(
+        control.issueV2({
+          jobId: 'job-retired-profile-v2',
+          snapshot: { routes: ['other-review'] },
+          latestIssueDeadline: (await d1Now(database)) + 60_000,
+        }),
+      ).resolves.toEqual({ kind: 'invalid' });
+    } finally {
+      database.close();
+    }
+  });
+
   it('reads a legacy frozen grant mapping as chat', async () => {
     const { database } = setup();
     try {

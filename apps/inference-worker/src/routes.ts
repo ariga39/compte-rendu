@@ -10,12 +10,6 @@ import { CredentialAlias, ProviderSlug, RouteId } from './route-schema.ts';
 export { RouteId } from './route-schema.ts';
 export { ModelProfile } from '@compte-rendu/contracts';
 
-// Gemini places the model identity in the URL path. A frozen upstream model is
-// therefore one plain model-name segment: no slash, dot segment or encoding.
-export const isGeminiUpstreamModel = Schema.is(
-  SafeModel.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/)),
-);
-
 export const FrozenRoute = Schema.Struct({
   routeId: RouteId,
   upstreamModel: SafeModel,
@@ -57,8 +51,6 @@ export const legacyFrozenMapping = (
   routes.map(({ profile: _profile, limit: _limit, ...route }) => route);
 
 export const gatewayProviderPath = (providerSlug: string): string => {
-  if (providerSlug === 'native:anthropic') return 'anthropic/v1';
-  if (providerSlug === 'native:google-ai-studio') return 'google-ai-studio/v1beta';
   if (providerSlug === 'native:openai') return 'openai';
   return providerSlug.startsWith('custom-') ? providerSlug : `custom-${providerSlug}`;
 };

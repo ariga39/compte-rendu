@@ -21,7 +21,7 @@ export const REVIEW_ATTEMPT_BUDGET_MS = 90 * 60 * 1000;
 export const RunnerDeadline = Schema.Literals(['claim', 'credential']);
 export type RunnerDeadline = typeof RunnerDeadline.Type;
 
-export const ModelProfile = Schema.Literals(['chat', 'responses', 'messages', 'gemini']);
+export const ModelProfile = Schema.Literals(['chat', 'responses']);
 export type ModelProfile = typeof ModelProfile.Type;
 export const ModelRouteLimit = Schema.Struct({
   context: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThan(0))),

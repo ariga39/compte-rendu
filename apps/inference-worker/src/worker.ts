@@ -27,14 +27,7 @@ import {
   type AuthenticatedGrant,
 } from './ledger.ts';
 import { relayInference, validateChatBody, type GatewayConfig } from './relay.ts';
-import {
-  buildMessagesUpstreamBody,
-  relayMessages,
-  selectMessagesRoute,
-  validateMessagesBody,
-} from './messages.ts';
-import { relayGemini, selectGeminiRoute, validateGeminiBody } from './gemini.ts';
-import { protocolForRequest, type ProtocolRouteRequest } from './protocols.ts';
+import { protocolForRequest } from './protocols.ts';
 import { relayResponses, responsesUpstreamBody, validateResponsesBody } from './responses.ts';
 import type { FrozenRoute } from './routes.ts';
 
@@ -96,31 +89,11 @@ const validateForProfile = (
   raw: unknown,
 ): Record<string, unknown> | null => {
   if (profile === 'responses') return validateResponsesBody(raw);
-  if (profile === 'messages') return validateMessagesBody(raw);
-  if (profile === 'gemini') return validateGeminiBody(raw);
   return validateChatBody(raw);
 };
 
-const routeForProfile = (
-  profile: ModelProfile,
-  grant: AuthenticatedGrant,
-  body: Record<string, unknown>,
-  handle: string | undefined,
-): FrozenRoute | null => {
-  if (profile === 'gemini') {
-    if (handle === undefined) return null;
-    return selectGeminiRoute(grant.routes, handle);
-  }
-  if (profile === 'messages') return selectMessagesRoute(grant.routes, body);
-  return selectedRoute(grant, body);
-};
-
 export class InferenceWorker extends WorkerEntrypoint<InferenceWorkerEnv> {
-  private async handleInference(
-    request: Request,
-    selected: ProtocolRouteRequest,
-  ): Promise<Response> {
-    const profile = selected.profile;
+  private async handleInference(request: Request, profile: ModelProfile): Promise<Response> {
     const grant = await authenticateGrant(this.env.RELAY_DB, request.headers.get('authorization'));
     if (grant === null) return error(401, 'unauthorized');
     const gateway = gatewayConfig(this.env);
@@ -136,7 +109,7 @@ export class InferenceWorker extends WorkerEntrypoint<InferenceWorkerEnv> {
     }
     const body = validateForProfile(profile, raw);
     if (body === null) return error(400, 'invalid request');
-    const route = routeForProfile(profile, grant, body, selected.handle);
+    const route = selectedRoute(grant, body);
     if (route?.profile !== profile) return error(403, 'route forbidden');
 
     const requestId = crypto.randomUUID();
@@ -152,36 +125,6 @@ export class InferenceWorker extends WorkerEntrypoint<InferenceWorkerEnv> {
           grant,
           route,
           body: responsesUpstreamBody(body, route),
-          request,
-          waitUntil: (task) => this.ctx.waitUntil(task),
-        }),
-      );
-    }
-
-    if (profile === 'messages') {
-      return Effect.runPromise(
-        relayMessages({
-          database: this.env.RELAY_DB,
-          requestId,
-          gateway,
-          grant,
-          route,
-          body: buildMessagesUpstreamBody(route, body),
-          request,
-          waitUntil: (task) => this.ctx.waitUntil(task),
-        }),
-      );
-    }
-
-    if (profile === 'gemini') {
-      return Effect.runPromise(
-        relayGemini({
-          database: this.env.RELAY_DB,
-          requestId,
-          gateway,
-          grant,
-          route,
-          body,
           request,
           waitUntil: (task) => this.ctx.waitUntil(task),
         }),
@@ -206,14 +149,14 @@ export class InferenceWorker extends WorkerEntrypoint<InferenceWorkerEnv> {
 
   fetch(request: Request): Response | Promise<Response> {
     const url = new URL(request.url);
-    const selected = protocolForRequest(url);
-    if (selected === null) {
+    const profile = protocolForRequest(url);
+    if (profile === null) {
       return new Response(null, { status: 404, headers: { 'cache-control': 'no-store' } });
     }
     if (request.method !== 'POST') {
       return new Response(null, { status: 405, headers: { 'cache-control': 'no-store' } });
     }
-    return this.handleInference(request, selected);
+    return this.handleInference(request, profile);
   }
 
   #modelCatalog() {

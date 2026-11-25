@@ -266,22 +266,6 @@ const relayCredential = '{env:OPENCODE_API_KEY}';
 
 function modelConfig(descriptor: ModelRouteDescriptor, baseURL: string) {
   switch (descriptor.profile) {
-    case 'messages':
-      return {
-        package: '@opencode/ai/providers/anthropic',
-        settings: { baseURL, authToken: relayCredential },
-      };
-    case 'gemini':
-      return {
-        package: '@opencode/ai/providers/google',
-        modelID: 'r-' + Buffer.from(descriptor.routeId).toString('base64url'),
-        settings: {
-          baseURL: new URL('/v1beta', baseURL).href,
-          // The Google SDK requires an API key. The relay authenticates only the job bearer.
-          apiKey: 'relay',
-          headers: { authorization: 'Bearer ' + relayCredential },
-        },
-      };
     case 'responses':
       return {
         package: '@opencode/ai/providers/openai',
@@ -309,9 +293,7 @@ export const multiReviewConfig = (options: {
     models[identity.id] = {
       ...descriptor.metadata,
       ...modelConfig(descriptor, baseURL),
-      ...(descriptor.profile !== 'gemini' && identity.id !== descriptor.routeId
-        ? { modelID: descriptor.routeId }
-        : {}),
+      ...(identity.id !== descriptor.routeId ? { modelID: descriptor.routeId } : {}),
       ...(descriptor.limit === undefined ? {} : { limit: descriptor.limit }),
     };
     descriptorModels.set(identity.providerID, models);

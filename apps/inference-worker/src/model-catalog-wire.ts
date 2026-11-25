@@ -35,15 +35,11 @@ const apiEndpoint = Schema.optionalKey(Schema.Record(Schema.String, Schema.Unkno
 const apiEndpoints = {
   'chat-completions': apiEndpoint,
   responses: apiEndpoint,
-  messages: apiEndpoint,
-  'generate-content': apiEndpoint,
   interactions: apiEndpoint,
 } as const;
 const ApiProfile = {
   'chat-completions': 'chat',
   responses: 'responses',
-  messages: 'messages',
-  'generate-content': 'gemini',
 } as const satisfies Record<string, ModelProfile>;
 const CatalogEntry = Schema.Struct({
   id: Schema.String,
@@ -126,87 +122,10 @@ const catalogModel = (
   return { id: entry.id, profiles: supported, recommended, toolsSupported, limit, metadata };
 };
 
-const NativeAnthropicModel = Schema.Struct({
-  id: CatalogModelId,
-  max_input_tokens: Schema.optionalKey(Schema.NullOr(positiveLimit)),
-  max_tokens: Schema.optionalKey(Schema.NullOr(positiveLimit)),
-});
-const NativeAnthropicPage = Schema.fromJsonString(
-  Schema.Struct({
-    data: Schema.Array(Schema.Unknown),
-    has_more: Schema.Boolean,
-    last_id: Schema.optionalKey(Schema.NullOr(CatalogModelId)),
-  }),
-);
-const PageToken = Schema.NonEmptyString.check(Schema.isMaxLength(2048));
-const NativeGoogleModel = Schema.Struct({
-  name: Schema.String.check(Schema.isPattern(/^models\/[a-zA-Z0-9._-]+$/)),
-  supportedGenerationMethods: Schema.Array(Schema.String),
-  inputTokenLimit: Schema.optionalKey(Schema.NullOr(positiveLimit)),
-  outputTokenLimit: Schema.optionalKey(Schema.NullOr(positiveLimit)),
-});
-const NativeGooglePage = Schema.fromJsonString(
-  Schema.Struct({
-    models: Schema.Array(Schema.Unknown),
-    nextPageToken: Schema.optionalKey(PageToken),
-  }),
-);
-function cursorUrl(currentUrl: string, param: string, value: string): string {
-  const next = new URL(currentUrl);
-  next.searchParams.set(param, value);
-  return next.href;
-}
-
-export const readModelCatalogPage = async (
-  response: Response,
-  currentUrl: string,
-  gatewayProvider?: string,
-) => {
+export const readModelCatalogPage = async (response: Response, currentUrl: string) => {
   if (!response.ok) throw new Error('catalog unavailable');
   const body = await readBoundedBody(response.body, MAX_CATALOG_BYTES);
   if (body.kind !== 'ok') throw new Error('catalog too large');
-  if (gatewayProvider === 'native:anthropic') {
-    const page = Schema.decodeUnknownSync(NativeAnthropicPage)(body.text);
-    if (page.has_more && !page.last_id) throw new Error('missing catalog cursor');
-    return {
-      models: page.data.map((entry) => {
-        const model = Schema.decodeUnknownSync(NativeAnthropicModel)(entry);
-        return catalogModel(
-          { id: model.id },
-          metadataRecord(entry),
-          normalizedLimit({
-            context: model.max_input_tokens ?? undefined,
-            output: model.max_tokens ?? undefined,
-          }),
-        );
-      }),
-      rejected: 0,
-      next: page.has_more && page.last_id ? cursorUrl(currentUrl, 'after_id', page.last_id) : null,
-    };
-  }
-  if (gatewayProvider === 'native:google-ai-studio') {
-    const page = Schema.decodeUnknownSync(NativeGooglePage)(body.text);
-    return {
-      models: page.models
-        .map((entry) => ({
-          entry,
-          model: Schema.decodeUnknownSync(NativeGoogleModel)(entry),
-        }))
-        .filter(({ model }) => model.supportedGenerationMethods.includes('generateContent'))
-        .map(({ entry, model }) =>
-          catalogModel(
-            { id: model.name.slice('models/'.length) },
-            metadataRecord(entry),
-            normalizedLimit({
-              context: model.inputTokenLimit ?? undefined,
-              output: model.outputTokenLimit ?? undefined,
-            }),
-          ),
-        ),
-      rejected: 0,
-      next: page.nextPageToken ? cursorUrl(currentUrl, 'pageToken', page.nextPageToken) : null,
-    };
-  }
   const page = Schema.decodeUnknownSync(Schema.fromJsonString(CatalogEnvelope))(body.text);
   const current = new URL(currentUrl);
   let next: string | null = null;

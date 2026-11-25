@@ -671,34 +671,6 @@ describe('Runner multi-model review', () => {
     expect(provider.models['deepseek-v4.1-flash']).toMatchObject({ name: 'DeepSeek' });
   });
 
-  it('configures signed Messages and path-routed Gemini models on the same sandbox relay', async () => {
-    const result = await runScenario({
-      descriptors: [
-        { routeId: 'step-5-preview', profile: 'gemini' },
-        { routeId: 'deepseek-v4.1-flash', profile: 'messages' },
-      ],
-    });
-    const config = JSON.parse(
-      result
-        .createArgs!.find((x) => x.startsWith('OPENCODE_CONFIG_CONTENT='))!
-        .slice('OPENCODE_CONFIG_CONTENT='.length),
-    );
-    const provider = config.providers['compte-rendu'];
-    expect(provider.settings.apiKey).toBeUndefined();
-    expect(provider.models['step-5-preview']).toMatchObject({
-      package: '@opencode/ai/providers/google',
-      modelID: 'r-c3RlcC01LXByZXZpZXc',
-      settings: {
-        baseURL: 'https://inference.example/v1beta',
-        headers: { authorization: 'Bearer {env:OPENCODE_API_KEY}' },
-      },
-    });
-    expect(provider.models['deepseek-v4.1-flash']).toMatchObject({
-      package: '@opencode/ai/providers/anthropic',
-      settings: { authToken: '{env:OPENCODE_API_KEY}', baseURL: 'https://inference.example/v1' },
-    });
-  });
-
   const validGrantDescriptors = [
     { routeId: 'deepseek-v4.1-flash', profile: 'chat' },
     { routeId: 'step-5-preview', profile: 'responses' },
