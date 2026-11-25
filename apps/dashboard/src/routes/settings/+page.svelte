@@ -27,9 +27,9 @@
             reviewers: [...selection.reviewers].sort(),
             synthesis: selection.synthesis,
             efforts: Object.fromEntries(
-              Object.entries(selection.efforts ?? {}).sort(([left], [right]) =>
-                left.localeCompare(right),
-              ),
+              Object.entries(selection.efforts ?? {})
+                .filter(([, name]) => name !== '')
+                .sort(([left], [right]) => left.localeCompare(right)),
             ),
           },
     );

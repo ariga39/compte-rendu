@@ -219,6 +219,42 @@ test('changes only concurrency when one reviewer keeps a dormant synthesis effor
   expect((await saved).postDataJSON()).toEqual({ revision: 1, concurrency: 4 });
 });
 
+test('treats a restored default effort as unchanged for a concurrency-only save', async ({
+  page,
+  harness,
+  base,
+}) => {
+  harness.setHandler((url, req) => {
+    if (url.pathname !== '/api/model-settings') return { status: 404 };
+    if (req.method === 'PUT') return { status: 200, json: { revision: 2 } };
+    return {
+      status: 200,
+      json: {
+        routes: ['review/a', 'review/b'],
+        efforts: { 'review/a': [{ name: 'high', controls: { reasoning_effort: 'high' } }] },
+        lastAttemptAt: new Date(100).toISOString(),
+        catalogRefreshFailed: false,
+        configuration: {
+          revision: 1,
+          selection: {
+            reviewers: ['review/a'],
+            synthesis: 'review/b',
+            efforts: { 'review/b': 'high' },
+          },
+          concurrency: 2,
+        },
+      },
+    };
+  });
+  await page.goto(base + '/settings');
+  await page.getByLabel('Thinking effort for review/a').selectOption('high');
+  await page.getByLabel('Thinking effort for review/a').selectOption('');
+  await page.getByLabel('Runner concurrency').fill('4');
+  const saved = page.waitForRequest((request) => request.method() === 'PUT');
+  await page.getByRole('button', { name: 'Save changes' }).click();
+  expect((await saved).postDataJSON()).toEqual({ revision: 1, concurrency: 4 });
+});
+
 test('saves an explicit selection when switching from the instance default', async ({
   page,
   harness,
