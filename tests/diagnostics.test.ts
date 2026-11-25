@@ -1,8 +1,8 @@
+import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   createDefaultDiagnosticSources,
   runDiagnosticCommand,
-  type DiagnosticCommandOptions,
   type DiagnosticSources,
 } from '../scripts/diagnose.mts';
 
@@ -205,6 +205,7 @@ describe('diagnostics command', () => {
     });
     expect(report).toHaveProperty('timeline');
     expect(report).toHaveProperty('firstFailureBoundary', null);
+    expect(report).not.toHaveProperty('workflow');
     expect(JSON.stringify(report)).not.toContain('No findings.');
   });
 
@@ -244,58 +245,7 @@ describe('diagnostics command', () => {
     });
   });
 
-  it('reports the earliest concrete failure boundary across available systems', async () => {
-    const report = JSON.parse(
-      await runDiagnosticCommand(['run:run-boundary'], {
-        d1: {
-          find: async () => ({
-            delivery: {
-              deliveryId: 'delivery-boundary',
-              repositoryId: 42,
-              pullRequestNumber: 7,
-              baseSha: null,
-              headSha: null,
-              trigger: 'automatic',
-              status: 'failed',
-              createdAt: '2026-09-01T13:42:00.000Z',
-              updatedAt: '2026-09-01T13:43:00.000Z',
-            },
-            run: {
-              runId: 'run-boundary',
-              status: 'failed',
-              createdAt: '2026-09-01T13:42:00.000Z',
-              updatedAt: '2026-09-01T13:43:00.000Z',
-            },
-          }),
-        },
-        github: { find: async () => undefined },
-        r2: { get: async () => undefined },
-        workflow: {
-          find: async () => ({
-            id: 'run-boundary',
-            events: [
-              {
-                at: '2026-09-01T13:44:00.000Z',
-                type: 'WorkflowInternalError',
-                status: 'failed',
-                reason: 'later workflow failure',
-              },
-            ],
-          }),
-        },
-      }),
-    ) as Record<string, unknown>;
-
-    expect(report).toMatchObject({
-      firstFailureBoundary: {
-        source: 'd1',
-        at: '2026-09-01T13:43:00.000Z',
-        reason: 'run failed',
-      },
-    });
-  });
-
-  it('correlates historical Workflow failure with the real R2 envelope and sanitized times', async () => {
+  it('correlates a historical failure with the real R2 envelope and sanitized times', async () => {
     const runId = 'f963a9fa-de77-4481-b482-0ba671e02468';
     const jobId = '5a7149b6-b99c-4cee-b47b-ff4ca39ecb49';
     const evidenceId = 'b8125c62-3282-4616-aad9-f1fa1054bf29';
@@ -418,19 +368,6 @@ describe('diagnostics command', () => {
           };
         },
       },
-      workflow: {
-        find: async () => ({
-          id: 'historical-workflow-42',
-          events: [
-            {
-              at: '2026-09-01T13:44:02.000Z',
-              type: 'WorkflowInternalError',
-              status: 'failed',
-              reason: 'Attempt failed due to internal workflows error',
-            },
-          ],
-        }),
-      },
     };
 
     const report = JSON.parse(await runDiagnosticCommand([runId], sources)) as Record<
@@ -456,51 +393,23 @@ describe('diagnostics command', () => {
           terminalAt: '2026-09-01T13:44:17.988Z',
         },
       },
-      workflow: {
-        available: true,
-        events: [
-          {
-            at: '2026-09-01T13:44:02.000Z',
-            type: 'WorkflowInternalError',
-            status: 'failed',
-            reason: 'Attempt failed due to internal workflows error',
-          },
-        ],
-      },
       firstFailureBoundary: {
-        source: 'workflow',
-        at: '2026-09-01T13:44:02.000Z',
-        reason: 'Attempt failed due to internal workflows error',
+        source: 'd1',
+        at: '2026-09-01T13:44:02.799Z',
+        reason: 'run failed',
       },
     });
+    expect(report).not.toHaveProperty('workflow');
     expect(JSON.stringify(report)).not.toContain('No findings.');
   });
 
-  it('retrieves configured historical Workflow details through the production CLI adapter', async () => {
+  it('retrieves configured D1 and GitHub details through the production CLI adapter', async () => {
     let automatic = false;
+    const invocations: Array<{ readonly executable: string; readonly args: readonly string[] }> =
+      [];
     const command = {
-      run: async (
-        _executable: string,
-        args: readonly string[],
-        options?: DiagnosticCommandOptions,
-      ) => {
-        if (args.includes('workflows')) {
-          const end = options?.env?.TZ === 'UTC' ? '9/1/2026, 1:44:02 PM' : '9/1/2026, 6:44:02 AM';
-          return {
-            exitCode: 0,
-            stdout: [
-              'Name: review-1',
-              'Type: step',
-              'Start: 9/1/2026, 1:43:58 PM',
-              `End: ${end}`,
-              'Status: errored',
-              '┌─────────┬─────────┐',
-              '│ Step    │ Status  │',
-              '└─────────┴─────────┘',
-              'WorkflowInternalError: Attempt failed due to internal workflows error',
-            ].join('\n'),
-          };
-        }
+      run: async (executable: string, args: readonly string[]) => {
+        invocations.push({ executable, args });
         if (args.includes('repositories/42')) {
           return {
             exitCode: 0,
@@ -614,7 +523,6 @@ describe('diagnostics command', () => {
       database: 'actual-review-state',
       bucket: 'actual-review-evidence',
       wranglerConfig: 'apps/dashboard/wrangler.actual.jsonc',
-      workflowName: 'petit-chiba-review',
     });
 
     const report = JSON.parse(
@@ -638,24 +546,28 @@ describe('diagnostics command', () => {
           },
         ],
       },
-      workflow: {
-        available: true,
-        id: 'f963a9fa-de77-4481-b482-0ba671e02468',
-        events: [
-          {
-            at: '2026-09-01T13:44:02.000Z',
-            type: 'WorkflowInternalError',
-            status: 'failed',
-            reason: 'Attempt failed due to internal workflows error',
-          },
-        ],
-      },
       firstFailureBoundary: {
-        source: 'workflow',
-        at: '2026-09-01T13:44:02.000Z',
-        reason: 'Attempt failed due to internal workflows error',
+        source: 'd1',
+        at: '2026-09-01T13:44:14.000Z',
+        reason: 'run failed',
       },
     });
+    expect(report).not.toHaveProperty('workflow');
+    const wranglerInvocations = invocations.filter((invocation) =>
+      invocation.args.includes('wrangler'),
+    );
+    expect(wranglerInvocations.length).toBeGreaterThan(0);
+    expect(
+      wranglerInvocations.every(
+        ({ executable, args }) =>
+          executable === 'corepack' &&
+          args.includes('--filter') &&
+          args.includes('@compte-rendu/dashboard') &&
+          args.includes('exec') &&
+          !args.includes('dlx') &&
+          !args.includes('workflows'),
+      ),
+    ).toBe(true);
 
     automatic = true;
     const automaticReport = JSON.parse(
@@ -668,6 +580,33 @@ describe('diagnostics command', () => {
         reactions: [],
       },
     });
+  });
+
+  it('resolves a caller-relative Wrangler config before D1 and R2 dispatch', async () => {
+    const invocations: Array<{ readonly args: readonly string[] }> = [];
+    const command = {
+      run: async (_executable: string, args: readonly string[]) => {
+        invocations.push({ args });
+        return { exitCode: 1, stdout: '' };
+      },
+    };
+    const sources = createDefaultDiagnosticSources(command, {
+      database: 'actual-review-state',
+      bucket: 'actual-review-evidence',
+      wranglerConfig: 'apps/dashboard/wrangler.actual.jsonc',
+    });
+
+    await sources.d1.find({ kind: 'run', id: 'run-relative' });
+    await sources.r2.get('reviews/run-relative');
+
+    const expectedConfig = resolve('apps/dashboard/wrangler.actual.jsonc');
+    expect(invocations).toHaveLength(2);
+    for (const { args } of invocations) {
+      const configIndex = args.indexOf('--config');
+      expect(configIndex).toBeGreaterThanOrEqual(0);
+      expect(args[configIndex + 1]).toBe(expectedConfig);
+      expect(args).not.toContain('apps/dashboard/wrangler.actual.jsonc');
+    }
   });
 
   it('reports only independently correlated evidence metadata', async () => {

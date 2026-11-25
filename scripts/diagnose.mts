@@ -81,27 +81,10 @@ export interface DiagnosticR2Snapshot {
   readonly object: unknown;
 }
 
-export interface DiagnosticWorkflowEvent {
-  readonly at: string;
-  readonly type: string;
-  readonly status?: string;
-  readonly reason?: string;
-}
-
-export interface DiagnosticWorkflowSnapshot {
-  readonly id: string;
-  readonly events: ReadonlyArray<DiagnosticWorkflowEvent>;
-}
-
-export interface DiagnosticCommandOptions {
-  readonly env?: Readonly<Record<string, string | undefined>>;
-}
-
 export interface DiagnosticCommandAdapter {
   run(
     command: string,
     args: readonly string[],
-    options?: DiagnosticCommandOptions,
   ): Promise<{ readonly stdout: string; readonly exitCode: number }>;
 }
 
@@ -122,12 +105,6 @@ export interface DiagnosticSources {
     }): Promise<DiagnosticGitHubSnapshot | undefined>;
   };
   readonly r2: { get(key: string): Promise<DiagnosticR2Snapshot | undefined> };
-  readonly workflow?: {
-    find(
-      target: DiagnosticTarget,
-      context?: { readonly runId?: string },
-    ): Promise<DiagnosticWorkflowSnapshot | undefined>;
-  };
 }
 
 const decode = <S extends Schema.ConstraintDecoder<unknown>>(
@@ -200,34 +177,7 @@ const R2Snapshot = Schema.Struct({
   rawSha256: Sha256,
   object: Schema.Unknown,
 });
-const IncompleteEvidence = Schema.Struct({
-  id: Identifier,
-  status: Schema.Literal('incomplete'),
-  manifest: EvidenceField,
-  opencodeJsonl: EvidenceField,
-  opencodeStderr: EvidenceField,
-  validatedReview: Schema.optional(EvidenceField),
-  opencodeSessionList: Schema.optional(EvidenceField),
-  opencodeExport: Schema.optional(Schema.Struct({ sessionId: Identifier, content: EvidenceField })),
-});
-const CompleteEvidence = Schema.Struct({
-  id: Identifier,
-  status: Schema.Literal('complete'),
-  manifest: EvidenceField,
-  opencodeJsonl: EvidenceField,
-  opencodeStderr: EvidenceField,
-  validatedReview: EvidenceField,
-  opencodeSessionList: EvidenceField,
-  opencodeExport: Schema.Struct({ sessionId: Identifier, content: EvidenceField }),
-});
-const R2ObjectV1 = Schema.Struct({
-  version: Schema.Literal(1),
-  runId: Identifier,
-  jobId: Identifier,
-  evidenceId: Identifier,
-  evidence: Schema.Union([CompleteEvidence, IncompleteEvidence]),
-});
-const UploadedEvidence = Schema.Struct({
+const ArchiveEvidence = Schema.Struct({
   id: Identifier,
   status: Schema.Literals(['complete', 'incomplete']),
   manifest: EvidenceField,
@@ -237,13 +187,20 @@ const UploadedEvidence = Schema.Struct({
   opencodeSessionList: Schema.optional(EvidenceField),
   opencodeExport: Schema.optional(Schema.Struct({ sessionId: Identifier, content: EvidenceField })),
 });
+const R2ObjectV1 = Schema.Struct({
+  version: Schema.Literal(1),
+  runId: Identifier,
+  jobId: Identifier,
+  evidenceId: Identifier,
+  evidence: ArchiveEvidence,
+});
 const R2ObjectV2 = Schema.Struct({
   version: Schema.Literal(2),
   runId: Identifier,
   jobId: Identifier,
   attempt: Schema.Int,
   evidenceId: Identifier,
-  evidence: UploadedEvidence,
+  evidence: ArchiveEvidence,
   timestamps: Schema.optional(Schema.Unknown),
 });
 const R2Object = Schema.Union([R2ObjectV1, R2ObjectV2]);
@@ -269,16 +226,6 @@ const RunnerManifest = Schema.Struct({
   startedAt: Schema.optional(Schema.String),
   finishedAt: Schema.optional(Schema.String),
 });
-const WorkflowEvent = Schema.Struct({
-  at: Schema.String,
-  type: Schema.String,
-  status: Schema.optional(Schema.String),
-  reason: Schema.optional(Schema.String),
-});
-const WorkflowSnapshot = Schema.Struct({ id: Identifier, events: Schema.Array(WorkflowEvent) });
-const WorkflowTableDate = Schema.String.check(
-  Schema.isPattern(/^\d{1,2}\/\d{1,2}\/\d{4}, \d{1,2}:\d{2}:\d{2} [AP]M$/),
-);
 const SessionList = Schema.Union([
   Schema.Array(Schema.Struct({ id: Identifier })),
   Schema.Struct({ sessions: Schema.Array(Schema.Struct({ id: Identifier })) }),
@@ -288,8 +235,19 @@ const SessionExport = Schema.Struct({
   messages: Schema.Array(Schema.Unknown),
 });
 const Timestamp = Schema.Union([Schema.String, Schema.Number]);
-type EvidenceFieldValue = typeof EvidenceField.Type;
-type R2Value = typeof R2Object.Type;
+const TimeBounds = Schema.Union([
+  Timestamp,
+  Schema.Struct({
+    created: Schema.optional(Timestamp),
+    completed: Schema.optional(Timestamp),
+    start: Schema.optional(Timestamp),
+    end: Schema.optional(Timestamp),
+  }),
+]);
+const MessageMetadata = Schema.Struct({
+  info: Schema.optional(Schema.Struct({ time: Schema.optional(TimeBounds) })),
+  time: Schema.optional(TimeBounds),
+});
 
 const decodeArtifact = (content: string) => decode(Schema.Uint8ArrayFromBase64, content);
 
@@ -299,7 +257,7 @@ const sha256Hex = async (bytes: Uint8Array) => {
 };
 
 const decodeJsonArtifact = <S extends Schema.ConstraintDecoder<unknown>>(
-  artifact: EvidenceFieldValue,
+  artifact: typeof EvidenceField.Type,
   schema: S,
 ) => {
   const bytes = decodeArtifact(artifact.content);
@@ -322,33 +280,7 @@ const timestamp = (value: unknown): string | undefined => {
     : undefined;
 };
 
-const workflowTableTimestamp = (value: string) => {
-  const valid = decode(WorkflowTableDate, value);
-  if (valid === undefined) return undefined;
-  const match = /^(\d{1,2})\/(\d{1,2})\/(\d{4}), (\d{1,2}):(\d{2}):(\d{2}) ([AP]M)$/.exec(valid);
-  if (match === null) return undefined;
-  const hour = (Number(match[4]) % 12) + (match[7] === 'PM' ? 12 : 0);
-  return timestamp(
-    `${match[3]}-${match[1].padStart(2, '0')}-${match[2].padStart(2, '0')}T${hour
-      .toString()
-      .padStart(2, '0')}:${match[5]}:${match[6]}Z`,
-  );
-};
-
-const workflowText = (output: string, runId: string): DiagnosticWorkflowSnapshot | undefined => {
-  const stepEnd =
-    /Name\s*:\s*review-1[\s\S]*?\bEnd\s*:?\s*([0-9]{1,2}\/\d{1,2}\/\d{4}, \d{1,2}:\d{2}:\d{2} [AP]M)/i.exec(
-      output,
-    );
-  const failure = /WorkflowInternalError:\s*([^\r\n|│]+)/i.exec(output);
-  if (stepEnd === null || failure === null) return undefined;
-  const at = workflowTableTimestamp(stepEnd[1].trim());
-  const reason = failure[1].trim();
-  if (at === undefined || reason.length === 0) return undefined;
-  return { id: runId, events: [{ at, type: 'WorkflowInternalError', status: 'failed', reason }] };
-};
-
-const validatedEvidence = async (value: R2Value) => {
+const validatedEvidence = async (value: typeof R2Object.Type) => {
   // Historical and uploaded archives are read for diagnosis. Per-file hashes
   // are retained metadata, not a read gate: a truncated or unreadable artifact
   // is shown as retained metadata while every readable material stays visible.
@@ -423,154 +355,99 @@ const validatedEvidence = async (value: R2Value) => {
   };
 };
 
+const correlateEvidence = async (
+  run: NonNullable<DiagnosticD1Snapshot['run']>,
+  get: (key: string) => Promise<DiagnosticR2Snapshot | undefined>,
+) => {
+  const d1Evidence = run.evidence;
+  if (d1Evidence === undefined || run.runnerJobId === undefined) return undefined;
+  const snapshot = await get(d1Evidence.key);
+  const decodedSnapshot = snapshot === undefined ? undefined : decode(R2Snapshot, snapshot);
+  if (decodedSnapshot === undefined) return undefined;
+  const value = r2Evidence(decodedSnapshot.object);
+  if (value === undefined) return undefined;
+  if (
+    d1Evidence.key !== decodedSnapshot.key ||
+    d1Evidence.size !== decodedSnapshot.rawSize ||
+    d1Evidence.sha256.toLowerCase() !== decodedSnapshot.rawSha256.toLowerCase() ||
+    value.runId !== run.runId ||
+    value.jobId !== run.runnerJobId ||
+    (value.version === 2 && value.attempt !== run.runnerAttempt)
+  ) {
+    return undefined;
+  }
+  const details = await validatedEvidence(value);
+  return details === undefined ? undefined : { snapshot: decodedSnapshot, details };
+};
+
 export const runDiagnostic = async (argument: string, sources: DiagnosticSources) => {
   const target = targetFromArgument(argument);
   if (target === undefined) throw new Error('Expected a GitHub PR URL, delivery ID, or run ID');
-  const missingSources: string[] = [];
-  let d1: DiagnosticD1Snapshot | undefined;
-  let github: DiagnosticGitHubSnapshot | undefined;
-  let r2: R2Value | undefined;
-  let r2Snapshot: DiagnosticR2Snapshot | undefined;
-  let evidenceDetails: Awaited<ReturnType<typeof validatedEvidence>>;
-  let workflow: DiagnosticWorkflowSnapshot | undefined;
-  try {
-    d1 = await sources.d1.find(target);
-  } catch {
-    missingSources.push('d1');
-  }
-  try {
-    github = await sources.github.find({
+  const unavailable = new Set<'d1' | 'github' | 'r2'>();
+  const findGithub = () =>
+    sources.github.find({
       target,
       repositoryId: d1?.delivery?.repositoryId,
       pullRequestNumber: d1?.delivery?.pullRequestNumber,
       commentId: d1?.run?.commentId,
       triggerKind: d1?.delivery?.trigger,
     });
+  let d1: DiagnosticD1Snapshot | undefined;
+  let github: DiagnosticGitHubSnapshot | undefined;
+  try {
+    d1 = await sources.d1.find(target);
   } catch {
-    missingSources.push('github');
+    d1 = undefined;
+  }
+  try {
+    github = await findGithub();
+  } catch {
+    github = undefined;
   }
   if (github === undefined && d1?.delivery !== undefined) {
     try {
-      github = await sources.github.find({
-        target,
-        repositoryId: d1.delivery.repositoryId,
-        pullRequestNumber: d1.delivery.pullRequestNumber,
-        commentId: d1.run?.commentId,
-        triggerKind: d1.delivery.trigger,
-      });
+      github = await findGithub();
     } catch {
-      if (!missingSources.includes('github')) missingSources.push('github');
+      github = undefined;
     }
   }
-  const needsGithubEnrichment = d1 === undefined && target.kind === 'pull-request';
-  if (needsGithubEnrichment && github !== undefined) {
+  if (d1 === undefined && target.kind === 'pull-request' && github !== undefined) {
     try {
       d1 = await sources.d1.find(target, { repositoryId: github.repository.id });
     } catch {
-      if (!missingSources.includes('d1')) missingSources.push('d1');
+      d1 = undefined;
     }
     if (d1 !== undefined) {
       try {
-        const enriched = await sources.github.find({
-          target,
-          repositoryId: d1.delivery?.repositoryId,
-          pullRequestNumber: d1.delivery?.pullRequestNumber,
-          commentId: d1.run?.commentId,
-          triggerKind: d1.delivery?.trigger,
-        });
+        const enriched = await findGithub();
         if (enriched !== undefined) github = enriched;
       } catch {
         // Keep the first GitHub snapshot when enrichment is unavailable.
       }
     }
   }
-  if (d1 !== undefined) {
-    missingSources.splice(missingSources.indexOf('d1'), missingSources.includes('d1') ? 1 : 0);
-  } else if (!missingSources.includes('d1')) {
-    missingSources.push('d1');
-  }
-  if (github !== undefined) {
-    missingSources.splice(
-      missingSources.indexOf('github'),
-      missingSources.includes('github') ? 1 : 0,
-    );
-  } else if (!missingSources.includes('github')) {
-    missingSources.push('github');
-  }
-  const evidenceKey = d1?.run?.evidence?.key;
-  if (evidenceKey === undefined) {
-    missingSources.push('r2');
+  if (d1 === undefined) unavailable.add('d1');
+  if (github === undefined) unavailable.add('github');
+
+  const run = d1?.run;
+  const evidenceKey = run?.evidence?.key;
+  let correlated: Awaited<ReturnType<typeof correlateEvidence>>;
+  if (evidenceKey === undefined || run === undefined) {
+    unavailable.add('r2');
   } else {
     try {
-      const stored = await sources.r2.get(evidenceKey);
-      const snapshot = stored === undefined ? undefined : decode(R2Snapshot, stored);
-      r2Snapshot = snapshot;
-      const parsed = snapshot === undefined ? undefined : r2Evidence(snapshot.object);
-      r2 = parsed;
-      const d1Run = d1?.run;
-      const d1Evidence = d1Run?.evidence;
-      const correlated =
-        snapshot !== undefined &&
-        d1Run !== undefined &&
-        d1Evidence !== undefined &&
-        d1Evidence.key === snapshot.key &&
-        d1Evidence.size === snapshot.rawSize &&
-        d1Evidence.sha256.toLowerCase() === snapshot.rawSha256.toLowerCase() &&
-        d1Run.runnerJobId !== undefined &&
-        parsed?.runId === d1Run.runId &&
-        parsed.jobId === d1Run.runnerJobId &&
-        (parsed.version === 1 || parsed.attempt === d1Run.runnerAttempt);
-      evidenceDetails =
-        parsed === undefined || !correlated ? undefined : await validatedEvidence(parsed);
-      if (evidenceDetails === undefined) missingSources.push('r2');
+      correlated = await correlateEvidence(run, (key) => sources.r2.get(key));
     } catch {
-      missingSources.push('r2');
+      correlated = undefined;
     }
+    if (correlated === undefined) unavailable.add('r2');
   }
-  if (sources.workflow !== undefined && d1?.run !== undefined) {
-    try {
-      const candidate = await sources.workflow.find(target, { runId: d1.run.runId });
-      workflow = candidate === undefined ? undefined : decode(WorkflowSnapshot, candidate);
-      if (candidate === undefined || workflow === undefined) missingSources.push('workflow');
-    } catch {
-      missingSources.push('workflow');
-    }
-  }
-  const evidence = evidenceDetails?.value.evidence;
-  const manifest = evidenceDetails?.manifest;
+
+  const evidence = correlated?.details.value.evidence;
+  const manifest = correlated?.details.manifest;
   const exportTimestamps =
-    evidenceDetails?.sessionExport?.messages.flatMap((message) => {
-      const metadata = decode(
-        Schema.Struct({
-          info: Schema.optional(
-            Schema.Struct({
-              time: Schema.optional(
-                Schema.Union([
-                  Timestamp,
-                  Schema.Struct({
-                    created: Schema.optional(Timestamp),
-                    completed: Schema.optional(Timestamp),
-                    start: Schema.optional(Timestamp),
-                    end: Schema.optional(Timestamp),
-                  }),
-                ]),
-              ),
-            }),
-          ),
-          time: Schema.optional(
-            Schema.Union([
-              Timestamp,
-              Schema.Struct({
-                created: Schema.optional(Timestamp),
-                completed: Schema.optional(Timestamp),
-                start: Schema.optional(Timestamp),
-                end: Schema.optional(Timestamp),
-              }),
-            ]),
-          ),
-        }),
-        message,
-      );
+    correlated?.details.sessionExport?.messages.flatMap((message) => {
+      const metadata = decode(MessageMetadata, message);
       const messageTime = metadata?.info?.time ?? metadata?.time;
       if (messageTime === undefined) return [];
       if (typeof messageTime === 'object' && messageTime !== null) {
@@ -583,11 +460,11 @@ export const runDiagnostic = async (argument: string, sources: DiagnosticSources
       return [timestamp(messageTime)].filter((at): at is string => at !== undefined);
     }) ?? [];
   const runner =
-    d1?.run === undefined
+    run === undefined
       ? undefined
       : {
-          jobId: d1.run.runnerJobId ?? evidenceDetails?.value.jobId,
-          attempt: d1.run.runnerAttempt ?? manifest?.attempt,
+          jobId: run.runnerJobId ?? correlated?.details.value.jobId,
+          attempt: run.runnerAttempt ?? manifest?.attempt,
           stage: manifest === undefined ? undefined : 'cleanup',
           sandboxName: manifest?.sandboxName,
           sandboxId: manifest?.sandboxId,
@@ -597,51 +474,36 @@ export const runDiagnostic = async (argument: string, sources: DiagnosticSources
           cleanup: manifest?.cleanup.status,
         };
   const timeline = [
-    d1?.run?.createdAt === undefined
+    run?.createdAt === undefined
       ? undefined
-      : { at: d1.run.createdAt, source: 'd1', event: 'run scheduled' },
-    (d1?.run?.evidence?.executionStartedAt ?? manifest?.startedAt) === undefined
+      : { at: run.createdAt, source: 'd1', event: 'run scheduled' },
+    (run?.evidence?.executionStartedAt ?? manifest?.startedAt) === undefined
       ? undefined
       : {
-          at: d1?.run?.evidence?.executionStartedAt ?? manifest!.startedAt!,
+          at: run?.evidence?.executionStartedAt ?? manifest!.startedAt!,
           source: 'runner',
           event: 'execution started',
         },
-    d1?.run?.evidence?.submissionCompletedAt === undefined
+    run?.evidence?.submissionCompletedAt === undefined
       ? undefined
       : {
-          at: d1.run.evidence.submissionCompletedAt,
+          at: run.evidence.submissionCompletedAt,
           source: 'runner',
           event: 'review submitted',
         },
-    d1?.run?.evidence?.cleanupCompletedAt === undefined
+    run?.evidence?.cleanupCompletedAt === undefined
       ? manifest?.finishedAt === undefined
         ? undefined
         : { at: manifest.finishedAt, source: 'runner', event: 'cleanup completed' }
-      : { at: d1.run.evidence.cleanupCompletedAt, source: 'runner', event: 'cleanup completed' },
-    d1?.run?.evidence?.uploadedAt === undefined
+      : { at: run.evidence.cleanupCompletedAt, source: 'runner', event: 'cleanup completed' },
+    run?.evidence?.uploadedAt === undefined
       ? undefined
-      : { at: d1.run.evidence.uploadedAt, source: 'r2', event: 'evidence uploaded' },
+      : { at: run.evidence.uploadedAt, source: 'r2', event: 'evidence uploaded' },
     ...exportTimestamps.map((at) => ({ at, source: 'runner', event: 'session event' })),
-    ...(workflow?.events ?? []).map((event) => ({
-      at: event.at,
-      source: 'workflow',
-      event: event.type,
-    })),
   ]
     .filter((event): event is { at: string; source: string; event: string } => event !== undefined)
     .sort((a, b) => a.at.localeCompare(b.at));
-  const workflowFailure = workflow?.events.find(
-    (event) => event.status === 'failed' || event.type === 'WorkflowInternalError',
-  );
   const firstFailureBoundary = [
-    workflowFailure === undefined
-      ? undefined
-      : {
-          source: 'workflow',
-          at: workflowFailure.at,
-          reason: workflowFailure.reason ?? workflowFailure.type,
-        },
     runner?.terminal !== 'failed'
       ? undefined
       : {
@@ -649,14 +511,14 @@ export const runDiagnostic = async (argument: string, sources: DiagnosticSources
           at: manifest?.finishedAt,
           reason: runner.failure ?? 'Runner Job failed',
         },
-    d1?.run?.status !== 'failed'
+    run?.status !== 'failed'
       ? undefined
-      : { source: 'd1', at: d1.run.updatedAt, reason: 'run failed' },
+      : { source: 'd1', at: run.updatedAt, reason: 'run failed' },
     evidence?.status !== 'incomplete'
       ? undefined
       : {
           source: 'r2',
-          at: d1?.run?.evidence?.uploadedAt,
+          at: run?.evidence?.uploadedAt,
           reason: 'evidence incomplete',
         },
   ]
@@ -679,29 +541,26 @@ export const runDiagnostic = async (argument: string, sources: DiagnosticSources
             reviews: github.reviews,
           },
     d1:
-      d1?.delivery === undefined || d1.run === undefined
+      d1?.delivery === undefined || run === undefined
         ? { available: false }
-        : { available: true, delivery: d1.delivery, run: d1.run },
+        : { available: true, delivery: d1.delivery, run },
     runner: runner ?? { available: false },
     evidence:
-      evidence === undefined ||
-      r2 === undefined ||
-      r2Snapshot === undefined ||
-      evidenceDetails === undefined
+      evidence === undefined || correlated === undefined || run?.evidence === undefined
         ? { available: false }
         : {
             available: true,
-            key: d1?.run?.evidence?.key,
+            key: run.evidence.key,
             status: evidence.status,
             evidenceId: evidence.id,
             sessionId: evidence.opencodeExport?.sessionId,
-            sessionIds: evidenceDetails.sessionIds,
-            readable: evidenceDetails.readable,
+            sessionIds: correlated.details.sessionIds,
+            readable: correlated.details.readable,
             timestamps: {
               executionStartedAt: manifest?.startedAt,
-              submissionCompletedAt: d1?.run?.evidence?.submissionCompletedAt,
+              submissionCompletedAt: run.evidence.submissionCompletedAt,
               terminalAt: exportTimestamps.at(-1),
-              cleanupCompletedAt: d1?.run?.evidence?.cleanupCompletedAt ?? manifest?.finishedAt,
+              cleanupCompletedAt: run.evidence.cleanupCompletedAt ?? manifest?.finishedAt,
             },
             files: {
               manifest: reportField(evidence.manifest),
@@ -718,12 +577,8 @@ export const runDiagnostic = async (argument: string, sources: DiagnosticSources
             },
           },
     timeline,
-    workflow:
-      workflow === undefined
-        ? { available: false }
-        : { available: true, id: workflow.id, events: workflow.events },
     firstFailureBoundary: firstFailureBoundary ?? null,
-    missingSources: [...new Set(missingSources)],
+    missingSources: [...unavailable],
     fallback:
       firstFailureBoundary?.source === 'runner' || firstFailureBoundary?.source === 'r2'
         ? 'SSH only if the Runner host is lost or cleanup failure requires host recovery.'
@@ -732,13 +587,12 @@ export const runDiagnostic = async (argument: string, sources: DiagnosticSources
 };
 
 const commandAdapter: DiagnosticCommandAdapter = {
-  run: async (command, args, options) => {
+  run: async (command, args) => {
     try {
       const stdout = execFileSync(command, [...args], {
         encoding: 'utf8',
         stdio: 'pipe',
         maxBuffer: 40 * 1024 * 1024,
-        env: options?.env === undefined ? undefined : { ...process.env, ...options.env },
       });
       return { stdout, exitCode: 0 };
     } catch (error) {
@@ -831,12 +685,26 @@ const paginatedJsonCommand = async <S extends Schema.ConstraintDecoder<unknown>>
   return pages?.flat();
 };
 
+const workspaceWrangler = (...args: readonly string[]) => [
+  'pnpm',
+  '--filter',
+  '@compte-rendu/dashboard',
+  'exec',
+  'wrangler',
+  ...args,
+];
+
 export interface DiagnosticConfig {
   readonly database: string;
   readonly bucket: string;
   readonly wranglerConfig: string;
-  readonly workflowName?: string;
 }
+
+// `pnpm --filter ... exec` changes Wrangler's working directory to the
+// dashboard workspace. Resolve the operator's path before dispatch so a path
+// relative to the caller (typically the repository root) still points at the
+// intended file.
+const diagnosticConfigPath = (path: string) => (path.length === 0 ? '' : resolve(path));
 
 export const createDefaultDiagnosticSources = (
   command: DiagnosticCommandAdapter = commandAdapter,
@@ -844,12 +712,12 @@ export const createDefaultDiagnosticSources = (
     database: process.env.DIAGNOSTIC_D1_DATABASE ?? '',
     bucket: process.env.DIAGNOSTIC_R2_BUCKET ?? '',
     wranglerConfig: process.env.DIAGNOSTIC_WRANGLER_CONFIG ?? '',
-    workflowName: process.env.DIAGNOSTIC_WORKFLOW_NAME,
   },
 ): DiagnosticSources => ({
   d1: {
     find: async (target, context) => {
-      if (config.database.length === 0 || config.wranglerConfig.length === 0) return undefined;
+      const wranglerConfig = diagnosticConfigPath(config.wranglerConfig);
+      if (config.database.length === 0 || wranglerConfig.length === 0) return undefined;
       const value =
         target.kind === 'run'
           ? `r.run_id = '${target.id.replaceAll("'", "''")}'`
@@ -863,20 +731,17 @@ export const createDefaultDiagnosticSources = (
       const rows = await jsonCommand(
         command,
         'corepack',
-        [
-          'pnpm',
-          'dlx',
-          'wrangler@4.124.0',
+        workspaceWrangler(
           'd1',
           'execute',
           config.database,
           '--remote',
           '--config',
-          config.wranglerConfig,
+          wranglerConfig,
           '--json',
           '--command',
           `SELECT d.*, r.run_id, r.status AS run_status, r.created_at AS run_created_at, r.updated_at AS run_updated_at, r.runner_job_id, r.runner_attempt, r.comment_id, r.evidence_key, r.evidence_status, r.evidence_size, r.evidence_sha256, r.evidence_uploaded_at, r.execution_started_at, r.submission_completed_at, r.cleanup_completed_at FROM review_runs r JOIN deliveries d ON d.delivery_id = r.delivery_id WHERE ${value} ORDER BY r.updated_at DESC LIMIT 1`,
-        ],
+        ),
         D1Json,
       );
       const row = rows?.[0]?.results[0];
@@ -1004,23 +869,24 @@ export const createDefaultDiagnosticSources = (
   },
   r2: {
     get: async (key) => {
-      if (config.bucket.length === 0 || config.wranglerConfig.length === 0) return undefined;
-      const result = await command.run('corepack', [
-        'pnpm',
-        'dlx',
-        'wrangler@4.124.0',
-        'r2',
-        'object',
-        'get',
-        `${config.bucket}/${key}`,
-        '--pipe',
-        '--remote',
-        '--config',
-        config.wranglerConfig,
-      ]);
+      const wranglerConfig = diagnosticConfigPath(config.wranglerConfig);
+      if (config.bucket.length === 0 || wranglerConfig.length === 0) return undefined;
+      const result = await command.run(
+        'corepack',
+        workspaceWrangler(
+          'r2',
+          'object',
+          'get',
+          `${config.bucket}/${key}`,
+          '--pipe',
+          '--remote',
+          '--config',
+          wranglerConfig,
+        ),
+      );
       if (result.exitCode !== 0) return undefined;
       const bytes = new TextEncoder().encode(result.stdout);
-      let object: R2Value | undefined;
+      let object: typeof R2Object.Type | undefined;
       try {
         object = r2Evidence(JSON.parse(result.stdout));
       } catch {
@@ -1031,33 +897,6 @@ export const createDefaultDiagnosticSources = (
         : { key, rawSize: bytes.byteLength, rawSha256: await sha256Hex(bytes), object };
     },
   },
-  ...(config.workflowName === undefined
-    ? {}
-    : {
-        workflow: {
-          find: async (_target: DiagnosticTarget, context?: { readonly runId?: string }) => {
-            if (context?.runId === undefined || config.wranglerConfig.length === 0)
-              return undefined;
-            const result = await command.run(
-              'corepack',
-              [
-                'pnpm',
-                'dlx',
-                'wrangler@4.124.0',
-                'workflows',
-                'instances',
-                'describe',
-                config.workflowName!,
-                context.runId,
-                '--config',
-                config.wranglerConfig,
-              ],
-              { env: { TZ: 'UTC', LANG: 'en_US.UTF-8', LC_ALL: 'en_US.UTF-8' } },
-            );
-            return workflowText(result.stdout, context.runId);
-          },
-        },
-      }),
 });
 
 export const runDiagnosticCommand = async (

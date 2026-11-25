@@ -16,13 +16,13 @@ DIAGNOSTIC_WRANGLER_CONFIG=apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc \
 corepack pnpm diagnose <PR_URL|DELIVERY_ID|RUN_ID>
 ```
 
-The command invokes `gh` for GitHub and
-`corepack pnpm dlx wrangler@4.124.0 --config ...` for the deployed D1 and R2
-bindings. There is no default database or bucket name: use the generated
-config and resource names for the intended instance. Authenticate `gh` or
-provide `GH_TOKEN` for repositories that require it. To include a retained
-historical Workflow whose instance ID is the run ID, also set
-`DIAGNOSTIC_WORKFLOW_NAME=<INSTANCE_NAME>-review`.
+The command invokes `gh` for GitHub and the workspace-pinned Wrangler through
+`corepack pnpm --filter @compte-rendu/dashboard exec wrangler ... --config ...`
+for the deployed D1 and R2 bindings. A relative config path is resolved from
+the caller's working directory before Wrangler runs in the dashboard workspace.
+There is no default database or bucket name: use the generated config and
+resource names for the intended instance. Authenticate `gh` or provide
+`GH_TOKEN` for repositories that require it.
 
 Missing sources are reported without suppressing available sources. A complete
 archive with one truncated or unreadable diagnostic artifact still shows every
