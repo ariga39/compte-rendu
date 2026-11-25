@@ -5,11 +5,9 @@ import {
   MAX_WEBHOOK_BYTES,
   REVIEW_ATTEMPT_BUDGET_MS,
   MetadataInvalidationEvent,
-  RunnerCleanupRecoveryReport,
   RunnerEvidenceUpload,
   RunnerJobInput,
   RunnerProgressReport,
-  RunnerResultCallback,
   RunnerTerminalCallback,
   readBoundedRequestBody,
   type PublicTaskFailure,
@@ -156,6 +154,7 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
       requireUnprepared?: boolean;
     },
     failure?: PublicTaskFailure,
+    requireUnpublished = false,
   ): Promise<ReviewOutcome | undefined> => {
     const notificationClaimed =
       outcome.status === 'scheduled' || outcome.status === 'failed'
@@ -166,6 +165,7 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
       occurredAt,
       ...(releaseRunnerClaim === undefined ? {} : { releaseRunnerClaim }),
       ...(failure === undefined ? {} : { failure }),
+      ...(requireUnpublished ? { requireUnpublished: true } : {}),
     });
     // Cancellation can win after the caller read the run but before the claim
     // and status write above. The durable outcome is the winner; only the
@@ -220,72 +220,6 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
     return winner;
   };
 
-  const handleRunnerCleanupRecovery = async (request: Request): Promise<Response> => {
-    if (request.headers.get('x-compte-rendu-runner-cleanup-recovery') !== 'verified') {
-      return new Response(null, { status: 401 });
-    }
-    const body = await request.arrayBuffer();
-    if (body.byteLength > 64 * 1024) return new Response(null, { status: 413 });
-    let report: typeof RunnerCleanupRecoveryReport.Type;
-    try {
-      report = await Schema.decodeUnknownPromise(
-        Schema.fromJsonString(RunnerCleanupRecoveryReport),
-        {
-          onExcessProperty: 'error',
-        },
-      )(new TextDecoder().decode(body));
-    } catch {
-      return new Response(null, { status: 400 });
-    }
-    if (env.EVIDENCE_BUCKET === undefined) {
-      return new Response(null, { status: 503 });
-    }
-    if (
-      Option.isNone(DateTime.make(report.confirmedAt)) ||
-      report.sandboxName !== `compte-rendu-${report.jobId}`
-    ) {
-      return new Response(null, { status: 400 });
-    }
-    const validation = await stateStore.validateRunnerCleanupRecovery({
-      runId: report.runId,
-      jobId: report.jobId,
-      attempt: report.attempt,
-      evidenceId: report.evidenceId,
-      baseSha: report.baseSha,
-      headSha: report.headSha,
-      sandboxName: report.sandboxName,
-      confirmedAt: report.confirmedAt,
-    });
-    if (validation.kind === 'rejected') return new Response(null, { status: 409 });
-    const audit = {
-      version: 1,
-      ...report,
-      confirmedAt:
-        validation.kind === 'already'
-          ? validation.cleanupCompletedAt || report.confirmedAt
-          : report.confirmedAt,
-    };
-    await env.EVIDENCE_BUCKET.put(
-      `cleanup-recoveries/${report.runId}/${report.jobId}/${report.attempt}.json`,
-      JSON.stringify(audit),
-    );
-    const result = await stateStore.recoverRunnerCleanup({
-      runId: report.runId,
-      jobId: report.jobId,
-      attempt: report.attempt,
-      evidenceId: report.evidenceId,
-      baseSha: report.baseSha,
-      headSha: report.headSha,
-      sandboxName: report.sandboxName,
-      confirmedAt: report.confirmedAt,
-    });
-    if (result.kind === 'rejected') return new Response(null, { status: 409 });
-    return Response.json(
-      { accepted: true },
-      { status: 202, headers: { 'cache-control': 'no-store' } },
-    );
-  };
-
   const handleRunnerResult = async (
     request: Request,
     lifecycleLog: ReturnType<typeof createPostHogLifecycleLog>,
@@ -309,6 +243,33 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
     if (outcome === undefined) return new Response(null, { status: 404 });
     if (outcome.runnerJobId !== callback.id || outcome.runnerAttempt !== callback.attempt) {
       return new Response(null, { status: 409 });
+    }
+    // New callbacks carry immutable SHAs. Older issued v2 archives may omit
+    // them, so absence remains compatible while a present value must match.
+    if (
+      (callback.baseSha !== undefined && outcome.baseSha !== callback.baseSha) ||
+      (callback.headSha !== undefined && outcome.headSha !== callback.headSha)
+    ) {
+      return new Response(null, { status: 409 });
+    }
+    // A non-success result can never overwrite a completed review or a
+    // publication that already owns the run. Reject before any D1 write.
+    if (
+      callback.status !== 'succeeded' &&
+      (outcome.status === 'completed' ||
+        (outcome.status === 'scheduled' && outcome.publicationClaimedAt !== undefined))
+    ) {
+      return new Response(null, { status: 409 });
+    }
+    // A repeated fully-settled failure is idempotent. Its original failure,
+    // usage, result time and first cleanup confirmation remain unchanged.
+    if (
+      callback.status !== 'succeeded' &&
+      outcome.resultReceivedAt !== undefined &&
+      outcome.cleanup === 'destroyed' &&
+      (outcome.status === 'cancelled' || outcome.status === 'superseded')
+    ) {
+      return new Response(null, { status: 202 });
     }
     if (callback.usage !== undefined) {
       try {
@@ -383,11 +344,7 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
                   ? 'unknown'
                   : reason,
       };
-      return markRunFailed(outcome, callback.runId, occurredAt, undefined, failure);
-    };
-    const clearRunnerJob = async () => {
-      if (callback.sandbox.cleanup !== 'destroyed') return;
-      await stateStore.clearRunnerJob({ runId: callback.runId, jobId: callback.id });
+      return markRunFailed(outcome, callback.runId, occurredAt, undefined, failure, true);
     };
     await stateStore.recordRunnerTerminal({
       runId: callback.runId,
@@ -405,54 +362,11 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
         : { cleanupCompletedAt: callback.timestamps.cleanupCompletedAt }),
     });
 
-    // Legacy Runner callbacks still carry their private archive inline. It is
-    // stored as-is for historical readability, but an archive failure never
-    // changes the publication outcome.
-    if (!('version' in callback)) {
-      const legacy = callback as typeof RunnerResultCallback.Type;
-      const evidenceObject = JSON.stringify({
-        version: 1,
-        runId: legacy.runId,
-        jobId: legacy.id,
-        evidenceId: legacy.evidence.id,
-        evidence: legacy.evidence,
-      });
-      try {
-        await env.EVIDENCE_BUCKET.put(`reviews/${legacy.runId}`, evidenceObject);
-        const evidenceBytes = new TextEncoder().encode(evidenceObject);
-        const evidenceHash = await globalThis.crypto.subtle.digest('SHA-256', evidenceBytes);
-        const evidenceRecorded = await stateStore.recordEvidence({
-          runId: legacy.runId,
-          sandboxCleanup: legacy.sandbox.cleanup,
-          evidence: {
-            key: `reviews/${legacy.runId}`,
-            status: legacy.evidence.status,
-            size: evidenceBytes.byteLength,
-            sha256: Array.from(new Uint8Array(evidenceHash), (byte) =>
-              byte.toString(16).padStart(2, '0'),
-            ).join(''),
-            uploadedAt: new Date().toISOString(),
-            executionStartedAt: legacy.timestamps.executionStartedAt,
-            submissionCompletedAt: legacy.timestamps.submissionCompletedAt,
-            cleanupCompletedAt: legacy.timestamps.cleanupCompletedAt,
-          },
-        });
-        if (!evidenceRecorded)
-          await Effect.runPromise(Effect.logWarning('legacy evidence metadata not recorded')).catch(
-            () => undefined,
-          );
-      } catch {
-        await Effect.runPromise(Effect.logWarning('legacy evidence archive unavailable')).catch(
-          () => undefined,
-        );
-      }
-    }
     if ((await stateStore.getRunOutcome(callback.runId))?.status === 'cancelled')
       return new Response(null, { status: 202 });
 
     if (callback.status === 'succeeded') {
       if (outcome.status === 'superseded') {
-        await clearRunnerJob();
         if (
           outcome.trigger === 'manual' &&
           outcome.commentId !== undefined &&
@@ -537,7 +451,6 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
         callback,
       );
     }
-    await clearRunnerJob();
     return new Response(null, { status: 202 });
   };
 
@@ -1040,7 +953,6 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
 
   return {
     recordFinishedLifecycle,
-    handleRunnerCleanupRecovery,
     handleRunnerResult,
     handleRunnerEvidence,
     handleMetadataInvalidation,

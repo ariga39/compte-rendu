@@ -874,7 +874,7 @@ describe('Core lifecycle telemetry and terminal classification', () => {
   });
 
   it.each([successfulCallback, failedCallback, abortedCallback])(
-    'keeps a cancelled claim and its evidence when a late %s arrives',
+    'keeps a cancelled claim when a late %s arrives',
     async (makeCallback) => {
       const database = new SqliteD1Database();
       const { fetcher, requests, waitUntilTasks } = capturePostHogTransport();
@@ -922,7 +922,6 @@ describe('Core lifecycle telemetry and terminal classification', () => {
           status: 'cancelled',
           runnerJobId: jobId,
           runnerAttempt: 1,
-          evidence: { key: 'reviews/' + runId },
         });
         await Promise.all(waitUntilTasks);
         expect(await postHogEvents(requests)).not.toContainEqual(

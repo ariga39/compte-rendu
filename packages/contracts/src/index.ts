@@ -219,40 +219,6 @@ const EvidenceSize = Schema.Int.check(
   Schema.makeFilter((size) => size >= 0, { expected: 'non-negative evidence size' }),
 );
 const EvidenceSha256 = Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/i));
-export const RunnerEvidenceField = Schema.Struct({
-  content: Schema.String,
-  size: EvidenceSize,
-  sha256: EvidenceSha256,
-});
-const RequiredRunnerEvidenceField = Schema.Struct({
-  content: Schema.NonEmptyString,
-  size: EvidenceSize,
-  sha256: EvidenceSha256,
-});
-const RunnerEvidenceExport = Schema.Struct({
-  sessionId: Schema.NonEmptyString,
-  content: RequiredRunnerEvidenceField,
-});
-const IncompleteRunnerEvidence = Schema.Struct({
-  id: Schema.NonEmptyString,
-  status: Schema.Literals(['complete', 'incomplete']),
-  manifest: RunnerEvidenceField,
-  opencodeJsonl: RunnerEvidenceField,
-  opencodeStderr: RunnerEvidenceField,
-  validatedReview: Schema.optional(RunnerEvidenceField),
-  opencodeSessionList: Schema.optional(RunnerEvidenceField),
-  opencodeExport: Schema.optional(RunnerEvidenceExport),
-});
-const CompleteRunnerEvidence = Schema.Struct({
-  id: Schema.NonEmptyString,
-  status: Schema.Literal('complete'),
-  manifest: RequiredRunnerEvidenceField,
-  opencodeJsonl: RequiredRunnerEvidenceField,
-  opencodeStderr: RunnerEvidenceField,
-  validatedReview: RequiredRunnerEvidenceField,
-  opencodeSessionList: RequiredRunnerEvidenceField,
-  opencodeExport: RunnerEvidenceExport,
-});
 const CallbackTimestamps = Schema.Struct({
   executionStartedAt: Schema.NonEmptyString,
   submissionCompletedAt: Schema.NonEmptyString,
@@ -335,42 +301,8 @@ export const RunnerProgressReport = Schema.Struct({
 });
 export type RunnerProgressReport = typeof RunnerProgressReport.Type;
 
-const SuccessfulRunnerResultCallback = Schema.Struct({
-  ...CallbackIdentity,
-  status: Schema.Literal('succeeded'),
-  evidence: CompleteRunnerEvidence,
-  timestamps: CallbackTimestamps,
-  sandbox: Schema.Struct({ cleanup: Schema.Literal('destroyed') }),
-  result: RunnerReviewResult,
-  lifecycle: Schema.optional(RunnerProgressSnapshot),
-});
-const FailedRunnerResultCallback = Schema.Struct({
-  ...CallbackIdentity,
-  status: Schema.Literal('failed'),
-  evidence: IncompleteRunnerEvidence,
-  timestamps: PartialCallbackTimestamps,
-  sandbox: CallbackSandbox,
-  failure: CallbackFailure,
-  lifecycle: Schema.optional(RunnerProgressSnapshot),
-});
-const AbortedRunnerResultCallback = Schema.Struct({
-  ...CallbackIdentity,
-  status: Schema.Literal('aborted'),
-  evidence: IncompleteRunnerEvidence,
-  timestamps: PartialCallbackTimestamps,
-  sandbox: CallbackSandbox,
-  lifecycle: Schema.optional(RunnerProgressSnapshot),
-});
-
-export const RunnerResultCallback = Schema.Union([
-  SuccessfulRunnerResultCallback,
-  FailedRunnerResultCallback,
-  AbortedRunnerResultCallback,
-]);
-
 export type RunnerJobInput = typeof RunnerJobInput.Type;
 export type RunnerJobResponse = typeof RunnerJobResponse.Type;
-export type RunnerResultCallback = typeof RunnerResultCallback.Type;
 
 const OptionalProgressSnapshot = { lifecycle: Schema.optional(RunnerProgressSnapshot) };
 const RunnerEvidenceReference = Schema.Struct({
@@ -384,6 +316,10 @@ const CompleteRunnerEvidenceReference = Schema.Struct({
 const V2CallbackIdentity = {
   version: Schema.Literal(2),
   ...CallbackIdentity,
+  // New callbacks carry the immutable revision; archives issued before this
+  // field existed remain replayable from the locally verified manifest.
+  baseSha: Schema.optionalKey(GitHubSha),
+  headSha: Schema.optionalKey(GitHubSha),
 };
 const SuccessfulRunnerResultCallbackV2 = Schema.Struct({
   ...V2CallbackIdentity,
@@ -391,7 +327,9 @@ const SuccessfulRunnerResultCallbackV2 = Schema.Struct({
   evidence: CompleteRunnerEvidenceReference,
   timestamps: CallbackTimestamps,
   sandbox: Schema.Struct({ cleanup: Schema.Literal('destroyed') }),
-  result: StructuredReviewResult,
+  // A retained pre-v2 Markdown result is accepted as-is and published as a
+  // comment. New Runner callbacks always carry the structured result.
+  result: RunnerReviewResult,
   ...OptionalProgressSnapshot,
 });
 const FailedRunnerResultCallbackV2 = Schema.Struct({
@@ -422,8 +360,8 @@ export const RunnerResultCallbackV2 = Schema.Union([
   AbortedRunnerResultCallbackV2,
 ]);
 
-/** Core accepts both the legacy inline callback and the slim v2 callback. */
-export const RunnerTerminalCallback = Schema.Union([RunnerResultCallback, RunnerResultCallbackV2]);
+/** The only terminal callback identity Core accepts after the v1 cleanup. */
+export const RunnerTerminalCallback = RunnerResultCallbackV2;
 
 export type RunnerResultCallbackV2 = typeof RunnerResultCallbackV2.Type;
 export type RunnerTerminalCallback = typeof RunnerTerminalCallback.Type;
@@ -462,18 +400,6 @@ export const RunnerEvidenceUpload = Schema.Struct({
   timestamps: Schema.optionalKey(PartialCallbackTimestamps),
 });
 export type RunnerEvidenceUpload = typeof RunnerEvidenceUpload.Type;
-
-export const RunnerCleanupRecoveryReport = Schema.Struct({
-  runId: Schema.NonEmptyString,
-  jobId: Schema.NonEmptyString,
-  attempt: Schema.Int,
-  evidenceId: Schema.NonEmptyString,
-  baseSha: GitHubSha,
-  headSha: GitHubSha,
-  sandboxName: Schema.NonEmptyString,
-  confirmedAt: Schema.NonEmptyString,
-});
-export type RunnerCleanupRecoveryReport = typeof RunnerCleanupRecoveryReport.Type;
 
 const PullRequestAction = Schema.Literals([
   'opened',
@@ -714,14 +640,6 @@ export type OperationalLogEvent =
     }
   | {
       readonly phase: 'runner';
-      readonly outcome: 'cleanup-recovery';
-      readonly runId: string;
-      readonly jobId: string;
-      readonly attempt: number;
-      readonly status: number;
-    }
-  | {
-      readonly phase: 'runner';
       readonly outcome: 'claim';
       readonly reason:
         | 'http-error'
@@ -756,18 +674,7 @@ export type OperationalLogEvent =
       readonly failures: ReadonlyArray<{
         readonly jobId: string;
         readonly sandboxName: string;
-        readonly step:
-          | 'record'
-          | 'inspect'
-          | 'ownership'
-          | 'policy-list'
-          | 'policy-remove'
-          | 'policy-verify'
-          | 'sandbox-remove'
-          | 'sandbox-verify'
-          | 'secret-remove'
-          | 'secret-verify'
-          | 'record-remove';
+        readonly step: string;
         readonly command?: string;
         readonly exitCode?: number;
         readonly timedOut?: boolean;

@@ -4,8 +4,6 @@ import type {
   ActiveRunnerJob,
   ReviewApproval,
   ReviewCheckSetupStatus,
-  ReviewCleanupRecovery,
-  ReviewCleanupRecoveryResult,
   ReviewDeliveryRecord,
   ReviewDisposition,
   ReviewEvidenceMetadata,
@@ -100,6 +98,7 @@ export interface DeliveryRow {
   comment_id?: number | null;
   check_run_id?: number | null;
   runner_cleanup_status?: RunnerCleanupStatus | null;
+  result_received_at?: string | null;
   check_setup_status: 'pending' | 'ready' | 'failed';
   evidence_key?: string | null;
   evidence_status?: 'complete' | 'incomplete' | null;
@@ -132,6 +131,7 @@ export const outcomeFromRow = (row: DeliveryRow): ReviewOutcome => ({
   ...(row.comment_id == null ? {} : { commentId: row.comment_id }),
   ...(row.check_run_id == null ? {} : { checkRunId: row.check_run_id }),
   ...(row.runner_cleanup_status == null ? {} : { cleanup: row.runner_cleanup_status }),
+  ...(row.result_received_at == null ? {} : { resultReceivedAt: row.result_received_at }),
   ...(row.evidence_key == null ||
   row.evidence_status == null ||
   row.evidence_size == null ||
@@ -163,7 +163,7 @@ export const runOutcomeSelect = `
     d.base_sha, d.head_sha, d.trigger, r.status,
     r.created_at, r.updated_at, r.claimed_at, r.publication_claimed_at,
     r.runner_job_id, r.runner_attempt, r.comment_id,
-    r.check_run_id, r.runner_cleanup_status,
+    r.check_run_id, r.runner_cleanup_status, r.result_received_at,
     r.check_setup_status, r.review_decision,
     r.evidence_key, r.evidence_status,
     r.evidence_size, r.evidence_sha256, r.evidence_uploaded_at,
@@ -334,6 +334,8 @@ export interface ReviewLifecycleStore {
     failure?: import('@compte-rendu/contracts').PublicTaskFailure;
     runId: string;
     occurredAt: string;
+    /** Refuse to overwrite a publication that already started. */
+    requireUnpublished?: boolean;
     releaseRunnerClaim?: {
       jobId: string;
       attempt: number;
@@ -343,11 +345,6 @@ export interface ReviewLifecycleStore {
   recordDelivery: (input: ReviewDeliveryRecord) => Promise<void>;
   claimStalledPublications(before: string, now: string, limit: number): Promise<readonly string[]>;
   listPriorReviewRunIds(runId: string): Promise<readonly string[]>;
-  recordEvidence(input: {
-    runId: string;
-    evidence: ReviewEvidenceMetadata;
-    sandboxCleanup?: import('./review-records').RunnerCleanupStatus;
-  }): Promise<boolean>;
   recordEvidenceUpload(input: {
     runId: string;
     jobId: string;
@@ -369,14 +366,6 @@ export interface ReviewLifecycleStore {
     submissionCompletedAt?: string;
     cleanupCompletedAt?: string;
   }): Promise<boolean>;
-  validateRunnerCleanupRecovery(
-    input: ReviewCleanupRecovery,
-  ): Promise<
-    | { readonly kind: 'recoverable' }
-    | { readonly kind: 'already'; readonly cleanupCompletedAt: string }
-    | { readonly kind: 'rejected' }
-  >;
-  recoverRunnerCleanup(input: ReviewCleanupRecovery): Promise<ReviewCleanupRecoveryResult>;
   clearRunnerJob(input: { runId: string; jobId: string }): Promise<boolean>;
   markRunCompleted(input: { runId: string; occurredAt: string }): Promise<boolean>;
   markRunSuperseded(input: {
@@ -861,12 +850,20 @@ export const createReviewLifecycleStore = (
     return result.meta.changes === 1;
   },
 
-  markSchedulingFailed: async ({ runId, occurredAt, releaseRunnerClaim, failure }) => {
+  markSchedulingFailed: async ({
+    runId,
+    occurredAt,
+    releaseRunnerClaim,
+    failure,
+    requireUnpublished = false,
+  }) => {
     const statements: D1PreparedStatementLike[] = [
       database
         .prepare(
           `UPDATE review_runs SET status = 'failed', updated_at = ?, terminal_at = COALESCE(terminal_at, ?), failure_phase = ?, failure_reason = ?, failure_http_status = ?
-           WHERE run_id = ? AND status = 'scheduled'`,
+           WHERE run_id = ? AND status = 'scheduled'${
+             requireUnpublished ? ' AND publication_started_at IS NULL' : ''
+           }`,
         )
         .bind(
           occurredAt,
@@ -899,57 +896,15 @@ export const createReviewLifecycleStore = (
           `UPDATE deliveries SET status = 'failed', updated_at = ?
            WHERE delivery_id = (
              SELECT delivery_id FROM review_runs WHERE run_id = ?
-           ) AND status = 'scheduled'`,
+           ) AND status = 'scheduled'
+             AND EXISTS (
+               SELECT 1 FROM review_runs WHERE run_id = ? AND status = 'failed'
+             )`,
         )
-        .bind(occurredAt, runId),
+        .bind(occurredAt, runId, runId),
     ];
     const results = await database.batch(statements);
     return results[0]?.meta.changes === 1;
-  },
-
-  recordEvidence: async ({
-    runId,
-    evidence,
-    sandboxCleanup,
-  }: {
-    runId: string;
-    evidence: ReviewEvidenceMetadata;
-    sandboxCleanup?: RunnerCleanupStatus;
-  }) => {
-    const result = await database
-      .prepare(
-        `UPDATE review_runs SET
-           evidence_key = ?, evidence_status = ?, evidence_size = ?,
-           evidence_sha256 = ?, evidence_uploaded_at = ?,
-           execution_started_at = ?, submission_completed_at = ?,
-           cleanup_completed_at = CASE
-             WHEN runner_cleanup_status = 'destroyed' AND (cleanup_completed_at IS NOT NULL OR ? IS NOT 'destroyed') THEN cleanup_completed_at
-             ELSE ?
-           END,
-           runner_cleanup_status = CASE
-             WHEN runner_cleanup_status = 'destroyed' THEN 'destroyed'
-             ELSE COALESCE(?, runner_cleanup_status)
-           END
-         WHERE run_id = ? AND (
-           evidence_key IS NULL OR evidence_key = ?
-         )`,
-      )
-      .bind(
-        evidence.key,
-        evidence.status,
-        evidence.size,
-        evidence.sha256,
-        evidence.uploadedAt,
-        evidence.executionStartedAt ?? null,
-        evidence.submissionCompletedAt ?? null,
-        sandboxCleanup ?? null,
-        evidence.cleanupCompletedAt ?? null,
-        sandboxCleanup ?? null,
-        runId,
-        evidence.key,
-      )
-      .run();
-    return result.meta.changes === 1;
   },
 
   recordEvidenceUpload: async ({
@@ -1017,8 +972,13 @@ export const createReviewLifecycleStore = (
              ELSE ?
            END,
            cleanup_completed_at = CASE
-             WHEN runner_cleanup_status = 'destroyed' AND cleanup_completed_at IS NOT NULL
-               THEN cleanup_completed_at
+             WHEN runner_cleanup_status = 'destroyed' THEN
+               CASE
+                 WHEN cleanup_completed_at IS NOT NULL THEN cleanup_completed_at
+                 WHEN ? = 'destroyed' THEN COALESCE(?, cleanup_completed_at)
+                 ELSE cleanup_completed_at
+               END
+             WHEN ? = 'destroyed' THEN COALESCE(?, cleanup_completed_at)
              ELSE COALESCE(cleanup_completed_at, ?)
            END
          WHERE run_id = ? AND runner_job_id = ? AND runner_attempt = ?`,
@@ -1027,6 +987,10 @@ export const createReviewLifecycleStore = (
         executionStartedAt ?? null,
         submissionCompletedAt ?? null,
         cleanup,
+        cleanup,
+        cleanupCompletedAt ?? null,
+        cleanup,
+        cleanupCompletedAt ?? null,
         cleanupCompletedAt ?? null,
         runId,
         jobId,
@@ -1034,83 +998,6 @@ export const createReviewLifecycleStore = (
       )
       .run();
     return result.meta.changes === 1;
-  },
-
-  validateRunnerCleanupRecovery: async ({ runId, jobId, attempt, baseSha, headSha }) => {
-    const row = await database
-      .prepare(
-        `SELECT runner_cleanup_status, cleanup_completed_at FROM review_runs
-         WHERE run_id = ? AND runner_job_id = ? AND runner_attempt = ?
-           AND base_sha = ? AND head_sha = ? AND status IN ('failed', 'superseded', 'cancelled')`,
-      )
-      .bind(runId, jobId, attempt, baseSha, headSha)
-      .first<{
-        runner_cleanup_status: RunnerCleanupStatus | null;
-        cleanup_completed_at: string | null;
-      }>();
-    if (row === null) return { kind: 'rejected' as const };
-    if (row.runner_cleanup_status === 'destroyed') {
-      return {
-        kind: 'already' as const,
-        cleanupCompletedAt: row.cleanup_completed_at ?? '',
-      };
-    }
-    return row.runner_cleanup_status === 'failed'
-      ? { kind: 'recoverable' as const }
-      : { kind: 'rejected' as const };
-  },
-
-  recoverRunnerCleanup: async ({ runId, jobId, attempt, baseSha, headSha, confirmedAt }) => {
-    const identify = `run_id = ? AND runner_job_id = ? AND runner_attempt = ? AND base_sha = ? AND head_sha = ?`;
-    const before = await database
-      .prepare(
-        `SELECT runner_cleanup_status, cleanup_completed_at FROM review_runs
-         WHERE ${identify} AND status IN ('failed', 'superseded', 'cancelled')`,
-      )
-      .bind(runId, jobId, attempt, baseSha, headSha)
-      .first<{
-        runner_cleanup_status: RunnerCleanupStatus | null;
-        cleanup_completed_at: string | null;
-      }>();
-    if (
-      before === null ||
-      (before.runner_cleanup_status !== 'failed' && before.runner_cleanup_status !== 'destroyed')
-    ) {
-      return { kind: 'rejected' as const };
-    }
-    if (before.runner_cleanup_status === 'destroyed') {
-      return {
-        kind: 'already' as const,
-        cleanupCompletedAt: before.cleanup_completed_at ?? confirmedAt,
-      };
-    }
-    await database
-      .prepare(
-        `UPDATE review_runs SET
-           runner_cleanup_status = 'destroyed',
-           cleanup_completed_at = CASE WHEN runner_cleanup_status = 'destroyed'
-             THEN cleanup_completed_at ELSE ? END,
-           updated_at = CASE WHEN runner_cleanup_status = 'destroyed' THEN updated_at ELSE ? END
-         WHERE ${identify} AND status IN ('failed', 'superseded', 'cancelled')
-           AND runner_cleanup_status IN ('failed', 'destroyed')`,
-      )
-      .bind(confirmedAt, confirmedAt, runId, jobId, attempt, baseSha, headSha)
-      .run();
-    const after = await database
-      .prepare(
-        `SELECT runner_cleanup_status, cleanup_completed_at FROM review_runs
-         WHERE ${identify} AND status IN ('failed', 'superseded', 'cancelled')`,
-      )
-      .bind(runId, jobId, attempt, baseSha, headSha)
-      .first<{
-        runner_cleanup_status: RunnerCleanupStatus | null;
-        cleanup_completed_at: string | null;
-      }>();
-    if (after?.runner_cleanup_status !== 'destroyed') return { kind: 'rejected' as const };
-    return {
-      kind: 'recovered' as const,
-      cleanupCompletedAt: after.cleanup_completed_at ?? confirmedAt,
-    };
   },
 
   clearRunnerJob: async ({ runId, jobId }) => {

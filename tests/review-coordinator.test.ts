@@ -10,6 +10,7 @@ import {
 } from '../apps/core/src/index';
 import type { ReviewEvent } from '../packages/contracts/src';
 import { SqliteD1Database } from './support/d1-database';
+import { recordTestEvidence } from './support/core-worker-harness';
 
 const currentFacts = {
   repositoryVisibility: 'public',
@@ -2149,7 +2150,7 @@ it('retains superseded recovery identity while unblocking the next claim', async
   const first = await store.claimReview({ deliveryId: 'recovery-old', job, occurredAt: at });
   if (first.kind !== 'claimed') throw new Error('not scheduled');
   await store.claimNextJob({ jobId: 'old-job', attempt: 1, occurredAt: at });
-  await store.recordEvidence({
+  await recordTestEvidence(store, {
     runId: first.runId,
     evidence: {
       key: 'old-evidence',
@@ -2170,22 +2171,24 @@ it('retains superseded recovery identity while unblocking the next claim', async
   expect(await store.claimNextJob({ jobId: 'next-job', attempt: 1, occurredAt: at })).toEqual({
     kind: 'empty',
   });
-  const report = {
-    runId: first.runId,
-    jobId: 'old-job',
-    attempt: 1,
-    evidenceId: 'old-evidence',
-    baseSha: job.baseSha,
-    headSha: job.headSha,
-    sandboxName: 'compte-rendu-old-job',
-    confirmedAt: at,
-  };
-  expect(await store.validateRunnerCleanupRecovery(report)).toEqual({ kind: 'recoverable' });
-  expect(await store.recoverRunnerCleanup(report)).toMatchObject({ kind: 'recovered' });
-  expect(await store.recoverRunnerCleanup(report)).toMatchObject({
-    kind: 'already',
-    cleanupCompletedAt: at,
-  });
+  expect(
+    await store.recordRunnerTerminal({
+      runId: first.runId,
+      jobId: 'old-job',
+      attempt: 1,
+      cleanup: 'destroyed',
+      cleanupCompletedAt: at,
+    }),
+  ).toBe(true);
+  expect(
+    await store.recordRunnerTerminal({
+      runId: first.runId,
+      jobId: 'old-job',
+      attempt: 1,
+      cleanup: 'destroyed',
+      cleanupCompletedAt: at,
+    }),
+  ).toBe(true);
   expect(await store.getRunOutcome(first.runId)).toMatchObject({
     status: 'superseded',
     runnerJobId: 'old-job',

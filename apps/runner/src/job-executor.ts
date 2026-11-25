@@ -11,7 +11,7 @@ import type { ChildProcess } from 'node:child_process';
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Effect } from 'effect';
+import { Duration, Effect } from 'effect';
 import type {
   RunnerDiagnostic,
   RunnerProcess,
@@ -71,6 +71,7 @@ const SETUP_TIMEOUT_MS = 2 * 60 * 1000;
 const SUBMIT_REMINDER_BUDGET_MS = 2 * 60 * 1000;
 const FINALIZATION_BUDGET_MS = 60 * 1000;
 const CLEANUP_COMMAND_TIMEOUT_MS = 30 * 1000;
+const DEFAULT_DESTROY_RETRY_DELAYS_MS = [0, 3_000, 10_000] as const;
 const ARCHIVE_COMMAND_TIMEOUT_MS = 30 * 1000;
 const ARCHIVE_PHASE_TIMEOUT_MS = 2 * 60 * 1000;
 const MAX_DIAGNOSTIC_STDERR_BYTES = 4 * 1024;
@@ -148,6 +149,7 @@ export interface JobExecutorDependencies {
   readonly callbackFetch: typeof fetch;
   readonly callbackTimeoutMs: number;
   readonly callbackRetryDelaysMs?: readonly number[] | undefined;
+  readonly destroyRetryDelaysMs?: readonly number[] | undefined;
   readonly evidenceUrl?: string | undefined;
   readonly evidenceFetch: typeof fetch;
   readonly evidenceTimeoutMs: number;
@@ -177,6 +179,7 @@ export const createJobExecutor = (deps: JobExecutorDependencies) => {
     callbackFetch,
     callbackTimeoutMs,
     callbackRetryDelaysMs,
+    destroyRetryDelaysMs = DEFAULT_DESTROY_RETRY_DELAYS_MS,
     evidenceUrl,
     evidenceFetch,
     evidenceTimeoutMs,
@@ -556,10 +559,22 @@ export const createJobExecutor = (deps: JobExecutorDependencies) => {
       },
     };
     if (job.sandboxAttempted && job.sandbox !== undefined) {
-      try {
-        await job.sandbox.destroy(cleanupPort);
-      } catch {
-        sandboxClean = false;
+      const sandbox = job.sandbox;
+      const destroyDelays = destroyRetryDelaysMs.length === 0 ? [0] : destroyRetryDelaysMs;
+      // A transient CLI/daemon failure is not proof that destruction failed.
+      // Retry the same owned Sandbox briefly; a confirmed destroy is never
+      // repeated after it succeeds, and an empty delay list still performs the
+      // one required destroy attempt.
+      for (const [index, delay] of destroyDelays.entries()) {
+        if (delay > 0) await Effect.runPromise(Effect.sleep(Duration.millis(delay)));
+        try {
+          await sandbox.destroy(cleanupPort);
+          sandboxClean = true;
+          break;
+        } catch {
+          sandboxClean = false;
+          if (index === destroyDelays.length - 1) break;
+        }
       }
     }
     const hostClean = await removeHostDirectories(job);
@@ -1552,7 +1567,13 @@ export const createJobExecutor = (deps: JobExecutorDependencies) => {
       job.progress?.stop();
       await sendCallback({
         evidencePath,
-        identity: { id: job.id, runId: job.input.runId, attempt: job.input.attempt },
+        identity: {
+          id: job.id,
+          runId: job.input.runId,
+          attempt: job.input.attempt,
+          baseSha: job.input.baseSha,
+          headSha: job.input.headSha,
+        },
         status: finalStatus,
         stage: job.state.stage,
         failure: finalFailure,

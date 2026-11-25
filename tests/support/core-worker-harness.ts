@@ -54,54 +54,16 @@ export const deferred = <A>() => {
   return { promise, resolve };
 };
 
-export const evidenceField = async (content: string) => {
-  const decoded = globalThis.atob(content);
-  const bytes = Uint8Array.from(decoded, (character) => character.charCodeAt(0));
-  const hash = await globalThis.crypto.subtle.digest('SHA-256', bytes);
-  return {
-    content,
-    size: bytes.byteLength,
-    sha256: Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, '0')).join(''),
-  };
-};
-
-export const jsonlArtifact = 'e30=';
-export const sessionListArtifact = 'W3siaWQiOiJzZXNzaW9uLTEifV0=';
-export const exportArtifact = 'eyJpbmZvIjp7ImlkIjoic2Vzc2lvbi0xIn0sIm1lc3NhZ2VzIjpbXX0=';
-export const reviewArtifact = 'IyMgUmV2aWV3OgoKTm8gZGVmZWN0cyBmb3VuZC4K';
-export const manifestArtifact = (runId: string, id: string, attempt: number) =>
-  Buffer.from(
-    JSON.stringify({
-      jobId: id,
-      runId,
-      attempt,
-      evidenceId: 'evidence-1',
-      sessionIds: ['session-1'],
-      terminal: { status: 'succeeded' },
-      evidence: { id: 'evidence-1', status: 'complete' },
-      complete: true,
-      cleanup: { status: 'destroyed' },
-    }),
-  ).toString('base64');
-
 export const successfulCallback = async (runId: string, id = 'runner-job-1', attempt = 1) =>
   JSON.stringify({
+    version: 2,
     id,
     runId,
     attempt,
     status: 'succeeded',
     stage: 'cleanup',
     sandbox: { cleanup: 'destroyed' },
-    evidence: {
-      id: 'evidence-1',
-      status: 'complete',
-      manifest: await evidenceField(manifestArtifact(runId, id, attempt)),
-      opencodeJsonl: await evidenceField(jsonlArtifact),
-      opencodeStderr: await evidenceField(''),
-      validatedReview: await evidenceField(reviewArtifact),
-      opencodeSessionList: await evidenceField(sessionListArtifact),
-      opencodeExport: { sessionId: 'session-1', content: await evidenceField(exportArtifact) },
-    },
+    evidence: { id: 'evidence-1', status: 'complete' },
     timestamps: {
       executionStartedAt: '2026-09-01T00:00:01.000Z',
       submissionCompletedAt: '2026-09-01T00:00:02.000Z',
@@ -110,21 +72,21 @@ export const successfulCallback = async (runId: string, id = 'runner-job-1', att
     result: '## Review:\n\nNo defects found.\n',
   });
 
-export const failedCallback = async (runId: string, id = 'runner-job-1', attempt = 1) =>
+export const failedCallback = async (
+  runId: string,
+  id = 'runner-job-1',
+  attempt = 1,
+  cleanup: 'pending' | 'destroyed' | 'failed' = 'destroyed',
+) =>
   JSON.stringify({
+    version: 2,
     id,
     runId,
     attempt,
     status: 'failed',
     stage: 'agent',
-    sandbox: { cleanup: 'destroyed' },
-    evidence: {
-      id: 'evidence-1',
-      status: 'incomplete',
-      manifest: await evidenceField(''),
-      opencodeJsonl: await evidenceField(''),
-      opencodeStderr: await evidenceField(''),
-    },
+    sandbox: { cleanup },
+    evidence: { id: 'evidence-1', status: 'incomplete' },
     timestamps: {},
     failure: { reason: 'agent' },
   });
@@ -136,21 +98,84 @@ export const abortedCallback = async (
   cleanup: 'pending' | 'destroyed' | 'failed' = 'destroyed',
 ) =>
   JSON.stringify({
+    version: 2,
     id,
     runId,
     attempt,
     status: 'aborted',
     stage: 'cleanup',
     sandbox: { cleanup },
-    evidence: {
-      id: 'evidence-aborted',
-      status: 'incomplete',
-      manifest: await evidenceField(''),
-      opencodeJsonl: await evidenceField(''),
-      opencodeStderr: await evidenceField(''),
-    },
+    evidence: { id: 'evidence-aborted', status: 'incomplete' },
     timestamps: { cleanupCompletedAt: '2026-09-01T00:00:03.000Z' },
   });
+
+/**
+ * Tests build historical state through the current production writes. Evidence
+ * metadata uses the owner-checked upload write; cleanup and terminal timestamps
+ * use the real Runner terminal update.
+ */
+export const recordTestEvidence = async (
+  store: Pick<
+    ReviewPublicationStateStore,
+    'getRunOutcome' | 'recordRunnerTerminal' | 'recordEvidenceUpload'
+  >,
+  input: {
+    readonly runId: string;
+    readonly jobId?: string;
+    readonly attempt?: number;
+    readonly evidence?: {
+      readonly key: string;
+      readonly status: 'complete' | 'incomplete';
+      readonly size: number;
+      readonly sha256: string;
+      readonly uploadedAt: string;
+      readonly executionStartedAt?: string;
+      readonly submissionCompletedAt?: string;
+      readonly cleanupCompletedAt?: string;
+    };
+    readonly sandboxCleanup?: 'pending' | 'destroyed' | 'failed';
+  },
+) => {
+  const outcome = await store.getRunOutcome(input.runId);
+  const jobId = input.jobId ?? outcome?.runnerJobId;
+  const attempt = input.attempt ?? outcome?.runnerAttempt;
+  if (jobId === undefined || attempt === undefined) {
+    throw new Error('test evidence requires a retained Runner job identity');
+  }
+  let written = true;
+  if (input.evidence !== undefined) {
+    written =
+      (await store.recordEvidenceUpload({
+        runId: input.runId,
+        jobId,
+        attempt,
+        evidence: {
+          key: input.evidence.key,
+          status: input.evidence.status,
+          size: input.evidence.size,
+          sha256: input.evidence.sha256,
+          uploadedAt: input.evidence.uploadedAt,
+        },
+      })) && written;
+  }
+  written =
+    (await store.recordRunnerTerminal({
+      runId: input.runId,
+      jobId,
+      attempt,
+      cleanup: input.sandboxCleanup ?? outcome?.cleanup ?? 'pending',
+      ...(input.evidence?.executionStartedAt === undefined
+        ? {}
+        : { executionStartedAt: input.evidence.executionStartedAt }),
+      ...(input.evidence?.submissionCompletedAt === undefined
+        ? {}
+        : { submissionCompletedAt: input.evidence.submissionCompletedAt }),
+      ...(input.evidence?.cleanupCompletedAt === undefined
+        ? {}
+        : { cleanupCompletedAt: input.evidence.cleanupCompletedAt }),
+    })) && written;
+  return written;
+};
 
 export const postHogEvents = async (requests: readonly Request[]) =>
   Promise.all(

@@ -97,7 +97,6 @@ const runnerReadTokenPath = '/runner-read-token';
 const runnerResultsPath = '/runner-results';
 const runnerEvidencePath = '/runner-evidence';
 const runnerProgressPath = '/runner-progress';
-const runnerCleanupRecoveryPath = '/runner-cleanup-recovery';
 const responseForDisposition = (
   disposition: Awaited<ReturnType<ReturnType<typeof createReviewCoordinator>['handleReviewEvent']>>,
 ) => new Response(null, { status: disposition === 'failed' ? 503 : 202 });
@@ -347,16 +346,6 @@ export const createCoreWorker = (
       if (request.method === 'POST' && new URL(request.url).pathname === runnerReadTokenPath) {
         try {
           return await protocol.handleRunnerReadToken(request);
-        } catch {
-          return new Response(null, { status: 503 });
-        }
-      }
-      if (
-        request.method === 'POST' &&
-        new URL(request.url).pathname === runnerCleanupRecoveryPath
-      ) {
-        try {
-          return await protocol.handleRunnerCleanupRecovery(request);
         } catch {
           return new Response(null, { status: 503 });
         }

@@ -42,8 +42,6 @@ const RunnerManifest = Schema.Struct({
     status: Schema.Literals(['destroyed', 'failed']),
   }),
   result: Schema.optional(StructuredReviewResult),
-  /** Read-only fallback for manifests written before backend-owned proofs. */
-  catalogIdentity: Schema.optional(Schema.String),
   recoveryProof: Schema.optional(Schema.Record(Schema.String, Schema.String)),
   // Retained as a free-form string so records written by a retired backend
   // remain readable even though no new job can select that runtime.
@@ -75,6 +73,7 @@ export class CallbackRecoveryError extends Schema.TaggedError<CallbackRecoveryEr
 
 export type RecoveredCallback = {
   readonly recoveryProof?: Readonly<Record<string, string>> | undefined;
+  /** The callback body normalized to the current v2 wire shape. */
   readonly body: string;
   readonly callback: typeof RunnerTerminalCallback.Type;
   readonly manifest: RecoveredManifest;
@@ -86,6 +85,64 @@ const readStat = (path: string, reason: CallbackRecoveryReason) =>
   Effect.tryPromise({
     try: () => stat(path),
     catch: () => new CallbackRecoveryError({ reason }),
+  });
+
+/**
+ * A pre-v2 archive has the same terminal shape but no version tag. Adding the
+ * tag and decoding through the real v2 schema drops the six legacy inline
+ * attachments automatically while preserving an old Markdown/string result.
+ */
+const decodeArchivedCallback = (text: string) => {
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const tagged =
+    'version' in value ? value : { ...(value as Record<string, unknown>), version: 2 as const };
+  return Option.getOrUndefined(
+    Schema.decodeUnknownOption(Schema.fromJsonString(RunnerTerminalCallback))(
+      JSON.stringify(tagged),
+      { onExcessProperty: 'ignore' },
+    ),
+  );
+};
+
+const encodeForManifest = (
+  callback: typeof RunnerTerminalCallback.Type,
+  manifest: RecoveredManifest,
+  overrides: { readonly cleanup?: 'destroyed'; readonly cleanupCompletedAt?: string } = {},
+) => {
+  const candidate = {
+    ...callback,
+    sandbox: { cleanup: overrides.cleanup ?? callback.sandbox.cleanup },
+    timestamps: {
+      ...callback.timestamps,
+      ...(overrides.cleanupCompletedAt === undefined
+        ? {}
+        : { cleanupCompletedAt: overrides.cleanupCompletedAt }),
+    },
+    baseSha: manifest.baseSha,
+    headSha: manifest.headSha,
+  };
+  const decoded = Schema.decodeUnknownOption(RunnerTerminalCallback)(candidate);
+  return Option.isSome(decoded) ? JSON.stringify(decoded.value) : undefined;
+};
+
+/**
+ * Build the real v2 failed callback sent after an exact cleanup confirmation.
+ * The original failure, usage, lifecycle, evidence and timestamps are preserved;
+ * only the cleanup state and completion time change.
+ */
+export const cleanupConfirmedCallbackBody = (
+  recovered: RecoveredCallback,
+  confirmedAt: string,
+): string | undefined =>
+  encodeForManifest(recovered.callback, recovered.manifest, {
+    cleanup: 'destroyed',
+    cleanupCompletedAt: confirmedAt,
   });
 
 export const recoverCallback = Effect.fn('recoverCallback')(function* (
@@ -112,10 +169,7 @@ export const recoverCallback = Effect.fn('recoverCallback')(function* (
   });
   if (body.byteLength > MAX_RUNNER_CALLBACK_BYTES) return yield* fail('oversized-callback');
 
-  const text = new TextDecoder().decode(body);
-  const callback = Option.getOrUndefined(
-    Schema.decodeUnknownOption(Schema.fromJsonString(RunnerTerminalCallback))(text),
-  );
+  const callback = decodeArchivedCallback(new TextDecoder().decode(body));
   if (callback === undefined) return yield* fail('invalid-callback');
 
   // The local manifest is the retained ownership and cleanup record. Diagnostic
@@ -152,6 +206,8 @@ export const recoverCallback = Effect.fn('recoverCallback')(function* (
     callback.evidence.id !== request.evidenceId ||
     manifest.baseSha !== request.baseSha ||
     manifest.headSha !== request.headSha ||
+    (callback.baseSha !== undefined && callback.baseSha !== manifest.baseSha) ||
+    (callback.headSha !== undefined && callback.headSha !== manifest.headSha) ||
     manifest.terminal.status !== callback.status
   ) {
     return yield* fail('identity-mismatch');
@@ -189,14 +245,15 @@ export const recoverCallback = Effect.fn('recoverCallback')(function* (
     ) {
       return yield* fail('result-mismatch');
     }
-  } else if (manifest.result !== undefined) {
+  } else if (
+    manifest.result !== undefined ||
+    (callback.status === 'failed' && callback.failure === undefined)
+  ) {
     return yield* fail('result-mismatch');
   }
 
-  const recoveryProof =
-    manifest.recoveryProof ??
-    (manifest.catalogIdentity === undefined
-      ? undefined
-      : { catalogIdentity: manifest.catalogIdentity });
-  return { body: text, callback, recoveryProof, manifest };
+  const converted = encodeForManifest(callback, manifest);
+  if (converted === undefined) return yield* fail('invalid-callback');
+
+  return { body: converted, callback, recoveryProof: manifest.recoveryProof, manifest };
 });

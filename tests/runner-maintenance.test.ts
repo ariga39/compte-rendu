@@ -510,7 +510,7 @@ describe('Runner maintenance drain', () => {
 });
 
 describe('Runner same-PR admission', () => {
-  it('runs a fresh claim after the retained terminal claim budget expires', async () => {
+  it('keeps a known failed cleanup blocking past the retained claim budget', async () => {
     const root = await mkdtemp(join(tmpdir(), 'cr-same-pr-expiry-'));
     const baseSha = '1'.repeat(40);
     const oldHead = '2'.repeat(40);
@@ -597,11 +597,8 @@ describe('Runner same-PR admission', () => {
       authToken: 'runner-test-token',
       claimIntervalMs: 10,
       process,
-      callbackFetch: async (input) => {
-        const url = new URL(input instanceof Request ? input.url : input.toString());
-        return new Response(null, {
-          status: url.pathname === '/runner-cleanup-recovery' ? 409 : 202,
-        });
+      callbackFetch: async () => {
+        return new Response(null, { status: 202 });
       },
     });
     const maintenance = async () =>
@@ -645,11 +642,11 @@ describe('Runner same-PR admission', () => {
         claimDeadlineAt: Date.now() + 90 * 60 * 1000,
       });
       expect(await waitForTerminal(runner, replacementId)).toMatchObject({
-        status: 'succeeded',
+        status: 'aborted',
         sandbox: { cleanup: 'destroyed' },
       });
-      expect(created).toEqual([oldName, replacementName]);
-      expect(agentSandboxes).toEqual([oldName, replacementName]);
+      expect(created).toEqual([oldName]);
+      expect(agentSandboxes).toEqual([oldName]);
       // The unresolved original VM is neither reused nor removed without proof.
       expect(present.has(oldName)).toBe(true);
       expect(present.has(replacementName)).toBe(false);

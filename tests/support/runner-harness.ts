@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeEach, expect, onTestFinished, vi } from 'vitest';
 import {
-  createRunner as createProductionRunner,
+  createRunner as createProductionRunnerRaw,
   runProcess,
   type RunnerProcess,
   type RunnerProcessOptions,
@@ -175,6 +175,17 @@ export const readTextTree = async (root: string): Promise<string> => {
 export type MergeBaseOverride = Partial<
   Pick<RunnerProcessResult, 'exitCode' | 'stdout' | 'timedOut' | 'truncated'>
 >;
+const withTestDestroyDefaults = <T extends { readonly destroyRetryDelaysMs?: readonly number[] }>(
+  options: T,
+): T & { readonly destroyRetryDelaysMs: readonly number[] } => ({
+  ...options,
+  destroyRetryDelaysMs: options.destroyRetryDelaysMs ?? [0],
+});
+
+export const createProductionRunner = (
+  options: NonNullable<Parameters<typeof createProductionRunnerRaw>[0]> = {},
+) => createProductionRunnerRaw(withTestDestroyDefaults(options));
+
 export type TestRunnerOptions = Parameters<typeof createProductionRunner>[0] & {
   readonly mergeBase?: MergeBaseOverride;
 };
@@ -247,7 +258,16 @@ export const withAutoClaim = (
 };
 
 export const createProductionRunnerWithMergeBase = (options: RunnerOptions = {}) => {
-  const { options: optionsWithCallback, execution, cleanupRoot } = withAutoClaim(options);
+  const {
+    options: optionsWithCallback,
+    execution,
+    cleanupRoot,
+  } = withAutoClaim({
+    // Existing behavior tests fail teardown deterministically; a zero settle
+    // delay keeps them fast. Retry behavior gets its own explicit delays.
+    destroyRetryDelaysMs: [0],
+    ...options,
+  });
   const runner =
     options.process === undefined
       ? createProductionRunner(optionsWithCallback)
@@ -298,7 +318,7 @@ export const withClaimSubmission = (
 };
 
 export const createRunner = (options: TestRunnerOptions = {}) => {
-  const { mergeBase: mergeBaseOverride, ...productionOptions } = options;
+  const { mergeBase: mergeBaseOverride, ...productionOptions } = withTestDestroyDefaults(options);
   const { options: optionsWithCallback, execution, cleanupRoot } = withAutoClaim(productionOptions);
   const originalProcess = productionOptions.process;
   if (originalProcess === undefined) {
@@ -552,6 +572,7 @@ export const runAgentScenario = async (scenario: {
   onModelSecret?: (args: readonly string[]) => Promise<void>;
   callbackStatuses?: readonly number[];
   callbackRetryDelaysMs?: readonly number[];
+  destroyRetryDelaysMs?: readonly number[];
   evidenceStatuses?: readonly number[];
   callbackHangs?: boolean;
   callbackThrows?: string;
@@ -624,6 +645,7 @@ export const runAgentScenario = async (scenario: {
       callbackToken: 'callback-token',
       callbackTimeoutMs: scenario.callbackTimeoutMs,
       callbackRetryDelaysMs: scenario.callbackRetryDelaysMs,
+      destroyRetryDelaysMs: scenario.destroyRetryDelaysMs,
       callbackFetch: async (input: RequestInfo | URL, init?: RequestInit) => {
         const inputUrl =
           input instanceof Request ? input.url : input instanceof URL ? input.href : String(input);
@@ -1033,7 +1055,6 @@ export const completedWithoutSubmitJsonl = (sessionId: string) =>
   });
 
 export {
-  createProductionRunner,
   createClaimExecution,
   claimRunnerJob,
   createCoreWorker,

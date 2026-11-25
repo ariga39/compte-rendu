@@ -217,7 +217,7 @@ describe.each(['sbx', 'microsandbox'] as const)('%s backend contract', (kind) =>
     } else {
       fixture.state.owner = 'foreign-owner';
     }
-    const result = await fixture.backend.reconcileOrphans({ isLiveJob: () => false });
+    const result = await fixture.backend.reconcileOrphans!({ isLiveJob: () => false });
     expect(result.ok).toBe(false);
     expect(fixture.state.present).toBe(true);
     expect(await markerFiles(fixture.ownershipRoot, kind)).toHaveLength(1);
@@ -238,7 +238,7 @@ describe.each(['sbx', 'microsandbox'] as const)('%s backend contract', (kind) =>
       })}\n`,
       { mode: 0o600 },
     );
-    const result = await fixture.backend.reconcileOrphans({ isLiveJob: () => false });
+    const result = await fixture.backend.reconcileOrphans!({ isLiveJob: () => false });
     expect(result.ok).toBe(false);
     expect(fixture.state.present).toBe(true);
     expect(await markerFiles(fixture.ownershipRoot, kind)).toHaveLength(1);

@@ -366,6 +366,7 @@ describe('Runner relay admission and recovery', () => {
     const events: Array<Record<string, unknown>> = [];
     const execution = createClaimExecution();
     const runner = createRunner({
+      destroyRetryDelaysMs: [0],
       ...relayBaseOptions(),
       evidenceRoot: root,
       claimUrl: 'https://ingress.test/runner-claim',
@@ -390,6 +391,7 @@ describe('Runner relay admission and recovery', () => {
     const commands: string[] = [];
     const execution = createClaimExecution();
     const runner = createRunner({
+      destroyRetryDelaysMs: [0],
       ...relayBaseOptions(),
       evidenceRoot: await evidenceRoot(),
       claimUrl: 'https://ingress.test/runner-claim',
@@ -434,6 +436,7 @@ describe('Runner relay admission and recovery', () => {
     const headSha = '2222222222222222222222222222222222222222';
     const execution = createClaimExecution();
     const runner = createRunner({
+      destroyRetryDelaysMs: [0],
       ...relayBaseOptions('https://inference.example/v1'),
       evidenceRoot: root,
       claimUrl: 'https://ingress.test/runner-claim',
@@ -553,6 +556,7 @@ describe('Runner relay admission and recovery', () => {
     const headSha = '2222222222222222222222222222222222222222';
     const execution = createClaimExecution();
     const runner = createRunner({
+      destroyRetryDelaysMs: [0],
       ...relayBaseOptions(),
       evidenceRoot: await evidenceRoot(),
       claimUrl: 'https://ingress.test/runner-claim',
@@ -638,6 +642,7 @@ describe('Runner relay admission and recovery', () => {
     const execution = createClaimExecution();
     vi.stubEnv('MODEL_SECRET_COMMAND', 'secret-resolver get MODEL_API_KEY');
     const runner = createRunner({
+      destroyRetryDelaysMs: [0],
       evidenceRoot: root,
       authToken: 'runner-test-token',
       modelConfig: JSON.stringify({

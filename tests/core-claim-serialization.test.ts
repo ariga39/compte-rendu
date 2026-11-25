@@ -12,6 +12,7 @@ import {
   deferred,
   abortedCallback,
   claimGithub,
+  recordTestEvidence,
 } from './support/core-worker-harness';
 
 describe('Runner claim serialization', () => {
@@ -116,7 +117,7 @@ describe('Runner claim serialization', () => {
       attempt: 1,
       occurredAt: '2026-09-01T00:00:01.000Z',
     });
-    await store.recordEvidence({
+    await recordTestEvidence(store, {
       runId: failed.runId,
       evidence: evidenceFor(failed.runId),
       sandboxCleanup: 'failed',
@@ -154,7 +155,7 @@ describe('Runner claim serialization', () => {
       }),
     ).toEqual({ kind: 'empty' });
 
-    await fresh.recordEvidence({
+    await recordTestEvidence(fresh, {
       runId: failed.runId,
       evidence: evidenceFor(failed.runId),
       sandboxCleanup: 'destroyed',
@@ -407,181 +408,6 @@ describe('Runner claim serialization', () => {
     }
   });
 
-  it.each(['failed', 'superseded'] as const)(
-    'recovers an exact %s cleanup without clearing identity and keeps it monotonic through a late failed callback',
-    async (terminalStatus) => {
-      const database = new SqliteD1Database();
-      const evidenceWrites: Array<{ key: string; value: string }> = [];
-      const env = {
-        ...coreEnv(database),
-        EVIDENCE_BUCKET: {
-          put: async (key: string, value: ArrayBuffer | string) => {
-            evidenceWrites.push({
-              key,
-              value: typeof value === 'string' ? value : new TextDecoder().decode(value),
-            });
-          },
-        },
-      };
-      let currentHead = oldHead;
-      const dependencies = {
-        github: claimGithub(() => currentHead),
-        getReadInstallationToken: async () => ({
-          token: 'repository-read-token',
-          expiresAt: '2026-09-01T01:00:00.000Z',
-        }),
-      };
-      const callbackRequest = (body: string) =>
-        new Request('https://core.internal/runner-results', {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            'x-compte-rendu-runner-callback': 'verified',
-          },
-          body,
-        });
-      const recoveryRequest = (body: unknown, verified = true) =>
-        new Request('https://core.internal/runner-cleanup-recovery', {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            ...(verified ? { 'x-compte-rendu-runner-cleanup-recovery': 'verified' } : {}),
-          },
-          body: JSON.stringify(body),
-        });
-      const worker = createCoreWorker(env, dependencies);
-
-      try {
-        expect((await scheduleReview(worker, oldHead, 'delivery-recovery-old')).status).toBe(202);
-        const claim = await worker.fetch(claimRequest());
-        expect(claim.status).toBe(200);
-        const job = (await claim.json()) as { id: string; runId: string; attempt: number };
-
-        if (terminalStatus === 'superseded') {
-          currentHead = newHead;
-          expect(
-            (await scheduleReview(worker, newHead, 'delivery-recovery-replacement')).status,
-          ).toBe(202);
-        }
-
-        expect(
-          (
-            await worker.fetch(
-              callbackRequest(await abortedCallback(job.runId, job.id, job.attempt, 'failed')),
-            )
-          ).status,
-        ).toBe(202);
-
-        if (terminalStatus === 'failed') {
-          currentHead = newHead;
-          expect(
-            (await scheduleReview(worker, newHead, 'delivery-recovery-replacement')).status,
-          ).toBe(202);
-        }
-        const queued = (await (
-          await worker.fetch(new Request('https://core.internal/api/jobs?status=queued'))
-        ).json()) as { tasks: Array<{ runId: string; queueBlockReason?: string | null }> };
-        const blockedReplacement = queued.tasks.find((task) => task.queueBlockReason === 'cleanup');
-        expect(blockedReplacement).toBeDefined();
-        expect((await worker.fetch(claimRequest())).status).toBe(204);
-
-        const report = {
-          runId: job.runId,
-          jobId: job.id,
-          attempt: job.attempt,
-          evidenceId: 'evidence-aborted',
-          baseSha: eligibleEvent.baseSha,
-          headSha: oldHead,
-          sandboxName: `compte-rendu-${job.id}`,
-          confirmedAt: '2026-09-01T00:00:05.000Z',
-        };
-        const originalWritesBefore = evidenceWrites.filter((write) =>
-          write.key.startsWith(`reviews/${job.runId}`),
-        ).length;
-        expect((await worker.fetch(recoveryRequest(report, false))).status).toBe(401);
-        expect((await worker.fetch(recoveryRequest({ ...report, headSha: newHead }))).status).toBe(
-          409,
-        );
-        expect(
-          (
-            await worker.fetch(
-              recoveryRequest({
-                ...report,
-                runId: blockedReplacement!.runId,
-                headSha: newHead,
-                confirmedAt: '2026-09-01T00:00:05.500Z',
-              }),
-            )
-          ).status,
-        ).toBe(409);
-        expect((await worker.fetch(recoveryRequest(report))).status).toBe(202);
-        expect(
-          (
-            await worker.fetch(
-              recoveryRequest({ ...report, confirmedAt: '2026-09-01T00:00:06.000Z' }),
-            )
-          ).status,
-        ).toBe(202);
-        expect(
-          evidenceWrites.filter((write) => write.key.startsWith(`reviews/${job.runId}`)).length,
-        ).toBe(originalWritesBefore);
-
-        expect(
-          (
-            await worker.fetch(
-              callbackRequest(await abortedCallback(job.runId, job.id, job.attempt, 'failed')),
-            )
-          ).status,
-        ).toBe(202);
-
-        const recovered = await worker.fetch(claimRequest());
-        expect(recovered.status).toBe(200);
-        expect(await recovered.json()).toMatchObject({
-          pullRequestNumber: 42,
-          headSha: newHead,
-        });
-
-        const recoveryWrites = evidenceWrites.filter((write) =>
-          write.key.startsWith('cleanup-recoveries/'),
-        );
-        expect(recoveryWrites).toHaveLength(2);
-        expect(recoveryWrites[0]?.key).toBe(
-          `cleanup-recoveries/${job.runId}/${job.id}/${job.attempt}.json`,
-        );
-        expect(recoveryWrites[1]?.key).toBe(recoveryWrites[0]?.key);
-        expect(recoveryWrites[1]?.value).toBe(recoveryWrites[0]?.value);
-        expect(JSON.parse(recoveryWrites[1]!.value)).toMatchObject({
-          runId: job.runId,
-          jobId: job.id,
-          attempt: job.attempt,
-          evidenceId: 'evidence-aborted',
-          baseSha: eligibleEvent.baseSha,
-          headSha: oldHead,
-          sandboxName: `compte-rendu-${job.id}`,
-          confirmedAt: '2026-09-01T00:00:05.000Z',
-        });
-        const detail = (await (
-          await worker.fetch(new Request(`https://core.internal/api/jobs/${job.runId}`))
-        ).json()) as {
-          task: {
-            status: string;
-            cleanup: string;
-            cleanupCompletedAt?: string | null;
-            queueBlockReason?: string | null;
-          };
-        };
-        expect(detail.task).toMatchObject({
-          status: terminalStatus,
-          cleanup: 'destroyed',
-          cleanupCompletedAt: '2026-09-01T00:00:05.000Z',
-          queueBlockReason: null,
-        });
-      } finally {
-        database.close();
-      }
-    },
-  );
-
   it('does not label ordinary same-pull-request serialization as a cleanup block', async () => {
     const database = new SqliteD1Database();
     const worker = createCoreWorker(coreEnv(database), {
@@ -605,85 +431,6 @@ describe('Runner claim serialization', () => {
       ).json()) as { tasks: Array<{ runId: string; queueBlockReason?: string | null }> };
       expect(queued.tasks).toHaveLength(1);
       expect(queued.tasks[0]?.queueBlockReason).toBeNull();
-    } finally {
-      database.close();
-    }
-  });
-
-  it('does not mutate cleanup when recovery audit persistence or trusted report validation fails', async () => {
-    const database = new SqliteD1Database();
-    const env = {
-      ...coreEnv(database),
-      EVIDENCE_BUCKET: {
-        put: async (key: string) => {
-          if (key.startsWith('cleanup-recoveries/')) throw new Error('audit unavailable');
-        },
-      },
-    };
-    let currentHead = oldHead;
-    const dependencies = {
-      github: claimGithub(() => currentHead),
-      getReadInstallationToken: async () => ({
-        token: 'repository-read-token',
-        expiresAt: '2026-09-01T01:00:00.000Z',
-      }),
-    };
-    const callbackRequest = (body: string) =>
-      new Request('https://core.internal/runner-results', {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          'x-compte-rendu-runner-callback': 'verified',
-        },
-        body,
-      });
-    const recoveryRequest = (body: unknown) =>
-      new Request('https://core.internal/runner-cleanup-recovery', {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          'x-compte-rendu-runner-cleanup-recovery': 'verified',
-        },
-        body: JSON.stringify(body),
-      });
-    const worker = createCoreWorker(env, dependencies);
-    try {
-      expect((await scheduleReview(worker, oldHead, 'delivery-audit-failure-old')).status).toBe(
-        202,
-      );
-      const claim = await worker.fetch(claimRequest());
-      expect(claim.status).toBe(200);
-      const job = (await claim.json()) as { id: string; runId: string; attempt: number };
-      expect(
-        (
-          await worker.fetch(
-            callbackRequest(await abortedCallback(job.runId, job.id, job.attempt, 'failed')),
-          )
-        ).status,
-      ).toBe(202);
-      expect((await scheduleReview(worker, newHead, 'delivery-audit-failure-new')).status).toBe(
-        202,
-      );
-      expect((await worker.fetch(claimRequest())).status).toBe(204);
-
-      const report = {
-        runId: job.runId,
-        jobId: job.id,
-        attempt: job.attempt,
-        evidenceId: 'evidence-aborted',
-        baseSha: eligibleEvent.baseSha,
-        headSha: oldHead,
-        sandboxName: `compte-rendu-${job.id}`,
-        confirmedAt: '2026-09-01T00:00:05.000Z',
-      };
-      expect(
-        (await worker.fetch(recoveryRequest({ ...report, sandboxName: 'foreign-sandbox' }))).status,
-      ).toBe(400);
-      expect(
-        (await worker.fetch(recoveryRequest({ ...report, confirmedAt: 'not-a-time' }))).status,
-      ).toBe(400);
-      expect((await worker.fetch(recoveryRequest(report))).status).toBe(503);
-      expect((await worker.fetch(claimRequest())).status).toBe(204);
     } finally {
       database.close();
     }

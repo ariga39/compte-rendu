@@ -838,9 +838,8 @@ uses the temporary invocation described above.
    ```
 
    The lifecycle rule is evaluated by Cloudflare R2 and expires objects under
-   `reviews/` automatically. Cleanup confirmation records use the separate
-   `cleanup-recoveries/` prefix and remain in R2 unless the bucket operator
-   configures a lifecycle rule for that prefix.
+   `reviews/` automatically. Cleanup confirmation no longer writes a separate
+   recovery object or prefix: Core applies the normal terminal callback state.
 
    Copy only the returned `database_id` into the renderer command below. Do
    not edit either tracked template or copy any account ID, token, or other

@@ -7,6 +7,7 @@ import {
   type ReviewStateStore,
 } from '../apps/core/src/index';
 import { SqliteD1Database } from './support/d1-database';
+import { recordTestEvidence } from './support/core-worker-harness';
 
 const baseSha = '1111111111111111111111111111111111111111';
 const headSha = '2222222222222222222222222222222222222222';
@@ -223,7 +224,7 @@ describe('D1 cancellation store', () => {
     });
 
     await expect(
-      store.recordEvidence({
+      recordTestEvidence(store, {
         runId,
         evidence: evidence('late-evidence'),
         sandboxCleanup: 'destroyed',
@@ -341,7 +342,7 @@ describe('D1 cancellation store', () => {
       }),
     ).resolves.toMatchObject({ kind: 'existing', disposition: 'cancelled' });
 
-    await store.recordEvidence({
+    await recordTestEvidence(store, {
       runId,
       evidence: evidence('retry-evidence'),
       sandboxCleanup: 'destroyed',
@@ -391,7 +392,7 @@ describe('D1 cancellation store', () => {
       }),
     ).resolves.toEqual({ kind: 'empty' });
 
-    await store.recordEvidence({
+    await recordTestEvidence(store, {
       runId: cancelledRun,
       evidence: evidence('blocking-evidence'),
       sandboxCleanup: 'destroyed',
@@ -495,15 +496,19 @@ describe('D1 cancellation store', () => {
     await claimRunnerJob(store, { occurredAt: claimedAt, runId, jobId: 'job', job: job() });
     await store.cancelRun({ runId, requestedByUid: 1, occurredAt: '2026-11-19T00:01:00.000Z' });
     const key = 'reviews/' + runId;
-    await store.recordEvidence({ runId, evidence: evidence(key), sandboxCleanup: 'destroyed' });
-    await store.recordEvidence({
+    await recordTestEvidence(store, {
+      runId,
+      evidence: evidence(key),
+      sandboxCleanup: 'destroyed',
+    });
+    await recordTestEvidence(store, {
       runId,
       evidence: { ...evidence(key), cleanupCompletedAt: '2026-11-19T00:01:59.000Z' },
       sandboxCleanup: 'failed',
     });
     expect((await store.getRunOutcome(runId))?.evidence?.cleanupCompletedAt).toBeUndefined();
     for (const timestamp of ['2026-11-19T00:02:00.000Z', '2026-11-19T00:03:00.000Z'])
-      await store.recordEvidence({
+      await recordTestEvidence(store, {
         runId,
         evidence: { ...evidence(key), cleanupCompletedAt: timestamp },
         sandboxCleanup: 'destroyed',
@@ -601,34 +606,31 @@ describe('D1 cancellation store', () => {
       requestedByUid: 1001,
       occurredAt: '2026-11-19T00:01:00.000Z',
     });
-    await store.recordEvidence({
+    await recordTestEvidence(store, {
       runId,
       evidence: evidence('failed-cleanup'),
       sandboxCleanup: 'failed',
     });
 
-    const recovery = {
-      runId,
-      jobId: claimed.jobId,
-      attempt: claimed.attempt,
-      evidenceId: 'evidence-id',
-      baseSha,
-      headSha,
-      sandboxName: 'sandbox',
-      confirmedAt: '2026-11-19T00:02:00.000Z',
-    };
-    await expect(store.validateRunnerCleanupRecovery(recovery)).resolves.toEqual({
-      kind: 'recoverable',
-    });
-    await expect(store.recoverRunnerCleanup(recovery)).resolves.toEqual({
-      kind: 'recovered',
-      cleanupCompletedAt: '2026-11-19T00:02:00.000Z',
-    });
-    await expect(store.validateRunnerCleanupRecovery(recovery)).resolves.toEqual({
-      kind: 'already',
-      cleanupCompletedAt: '2026-11-19T00:02:00.000Z',
-    });
-    await store.recordEvidence({
+    await expect(
+      store.recordRunnerTerminal({
+        runId,
+        jobId: claimed.jobId,
+        attempt: claimed.attempt,
+        cleanup: 'destroyed',
+        cleanupCompletedAt: '2026-11-19T00:02:00.000Z',
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      store.recordRunnerTerminal({
+        runId,
+        jobId: claimed.jobId,
+        attempt: claimed.attempt,
+        cleanup: 'destroyed',
+        cleanupCompletedAt: '2026-11-19T00:02:05.000Z',
+      }),
+    ).resolves.toBe(true);
+    await recordTestEvidence(store, {
       runId,
       evidence: evidence('failed-cleanup'),
       sandboxCleanup: 'failed',
@@ -715,7 +717,7 @@ describe('D1 cancellation store', () => {
       }),
     ).resolves.toBe(true);
     await expect(
-      store.recordEvidence({
+      recordTestEvidence(store, {
         runId,
         evidence: evidence('late-cancellation-evidence'),
       }),

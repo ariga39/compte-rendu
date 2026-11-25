@@ -72,6 +72,50 @@ describe('Runner v2 callback and private diagnostic upload', () => {
     }
   });
 
+  it('retries a transient Sandbox destroy even with zero settle delays', async () => {
+    const evidenceRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-destroy-retry-'));
+    let destroyAttempts = 0;
+    try {
+      const result = await runAgentScenario({
+        output: finalMarkdownJsonl(),
+        evidenceRoot,
+        runId: 'run-callback-destroy-retry',
+        destroyRetryDelaysMs: [0, 0, 0],
+        sandboxBackend: {
+          kind: 'sbx',
+          createJob: (spec) => ({
+            metadata: {
+              created: true,
+              hostCleanupConfirmed: true,
+              id: spec.name,
+              name: spec.name,
+              runtime: 'sbx',
+              imageRef: 'review-image',
+              evidenceRoot: '/tmp/evidence',
+            },
+            setup: async () => undefined,
+            exec: (args, exec, options, diagnostic) =>
+              exec.run('sbx', ['exec', spec.name, ...args], options, diagnostic),
+            copyOut: (source, destination, exec, diagnostic, options) =>
+              exec.run('sbx', ['cp', `${spec.name}:${source}`, destination], options, diagnostic),
+            destroy: async () => {
+              destroyAttempts += 1;
+              if (destroyAttempts < 3) throw new Error('transient destroy failure');
+            },
+          }),
+        },
+      });
+
+      expect(result.terminal).toMatchObject({
+        status: 'succeeded',
+        sandbox: { cleanup: 'destroyed' },
+      });
+      expect(destroyAttempts).toBe(3);
+    } finally {
+      await rm(evidenceRoot, { recursive: true, force: true });
+    }
+  });
+
   it('keeps the verified result when the independent evidence upload is unavailable', async () => {
     const evidenceRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-callback-v2-failure-'));
     const callbackRequests: Request[] = [];

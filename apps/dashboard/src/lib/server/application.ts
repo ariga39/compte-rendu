@@ -97,7 +97,6 @@ export function createApplication(env: ApplicationEnv, dependencies: CoreWorkerD
           '/runner-claim',
           '/runner-read-token',
           '/runner-progress',
-          '/runner-cleanup-recovery',
         ].includes(path) ||
         ((path === '/' || path === '/webhooks/github') && request.method === 'POST');
       if (!accepted) return new Response(null, { status: 404 });

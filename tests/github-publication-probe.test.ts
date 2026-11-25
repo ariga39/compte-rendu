@@ -18,18 +18,13 @@ const job: RunnerJobInput = {
   repositoryReadToken: 'read-only-token-must-not-be-persisted',
 };
 
-const encoded = (value: string) => Buffer.from(value).toString('base64');
-
-const evidenceField = (content: string) => ({
-  content,
-  size: Buffer.from(content, 'utf8').byteLength,
-  sha256: '0'.repeat(64),
-});
-
 const successfulCallback = {
+  version: 2 as const,
   id: job.id,
   runId: job.runId,
   attempt: job.attempt,
+  baseSha: job.baseSha,
+  headSha: job.headSha,
   status: 'succeeded' as const,
   stage: 'cleanup' as const,
   sandbox: { cleanup: 'destroyed' as const },
@@ -38,19 +33,7 @@ const successfulCallback = {
     submissionCompletedAt: '2026-09-02T00:00:02.000Z',
     cleanupCompletedAt: '2026-09-02T00:00:03.000Z',
   },
-  evidence: {
-    id: 'probe-evidence-1',
-    status: 'complete' as const,
-    manifest: evidenceField(encoded('{}')),
-    opencodeJsonl: evidenceField(encoded('{}')),
-    opencodeStderr: evidenceField(encoded('')),
-    validatedReview: evidenceField(encoded('## Review:\n\nProbe result.\n')),
-    opencodeSessionList: evidenceField(encoded('[]')),
-    opencodeExport: {
-      sessionId: 'probe-session-1',
-      content: evidenceField(encoded('{}')),
-    },
-  },
+  evidence: { id: 'probe-evidence-1', status: 'complete' as const },
   result: '## Review:\n\nProbe result.\n',
 };
 
@@ -256,19 +239,16 @@ describe('GitHub publication probe', () => {
     const evidenceRoot = join(root, 'evidence');
     const externalReview = 'external review must remain unchanged';
     const abortedCallback = {
+      version: 2 as const,
       id: job.id,
       runId: job.runId,
       attempt: job.attempt,
+      baseSha: job.baseSha,
+      headSha: job.headSha,
       status: 'aborted' as const,
       stage: 'cleanup' as const,
       sandbox: { cleanup: 'destroyed' as const },
-      evidence: {
-        id: 'probe-evidence-aborted',
-        status: 'incomplete' as const,
-        manifest: evidenceField(encoded('{}')),
-        opencodeJsonl: evidenceField(encoded('{}')),
-        opencodeStderr: evidenceField(encoded('')),
-      },
+      evidence: { id: 'probe-evidence-aborted', status: 'incomplete' as const },
       timestamps: { cleanupCompletedAt: '2026-09-02T00:00:03.000Z' },
     };
     await writeFile(jobsPath, JSON.stringify([{ repositoryId: 11, installationId: 7, job }]), {
@@ -340,11 +320,7 @@ describe('GitHub publication probe', () => {
       id: secondJob.id,
       runId: secondJob.runId,
       result: '## Review:\n\nSecond probe result.\n',
-      evidence: {
-        ...successfulCallback.evidence,
-        id: 'probe-evidence-2',
-        validatedReview: evidenceField(encoded('## Review:\n\nSecond probe result.\n')),
-      },
+      evidence: { id: 'probe-evidence-2', status: 'complete' as const },
     };
     await writeFile(firstJobsPath, JSON.stringify([{ repositoryId: 11, installationId: 7, job }]), {
       mode: 0o600,
@@ -457,11 +433,7 @@ describe('GitHub publication probe', () => {
       id: secondJob.id,
       runId: secondJob.runId,
       result: '## Review:\n\nSecond concurrent result.\n',
-      evidence: {
-        ...successfulCallback.evidence,
-        id: 'probe-evidence-2',
-        validatedReview: evidenceField(encoded('## Review:\n\nSecond concurrent result.\n')),
-      },
+      evidence: { id: 'probe-evidence-2', status: 'complete' as const },
     };
     const preexisting = {
       'callback-1.json': 'preexisting callback one',

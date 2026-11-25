@@ -7,8 +7,8 @@ import {
   GitHubSha,
   MAX_RUNNER_CALLBACK_BYTES,
   RunnerJobInput,
-  RunnerResultCallback,
-  type RunnerResultCallback as RunnerResultCallbackType,
+  RunnerTerminalCallback,
+  type RunnerTerminalCallback as RunnerTerminalCallbackType,
 } from '../packages/contracts/src/index.ts';
 import { formatReviewPublicationPayload } from '../apps/core/src/review-publication-format.ts';
 import {
@@ -141,9 +141,9 @@ export const createGitHubPublicationProbe = async (
     const body = await request.arrayBuffer();
     if (body.byteLength > MAX_RUNNER_CALLBACK_BYTES) return response(413);
 
-    let callback: RunnerResultCallbackType;
+    let callback: RunnerTerminalCallbackType;
     try {
-      callback = await Schema.decodeUnknownPromise(RunnerResultCallback)(
+      callback = await Schema.decodeUnknownPromise(RunnerTerminalCallback)(
         JSON.parse(new TextDecoder().decode(body)),
       );
     } catch {
