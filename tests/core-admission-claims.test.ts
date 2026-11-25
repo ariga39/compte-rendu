@@ -871,12 +871,15 @@ describe('Core admission, claims, and manual policy', () => {
         EVIDENCE_BUCKET: { put: async () => undefined },
       };
       let currentHead = eligibleEvent.headSha;
+      const checkUpdates: Array<{ runId: string; checkRunId: number; status: string }> = [];
       const worker = createCoreWorker(env, {
         stateStore,
         github: {
           ...claimGithub(() => currentHead),
           createCheckRun: async () => ({ id: 321 }),
-          updateCheckRun: async () => {},
+          updateCheckRun: async (input) => {
+            checkUpdates.push(input);
+          },
         },
         getReadInstallationToken: async () => ({
           token: 'repository-read-token',
@@ -936,6 +939,13 @@ describe('Core admission, claims, and manual policy', () => {
           runnerJobId: old.id,
           cleanup: 'pending',
         });
+        expect(checkUpdates).toContainEqual({
+          runId: old.runId,
+          repositoryId: 11,
+          installationId: 7,
+          checkRunId: 321,
+          status: 'failure',
+        });
         expect((await stateStore.getRunOutcome(fresh.runId))?.status).toBe('scheduled');
         expect(
           (
@@ -966,6 +976,60 @@ describe('Core admission, claims, and manual policy', () => {
       }
     },
   );
+
+  it('attempts one failed Check when Runner timeout expires a claim without blocking claims', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-01T00:00:00Z'));
+    const database = new SqliteD1Database();
+    const stateStore = createD1ReviewStateStore(database);
+    const attempts: Array<{ runId: string; checkRunId: number; status: string }> = [];
+    const worker = createCoreWorker(coreEnv(database), {
+      stateStore,
+      github: {
+        ...claimGithub(),
+        createCheckRun: async () => ({ id: 321 }),
+        updateCheckRun: async (input) => {
+          attempts.push(input);
+          if (input.status === 'failure') throw new Error('Checks API unavailable');
+        },
+      },
+      getReadInstallationToken: async () => ({
+        token: 'repository-read-token',
+        expiresAt: '2026-09-01T01:20:00.000Z',
+      }),
+    });
+    try {
+      expect(
+        (await scheduleEligibleReview(worker, eligibleEvent.headSha, 'delivery-expiry-check'))
+          .status,
+      ).toBe(202);
+      const claim = await worker.fetch(runnerClaimRequest());
+      expect(claim.status).toBe(200);
+      const claimed = (await claim.json()) as { id: string; runId: string; attempt: number };
+      await vi.waitFor(async () =>
+        expect((await stateStore.getRunOutcome(claimed.runId))?.checkRunId).toBe(321),
+      );
+
+      vi.setSystemTime(new Date('2026-09-01T01:31:00Z'));
+      expect((await worker.fetch(runnerClaimRequest())).status).toBe(204);
+      await expect(stateStore.getRunOutcome(claimed.runId)).resolves.toMatchObject({
+        status: 'failed',
+        runnerJobId: claimed.id,
+        cleanup: 'pending',
+      });
+      const failedAttempts = () =>
+        attempts.filter(
+          (attempt) => attempt.runId === claimed.runId && attempt.status === 'failure',
+        );
+      expect(failedAttempts()).toHaveLength(1);
+
+      expect((await worker.fetch(runnerClaimRequest())).status).toBe(204);
+      expect(failedAttempts()).toHaveLength(1);
+    } finally {
+      database.close();
+      vi.useRealTimers();
+    }
+  });
 
   it('releases an unprepared expired claim without retaining a cleanup obligation', async () => {
     vi.useFakeTimers({ toFake: ['Date'] });

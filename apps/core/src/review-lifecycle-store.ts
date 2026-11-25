@@ -189,16 +189,23 @@ const staleScheduledRunPage = `SELECT run_id, delivery_id, check_run_id FROM rev
   ORDER BY COALESCE(claimed_at, created_at) ASC, run_id ASC
   LIMIT ?`;
 
-// Expire at most one bounded page per admission or claim attempt. A terminal
-// Check stays best effort even when the Runner never returns.
-export const expireStaleScheduledClaims = async (database: D1DatabaseLike, occurredAt: string) => {
+export type ExpiredClaimCheckHandler = (runIds: readonly string[]) => Promise<void>;
+
+// Expire at most one bounded page per admission or claim attempt. Each run
+// actually transitioned by the UPDATE gets one best-effort terminal Check
+// attempt; failure never blocks the caller or creates durable retry work.
+export const expireStaleScheduledClaims = async (
+  database: D1DatabaseLike,
+  occurredAt: string,
+  onExpiredClaims?: ExpiredClaimCheckHandler,
+) => {
   const expiredBefore = claimExpiryCutoff(occurredAt);
   const expired = await database
-    .prepare(`SELECT run_id FROM (${staleScheduledRunPage}) LIMIT 1`)
+    .prepare(`SELECT 1 FROM (${staleScheduledRunPage}) LIMIT 1`)
     .bind(expiredBefore, expiredBefore, expiredBefore, STALE_CLAIM_SWEEP_LIMIT)
-    .first<{ run_id: string }>();
+    .first();
   if (expired === null) return;
-  await database.batch([
+  const results = await database.batch([
     database
       .prepare(
         `UPDATE deliveries SET status = 'failed', updated_at = ?
@@ -216,7 +223,8 @@ export const expireStaleScheduledClaims = async (database: D1DatabaseLike, occur
            failure_phase = 'scheduling', failure_reason = 'timeout'
          WHERE run_id IN (
            SELECT run_id FROM (${staleScheduledRunPage})
-         )`,
+         )
+         RETURNING run_id`,
       )
       .bind(
         occurredAt,
@@ -227,6 +235,12 @@ export const expireStaleScheduledClaims = async (database: D1DatabaseLike, occur
         STALE_CLAIM_SWEEP_LIMIT,
       ),
   ]);
+  const expiredRunIds = (results[1]?.results ?? [])
+    .map((row) => (row as { run_id?: unknown }).run_id)
+    .filter((runId): runId is string => typeof runId === 'string');
+  if (onExpiredClaims !== undefined && expiredRunIds.length > 0) {
+    await onExpiredClaims(expiredRunIds).catch(() => undefined);
+  }
 };
 
 export const claimResultFromRow = (row: ClaimRow, replay: boolean, occurredAt: string) => ({
@@ -265,6 +279,7 @@ export interface ReviewLifecycleStore {
     job: ReviewJob;
     occurredAt: string;
     approval?: ReviewApproval;
+    onExpiredClaims?: ExpiredClaimCheckHandler;
   }): Promise<
     | {
         kind: 'claimed';
@@ -295,6 +310,7 @@ export interface ReviewLifecycleStore {
     requestId?: string;
     attempt: number;
     occurredAt: string;
+    onExpiredClaims?: ExpiredClaimCheckHandler;
   }): Promise<
     | {
         kind: 'claimed';
@@ -428,9 +444,9 @@ export const createReviewLifecycleStore = (
       .run();
   },
 
-  claimReview: async ({ deliveryId, job, occurredAt, approval }) => {
+  claimReview: async ({ deliveryId, job, occurredAt, approval, onExpiredClaims }) => {
     const expiredBefore = claimExpiryCutoff(occurredAt);
-    await expireStaleScheduledClaims(database, occurredAt);
+    await expireStaleScheduledClaims(database, occurredAt, onExpiredClaims);
     const runId = crypto.randomUUID();
     const statements: D1PreparedStatementLike[] = [
       database
@@ -764,7 +780,7 @@ export const createReviewLifecycleStore = (
     };
   },
 
-  claimNextJob: async ({ jobId, requestId, attempt, occurredAt }) => {
+  claimNextJob: async ({ jobId, requestId, attempt, occurredAt, onExpiredClaims }) => {
     const expiredBefore = claimExpiryCutoff(occurredAt);
     const selectClaim = () =>
       database
@@ -813,7 +829,7 @@ export const createReviewLifecycleStore = (
 
     // Sweep before fresh selection: unrelated eligible work must not starve a
     // pull request whose stale claim is past the execution budget.
-    await expireStaleScheduledClaims(database, occurredAt);
+    await expireStaleScheduledClaims(database, occurredAt, onExpiredClaims);
     const row = await selectClaim();
     if (row === null) return { kind: 'empty' as const };
     return claimResultFromRow(row, false, occurredAt);

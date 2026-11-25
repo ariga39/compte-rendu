@@ -4,6 +4,7 @@ export interface D1ResultLike {
   readonly meta: {
     readonly changes: number;
   };
+  readonly results?: readonly unknown[];
 }
 
 export interface D1PreparedStatementLike {

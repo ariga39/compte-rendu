@@ -21,6 +21,7 @@ import type { ReviewOutcome } from './review-records';
 import { formatReviewFailureComment } from './review-publication-format';
 import {
   claimHeadStatus,
+  publishExpiredClaimChecks,
   publishTerminalCheck,
   resetPreviousReviewVerdicts,
 } from './review-publication';
@@ -680,7 +681,13 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
     if (Option.isNone(parsed)) return new Response(null, { status: 400 });
     const requestId = parsed.value.requestId;
     const jobId = globalThis.crypto.randomUUID();
-    const claim = await stateStore.claimNextJob({ jobId, requestId, attempt: 1, occurredAt });
+    const claim = await stateStore.claimNextJob({
+      jobId,
+      requestId,
+      attempt: 1,
+      occurredAt,
+      onExpiredClaims: (claims) => publishExpiredClaimChecks(github, stateStore, claims),
+    });
     if (claim.kind === 'empty') return new Response(null, { status: 204 });
     if (claim.kind === 'preparing' || claim.replay) {
       const start = epochMilliseconds(claim.claimedAt);

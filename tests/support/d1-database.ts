@@ -36,8 +36,15 @@ class SqlitePreparedStatement implements D1PreparedStatementLike {
   }
 
   async run(): Promise<D1ResultLike> {
-    const result = this.database.prepare(this.sql).run(...this.values);
-    return { meta: { changes: Number(result.changes) } };
+    const statement = this.database.prepare(this.sql) as unknown as {
+      run: (...values: unknown[]) => { changes: number | bigint };
+      all: (...values: unknown[]) => unknown[];
+    };
+    if (/\breturning\b/i.test(this.sql)) {
+      const results = statement.all(...this.values);
+      return { meta: { changes: results.length }, results };
+    }
+    return { meta: { changes: Number(statement.run(...this.values).changes) } };
   }
 
   async first<T>(): Promise<T | null> {

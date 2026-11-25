@@ -577,6 +577,16 @@ export const publishTerminalCheck = async (input: {
   return true;
 };
 
+export const publishExpiredClaimChecks = async (
+  github: GitHubAdapter,
+  stateStore: ReviewCompletionStateStore,
+  runIds: readonly string[],
+): Promise<void> => {
+  await Promise.allSettled(
+    runIds.map((runId) => publishTerminalCheck({ github, stateStore, runId })),
+  );
+};
+
 const checkSetupLeaseDuration = { minutes: 1 } as const;
 
 export const setupCheck = Effect.fn('setupCheck')(function* (
