@@ -465,15 +465,25 @@ it('rejects a snapshot over the distinct selectable route limit and keeps the pr
     },
   ]);
   try {
+    db.database
+      .prepare(
+        `INSERT INTO catalog_routes
+          (route_id, upstream_model, provider_slug, credential_alias, profile)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run('p/retired', 'retired', 'custom-review', 'default', 'messages');
     vi.stubGlobal('fetch', async () => Response.json({ data: [{ id: 'old' }] }));
     await catalog.refresh(100);
     vi.stubGlobal('fetch', async () =>
-      Response.json({ data: Array.from({ length: 1000 }, (_, i) => ({ id: 'm' + i })) }),
+      Response.json({
+        data: [...Array.from({ length: 1000 }, (_, i) => ({ id: 'm' + i })), { id: 'retired' }],
+      }),
     );
     await catalog.refresh(200);
     const capped = await catalog.get();
     expect(capped.routes).toHaveLength(1000);
     expect(capped.routes).not.toContain('p/old');
+    expect(capped.routes).not.toContain('p/retired');
     expect(capped.lastRefreshError).toBeNull();
     await expect(
       createGrantControl(db).issue({

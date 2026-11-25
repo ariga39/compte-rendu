@@ -309,7 +309,6 @@ export function createRelayCatalog(
             Object.entries(models).filter(([id, route]) => !validId(id) || !validId(route.model))
               .length;
           if (rejected) error = 'refresh failed';
-          if (Object.keys(models).length > MAX_CATALOG_MODELS) error = 'catalog limit reached';
         } catch {
           error = 'refresh failed';
         }
