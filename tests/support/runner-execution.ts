@@ -83,12 +83,19 @@ export const createClaimExecution = (options: ClaimExecutionOptions = {}) => {
       while (readCallback < callbackRequests.length) {
         const request = callbackRequests[readCallback]!;
         readCallback += 1;
-        const callback = (await request.clone().json()) as RunnerTerminalCallback;
+        const body = await request.text();
+        const snapshot = new Request(request.url, {
+          method: request.method,
+          headers: request.headers,
+          body,
+        });
+        callbackRequests[readCallback - 1] = snapshot;
+        const callback = JSON.parse(body) as RunnerTerminalCallback;
         if (!terminalStatuses.has(callback.status)) continue;
         pendingTerminals.push({
           callback,
           terminal: stateFromCallback(callback),
-          request,
+          request: snapshot,
         });
       }
       const index = pendingTerminals.findIndex(
