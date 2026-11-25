@@ -8,7 +8,6 @@ import {
   type OperationalLogEvent,
 } from '@compte-rendu/contracts';
 import type { SandboxBackend } from './sandbox-runtime.js';
-import type { GrantLedger } from './grant-ledger.js';
 import type { JobRegistry } from './job-registry.js';
 import type { CleanupReconciler } from './cleanup-reconciler.js';
 import type { JobExecutionInput } from './job-executor.js';
@@ -18,7 +17,6 @@ const MAX_REQUEST_BYTES = 64 * 1024;
 export interface ClaimSchedulerDependencies {
   readonly backend: SandboxBackend;
   readonly registry: JobRegistry;
-  readonly grants: GrantLedger;
   readonly cleanup: CleanupReconciler;
   readonly claimUrl?: string | undefined;
   readonly claimFetch: typeof fetch;
@@ -85,7 +83,7 @@ export const createClaimScheduler = (deps: ClaimSchedulerDependencies): ClaimSch
   };
   const hasCapacity = () => deps.registry.hasCapacity(deps.concurrency(), claiming);
   const recordClaimGateFailure = async (
-    reason: 'grant-recovery-failed' | 'sandbox-recovery-failed' | 'runtime-preflight-failed',
+    reason: 'sandbox-recovery-failed' | 'runtime-preflight-failed',
     pollingHalted = true,
   ) => {
     if (claimGateFailureLogged) return;
@@ -114,11 +112,6 @@ export const createClaimScheduler = (deps: ClaimSchedulerDependencies): ClaimSch
   };
   const claimNextJob = async () => {
     if (deps.isClosed()) return;
-    const grantRecovery = deps.grants.recovery();
-    if (grantRecovery !== undefined && !(await grantRecovery)) {
-      await recordClaimGateFailure('grant-recovery-failed');
-      return;
-    }
     await deps.cleanup.startup.catch(() => undefined);
     if (deps.isClosed()) return;
     let needsCleanupRecovery = deps.cleanup.pendingCount() > 0;

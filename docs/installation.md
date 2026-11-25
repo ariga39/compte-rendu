@@ -1213,9 +1213,9 @@ settings forward.
    Confirm that the operator catalog endpoint
    lists every selected reviewer and synthesis route after the scheduled refresh.
 3. Drain the Runner before changing its inference settings. Verify old grants have been
-   revoked, legacy null-snapshot jobs have finished, and recovery markers are
-   clear. Configure the existing callback URL and bearer, the HTTPS inference
-   model base on port 443 ending in `/v1`, and the relay issuer generation.
+   revoked and legacy null-snapshot jobs have finished. Configure the existing
+   callback URL and bearer and the HTTPS inference model base on port 443 ending
+   in `/v1`.
    If the intended default, any reviewer, or the synthesis route uses a non-Chat protocol or declares
    a context or output limit, set `RUNNER_LLM_GRANT_VERSION=2`
    only after verifying that the installed Runner build can issue v2 grants and both

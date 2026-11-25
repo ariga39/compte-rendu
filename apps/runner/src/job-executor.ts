@@ -55,7 +55,7 @@ import {
 } from './opencode-multi-review.js';
 import { reviewCorrectionPrompt, reviewPrompt, reviewerSystemPrompt } from './review-prompt.js';
 import { reviewSkills } from './review-skill.js';
-import type { GrantLedger } from './grant-ledger.js';
+import type { GrantRevoker } from './grant-revoker.js';
 import {
   LlmGrantIssueError,
   type LlmGrantIdentity,
@@ -147,7 +147,7 @@ export interface JobExecutorDependencies {
   readonly callbackFetch: typeof fetch;
   readonly callbackTimeoutMs: number;
   readonly progressFetch: typeof fetch;
-  readonly grants: GrantLedger;
+  readonly grants: GrantRevoker;
   readonly llmServiceClient?: LlmServiceClient | undefined;
   readonly readTokenClient?: ReadTokenClient | undefined;
   readonly relayEnabled: boolean;
@@ -172,7 +172,7 @@ export const createJobExecutor = (deps: JobExecutorDependencies) => {
     callbackFetch,
     callbackTimeoutMs,
     progressFetch,
-    grants: grantLedger,
+    grants: grantRevoker,
     llmServiceClient,
     readTokenClient,
     relayEnabled,
@@ -560,7 +560,7 @@ export const createJobExecutor = (deps: JobExecutorDependencies) => {
   const revokeGrant = async (job: ExecutionJob): Promise<boolean> => {
     if (llmServiceClient === undefined || job.grantRevoked) return true;
     if (!job.grantIssuanceAttempted) return true;
-    const revoked = await grantLedger.revoke(job.id, true);
+    const revoked = await grantRevoker.revoke(job.id, true);
     if (revoked) job.grantRevoked = true;
     return revoked;
   };
@@ -747,14 +747,8 @@ export const createJobExecutor = (deps: JobExecutorDependencies) => {
         const grantRoutes = directExecution
           ? [multiSelection.reviewers[0]!]
           : dedupedRoutes(multiSelection);
-        // Persist the issuer-bound marker before the call: an ambiguous response
-        // must revoke by job identity and never retry issuance for this job.
-        try {
-          await grantLedger.write(job.id);
-        } catch {
-          failure = { reason: 'agent' };
-          return;
-        }
+        // An ambiguous response is revoked by job identity and issuance is never
+        // retried for this job; the short grant expiry bounds any lost response.
         job.grantIssuanceAttempted = true;
         const grantIdentity: LlmGrantIdentity = {
           runId: job.input.runId,

@@ -36,7 +36,6 @@ const relayBaseOptions = (baseUrl = 'https://relay.example/v1') => ({
   callbackFetch: async () => new Response(null, { status: 204 }),
   claimUrl: '',
   llmRelay: true,
-  llmRelayGeneration: 'generation-a',
   modelConfig: relayModelConfig(baseUrl),
 });
 
@@ -305,10 +304,6 @@ describe('Runner relay configuration', () => {
     ).toThrow();
   });
 
-  it('requires a backend generation for the relay issuer identity', () => {
-    expect(() => createRunner({ ...relayBaseOptions(), llmRelayGeneration: undefined })).toThrow();
-  });
-
   it('rejects an http callback origin before transmitting the relay credential', () => {
     let transmitted = 0;
     expect(() =>
@@ -349,6 +344,48 @@ describe('Runner relay configuration', () => {
 });
 
 describe('Runner relay admission and recovery', () => {
+  it("claims through a previous release's stale grant marker and generation", async () => {
+    const root = await evidenceRoot();
+    const jobId = 'stale-relay-job';
+    const markerRoot = join(root, 'llm-grant-pending');
+    await mkdir(markerRoot, { recursive: true, mode: 0o700 });
+    await writeFile(
+      join(markerRoot, `${createHash('sha256').update(jobId).digest('hex')}.marker`),
+      JSON.stringify({
+        version: 1,
+        jobId,
+        issuer: {
+          transport: 'relay',
+          origin: 'https://old.example',
+          generation: 'generation-old',
+        },
+      }),
+      { mode: 0o600 },
+    );
+    vi.stubEnv('RUNNER_LLM_RELAY_GENERATION', 'generation-old');
+    const events: Array<Record<string, unknown>> = [];
+    const execution = createClaimExecution();
+    const runner = createRunner({
+      ...relayBaseOptions(),
+      evidenceRoot: root,
+      claimUrl: 'https://ingress.test/runner-claim',
+      claimIntervalMs: 1,
+      claimFetch: execution.claimFetch,
+      callbackFetch: execution.callbackFetch,
+      log: {
+        record: async (event) => {
+          events.push(event as Record<string, unknown>);
+        },
+      },
+    });
+    try {
+      await vi.waitFor(() => expect(execution.claimRequests.length).toBeGreaterThan(0));
+      expect(events.filter((event) => event.outcome === 'claim')).toEqual([]);
+    } finally {
+      await runner.close();
+    }
+  });
+
   it('fails a relay claim without a frozen selection before checkout', async () => {
     const commands: string[] = [];
     const execution = createClaimExecution();
@@ -588,87 +625,16 @@ describe('Runner relay admission and recovery', () => {
     }
   });
 
-  it('keeps a foreign issuer marker and does not clear it through the configured backend', async () => {
-    const root = await evidenceRoot();
-    const markerRoot = join(root, 'llm-grant-pending');
-    const jobId = 'foreign-relay-job';
-    const markerPath = join(
-      markerRoot,
-      `${createHash('sha256').update(jobId).digest('hex')}.marker`,
-    );
-    await mkdir(markerRoot, { recursive: true, mode: 0o700 });
-    await writeFile(
-      markerPath,
-      JSON.stringify({
-        version: 1,
-        jobId,
-        issuer: {
-          transport: 'relay',
-          origin: 'https://old.example',
-          generation: 'generation-old',
-        },
-      }),
-      { mode: 0o600 },
-    );
-    let controlCalls = 0;
-    const runner = createRunner({
-      ...relayBaseOptions(),
-      evidenceRoot: root,
-      callbackUrl: 'https://new.example/runner-callback',
-      llmRelayGeneration: 'generation-new',
-      callbackFetch: async () => {
-        controlCalls += 1;
-        return new Response(null, { status: 204 });
-      },
-    });
-    try {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      expect(controlCalls).toBe(0);
-      expect(await readFile(markerPath, 'utf8')).toContain('old.example');
-    } finally {
-      await runner.close();
-    }
-  });
-
-  it('treats a legacy plaintext marker as the local issuer and refuses a foreign backend', async () => {
-    const root = await evidenceRoot();
-    const markerRoot = join(root, 'llm-grant-pending');
-    const jobId = 'legacy-local-job';
-    const markerPath = join(
-      markerRoot,
-      `${createHash('sha256').update(jobId).digest('hex')}.marker`,
-    );
-    await mkdir(markerRoot, { recursive: true, mode: 0o700 });
-    await writeFile(markerPath, jobId, { mode: 0o600 });
-    let controlCalls = 0;
-    const runner = createRunner({
-      ...relayBaseOptions(),
-      evidenceRoot: root,
-      callbackFetch: async () => {
-        controlCalls += 1;
-        return new Response(null, { status: 204 });
-      },
-    });
-    try {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      expect(controlCalls).toBe(0);
-      expect(await readFile(markerPath, 'utf8')).toBe('legacy-local-job');
-    } finally {
-      await runner.close();
-    }
-  });
-
-  it('scans stale markers in direct mode and gates admission, claims and diagnostics', async () => {
+  it('claims in direct mode regardless of a stale grant marker', async () => {
     const root = await evidenceRoot();
     const markerRoot = join(root, 'llm-grant-pending');
     const jobId = 'direct-stale-job';
-    const markerPath = join(
-      markerRoot,
-      `${createHash('sha256').update(jobId).digest('hex')}.marker`,
-    );
     await mkdir(markerRoot, { recursive: true, mode: 0o700 });
-    await writeFile(markerPath, jobId, { mode: 0o600 });
-    const events: Array<Record<string, unknown>> = [];
+    await writeFile(
+      join(markerRoot, `${createHash('sha256').update(jobId).digest('hex')}.marker`),
+      jobId,
+      { mode: 0o600 },
+    );
     const execution = createClaimExecution();
     vi.stubEnv('MODEL_SECRET_COMMAND', 'secret-resolver get MODEL_API_KEY');
     const runner = createRunner({
@@ -684,115 +650,9 @@ describe('Runner relay admission and recovery', () => {
       claimUrl: 'https://ingress.test/runner-claim',
       claimIntervalMs: 10,
       claimFetch: execution.claimFetch,
-      log: {
-        record: async (event) => {
-          events.push(event as Record<string, unknown>);
-        },
-      },
     });
     try {
-      await vi.waitFor(() =>
-        expect(events).toContainEqual(
-          expect.objectContaining({ outcome: 'claim', reason: 'grant-recovery-failed' }),
-        ),
-      );
-      expect(execution.claimRequests).toHaveLength(0);
-      expect(await readFile(markerPath, 'utf8')).toBe(jobId);
-    } finally {
-      await runner.close();
-    }
-  });
-
-  it('fails closed for a legacy plaintext id starting with a brace when its filename matches', async () => {
-    const root = await evidenceRoot();
-    const markerRoot = join(root, 'llm-grant-pending');
-    const jobId = '{"legacy-but-not-json":';
-    const markerPath = join(
-      markerRoot,
-      `${createHash('sha256').update(jobId).digest('hex')}.marker`,
-    );
-    await mkdir(markerRoot, { recursive: true, mode: 0o700 });
-    await writeFile(markerPath, jobId, { mode: 0o600 });
-    let controlCalls = 0;
-    const runner = createRunner({
-      ...relayBaseOptions(),
-      evidenceRoot: root,
-      callbackFetch: async () => {
-        controlCalls += 1;
-        return new Response(null, { status: 204 });
-      },
-    });
-    try {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      expect(controlCalls).toBe(0);
-      expect(await readFile(markerPath, 'utf8')).toBe(jobId);
-    } finally {
-      await runner.close();
-    }
-  });
-
-  it('fails closed for malformed JSON that is not a matching legacy plaintext id', async () => {
-    const root = await evidenceRoot();
-    const markerRoot = join(root, 'llm-grant-pending');
-    const markerPath = join(
-      markerRoot,
-      `${createHash('sha256').update('intended-job').digest('hex')}.marker`,
-    );
-    await mkdir(markerRoot, { recursive: true, mode: 0o700 });
-    await writeFile(markerPath, '{"legacy":', { mode: 0o600 });
-    let controlCalls = 0;
-    const runner = createRunner({
-      ...relayBaseOptions(),
-      evidenceRoot: root,
-      callbackFetch: async () => {
-        controlCalls += 1;
-        return new Response(null, { status: 204 });
-      },
-    });
-    try {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      expect(controlCalls).toBe(0);
-      expect(await readFile(markerPath, 'utf8')).toBe('{"legacy":');
-    } finally {
-      await runner.close();
-    }
-  });
-
-  it('refuses a marker whose filename does not match its encoded job', async () => {
-    const root = await evidenceRoot();
-    const markerRoot = join(root, 'llm-grant-pending');
-    const encodedJob = 'encoded-job';
-    const markerPath = join(
-      markerRoot,
-      `${createHash('sha256').update('different-job').digest('hex')}.marker`,
-    );
-    await mkdir(markerRoot, { recursive: true, mode: 0o700 });
-    await writeFile(
-      markerPath,
-      JSON.stringify({
-        version: 1,
-        jobId: encodedJob,
-        issuer: {
-          transport: 'relay',
-          origin: 'https://ingress.test',
-          generation: 'generation-a',
-        },
-      }),
-      { mode: 0o600 },
-    );
-    let controlCalls = 0;
-    const runner = createRunner({
-      ...relayBaseOptions(),
-      evidenceRoot: root,
-      callbackFetch: async () => {
-        controlCalls += 1;
-        return new Response(null, { status: 204 });
-      },
-    });
-    try {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      expect(controlCalls).toBe(0);
-      expect(await readFile(markerPath, 'utf8')).toContain(encodedJob);
+      await vi.waitFor(() => expect(execution.claimRequests.length).toBeGreaterThan(0));
     } finally {
       await runner.close();
     }

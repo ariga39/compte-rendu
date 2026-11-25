@@ -614,7 +614,6 @@ export const runAgentScenario = async (scenario: {
       modelConfig: scenario.modelConfig,
       progressFetch: scenario.progressFetch,
       llmRelay: scenario.relayControl === undefined ? undefined : true,
-      llmRelayGeneration: scenario.relayControl === undefined ? undefined : 'generation-a',
       claimUrl: 'https://ingress.test/runner-claim',
       claimFetch: execution.claimFetch,
       callbackUrl: 'https://ingress.test/runner-callback',
