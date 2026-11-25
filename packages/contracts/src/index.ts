@@ -317,7 +317,7 @@ const V2CallbackIdentity = {
   version: Schema.Literal(2),
   ...CallbackIdentity,
   // New callbacks carry the immutable revision; archives issued before this
-  // field existed remain replayable from the locally verified manifest.
+  // field existed can be read for cleanup recovery using the verified manifest.
   baseSha: Schema.optionalKey(GitHubSha),
   headSha: Schema.optionalKey(GitHubSha),
 };
