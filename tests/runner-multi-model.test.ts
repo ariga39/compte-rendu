@@ -603,6 +603,90 @@ describe('Runner multi-model review', () => {
     expect(models['compte-rendu/compte-rendu/foo']).toMatchObject({ modelID: 'foo' });
   });
 
+  it('uses local __proto__ provider and model ids while keeping the selected wire routes', async () => {
+    const modelRoute = 'provider/__proto__';
+    const providerRoute = '__proto__/normal';
+    const sibling = 'provider/normal';
+    const routes = [modelRoute, providerRoute, sibling];
+    const selectionWithProto = {
+      revision: 3,
+      selection: {
+        reviewers: routes,
+        synthesis: sibling,
+      },
+    };
+    const children = [
+      {
+        id: 'ses_multi_child_a',
+        parentID: rootSession,
+        agent: 'reviewer-0',
+        model: { providerID: 'provider', id: '~__proto__' },
+        outcome: 'succeeded',
+      },
+      {
+        id: 'ses_multi_child_b',
+        parentID: rootSession,
+        agent: 'reviewer-1',
+        model: { providerID: '~__proto__', id: 'normal' },
+        outcome: 'succeeded',
+      },
+      {
+        id: 'ses_multi_child_c',
+        parentID: rootSession,
+        agent: 'reviewer-2',
+        model: { providerID: 'provider', id: 'normal' },
+        outcome: 'succeeded',
+      },
+    ];
+    const childExport = (id: string, agent: string, providerID: string, modelId: string) =>
+      JSON.stringify({
+        info: {
+          id,
+          parentID: rootSession,
+          agent,
+          model: { providerID, id: modelId },
+          outcome: 'succeeded',
+        },
+        messages: [],
+      });
+    const protoRoot = JSON.parse(rootExport) as {
+      info: { model: { providerID: string; id: string } };
+      messages: Array<{ model?: { providerID: string; id: string } }>;
+    };
+    protoRoot.info.model = { providerID: 'provider', id: 'normal' };
+    for (const message of protoRoot.messages)
+      if (message.model !== undefined) message.model = { providerID: 'provider', id: 'normal' };
+    const result = await runScenario({
+      selection: selectionWithProto,
+      descriptors: routes.map((routeId) => ({ routeId, profile: 'chat' as const })),
+      children,
+      rootExport: JSON.stringify(protoRoot),
+      exports: {
+        [rootSession]: JSON.stringify(protoRoot),
+        ses_multi_child_a: childExport('ses_multi_child_a', 'reviewer-0', 'provider', '~__proto__'),
+        ses_multi_child_b: childExport('ses_multi_child_b', 'reviewer-1', '~__proto__', 'normal'),
+        ses_multi_child_c: childExport('ses_multi_child_c', 'reviewer-2', 'provider', 'normal'),
+      },
+    });
+    expect(result.terminal.status).toBe('succeeded');
+    const config = JSON.parse(
+      result
+        .createArgs!.find((x) => x.startsWith('OPENCODE_CONFIG_CONTENT='))!
+        .slice('OPENCODE_CONFIG_CONTENT='.length),
+    );
+    expect(config.agents['reviewer-0'].model).toBe('provider/~__proto__');
+    expect(config.agents['reviewer-1'].model).toBe('~__proto__/normal');
+    expect(config.agents['reviewer-2'].model).toBe('provider/normal');
+    expect(config.providers.provider.models['~__proto__']).toMatchObject({ modelID: modelRoute });
+    expect(config.providers.provider.models.normal).toMatchObject({ modelID: sibling });
+    expect(config.providers['~__proto__'].models.normal).toMatchObject({ modelID: providerRoute });
+    expect(
+      (result.multiReviewDocument as { reviewers: Array<{ route: string }> }).reviewers.map(
+        (reviewer) => reviewer.route,
+      ),
+    ).toEqual(routes);
+  });
+
   it('restores qualified child evidence routes from the selected model identity', async () => {
     const qualifiedSelection = {
       revision: 3,
