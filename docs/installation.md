@@ -87,23 +87,6 @@ request it created with `gh api repos/<OWNER>/<REPO>/pulls/<NUMBER> --jq
 Each independent deployment and its GitHub App must configure its own
 `ALLOWED_BOT_AUTHOR_IDS` value.
 
-PostHog capture is optional and disabled unless the PostHog argument is supplied
-with an enabled JSON object. The project API key is a non-secret ingestion key;
-never provide a PostHog Personal API key. For example:
-
-```sh
-corepack pnpm render:wrangler petit-chiba <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '[]' \
-  '{"enabled":true,"projectApiKey":"phc_<PROJECT_KEY>","host":"https://us.i.posthog.com","deployment":"petit-chiba","environment":"production"}'
-```
-
-The renderer writes these values only to the generated, gitignored public Worker
-configuration: `POSTHOG_ENABLED`, `POSTHOG_PROJECT_API_KEY`, `POSTHOG_HOST`,
-`POSTHOG_DEPLOYMENT`, and `POSTHOG_ENVIRONMENT`. Omit the object, or set
-`enabled` to `false`, to send no PostHog requests. An enabled configuration
-requires an HTTPS host, a `phc_` project API key, a bounded deployment alias,
-and `production` or `staging`; missing values are reported locally and do not
-change review scheduling, Runner claims, callbacks, evidence, or publication.
-
 Independent deployed instances require distinct product GitHub Apps because
 each App has one webhook URL and secret; this does not require a router.
 
@@ -840,7 +823,7 @@ uses the temporary invocation described above.
 3. Render deployment-only configs from the repository root:
 
    ```sh
-   corepack pnpm render:wrangler <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '<GITHUB_BOT_AUTHOR_IDS_JSON>' ['<POSTHOG_CONFIG_JSON>'] ['<GITHUB_CHECK_NAME>']
+   corepack pnpm render:wrangler <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '<GITHUB_BOT_AUTHOR_IDS_JSON>' ['<GITHUB_CHECK_NAME>'] ['<RELAY_CONFIG_FILE>']
    ```
 
    This writes `apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc`. Use these generated paths
@@ -1150,11 +1133,11 @@ when merging template updates or restoring a rollback configuration; do not run
 the renderer over existing files.
 
 For the first render only, the renderer accepts the name as its final optional
-argument. Include the Bot allowlist and PostHog arguments when supplying it; use
-`[]` and `{"enabled":false}` when those options are unused. For example:
+argument. Include the Bot allowlist argument when supplying it; use `[]` when
+that option is unused. For example:
 
 ```sh
-corepack pnpm render:wrangler ariga39-ai-reviewers <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '[]' '{"enabled":false}' 'Ariga39 AI Review'
+corepack pnpm render:wrangler ariga39-ai-reviewers <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '[]' 'Ariga39 AI Review'
 ```
 
 ### Configure the managed inference relay

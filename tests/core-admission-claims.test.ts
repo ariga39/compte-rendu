@@ -12,12 +12,9 @@ import {
   deferred,
   successfulCallback,
   abortedCallback,
-  postHogEvents,
-  postHogTestDefaults,
   runnerClaimRequest,
   scheduleEligibleReview,
   claimGithub,
-  capturePostHogTransport,
 } from './support/core-worker-harness';
 
 describe('Core admission, claims, and manual policy', () => {
@@ -351,7 +348,7 @@ describe('Core admission, claims, and manual policy', () => {
 
   it('creates the replacement Check when old-head cancellation fails', async () => {
     const database = new SqliteD1Database();
-    const { fetcher, requests, waitUntilTasks } = capturePostHogTransport();
+    const waitUntilTasks: Promise<unknown>[] = [];
     const checks: Array<{ headSha: string }> = [];
     const env = {
       ...coreEnv(database),
@@ -362,7 +359,6 @@ describe('Core admission, claims, and manual policy', () => {
           return runnerResponse(request);
         },
       },
-      ...postHogTestDefaults.environment,
     };
     const context = { waitUntil: (task: Promise<unknown>) => waitUntilTasks.push(task) };
     let currentHead = eligibleEvent.headSha;
@@ -406,10 +402,6 @@ describe('Core admission, claims, and manual policy', () => {
       currentHead = newEvent.headSha;
       expect(await worker.schedule(newEvent, context)).toBe('accepted');
       await Promise.all(waitUntilTasks.splice(0));
-      const scheduledEvents = (await postHogEvents(requests)).filter(
-        (event) => (event as { event: string }).event === 'review scheduled',
-      );
-      expect(scheduledEvents).toHaveLength(2);
       expect(checks.map(({ headSha }) => headSha)).toEqual([
         eligibleEvent.headSha,
         newEvent.headSha,
@@ -460,7 +452,6 @@ describe('Core admission, claims, and manual policy', () => {
       expect(claimAfterCleanup.status).toBe(200);
       expect(await claimAfterCleanup.json()).toMatchObject({ headSha: newEvent.headSha });
     } finally {
-      fetcher.mockRestore();
       database.close();
     }
   });
@@ -475,7 +466,17 @@ describe('Core admission, claims, and manual policy', () => {
       ...coreEnv(database, (request) => runner.handle(request)),
       EVIDENCE_BUCKET: { put: async () => undefined },
     };
-    const core = createCoreWorker(env, { stateStore, ...postHogTestDefaults.dependencies });
+    const core = createCoreWorker(env, {
+      stateStore,
+      github: {
+        getRepositoryUrl: async () => 'https://github.com/acme/reviewed.git',
+        loadReviewTarget: async () => ({ headSha: eligibleEvent.headSha }),
+      },
+      getReadInstallationToken: async () => ({
+        token: 'read-token',
+        expiresAt: '2026-09-01T01:00:00.000Z',
+      }),
+    });
     const schedule = (event: ReviewEvent) => core.schedule(event);
     await schedule(eligibleEvent);
     let polled = false;
@@ -1906,12 +1907,10 @@ describe('Core admission, claims, and manual policy', () => {
       });
       const newPublications: unknown[] = [];
       const markerLookups: unknown[] = [];
-      const { fetcher, requests } = capturePostHogTransport();
       const diagnostics: unknown[] = [];
       const worker = createCoreWorker(
         {
           ...coreEnv(database),
-          ...postHogTestDefaults.environment,
           EVIDENCE_BUCKET: {
             put: async (key, data) => {
               if (typeof data === 'string') archive.set(key, data);
@@ -1969,13 +1968,6 @@ describe('Core admission, claims, and manual policy', () => {
           });
           markerAvailable = true;
           await worker.reconcilePublications(now + 60_000);
-          expect(await postHogEvents(requests)).toContainEqual(
-            expect.objectContaining({
-              event: 'review finished',
-              distinct_id: claimed.runId,
-              properties: expect.objectContaining({ outcome: published ? 'completed' : 'failed' }),
-            }),
-          );
           expect((await stateStore.getRunOutcome(claimed.runId))?.status).toBe(
             published ? 'completed' : 'failed',
           );
@@ -1983,16 +1975,6 @@ describe('Core admission, claims, and manual policy', () => {
           expect((await worker.handleRunnerCallback(request())).status).toBe(published ? 202 : 503);
         }
         expect((await worker.handleRunnerCallback(request())).status).toBe(202);
-        if (scheduled) {
-          const finished = (await postHogEvents(requests)).filter(
-            (event) =>
-              typeof event === 'object' &&
-              event !== null &&
-              'event' in event &&
-              event.event === 'review finished',
-          );
-          expect(finished).toHaveLength(1);
-        }
         expect(newPublications).toEqual([]);
         expect(markerLookups).toContainEqual({
           repositoryId: 11,
@@ -2006,7 +1988,6 @@ describe('Core admission, claims, and manual policy', () => {
           ...(published && { decision: 'request_changes' }),
         });
       } finally {
-        fetcher.mockRestore();
         database.close();
       }
     },

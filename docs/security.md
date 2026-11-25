@@ -100,8 +100,8 @@ they are not dashboard data.
 R2 lifecycle expiration is an operator deployment setting. Host recovery evidence
 has no automatic retention policy. The public dashboard uses persisted D1 state,
 not live Runner/process inspection. Missing telemetry does not establish failure
-or liveness. Optional PostHog events are secondary, best effort and disabled unless
-configured; they are not the product state or an authorization dependency.
+or liveness. D1 product state and operational error logs are not an authorization
+dependency.
 
 ## Source anchors
 
