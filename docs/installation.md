@@ -1222,10 +1222,11 @@ no separate fresh-install procedure.
 
 ### Upgrading a direct-provider installation
 
-An already managed installation does not repeat this cutover. It also does not
-need to pause admissions, drain, or rerender merely for an ordinary update; use
-the normal [update procedure](operations.md#update-and-rollback) and keep its
-retained generated files.
+For an already managed installation, keep the generated Worker configs and
+follow the [normal update procedure](operations.md#update-and-rollback). Before
+restarting the upgraded Runner, remove any `MODEL_SECRET_COMMAND` entry from
+its environment file or service unit, even if the relay was already enabled.
+The Runner rejects this retired setting at startup.
 
 A direct-provider installation has an old Runner without a relay client. Prepare
 one target-release checkout and both configs first, outside the maintenance
