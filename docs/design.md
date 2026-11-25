@@ -395,12 +395,21 @@ owners instead of holding every execution object:
   stop replay, drain/resume, outage staging and the startup claim gate.
 - `CleanupReconciler` owns retained-evidence cleanup recovery, startup/orphan
   reconciliation, deferred recovery and replay delivery.
-- `JobExecutor` owns one execution stack. Its sandbox, child process, token
-  lease, progress reporter, grant material, checkout/config/grant directories,
-  sessions, usage and multi-review evidence live only for that execution and
-  are released when it finishes. Finalization order remains grant revocation,
+- `JobExecutor` owns one execution stack and only sequences phases. Its sandbox,
+  child process, token lease, progress reporter, grant material,
+  checkout/config/grant directories, sessions, usage and multi-review evidence
+  live only for that execution and are released when it finishes. `checkout.ts`
+  proves the admitted base/head revisions and merge base; `agent-runner.ts`
+  stages the OpenCode configuration and sandbox, runs the GitHub preflight,
+  agent and one bounded correction, then extracts the validated review;
+  `job-finalizer.ts` owns grant revocation, evidence archival/redaction,
+  bounded destroy retries, manifest finalization, callback delivery and the
+  independent evidence upload. Finalization order remains grant revocation,
   evidence archival/redaction, manifest finalization, cleanup, callback and
-  finally job retirement.
+  finally job retirement. Stage modules use the host's plain timers and
+  best-effort logging, so the execution path adds no ad-hoc `Effect.runPromise`
+  bridge, and each sandbox, credential lease and host directory keeps its
+  existing bounded acquire/release owner.
 - `GrantRevoker`, `ReadTokenLease`, `ProgressReporter`, the evidence store and the
   host process port own their own state and timers. Claim scheduling and cleanup
   recovery depend on these narrow ports, never on the assembly module.
