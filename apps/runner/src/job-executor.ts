@@ -888,6 +888,7 @@ export const createJobExecutor = (deps: JobExecutorDependencies) => {
           `OPENCODE_CONFIG_CONTENT=${activeOpenCodeConfig!}`,
           'OPENCODE_DISABLE_PROJECT_CONFIG=1',
         ],
+        hostScratchRoot: checkoutRoot,
         checkoutRoot: join(checkoutRoot, 'checkout'),
         configRoot,
         modelResource,

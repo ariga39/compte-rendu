@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -37,10 +37,12 @@ interface Fixture {
   readonly ownershipRoot: string;
   readonly root: string;
   readonly hostRun: HostRun;
+  readonly commands: string[][];
   readonly state: {
     present: boolean;
     owner: string;
     createResult: RunnerProcessResult;
+    policyListFailure?: RunnerProcessResult;
     rules: Array<{
       id: string;
       resources: string[];
@@ -56,12 +58,13 @@ const specFor = (root: string, id: string): SandboxJobSpec => ({
   cpu: '1',
   memoryGib: 2,
   env: [],
+  hostScratchRoot: join(root, 'host scratch'),
   checkoutRoot: join(root, 'checkout'),
   configRoot: join(root, 'config'),
   modelResource: 'llm.example.test:443',
   modelTokenFile: join(root, 'model-token'),
   githubResource: 'api.github.com:443',
-  githubReadToken: 'github-read-token',
+  githubReadToken: 'fixture-github-token',
 });
 
 const createFixture = async (kind: 'sbx' | 'microsandbox'): Promise<Fixture> => {
@@ -72,6 +75,8 @@ const createFixture = async (kind: 'sbx' | 'microsandbox'): Promise<Fixture> => 
   await writeFile(join(root, 'model-token'), 'grant', { mode: 0o600 });
   const ownershipRoot = join(root, 'owners');
   const spec = specFor(root, `contract-${kind}`);
+  await mkdir(spec.hostScratchRoot, { recursive: true, mode: 0o700 });
+  const commands: string[][] = [];
   const state: Fixture['state'] = {
     present: false,
     owner: '',
@@ -86,6 +91,10 @@ const createFixture = async (kind: 'sbx' | 'microsandbox'): Promise<Fixture> => 
     vi.stubEnv('MSB_HOME', home);
   }
   const hostRun: HostRun = async (_program, args) => {
+    commands.push([...args]);
+    if (args[0] === 'policy' && args[1] === 'ls' && state.policyListFailure !== undefined) {
+      return state.policyListFailure;
+    }
     if (kind === 'microsandbox') {
       if (args[0] === 'create') {
         if (state.createResult.exitCode !== 0) return state.createResult;
@@ -170,7 +179,7 @@ const createFixture = async (kind: 'sbx' | 'microsandbox'): Promise<Fixture> => 
           ownershipRoot,
           image: 'review-image',
         });
-  return { backend, spec, ownershipRoot, root, hostRun, state };
+  return { backend, spec, ownershipRoot, root, hostRun, commands, state };
 };
 
 const setup = async (fixture: Fixture): Promise<JobSandbox> => {
@@ -255,5 +264,80 @@ describe.each(['sbx', 'microsandbox'] as const)('%s backend contract', (kind) =>
       }),
     ).rejects.toThrow();
     expect(fixture.state.present).toBe(true);
+  });
+});
+
+describe('sbx cleanup retries', () => {
+  it('treats an already-removed owned policy as done after a complete empty inventory', async () => {
+    const fixture = await createFixture('sbx');
+    const job = await setup(fixture);
+    fixture.state.rules = fixture.state.rules.filter((rule) => rule.id !== 'rule-1');
+
+    await expect(job.destroy({ run: fixture.hostRun })).resolves.toBeUndefined();
+
+    expect(fixture.state.present).toBe(false);
+    expect(job.metadata.hostCleanupConfirmed).toBe(true);
+    expect(await markerFiles(fixture.ownershipRoot, 'sbx')).toHaveLength(0);
+  });
+
+  it.each([
+    ['truncated', { ...ok, truncated: true }],
+    ['malformed', { ...ok, stdout: '{"rules":' }],
+    ['failed', { ...ok, exitCode: 1, stderr: 'inventory unavailable' }],
+  ])('fails closed when the cleanup policy inventory is %s', async (_name, failure) => {
+    const fixture = await createFixture('sbx');
+    const job = await setup(fixture);
+    fixture.state.policyListFailure = failure;
+
+    await expect(job.destroy({ run: fixture.hostRun })).rejects.toThrow();
+
+    expect(await markerFiles(fixture.ownershipRoot, 'sbx')).toHaveLength(1);
+    expect(fixture.state.rules).toHaveLength(2);
+  });
+
+  it('never removes a scoped policy it cannot prove it owns', async () => {
+    const fixture = await createFixture('sbx');
+    const job = await setup(fixture);
+    fixture.state.rules.push({
+      id: 'scoped-foreign',
+      resources: ['other.example.test:443'],
+      sandbox_id: fixture.spec.name,
+      editable: true,
+    });
+
+    await expect(job.destroy({ run: fixture.hostRun })).rejects.toThrow();
+
+    expect(fixture.state.rules.some((rule) => rule.id === 'scoped-foreign')).toBe(true);
+    expect(fixture.commands).not.toContainEqual([
+      'policy',
+      'rm',
+      'network',
+      '--id',
+      'scoped-foreign',
+      '--sandbox',
+      fixture.spec.name,
+      '--force',
+    ]);
+  });
+
+  it('keeps the rotating GitHub token private under the host scratch root', async () => {
+    const fixture = await createFixture('sbx');
+    const job = await setup(fixture);
+    await job.updateGithubReadToken!('rotated-host-token');
+
+    const tokenPath = join(fixture.spec.hostScratchRoot, 'github-read-token');
+    expect(fixture.spec.hostScratchRoot).toContain(' ');
+    expect((await stat(fixture.spec.hostScratchRoot)).mode & 0o777).toBe(0o700);
+    expect(tokenPath.startsWith(fixture.spec.checkoutRoot)).toBe(false);
+    expect(tokenPath.startsWith(fixture.spec.configRoot)).toBe(false);
+    expect((await stat(tokenPath)).mode & 0o777).toBe(0o600);
+    expect(await readFile(tokenPath, 'utf8')).toBe('rotated-host-token');
+    await expect(stat(`${tokenPath}.tmp`)).rejects.toThrow();
+
+    const githubSecret = fixture.commands.find(
+      (args) => args[0] === 'secret' && args[1] === 'set' && args[2] === 'github',
+    )!;
+    expect(githubSecret[githubSecret.indexOf('--command') + 1]).toBe(`cat '${tokenPath}'`);
+    expect(githubSecret.join('\n')).not.toContain('fixture-github-token');
   });
 });

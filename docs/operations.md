@@ -207,6 +207,11 @@ Core sets a 90-minute deadline at claim time. Deploy the application Worker with
 replaces the sbx token file or updates the active microsandbox VM's GitHub secret. If renewal fails,
 the Runner uses the earlier of the claim deadline and the current token's expiry
 minus one minute.
+The sbx backend rotates a mode-0600 token file inside the Runner's private
+per-job scratch root. Only the checkout and configuration directories are
+mounted in the guest. If removing the scratch root fails, the Runner logs the
+exact directory on the host for cleanup.
+
 The callback and evidence manifest identify the limiting clock for an exhausted
 attempt. The dashboard reports a timeout.
 
@@ -396,7 +401,7 @@ curl --fail-with-body --silent --show-error --config "$RUNNER_CURL_CONFIG" \
 This operation accepts retained failed sbx or microsandbox callbacks, including
 jobs cancelled after their Core run was superseded, with valid callback evidence
 and the backend's own host-resource confirmation (`hostCleanupConfirmed: true`
-for sbx and microsandbox; Runner scratch roots are separate). It verifies the immutable identity and exact absence, removes
+for sbx and microsandbox). It verifies the immutable identity and exact absence, removes
 only its scoped sbx network policies and secrets, and revokes its LLM grant when
 configured. It then sends one `v2` `failed` callback that keeps the original
 failure, usage, lifecycle, evidence and timestamps and changes only cleanup to

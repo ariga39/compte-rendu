@@ -919,7 +919,9 @@ export const runReminderScenario = async (scenario: {
       if (args[0] === 'secret' && args[1] === 'set' && args[2] === 'github') {
         githubSecretArgs = [...args];
         const command = args[args.indexOf('--command') + 1] ?? '';
-        githubTokenPath = /^cat (.+)$/.exec(command)?.[1];
+        // Fixtures accept the controlled POSIX single-quoted host path emitted
+        // for TMPDIR values that may contain spaces.
+        githubTokenPath = /^cat '(.+)'$/.exec(command)?.[1] ?? /^cat (.+)$/.exec(command)?.[1];
       }
       if (args.includes('merge-base') && scenario.advanceOnCheckoutMs !== undefined) {
         vi.setSystemTime(Date.now() + scenario.advanceOnCheckoutMs);

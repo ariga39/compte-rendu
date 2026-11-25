@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto';
-import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { chmod, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { Effect, Option, Schema } from 'effect';
 import type {
@@ -460,13 +459,11 @@ const createSbxJobSandbox = (options: SbxRuntimeOptions, spec: SandboxJobSpec): 
   const modelHost = spec.modelResource.replace(/:\d+$/, '');
   const networkRules: Array<{ resource: string; id?: string }> = [];
   let githubServiceCleanupRequired = false;
-  let tokenRoot: string | undefined;
   let tokenPath: string | undefined;
   let activeGithubReadToken = spec.githubReadToken;
   let tokenWriteChain: Promise<void> = Promise.resolve();
   let destroyed = false;
   let created = false;
-  let hostCleanupConfirmed = false;
   let ownership: SbxOwnershipRecord | undefined;
   const markOwnership = async (patch: Partial<SbxOwnershipRecord>) => {
     if (ownership === undefined) return;
@@ -475,9 +472,10 @@ const createSbxJobSandbox = (options: SbxRuntimeOptions, spec: SandboxJobSpec): 
       await saveOwnershipRecord(options.ownershipRoot, ownership);
   };
   const metadata = {
-    get hostCleanupConfirmed() {
-      return hostCleanupConfirmed;
-    },
+    // The rotating GitHub token lives under the Runner-owned host scratch root,
+    // outside the guest-mounted checkout/config paths. The Runner removes that
+    // root; sbx owns no separate host-only resource.
+    hostCleanupConfirmed: true,
     get created() {
       return created;
     },
@@ -517,6 +515,12 @@ const createSbxJobSandbox = (options: SbxRuntimeOptions, spec: SandboxJobSpec): 
       { captureStdout: true, maxBytes: MAX_POLICY_JSON_BYTES },
     );
     if (listed.exitCode !== 0 || listed.timedOut || listed.truncated) return undefined;
+    if (
+      listed.stderrTruncated === true ||
+      listed.streamError === true ||
+      listed.processError === true
+    )
+      return undefined;
     return networkPolicyRulesFrom(listed.stdout);
   };
 
@@ -618,8 +622,8 @@ const createSbxJobSandbox = (options: SbxRuntimeOptions, spec: SandboxJobSpec): 
     );
     if (secret.exitCode !== 0 || secret.timedOut) throw new Error('sandbox secret setup failed');
 
-    tokenRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-sbx-token-'));
-    tokenPath = join(tokenRoot, 'github-read-token');
+    const tokenFile = join(spec.hostScratchRoot, 'github-read-token');
+    tokenPath = tokenFile;
     githubServiceCleanupRequired = true;
     await writeActiveGithubToken(activeGithubReadToken);
     await markOwnership({ githubSecretAttempted: true });
@@ -631,7 +635,7 @@ const createSbxJobSandbox = (options: SbxRuntimeOptions, spec: SandboxJobSpec): 
         '--sandbox',
         spec.name,
         '--command',
-        `cat ${tokenPath}`,
+        `cat ${shellQuote(tokenFile)}`,
         '--refresh',
         'on-demand',
       ],
@@ -737,15 +741,16 @@ const createSbxJobSandbox = (options: SbxRuntimeOptions, spec: SandboxJobSpec): 
       let clean = true;
       for (const expected of networkRules) {
         const matching = await findRule(command, expected);
-        if (matching === undefined) {
-          clean = false;
-          continue;
-        }
-        const removed = await command(
+        // An expected policy can already be absent after a partial destroy.
+        // The complete final inventory is authoritative for whether any policy
+        // scoped to this exact Sandbox remains; a transient removal failure
+        // after the rule disappeared must not fail a confirmed retry, and a
+        // failed or ambiguous lookup never authorizes deleting anything else.
+        if (matching === undefined) continue;
+        await command(
           ['policy', 'rm', 'network', '--id', matching.id, '--sandbox', spec.name, '--force'],
           { stage: 'cleanup', command: 'remove-network-policy', includeStderr: true },
         );
-        if (removed.exitCode !== 0 || removed.timedOut) clean = false;
       }
       const removed = await command(['rm', '--force', spec.name], {
         stage: 'cleanup',
@@ -783,17 +788,6 @@ const createSbxJobSandbox = (options: SbxRuntimeOptions, spec: SandboxJobSpec): 
           },
         );
         if (github.exitCode !== 0 || github.timedOut) clean = false;
-      }
-      hostCleanupConfirmed = tokenRoot === undefined;
-      if (tokenRoot !== undefined) {
-        try {
-          await rm(tokenRoot, { recursive: true, force: true });
-          tokenRoot = undefined;
-          tokenPath = undefined;
-          hostCleanupConfirmed = true;
-        } catch {
-          clean = false;
-        }
       }
       if (!clean) throw new Error('sbx sandbox cleanup was not confirmed');
       if (ownership !== undefined && options.ownershipRoot !== undefined) {

@@ -90,6 +90,13 @@ export interface SandboxJobSpec {
   readonly checkoutRoot: string;
   /** Host configuration directory to stage into the sandbox. */
   readonly configRoot: string;
+  /**
+   * Runner-owned, host-only scratch root for this job. It must not be mounted
+   * into the sandbox and must not be inside `checkoutRoot` or `configRoot`.
+   * Backends place host-only credential files here and leave recursive removal
+   * to the Runner's bounded job-scratch cleanup.
+   */
+  readonly hostScratchRoot: string;
   readonly modelResource: string;
   /**
    * Absolute host path to a private mode-0600 file holding the job's model
