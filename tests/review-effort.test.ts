@@ -1,6 +1,6 @@
 import { expect, it, vi } from 'vitest';
 import type { EffortJobDetail } from '../packages/contracts/src';
-import { createCoreWorker } from '../apps/core/src/core-worker';
+import { createCoreWorker } from './support/core-http-adapter';
 import { createD1ReviewStateStore } from '../apps/core/src/index';
 import { createApplication } from '../apps/dashboard/src/lib/server/application';
 import { SqliteD1Database } from './support/d1-database';

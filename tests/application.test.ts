@@ -1,6 +1,7 @@
 import { createD1ReviewStateStore } from '../apps/core/src/index';
 import { expect, it } from 'vitest';
 import { createApplication } from '../apps/dashboard/src/lib/server/application';
+import { MAX_RUNNER_CALLBACK_BYTES } from '../packages/contracts/src';
 import { SqliteD1Database } from './support/d1-database';
 
 it('serves public data in-process without exposing trusted Core endpoints', async () => {
@@ -370,3 +371,128 @@ it.each(['', 'broken route'])(
     }
   },
 );
+
+it('lets document routes fall through to SvelteKit while keeping machine routes explicit', async () => {
+  const app = createApplication({
+    REVIEW_DB: new SqliteD1Database(),
+    GITHUB_APP_ID: '1',
+    GITHUB_APP_PRIVATE_KEY: 'unused',
+    WEBHOOK_SECRET: 'unused',
+    ALLOWED_INSTALLATION_IDS: '[7]',
+  });
+  expect(await app.handle(new Request('https://reviews.test/'))).toBeNull();
+  expect(await app.handle(new Request('https://reviews.test/history'))).toBeNull();
+  expect(await app.handle(new Request('https://reviews.test/settings'))).toBeNull();
+  expect((await app.fetch(new Request('https://reviews.test/history'))).status).toBe(404);
+  expect((await app.fetch(new Request('https://reviews.test/api/unknown'))).status).toBe(405);
+  expect(
+    (await app.fetch(new Request('https://reviews.test/api/unknown', { method: 'DELETE' }))).status,
+  ).toBe(405);
+  expect(
+    (await app.fetch(new Request('https://reviews.test/api/unknown', { method: 'POST' }))).status,
+  ).toBe(204);
+  for (const path of ['/runner-results', '/metadata-events', '/review-events'])
+    expect(
+      (await app.fetch(new Request('https://reviews.test' + path, { method: 'POST' }))).status,
+    ).toBe(404);
+});
+
+it('enforces Runner method precedence, bearer authentication, limits and body bounds', async () => {
+  const database = new SqliteD1Database();
+  const app = createApplication({
+    REVIEW_DB: database,
+    GITHUB_APP_ID: '1',
+    GITHUB_APP_PRIVATE_KEY: 'unused',
+    WEBHOOK_SECRET: 'unused',
+    ALLOWED_INSTALLATION_IDS: '[7]',
+    RUNNER_CALLBACK_TOKEN: 'runner-token',
+  });
+  try {
+    expect((await app.fetch(new Request('https://reviews.test/runner-claim'))).status).toBe(405);
+    expect(
+      (
+        await app.fetch(
+          new Request('https://reviews.test/runner-claim', { method: 'POST', body: '{}' }),
+        )
+      ).status,
+    ).toBe(401);
+    expect(
+      (
+        await app.fetch(
+          new Request('https://reviews.test/runner-evidence', { method: 'POST', body: '{}' }),
+        )
+      ).status,
+    ).toBe(401);
+    const emptyClaim = await app.fetch(
+      new Request('https://reviews.test/runner-claim', {
+        method: 'POST',
+        headers: { authorization: 'Bearer runner-token' },
+      }),
+    );
+    expect(emptyClaim.status).toBe(204);
+    expect(emptyClaim.body).toBeNull();
+    expect(
+      (
+        await app.fetch(
+          new Request('https://reviews.test/runner-callback', {
+            method: 'POST',
+            headers: { authorization: 'Bearer runner-token', 'content-type': 'application/json' },
+            body: '{}',
+          }),
+        )
+      ).status,
+    ).toBe(400);
+
+    let cancelled = false;
+    let sent = false;
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull(controller) {
+          if (sent) controller.close();
+          else controller.enqueue(new Uint8Array(16 * 1024 + 1));
+          sent = true;
+        },
+        cancel() {
+          cancelled = true;
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    const oversizedProgress = await app.fetch(
+      new Request('https://reviews.test/runner-progress', {
+        method: 'POST',
+        headers: { authorization: 'Bearer runner-token' },
+        body,
+        duplex: 'half',
+      } as RequestInit & { duplex: 'half' }),
+    );
+    expect(oversizedProgress.status).toBe(413);
+    expect(cancelled).toBe(true);
+
+    let pulled = false;
+    const callbackBody = new ReadableStream<Uint8Array>(
+      {
+        pull(controller) {
+          pulled = true;
+          controller.close();
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    const oversizedCallback = await app.fetch(
+      new Request('https://reviews.test/runner-callback', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer runner-token',
+          'content-length': String(MAX_RUNNER_CALLBACK_BYTES + 1),
+        },
+        body: callbackBody,
+        duplex: 'half',
+      } as RequestInit & { duplex: 'half' }),
+    );
+    expect(oversizedCallback.status).toBe(413);
+    expect(pulled).toBe(false);
+  } finally {
+    database.close();
+  }
+});

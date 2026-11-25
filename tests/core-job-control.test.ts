@@ -1,5 +1,5 @@
 import { expect, it, vi } from 'vitest';
-import { createCoreWorker } from '../apps/core/src/core-worker';
+import { createCoreWorker } from './support/core-http-adapter';
 import { createD1ReviewStateStore } from '../apps/core/src/review-state-store';
 import { REVIEW_ATTEMPT_BUDGET_MS, type OperationalLogEvent } from '../packages/contracts/src';
 import { SqliteD1Database } from './support/d1-database';

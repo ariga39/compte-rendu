@@ -1,7 +1,7 @@
 import { expect, it } from 'vitest';
-import { createCoreWorker } from '../apps/core/src/core-worker';
+import { createCoreWorker } from './support/core-http-adapter';
 import { SqliteD1Database } from './support/d1-database';
-import { createIngressWorker } from '../apps/ingress/src/index';
+import { createApplication } from '../apps/dashboard/src/lib/server/application';
 import { createD1ReviewStateStore } from '../apps/core/src/index';
 
 const selection = {
@@ -121,16 +121,14 @@ it('persists operator-selected review models across fresh Core workers', async (
 it('protects settings through ingress and preserves valid settings on invalid or stale updates', async () => {
   const database = new SqliteD1Database();
   try {
-    const core = createCoreWorker(environment(database));
-    const ingress = createIngressWorker({
-      secret: 'webhook-secret',
-      allowedInstallationIds: '[7]',
-      crypto: globalThis.crypto,
-      core,
+    const app = createApplication({
+      ...environment(database),
+      WEBHOOK_SECRET: 'webhook-secret',
+      ALLOWED_INSTALLATION_IDS: '[7]',
     });
     const request = (method: string, body?: unknown, token?: string) => {
       const input = settingsRequest(method, body, token);
-      return ingress.fetch(new Request('https://reviews.example/api/review-configuration', input));
+      return app.fetch(new Request('https://reviews.example/api/review-configuration', input));
     };
     expect((await request('PUT', { revision: 0, selection }, '')).status).toBe(401);
     expect((await request('GET', undefined, 'runner-token')).status).toBe(401);

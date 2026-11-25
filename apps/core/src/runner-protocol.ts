@@ -9,6 +9,7 @@ import {
   RunnerJobInput,
   RunnerProgressReport,
   RunnerTerminalCallback,
+  readBoundedRequestBytes,
   readBoundedRequestBody,
   type PublicTaskFailure,
 } from '@compte-rendu/contracts';
@@ -231,11 +232,8 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
     request: Request,
     lifecycleLog: ReturnType<typeof createPostHogLifecycleLog>,
   ): Promise<Response> => {
-    if (request.headers.get('x-compte-rendu-runner-callback') !== 'verified') {
-      return new Response(null, { status: 401 });
-    }
-    const body = await request.arrayBuffer();
-    if (body.byteLength > MAX_RUNNER_CALLBACK_BYTES) return new Response(null, { status: 413 });
+    const body = await readBoundedRequestBytes(request, MAX_RUNNER_CALLBACK_BYTES);
+    if (body === undefined) return new Response(null, { status: 413 });
     let callback: typeof RunnerTerminalCallback.Type;
     try {
       callback = await Schema.decodeUnknownPromise(Schema.fromJsonString(RunnerTerminalCallback))(
@@ -461,11 +459,8 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
   };
 
   const handleRunnerEvidence = async (request: Request): Promise<Response> => {
-    if (request.headers.get('x-compte-rendu-runner-evidence') !== 'verified') {
-      return new Response(null, { status: 401 });
-    }
-    const body = await request.arrayBuffer();
-    if (body.byteLength > MAX_RUNNER_EVIDENCE_BYTES) return new Response(null, { status: 413 });
+    const body = await readBoundedRequestBytes(request, MAX_RUNNER_EVIDENCE_BYTES);
+    if (body === undefined) return new Response(null, { status: 413 });
     let upload: typeof RunnerEvidenceUpload.Type;
     try {
       upload = await Schema.decodeUnknownPromise(Schema.fromJsonString(RunnerEvidenceUpload), {
@@ -521,9 +516,21 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
     return new Response(null, { status: recorded ? 202 : 409 });
   };
 
+  const invalidateMetadata = async (event: typeof MetadataInvalidationEvent.Type) => {
+    const decoded = await Schema.decodeUnknownPromise(MetadataInvalidationEvent)(event);
+    const observedAt = new Date().toISOString();
+    await stateStore.invalidateRepositoryMetadataBatch({
+      installationId: decoded.installationId,
+      repositoryIds: decoded.repositoryIds,
+      visibility: decoded.visibility,
+      updatedAt: observedAt,
+      nextRefreshAt: observedAt,
+    });
+  };
+
   const handleMetadataInvalidation = async (request: Request): Promise<Response> => {
-    const body = await request.arrayBuffer();
-    if (body.byteLength > MAX_WEBHOOK_BYTES) return new Response(null, { status: 413 });
+    const body = await readBoundedRequestBytes(request, MAX_WEBHOOK_BYTES);
+    if (body === undefined) return new Response(null, { status: 413 });
     let event: typeof MetadataInvalidationEvent.Type;
     try {
       event = await Schema.decodeUnknownPromise(Schema.fromJsonString(MetadataInvalidationEvent), {
@@ -532,23 +539,13 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
     } catch {
       return new Response(null, { status: 400 });
     }
-    const observedAt = new Date().toISOString();
-    await stateStore.invalidateRepositoryMetadataBatch({
-      installationId: event.installationId,
-      repositoryIds: event.repositoryIds,
-      visibility: event.visibility,
-      updatedAt: observedAt,
-      nextRefreshAt: observedAt,
-    });
+    await invalidateMetadata(event);
     return new Response(null, { status: 202 });
   };
 
   const handleRunnerProgress = async (request: Request): Promise<Response> => {
-    if (request.headers.get('x-compte-rendu-runner-progress') !== 'verified') {
-      return new Response(null, { status: 401 });
-    }
-    const body = await request.arrayBuffer();
-    if (body.byteLength > MAX_PROGRESS_BYTES) return new Response(null, { status: 413 });
+    const body = await readBoundedRequestBytes(request, MAX_PROGRESS_BYTES);
+    if (body === undefined) return new Response(null, { status: 413 });
     let report: typeof RunnerProgressReport.Type;
     try {
       report = await Schema.decodeUnknownPromise(Schema.fromJsonString(RunnerProgressReport), {
@@ -599,11 +596,8 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
   };
 
   const handleRunnerReadToken = async (request: Request): Promise<Response> => {
-    if (request.headers.get('x-compte-rendu-runner-read-token') !== 'verified') {
-      return new Response(null, { status: 401 });
-    }
-    const body = await request.arrayBuffer();
-    if (body.byteLength > MAX_READ_TOKEN_REQUEST_BYTES) {
+    const body = await readBoundedRequestBytes(request, MAX_READ_TOKEN_REQUEST_BYTES);
+    if (body === undefined) {
       return new Response(null, { status: 413 });
     }
     let renewal: typeof RunnerReadTokenRequest.Type;
@@ -665,9 +659,6 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
     request: Request,
     lifecycleLog: ReturnType<typeof createPostHogLifecycleLog>,
   ): Promise<Response> => {
-    if (request.headers.get('x-compte-rendu-runner-claim') !== 'verified') {
-      return new Response(null, { status: 401 });
-    }
     const occurredAt = new Date().toISOString();
     const body = await readBoundedRequestBody(request, 64 * 1024);
     if (body.kind !== 'ok') return new Response(null, { status: 413 });
@@ -952,6 +943,7 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
     handleRunnerResult,
     handleRunnerEvidence,
     handleMetadataInvalidation,
+    invalidateMetadata,
     handleRunnerProgress,
     handleRunnerReadToken,
     handleRunnerClaim,

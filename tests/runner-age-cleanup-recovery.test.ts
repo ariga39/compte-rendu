@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createCoreWorker } from '../apps/core/src/core-worker';
+import { createCoreWorker } from './support/core-http-adapter';
 import { createD1ReviewStateStore } from '../apps/core/src/index';
 import { createRunner } from '../apps/runner/src/runner';
 import { sandboxResourceName } from '../apps/runner/src/sandbox-resource-name';

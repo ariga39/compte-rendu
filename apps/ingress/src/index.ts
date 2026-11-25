@@ -6,14 +6,10 @@ import {
   MetadataInvalidationEvent,
   ReviewEvent,
   GitHubSha,
-  MAX_RUNNER_CALLBACK_BYTES,
-  MAX_RUNNER_EVIDENCE_BYTES,
   MAX_WEBHOOK_BYTES,
-  type CoreServiceBinding,
   type OperationalLog,
   type OperationalLogEvent,
   type ReviewEvent as NormalizedReviewEvent,
-  type WorkerEntrypoint,
   sanitizeOperationalLogIdentifier,
   sanitizeOperationalLogEvent,
 } from '@compte-rendu/contracts';
@@ -29,13 +25,6 @@ const supportedEvents = [
   'installation',
   'installation_repositories',
 ] as const;
-const runnerCallbackPath = '/runner-callback';
-const runnerEvidencePath = '/runner-evidence';
-const runnerClaimPath = '/runner-claim';
-const runnerReadTokenPath = '/runner-read-token';
-const runnerProgressPath = '/runner-progress';
-const MAX_RUNNER_PROGRESS_BYTES = 16 * 1024;
-const MAX_RUNNER_READ_TOKEN_BYTES = 16 * 1024;
 const supportedPullRequestActions = [
   'opened',
   'reopened',
@@ -141,21 +130,24 @@ const InstallationWebhook = Schema.Struct({
 
 const Signature = Schema.String.check(Schema.isPattern(new RegExp('^sha256=[0-9a-f]{64}$', 'i')));
 
-export interface IngressDependencies {
+export interface WebhookCoreSink {
+  readonly submitReviewEvent: (event: NormalizedReviewEvent) => Promise<'accepted' | 'failed'>;
+  readonly invalidateMetadata: (event: typeof MetadataInvalidationEvent.Type) => Promise<void>;
+}
+
+export interface WebhookIngressDependencies {
   readonly secret: string;
   readonly crypto: Pick<Crypto, 'subtle'>;
   readonly allowedInstallationIds: unknown;
   readonly allowedBotAuthorIds?: unknown;
-  readonly core: CoreServiceBinding;
-  readonly runnerCallbackToken?: string;
+  readonly core: WebhookCoreSink;
   readonly log?: OperationalLog;
 }
 
-export interface IngressEnv {
+export interface WebhookIngressEnv {
   readonly WEBHOOK_SECRET: string;
   readonly ALLOWED_INSTALLATION_IDS: string;
   readonly ALLOWED_BOT_AUTHOR_IDS?: string;
-  readonly RUNNER_CALLBACK_TOKEN?: string;
 }
 
 const InvalidWebhookReason = Schema.Literals(['invalid_signature', 'invalid_webhook']);
@@ -212,7 +204,7 @@ const signatureBytes = (signature: string) => {
 const verifySignature = (
   body: Uint8Array<ArrayBuffer>,
   signature: string,
-  dependencies: IngressDependencies,
+  dependencies: WebhookIngressDependencies,
 ) =>
   Effect.gen(function* () {
     const validSignature = yield* Effect.tryPromise({
@@ -305,7 +297,7 @@ const checkInstallation = (
   deliveryId: string,
   event: NormalizedReviewEvent['event'] | 'metadata',
   installationId: number,
-  dependencies: IngressDependencies,
+  dependencies: WebhookIngressDependencies,
 ) =>
   Effect.gen(function* () {
     const allowedInstallationIds = yield* Schema.decodeUnknownEffect(InstallationIdsConfig)(
@@ -329,7 +321,7 @@ const checkInstallation = (
 
 const isAllowedBotAuthor = Effect.fn('isAllowedBotAuthor')(function* (
   authorId: number | null | undefined,
-  dependencies: IngressDependencies,
+  dependencies: WebhookIngressDependencies,
 ) {
   return yield* Schema.decodeUnknownEffect(BotAuthorIdsConfig)(
     dependencies.allowedBotAuthorIds,
@@ -342,7 +334,7 @@ const isAllowedBotAuthor = Effect.fn('isAllowedBotAuthor')(function* (
   );
 });
 
-const processWebhook = (request: Request, dependencies: IngressDependencies) =>
+const processWebhook = (request: Request, dependencies: WebhookIngressDependencies) =>
   Effect.gen(function* () {
     const body = yield* Effect.tryPromise({
       try: () => readBoundedRequestBytes(request, MAX_WEBHOOK_BYTES),
@@ -645,27 +637,15 @@ type MetadataInvalidationInput = Omit<typeof MetadataInvalidationEvent.Type, 'ev
 
 const forwardMetadataInvalidation = (
   event: MetadataInvalidationInput,
-  dependencies: IngressDependencies,
+  dependencies: WebhookIngressDependencies,
 ) =>
   Effect.gen(function* () {
     const decoded = yield* Schema.decodeUnknownEffect(MetadataInvalidationEvent)({
       ...event,
       event: 'metadata',
     }).pipe(Effect.mapError(() => invalidWebhook('Metadata invalidation is invalid')));
-    const coreResponse = yield* Effect.tryPromise({
-      try: () =>
-        Promise.resolve(
-          dependencies.core.fetch(
-            new Request('https://core.internal/metadata-events', {
-              method: 'POST',
-              headers: {
-                'content-type': 'application/json',
-                'x-compte-rendu-delivery': decoded.deliveryId,
-              },
-              body: JSON.stringify(decoded),
-            }),
-          ),
-        ),
+    yield* Effect.tryPromise({
+      try: () => dependencies.core.invalidateMetadata(decoded),
       catch: () =>
         new CoreUnavailable({
           message: 'Core service failed',
@@ -673,14 +653,6 @@ const forwardMetadataInvalidation = (
           event: 'metadata',
         }),
     });
-
-    if (!coreResponse.ok) {
-      return yield* new CoreUnavailable({
-        message: `Core service returned ${coreResponse.status}`,
-        deliveryId: event.deliveryId,
-        event: 'metadata',
-      });
-    }
 
     yield* recordOperationalLog(dependencies.log ?? createCloudflareOperationalLog(), {
       phase: 'ingress',
@@ -692,25 +664,13 @@ const forwardMetadataInvalidation = (
     return 'accepted' as const;
   });
 
-const forwardEvent = (event: NormalizedReviewEvent, dependencies: IngressDependencies) =>
+const forwardEvent = (event: NormalizedReviewEvent, dependencies: WebhookIngressDependencies) =>
   Effect.gen(function* () {
     const decodedEvent = yield* Schema.decodeUnknownEffect(ReviewEvent)(event).pipe(
       Effect.mapError(() => invalidWebhook('Normalized webhook is invalid')),
     );
-    const coreResponse = yield* Effect.tryPromise({
-      try: () =>
-        Promise.resolve(
-          dependencies.core.fetch(
-            new Request('https://core.internal/review-events', {
-              method: 'POST',
-              headers: {
-                'content-type': 'application/json',
-                'x-compte-rendu-delivery': decodedEvent.deliveryId,
-              },
-              body: JSON.stringify(decodedEvent),
-            }),
-          ),
-        ),
+    const disposition = yield* Effect.tryPromise({
+      try: () => dependencies.core.submitReviewEvent(decodedEvent),
       catch: () =>
         new CoreUnavailable({
           message: 'Core service failed',
@@ -719,9 +679,9 @@ const forwardEvent = (event: NormalizedReviewEvent, dependencies: IngressDepende
         }),
     });
 
-    if (!coreResponse.ok) {
+    if (disposition === 'failed') {
       return yield* new CoreUnavailable({
-        message: `Core service returned ${coreResponse.status}`,
+        message: 'Core service rejected the event',
         deliveryId: event.deliveryId,
         event: event.event,
       });
@@ -737,260 +697,52 @@ const forwardEvent = (event: NormalizedReviewEvent, dependencies: IngressDepende
     return 'accepted' as const;
   });
 
-const forwardRunnerRequest = async (
+export const handleGitHubWebhook = async (
   request: Request,
-  dependencies: IngressDependencies,
-  target: {
-    readonly path: string;
-    readonly maxBytes: number;
-    readonly verificationHeader: string;
-  },
-) => {
-  if (
-    dependencies.runnerCallbackToken === undefined ||
-    request.headers.get('authorization') !== `Bearer ${dependencies.runnerCallbackToken}`
-  ) {
-    return new Response(null, { status: 401 });
+  dependencies: WebhookIngressDependencies,
+): Promise<Response> => {
+  const eventName = request.headers.get('x-github-event');
+  if (!supportedEvents.includes(eventName as (typeof supportedEvents)[number])) {
+    await Effect.runPromise(
+      recordOperationalLog(dependencies.log ?? createCloudflareOperationalLog(), {
+        phase: 'ingress',
+        outcome: 'ignored',
+        deliveryId: sanitizeOperationalLogIdentifier(
+          request.headers.get('x-github-delivery') ?? '',
+        ),
+        reason: 'unsupported_event',
+      }),
+    );
+    return new Response(null, { status: 204 });
   }
 
-  const body = await readBoundedRequestBytes(request, target.maxBytes);
-  if (body === undefined) return new Response(null, { status: 413 });
-  const forwarded = await dependencies.core.fetch(
-    new Request(`https://core.internal${target.path}`, {
-      method: 'POST',
-      headers: {
-        'content-type': request.headers.get('content-type') ?? 'application/json',
-        [target.verificationHeader]: 'verified',
-      },
-      body,
-    }),
-  );
-  await forwarded.body?.cancel().catch(() => undefined);
-  // Preserve Core's status (for example 409 for a stale attempt or 503 for a
-  // transient outage) without forwarding its private response body.
-  return new Response(null, { status: forwarded.status });
-};
+  try {
+    const result = await Effect.runPromise(processWebhook(request, dependencies));
+    return new Response(null, { status: result === 'ignored' ? 204 : 202 });
+  } catch (error) {
+    if (error instanceof InvalidWebhook) {
+      await Effect.runPromise(
+        recordOperationalLog(dependencies.log ?? createCloudflareOperationalLog(), {
+          phase: 'ingress',
+          outcome: 'rejected',
+          reason: error.reason,
+        }),
+      );
+      return new Response(null, { status: 400 });
+    }
 
-const forwardRunnerCallback = (request: Request, dependencies: IngressDependencies) =>
-  forwardRunnerRequest(request, dependencies, {
-    path: '/runner-results',
-    maxBytes: MAX_RUNNER_CALLBACK_BYTES,
-    verificationHeader: 'x-compte-rendu-runner-callback',
-  });
+    if (error instanceof CoreUnavailable) {
+      await Effect.runPromise(
+        recordOperationalLog(dependencies.log ?? createCloudflareOperationalLog(), {
+          phase: 'ingress',
+          outcome: 'retryable',
+          deliveryId: sanitizeOperationalLogIdentifier(error.deliveryId),
+          event: error.event,
+          reason: 'core_unavailable',
+        }),
+      );
+    }
 
-const forwardRunnerEvidence = (request: Request, dependencies: IngressDependencies) =>
-  forwardRunnerRequest(request, dependencies, {
-    path: '/runner-evidence',
-    maxBytes: MAX_RUNNER_EVIDENCE_BYTES,
-    verificationHeader: 'x-compte-rendu-runner-evidence',
-  });
-
-const forwardRunnerClaim = async (request: Request, dependencies: IngressDependencies) => {
-  if (
-    dependencies.runnerCallbackToken === undefined ||
-    request.headers.get('authorization') !== `Bearer ${dependencies.runnerCallbackToken}`
-  ) {
-    return new Response(null, { status: 401 });
+    return new Response(null, { status: 503 });
   }
-
-  const body = await readBoundedRequestBytes(request, 64 * 1024);
-  if (body === undefined) return new Response(null, { status: 413 });
-  return dependencies.core.fetch(
-    new Request('https://core.internal/runner-claims', {
-      method: 'POST',
-      headers: {
-        'content-type': request.headers.get('content-type') ?? 'application/json',
-        'x-compte-rendu-runner-claim': 'verified',
-      },
-      body,
-    }),
-  );
 };
-
-const forwardRunnerReadToken = async (request: Request, dependencies: IngressDependencies) => {
-  if (
-    dependencies.runnerCallbackToken === undefined ||
-    request.headers.get('authorization') !== `Bearer ${dependencies.runnerCallbackToken}`
-  ) {
-    return new Response(null, { status: 401 });
-  }
-  const body = await readBoundedRequestBytes(request, MAX_RUNNER_READ_TOKEN_BYTES);
-  if (body === undefined) {
-    return new Response(null, { status: 413 });
-  }
-  const forwarded = await dependencies.core.fetch(
-    new Request('https://core.internal/runner-read-token', {
-      method: 'POST',
-      headers: {
-        'content-type': request.headers.get('content-type') ?? 'application/json',
-        'x-compte-rendu-runner-read-token': 'verified',
-      },
-      body,
-    }),
-  );
-  return new Response(await forwarded.arrayBuffer(), {
-    status: forwarded.status,
-    headers: forwarded.headers,
-  });
-};
-
-const isPublicReadPath = (path: string) =>
-  path === '/api/dashboard-config' ||
-  path === '/api/dashboard' ||
-  path === '/api/jobs' ||
-  path.startsWith('/api/jobs/');
-
-const forwardPublicRead = async (request: Request, dependencies: IngressDependencies) => {
-  const url = new URL(request.url);
-  const forwarded = await dependencies.core.fetch(
-    new Request(`https://core.internal${url.pathname}${url.search}`, {
-      method: 'GET',
-      headers: { accept: 'application/json' },
-    }),
-  );
-  return new Response(await forwarded.arrayBuffer(), {
-    status: forwarded.status,
-    headers: forwarded.headers,
-  });
-};
-
-const forwardRunnerProgress = async (request: Request, dependencies: IngressDependencies) => {
-  if (
-    dependencies.runnerCallbackToken === undefined ||
-    request.headers.get('authorization') !== `Bearer ${dependencies.runnerCallbackToken}`
-  ) {
-    return new Response(null, { status: 401 });
-  }
-  const body = await readBoundedRequestBytes(request, MAX_RUNNER_PROGRESS_BYTES);
-  if (body === undefined) return new Response(null, { status: 413 });
-  const forwarded = await dependencies.core.fetch(
-    new Request('https://core.internal/runner-progress', {
-      method: 'POST',
-      headers: {
-        'content-type': request.headers.get('content-type') ?? 'application/json',
-        'x-compte-rendu-runner-progress': 'verified',
-      },
-      body,
-    }),
-  );
-  return new Response(null, { status: forwarded.status });
-};
-
-export function createIngressWorker(dependencies: IngressDependencies): WorkerEntrypoint {
-  return {
-    fetch: async (request) => {
-      if (new URL(request.url).pathname === '/api/review-configuration') {
-        try {
-          return await dependencies.core.fetch(
-            new Request('https://core.internal/review-configuration', request),
-          );
-        } catch {
-          return new Response(null, { status: 503, headers: { 'cache-control': 'no-store' } });
-        }
-      }
-      if (request.method === 'GET') {
-        const path = new URL(request.url).pathname;
-        if (isPublicReadPath(path)) {
-          try {
-            return await forwardPublicRead(request, dependencies);
-          } catch {
-            return new Response(null, { status: 503, headers: { 'cache-control': 'no-store' } });
-          }
-        }
-      }
-
-      if (request.method !== 'POST') {
-        return new Response(null, { status: 405 });
-      }
-
-      if (new URL(request.url).pathname === runnerCallbackPath) {
-        try {
-          return await forwardRunnerCallback(request, dependencies);
-        } catch {
-          return new Response(null, { status: 503 });
-        }
-      }
-
-      if (new URL(request.url).pathname === runnerEvidencePath) {
-        try {
-          return await forwardRunnerEvidence(request, dependencies);
-        } catch {
-          return new Response(null, { status: 503 });
-        }
-      }
-
-      if (new URL(request.url).pathname === runnerClaimPath) {
-        try {
-          return await forwardRunnerClaim(request, dependencies);
-        } catch {
-          return new Response(null, { status: 503 });
-        }
-      }
-
-      if (new URL(request.url).pathname === runnerReadTokenPath) {
-        try {
-          return await forwardRunnerReadToken(request, dependencies);
-        } catch {
-          return new Response(null, { status: 503 });
-        }
-      }
-
-      if (new URL(request.url).pathname === runnerProgressPath) {
-        try {
-          return await forwardRunnerProgress(request, dependencies);
-        } catch {
-          return new Response(null, { status: 503 });
-        }
-      }
-
-      const eventName = request.headers.get('x-github-event');
-      if (!supportedEvents.includes(eventName as (typeof supportedEvents)[number])) {
-        await Effect.runPromise(
-          recordOperationalLog(dependencies.log ?? createCloudflareOperationalLog(), {
-            phase: 'ingress',
-            outcome: 'ignored',
-            deliveryId: sanitizeOperationalLogIdentifier(
-              request.headers.get('x-github-delivery') ?? '',
-            ),
-            reason: 'unsupported_event',
-          }),
-        );
-        return new Response(null, { status: 204 });
-      }
-
-      try {
-        const result = await Effect.runPromise(processWebhook(request, dependencies));
-        return new Response(null, { status: result === 'ignored' ? 204 : 202 });
-      } catch (error) {
-        if (error instanceof InvalidWebhook) {
-          await Effect.runPromise(
-            recordOperationalLog(dependencies.log ?? createCloudflareOperationalLog(), {
-              phase: 'ingress',
-              outcome: 'rejected',
-              reason: error.reason,
-            }),
-          );
-          return new Response(null, { status: 400 });
-        }
-
-        if (error instanceof CoreUnavailable) {
-          await Effect.runPromise(
-            recordOperationalLog(dependencies.log ?? createCloudflareOperationalLog(), {
-              phase: 'ingress',
-              outcome: 'retryable',
-              deliveryId: sanitizeOperationalLogIdentifier(error.deliveryId),
-              event: error.event,
-              reason: 'core_unavailable',
-            }),
-          );
-        }
-
-        if (error instanceof InvalidAdmissionConfiguration) {
-          return new Response(null, { status: 503 });
-        }
-
-        return new Response(null, { status: 503 });
-      }
-    },
-  };
-}

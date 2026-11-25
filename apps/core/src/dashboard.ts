@@ -221,6 +221,123 @@ export interface DashboardDependencies {
   readonly stateStore: ReviewPublicationStateStore;
 }
 
+export const getDashboardOverview = async (
+  store: ReviewPublicationStateStore,
+  now = nowIso(),
+): Promise<Response> => {
+  const since = isoFromMs(Date.parse(now) - DAY_MS);
+  const { counts, rows } = await store.getPublicOverview({ since, limit: DEFAULT_LIMIT });
+  const last = rows.at(-1);
+  return json({
+    generatedAt: now,
+    counts: {
+      queued: counts.queued,
+      claimed: counts.claimed,
+      publishedLast24h: counts.publishedLast24h,
+      failedLast24h: counts.failedLast24h,
+      cancelledLast24h: counts.cancelledLast24h,
+    },
+    cleanupAttention: counts.cleanupAttention,
+    tasks: rows.map((row) => projectPublicTask(row, now)),
+    nextCursor:
+      rows.length === DEFAULT_LIMIT && last !== undefined
+        ? encodeCursor('current', { status: 'all', cleanup: 'all' }, last)
+        : null,
+  });
+};
+
+export const listPublicJobs = async (
+  store: ReviewPublicationStateStore,
+  searchParams: URLSearchParams,
+  now = nowIso(),
+): Promise<Response> => {
+  const raw = {
+    ...(searchParams.has('status') ? { status: searchParams.get('status') } : {}),
+    ...(searchParams.has('cleanup') ? { cleanup: searchParams.get('cleanup') } : {}),
+    ...(searchParams.has('view') ? { view: searchParams.get('view') } : {}),
+    ...(searchParams.has('from') ? { from: searchParams.get('from') } : {}),
+    ...(searchParams.has('to') ? { to: searchParams.get('to') } : {}),
+    ...(searchParams.has('limit') ? { limit: Number(searchParams.get('limit')) } : {}),
+  };
+  const decoded = Schema.decodeUnknownOption(JobsQuerySchema)(raw);
+  if (Option.isNone(decoded)) return badRequest();
+  const query = decoded.value;
+  const filter: PublicRunFilter = {
+    status: query.status ?? 'all',
+    cleanup: query.cleanup ?? 'all',
+    ...(query.from === undefined ? {} : { from: new Date(query.from).toISOString() }),
+    ...(query.to === undefined ? {} : { to: new Date(query.to).toISOString() }),
+  };
+  const view = query.view ?? 'history';
+  const limit = Math.min(query.limit ?? DEFAULT_LIMIT, MAX_LIMIT);
+  const rawCursor = searchParams.get('cursor');
+  let cursor: PublicRunCursor | undefined;
+  if (rawCursor !== null) {
+    const parsed = decodeCursor(rawCursor);
+    if (parsed === undefined || !cursorMatchesScope(parsed, view, filter)) return badRequest();
+    cursor = cursorToRunCursor(parsed);
+  }
+  const rows = await store.listPublicRuns({
+    limit,
+    filter,
+    view,
+    ...(cursor === undefined ? {} : { cursor }),
+  });
+  const tasks = rows.map((row) => projectPublicTask(row, now));
+  const last = rows.at(-1);
+  return json({
+    generatedAt: now,
+    tasks,
+    nextCursor:
+      rows.length === limit && last !== undefined ? encodeCursor(view, filter, last) : null,
+  });
+};
+
+export const getPublicJobDetail = async (
+  store: ReviewPublicationStateStore,
+  rawRunId: string,
+  now = nowIso(),
+): Promise<Response> => {
+  let runId: string;
+  try {
+    runId = decodeURIComponent(rawRunId);
+  } catch {
+    return notFound();
+  }
+  if (runId.length === 0 || runId.includes('/')) return notFound();
+  const row = await store.getPublicRun(runId);
+  if (row === undefined) return notFound();
+  const parsedMilestones =
+    row.progressMilestones === null
+      ? Option.none()
+      : Schema.decodeUnknownOption(PublicMilestonesSchema)(row.progressMilestones);
+  const milestones = Option.isSome(parsedMilestones) ? parsedMilestones.value : [];
+  const usage =
+    row.modelUsage == null
+      ? null
+      : Option.getOrNull(
+          Schema.decodeUnknownOption(Schema.fromJsonString(ModelUsageSummary))(row.modelUsage),
+        );
+  return json({
+    generatedAt: now,
+    task: projectPublicTask(row, now),
+    usage,
+    efforts: {
+      selection: effortSelection(row.reviewConfiguration),
+      summary: usage?.efforts ?? null,
+    },
+    milestones,
+    processingMilestones: [
+      ...(row.resultReceivedAt === null
+        ? []
+        : [{ stage: 'received', startedAt: row.resultReceivedAt }]),
+      ...(row.publicationStartedAt === null
+        ? []
+        : [{ stage: 'publishing', startedAt: row.publicationStartedAt }]),
+    ],
+  });
+};
+
 export const handleDashboardRequest = async (
   request: Request,
   dependencies: DashboardDependencies,
@@ -228,114 +345,17 @@ export const handleDashboardRequest = async (
   if (request.method !== 'GET') return undefined;
   const url = new URL(request.url);
   const store = dependencies.stateStore;
-  const now = nowIso();
 
-  if (url.pathname === '/api/dashboard' || url.pathname === '/dashboard') {
-    const since = isoFromMs(Date.parse(now) - DAY_MS);
-    const { counts, rows } = await store.getPublicOverview({ since, limit: DEFAULT_LIMIT });
-    const last = rows.at(-1);
-    return json({
-      generatedAt: now,
-      counts: {
-        queued: counts.queued,
-        claimed: counts.claimed,
-        publishedLast24h: counts.publishedLast24h,
-        failedLast24h: counts.failedLast24h,
-        cancelledLast24h: counts.cancelledLast24h,
-      },
-      cleanupAttention: counts.cleanupAttention,
-      tasks: rows.map((row) => projectPublicTask(row, now)),
-      nextCursor:
-        rows.length === DEFAULT_LIMIT && last !== undefined
-          ? encodeCursor('current', { status: 'all', cleanup: 'all' }, last)
-          : null,
-    });
-  }
+  if (url.pathname === '/api/dashboard' || url.pathname === '/dashboard')
+    return getDashboardOverview(store);
 
-  if (url.pathname === '/api/jobs' || url.pathname === '/jobs') {
-    const raw = {
-      ...(url.searchParams.has('status') ? { status: url.searchParams.get('status') } : {}),
-      ...(url.searchParams.has('cleanup') ? { cleanup: url.searchParams.get('cleanup') } : {}),
-      ...(url.searchParams.has('view') ? { view: url.searchParams.get('view') } : {}),
-      ...(url.searchParams.has('from') ? { from: url.searchParams.get('from') } : {}),
-      ...(url.searchParams.has('to') ? { to: url.searchParams.get('to') } : {}),
-      ...(url.searchParams.has('limit') ? { limit: Number(url.searchParams.get('limit')) } : {}),
-    };
-    const decoded = Schema.decodeUnknownOption(JobsQuerySchema)(raw);
-    if (Option.isNone(decoded)) return badRequest();
-    const query = decoded.value;
-    const filter: PublicRunFilter = {
-      status: query.status ?? 'all',
-      cleanup: query.cleanup ?? 'all',
-      ...(query.from === undefined ? {} : { from: new Date(query.from).toISOString() }),
-      ...(query.to === undefined ? {} : { to: new Date(query.to).toISOString() }),
-    };
-    const view = query.view ?? 'history';
-    const limit = Math.min(query.limit ?? DEFAULT_LIMIT, MAX_LIMIT);
-    const rawCursor = url.searchParams.get('cursor');
-    let cursor: PublicRunCursor | undefined;
-    if (rawCursor !== null) {
-      const parsed = decodeCursor(rawCursor);
-      if (parsed === undefined || !cursorMatchesScope(parsed, view, filter)) return badRequest();
-      cursor = cursorToRunCursor(parsed);
-    }
-    const rows = await store.listPublicRuns({
-      limit,
-      filter,
-      view,
-      ...(cursor === undefined ? {} : { cursor }),
-    });
-    const tasks = rows.map((row) => projectPublicTask(row, now));
-    const last = rows.at(-1);
-    return json({
-      generatedAt: now,
-      tasks,
-      nextCursor:
-        rows.length === limit && last !== undefined ? encodeCursor(view, filter, last) : null,
-    });
-  }
+  if (url.pathname === '/api/jobs' || url.pathname === '/jobs')
+    return listPublicJobs(store, url.searchParams);
 
   const detailPrefix = '/api/jobs/';
   if (url.pathname.startsWith(detailPrefix) || url.pathname.startsWith('/jobs/')) {
     const prefix = url.pathname.startsWith(detailPrefix) ? detailPrefix : '/jobs/';
-    let runId: string;
-    try {
-      runId = decodeURIComponent(url.pathname.slice(prefix.length));
-    } catch {
-      return notFound();
-    }
-    if (runId.length === 0 || runId.includes('/')) return notFound();
-    const row = await store.getPublicRun(runId);
-    if (row === undefined) return notFound();
-    const parsedMilestones =
-      row.progressMilestones === null
-        ? Option.none()
-        : Schema.decodeUnknownOption(PublicMilestonesSchema)(row.progressMilestones);
-    const milestones = Option.isSome(parsedMilestones) ? parsedMilestones.value : [];
-    const usage =
-      row.modelUsage == null
-        ? null
-        : Option.getOrNull(
-            Schema.decodeUnknownOption(Schema.fromJsonString(ModelUsageSummary))(row.modelUsage),
-          );
-    return json({
-      generatedAt: now,
-      task: projectPublicTask(row, now),
-      usage,
-      efforts: {
-        selection: effortSelection(row.reviewConfiguration),
-        summary: usage?.efforts ?? null,
-      },
-      milestones,
-      processingMilestones: [
-        ...(row.resultReceivedAt === null
-          ? []
-          : [{ stage: 'received', startedAt: row.resultReceivedAt }]),
-        ...(row.publicationStartedAt === null
-          ? []
-          : [{ stage: 'publishing', startedAt: row.publicationStartedAt }]),
-      ],
-    });
+    return getPublicJobDetail(store, url.pathname.slice(prefix.length));
   }
 
   return undefined;

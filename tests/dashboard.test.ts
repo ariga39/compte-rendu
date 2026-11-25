@@ -1,9 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import {
-  createCoreWorker,
-  runScheduledMetadataRefresh,
-  type CoreWorkerEnv,
-} from '../apps/core/src/core-worker';
+import { runScheduledMetadataRefresh, type CoreWorkerEnv } from '../apps/core/src/core-worker';
+import { createCoreWorker } from './support/core-http-adapter';
 import {
   createD1ReviewStateStore,
   createGitHubPublicationAdapter,
@@ -14,7 +11,8 @@ import { GitHubRequestError } from '../apps/core/src/github-review-adapter';
 import { createGitHubAppTokenProvider } from '../apps/core/src/github-app-token';
 import { refreshRepositoryMetadata } from '../apps/core/src/dashboard';
 import type { OperationalLogEvent } from '../packages/contracts/src';
-import { createIngressWorker } from '../apps/ingress/src/index';
+import { handleGitHubWebhook } from '../apps/ingress/src/index';
+import { createApplication } from '../apps/dashboard/src/lib/server/application';
 import { SqliteD1Database } from './support/d1-database';
 
 const coreEnv = (database: SqliteD1Database): CoreWorkerEnv => ({
@@ -22,6 +20,12 @@ const coreEnv = (database: SqliteD1Database): CoreWorkerEnv => ({
   GITHUB_APP_ID: '1',
   GITHUB_APP_PRIVATE_KEY: 'test-private-key',
   RUNNER_AUTH_TOKEN: 'test-runner-token',
+});
+
+const applicationEnv = (database: SqliteD1Database) => ({
+  ...coreEnv(database),
+  WEBHOOK_SECRET: 'webhook-secret',
+  ALLOWED_INSTALLATION_IDS: '[7]',
 });
 
 const job = (overrides: Record<string, unknown> = {}) => ({
@@ -624,18 +628,13 @@ describe('public dashboard reads are DB-only', () => {
     });
     expect(review.kind).toBe('claimed');
     await verifyMetadata(store, 7, 300, 'public');
-    const ingress = createIngressWorker({
-      secret: 'webhook-secret',
-      crypto: globalThis.crypto,
-      allowedInstallationIds: '[7]',
-      core: createCoreWorker(coreEnv(database)),
-    });
-    const response = await ingress.fetch(new Request('https://ingress.test/api/jobs'));
+    const app = createApplication(applicationEnv(database));
+    const response = await app.fetch(new Request('https://ingress.test/api/jobs'));
     expect(response.status).toBe(200);
     const page = (await response.json()) as { tasks: unknown[] };
     expect(page.tasks).toHaveLength(1);
     expect(JSON.stringify(page)).not.toContain('repositoryFullName');
-    const rejected = await ingress.fetch(
+    const rejected = await app.fetch(
       new Request('https://ingress.test/api/jobs', { method: 'DELETE' }),
     );
     expect(rejected.status).toBe(405);
@@ -717,15 +716,12 @@ describe('public dashboard reads are DB-only', () => {
       attempt: 1,
       occurredAt: '2026-01-01T00:00:10.000Z',
     });
-    const ingress = createIngressWorker({
-      secret: 'webhook-secret',
-      crypto: globalThis.crypto,
-      allowedInstallationIds: '[7]',
-      runnerCallbackToken: 'progress-token',
-      core: createCoreWorker(coreEnv(database)),
+    const app = createApplication({
+      ...applicationEnv(database),
+      RUNNER_CALLBACK_TOKEN: 'progress-token',
     });
     const checkout = { stage: 'checkout', startedAt: '2026-01-01T00:00:11.000Z' };
-    const unauthorized = await ingress.fetch(
+    const unauthorized = await app.fetch(
       new Request('https://ingress.test/runner-progress', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -740,7 +736,7 @@ describe('public dashboard reads are DB-only', () => {
       }),
     );
     expect(unauthorized.status).toBe(401);
-    const forwarded = await ingress.fetch(
+    const forwarded = await app.fetch(
       new Request('https://ingress.test/runner-progress', {
         method: 'POST',
         headers: { authorization: 'Bearer progress-token', 'content-type': 'application/json' },
@@ -756,25 +752,21 @@ describe('public dashboard reads are DB-only', () => {
     );
     expect(forwarded.status).toBe(202);
     const detail = await asJson<{ task: { stage: string | null } }>(
-      await ingress.fetch(new Request(`https://ingress.test/api/jobs/${review.runId}`)),
+      await app.fetch(new Request(`https://ingress.test/api/jobs/${review.runId}`)),
     );
     expect(detail.task.stage).toBe('checkout');
 
     database.close();
   });
 
-  it('does not cache an unavailable Core binding on public reads', async () => {
-    const ingress = createIngressWorker({
-      secret: 'webhook-secret',
-      crypto: globalThis.crypto,
-      allowedInstallationIds: '[7]',
-      core: {
-        fetch: async () => {
-          throw new Error('unavailable');
-        },
+  it('does not cache an unavailable database on public reads', async () => {
+    const outage = {
+      prepare: () => {
+        throw new Error('database unavailable');
       },
-    });
-    const response = await ingress.fetch(new Request('https://ingress.test/api/dashboard'));
+    } as unknown as SqliteD1Database;
+    const app = createApplication(applicationEnv(outage));
+    const response = await app.fetch(new Request('https://ingress.test/api/dashboard'));
     expect(response.status).toBe(503);
     expect(response.headers.get('cache-control')).toBe('no-store');
     expect(await response.text()).toBe('');
@@ -979,7 +971,7 @@ describe('public dashboard reads are DB-only', () => {
     const send = async (event: string, value: unknown) => {
       const body = JSON.stringify(value);
       const signature = await sign(body);
-      return ingress.fetch(
+      return app.fetch(
         new Request('https://ingress.test/webhooks/github', {
           method: 'POST',
           headers: {
@@ -1002,16 +994,10 @@ describe('public dashboard reads are DB-only', () => {
       });
       await verifyMetadata(store, 7, repositoryId, 'public');
     }
-    const worker = createCoreWorker(coreEnv(database));
-    const ingress = createIngressWorker({
-      secret,
-      crypto: globalThis.crypto,
-      allowedInstallationIds: '[7]',
-      core: worker,
-    });
+    const app = createApplication(applicationEnv(database));
     const identityFor = async (runId: string) =>
       (
-        (await (await get(worker, `/api/jobs/${runId}`)).json()) as {
+        (await (await app.fetch(new Request(`https://ingress.test/api/jobs/${runId}`))).json()) as {
           task: { identity: { kind: string } };
         }
       ).task.identity.kind;
@@ -1331,18 +1317,21 @@ describe('public dashboard reads are DB-only', () => {
       );
       return Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
     };
-    const forwarded: Request[] = [];
-    const ingress = createIngressWorker({
-      secret,
-      crypto: globalThis.crypto,
-      allowedInstallationIds: '[7]',
-      core: {
-        fetch: async (request) => {
-          forwarded.push(request);
-          return new Response(null, { status: 202 });
-        },
-      },
-    });
+    const invalidated: unknown[] = [];
+    const ingress = {
+      fetch: (request: Request) =>
+        handleGitHubWebhook(request, {
+          secret,
+          crypto: globalThis.crypto,
+          allowedInstallationIds: '[7]',
+          core: {
+            submitReviewEvent: async () => 'accepted',
+            invalidateMetadata: async (event) => {
+              invalidated.push(event);
+            },
+          },
+        }),
+    };
     const send = async (event: string, value: unknown) => {
       const body = JSON.stringify(value);
       return ingress.fetch(
@@ -1372,7 +1361,7 @@ describe('public dashboard reads are DB-only', () => {
     for (const [event, value] of unhandled) {
       expect((await send(event, value)).status).toBe(204);
     }
-    expect(forwarded).toHaveLength(0);
+    expect(invalidated).toHaveLength(0);
 
     expect(
       (
@@ -1383,7 +1372,7 @@ describe('public dashboard reads are DB-only', () => {
         })
       ).status,
     ).toBe(202);
-    expect(forwarded).toHaveLength(1);
+    expect(invalidated).toHaveLength(1);
   });
 
   it('fails closed when metadata revocation storage errors', async () => {
@@ -1540,16 +1529,11 @@ describe('dashboard instance name', () => {
     'serves the Check name through ingress (%s)',
     async (name) => {
       const database = new SqliteD1Database();
-      const core = createCoreWorker({ ...coreEnv(database), GITHUB_CHECK_NAME: name });
-      const ingress = createIngressWorker({
-        core,
-        secret: 'test-secret',
-        crypto,
-        allowedInstallationIds: [],
+      const app = createApplication({
+        ...applicationEnv(database),
+        GITHUB_CHECK_NAME: name,
       });
-      const response = await ingress.fetch(
-        new Request('https://reviews.example/api/dashboard-config'),
-      );
+      const response = await app.fetch(new Request('https://reviews.example/api/dashboard-config'));
       expect(response.status).toBe(200);
       expect(await response.json()).toEqual({ name: name?.trim() || 'Compte-rendu review' });
       expect(response.headers.get('cache-control')).toBe('no-store');

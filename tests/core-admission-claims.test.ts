@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createRunner } from '../apps/runner/src/runner';
-import { createCoreWorker } from '../apps/core/src/core-worker';
+import { createCoreWorker } from './support/core-http-adapter';
 import { createD1ReviewStateStore } from '../apps/core/src/index';
 import type { ReviewEvent } from '../packages/contracts/src';
 import { SqliteD1Database } from './support/d1-database';

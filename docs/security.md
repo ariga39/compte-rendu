@@ -105,7 +105,8 @@ configured; they are not the product state or an authorization dependency.
 
 ## Source anchors
 
-- Ingress: `apps/ingress/src/`
+- Edge dispatch and Runner authentication: `apps/dashboard/src/lib/server/application.ts`
+- GitHub webhook ingress: `apps/ingress/src/`
 - Ownership, publication and projection: `apps/core/src/core-worker.ts`,
   `runner-protocol.ts`, `review-publication.ts`, `review-admission.ts`,
   `review-lifecycle-store.ts`, `check-run-store.ts`, `cancellation-store.ts`,
