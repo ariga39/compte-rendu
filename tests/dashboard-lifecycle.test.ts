@@ -162,6 +162,8 @@ it('projects an authenticated failed callback through a fresh dashboard worker',
         id: identity.jobId,
         runId: identity.runId,
         attempt: 1,
+        baseSha: '1'.repeat(40),
+        headSha: '2'.repeat(40),
         status: 'failed',
         stage: 'cleanup',
         sandbox: { cleanup: 'destroyed' },
@@ -271,7 +273,11 @@ it('records publication start and completion at their actual transitions', async
     expect(
       await coordinator.completeReview({
         runId: identity.runId,
-        output: '## Review: No actionable findings.',
+        output: {
+          version: 2,
+          decision: 'comment',
+          markdown: '## Review: No actionable findings.',
+        },
       }),
     ).toBe('completed');
     expect(await detail()).toMatchObject({

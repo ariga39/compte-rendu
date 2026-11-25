@@ -250,12 +250,7 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
     if (outcome.runnerJobId !== callback.id || outcome.runnerAttempt !== callback.attempt) {
       return new Response(null, { status: 409 });
     }
-    // New callbacks carry immutable SHAs. Older issued v2 archives may omit
-    // them, so absence remains compatible while a present value must match.
-    if (
-      (callback.baseSha !== undefined && outcome.baseSha !== callback.baseSha) ||
-      (callback.headSha !== undefined && outcome.headSha !== callback.headSha)
-    ) {
+    if (callback.baseSha !== outcome.baseSha || callback.headSha !== outcome.headSha) {
       return new Response(null, { status: 409 });
     }
     // A non-success result can never overwrite a completed review or a

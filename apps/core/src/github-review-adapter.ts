@@ -76,11 +76,6 @@ const expectedReviewState = (event: 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT') =
 const pageSize = 100;
 const maxReviewPages = 10;
 
-const CreatedReview = Schema.Struct({
-  id: Schema.Int,
-  body: Schema.NullOr(Schema.String),
-});
-
 const IssueComment = Schema.Struct({
   id: Schema.Int,
   body: Schema.NullOr(Schema.String),
@@ -608,13 +603,7 @@ export const createGitHubPublicationAdapter = (
           throw new ReviewConfirmationFailed('Review dismissal was not confirmed');
       }
     },
-    createReview: async ({
-      repositoryId,
-      pullRequestNumber,
-      installationId,
-      payload,
-      verifyPublication,
-    }) => {
+    createReview: async ({ repositoryId, pullRequestNumber, installationId, payload }) => {
       let attempt = 0;
       while (attempt < 2) {
         try {
@@ -630,14 +619,12 @@ export const createGitHubPublicationAdapter = (
             );
             return {
               kind: 'created',
-              review: verifyPublication
-                ? await confirmReview(
-                    value,
-                    { headSha: payload.commit_id, event: payload.event },
-                    false,
-                    await options.getReviewAuthorLogin?.(),
-                  )
-                : await Schema.decodeUnknownPromise(CreatedReview)(value),
+              review: await confirmReview(
+                value,
+                { headSha: payload.commit_id, event: payload.event },
+                false,
+                await options.getReviewAuthorLogin?.(),
+              ),
             };
           } catch (error) {
             if (error instanceof ReviewConfirmationFailed) throw error;

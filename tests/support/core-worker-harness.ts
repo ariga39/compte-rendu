@@ -60,6 +60,8 @@ export const successfulCallback = async (runId: string, id = 'runner-job-1', att
     id,
     runId,
     attempt,
+    baseSha: eligibleEvent.baseSha,
+    headSha: eligibleEvent.headSha,
     status: 'succeeded',
     stage: 'cleanup',
     sandbox: { cleanup: 'destroyed' },
@@ -69,7 +71,11 @@ export const successfulCallback = async (runId: string, id = 'runner-job-1', att
       submissionCompletedAt: '2026-09-01T00:00:02.000Z',
       cleanupCompletedAt: '2026-09-01T00:00:03.000Z',
     },
-    result: '## Review:\n\nNo defects found.\n',
+    result: {
+      version: 2,
+      decision: 'comment',
+      markdown: '## Review:\n\nNo defects found.\n',
+    },
   });
 
 export const failedCallback = async (
@@ -83,6 +89,8 @@ export const failedCallback = async (
     id,
     runId,
     attempt,
+    baseSha: eligibleEvent.baseSha,
+    headSha: eligibleEvent.headSha,
     status: 'failed',
     stage: 'agent',
     sandbox: { cleanup },
@@ -102,6 +110,8 @@ export const abortedCallback = async (
     id,
     runId,
     attempt,
+    baseSha: eligibleEvent.baseSha,
+    headSha: eligibleEvent.headSha,
     status: 'aborted',
     stage: 'cleanup',
     sandbox: { cleanup },

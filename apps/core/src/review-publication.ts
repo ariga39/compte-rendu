@@ -1,7 +1,7 @@
 import {
   GitHubSha,
   REVIEW_ATTEMPT_BUDGET_MS,
-  RunnerReviewResult,
+  StructuredReviewResult,
   type OperationalLog,
   type OperationalLogEvent,
   type PublicTaskFailure,
@@ -328,14 +328,14 @@ export const completeReviewEffect = Effect.fn('completeReview')(function* (
     return 'failed' as const;
   });
 
-  const decodedOutput = yield* Schema.decodeUnknownEffect(RunnerReviewResult)(input.output).pipe(
-    Effect.catch(() => Effect.succeed(undefined)),
-  );
+  const decodedOutput = yield* Schema.decodeUnknownEffect(StructuredReviewResult)(
+    input.output,
+  ).pipe(Effect.catch(() => Effect.succeed(undefined)));
   if (decodedOutput === undefined) {
     return yield* completionFailed('invalid_output');
   }
 
-  decision = typeof decodedOutput === 'string' ? undefined : decodedOutput.decision;
+  decision = decodedOutput.decision;
 
   if (
     github.loadReviewTarget === undefined ||
@@ -397,8 +397,8 @@ export const completeReviewEffect = Effect.fn('completeReview')(function* (
   const payload: ReviewPublicationPayload = formatReviewPublicationPayload({
     runId: input.runId,
     headSha: outcome.headSha,
-    markdown: typeof decodedOutput === 'string' ? decodedOutput : decodedOutput.markdown,
-    decision: typeof decodedOutput === 'string' ? 'comment' : decodedOutput.decision,
+    markdown: decodedOutput.markdown,
+    decision: decodedOutput.decision,
   });
 
   const marker = formatReviewPublicationMarker(input.runId);
@@ -486,7 +486,6 @@ export const completeReviewEffect = Effect.fn('completeReview')(function* (
         pullRequestNumber: outcome.pullRequestNumber,
         installationId: outcome.installationId,
         payload,
-        ...(typeof decodedOutput === 'string' ? {} : { verifyPublication: true }),
       }),
     catch: () => undefined,
   }).pipe(

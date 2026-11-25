@@ -42,8 +42,8 @@ callback contains the validated structured result, exact run/job/attempt, stage,
 timestamps and confirmed cleanup, plus only an evidence ID and status. Before
 publication Core stores the small authoritative attempt-specific record
 `reviews/<runId>/publications/<jobId>/<attempt>.json`; scheduled reconciliation uses
-that record for the D1-owned job and attempt, and falls back to the historical
-`reviews/<runId>` archive only when no small record exists. The attempt key is
+only that record for the D1-owned job and attempt. A successful callback requires
+immutable base/head SHAs and the structured review result. The attempt key is
 created once; a stale attempt or a duplicate callback cannot replace it. A
 failed necessary record write keeps the callback retryable rather than claiming
 publication that could never be recovered. Ingress authenticates and bounds the
@@ -65,10 +65,10 @@ the later upload. Historical `version: 1` inline archives remain readable by
 rather than a read gate.
 
 Publication and diagnostics share the `EVIDENCE_BUCKET` binding. Publication
-depends on it to create and later reconcile the small publication record (and,
-for legacy v1 runs, to read `reviews/<runId>`). A full bucket outage therefore
-makes the terminal callback retryable instead of silently claiming publication;
-a diagnostic-only upload failure does not affect an already persisted result.
+depends on it to create and later reconcile the small publication record. A full
+bucket outage therefore makes the terminal callback retryable instead of
+silently claiming publication; a diagnostic-only upload failure does not affect
+an already persisted result.
 Both new object layouts stay under the existing managed `reviews/` prefix, so
 the deployment's 90-day lifecycle rule covers them without another bucket
 configuration.
