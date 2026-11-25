@@ -1724,7 +1724,7 @@ it('keeps an unqualified rich source on its historical chat-only semantics', asy
   }
 });
 
-it('omits rich entries that advertise only retired protocols without defaulting them to Chat', async () => {
+it('omits retired-only rich entries for a source that negotiates profiles', async () => {
   const db = database();
   try {
     vi.stubGlobal('fetch', async () =>
@@ -1743,6 +1743,7 @@ it('omits rich entries that advertise only retired protocols without defaulting 
         prefix: 'p/',
         providerSlug: 'custom-review',
         credentialAlias: 'default',
+        profiles: ['chat', 'responses'],
       },
     ]);
     await catalog.refresh(10);
@@ -1759,6 +1760,84 @@ it('omits rich entries that advertise only retired protocols without defaulting 
     ]);
   } finally {
     db.close();
+  }
+});
+
+it('keeps real retired-only operator Chat entries for unqualified sources', async () => {
+  const entries = [
+    {
+      id: 'claude-haiku-5-5',
+      api: {
+        messages: {
+          base_url: 'https://opencode.ai/inference/go/anthropic/v1',
+          sdk: { aisdk: '@ai-sdk/anthropic', opencodeai: '@opencode/ai/providers/anthropic' },
+        },
+      },
+      capabilities: { tools: { supported: true } },
+      limit: { context: 1_000_000, output: 128_000 },
+      modalities: { input: ['text', 'image/png'], output: ['text'] },
+      type: 'chat',
+    },
+    {
+      id: 'gemini-4-argon',
+      api: {
+        'generate-content': {
+          base_url: 'https://opencode.ai/inference/go/google/v1',
+          sdk: { aisdk: '@ai-sdk/google' },
+        },
+      },
+      capabilities: { tools: { supported: true } },
+      limit: { context: 1_048_576, output: 65_536 },
+      type: 'chat',
+    },
+    {
+      id: 'no-tools',
+      api: { messages: {} },
+      recommended_api: null,
+      capabilities: { tools: { supported: false } },
+    },
+  ];
+  const source = (overrides: Record<string, unknown>) => ({
+    url: 'https://models.example/models',
+    prefix: 'p/',
+    providerSlug: 'custom-review',
+    credentialAlias: 'default',
+    ...overrides,
+  });
+  vi.stubGlobal('fetch', async () => Response.json({ data: entries }));
+
+  const unqualified = database();
+  try {
+    const catalog = createRelayCatalog(unqualified, [source({})]);
+    await catalog.refresh(10);
+    expect(await catalog.get()).toMatchObject({
+      routes: ['p/claude-haiku-5-5', 'p/gemini-4-argon'],
+      rejected: 0,
+      lastRefreshError: null,
+    });
+    expect(
+      unqualified.database
+        .prepare('SELECT route_id, profile FROM catalog_routes ORDER BY route_id')
+        .all(),
+    ).toEqual([
+      { route_id: 'p/claude-haiku-5-5', profile: 'chat' },
+      { route_id: 'p/gemini-4-argon', profile: 'chat' },
+    ]);
+  } finally {
+    unqualified.close();
+  }
+
+  const qualified = database();
+  try {
+    const catalog = createRelayCatalog(qualified, [source({ profiles: ['chat', 'responses'] })]);
+    await catalog.refresh(10);
+    expect(await catalog.get()).toMatchObject({
+      routes: [],
+      rejected: 0,
+      lastRefreshError: null,
+    });
+  } finally {
+    qualified.close();
   }
 });
 
@@ -1821,7 +1900,7 @@ it('treats a profile change for an existing route as an immutable conflict', asy
   }
 });
 
-it('retires a historical Messages route without blocking sibling discovery', async () => {
+it('retires historical Messages and Gemini routes without blocking sibling discovery', async () => {
   const db = database();
   const source = {
     url: 'https://models.example/v1/models',
@@ -1830,17 +1909,22 @@ it('retires a historical Messages route without blocking sibling discovery', asy
     credentialAlias: 'default',
   };
   try {
-    db.database
-      .prepare(
-        `INSERT INTO catalog_routes
-          (route_id, upstream_model, provider_slug, credential_alias, profile)
-         VALUES (?, ?, ?, ?, ?)`,
-      )
-      .run('go/historical', 'historical-model', 'custom-go', 'default', 'messages');
+    for (const row of [
+      ['go/historical', 'historical-model', 'messages'],
+      ['go/historical-gemini', 'historical-gemini-model', 'gemini'],
+    ] as const)
+      db.database
+        .prepare(
+          `INSERT INTO catalog_routes
+            (route_id, upstream_model, provider_slug, credential_alias, profile)
+           VALUES (?, ?, ?, ?, ?)`,
+        )
+        .run(row[0], row[1], 'custom-go', 'default', row[2]);
     vi.stubGlobal('fetch', async () =>
       Response.json({
         data: [
           { id: 'historical', api: { 'chat-completions': {} } },
+          { id: 'historical-gemini', api: { 'chat-completions': {} } },
           { id: 'sibling', api: { 'chat-completions': {} } },
         ],
       }),
@@ -1854,9 +1938,17 @@ it('retires a historical Messages route without blocking sibling discovery', asy
     });
     expect(
       db.database
-        .prepare('SELECT upstream_model, profile FROM catalog_routes WHERE route_id = ?')
-        .get('go/historical'),
-    ).toEqual({ upstream_model: 'historical-model', profile: 'messages' });
+        .prepare('SELECT route_id, upstream_model, profile FROM catalog_routes ORDER BY route_id')
+        .all(),
+    ).toEqual([
+      { route_id: 'go/historical', upstream_model: 'historical-model', profile: 'messages' },
+      {
+        route_id: 'go/historical-gemini',
+        upstream_model: 'historical-gemini-model',
+        profile: 'gemini',
+      },
+      { route_id: 'go/sibling', upstream_model: 'sibling', profile: 'chat' },
+    ]);
 
     await expect(
       createGrantControl(db).issueV2({
@@ -1875,21 +1967,31 @@ it('retires a historical Messages route without blocking sibling discovery', asy
         latestIssueDeadline: deadline(),
       }),
     ).resolves.toEqual({ kind: 'invalid' });
-    await expect(
-      createGrantControl(db).issueV2({
-        jobId: 'job-retired-v2',
-        snapshot: { routes: ['go/historical'] },
-        latestIssueDeadline: deadline(),
-      }),
-    ).resolves.toEqual({ kind: 'invalid' });
+    for (const route of ['go/historical', 'go/historical-gemini']) {
+      await expect(
+        createGrantControl(db).issueV2({
+          jobId: `job-retired-${route}`,
+          snapshot: { routes: [route] },
+          latestIssueDeadline: deadline(),
+        }),
+      ).resolves.toEqual({ kind: 'invalid' });
+    }
 
     await catalog.refresh(100);
     expect(await catalog.get()).toMatchObject({ routes: ['go/sibling'] });
     expect(
       db.database
-        .prepare('SELECT upstream_model, profile FROM catalog_routes WHERE route_id = ?')
-        .get('go/historical'),
-    ).toEqual({ upstream_model: 'historical-model', profile: 'messages' });
+        .prepare('SELECT route_id, upstream_model, profile FROM catalog_routes ORDER BY route_id')
+        .all(),
+    ).toEqual([
+      { route_id: 'go/historical', upstream_model: 'historical-model', profile: 'messages' },
+      {
+        route_id: 'go/historical-gemini',
+        upstream_model: 'historical-gemini-model',
+        profile: 'gemini',
+      },
+      { route_id: 'go/sibling', upstream_model: 'sibling', profile: 'chat' },
+    ]);
   } finally {
     db.close();
   }
