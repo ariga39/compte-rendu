@@ -539,3 +539,111 @@ it('returns the stored 503 when the model settings binding fails after catalog l
     db.close();
   }
 });
+
+it('loads and saves concurrency through Settings when the catalog is unavailable', async () => {
+  const db = new SqliteD1Database();
+  let catalogUnavailable = false;
+  const app = createApplication({
+    REVIEW_DB: db,
+    WEBHOOK_SECRET: 'test',
+    GITHUB_APP_ID: '1',
+    GITHUB_APP_PRIVATE_KEY: 'test',
+    ALLOWED_INSTALLATION_IDS: '[7]',
+    DASHBOARD_ORIGIN: origin,
+    DASHBOARD_GITHUB_CLIENT_ID: 'Iv23test',
+    DASHBOARD_GITHUB_CLIENT_SECRET: 'test-secret',
+    DASHBOARD_MODEL_EDITOR_IDS: '[42]',
+    INFERENCE_RELAY: {
+      catalog: async () => {
+        if (catalogUnavailable) throw new Error('relay unavailable');
+        return {
+          routes: ['model/a'],
+          efforts: { 'model/a': [{ name: 'high', controls: { reasoning_effort: 'high' } }] },
+          lastAttemptAt: '2026-11-25T00:00:00.000Z',
+          lastSuccessAt: '2026-11-25T00:00:00.000Z',
+          rejected: 0,
+          lastRefreshError: null,
+        };
+      },
+      refreshCatalog: async () => {},
+      issue: async () => ({ kind: 'invalid' as const }),
+      revoke: async () => ({ kind: 'revoked' as const }),
+      usage: async () => null,
+    },
+  });
+  stubGitHub(() => ({ id: 42, login: 'operator' }));
+  try {
+    const { cookie } = await signIn(app);
+    const request = (method: string, body?: unknown) =>
+      app.fetch(
+        new Request(origin + '/api/model-settings', {
+          method,
+          headers: { cookie, origin, 'content-type': 'application/json' },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        }),
+      );
+    expect(
+      (
+        await request('PUT', {
+          revision: 0,
+          selection: {
+            reviewers: ['model/a'],
+            synthesis: 'model/a',
+            efforts: { 'model/a': 'high' },
+          },
+          concurrency: 2,
+        })
+      ).status,
+    ).toBe(200);
+    const before = db.database
+      .prepare('SELECT selection, effort_snapshot FROM review_configuration WHERE id = 1')
+      .get() as { selection: string; effort_snapshot: string };
+
+    catalogUnavailable = true;
+    const loaded = await request('GET');
+    expect(loaded.status).toBe(200);
+    expect(await loaded.json()).toMatchObject({
+      configuration: {
+        revision: 1,
+        concurrency: 2,
+        selection: { reviewers: ['model/a'], synthesis: 'model/a' },
+      },
+      routes: [],
+      catalogUnavailable: true,
+      catalogRefreshFailed: false,
+    });
+
+    const saved = await request('PUT', { revision: 1, concurrency: 5 });
+    expect(saved.status).toBe(200);
+    expect(await saved.json()).toEqual({
+      revision: 2,
+      concurrency: 5,
+      selection: {
+        reviewers: ['model/a'],
+        synthesis: 'model/a',
+        efforts: { 'model/a': 'high' },
+      },
+    });
+    const after = db.database
+      .prepare(
+        'SELECT selection, effort_snapshot, runner_concurrency FROM review_configuration WHERE id = 1',
+      )
+      .get() as { selection: string; effort_snapshot: string; runner_concurrency: number };
+    expect(after.runner_concurrency).toBe(5);
+    expect(after.selection).toBe(before.selection);
+    expect(after.effort_snapshot).toBe(before.effort_snapshot);
+
+    // Normal model editing resumes once the catalog is reachable again.
+    catalogUnavailable = false;
+    expect(
+      (
+        await request('PUT', {
+          revision: 2,
+          selection: { reviewers: ['model/a'], synthesis: 'model/a' },
+        })
+      ).status,
+    ).toBe(200);
+  } finally {
+    db.close();
+  }
+});

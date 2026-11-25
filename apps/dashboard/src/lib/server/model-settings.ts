@@ -75,19 +75,26 @@ export function modelSettings(request: Request, env: ApplicationEnv): Effect.Eff
       requireOperator(request, env, 'This GitHub account is not authorized to edit review models.'),
     );
     if (operator instanceof Response) return operator;
-    unavailable = 'Could not load the model catalog.';
-    if (!env.INFERENCE_RELAY) return noStore(503, { error: unavailable });
     if (resetPath) return yield* resetReviewEffort(request, env.REVIEW_DB);
     if (request.method === 'PUT')
       return yield* applyReviewConfiguration(request, env.REVIEW_DB, env.INFERENCE_RELAY);
-    const { routes, efforts, lastAttemptAt, lastRefreshError } = yield* Effect.tryPromise(() =>
-      env.INFERENCE_RELAY!.catalog(),
-    );
+    // Catalog failure must not hide the saved configuration: concurrency uses
+    // the same revision CAS and does not need route or effort resolution.
+    const catalog =
+      env.INFERENCE_RELAY === undefined
+        ? undefined
+        : yield* Effect.tryPromise(() => env.INFERENCE_RELAY!.catalog()).pipe(
+            Effect.catch(() => Effect.succeed(undefined)),
+          );
+    const catalogUnavailable = catalog === undefined;
+    const routes: readonly string[] = catalog?.routes ?? [];
+    const efforts: Readonly<Record<string, readonly RouteEffortOption[]>> = catalog?.efforts ?? {};
+    const lastAttemptAt = catalog?.lastAttemptAt ?? null;
     const saved = yield* Effect.tryPromise(() => readSavedEfforts(env));
     const generations = new Map(saved.map((entry) => [entry.routeId, entry.generation]));
     let effortStates: readonly EffortRouteState[] = [];
     let effortStateUnavailable = false;
-    if (env.INFERENCE_RELAY.effortStates !== undefined) {
+    if (env.INFERENCE_RELAY?.effortStates !== undefined) {
       // A reset advances Core's generation without clearing the relay row.
       // A state from an older generation no longer applies to new requests.
       const states = yield* Effect.promise(() =>
@@ -107,11 +114,12 @@ export function modelSettings(request: Request, env: ApplicationEnv): Effect.Eff
       ? noStore(200, {
           configuration: yield* Effect.tryPromise(() => config.json()),
           routes,
-          efforts: (efforts ?? {}) satisfies Readonly<Record<string, readonly RouteEffortOption[]>>,
+          efforts,
           effortStates,
           effortStateUnavailable,
           effortDrift: catalogDrift(saved, efforts),
-          catalogRefreshFailed: lastRefreshError !== null,
+          catalogRefreshFailed: catalog !== undefined && catalog.lastRefreshError !== null,
+          catalogUnavailable,
           lastAttemptAt,
         })
       : config;

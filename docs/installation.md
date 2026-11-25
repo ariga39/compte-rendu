@@ -634,8 +634,20 @@ corepack pnpm dlx wrangler@4.124.0 d1 execute REVIEW_DB --remote \
   --command "SELECT revision, runner_concurrency FROM review_configuration WHERE id = 1;"
 ```
 
-Then [drain](operations.md#drain-before-maintenance), remove
-`RUNNER_SETTINGS_FILE` from the Runner unit, and start the upgraded Runner.
+Then upgrade in this order. An old Runner remains compatible with the new
+Worker, but a new Runner must not probe an old Worker.
+
+1. Deploy the new Worker (Core and Dashboard) with migration `0020` applied.
+2. Verify `probeOnly` before starting the new Runner. Send one
+   `POST /runner-claim` with the Runner callback bearer and body
+   `{"probeOnly":true}`. Expect `204` and no queued review acquiring a
+   `runner_job_id`. A `200` with a job body means the old Worker is still serving
+   that route and interpreted the probe as a normal claim; keep the old Runner
+   running, finish the Worker rollout, and do not start the new Runner yet.
+3. [Drain](operations.md#drain-before-maintenance) the old Runner.
+4. Remove `RUNNER_SETTINGS_FILE` from the Runner unit and start the upgraded
+   Runner.
+
 Do not change model rosters or thinking efforts as part of this seed.
 
 ### KVM permissions and the persistent Runner service
