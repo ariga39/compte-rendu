@@ -234,6 +234,7 @@ export const withAutoClaim = (
       callbackUrl: options.callbackUrl ?? 'https://ingress.test/runner-callback',
       callbackToken: options.callbackToken ?? 'callback-token',
       progressFetch: options.progressFetch ?? (async () => new Response(null, { status: 202 })),
+      evidenceFetch: options.evidenceFetch ?? (async () => new Response(null, { status: 202 })),
       callbackFetch:
         options.callbackFetch === undefined
           ? execution.callbackFetch
@@ -543,12 +544,15 @@ export const runAgentScenario = async (scenario: {
   create?: { readonly exitCode?: number; readonly timedOut?: boolean };
   sandboxRemovalFailure?: boolean;
   callbackRequests?: Request[];
+  evidenceRequests?: Request[];
   progressFetch?: typeof fetch;
   agentGate?: Promise<void>;
   onAgentStart?: () => void | Promise<void>;
   microsandbox?: boolean;
   onModelSecret?: (args: readonly string[]) => Promise<void>;
   callbackStatuses?: readonly number[];
+  callbackRetryDelaysMs?: readonly number[];
+  evidenceStatuses?: readonly number[];
   callbackHangs?: boolean;
   callbackThrows?: string;
   callbackTimeoutMs?: number;
@@ -619,6 +623,7 @@ export const runAgentScenario = async (scenario: {
       callbackUrl: 'https://ingress.test/runner-callback',
       callbackToken: 'callback-token',
       callbackTimeoutMs: scenario.callbackTimeoutMs,
+      callbackRetryDelaysMs: scenario.callbackRetryDelaysMs,
       callbackFetch: async (input: RequestInfo | URL, init?: RequestInit) => {
         const inputUrl =
           input instanceof Request ? input.url : input instanceof URL ? input.href : String(input);
@@ -637,6 +642,13 @@ export const runAgentScenario = async (scenario: {
           return new Promise<Response>(() => undefined);
         }
         const status = scenario.callbackStatuses?.[execution.callbackRequests.length - 1] ?? 202;
+        return new Response(null, { status });
+      },
+      evidenceFetch: async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = new Request(input, init);
+        scenario.evidenceRequests?.push(request);
+        const status =
+          scenario.evidenceStatuses?.[(scenario.evidenceRequests?.length ?? 1) - 1] ?? 202;
         return new Response(null, { status });
       },
       log:
@@ -752,15 +764,18 @@ export const runAgentScenario = async (scenario: {
   const terminalStartedAt = performance.now();
   const terminal = await execution.waitForTerminal(jobInput.id);
   const terminalDurationMs = performance.now() - terminalStartedAt;
+  await vi.waitFor(async () => {
+    const status = await runner.handle(
+      new Request('http://runner/maintenance', {
+        headers: { authorization: 'Bearer runner-test-token' },
+      }),
+    );
+    expect(await status.json()).toMatchObject({ activeJobs: 0 });
+  });
+  if (scenario.evidenceRequests !== undefined) {
+    await vi.waitFor(() => expect(scenario.evidenceRequests!.length).toBeGreaterThan(0));
+  }
   if (scenario.onRunner === undefined) {
-    await vi.waitFor(async () => {
-      const status = await runner.handle(
-        new Request('http://runner/maintenance', {
-          headers: { authorization: 'Bearer runner-test-token' },
-        }),
-      );
-      expect(await status.json()).toMatchObject({ activeJobs: 0 });
-    });
     await runner.close();
   }
   const terminalState = terminal.terminal;

@@ -960,25 +960,27 @@ describe('Runner multi-model review', () => {
 
     expect(result.callbacks).toHaveLength(1);
     const callback = (await result.callbacks[0]!.json()) as {
+      version: number;
       status: string;
       result: unknown;
-      evidence: { manifest: { content: string } };
+      evidence: { id: string; status: string };
     };
-    expect(callback.status).toBe('succeeded');
+    expect(callback).toMatchObject({
+      version: 2,
+      status: 'succeeded',
+      evidence: { id: result.terminal.evidenceId, status: 'complete' },
+    });
     expect(callback.result).toEqual({
       version: 2,
       decision: 'request_changes',
       markdown: synthesisMarkdown,
     });
-    const callbackManifest = JSON.parse(
-      Buffer.from(callback.evidence.manifest.content, 'base64').toString('utf8'),
-    );
-    expect(callbackManifest.multiReview.reviewers).toHaveLength(2);
-    expect(callbackManifest.multiReview.synthesis).toMatchObject({
+    expect(result.manifest.multiReview.reviewers).toHaveLength(2);
+    expect(result.manifest.multiReview.synthesis).toMatchObject({
       decision: 'request_changes',
       markdown: synthesisMarkdown,
     });
-    expect(callbackManifest.sessionIds).toEqual([rootSession]);
+    expect(result.manifest.sessionIds).toEqual([rootSession]);
 
     for (const child of ['ses_multi_child_a', 'ses_multi_child_b']) {
       const exported = result.childExports[child] as {

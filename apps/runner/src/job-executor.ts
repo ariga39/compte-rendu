@@ -26,6 +26,7 @@ import { currentEpochMillis, currentIso } from './runner-clock.js';
 import {
   archiveEvidence,
   createCallbackSender,
+  createEvidenceUploader,
   evidenceFiles,
   redactEvidenceTextFiles,
   secureEvidenceTree,
@@ -146,6 +147,10 @@ export interface JobExecutorDependencies {
   readonly callbackToken?: string | undefined;
   readonly callbackFetch: typeof fetch;
   readonly callbackTimeoutMs: number;
+  readonly callbackRetryDelaysMs?: readonly number[] | undefined;
+  readonly evidenceUrl?: string | undefined;
+  readonly evidenceFetch: typeof fetch;
+  readonly evidenceTimeoutMs: number;
   readonly progressFetch: typeof fetch;
   readonly grants: GrantRevoker;
   readonly llmServiceClient?: LlmServiceClient | undefined;
@@ -171,6 +176,10 @@ export const createJobExecutor = (deps: JobExecutorDependencies) => {
     callbackToken,
     callbackFetch,
     callbackTimeoutMs,
+    callbackRetryDelaysMs,
+    evidenceUrl,
+    evidenceFetch,
+    evidenceTimeoutMs,
     progressFetch,
     grants: grantRevoker,
     llmServiceClient,
@@ -247,7 +256,14 @@ export const createJobExecutor = (deps: JobExecutorDependencies) => {
     token: callbackToken,
     fetch: callbackFetch,
     timeoutMs: callbackTimeoutMs,
+    retryDelaysMs: callbackRetryDelaysMs,
     recordLog,
+  });
+  const sendEvidence = createEvidenceUploader({
+    url: evidenceUrl,
+    token: callbackToken,
+    fetch: evidenceFetch,
+    timeoutMs: evidenceTimeoutMs,
   });
 
   const recordCommand = async (
@@ -1532,10 +1548,9 @@ export const createJobExecutor = (deps: JobExecutorDependencies) => {
     update(job, {
       evidence: { id: evidenceId, status: evidenceComplete ? 'complete' : 'incomplete' },
     });
-    let callbackTooLarge = false;
     try {
       job.progress?.stop();
-      callbackTooLarge = await sendCallback({
+      await sendCallback({
         evidencePath,
         identity: { id: job.id, runId: job.input.runId, attempt: job.input.attempt },
         status: finalStatus,
@@ -1555,12 +1570,6 @@ export const createJobExecutor = (deps: JobExecutorDependencies) => {
       });
     } catch {
       // Callback serialization or transport failure must not discard local evidence.
-    }
-    if (callbackTooLarge) {
-      finalStatus = 'failed';
-      finalFailure = { reason: 'evidence' };
-      evidenceComplete = false;
-      update(job, { evidence: { id: evidenceId, status: 'incomplete' } });
     }
     update(
       job,
@@ -1590,6 +1599,23 @@ export const createJobExecutor = (deps: JobExecutorDependencies) => {
     }
     retire(job.handle);
     requestNextJob?.();
+    try {
+      // Diagnostics are independent after the terminal result is settled and
+      // the Job slot is released. Their size or transport never changes it.
+      await sendEvidence({
+        evidencePath,
+        identity: { id: job.id, runId: job.input.runId, attempt: job.input.attempt },
+        evidence: job.state.evidence,
+        sessionIds: job.sessionIds,
+        timestamps: {
+          executionStartedAt: job.executionStartedAt,
+          submissionCompletedAt: job.submissionCompletedAt,
+          cleanupCompletedAt: job.cleanupCompletedAt,
+        },
+      });
+    } catch {
+      // The complete local evidence directory remains available.
+    }
   };
 
   const execute = async (input: JobExecutionInput, handle: JobHandle) => {

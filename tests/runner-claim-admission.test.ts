@@ -432,72 +432,95 @@ describe('Runner Job HTTP interface', () => {
     }
   });
 
-  it('sends one named-field evidence callback after a successful Job', async () => {
+  it('sends one slim terminal callback and one private diagnostic upload after a successful Job', async () => {
     const callbackRequests: Request[] = [];
+    const evidenceRequests: Request[] = [];
     const result = await runAgentScenario({
       runId: 'run-callback-success',
       output: finalMarkdownJsonl(),
       callbackRequests,
+      evidenceRequests,
     });
 
     expect(result.terminal.status).toBe('succeeded');
     expect(callbackRequests).toHaveLength(1);
+    expect(evidenceRequests).toHaveLength(1);
     expect(callbackRequests[0]?.url).toBe('https://ingress.test/runner-callback');
     expect(callbackRequests[0]?.headers.get('authorization')).toBe('Bearer callback-token');
-    const callback = (await callbackRequests[0]?.json()) as {
+    expect(evidenceRequests[0]?.url).toBe('https://ingress.test/runner-evidence');
+    expect(evidenceRequests[0]?.headers.get('authorization')).toBe('Bearer callback-token');
+    const callback = (await callbackRequests[0]?.clone().json()) as {
+      version: number;
       evidence: Record<string, unknown>;
     };
-    expect(callback.evidence).toMatchObject({
-      id: result.terminal.evidenceId,
-      status: 'complete',
-      manifest: {
-        content: expect.any(String),
-        size: expect.any(Number),
-        sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
-      },
-      opencodeJsonl: {
-        content: expect.any(String),
-        size: expect.any(Number),
-        sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
-      },
-      opencodeStderr: {
-        content: expect.any(String),
-        size: expect.any(Number),
-        sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
-      },
-      validatedReview: {
-        content: expect.any(String),
-        size: expect.any(Number),
-        sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
-      },
-      opencodeSessionList: {
-        content: expect.any(String),
-        size: expect.any(Number),
-        sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
-      },
-      opencodeExport: {
-        sessionId: 'scenario-session',
-        content: {
+    expect(callback).toMatchObject({
+      version: 2,
+      evidence: { id: result.terminal.evidenceId, status: 'complete' },
+    });
+    expect(callback.evidence).not.toHaveProperty('manifest');
+    expect(callback.evidence).not.toHaveProperty('opencodeJsonl');
+    const upload = (await evidenceRequests[0]?.clone().json()) as {
+      version: number;
+      evidence: Record<string, unknown>;
+    };
+    expect(upload).toMatchObject({
+      version: 2,
+      evidence: {
+        id: result.terminal.evidenceId,
+        status: 'complete',
+        manifest: {
           content: expect.any(String),
           size: expect.any(Number),
           sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
         },
+        opencodeJsonl: {
+          content: expect.any(String),
+          size: expect.any(Number),
+          sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+        },
+        opencodeStderr: {
+          content: expect.any(String),
+          size: expect.any(Number),
+          sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+        },
+        validatedReview: {
+          content: expect.any(String),
+          size: expect.any(Number),
+          sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+        },
+        opencodeSessionList: {
+          content: expect.any(String),
+          size: expect.any(Number),
+          sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+        },
+        opencodeExport: {
+          sessionId: 'scenario-session',
+          content: {
+            content: expect.any(String),
+            size: expect.any(Number),
+            sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+          },
+        },
       },
     });
-    expect(callback.evidence).not.toHaveProperty('files');
+    expect(upload.evidence).not.toHaveProperty('files');
   });
 
-  it('makes one bounded immediate callback retry while retaining local evidence', async () => {
+  it('retries a transient callback failure with bounded backoff while retaining local evidence', async () => {
     const callbackRequests: Request[] = [];
     const result = await runAgentScenario({
       runId: 'run-callback-loss',
       output: finalMarkdownJsonl(),
       callbackRequests,
-      callbackStatuses: [503, 503],
+      callbackStatuses: [503, 429, 202],
+      callbackRetryDelaysMs: [0, 0, 0],
     });
 
     expect(result.terminal.status).toBe('succeeded');
-    expect(callbackRequests).toHaveLength(2);
+    expect(callbackRequests).toHaveLength(3);
+    expect(await callbackRequests[1]!.clone().text()).toBe(
+      await callbackRequests[0]!.clone().text(),
+    );
     await expect(
       readFile(
         join(sharedEvidenceRoot, result.terminal.evidenceId as string, 'manifest.json'),
@@ -515,169 +538,121 @@ describe('Runner Job HTTP interface', () => {
       callbackRequests,
       callbackHangs: true,
       callbackTimeoutMs: 5,
+      callbackRetryDelaysMs: [0, 0, 0, 0, 0],
     });
-    for (let attempt = 0; attempt < 50 && callbackRequests.length < 2; attempt += 1) {
+    for (let attempt = 0; attempt < 50 && callbackRequests.length < 5; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
 
     expect(result.terminal.status).toBe('succeeded');
-    expect(callbackRequests).toHaveLength(2);
-    expect(performance.now() - startedAt).toBeLessThan(500);
+    expect(callbackRequests).toHaveLength(5);
+    expect(performance.now() - startedAt).toBeLessThan(1000);
   });
 
-  it('reports oversized callback evidence as terminal incomplete without truncating local evidence', async () => {
+  it('keeps an oversized diagnostic artifact replayable without failing the verified result', async () => {
     const evidenceRoot = await mkdtemp(`${tmpdir()}/compte-rendu-oversized-callback-`);
     const callbackRequests: Request[] = [];
-    const baseSha = '1111111111111111111111111111111111111111';
-    const headSha = '2222222222222222222222222222222222222222';
-    const sessionExport = JSON.stringify({
-      info: { id: 'oversized-session' },
-      messages: [
-        { id: 'message-1', parts: [{ type: 'text', text: 'x'.repeat(25 * 1024 * 1024) }] },
-      ],
-    });
-    let runner: ReturnType<typeof createRunner> | undefined;
+    const evidenceRequests: Request[] = [];
+    const sessionExport = (() => {
+      const exported = JSON.parse(sessionExportJson('scenario-session')) as {
+        messages: unknown[];
+      };
+      exported.messages.unshift({
+        type: 'assistant',
+        id: 'preamble',
+        finish: 'stop',
+        content: [{ type: 'text', text: 'x'.repeat(25 * 1024 * 1024) }],
+      });
+      return JSON.stringify(exported);
+    })();
+    let restarted: ReturnType<typeof createRunner> | undefined;
     try {
-      runner = createRunner({
+      const result = await runAgentScenario({
+        runId: 'run-114-oversized-callback',
+        output: finalMarkdownJsonl(),
+        evidenceRoot,
+        callbackRequests,
+        evidenceRequests,
+        sessionExport,
+        callbackStatuses: [503, 503, 503, 503, 503],
+        callbackRetryDelaysMs: [0, 0, 0, 0, 0],
+      });
+      const evidenceId = result.terminal.evidenceId as string;
+      expect(result.terminal).toMatchObject({
+        status: 'succeeded',
+        sandbox: { cleanup: 'destroyed' },
+      });
+      expect(callbackRequests).toHaveLength(5);
+      expect(evidenceRequests).toHaveLength(1);
+      const callbackBody = await callbackRequests[0]!.clone().text();
+      const callback = JSON.parse(callbackBody) as {
+        version: number;
+        status: string;
+        evidence: Record<string, unknown>;
+        lifecycle?: unknown;
+      };
+      expect(callback).toMatchObject({
+        version: 2,
+        status: 'succeeded',
+        evidence: { id: evidenceId, status: 'complete' },
+        lifecycle: { stage: 'cleanup', sequence: 5 },
+      });
+      expect(callback.evidence).not.toHaveProperty('manifest');
+      expect(new TextEncoder().encode(callbackBody).byteLength).toBeLessThan(2048);
+      await expect(
+        readFile(join(evidenceRoot, evidenceId, 'opencode-export-scenario-session.json'), 'utf8'),
+      ).resolves.toBe(sessionExport);
+
+      const upload = (await evidenceRequests[0]!.clone().json()) as {
+        evidence: {
+          opencodeExport: { content: { truncated?: boolean; size: number } };
+        };
+      };
+      expect(upload.evidence.opencodeExport.content.truncated).toBe(true);
+      expect(upload.evidence.opencodeExport.content.size).toBeLessThan(
+        Buffer.byteLength(sessionExport),
+      );
+
+      const replayRequests: Request[] = [];
+      restarted = createRunner({
         authToken: 'runner-test-token',
         evidenceRoot,
+        claimUrl: '',
         callbackUrl: 'https://ingress.test/runner-callback',
         callbackToken: 'callback-token',
         callbackFetch: async (input, init) => {
-          callbackRequests.push(new Request(input, init));
-          return new Response(null, { status: 503 });
-        },
-        process: async (_command, args, options = {}) => {
-          if (args[0] === 'exec' && args.includes('--agent')) {
-            await writeFile(
-              options.stdoutFilePath!,
-              `${finalMarkdownJsonl(undefined, 'oversized-session')}\n`,
-              { mode: 0o600 },
-            );
-            await writeFile(options.stderrFilePath!, '', { mode: 0o600 });
-          }
-          if (args[0] === 'cp') {
-            const source = args[1];
-            const destination = args[2];
-            if (source.endsWith('opencode-export-oversized-session.json')) {
-              await writeFile(destination, sessionExport, { mode: 0o600 });
-            } else {
-              await mkdir(destination, { recursive: true, mode: 0o700 });
-              await writeFile(join(destination, 'opencode.db'), 'db', { mode: 0o600 });
-              await writeFile(join(destination, 'review.log'), 'log', { mode: 0o600 });
-            }
-          }
-          return {
-            exitCode: 0,
-            stdout: args.includes('rev-parse')
-              ? `${baseSha}\n${headSha}\n`
-              : args.includes('session')
-                ? '[{"id":"oversized-session"}]\n'
-                : args.includes('--agent')
-                  ? `${finalMarkdownJsonl(undefined, 'oversized-session')}\n`
-                  : '',
-            timedOut: false,
-            truncated: false,
-          };
+          replayRequests.push(new Request(input, init));
+          return new Response(null, { status: 202 });
         },
       });
-      try {
-        const submittedJob = {
-          ...runnerJobFields,
-          runId: 'run-114-oversized-callback',
-          attempt: 1,
-          repositoryUrl: 'https://github.com/acme/reviewed.git',
-          baseSha,
-          headSha,
-        };
-        runner.enqueue(submittedJob);
-        const id = submittedJob.id;
-        const terminal = await waitForTerminal(runner, id);
-        expect(terminal.status).toBe('failed');
-        await vi.waitFor(() => expect(callbackRequests).toHaveLength(2));
-        const callback = (await callbackRequests[0]?.clone().json()) as {
-          status: string;
-          failure?: { reason: string };
-          evidence: Record<string, unknown>;
-        };
-        expect(callback).toMatchObject({
-          status: 'failed',
-          failure: { reason: 'evidence' },
-          evidence: {
-            id: terminal.evidenceId,
-            status: 'incomplete',
-            manifest: { content: '', size: 0, sha256: expect.any(String) },
-            opencodeJsonl: { content: '', size: 0, sha256: expect.any(String) },
-            opencodeStderr: { content: '', size: 0, sha256: expect.any(String) },
-          },
-        });
-        expect(callback.evidence).not.toHaveProperty('opencodeExport');
-        // The bounded lifecycle snapshot is retained even when evidence exceeds the callback limit.
-        expect(callback).toMatchObject({ lifecycle: { stage: 'cleanup', sequence: 5 } });
-        expect(new TextEncoder().encode(JSON.stringify(callback)).byteLength).toBeLessThan(2048);
-        await expect(
-          readFile(
-            join(
-              evidenceRoot,
-              terminal.evidenceId as string,
-              'opencode-export-oversized-session.json',
-            ),
-            'utf8',
-          ),
-        ).resolves.toBe(sessionExport);
-        await runner.close();
-        const restarted = createRunner({
-          authToken: 'runner-test-token',
-          evidenceRoot,
-          claimUrl: '',
-          callbackUrl: 'https://ingress.test/runner-callback',
-          callbackToken: 'callback-token',
-          callbackFetch: async (input, init) => {
-            callbackRequests.push(new Request(input, init));
-            return new Response(null, { status: 202 });
-          },
-        });
-        const replay = () =>
-          restarted.handle(
-            new Request('http://runner/maintenance/replay-callback', {
-              method: 'POST',
-              headers: {
-                authorization: 'Bearer runner-test-token',
-                'content-type': 'application/json',
-              },
-              body: JSON.stringify({
-                evidenceId: terminal.evidenceId,
-                jobId: id,
-                runId: 'run-114-oversized-callback',
-                attempt: 1,
-                baseSha,
-                headSha,
-              }),
+      const replay = () =>
+        restarted!.handle(
+          new Request('http://runner/maintenance/replay-callback', {
+            method: 'POST',
+            headers: {
+              authorization: 'Bearer runner-test-token',
+              'content-type': 'application/json',
+            },
+            body: JSON.stringify({
+              evidenceId,
+              jobId: runnerJobFields.id,
+              runId: 'run-114-oversized-callback',
+              attempt: 1,
+              baseSha: result.manifest.baseSha,
+              headSha: result.manifest.headSha,
             }),
-          );
-        try {
-          const recovered = await replay();
-          expect(recovered.status).toBe(202);
-          expect(await recovered.json()).toEqual({ accepted: true });
-          expect(callbackRequests).toHaveLength(3);
-          expect(await callbackRequests[2]!.text()).toBe(await callbackRequests[0]!.text());
-          await writeFile(join(evidenceRoot, terminal.evidenceId as string, 'manifest.json'), '{}');
-          expect((await replay()).status).toBe(409);
-          expect(callbackRequests).toHaveLength(3);
-        } finally {
-          await restarted.close();
-        }
-      } finally {
-        await runner.handle(
-          new Request(`http://runner/jobs/${runnerJobFields.id}`, {
-            method: 'DELETE',
-            headers: { authorization: 'Bearer runner-test-token' },
           }),
         );
-        await runner.close();
-      }
+      const recovered = await replay();
+      expect(recovered.status).toBe(202);
+      expect(await recovered.json()).toEqual({ accepted: true });
+      expect(replayRequests).toHaveLength(1);
+      expect(await replayRequests[0]!.clone().text()).toBe(callbackBody);
+      await writeFile(join(evidenceRoot, evidenceId, 'manifest.json'), '{}');
+      expect((await replay()).status).toBe(409);
+      expect(replayRequests).toHaveLength(1);
     } finally {
-      await runner?.close();
+      await restarted?.close();
       await rm(evidenceRoot, { recursive: true, force: true });
     }
   });
@@ -5954,7 +5929,7 @@ describe('Runner concurrency', () => {
     }
   });
 
-  it('keeps an oversized-callback job occupying its slot until callback transport completes', async () => {
+  it('keeps a terminal Job occupying its slot until callback transport completes', async () => {
     const evidenceRoot = await mkdtemp(
       join(tmpdir(), 'compte-rendu-runner-oversized-concurrency-'),
     );
@@ -5963,17 +5938,18 @@ describe('Runner concurrency', () => {
     const jobC = independentJob(44, 'run-oversized-c');
     const jobD = independentJob(45, 'run-oversized-d');
     const sandboxA = `compte-rendu-${jobA.id}`;
-    const bigExport = JSON.stringify({
-      info: { id: 'oversized-session', outcome: 'succeeded' },
-      messages: [
-        {
-          type: 'assistant',
-          finish: 'stop',
-          parts: [{ type: 'text', text: 'x'.repeat(25 * 1024 * 1024) }],
-        },
-        { type: 'idle', outcome: 'succeeded' },
-      ],
-    });
+    const bigExport = (() => {
+      const exported = JSON.parse(sessionExportJson('oversized-session')) as {
+        messages: unknown[];
+      };
+      exported.messages.unshift({
+        type: 'assistant',
+        id: 'preamble',
+        finish: 'stop',
+        content: [{ type: 'text', text: 'x'.repeat(25 * 1024 * 1024) }],
+      });
+      return JSON.stringify(exported);
+    })();
     let callbacks = 0;
     let firstCallbackStarted!: () => void;
     const firstCallbackObserved = new Promise<void>((resolve) => {
@@ -6076,7 +6052,7 @@ describe('Runner concurrency', () => {
       await Promise.race([
         firstCallbackObserved,
         new Promise((_resolve, reject) =>
-          setTimeout(() => reject(new Error('oversized callback was not reached')), 3_000),
+          setTimeout(() => reject(new Error('terminal callback was not reached')), 3_000),
         ),
       ]);
 
@@ -6095,7 +6071,7 @@ describe('Runner concurrency', () => {
       expect(dAgents).toBe(0);
 
       releaseA?.();
-      expect((await waitForTerminal(runner, jobA.id)).status).toBe('failed');
+      expect((await waitForTerminal(runner, jobA.id)).status).toBe('succeeded');
       await dAgentObserved;
 
       releaseC?.();

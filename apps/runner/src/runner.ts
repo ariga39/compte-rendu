@@ -46,6 +46,8 @@ const GRANT_REVOKE_ATTEMPTS = 2;
 const GRANT_REVOKE_BUDGET_MS = 15 * 1000;
 const MAX_REQUEST_BYTES = 64 * 1024;
 const CALLBACK_REQUEST_TIMEOUT_MS = 30 * 1000;
+const EVIDENCE_REQUEST_TIMEOUT_MS = 30 * 1000;
+const DEFAULT_CALLBACK_RETRY_DELAYS_MS = [0, 2_000, 5_000, 15_000, 30_000] as const;
 const CLAIM_REQUEST_TIMEOUT_MS = 30 * 1000;
 const DEFAULT_CONCURRENCY = 1;
 const RUNNER_INSTANCE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -98,6 +100,10 @@ export interface RunnerOptions {
   readonly callbackUrl?: string;
   readonly callbackToken?: string;
   readonly callbackFetch?: typeof fetch;
+  /** Transport for the independent private diagnostic upload; defaults to callbackFetch. */
+  readonly evidenceFetch?: typeof fetch;
+  readonly evidenceTimeoutMs?: number;
+  readonly callbackRetryDelaysMs?: readonly number[];
   readonly progressFetch?: typeof fetch;
   /** Fetch for the authenticated read-token refresh; defaults to callbackFetch. */
   readonly readTokenFetch?: typeof fetch;
@@ -253,8 +259,21 @@ export const createRunner = (options: RunnerOptions = {}) => {
   const callbackUrl = options.callbackUrl ?? process.env.RUNNER_CALLBACK_URL;
   const callbackToken = options.callbackToken ?? process.env.RUNNER_CALLBACK_TOKEN;
   const callbackFetch = options.callbackFetch ?? globalThis.fetch;
+  const evidenceFetch = options.evidenceFetch ?? callbackFetch;
   const progressFetch = options.progressFetch ?? globalThis.fetch;
   const callbackTimeoutMs = options.callbackTimeoutMs ?? CALLBACK_REQUEST_TIMEOUT_MS;
+  const evidenceTimeoutMs = options.evidenceTimeoutMs ?? EVIDENCE_REQUEST_TIMEOUT_MS;
+  const callbackRetryDelaysMs = options.callbackRetryDelaysMs ?? DEFAULT_CALLBACK_RETRY_DELAYS_MS;
+  const evidenceUrl =
+    callbackUrl === undefined
+      ? undefined
+      : (() => {
+          try {
+            return new URL('/runner-evidence', callbackUrl).toString();
+          } catch {
+            return undefined;
+          }
+        })();
   const postBounded = createBoundedDelivery({
     token: callbackToken,
     fetch: callbackFetch,
@@ -347,6 +366,10 @@ export const createRunner = (options: RunnerOptions = {}) => {
     callbackToken,
     callbackFetch,
     callbackTimeoutMs,
+    callbackRetryDelaysMs,
+    evidenceUrl,
+    evidenceFetch,
+    evidenceTimeoutMs,
     progressFetch,
     grants: grantRevoker,
     llmServiceClient,

@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -80,8 +79,6 @@ describe('Runner callback recovery', () => {
       }),
     );
 
-  const sha256 = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
-
   const prepareArchive = async () => {
     const evidenceRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-callback-recovery-'));
     const requests: Request[] = [];
@@ -90,7 +87,8 @@ describe('Runner callback recovery', () => {
       output: finalMarkdownJsonl(),
       evidenceRoot,
       callbackRequests: requests,
-      callbackStatuses: [503, 503],
+      callbackStatuses: [503, 503, 503, 503, 503],
+      callbackRetryDelaysMs: [0, 0, 0, 0, 0],
     });
     const evidenceId = result.terminal.evidenceId as string;
     return {
@@ -132,17 +130,91 @@ describe('Runner callback recovery', () => {
     await rename(next, path);
   };
 
-  const rewriteManifest = (callback: Record<string, any>, mutate: (manifest: any) => void) => {
-    const bytes = Buffer.from(callback.evidence.manifest.content, 'base64');
-    const manifest = JSON.parse(bytes.toString('utf8'));
+  const rewriteManifest = async (
+    evidenceRoot: string,
+    evidenceId: string,
+    mutate: (manifest: any) => void,
+  ) => {
+    const path = join(evidenceRoot, evidenceId, 'manifest.json');
+    const manifest = JSON.parse(await readFile(path, 'utf8'));
     mutate(manifest);
-    const next = Buffer.from(JSON.stringify(manifest));
-    callback.evidence.manifest = {
-      content: next.toString('base64'),
-      size: next.byteLength,
-      sha256: sha256(next),
-    };
+    const next = join(evidenceRoot, evidenceId, 'manifest.json.next');
+    await writeFile(next, JSON.stringify(manifest), { mode: 0o600 });
+    await rename(next, path);
   };
+
+  it('recovers a legacy inline callback from the local manifest without re-hashing attachments', async () => {
+    const evidenceRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-callback-legacy-'));
+    const evidenceId = '44444444-4444-4444-8444-444444444444';
+    const directory = join(evidenceRoot, evidenceId);
+    const result = {
+      version: 2 as const,
+      decision: 'comment' as const,
+      markdown: '## Review:\n\nNo findings.',
+    };
+    const manifest = {
+      jobId: runnerJobFields.id,
+      runId: 'run-callback-legacy',
+      attempt: 1,
+      evidenceId,
+      baseSha,
+      headSha,
+      terminal: { status: 'succeeded' },
+      evidence: { id: evidenceId, status: 'complete' },
+      complete: true,
+      cleanup: { status: 'destroyed' },
+      result,
+    };
+    const artifact = {
+      content: Buffer.from('intentionally-stale').toString('base64'),
+      size: 18,
+      sha256: '0'.repeat(64),
+    };
+    const legacyBody = JSON.stringify({
+      id: runnerJobFields.id,
+      runId: 'run-callback-legacy',
+      attempt: 1,
+      status: 'succeeded',
+      stage: 'cleanup',
+      sandbox: { cleanup: 'destroyed' },
+      evidence: {
+        id: evidenceId,
+        status: 'complete',
+        manifest: artifact,
+        opencodeJsonl: artifact,
+        opencodeStderr: artifact,
+        validatedReview: artifact,
+        opencodeSessionList: artifact,
+        opencodeExport: { sessionId: 'legacy-session', content: artifact },
+      },
+      timestamps: {
+        executionStartedAt: '2026-09-01T00:00:01.000Z',
+        submissionCompletedAt: '2026-09-01T00:00:02.000Z',
+        cleanupCompletedAt: '2026-09-01T00:00:03.000Z',
+      },
+      result,
+    });
+    try {
+      await mkdir(directory);
+      await writeFile(join(directory, 'manifest.json'), JSON.stringify(manifest), { mode: 0o600 });
+      await writeFile(join(directory, 'callback.json'), legacyBody, { mode: 0o600 });
+      const { runner, requests } = replayRunner(evidenceRoot);
+      try {
+        const response = await replay(
+          runner,
+          replayIdentity(evidenceId, { runId: 'run-callback-legacy' }),
+        );
+        expect(response.status).toBe(202);
+        expect(await response.json()).toEqual({ accepted: true });
+        expect(requests).toHaveLength(1);
+        expect(await requests[0]!.clone().text()).toBe(legacyBody);
+      } finally {
+        await runner.close();
+      }
+    } finally {
+      await rm(evidenceRoot, { recursive: true, force: true });
+    }
+  });
 
   it('rejects an unauthenticated callback replay before delivery', async () => {
     let deliveries = 0;
@@ -189,10 +261,8 @@ describe('Runner callback recovery', () => {
       }
       expect(requests).toHaveLength(0);
 
-      await rewriteCallback(archive.evidenceRoot, archive.evidenceId, (callback) => {
-        rewriteManifest(callback, (manifest) => {
-          manifest.baseSha = '3'.repeat(40);
-        });
+      await rewriteManifest(archive.evidenceRoot, archive.evidenceId, (manifest) => {
+        manifest.baseSha = '3'.repeat(40);
       });
       const manifestMismatch = await replay(runner, replayIdentity(archive.evidenceId));
       expect(manifestMismatch.status).toBe(409);
@@ -208,10 +278,8 @@ describe('Runner callback recovery', () => {
     const archive = await prepareArchive();
     const { runner, requests } = replayRunner(archive.evidenceRoot);
     try {
-      await rewriteCallback(archive.evidenceRoot, archive.evidenceId, (callback) => {
-        rewriteManifest(callback, (manifest) => {
-          manifest.cleanup.status = 'failed';
-        });
+      await rewriteManifest(archive.evidenceRoot, archive.evidenceId, (manifest) => {
+        manifest.cleanup.status = 'failed';
       });
       const response = await replay(runner, replayIdentity(archive.evidenceId));
       expect(response.status).toBe(409);
@@ -227,10 +295,8 @@ describe('Runner callback recovery', () => {
     const archive = await prepareArchive();
     const { runner, requests } = replayRunner(archive.evidenceRoot);
     try {
-      await rewriteCallback(archive.evidenceRoot, archive.evidenceId, (callback) => {
-        rewriteManifest(callback, (manifest) => {
-          manifest.result.decision = 'approve';
-        });
+      await rewriteManifest(archive.evidenceRoot, archive.evidenceId, (manifest) => {
+        manifest.result.decision = 'approve';
       });
       const response = await replay(runner, replayIdentity(archive.evidenceId));
       expect(response.status).toBe(409);
@@ -362,9 +428,9 @@ describe('Runner callback recovery', () => {
     const archive = await prepareArchive();
     await rewriteCallback(archive.evidenceRoot, archive.evidenceId, (callback) => {
       callback.attempt = 2;
-      rewriteManifest(callback, (manifest) => {
-        manifest.attempt = 2;
-      });
+    });
+    await rewriteManifest(archive.evidenceRoot, archive.evidenceId, (manifest) => {
+      manifest.attempt = 2;
     });
     const identity = replayIdentity(archive.evidenceId, { attempt: 2 });
     const cases = [
@@ -443,21 +509,20 @@ describe('Runner callback recovery', () => {
     }
   });
 
-  it('rejects tampered evidence artifacts before delivery', async () => {
+  it('does not re-validate local diagnostic attachments before delivery', async () => {
     const archive = await prepareArchive();
     const { runner, requests } = replayRunner(archive.evidenceRoot);
     try {
-      await rewriteCallback(archive.evidenceRoot, archive.evidenceId, (callback) => {
-        callback.evidence.opencodeJsonl.content = Buffer.from('tampered').toString('base64');
-      });
+      await writeFile(
+        join(archive.evidenceRoot, archive.evidenceId, 'opencode.jsonl'),
+        'locally-diverged-diagnostic',
+        { mode: 0o600 },
+      );
       const response = await replay(runner, replayIdentity(archive.evidenceId));
-      expect(response.status).toBe(409);
-      expect(await response.json()).toEqual({
-        accepted: false,
-        error: 'callback recovery rejected',
-        reason: 'integrity-mismatch',
-      });
-      expect(requests).toHaveLength(0);
+      expect(response.status).toBe(202);
+      expect(await response.json()).toEqual({ accepted: true });
+      expect(requests).toHaveLength(1);
+      expect(await requests[0]!.clone().text()).toBe(archive.retained);
     } finally {
       await runner.close();
       await rm(archive.evidenceRoot, { recursive: true, force: true });
@@ -473,7 +538,8 @@ describe('Runner callback recovery', () => {
         output: finalMarkdownJsonl(),
         evidenceRoot,
         callbackRequests: originalRequests,
-        callbackStatuses: [503, 503],
+        callbackStatuses: [503, 503, 503, 503, 503],
+        callbackRetryDelaysMs: [0, 0, 0, 0, 0],
       });
       const evidenceId = result.terminal.evidenceId as string;
       const retained = await readFile(join(evidenceRoot, evidenceId, 'callback.json'), 'utf8');
@@ -522,7 +588,8 @@ describe('Runner callback recovery', () => {
         output: finalMarkdownJsonl(),
         evidenceRoot,
         callbackRequests: originalRequests,
-        callbackStatuses: [503, 503],
+        callbackStatuses: [503, 503, 503, 503, 503],
+        callbackRetryDelaysMs: [0, 0, 0, 0, 0],
       });
       const evidenceId = result.terminal.evidenceId as string;
       const retained = await readFile(join(evidenceRoot, evidenceId, 'callback.json'), 'utf8');
@@ -731,21 +798,12 @@ describe('Runner confirmed cleanup recovery', () => {
         runId: 'msb-legacy-proof',
       });
       const evidenceId = failed.terminal.evidenceId as string;
-      const callbackPath = join(root, evidenceId, 'callback.json');
-      const callback = JSON.parse(await readFile(callbackPath, 'utf8'));
-      const manifest = JSON.parse(
-        Buffer.from(callback.evidence.manifest.content, 'base64').toString('utf8'),
-      );
+      const manifestPath = join(root, evidenceId, 'manifest.json');
+      const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
       const catalogIdentity = manifest.recoveryProof.catalogIdentity as string;
       delete manifest.recoveryProof;
       manifest.catalogIdentity = catalogIdentity;
-      const manifestBytes = Buffer.from(JSON.stringify(manifest));
-      callback.evidence.manifest = {
-        content: manifestBytes.toString('base64'),
-        size: manifestBytes.length,
-        sha256: createHash('sha256').update(manifestBytes).digest('hex'),
-      };
-      await writeFile(callbackPath, JSON.stringify(callback));
+      await writeFile(manifestPath, JSON.stringify(manifest), { mode: 0o600 });
 
       const reports: Request[] = [];
       vi.stubEnv('RUNNER_SANDBOX_RUNTIME', 'microsandbox');
@@ -1039,18 +1097,10 @@ describe('Runner confirmed cleanup recovery', () => {
     const evidenceId = scenario.terminal.evidenceId as string;
     const callbackPath = join(evidenceRoot, evidenceId, 'callback.json');
     if (failure === 'legacy-host-cleanup') {
-      const callback = JSON.parse(await readFile(callbackPath, 'utf8'));
-      const manifest = JSON.parse(
-        Buffer.from(callback.evidence.manifest.content, 'base64').toString('utf8'),
-      );
+      const manifestPath = join(evidenceRoot, evidenceId, 'manifest.json');
+      const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
       delete manifest.hostCleanupConfirmed;
-      const bytes = Buffer.from(JSON.stringify(manifest));
-      callback.evidence.manifest = {
-        content: bytes.toString('base64'),
-        size: bytes.length,
-        sha256: createHash('sha256').update(bytes).digest('hex'),
-      };
-      await writeFile(callbackPath, JSON.stringify(callback));
+      await writeFile(manifestPath, JSON.stringify(manifest), { mode: 0o600 });
     }
     const original = await readFile(callbackPath, 'utf8');
     const manifest = scenario.manifest;
@@ -1497,7 +1547,7 @@ describe('Runner backend outage recovery', () => {
       });
       backendUp = true;
       await vi.waitFor(() => expect(reports).toBe(1));
-      await vi.waitFor(() => expect(callbackAttempts).toBe(3));
+      await vi.waitFor(() => expect(callbackAttempts).toBe(2));
       await vi.waitFor(() =>
         expect(events).toContainEqual(
           expect.objectContaining({
@@ -1514,7 +1564,7 @@ describe('Runner backend outage recovery', () => {
       try {
         await new Promise((resolve) => setTimeout(resolve, 300));
         expect(reports).toBe(1);
-        expect(callbackAttempts).toBe(3);
+        expect(callbackAttempts).toBe(2);
       } finally {
         advanceRetryClock.mockRestore();
       }
@@ -2247,6 +2297,7 @@ describe('Runner backend outage recovery', () => {
         terminalAttempts += 1;
         if (terminalAttempts <= 2) return new Response(null, { status: 503 });
       }
+      const body = typeof init?.body === 'string' ? init.body : '';
       const response = await dispatch(
         new Request(
           recovery
@@ -2260,7 +2311,7 @@ describe('Runner backend outage recovery', () => {
                 ? { 'x-compte-rendu-runner-cleanup-recovery': 'verified' }
                 : { 'x-compte-rendu-runner-callback': 'verified' }),
             },
-            body: typeof init?.body === 'string' ? init.body : '',
+            body,
           },
         ),
       );
@@ -2301,6 +2352,7 @@ describe('Runner backend outage recovery', () => {
         },
         callbackUrl: 'https://ingress.test/runner-callback',
         callbackToken: 'callback-token',
+        callbackRetryDelaysMs: [0, 0, 0, 0, 0],
         callbackFetch,
         process: async (_command, args) => {
           if (args[0] === 'ls') return backendUp ? ok : authFailure;
