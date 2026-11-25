@@ -200,6 +200,39 @@ describe('Webhook ingress', () => {
     expect(forwarded[0]?.url).toBe('https://core.internal/runner-results');
   });
 
+  it('propagates Core callback status instead of mapping every rejection to 503', async () => {
+    const forwarded: Request[] = [];
+    const statuses = [409, 503];
+    const worker = createIngressWorker({
+      secret,
+      crypto: globalThis.crypto,
+      allowedInstallationIds: '[7]',
+      runnerCallbackToken: 'callback-token',
+      core: {
+        fetch: async (request) => {
+          forwarded.push(request.clone());
+          return new Response(null, { status: statuses[forwarded.length - 1] });
+        },
+      },
+    });
+
+    const send = () =>
+      worker.fetch(
+        new Request('https://ingress.internal/runner-callback', {
+          method: 'POST',
+          headers: {
+            authorization: 'Bearer callback-token',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ version: 2, runId: 'run-status' }),
+        }),
+      );
+
+    expect((await send()).status).toBe(409);
+    expect((await send()).status).toBe(503);
+    expect(forwarded).toHaveLength(2);
+  });
+
   it('forwards authenticated cleanup recovery to Core with the verified internal header', async () => {
     const forwarded: Request[] = [];
     const body = JSON.stringify({
@@ -348,6 +381,35 @@ describe('Webhook ingress', () => {
     expect(new URL(forwarded[0]!.url).pathname).toBe('/runner-evidence');
     expect(forwarded[0]!.headers.get('x-compte-rendu-runner-evidence')).toBe('verified');
     expect(await forwarded[0]!.text()).toBe(body);
+  });
+
+  it('propagates the private evidence upload status for authentication and diagnosis', async () => {
+    const forwarded: Request[] = [];
+    const worker = createIngressWorker({
+      secret,
+      crypto: globalThis.crypto,
+      runnerCallbackToken: 'callback-token',
+      core: {
+        fetch: async (request) => {
+          forwarded.push(request.clone());
+          return new Response(null, { status: 409 });
+        },
+      },
+    });
+
+    const response = await worker.fetch(
+      new Request('https://ingress.internal/runner-evidence', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer callback-token',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ version: 2, runId: 'run-1', id: 'job-1', attempt: 1 }),
+      }),
+    );
+
+    expect(response.status).toBe(409);
+    expect(forwarded).toHaveLength(1);
   });
 
   it('rejects an unauthenticated or oversized private evidence upload without contacting core', async () => {

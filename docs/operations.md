@@ -42,7 +42,10 @@ that record for the D1-owned job and attempt, and falls back to the historical
 `reviews/<runId>` archive only when no small record exists. The attempt key is
 created once; a stale attempt or a duplicate callback cannot replace it. A
 failed necessary record write keeps the callback retryable rather than claiming
-publication that could never be recovered.
+publication that could never be recovered. Ingress authenticates and bounds the
+forwarded callback but preserves Core's status code without its private body, so
+an operator-visible 409 stale attempt is not retried as a transient 503. The same
+status preservation applies to the single best-effort evidence upload.
 
 Runner uploads readable private diagnostics separately to the authenticated
 `POST /runner-evidence` route. Core bounds the request at 32 MiB, requires the
