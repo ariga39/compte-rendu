@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -1180,6 +1180,50 @@ describe('Runner transport diagnostics', () => {
       release();
       await runner.close();
       await rm(evidenceRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('Runner OpenCode config materialization', () => {
+  it('mounts a legal >128 KiB config read-only for microsandbox without adding it to the command', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cr-config-file-microsandbox-'));
+    const previousHome = process.env.MSB_HOME;
+    const routes = Array.from(
+      { length: 40 },
+      (_, index) => `config-${String(index).padStart(2, '0')}`,
+    );
+    try {
+      process.env.MSB_HOME = root;
+      await mkdir(join(root, 'db'));
+      await writeFile(join(root, 'db', 'msb.db'), '');
+      const result = await runAgentScenario({
+        microsandbox: true,
+        runId: 'config-file-microsandbox',
+        output: finalMarkdownJsonl(),
+        reviewConfiguration: {
+          revision: 1,
+          selection: { reviewers: routes, synthesis: routes[0]! },
+        },
+        relayControl: createRelayControl(),
+        evidenceRoot: root,
+        create: { exitCode: 1 },
+      });
+      expect(result.configContent!.length).toBeGreaterThan(128 * 1024);
+      expect(JSON.parse(result.configContent!)).toHaveProperty('providers');
+      const create = result.createArgs ?? [];
+      expect(create).toEqual(expect.arrayContaining(['OPENCODE_DISABLE_PROJECT_CONFIG=1']));
+      expect(create).not.toEqual(
+        expect.arrayContaining([expect.stringMatching(/^OPENCODE_CONFIG_CONTENT=/)]),
+      );
+      const configRoot = create
+        .find((value) => value.startsWith('XDG_CONFIG_HOME='))!
+        .slice('XDG_CONFIG_HOME='.length);
+      expect(create).toContain(`${configRoot}:${configRoot}:ro,uid=1000,gid=1000`);
+      expect(Math.max(...create.map((value) => value.length))).toBeLessThan(4096);
+    } finally {
+      if (previousHome === undefined) delete process.env.MSB_HOME;
+      else process.env.MSB_HOME = previousHome;
+      await rm(root, { recursive: true, force: true });
     }
   });
 });
