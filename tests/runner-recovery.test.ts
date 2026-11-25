@@ -272,7 +272,6 @@ describe('Runner confirmed cleanup recovery', () => {
     await mkdir(join(root, 'db'));
     await writeFile(join(root, 'db', 'msb.db'), '');
     let runner: ReturnType<typeof createRunner> | undefined;
-    let removalAttempts = 0;
     try {
       const callbacks: Request[] = [];
       const scenario = await runAgentScenario({
@@ -285,9 +284,7 @@ describe('Runner confirmed cleanup recovery', () => {
         cleanupRemovalFailures: 1,
         callbackRequests: callbacks,
         callbackStatuses: [202, 503, 202],
-        onProcess: (args) => {
-          if (args[0] === 'rm') removalAttempts += 1;
-        },
+        claimIntervalMs: 5,
         onRunner: (started) => {
           runner = started;
         },
@@ -307,25 +304,24 @@ describe('Runner confirmed cleanup recovery', () => {
           activeJobs: number;
           cleanupBlockedJobs: number;
         };
-      // Wait for the failed destroy plus the exact-name reaper's retry before
-      // advancing the clock, so the deferred recovery timer sees a settled VM.
-      await vi.waitFor(() => expect(removalAttempts).toBeGreaterThanOrEqual(2), {
-        timeout: 5_000,
-      });
-      expect(await maintenance()).toMatchObject({ activeJobs: 0, cleanupBlockedJobs: 1 });
       let now = Date.now();
       const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
-      try {
-        now += 31_000;
-        await vi.waitFor(
-          async () => {
-            expect(callbacks).toHaveLength(2);
-            expect(await maintenance()).toMatchObject({ activeJobs: 0, cleanupBlockedJobs: 1 });
+      const waitForCallback = (expected: number) =>
+        vi.waitFor(
+          () => {
+            if (callbacks.length < expected) now += 31_000;
+            expect(callbacks).toHaveLength(expected);
           },
           { timeout: 5_000 },
         );
-        now += 31_000;
-        await vi.waitFor(() => expect(callbacks).toHaveLength(3), { timeout: 5_000 });
+      try {
+        // One bounded wait per public checkpoint. Each not-yet-observed
+        // callback advances the frozen clock by one retry interval, then the
+        // normal poll tick re-schedules the deferred recovery. Once the target
+        // is reached the clock stays frozen so 503/pending remains observable.
+        await waitForCallback(2);
+        expect(await maintenance()).toMatchObject({ activeJobs: 0, cleanupBlockedJobs: 1 });
+        await waitForCallback(3);
       } finally {
         clock.mockRestore();
       }

@@ -655,6 +655,7 @@ export const runAgentScenario = async (scenario: {
   repositoryReadToken?: string;
   agentProcess?: (options: RunnerProcessOptions) => Promise<RunnerProcessResult>;
   onProcess?: (args: readonly string[], options: RunnerProcessOptions) => void | Promise<void>;
+  claimIntervalMs?: number;
   sandboxBackend?: SandboxBackend;
   logEvents?: unknown[];
   onRunner?: (runner: ReturnType<typeof createRunner>) => void;
@@ -713,6 +714,7 @@ export const runAgentScenario = async (scenario: {
       llmRelay: scenario.relayControl === undefined ? undefined : true,
       claimUrl: 'https://ingress.test/runner-claim',
       claimFetch: execution.claimFetch,
+      claimIntervalMs: scenario.claimIntervalMs,
       callbackUrl: 'https://ingress.test/runner-callback',
       callbackToken: 'callback-token',
       callbackTimeoutMs: scenario.callbackTimeoutMs,
