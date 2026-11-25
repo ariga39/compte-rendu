@@ -223,7 +223,11 @@ the switch.
 
 1. Drain every Runner instance that targets this Core, wait for
    `drained: true` on each, and confirm `activeJobs: 0`, no in-flight claim and no
-   unresolved cleanup obligation. Queued work stays in D1.
+   unresolved cleanup obligation. Check Core's dashboard for failed cleanup
+   still blocking a PR, including jobs the Runner lost across a restart. Resolve
+   these jobs with the old Runner while it can still read the legacy microsandbox
+   catalog identity. Keep the compatible versions active until the blockers
+   clear. Queued work stays in D1.
 2. Confirm there is no terminal outcome still awaiting delivery. If a retained
    successful result has not been accepted by Core, replay it with
    `POST /maintenance/replay-callback` **before** upgrading the Core Worker while
@@ -308,7 +312,7 @@ startup ownership scan.
 
 The explicit cleanup recovery accepts only a retained failed-cleanup job for the
 active sbx or microsandbox runtime where the request and evidence match the exact
-job/run/attempt/evidence/SHAs, host cleanup was confirmed, and both the retained
+job/run/attempt/evidence/SHAs, the backend confirmed its own host resources, and both the retained
 manifest and callback still record failed cleanup. On success it makes a bounded
 grant revocation for that job and sends one real slim `v2` `failed` callback with
 cleanup `destroyed`. Core preserves the original failure and usage and unlocks the
@@ -391,8 +395,8 @@ curl --fail-with-body --silent --show-error --config "$RUNNER_CURL_CONFIG" \
 
 This operation accepts retained failed sbx or microsandbox callbacks, including
 jobs cancelled after their Core run was superseded, with valid callback evidence
-and the runtime's host-cleanup confirmation (`hostCleanupConfirmed: true` for sbx
-and microsandbox). It verifies the immutable identity and exact absence, removes
+and the backend's own host-resource confirmation (`hostCleanupConfirmed: true`
+for sbx and microsandbox; Runner scratch roots are separate). It verifies the immutable identity and exact absence, removes
 only its scoped sbx network policies and secrets, and revokes its LLM grant when
 configured. It then sends one `v2` `failed` callback that keeps the original
 failure, usage, lifecycle, evidence and timestamps and changes only cleanup to
@@ -422,6 +426,36 @@ cleanup never becomes claimable through elapsed time; an unknown pending cleanup
 still follows the original 90-minute claim budget when a restart loses a staged
 claim.
 
+Runner scratch cleanup is reported separately from Sandbox destruction. When a
+Runner-created temporary directory cannot be removed after bounded `rm` retries,
+the Runner writes one local host warning per exact directory on stderr/systemd
+journal:
+
+```json
+{
+  "phase": "runner",
+  "outcome": "host-cleanup",
+  "jobId": "<job ID>",
+  "directory": "<exact Runner-created path>"
+}
+```
+
+These paths stay local and are not added to Core callbacks, D1, R2 or the
+injectable operational log. After the task is terminal and its Sandbox is already
+confirmed destroyed, an operator with host access may remove only those exact
+directories, for example `rm -rf -- '<exact path from the warning>'`. Do not glob,
+prune by prefix or remove a directory still used by a live job. This scratch
+failure does not block the same PR and needs no Sandbox recovery.
+
+If both the real Sandbox destruction and the scratch removal fail, the terminal
+state is `failed` with `sandbox.cleanup: failed`; the same PR remains blocked.
+Scratch cleanup alone never proves Sandbox absence. Recovery succeeds only when
+the configured backend can still prove its own exact VM ownership/absence and the
+retained manifest records the backend's `hostCleanupConfirmed: true`. Runner
+scratch failure must not turn that proof false, and unresolved backend proof must
+not be replaced by a guessed or fabricated value. Historical
+`hostCleanupConfirmed: false` remains rejected.
+
 The original callback and manifest stay byte-for-byte unchanged. There is no
 separate local recovery file or Core recovery report; Core's normal terminal
 callback path owns the state change. The original terminal failure and job
@@ -438,8 +472,10 @@ delivery was not confirmed; 503 means callback configuration is unavailable.
 Check the database-backed dashboard after recovery. Local files alone are not
 proof that Core accepted the callback.
 
-Older archives without host-cleanup confirmation, missing retained callbacks,
-failed host-directory removal and retired-backend ownership recovery are unsupported.
+Older archives without the backend's own host-resource confirmation, missing
+retained callbacks and retired-backend ownership recovery are unsupported.
+Failure to remove a Runner scratch directory does not invalidate that backend
+proof.
 Do not add confirmation fields to historical evidence or fabricate callbacks.
 Those cases require separately verified operator recovery; this endpoint is not
 a general orphan-Sandbox sweep. Local host paths are deliberately not loaded from

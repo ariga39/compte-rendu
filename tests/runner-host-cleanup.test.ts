@@ -59,6 +59,132 @@ const reviewProcess: RunnerProcess = async (_command, args, options = {}) => {
 };
 
 describe('Runner host cleanup finalization', () => {
+  it('recovers a dual Sandbox and scratch failure from backend proof without inventing state', async () => {
+    const scratchRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-host-cleanup-dual-'));
+    const evidenceRoot = join(scratchRoot, 'evidence');
+    const previousTmp = process.env.TMPDIR;
+    process.env.TMPDIR = scratchRoot;
+    let failDestroy = true;
+    let allowConfirm = false;
+    const callbacks: Request[] = [];
+    const runner = createRunner({
+      authToken: 'runner-test-token',
+      evidenceRoot,
+      claimIntervalMs: 1_000,
+      process: reviewProcess,
+      callbackFetch: async (input, init) => {
+        callbacks.push(new Request(input, init));
+        return new Response(null, { status: 202 });
+      },
+      sandboxBackend: {
+        kind: 'sbx',
+        async confirmCleanupAbsent() {
+          if (!allowConfirm) throw new Error('absence not confirmed');
+        },
+        createJob: (spec) => ({
+          metadata: {
+            created: true,
+            hostCleanupConfirmed: true,
+            id: spec.name,
+            name: spec.name,
+            runtime: 'sbx',
+            imageRef: 'review-image',
+            evidenceRoot: '/tmp/evidence',
+          },
+          setup: async () => undefined,
+          exec: (args, exec, options, diagnostic) =>
+            exec.run('sbx', ['exec', spec.name, ...args], options, diagnostic),
+          copyOut: (source, destination, exec, diagnostic, options) =>
+            exec.run('sbx', ['cp', `${spec.name}:${source}`, destination], options, diagnostic),
+          destroy: async () => {
+            if (failDestroy) throw new Error('sandbox destroy failed');
+          },
+        }),
+      },
+    });
+    try {
+      fsState.failHostCleanup = true;
+      runner.enqueue({
+        ...runnerJobFields,
+        id: 'runner-dual-failure',
+        runId: 'run-dual-failure',
+        attempt: 1,
+        repositoryUrl: 'https://github.com/acme/reviewed.git',
+        baseSha: '1'.repeat(40),
+        headSha: '2'.repeat(40),
+      });
+      const first = await waitForTerminal(runner, 'runner-dual-failure');
+      expect(first).toMatchObject({
+        status: 'failed',
+        failure: { reason: 'cleanup' },
+        sandbox: { cleanup: 'failed' },
+      });
+      const manifest = JSON.parse(
+        await readFile(join(evidenceRoot, first.evidenceId as string, 'manifest.json'), 'utf8'),
+      ) as {
+        jobId: string;
+        runId: string;
+        attempt: number;
+        baseSha: string;
+        headSha: string;
+        hostCleanupConfirmed: boolean;
+      };
+      expect(manifest.hostCleanupConfirmed).toBe(true);
+      // Let the automatic attempt fail and release its single-flight guard
+      // before exercising the explicit recovery path with backend proof.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      allowConfirm = true;
+      const recovery = await runner.handle(
+        new Request('http://runner/maintenance/recover-cleanup', {
+          method: 'POST',
+          headers: {
+            authorization: 'Bearer runner-test-token',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            evidenceId: first.evidenceId,
+            jobId: manifest.jobId,
+            runId: manifest.runId,
+            attempt: manifest.attempt,
+            baseSha: manifest.baseSha,
+            headSha: manifest.headSha,
+          }),
+        }),
+      );
+      expect(recovery.status).toBe(202);
+      expect(await callbacks.at(-1)!.json()).toMatchObject({
+        version: 2,
+        id: manifest.jobId,
+        status: 'failed',
+        sandbox: { cleanup: 'destroyed' },
+        failure: { reason: 'cleanup' },
+      });
+
+      failDestroy = false;
+      fsState.failHostCleanup = false;
+      runner.enqueue({
+        ...runnerJobFields,
+        id: 'runner-dual-failure-next',
+        runId: 'run-dual-failure-next',
+        attempt: 1,
+        repositoryUrl: 'https://github.com/acme/reviewed.git',
+        baseSha: '1'.repeat(40),
+        headSha: '2'.repeat(40),
+      });
+      expect(await waitForTerminal(runner, 'runner-dual-failure-next')).toMatchObject({
+        status: 'succeeded',
+        sandbox: { cleanup: 'destroyed' },
+      });
+    } finally {
+      fsState.failHostCleanup = false;
+      await runner.close();
+      if (previousTmp === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = previousTmp;
+      await rm(scratchRoot, { recursive: true, force: true });
+    }
+  });
+
   it('fails the task without claiming the destroyed Sandbox survived, so the next task is claimable', async () => {
     const scratchRoot = await mkdtemp(join(tmpdir(), 'compte-rendu-host-cleanup-'));
     const evidenceRoot = join(scratchRoot, 'evidence');
@@ -75,6 +201,7 @@ describe('Runner host cleanup finalization', () => {
       },
     });
     try {
+      fsState.failHostCleanup = true;
       runner.enqueue({
         ...runnerJobFields,
         id: 'runner-host-cleanup-first',
