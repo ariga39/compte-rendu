@@ -115,5 +115,8 @@ export function modelSettings(request: Request, env: ApplicationEnv): Effect.Eff
           lastAttemptAt,
         })
       : config;
-  }).pipe(Effect.catch(() => Effect.succeed(noStore(503, { error: unavailable }))));
+  }).pipe(
+    Effect.catch(() => Effect.succeed(noStore(503, { error: unavailable }))),
+    Effect.catchDefect(() => Effect.succeed(noStore(503, { error: unavailable }))),
+  );
 }

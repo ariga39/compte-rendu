@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createD1ReviewStateStore } from '../apps/core/src/index';
 import { createGitHubPublicationAdapter } from '../apps/core/src/github-review-adapter';
+import { createApplication } from '../apps/dashboard/src/lib/server/application';
 import type { OperationalLogEvent } from '../packages/contracts/src';
 import { SqliteD1Database } from './support/d1-database';
 import { claimRunnerJob } from './support/runner-claim';
@@ -88,6 +89,75 @@ describe('Core callbacks and publication', () => {
       finishPublication();
       expect((await winner).status).toBe(202);
       expect(checkUpdates).toEqual([{ status: 'success' }]);
+    } finally {
+      database.close();
+    }
+  });
+
+  it('rejects a failed callback when the notification claim errors, then retries once', async () => {
+    const database = new SqliteD1Database();
+    const stateStore = createD1ReviewStateStore(database);
+    const claimed = await stateStore.claimReview({
+      deliveryId: 'delivery-notification-claim-retry',
+      job: {
+        repositoryId: 11,
+        pullRequestNumber: 42,
+        installationId: 7,
+        baseSha: eligibleEvent.baseSha,
+        headSha: eligibleEvent.headSha,
+        trigger: 'automatic',
+      },
+      occurredAt: '2026-09-01T00:00:00.000Z',
+    });
+    if (claimed.kind !== 'claimed') throw new Error('callback run was not claimed');
+    await claimRunnerJob(stateStore, { runId: claimed.runId, jobId: 'runner-job-1' });
+    let failClaim = true;
+    const comments: string[] = [];
+    const app = createApplication(
+      {
+        ...coreEnv(database),
+        WEBHOOK_SECRET: 'unused',
+        ALLOWED_INSTALLATION_IDS: '[7]',
+        RUNNER_CALLBACK_TOKEN: 'runner-token',
+        EVIDENCE_BUCKET: { put: async () => undefined },
+      },
+      {
+        stateStore: {
+          ...stateStore,
+          claimRunPublication: async (input) => {
+            if (failClaim) {
+              failClaim = false;
+              throw new Error('notification claim unavailable');
+            }
+            return stateStore.claimRunPublication(input);
+          },
+        },
+        github: {
+          createIssueComment: async ({ body }) => {
+            comments.push(body);
+          },
+        },
+      },
+    );
+    const callback = await failedCallback(claimed.runId);
+    const deliver = () =>
+      app.fetch(
+        new Request('https://reviews.test/runner-callback', {
+          method: 'POST',
+          headers: {
+            authorization: 'Bearer runner-token',
+            'content-type': 'application/json',
+          },
+          body: callback,
+        }),
+      );
+    try {
+      const first = await deliver();
+      expect(first.status).toBe(503);
+      expect(comments).toEqual([]);
+      const second = await deliver();
+      expect(second.status).toBe(202);
+      expect(comments).toHaveLength(1);
     } finally {
       database.close();
     }

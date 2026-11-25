@@ -236,6 +236,76 @@ it('issues a versioned relay grant with only frozen client descriptors', async (
   }
 });
 
+it('returns the stored 503 when Runner LLM control reads malformed configuration', async () => {
+  const database = new SqliteD1Database();
+  const store = createD1ReviewStateStore(database, 'provider/original');
+  const issued: unknown[] = [];
+  const application = createApplication({
+    REVIEW_DB: database,
+    GITHUB_APP_ID: '1',
+    GITHUB_APP_PRIVATE_KEY: 'unused',
+    WEBHOOK_SECRET: 'unused',
+    ALLOWED_INSTALLATION_IDS: '[7]',
+    RUNNER_CALLBACK_TOKEN: 'runner',
+    INFERENCE_RELAY: {
+      catalog: async () => ({
+        routes: [],
+        lastAttemptAt: null,
+        lastSuccessAt: null,
+        rejected: 0,
+        lastRefreshError: null,
+      }),
+      refreshCatalog: async () => {},
+      issue: async (input) => {
+        issued.push(input);
+        return { kind: 'issued' as const, token: 'token', expiresAt: '2030-01-01T00:00:00Z' };
+      },
+      revoke: async () => ({ kind: 'revoked' as const }),
+      usage: async () => null,
+    },
+  });
+  try {
+    await store.claimReview({
+      deliveryId: 'issue-grant-malformed',
+      occurredAt: '2026-11-18T00:00:00Z',
+      job: {
+        repositoryId: 1,
+        installationId: 7,
+        pullRequestNumber: 1,
+        baseSha: 'a'.repeat(40),
+        headSha: 'b'.repeat(40),
+        trigger: 'automatic',
+      },
+    });
+    const claim = await store.claimNextJob({
+      jobId: 'job-malformed',
+      attempt: 1,
+      occurredAt: '2026-11-18T00:01:00Z',
+    });
+    if (claim?.kind !== 'claimed') throw new Error('expected a claim');
+    database.database.exec(
+      `UPDATE review_runs SET review_configuration = '{"selection":' WHERE run_id = '${claim.runId}'`,
+    );
+    const response = await application.fetch(
+      new Request('https://reviews.test/runner-llm/issue', {
+        method: 'POST',
+        headers: { authorization: 'Bearer runner' },
+        body: JSON.stringify({
+          runId: claim.runId,
+          jobId: 'job-malformed',
+          attempt: 1,
+          routes: ['provider/original'],
+        }),
+      }),
+    );
+    expect(response.status).toBe(503);
+    expect(response.body).toBeNull();
+    expect(issued).toEqual([]);
+  } finally {
+    database.close();
+  }
+});
+
 it('fails closed when the relay cannot issue version 2 grants', async () => {
   const database = new SqliteD1Database();
   const store = createD1ReviewStateStore(database, 'provider/original');

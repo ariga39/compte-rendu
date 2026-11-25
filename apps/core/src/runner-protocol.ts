@@ -196,13 +196,10 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
       if (winner === undefined) return undefined;
       // Only a durably failed run may claim failure-notification ownership.
       // claimRunPublication accepts status=failed without publishing, so this
-      // remains race-safe after the terminal write. A comment failure releases
-      // the claim for a later retry.
+      // remains race-safe after the terminal write. A claim failure stays
+      // retryable instead of ACKing a callback that never notified.
       const notificationClaimed = failed
-        ? yield* Effect.tryPromise({
-            try: () => stateStore.claimRunPublication({ runId, occurredAt }),
-            catch: () => false,
-          }).pipe(Effect.catch(() => Effect.succeed(false)))
+        ? yield* port(() => stateStore.claimRunPublication({ runId, occurredAt }))
         : false;
       const failureTransitioned = failed && notificationClaimed && outcome.status === 'scheduled';
       const supersessionRetained =

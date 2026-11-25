@@ -486,3 +486,42 @@ it('requires the current operator and same origin to cancel a queued review by i
     db.close();
   }
 });
+
+it('returns the stored 503 when the model settings binding fails after catalog load', async () => {
+  const db = new SqliteD1Database();
+  let reads = 0;
+  let armed = false;
+  const app = createApplication({
+    get REVIEW_DB() {
+      reads += 1;
+      if (armed && reads === 2) throw new Error('binding unavailable');
+      return db;
+    },
+    WEBHOOK_SECRET: 'test',
+    GITHUB_APP_ID: '1',
+    GITHUB_APP_PRIVATE_KEY: 'test',
+    ALLOWED_INSTALLATION_IDS: '[7]',
+    DASHBOARD_ORIGIN: origin,
+    DASHBOARD_GITHUB_CLIENT_ID: 'Iv23test',
+    DASHBOARD_GITHUB_CLIENT_SECRET: 'test-secret',
+    DASHBOARD_MODEL_EDITOR_IDS: '[42]',
+    INFERENCE_RELAY: relay,
+  });
+  stubGitHub(() => ({ id: 42 }));
+  try {
+    const { cookie } = await signIn(app);
+    armed = true;
+    reads = 0;
+    const response = await app.fetch(
+      new Request(origin + '/api/model-settings', { headers: { cookie } }),
+    );
+    expect(response.status).toBe(503);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(response.headers.get('referrer-policy')).toBe('no-referrer');
+    expect(await response.json()).toEqual({
+      error: 'Could not read the saved model configuration.',
+    });
+  } finally {
+    db.close();
+  }
+});
