@@ -943,9 +943,15 @@ describe('Core lifecycle telemetry and terminal classification', () => {
   it.each([
     ['cancellation wins at the failure-notification claim', 'cancel', 'cancelled', false, false],
     ['the post-write read fails after owning publication', 'owned', 'failed', true, true],
-    ['the post-write read fails without publication ownership', 'unowned', 'failed', false, false],
+    [
+      'the post-write read fails without publication ownership',
+      'unowned',
+      'scheduled',
+      false,
+      false,
+    ],
   ] as const)(
-    'handles invalid evidence when %s',
+    'handles publication failure when %s',
     async (_name, kind, expectedStatus, expectReaction, expectLifecycle) => {
       const database = new SqliteD1Database();
       const { fetcher, requests, waitUntilTasks } = capturePostHogTransport();
@@ -994,13 +1000,16 @@ describe('Core lifecycle telemetry and terminal classification', () => {
           : failReadAfterSchedulingWrite(state, kind);
       const worker = createCoreWorker(env, {
         stateStore,
-        github: { addReaction: async (input) => void reactions.push(input) },
+        github: {
+          addReaction: async (input) => void reactions.push(input),
+          loadReviewTarget: async () => ({ headSha: eligibleEvent.headSha }),
+          createReview: async () => {
+            throw new Error('GitHub publication unavailable');
+          },
+        },
       });
       try {
-        const callback = JSON.parse(await successfulCallback(runId)) as {
-          evidence: { manifest: { sha256: string } };
-        };
-        callback.evidence.manifest.sha256 = '0'.repeat(64);
+        const callback = await successfulCallback(runId);
         const response = await worker.fetch(
           new Request('https://core.internal/runner-results', {
             method: 'POST',
@@ -1008,12 +1017,12 @@ describe('Core lifecycle telemetry and terminal classification', () => {
               'x-compte-rendu-runner-callback': 'verified',
               'content-type': 'application/json',
             },
-            body: JSON.stringify(callback),
+            body: callback,
           }),
           env,
           { waitUntil: (task) => waitUntilTasks.push(task) },
         );
-        expect(response.status).toBe(202);
+        expect(response.status).toBe(expectedStatus === 'cancelled' ? 202 : 503);
         expect(await state.getRunOutcome(runId)).toMatchObject({ status: expectedStatus });
         await Promise.all(waitUntilTasks);
         expect(reactions).toEqual(

@@ -31,6 +31,41 @@ timestamps, bounded stderr metadata, and artifact presence/size/hash—not
 credentials, repository contents, review bodies, or raw model/session/tool
 output.
 
+## Publication and private diagnostics
+
+Core publishes from the authenticated terminal callback. A slim `version: 2`
+callback contains the validated structured result, exact run/job/attempt, stage,
+timestamps and confirmed cleanup, plus only an evidence ID and status. Before
+publication Core stores the small authoritative attempt-specific record
+`reviews/<runId>/publications/<jobId>/<attempt>.json`; scheduled reconciliation uses
+that record for the D1-owned job and attempt, and falls back to the historical
+`reviews/<runId>` archive only when no small record exists. The attempt key is
+created once; a stale attempt or a duplicate callback cannot replace it. A
+failed necessary record write keeps the callback retryable rather than claiming
+publication that could never be recovered.
+
+Runner uploads readable private diagnostics separately to the authenticated
+`POST /runner-evidence` route. Core bounds the request at 32 MiB, requires the
+exact D1 run/job/attempt owner, and writes an immutable content-addressed archive
+at `reviews/<runId>/diagnostics/<jobId>/<attempt>/<sha256>.json`. D1 records only the key
+chosen for the current owner, so a late old-attempt upload writes its own key
+and cannot replace a newer archive. This upload is best effort: missing, late,
+malformed, oversized or failed archives are reported by Runner but never change
+the review result or publication state. Terminal execution, submission and
+cleanup timestamps come from the authoritative callback and are never updated by
+the later upload. Historical `version: 1` inline archives remain readable by
+`pnpm diagnose`; per-artifact hashes are retained metadata rather than a read
+gate.
+
+Publication and diagnostics share the `EVIDENCE_BUCKET` binding. Publication
+depends on it to create and later reconcile the small publication record (and,
+for legacy v1 runs, to read `reviews/<runId>`). A full bucket outage therefore
+makes the terminal callback retryable instead of silently claiming publication;
+a diagnostic-only upload failure does not affect an already persisted result.
+Both new object layouts stay under the existing managed `reviews/` prefix, so
+the deployment's 90-day lifecycle rule covers them without another bucket
+configuration.
+
 ## Operator cancellation
 
 The per-instance numeric GitHub UID list in `DASHBOARD_MODEL_EDITOR_IDS` authorizes both model changes and review cancellation. The dashboard verifies the current account on every cancellation request.

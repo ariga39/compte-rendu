@@ -4,7 +4,7 @@ import {
   createIngressWorker as createIngressWorkerWithConfig,
   type IngressDependencies,
 } from '../apps/ingress/src/index';
-import { MAX_RUNNER_CALLBACK_BYTES } from '../packages/contracts/src';
+import { MAX_RUNNER_CALLBACK_BYTES, MAX_RUNNER_EVIDENCE_BYTES } from '../packages/contracts/src';
 import type { OperationalLogEvent } from '../packages/contracts/src';
 
 const secret = 'test-webhook-secret';
@@ -314,6 +314,70 @@ describe('Webhook ingress', () => {
     );
 
     expect(response.status).toBe(413);
+    expect(forwarded).toHaveLength(0);
+  });
+
+  it('forwards an authenticated private evidence upload without changing its body', async () => {
+    const forwarded: Request[] = [];
+    const worker = createIngressWorker({
+      secret,
+      crypto: globalThis.crypto,
+      runnerCallbackToken: 'callback-token',
+      core: {
+        fetch: async (request) => {
+          forwarded.push(request.clone());
+          return new Response(null, { status: 202 });
+        },
+      },
+    });
+    const body = JSON.stringify({ version: 2, runId: 'run-1', id: 'job-1', attempt: 1 });
+
+    const response = await worker.fetch(
+      new Request('https://ingress.internal/runner-evidence', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer callback-token',
+          'content-type': 'application/json',
+        },
+        body,
+      }),
+    );
+
+    expect(response.status).toBe(202);
+    expect(forwarded).toHaveLength(1);
+    expect(new URL(forwarded[0]!.url).pathname).toBe('/runner-evidence');
+    expect(forwarded[0]!.headers.get('x-compte-rendu-runner-evidence')).toBe('verified');
+    expect(await forwarded[0]!.text()).toBe(body);
+  });
+
+  it('rejects an unauthenticated or oversized private evidence upload without contacting core', async () => {
+    const forwarded: Request[] = [];
+    const worker = createIngressWorker({
+      secret,
+      crypto: globalThis.crypto,
+      runnerCallbackToken: 'callback-token',
+      core: {
+        fetch: async (request) => {
+          forwarded.push(request);
+          return new Response(null, { status: 202 });
+        },
+      },
+    });
+    const unauthenticated = await worker.fetch(
+      new Request('https://ingress.internal/runner-evidence', {
+        method: 'POST',
+        body: '{}',
+      }),
+    );
+    expect(unauthenticated.status).toBe(401);
+    const oversized = await worker.fetch(
+      new Request('https://ingress.internal/runner-evidence', {
+        method: 'POST',
+        headers: { authorization: 'Bearer callback-token' },
+        body: new Uint8Array(MAX_RUNNER_EVIDENCE_BYTES + 1),
+      }),
+    );
+    expect(oversized.status).toBe(413);
     expect(forwarded).toHaveLength(0);
   });
 

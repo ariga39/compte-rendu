@@ -211,13 +211,23 @@ const CompleteEvidence = Schema.Struct({
   opencodeSessionList: EvidenceField,
   opencodeExport: Schema.Struct({ sessionId: Identifier, content: EvidenceField }),
 });
-const R2Object = Schema.Struct({
+const R2ObjectV1 = Schema.Struct({
   version: Schema.Literal(1),
   runId: Identifier,
   jobId: Identifier,
   evidenceId: Identifier,
   evidence: Schema.Union([CompleteEvidence, IncompleteEvidence]),
 });
+const R2ObjectV2 = Schema.Struct({
+  version: Schema.Literal(2),
+  runId: Identifier,
+  jobId: Identifier,
+  attempt: Schema.Int,
+  evidenceId: Identifier,
+  evidence: Schema.Union([CompleteEvidence, IncompleteEvidence]),
+  timestamps: Schema.optional(Schema.Unknown),
+});
+const R2Object = Schema.Union([R2ObjectV1, R2ObjectV2]);
 
 const RunnerManifest = Schema.Struct({
   jobId: Identifier,
@@ -267,13 +277,6 @@ const decodeArtifact = (content: string) => decode(Schema.Uint8ArrayFromBase64, 
 const sha256Hex = async (bytes: Uint8Array) => {
   const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes as unknown as BufferSource);
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
-};
-
-const artifactMatchesMetadata = async (artifact: EvidenceFieldValue) => {
-  const bytes = decodeArtifact(artifact.content);
-  if (bytes === undefined || bytes.byteLength !== artifact.size) return false;
-  const sha256 = await sha256Hex(bytes);
-  return sha256 === artifact.sha256.toLowerCase();
 };
 
 const decodeJsonArtifact = <S extends Schema.ConstraintDecoder<unknown>>(
@@ -327,22 +330,9 @@ const workflowText = (output: string, runId: string): DiagnosticWorkflowSnapshot
 };
 
 const validatedEvidence = async (value: R2Value) => {
-  const fields: EvidenceFieldValue[] = [
-    value.evidence.manifest,
-    value.evidence.opencodeJsonl,
-    value.evidence.opencodeStderr,
-  ];
-  if (value.evidence.validatedReview !== undefined) fields.push(value.evidence.validatedReview);
-  if (value.evidence.opencodeSessionList !== undefined)
-    fields.push(value.evidence.opencodeSessionList);
-  if (value.evidence.opencodeExport !== undefined)
-    fields.push(value.evidence.opencodeExport.content);
-  if (
-    !(await Promise.all(fields.map(artifactMatchesMetadata)).then((results) =>
-      results.every(Boolean),
-    ))
-  )
-    return undefined;
+  // Historical and uploaded archives are read for diagnosis. Per-file hashes
+  // are retained metadata, not a read gate: a truncated or older artifact must
+  // still be inspectable.
   const manifest = decodeJsonArtifact(value.evidence.manifest, RunnerManifest);
   const sessionList =
     value.evidence.opencodeSessionList === undefined
@@ -366,8 +356,9 @@ const validatedEvidence = async (value: R2Value) => {
       (sessionList === undefined ||
         sessionExport === undefined ||
         value.evidence.validatedReview === undefined))
-  )
+  ) {
     return undefined;
+  }
   if (
     manifest.jobId !== value.jobId ||
     manifest.runId !== value.runId ||
@@ -383,8 +374,9 @@ const validatedEvidence = async (value: R2Value) => {
         sessionExport?.info.id !== value.evidence.opencodeExport.sessionId ||
         !sessionIds.includes(sessionExport?.info.id ?? '') ||
         value.evidence.validatedReview.content.length === 0))
-  )
+  ) {
     return undefined;
+  }
   return { value, manifest, sessionIds, sessionExport };
 };
 
@@ -483,7 +475,8 @@ export const runDiagnostic = async (argument: string, sources: DiagnosticSources
         d1Evidence.sha256.toLowerCase() === snapshot.rawSha256.toLowerCase() &&
         d1Run.runnerJobId !== undefined &&
         parsed?.runId === d1Run.runId &&
-        parsed.jobId === d1Run.runnerJobId;
+        parsed.jobId === d1Run.runnerJobId &&
+        (parsed.version === 1 || parsed.attempt === d1Run.runnerAttempt);
       evidenceDetails =
         parsed === undefined || !correlated ? undefined : await validatedEvidence(parsed);
       if (evidenceDetails === undefined) missingSources.push('r2');

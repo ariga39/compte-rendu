@@ -93,6 +93,7 @@ export function createApplication(env: ApplicationEnv, dependencies: CoreWorkerD
         path.startsWith('/api/') ||
         [
           '/runner-callback',
+          '/runner-evidence',
           '/runner-claim',
           '/runner-read-token',
           '/runner-progress',

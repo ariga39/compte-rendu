@@ -23,6 +23,7 @@ import { handleReviewConfiguration } from './review-configuration';
 import type { OperationalLog } from '@compte-rendu/contracts';
 import { createRunnerProtocol } from './runner-protocol';
 import { validatePublicationEvidence } from './runner-evidence';
+import { readPublicationRecord } from './publication-record';
 import {
   handleDashboardRequest,
   refreshRepositoryMetadata,
@@ -72,7 +73,11 @@ export interface R2BucketLike {
   readonly get?: (
     key: string,
   ) => Promise<{ size: number; arrayBuffer(): Promise<ArrayBuffer> } | null>;
-  readonly put: (key: string, value: ArrayBuffer | string) => Promise<unknown>;
+  readonly put: (
+    key: string,
+    value: ArrayBuffer | string,
+    options?: { readonly onlyIf?: { readonly etagDoesNotMatch?: string } },
+  ) => Promise<unknown>;
 }
 
 export interface CoreWorkerDependencies {
@@ -90,6 +95,7 @@ const metadataEventsPath = '/metadata-events';
 const runnerClaimsPath = '/runner-claims';
 const runnerReadTokenPath = '/runner-read-token';
 const runnerResultsPath = '/runner-results';
+const runnerEvidencePath = '/runner-evidence';
 const runnerProgressPath = '/runner-progress';
 const runnerCleanupRecoveryPath = '/runner-cleanup-recovery';
 const responseForDisposition = (
@@ -234,23 +240,39 @@ export const createCoreWorker = (
         try {
           const outcome = await stateStore.getRunOutcome(runId);
           if (outcome?.status !== 'scheduled' || !outcome.publicationClaimedAt) continue;
+          if (outcome.runnerJobId === undefined || outcome.runnerAttempt === undefined) {
+            throw new Error('Current Runner identity is unavailable');
+          }
           reason = 'evidence';
-          const evidence = outcome.evidence;
-          const key = `reviews/${runId}`;
-          if (!evidence || evidence.key !== key || evidence.size > MAX_RUNNER_CALLBACK_BYTES)
-            throw new Error('Invalid evidence metadata');
-          const record = await env.EVIDENCE_BUCKET?.get?.(key);
-          if (!record || record.size !== evidence.size) throw new Error('Invalid evidence size');
-          const publication = await validatePublicationEvidence({
+          let output: unknown;
+          const publication = await readPublicationRecord(env.EVIDENCE_BUCKET, {
             runId,
-            runnerJobId: outcome.runnerJobId,
-            runnerAttempt: outcome.runnerAttempt,
-            bytes: await record.arrayBuffer(),
-            size: evidence.size,
-            sha256: evidence.sha256,
+            jobId: outcome.runnerJobId,
+            attempt: outcome.runnerAttempt,
           });
-          if (publication.kind !== 'valid') throw new Error('Invalid evidence identity');
-          const { output } = publication;
+          if (publication.kind === 'valid') {
+            output = publication.record.result;
+          } else {
+            if (publication.kind === 'invalid') throw new Error('Invalid publication record');
+            // Historical runs have no small record. Their inline archive is
+            // still readable through the legacy evidence shape.
+            const evidence = outcome.evidence;
+            const key = `reviews/${runId}`;
+            if (!evidence || evidence.key !== key || evidence.size > MAX_RUNNER_CALLBACK_BYTES)
+              throw new Error('Invalid evidence metadata');
+            const record = await env.EVIDENCE_BUCKET?.get?.(key);
+            if (!record || record.size !== evidence.size) throw new Error('Invalid evidence size');
+            const legacy = await validatePublicationEvidence({
+              runId,
+              runnerJobId: outcome.runnerJobId,
+              runnerAttempt: outcome.runnerAttempt,
+              bytes: await record.arrayBuffer(),
+              size: evidence.size,
+              sha256: evidence.sha256,
+            });
+            if (legacy.kind !== 'valid') throw new Error('Invalid evidence identity');
+            output = legacy.output;
+          }
           reason = 'publication';
           const disposition = await createCoordinator(lifecycle).completeReview({
             runId,
@@ -342,6 +364,13 @@ export const createCoreWorker = (
       if (request.method === 'POST' && new URL(request.url).pathname === runnerResultsPath) {
         try {
           return await protocol.handleRunnerResult(request, lifecycleLog);
+        } catch {
+          return new Response(null, { status: 503 });
+        }
+      }
+      if (request.method === 'POST' && new URL(request.url).pathname === runnerEvidencePath) {
+        try {
+          return await protocol.handleRunnerEvidence(request);
         } catch {
           return new Response(null, { status: 503 });
         }

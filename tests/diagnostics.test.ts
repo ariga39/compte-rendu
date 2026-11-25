@@ -810,4 +810,112 @@ describe('diagnostics command', () => {
       expect(overridden.missingSources, name).toContain('r2');
     }
   });
+
+  it('reads a version 2 uploaded archive without using per-artifact hashes as a gate', async () => {
+    const runId = 'run-v2-upload';
+    const jobId = 'job-v2-upload';
+    const evidenceId = 'evidence-v2-upload';
+    const sessionId = 'ses-v2-upload';
+    const validatedReview = await artifact('review body');
+    validatedReview.sha256 = '0'.repeat(64);
+    const object = {
+      version: 2 as const,
+      runId,
+      jobId,
+      attempt: 1,
+      evidenceId,
+      evidence: {
+        id: evidenceId,
+        status: 'complete' as const,
+        manifest: await artifact(
+          JSON.stringify({
+            jobId,
+            runId,
+            attempt: 1,
+            evidenceId,
+            sandboxName: `compte-rendu-${jobId}`,
+            sandboxId: `compte-rendu-${jobId}`,
+            sessionIds: [sessionId],
+            terminal: { status: 'succeeded' },
+            evidence: { id: evidenceId, status: 'complete' },
+            complete: true,
+            cleanup: { status: 'destroyed' },
+          }),
+        ),
+        opencodeJsonl: await artifact('{"type":"result"}\n'),
+        opencodeStderr: await artifact(''),
+        validatedReview,
+        opencodeSessionList: await artifact(JSON.stringify([{ id: sessionId }])),
+        opencodeExport: {
+          sessionId,
+          content: await artifact(JSON.stringify({ info: { id: sessionId }, messages: [] })),
+        },
+      },
+      timestamps: { cleanupCompletedAt: '2026-09-01T00:00:03.000Z' },
+    };
+    const raw = new TextEncoder().encode(JSON.stringify(object));
+    const digest = await crypto.subtle.digest('SHA-256', raw);
+    const rawSha256 = Array.from(new Uint8Array(digest), (byte) =>
+      byte.toString(16).padStart(2, '0'),
+    ).join('');
+    const archiveKey = `reviews/${runId}/diagnostics/${jobId}/1/${rawSha256}.json`;
+
+    const report = JSON.parse(
+      await runDiagnosticCommand(['run:' + runId], {
+        d1: {
+          find: async () => ({
+            delivery: {
+              deliveryId: 'delivery-v2-upload',
+              repositoryId: 42,
+              pullRequestNumber: 7,
+              baseSha: 'a'.repeat(40),
+              headSha: 'b'.repeat(40),
+              trigger: 'automatic',
+              status: 'completed',
+              createdAt: '2026-09-01T00:00:00.000Z',
+              updatedAt: '2026-09-01T00:00:03.000Z',
+            },
+            run: {
+              runId,
+              status: 'completed',
+              runnerJobId: jobId,
+              runnerAttempt: 1,
+              createdAt: '2026-09-01T00:00:00.000Z',
+              updatedAt: '2026-09-01T00:00:03.000Z',
+              evidence: {
+                key: archiveKey,
+                status: 'complete',
+                size: raw.byteLength,
+                sha256: rawSha256,
+                uploadedAt: '2026-09-01T00:00:03.000Z',
+              },
+            },
+          }),
+        },
+        github: {
+          find: async () => ({
+            repository: { owner: 'acme', name: 'reviewed', id: 42 },
+            pullRequest: { state: 'open', baseSha: 'a'.repeat(40), headSha: 'b'.repeat(40) },
+            reactions: [],
+            reviews: [],
+          }),
+        },
+        r2: {
+          get: async () => ({
+            key: archiveKey,
+            rawSize: raw.byteLength,
+            rawSha256,
+            object,
+          }),
+        },
+      }),
+    ) as Record<string, unknown>;
+
+    expect(report).toMatchObject({
+      runner: { jobId, attempt: 1, sandboxName: `compte-rendu-${jobId}` },
+      evidence: { available: true, key: archiveKey },
+      missingSources: [],
+    });
+    expect(JSON.stringify(report)).not.toContain('review body');
+  });
 });

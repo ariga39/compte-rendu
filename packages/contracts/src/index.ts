@@ -125,6 +125,7 @@ export const GitHubSha = Schema.String.check(Schema.isPattern(/^[0-9a-f]{40}$/i)
 export const MAX_REVIEW_RESULT_BYTES = 8 * 1024 * 1024;
 export const MAX_WEBHOOK_BYTES = 256 * 1024;
 export const MAX_RUNNER_CALLBACK_BYTES = 32 * 1024 * 1024;
+export const MAX_RUNNER_EVIDENCE_BYTES = 32 * 1024 * 1024;
 
 export const ReviewResult = Schema.String.check(
   Schema.makeFilter((markdown) => markdown.trim().length > 0, {
@@ -370,6 +371,97 @@ export const RunnerResultCallback = Schema.Union([
 export type RunnerJobInput = typeof RunnerJobInput.Type;
 export type RunnerJobResponse = typeof RunnerJobResponse.Type;
 export type RunnerResultCallback = typeof RunnerResultCallback.Type;
+
+const OptionalProgressSnapshot = { lifecycle: Schema.optional(RunnerProgressSnapshot) };
+const RunnerEvidenceReference = Schema.Struct({
+  id: Schema.NonEmptyString,
+  status: Schema.Literals(['complete', 'incomplete']),
+});
+const CompleteRunnerEvidenceReference = Schema.Struct({
+  id: Schema.NonEmptyString,
+  status: Schema.Literal('complete'),
+});
+const V2CallbackIdentity = {
+  version: Schema.Literal(2),
+  ...CallbackIdentity,
+};
+const SuccessfulRunnerResultCallbackV2 = Schema.Struct({
+  ...V2CallbackIdentity,
+  status: Schema.Literal('succeeded'),
+  evidence: CompleteRunnerEvidenceReference,
+  timestamps: CallbackTimestamps,
+  sandbox: Schema.Struct({ cleanup: Schema.Literal('destroyed') }),
+  result: StructuredReviewResult,
+  ...OptionalProgressSnapshot,
+});
+const FailedRunnerResultCallbackV2 = Schema.Struct({
+  ...V2CallbackIdentity,
+  status: Schema.Literal('failed'),
+  evidence: RunnerEvidenceReference,
+  timestamps: PartialCallbackTimestamps,
+  sandbox: CallbackSandbox,
+  failure: CallbackFailure,
+  ...OptionalProgressSnapshot,
+});
+const AbortedRunnerResultCallbackV2 = Schema.Struct({
+  ...V2CallbackIdentity,
+  status: Schema.Literal('aborted'),
+  evidence: RunnerEvidenceReference,
+  timestamps: PartialCallbackTimestamps,
+  sandbox: CallbackSandbox,
+  ...OptionalProgressSnapshot,
+});
+
+/**
+ * The slim terminal callback. It is the publication authority; diagnostic
+ * artifacts travel separately through `RunnerEvidenceUpload`.
+ */
+export const RunnerResultCallbackV2 = Schema.Union([
+  SuccessfulRunnerResultCallbackV2,
+  FailedRunnerResultCallbackV2,
+  AbortedRunnerResultCallbackV2,
+]);
+
+/** Core accepts both the legacy inline callback and the slim v2 callback. */
+export const RunnerTerminalCallback = Schema.Union([RunnerResultCallback, RunnerResultCallbackV2]);
+
+export type RunnerResultCallbackV2 = typeof RunnerResultCallbackV2.Type;
+export type RunnerTerminalCallback = typeof RunnerTerminalCallback.Type;
+
+const UploadedEvidenceField = Schema.Struct({
+  content: Schema.String,
+  size: EvidenceSize,
+  sha256: EvidenceSha256,
+  truncated: Schema.optionalKey(Schema.Boolean),
+});
+const UploadedEvidenceExport = Schema.Struct({
+  sessionId: Schema.NonEmptyString,
+  content: UploadedEvidenceField,
+});
+
+/**
+ * Best-effort private diagnostic upload. Truncation is per artifact and never
+ * changes the review result or terminal callback.
+ */
+export const RunnerEvidenceUpload = Schema.Struct({
+  version: Schema.Literal(2),
+  id: Schema.NonEmptyString,
+  runId: Schema.NonEmptyString,
+  attempt: Schema.Int,
+  evidenceId: Schema.NonEmptyString,
+  evidence: Schema.Struct({
+    id: Schema.optionalKey(Schema.NonEmptyString),
+    status: Schema.Literals(['complete', 'incomplete']),
+    manifest: UploadedEvidenceField,
+    opencodeJsonl: UploadedEvidenceField,
+    opencodeStderr: UploadedEvidenceField,
+    validatedReview: Schema.optionalKey(UploadedEvidenceField),
+    opencodeSessionList: Schema.optionalKey(UploadedEvidenceField),
+    opencodeExport: Schema.optionalKey(UploadedEvidenceExport),
+  }),
+  timestamps: Schema.optionalKey(PartialCallbackTimestamps),
+});
+export type RunnerEvidenceUpload = typeof RunnerEvidenceUpload.Type;
 
 export const RunnerCleanupRecoveryReport = Schema.Struct({
   runId: Schema.NonEmptyString,
