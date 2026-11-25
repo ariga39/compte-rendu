@@ -20,13 +20,29 @@ import {
 } from './support/runner-harness';
 
 describe('Runner Job HTTP interface', () => {
-  it.each([undefined, '', '   '])(
-    'fails sbx direct startup without a usable model credential resolver: %j',
-    (resolver) => {
-      const previous = process.env.MODEL_SECRET_COMMAND;
+  it('fails startup when MODEL_SECRET_COMMAND configures direct-provider mode', () => {
+    const previous = process.env.MODEL_SECRET_COMMAND;
+    try {
+      process.env.MODEL_SECRET_COMMAND = 'secret-resolver get MODEL_API_KEY';
+      expect(() =>
+        createProductionRunner({
+          modelConfig: standardModelConfig,
+          callbackUrl: 'https://ingress.test/runner-callback',
+          callbackToken: 'callback-token',
+          claimUrl: 'https://ingress.test/runner-claim',
+        }),
+      ).toThrow(/MODEL_SECRET_COMMAND.*direct-provider/);
+    } finally {
+      if (previous === undefined) delete process.env.MODEL_SECRET_COMMAND;
+      else process.env.MODEL_SECRET_COMMAND = previous;
+    }
+  });
+  it.each(['0', 'false', 'off', 'no'])(
+    'fails startup when RUNNER_LLM_RELAY explicitly disables managed inference: %s',
+    (value) => {
+      const previous = process.env.RUNNER_LLM_RELAY;
       try {
-        if (resolver === undefined) delete process.env.MODEL_SECRET_COMMAND;
-        else process.env.MODEL_SECRET_COMMAND = resolver;
+        process.env.RUNNER_LLM_RELAY = value;
         expect(() =>
           createProductionRunner({
             modelConfig: standardModelConfig,
@@ -34,35 +50,27 @@ describe('Runner Job HTTP interface', () => {
             callbackToken: 'callback-token',
             claimUrl: 'https://ingress.test/runner-claim',
           }),
-        ).toThrow(/MODEL_SECRET_COMMAND/);
+        ).toThrow(/managed inference is the only model credential path/);
       } finally {
-        if (previous === undefined) delete process.env.MODEL_SECRET_COMMAND;
-        else process.env.MODEL_SECRET_COMMAND = previous;
+        if (previous === undefined) delete process.env.RUNNER_LLM_RELAY;
+        else process.env.RUNNER_LLM_RELAY = previous;
       }
     },
   );
   it('does not claim durable work until local Job admission is fully configured', async () => {
     let claims = 0;
-    for (const overrides of [
-      { authToken: undefined },
-      {
-        authToken: 'runner-test-token',
-        callbackUrl: undefined,
+    createProductionRunner({
+      modelConfig: standardModelConfig,
+      authToken: undefined,
+      callbackUrl: 'https://ingress.test/runner-callback',
+      callbackToken: 'callback-token',
+      claimUrl: 'https://ingress.test/runner-claim',
+      claimFetch: async () => {
+        claims += 1;
+        return new Response(null, { status: 204 });
       },
-    ]) {
-      createProductionRunner({
-        modelConfig: standardModelConfig,
-        callbackUrl: 'https://ingress.test/runner-callback',
-        ...overrides,
-        callbackToken: 'callback-token',
-        claimUrl: 'https://ingress.test/runner-claim',
-        claimFetch: async () => {
-          claims += 1;
-          return new Response(null, { status: 204 });
-        },
-        claimIntervalMs: 1,
-      });
-    }
+      claimIntervalMs: 1,
+    });
 
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(claims).toBe(0);
@@ -295,47 +303,29 @@ describe('Runner Job HTTP interface', () => {
       await rm(evidenceRoot, { recursive: true, force: true });
     }
   });
-  it('does not claim when callback configuration is incomplete', async () => {
-    let claims = 0;
-    let processCalls = 0;
-    const runner = createProductionRunner({
-      modelConfig: standardModelConfig,
-      authToken: 'runner-test-token',
-      claimUrl: 'https://ingress.test/runner-claim',
-      claimIntervalMs: 1,
-      claimFetch: async () => {
-        claims += 1;
-        return Response.json({
-          ...runnerJobFields,
-          runId: 'run-callback-config-missing',
-          attempt: 1,
-          repositoryUrl: 'https://github.com/acme/reviewed.git',
-          baseSha: '1111111111111111111111111111111111111111',
-          headSha: '2222222222222222222222222222222222222222',
-        });
-      },
-      process: async (_command, args) => {
-        const readOnly =
-          args[0] === 'ls' ||
-          (args[0] === 'policy' && args[1] === 'ls') ||
-          (args[0] === 'secret' && args[1] === 'ls');
-        if (!readOnly) processCalls += 1;
-        return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
-      },
-    });
-
-    try {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      expect(claims).toBe(0);
-      expect(processCalls).toBe(0);
-    } finally {
-      await runner.close();
-    }
-  });
-  it('rejects malformed or unsupported deployment model config before claims or Sandbox work', async () => {
+  it.each([
+    ['missing callback URL', undefined, 'callback-token'],
+    ['missing callback token', 'https://ingress.test/runner-callback', undefined],
+    ['non-HTTPS callback URL', 'http://ingress.test/runner-callback', 'callback-token'],
+  ])(
+    'fails managed startup with a clear error for a %s',
+    async (_name, callbackUrl, callbackToken) => {
+      expect(() =>
+        createProductionRunner({
+          modelConfig: standardModelConfig,
+          authToken: 'runner-test-token',
+          ...(callbackUrl === undefined ? {} : { callbackUrl }),
+          ...(callbackToken === undefined ? {} : { callbackToken }),
+          claimUrl: 'https://ingress.test/runner-claim',
+        }),
+      ).toThrow(/RUNNER_CALLBACK_URL|RUNNER_CALLBACK_TOKEN/);
+    },
+  );
+  it('rejects direct-provider or malformed managed config before claims or Sandbox work', () => {
     const invalidConfigs = [
       undefined,
       '{',
+      JSON.stringify({ id: 'opencode-go/deepseek-flash', definition: { name: 'Direct' } }),
       JSON.stringify({ id: 'other-provider/model' }),
       JSON.stringify({ id: 'opencode-go/' }),
       JSON.stringify({ id: 'opencode-go/ has space' }),
@@ -364,32 +354,15 @@ describe('Runner Job HTTP interface', () => {
       JSON.stringify({ id: 'opencode-go/test-model', definition: { name: 'Test', unsafe: true } }),
     ];
     for (const modelConfig of invalidConfigs) {
-      let claims = 0;
-      let processCalls = 0;
-      const _runner = createProductionRunner({
-        authToken: 'runner-test-token',
-        ...(modelConfig === undefined ? {} : { modelConfig }),
-        callbackUrl: 'https://ingress.test/runner-callback',
-        callbackToken: 'callback-token',
-        claimUrl: 'https://ingress.test/runner-claim',
-        claimFetch: async () => {
-          claims += 1;
-          return new Response(null, { status: 204 });
-        },
-        claimIntervalMs: 1,
-        process: async (_command, args) => {
-          const readOnly =
-            args[0] === 'ls' ||
-            (args[0] === 'policy' && args[1] === 'ls') ||
-            (args[0] === 'secret' && args[1] === 'ls');
-          if (!readOnly) processCalls += 1;
-          return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
-        },
-      });
-
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      expect(claims).toBe(0);
-      expect(processCalls).toBe(0);
+      expect(() =>
+        createProductionRunner({
+          authToken: 'runner-test-token',
+          ...(modelConfig === undefined ? {} : { modelConfig }),
+          callbackUrl: 'https://ingress.test/runner-callback',
+          callbackToken: 'callback-token',
+          claimUrl: 'https://ingress.test/runner-claim',
+        }),
+      ).toThrow();
     }
   });
   it('retires direct job submission without starting work', async () => {
@@ -397,6 +370,8 @@ describe('Runner Job HTTP interface', () => {
     const runner = createProductionRunner({
       authToken: 'runner-test-token',
       modelConfig: standardModelConfig,
+      callbackUrl: 'https://ingress.test/runner-callback',
+      callbackToken: 'callback-token',
       evidenceRoot: sharedEvidenceRoot,
       process: async (_command, args) => {
         const readOnly =
@@ -1337,7 +1312,7 @@ describe('Runner claim reservations', () => {
       claimUrl: 'http://claim.test/runner-claim',
       claimIntervalMs: 1,
       claimTimeoutMs: 1_000,
-      callbackUrl: 'http://callback.test/runner-callback',
+      callbackUrl: 'https://callback.test/runner-callback',
       callbackToken: 'test-callback',
       claimFetch: async () => {
         const next = queued.shift();

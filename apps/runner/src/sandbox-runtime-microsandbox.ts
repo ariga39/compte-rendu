@@ -121,8 +121,7 @@ const createMicrosandboxJobSandbox = (
     if (
       !/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z][a-z0-9-]*$/i.test(host) ||
       host === 'api.github.com' ||
-      spec.modelResource !== host + ':443' ||
-      !spec.modelTokenFile
+      spec.modelResource !== host + ':443'
     )
       throw new Error('Microsandbox requires a dedicated HTTPS grant endpoint on port 443');
     const model = await readFile(spec.modelTokenFile, 'utf8');
@@ -266,7 +265,6 @@ export const createMicrosandboxSandboxBackend = (
 ): SandboxBackend => {
   const image = nonEmpty(options.image) ?? nonEmpty(process.env.MICROSANDBOX_IMAGE);
   if (image === undefined) throw new Error('Microsandbox requires MICROSANDBOX_IMAGE');
-  if (!options.relayEnabled) throw new Error('Microsandbox requires the managed HTTPS LLM relay');
   const program = nonEmpty(process.env.RUNNER_SANDBOX_CLI) ?? 'msb';
   const allowFakeIp = options.allowFakeIp ?? process.env.MICROSANDBOX_ALLOW_FAKE_IP === '1';
   let health: SandboxHealth = 'unready';

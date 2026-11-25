@@ -42,9 +42,7 @@ export interface AgentRunDependencies {
   readonly commands: CommandRunner;
   readonly evidencePath: string;
   readonly mergeBaseSha: string;
-  readonly modelId?: string | undefined;
-  readonly openCodeConfig?: string | undefined;
-  readonly serviceBaseUrl?: URL | undefined;
+  readonly serviceBaseUrl: URL;
   readonly modelResource: string;
 }
 
@@ -66,8 +64,6 @@ export const runAgentStage = async (
     commands,
     evidencePath,
     mergeBaseSha,
-    modelId,
-    openCodeConfig,
     serviceBaseUrl,
     modelResource,
   }: AgentRunDependencies,
@@ -75,18 +71,17 @@ export const runAgentStage = async (
   const descriptors = job.descriptors;
   const multiConfiguration = job.input.reviewConfiguration;
   const multiSelection = multiConfiguration?.selection ?? undefined;
-  const multi = multiSelection !== undefined;
-  const directExecution = multiSelection !== undefined && multiSelection.reviewers.length === 1;
+  const modelTokenFile = job.grantTokenPath;
+  if (multiSelection === undefined || modelTokenFile === undefined) {
+    return { failure: { reason: 'configuration' } };
+  }
+  const directExecution = multiSelection.reviewers.length === 1;
   let executionCause: RunnerFailureCauseValue | undefined;
 
-  const promptReviewers = multi
-    ? participants(multiSelection).map(({ participant, route }) => ({
-        participant,
-        model: routeModelIdentity(route, descriptors).reference,
-      }))
-    : modelId === undefined
-      ? []
-      : [{ participant: 'reviewer-0', model: modelId }];
+  const promptReviewers = participants(multiSelection).map(({ participant, route }) => ({
+    participant,
+    model: routeModelIdentity(route, descriptors).reference,
+  }));
   const promptInput = {
     repositoryName: job.input.repositoryName,
     pullRequestNumber: job.input.pullRequestNumber,
@@ -105,27 +100,25 @@ export const runAgentStage = async (
     await writeFile(join(directory, 'LICENSE.md'), skill.license);
     await writeFile(join(directory, 'NOTICE.md'), skill.notice);
   }
-  const activeOpenCodeConfig = multi
-    ? multiReviewConfig({
-        selection: multiSelection,
-        descriptors,
-        serviceBaseUrl: serviceBaseUrl!.toString(),
-        shellPermissionRules,
-        reviewerTask: reviewerSystemPrompt(promptInput),
-      })
-    : openCodeConfig;
+  const activeOpenCodeConfig = multiReviewConfig({
+    selection: multiSelection,
+    descriptors,
+    serviceBaseUrl: serviceBaseUrl.toString(),
+    shellPermissionRules,
+    reviewerTask: reviewerSystemPrompt(promptInput),
+  });
 
   const sandbox = sandboxBackend.createJob({
     id: job.id,
     name: job.sandboxName,
     cpu: '4',
     memoryGib: 8,
-    env: [`OPENCODE_CONFIG_CONTENT=${activeOpenCodeConfig!}`, 'OPENCODE_DISABLE_PROJECT_CONFIG=1'],
+    env: [`OPENCODE_CONFIG_CONTENT=${activeOpenCodeConfig}`, 'OPENCODE_DISABLE_PROJECT_CONFIG=1'],
     hostScratchRoot: job.checkoutRoot!,
     checkoutRoot: join(job.checkoutRoot!, 'checkout'),
     configRoot,
     modelResource,
-    ...(job.grantTokenPath === undefined ? {} : { modelTokenFile: job.grantTokenPath }),
+    modelTokenFile,
     githubResource: 'api.github.com:443',
     githubReadToken: job.input.repositoryReadToken,
   });
@@ -183,34 +176,14 @@ export const runAgentStage = async (
 
   updateJobState(job, { stage: 'agent' });
   job.progress?.stage('agent');
-  const agentRoute = multi
-    ? directExecution
-      ? multiSelection.reviewers[0]!
-      : multiSelection.synthesis
-    : undefined;
-  const agentIdentity =
-    agentRoute === undefined ? undefined : routeModelIdentity(agentRoute, descriptors);
-  const agentModel = agentIdentity?.reference ?? modelId;
-  const agentName = multi && !directExecution ? SUPERVISOR_AGENT_ID : 'review';
-  const submissionIdentity: SessionIdentity =
-    agentIdentity === undefined
-      ? {
-          agent: 'review',
-          model: (() => {
-            const reference = modelId!;
-            const slash = reference.indexOf('/');
-            return slash === -1
-              ? { providerID: 'opencode-go', id: reference }
-              : {
-                  providerID: reference.slice(0, slash),
-                  id: reference.slice(slash + 1),
-                };
-          })(),
-        }
-      : {
-          agent: agentName,
-          model: { providerID: agentIdentity.providerID, id: agentIdentity.id },
-        };
+  const agentRoute = directExecution ? multiSelection.reviewers[0]! : multiSelection.synthesis;
+  const agentIdentity = routeModelIdentity(agentRoute, descriptors);
+  const agentModel = agentIdentity.reference;
+  const agentName = directExecution ? 'review' : SUPERVISOR_AGENT_ID;
+  const submissionIdentity: SessionIdentity = {
+    agent: agentName,
+    model: { providerID: agentIdentity.providerID, id: agentIdentity.id },
+  };
   job.submissionIdentity = submissionIdentity;
   job.executionModel = agentModel;
   const agent = await sandbox.exec(

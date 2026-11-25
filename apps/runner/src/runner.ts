@@ -20,7 +20,7 @@ import { createReadTokenClient, type ReadTokenClient } from './read-token-client
 import { createGrantRevoker } from './grant-revoker.js';
 import { createBoundedDelivery } from './evidence-store.js';
 import { CleanupRecoveryRequest } from './callback-recovery.js';
-import { decodeReviewModelConfig, trustedOpenCodeConfig } from './opencode-config.js';
+import { decodeReviewModelConfig } from './opencode-config.js';
 
 export type {
   RunnerDiagnostic,
@@ -31,7 +31,6 @@ export type {
 } from './sandbox-runtime.js';
 export { runProcess };
 
-const MODEL_HOST = 'opencode.ai';
 const MODEL_PORT = '443';
 const GRANT_REVOKE_ATTEMPTS = 2;
 const GRANT_REVOKE_BUDGET_MS = 15 * 1000;
@@ -77,8 +76,6 @@ type MaintenanceStatus = {
 
 export interface RunnerOptions {
   readonly sandboxBackend?: SandboxBackend;
-  /** Opt in to the remote relay control plane over the callback origin. */
-  readonly llmRelay?: boolean;
   readonly llmGrantVersion?: 1 | 2;
   readonly authToken?: string;
   readonly modelConfig?: string;
@@ -146,32 +143,74 @@ export const createRunner = (options: RunnerOptions = {}) => {
       'RUNNER_LLM_SERVICE_SOCKET is no longer supported; use RUNNER_LLM_RELAY with an HTTPS inference origin',
     );
   }
-  const relayFlag = options.llmRelay ?? process.env.RUNNER_LLM_RELAY;
-  const relayEnabled = isEnabled(relayFlag);
-  const relayCallbackUrl = nonEmpty(options.callbackUrl ?? process.env.RUNNER_CALLBACK_URL);
-  const relayCallbackToken = nonEmpty(options.callbackToken ?? process.env.RUNNER_CALLBACK_TOKEN);
+  if (nonEmpty(process.env.MODEL_SECRET_COMMAND) !== undefined) {
+    throw new Error(
+      'MODEL_SECRET_COMMAND is no longer supported: direct-provider model credentials were removed. Configure managed inference with REVIEW_MODEL_CONFIG and the callback credentials instead.',
+    );
+  }
+  const relayFlag = nonEmpty(process.env.RUNNER_LLM_RELAY);
+  if (relayFlag !== undefined && !isEnabled(relayFlag)) {
+    throw new Error(
+      `RUNNER_LLM_RELAY=${relayFlag} is no longer supported: managed inference is the only model credential path. Remove RUNNER_LLM_RELAY or set it to 1.`,
+    );
+  }
+  const callbackUrl = nonEmpty(options.callbackUrl ?? process.env.RUNNER_CALLBACK_URL);
+  const callbackToken = nonEmpty(options.callbackToken ?? process.env.RUNNER_CALLBACK_TOKEN);
+  if (callbackUrl === undefined || callbackToken === undefined) {
+    throw new Error('Managed inference requires RUNNER_CALLBACK_URL and RUNNER_CALLBACK_TOKEN');
+  }
+  let controlUrl: URL;
+  try {
+    controlUrl = new URL(callbackUrl);
+  } catch {
+    throw new Error('RUNNER_CALLBACK_URL must be an HTTPS origin');
+  }
+  if (
+    controlUrl.protocol !== 'https:' ||
+    controlUrl.username !== '' ||
+    controlUrl.password !== '' ||
+    controlUrl.search !== '' ||
+    controlUrl.hash !== ''
+  ) {
+    throw new Error(
+      'RUNNER_CALLBACK_URL must be an HTTPS origin without credentials, query or fragment',
+    );
+  }
   // RUNNER_LLM_RELAY_GENERATION from an existing deployment is intentionally
   // ignored: grants are revoked by job identity and expire on their own.
-  let relayOrigin: string | undefined;
-  let relayToken: string | undefined;
-  if (relayEnabled) {
-    if (relayCallbackUrl === undefined || relayCallbackToken === undefined) {
-      throw new Error('RUNNER_LLM_RELAY requires RUNNER_CALLBACK_URL and RUNNER_CALLBACK_TOKEN');
-    }
-    const controlUrl = new URL(relayCallbackUrl);
-    if (
-      controlUrl.protocol !== 'https:' ||
-      controlUrl.username !== '' ||
-      controlUrl.password !== '' ||
-      controlUrl.search !== '' ||
-      controlUrl.hash !== ''
-    ) {
-      throw new Error('RUNNER_LLM_RELAY requires an HTTPS callback origin');
-    }
-    relayOrigin = controlUrl.origin;
-    relayToken = relayCallbackToken;
+  const relayOrigin = controlUrl.origin;
+  const relayToken = callbackToken;
+  const modelConfig = decodeReviewModelConfig(
+    options.modelConfig ?? process.env.REVIEW_MODEL_CONFIG,
+  );
+  if (modelConfig === undefined) {
+    throw new Error(
+      'Managed inference requires REVIEW_MODEL_CONFIG with baseUrl "https://<INFERENCE_FQDN>/v1" on port 443; direct-provider configuration was removed.',
+    );
   }
+  if (controlUrl.hostname.toLowerCase() === modelConfig.baseUrl.hostname.toLowerCase()) {
+    throw new Error(
+      'Managed inference requires a dedicated inference hostname distinct from the callback host',
+    );
+  }
+  const grantVersion = String(options.llmGrantVersion ?? process.env.RUNNER_LLM_GRANT_VERSION ?? 1);
+  if (grantVersion !== '1' && grantVersion !== '2')
+    throw new Error('Invalid RUNNER_LLM_GRANT_VERSION');
   const relayFetch = options.callbackFetch ?? globalThis.fetch;
+  const llmServiceClient = createRelayLlmServiceClient({
+    grantVersion: grantVersion === '2' ? 2 : 1,
+    origin: relayOrigin,
+    token: relayToken,
+    fetch: relayFetch,
+  });
+  const serviceBaseUrl = modelConfig.baseUrl;
+  const modelResource = `${serviceBaseUrl.hostname}:${serviceBaseUrl.port || MODEL_PORT}`;
+  const grantRevoker = createGrantRevoker({
+    client: llmServiceClient,
+    attempts: GRANT_REVOKE_ATTEMPTS,
+    budgetMs: GRANT_REVOKE_BUDGET_MS,
+  });
+  const log = options.log;
   const authToken = options.authToken ?? process.env.RUNNER_AUTH_TOKEN;
   const evidenceRoot =
     options.evidenceRoot ??
@@ -185,115 +224,31 @@ export const createRunner = (options: RunnerOptions = {}) => {
   const hostRun: HostRun = createHostRun(executeProcess);
   const sandboxBackend =
     options.sandboxBackend ??
-    createSandboxBackend(
-      { kind: process.env.RUNNER_SANDBOX_RUNTIME },
-      {
-        hostRun,
-        relayEnabled,
-      },
-    );
-  const modelConfig = decodeReviewModelConfig(
-    options.modelConfig ?? process.env.REVIEW_MODEL_CONFIG,
-    relayEnabled ? 'relay' : 'direct',
-  );
-  if (
-    relayEnabled &&
-    (modelConfig === undefined ||
-      modelConfig.baseUrl === undefined ||
-      modelConfig.definition === undefined)
-  ) {
-    throw new Error(
-      'LLM service mode requires REVIEW_MODEL_CONFIG with an explicit baseUrl and model definition',
-    );
-  }
-  if (
-    relayEnabled &&
-    relayOrigin !== undefined &&
-    modelConfig?.baseUrl !== undefined &&
-    new URL(relayOrigin).hostname.toLowerCase() === modelConfig.baseUrl.hostname.toLowerCase()
-  ) {
-    throw new Error('Remote LLM relay requires a dedicated inference hostname');
-  }
-  const grantVersion = String(options.llmGrantVersion ?? process.env.RUNNER_LLM_GRANT_VERSION ?? 1);
-  if (relayEnabled && grantVersion !== '1' && grantVersion !== '2')
-    throw new Error('Invalid RUNNER_LLM_GRANT_VERSION');
-  const llmServiceClient =
-    relayEnabled && relayOrigin !== undefined && relayToken !== undefined
-      ? createRelayLlmServiceClient({
-          grantVersion: grantVersion === '2' ? 2 : 1,
-          origin: relayOrigin,
-          token: relayToken,
-          fetch: relayFetch,
-        })
-      : undefined;
-  const modelId = modelConfig?.id;
-  const serviceBaseUrl = modelConfig?.baseUrl;
-  const modelResource = `${serviceBaseUrl?.hostname ?? MODEL_HOST}:${serviceBaseUrl?.port || MODEL_PORT}`;
-  const openCodeConfig = modelConfig === undefined ? undefined : trustedOpenCodeConfig(modelConfig);
-  const grantRevoker = createGrantRevoker({
-    client: llmServiceClient,
-    attempts: GRANT_REVOKE_ATTEMPTS,
-    budgetMs: GRANT_REVOKE_BUDGET_MS,
-  });
-  const log = options.log;
-  const callbackUrl = options.callbackUrl ?? process.env.RUNNER_CALLBACK_URL;
-  const callbackToken = options.callbackToken ?? process.env.RUNNER_CALLBACK_TOKEN;
+    createSandboxBackend({ kind: process.env.RUNNER_SANDBOX_RUNTIME }, { hostRun });
   const callbackFetch = options.callbackFetch ?? globalThis.fetch;
   const evidenceFetch = options.evidenceFetch ?? callbackFetch;
   const progressFetch = options.progressFetch ?? globalThis.fetch;
   const callbackTimeoutMs = options.callbackTimeoutMs ?? CALLBACK_REQUEST_TIMEOUT_MS;
   const evidenceTimeoutMs = options.evidenceTimeoutMs ?? EVIDENCE_REQUEST_TIMEOUT_MS;
   const callbackRetryDelaysMs = options.callbackRetryDelaysMs ?? DEFAULT_CALLBACK_RETRY_DELAYS_MS;
-  const evidenceUrl =
-    callbackUrl === undefined
-      ? undefined
-      : (() => {
-          try {
-            return new URL('/runner-evidence', callbackUrl).toString();
-          } catch {
-            return undefined;
-          }
-        })();
+  const evidenceUrl = new URL('/runner-evidence', callbackUrl).toString();
   const postBounded = createBoundedDelivery({
     token: callbackToken,
     fetch: callbackFetch,
     timeoutMs: callbackTimeoutMs,
   });
-  const claimUrl =
-    options.claimUrl ??
-    (callbackUrl === undefined
-      ? undefined
-      : (() => {
-          try {
-            return new URL('/runner-claim', callbackUrl).toString();
-          } catch {
-            return undefined;
-          }
-        })());
+  const claimUrl = options.claimUrl ?? new URL('/runner-claim', callbackUrl).toString();
   const claimFetch = options.claimFetch ?? globalThis.fetch;
   const claimTimeoutMs = options.claimTimeoutMs ?? CLAIM_REQUEST_TIMEOUT_MS;
   const claimIntervalMs = options.claimIntervalMs ?? 1000;
   // A full Runner still discovers D1 increases. Keep this gentle so an idle
   // full host does not poll D1 at the claim cadence.
   const claimProbeIntervalMs = options.claimProbeIntervalMs ?? Math.max(claimIntervalMs, 5_000);
-  const readTokenUrl =
-    callbackUrl === undefined
-      ? undefined
-      : (() => {
-          try {
-            return new URL('/runner-read-token', callbackUrl).toString();
-          } catch {
-            return undefined;
-          }
-        })();
-  const readTokenClient: ReadTokenClient | undefined =
-    readTokenUrl === undefined || callbackToken === undefined
-      ? undefined
-      : createReadTokenClient({
-          url: readTokenUrl,
-          token: callbackToken,
-          fetch: options.readTokenFetch ?? callbackFetch,
-        });
+  const readTokenClient: ReadTokenClient = createReadTokenClient({
+    url: new URL('/runner-read-token', callbackUrl).toString(),
+    token: callbackToken,
+    fetch: options.readTokenFetch ?? callbackFetch,
+  });
   const jobRegistry = createJobRegistry();
   let scheduler: ClaimScheduler;
   let closed = false;
@@ -358,10 +313,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
     grants: grantRevoker,
     llmServiceClient,
     readTokenClient,
-    relayEnabled,
     grantVersion,
-    modelId,
-    openCodeConfig,
     serviceBaseUrl,
     modelResource,
     log,

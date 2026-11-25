@@ -1,8 +1,14 @@
 import type {
+  ReviewConfiguration,
   RunnerJobInput,
   RunnerJobResponse,
   RunnerTerminalCallback,
 } from '../../packages/contracts/src';
+
+export const defaultManagedReviewConfiguration: ReviewConfiguration = {
+  revision: 1,
+  selection: { reviewers: ['deepseek-review'], synthesis: 'deepseek-review' },
+};
 
 export interface ClaimExecutionOptions {
   readonly callbackRequests?: Request[];
@@ -10,6 +16,12 @@ export interface ClaimExecutionOptions {
   readonly onClaim?: (request: Request) => void | Promise<void>;
   /** Simulated Core long-poll: wait for an enqueued job instead of returning 204. */
   readonly longPoll?: boolean;
+  /**
+   * Materialized selection for an enqueued job without one. Core always
+   * materializes a managed selection at admission; pass null to model a legacy
+   * queued job that still has none.
+   */
+  readonly reviewConfiguration?: ReviewConfiguration | null;
 }
 
 const terminalStatuses = new Set(['succeeded', 'failed', 'aborted']);
@@ -116,7 +128,14 @@ export const createClaimExecution = (options: ClaimExecutionOptions = {}) => {
     claimFetch,
     callbackFetch,
     enqueue(job: RunnerJobInput) {
-      queue.push(job);
+      queue.push(
+        job.reviewConfiguration !== undefined || options.reviewConfiguration === null
+          ? job
+          : {
+              ...job,
+              reviewConfiguration: options.reviewConfiguration ?? defaultManagedReviewConfiguration,
+            },
+      );
       const wake = wakeClaim;
       wakeClaim = undefined;
       wake?.();

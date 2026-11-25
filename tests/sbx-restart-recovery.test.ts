@@ -106,7 +106,6 @@ const runnerOptions = (
   }),
   callbackUrl: 'https://ingress.test/runner-callback',
   callbackToken: 'callback-token',
-  llmRelay: true,
   claimUrl: '',
   process: async (_command: string, args: readonly string[]) => hostRun('sbx', args),
   ...extra,
@@ -163,7 +162,7 @@ describe('sbx age cleanup', () => {
     const { state, hostRun } = sandboxFixture();
     const expired = sandboxResourceName(randomUUID(), Date.now() - 3 * 60 * 60 * 1000);
     state.customSecrets = [{ scope: expired, placeholder: 'cr-never-created' }];
-    const backend = createSbxSandboxBackend({ hostRun, relayEnabled: true });
+    const backend = createSbxSandboxBackend({ hostRun });
 
     await expect(backend.reconcileOrphans!({ isLiveJob: () => false })).resolves.toMatchObject({
       ok: true,
@@ -179,7 +178,7 @@ describe('sbx age cleanup', () => {
     const expired = sandboxResourceName(randomUUID(), Date.now() - 3 * 60 * 60 * 1000);
     state.names = [expired];
     state.secrets = [{ scope: expired, type: 'service', name: 'github' }];
-    const backend = createSbxSandboxBackend({ hostRun, relayEnabled: true });
+    const backend = createSbxSandboxBackend({ hostRun });
 
     const [first, second] = await Promise.all([
       backend.reconcileOrphans!({ isLiveJob: () => false }),
@@ -198,7 +197,7 @@ describe('sbx age cleanup', () => {
     const expired = sandboxResourceName(randomUUID(), Date.now() - 3 * 60 * 60 * 1000);
     state.names = [expired];
     state.listFailure = { ...ok, truncated: true };
-    const backend = createSbxSandboxBackend({ hostRun, relayEnabled: true });
+    const backend = createSbxSandboxBackend({ hostRun });
 
     await expect(backend.reconcileOrphans!({ isLiveJob: () => false })).resolves.toMatchObject({
       ok: false,
@@ -214,7 +213,7 @@ describe('sbx age cleanup', () => {
     const expired = sandboxResourceName(randomUUID(), Date.now() - 3 * 60 * 60 * 1000);
     state.names = [expired];
     state.secretListFailure = { ...ok, exitCode: 1, stderr: 'secret inventory unavailable' };
-    const backend = createSbxSandboxBackend({ hostRun, relayEnabled: true });
+    const backend = createSbxSandboxBackend({ hostRun });
 
     await expect(backend.reconcileOrphans!({ isLiveJob: () => false })).resolves.toMatchObject({
       ok: false,
@@ -231,7 +230,7 @@ describe('sbx age cleanup', () => {
     const target = sandboxResourceName(jobId, Date.now() - 3 * 60 * 60 * 1000);
     const other = sandboxResourceName(randomUUID());
     state.names = [target, other];
-    const backend = createSbxSandboxBackend({ hostRun, relayEnabled: true });
+    const backend = createSbxSandboxBackend({ hostRun });
 
     await expect(
       backend.reconcileOrphans!({
@@ -248,7 +247,7 @@ describe('sbx age cleanup', () => {
     const { state, hostRun } = sandboxFixture();
     const target = sandboxResourceName(randomUUID(), Date.now() - 3 * 60 * 60 * 1000);
     state.names = [target];
-    const backend = createSbxSandboxBackend({ hostRun, relayEnabled: true });
+    const backend = createSbxSandboxBackend({ hostRun });
 
     await expect(
       backend.reconcileOrphans!({
@@ -346,7 +345,7 @@ describe('sbx age cleanup', () => {
     ];
     state.secrets = [{ scope: name, type: 'service', name: 'github' }];
     state.customSecrets = [{ scope: name, placeholder: `cr-${jobId}` }];
-    const backend = createSbxSandboxBackend({ hostRun, relayEnabled: true });
+    const backend = createSbxSandboxBackend({ hostRun });
 
     await expect(backend.confirmCleanupAbsent?.({ jobId, sandboxName: name })).rejects.toThrow();
     expect(state.rules).toHaveLength(1);

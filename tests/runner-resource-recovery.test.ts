@@ -61,7 +61,6 @@ describe('microsandbox age cleanup', () => {
     state.createdAt = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
     const backend = createMicrosandboxSandboxBackend({
       hostRun,
-      relayEnabled: true,
       image: 'review-image',
     });
 
@@ -85,7 +84,6 @@ describe('microsandbox age cleanup', () => {
     state.createdAt = new Date().toISOString();
     const backend = createMicrosandboxSandboxBackend({
       hostRun,
-      relayEnabled: true,
       image: 'review-image',
     });
 
@@ -109,7 +107,6 @@ describe('microsandbox age cleanup', () => {
     state.listFailure = { ...ok, truncated: true };
     const backend = createMicrosandboxSandboxBackend({
       hostRun,
-      relayEnabled: true,
       image: 'review-image',
     });
 
@@ -138,7 +135,6 @@ describe('microsandbox age cleanup', () => {
         exitCode: 1,
         stderr: 'error: sandbox not found: ' + sandboxResourceName('job'),
       }),
-      relayEnabled: true,
       image: 'review-image',
     });
 
@@ -191,7 +187,6 @@ describe('microsandbox age cleanup', () => {
     };
     const backend = createMicrosandboxSandboxBackend({
       hostRun,
-      relayEnabled: true,
       image: 'review-image',
     });
 
@@ -236,7 +231,6 @@ describe('microsandbox age cleanup', () => {
     };
     const backend = createMicrosandboxSandboxBackend({
       hostRun,
-      relayEnabled: true,
       image: 'review-image',
     });
 
@@ -275,7 +269,6 @@ describe('microsandbox age cleanup', () => {
         baseUrl: 'https://llm.internal.example/v1',
         definition: { name: 'Review' },
       }),
-      llmRelay: true,
       callbackUrl: 'https://ingress.test/runner-callback',
       callbackToken: 'callback-token',
       claimUrl: '',

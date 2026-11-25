@@ -26,10 +26,6 @@ type SbxCommand = (
 ) => Promise<RunnerProcessResult>;
 
 const MAX_POLICY_JSON_BYTES = 256 * 1024;
-const nonEmpty = (value: string | undefined): string | undefined => {
-  const trimmed = value?.trim();
-  return trimmed === undefined || trimmed.length === 0 ? undefined : trimmed;
-};
 const SBX_MODEL_ENV = 'OPENCODE_API_KEY';
 const SBX_LAUNCHER = 'shell';
 const SBX_EVIDENCE_ROOT = '/tmp/petit-chiba-opencode-evidence';
@@ -125,8 +121,6 @@ const listAllNetworkPolicies = async (command: SbxCommand): Promise<SbxPolicyLis
 };
 
 interface SbxRuntimeOptions {
-  /** Host command that resolves the model API key; runs only in the sbx adapter. */
-  readonly modelSecretCommand?: string;
   /** Executable selected by the registration layer. */
   readonly program: string;
   /** Called after any destroy failure so the instance can refresh its health. */
@@ -434,38 +428,14 @@ const sbxEnvironment = (): NodeJS.ProcessEnv => ({
   GITHUB_TOKEN: undefined,
 });
 
-const sbxOptions = (
-  options: SbxRuntimeOptions,
-  processOptions?: RunnerProcessOptions,
-): RunnerProcessOptions => ({
+const sbxOptions = (processOptions?: RunnerProcessOptions): RunnerProcessOptions => ({
   ...processOptions,
   env: processOptions?.env ?? sbxEnvironment(),
-  stderrRedactions: [
-    ...(options.modelSecretCommand === undefined ? [] : [options.modelSecretCommand]),
-    ...(processOptions?.stderrRedactions ?? []),
-  ],
 });
-
-const redactSbxStderr = (
-  options: SbxRuntimeOptions,
-  result: RunnerProcessResult,
-): RunnerProcessResult => {
-  if (
-    options.modelSecretCommand === undefined ||
-    options.modelSecretCommand.length === 0 ||
-    result.stderr === undefined
-  )
-    return result;
-  const stderr = result.stderr.replaceAll(options.modelSecretCommand, '[redacted]');
-  return stderr === result.stderr ? result : { ...result, stderr };
-};
 
 const commandFor = (options: SbxRuntimeOptions, exec: SandboxExecPort): SbxCommand => {
   return async (args, diagnostic, processOptions) =>
-    redactSbxStderr(
-      options,
-      await exec.run(options.program, args, sbxOptions(options, processOptions), diagnostic),
-    );
+    exec.run(options.program, args, sbxOptions(processOptions), diagnostic);
 };
 
 const createSbxJobSandbox = (options: SbxRuntimeOptions, spec: SandboxJobSpec): JobSandbox => {
@@ -530,10 +500,7 @@ const createSbxJobSandbox = (options: SbxRuntimeOptions, spec: SandboxJobSpec): 
 
   const setup = async (exec: SandboxExecPort) => {
     const command = commandFor(options, exec);
-    const modelSecretSource =
-      spec.modelTokenFile === undefined
-        ? (options.modelSecretCommand ?? '')
-        : `/usr/bin/cat ${shellQuote(spec.modelTokenFile)}`;
+    const modelSecretSource = `/usr/bin/cat ${shellQuote(spec.modelTokenFile)}`;
     const secret = await command(
       [
         'secret',
@@ -681,17 +648,8 @@ const createSbxJobSandbox = (options: SbxRuntimeOptions, spec: SandboxJobSpec): 
 
 export const createSbxSandboxBackend = (context: SandboxBackendContext): SandboxBackend => {
   const program = process.env.RUNNER_SANDBOX_CLI ?? process.env.SBX_BIN ?? 'sbx';
-  const modelSecretCommand = context.relayEnabled
-    ? undefined
-    : nonEmpty(process.env.MODEL_SECRET_COMMAND);
-  if (!context.relayEnabled && modelSecretCommand === undefined) {
-    throw new Error(
-      'sbx direct mode requires MODEL_SECRET_COMMAND to resolve the model credential',
-    );
-  }
   const runtimeOptions: SbxRuntimeOptions = {
     program,
-    ...(modelSecretCommand === undefined ? {} : { modelSecretCommand }),
     onDestroyFailure: async () => {
       if (!(await probeAccess())) health = 'outage';
     },
@@ -700,10 +658,7 @@ export const createSbxSandboxBackend = (context: SandboxBackendContext): Sandbox
   // probe establishes ready/outage without waiting for the broad age sweep.
   let health: SandboxHealth = 'unready';
   const command: SbxCommand = async (args, diagnostic, processOptions) =>
-    redactSbxStderr(
-      runtimeOptions,
-      await context.hostRun(program, args, sbxOptions(runtimeOptions, processOptions), diagnostic),
-    );
+    context.hostRun(program, args, sbxOptions(processOptions), diagnostic);
   const probeAccess = async (): Promise<boolean> => {
     try {
       const listed = await context.hostRun(program, ['ls'], {

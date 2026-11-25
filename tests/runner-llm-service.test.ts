@@ -43,7 +43,8 @@ describe('Runner LLM service mode', () => {
   ])('rejects a relay endpoint outside the dedicated HTTPS inference origin: %s', (baseUrl) => {
     expect(() =>
       createRunner({
-        llmRelay: true,
+        callbackUrl: 'https://ingress.test/runner-callback',
+        callbackToken: 'callback-token',
         modelConfig: JSON.stringify({
           id: 'opencode-go/review',
           baseUrl,
@@ -199,7 +200,6 @@ describe('Runner LLM lifecycle failures', () => {
   };
   const relayOptions = (relay: RelayControl) => ({
     modelConfig,
-    llmRelay: true,
     callbackFetch: routeRelayControl(relay, async () => new Response(null, { status: 202 })),
   });
   it.each(['malformed', 'short', 'http', 'transport'] as const)(
@@ -1020,7 +1020,6 @@ describe('Runner transport diagnostics', () => {
       vi.stubEnv('MICROSANDBOX_IMAGE', 'review:test');
       const runner = createRunner({
         authToken: 'runner-test-token',
-        llmRelay: true,
         modelConfig: relayInferenceModelConfig('review'),
         claimUrl: 'https://ingress.test/runner-claim',
         claimIntervalMs: 1,
@@ -1089,7 +1088,6 @@ describe('Runner transport diagnostics', () => {
     vi.stubEnv('MICROSANDBOX_IMAGE', 'review:test');
     const runner = createRunner({
       authToken: 'runner-test-token',
-      llmRelay: true,
       modelConfig: relayInferenceModelConfig('review'),
       claimUrl: 'https://ingress.test/runner-claim',
       claimIntervalMs: 1,

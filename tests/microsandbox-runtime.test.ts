@@ -36,7 +36,6 @@ it.skipIf(!process.env.CR_MICROSANDBOX_NATIVE_IMAGE)(
     const token = join(root, 'grant');
     const runtime = createMicrosandboxSandboxBackend({
       hostRun,
-      relayEnabled: true,
       image: process.env.CR_MICROSANDBOX_NATIVE_IMAGE!,
     }).createJob({
       id,
@@ -123,7 +122,6 @@ it('destroys the sandbox after a pending credential update settles', async () =>
     await writeFile(token, 'test-grant');
     const runtime = createMicrosandboxSandboxBackend({
       hostRun,
-      relayEnabled: true,
       image: 'fixture',
     }).createJob({
       id: 'rotation',
@@ -201,7 +199,6 @@ it('sweeps an expired VM on Runner startup and preserves a fresh VM', async () =
       evidenceRoot: root,
       authToken: 'runner-test-token',
       claimUrl: '',
-      llmRelay: true,
       callbackUrl: 'https://ingress.test/runner-callback',
       callbackToken: 'callback-token',
       modelConfig: JSON.stringify({

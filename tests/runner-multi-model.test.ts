@@ -281,7 +281,6 @@ describe('Runner multi-model review', () => {
       evidenceRoot: join(controlRoot, 'evidence'),
       authToken: 'runner-test-token',
       modelConfig: multiModelConfig,
-      llmRelay: true,
       llmGrantVersion: overrides.descriptors ? 2 : 1,
       callbackUrl: 'https://ingress.test/runner-callback',
       callbackToken: 'callback-token',

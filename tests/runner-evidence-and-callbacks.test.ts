@@ -263,7 +263,7 @@ describe('Runner Job HTTP interface', () => {
             stdout: args.includes('rev-parse')
               ? `${baseSha}\n${headSha}\n`
               : args.includes('session')
-                ? '[{"id":"session-89"},{"id":"session-child"}]\n'
+                ? '[{"id":"session-89"}]\n'
                 : args.includes('export')
                   ? `{"session":"${args[args.indexOf('export') + 1]}","full":true}\n`
                   : options.captureStdout === true
@@ -297,9 +297,6 @@ describe('Runner Job HTTP interface', () => {
       await expect(
         readFile(join(archive, 'opencode-export-session-89.json'), 'utf8'),
       ).resolves.toContain('session-89');
-      await expect(
-        readFile(join(archive, 'opencode-export-session-child.json'), 'utf8'),
-      ).resolves.toContain('session-child');
       await expect(readFile(join(archive, 'opencode-data', 'opencode.db'), 'utf8')).resolves.toBe(
         'db',
       );
@@ -319,8 +316,8 @@ describe('Runner Job HTTP interface', () => {
         jobId: expect.any(String),
         sandboxName: expect.any(String),
         sandboxId: expect.any(String),
-        sessionIds: ['session-89', 'session-child'],
-        model: 'opencode-go/deepseek-flash',
+        sessionIds: ['session-89'],
+        model: 'compte-rendu/deepseek-review',
         image: 'ghcr.io/ariga39/petit-chiba-opencode:2.4.1-gh2.98.0',
         openCodeVersion: '2.4.1',
         agent: {
@@ -356,14 +353,14 @@ describe('Runner Job HTTP interface', () => {
         id: 'large-session',
         outcome: 'succeeded',
         agent: 'review',
-        model: { providerID: 'opencode-go', id: 'deepseek-flash' },
+        model: { providerID: 'compte-rendu', id: 'deepseek-review' },
       },
       messages: [
         {
           type: 'assistant',
           id: 'msg-large',
           agent: 'review',
-          model: { providerID: 'opencode-go', id: 'deepseek-flash' },
+          model: { providerID: 'compte-rendu', id: 'deepseek-review' },
           finish: 'stop',
           content: [
             {
@@ -581,7 +578,7 @@ describe('Runner Job HTTP interface', () => {
     const terminal = await waitForTerminal(runner, id);
     expect(terminal).toMatchObject({
       status: 'failed',
-      failure: { reason: 'invalid-output', cause: 'missing-terminal-message' },
+      failure: { reason: 'evidence' },
       evidence: { status: 'incomplete' },
       sandbox: { cleanup: 'destroyed' },
     });
