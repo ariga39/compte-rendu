@@ -72,7 +72,7 @@ export const runAgentStage = async (
   const multiConfiguration = job.input.reviewConfiguration;
   const multiSelection = multiConfiguration?.selection ?? undefined;
   const modelTokenFile = job.grantTokenPath;
-  if (multiSelection === undefined || modelTokenFile === undefined) {
+  if (multiSelection === undefined || modelTokenFile === undefined || descriptors === undefined) {
     return { failure: { reason: 'configuration' } };
   }
   const directExecution = multiSelection.reviewers.length === 1;

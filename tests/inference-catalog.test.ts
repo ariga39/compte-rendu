@@ -47,7 +47,7 @@ it('replaces a source snapshot while retaining historical mappings for queued gr
       rejected: 0,
     });
     await expect(
-      createGrantControl(db).issue({
+      createGrantControl(db).issueV2({
         jobId: 'job-original',
         snapshot: { routes: ['review-provider/original'] },
         latestIssueDeadline: deadline(),
@@ -378,9 +378,11 @@ it('requires the operator bearer to read the relay catalog from the application'
       ALLOWED_INSTALLATION_IDS: '[1]',
       REVIEW_CONFIGURATION_TOKEN: 'operator',
       INFERENCE_RELAY: {
-        issue: async () => ({ kind: 'invalid' }),
+        issueV2: async () => ({ kind: 'invalid' }),
         revoke: async () => ({ kind: 'revoked' }),
         usage: async () => null,
+        effortStates: async () => ({ routes: [] }),
+        effortDetails: async () => null,
         catalog: async () => catalog,
         refreshCatalog: async () => {},
       },
@@ -427,9 +429,11 @@ it('serves complete upstream model records only on an authorized detail read', a
       ALLOWED_INSTALLATION_IDS: '[1]',
       REVIEW_CONFIGURATION_TOKEN: 'operator',
       INFERENCE_RELAY: {
-        issue: async () => ({ kind: 'invalid' }),
+        issueV2: async () => ({ kind: 'invalid' }),
         revoke: async () => ({ kind: 'revoked' }),
         usage: async () => null,
+        effortStates: async () => ({ routes: [] }),
+        effortDetails: async () => null,
         catalog: async (input) => relay.get(input),
         refreshCatalog: async () => {},
       },
@@ -486,7 +490,7 @@ it('rejects a snapshot over the distinct selectable route limit and keeps the pr
     expect(capped.routes).not.toContain('p/retired');
     expect(capped.lastRefreshError).toBeNull();
     await expect(
-      createGrantControl(db).issue({
+      createGrantControl(db).issueV2({
         jobId: 'before-the-budget-replacement',
         snapshot: { routes: ['p/old'] },
         latestIssueDeadline: deadline(),
@@ -656,7 +660,7 @@ it('removes memberships from sources that are no longer configured but keeps old
     });
 
     await expect(
-      createGrantControl(db).issue({
+      createGrantControl(db).issueV2({
         jobId: 'job-retired',
         snapshot: { routes: ['retired'] },
         latestIssueDeadline: deadline(),
@@ -712,7 +716,7 @@ it('presents a discovered route instead of an alias with the same provider, cred
     await catalog.refresh(50);
     expect((await catalog.get()).routes).toEqual(['provider/same-model']);
     await expect(
-      createGrantControl(db).issue({
+      createGrantControl(db).issueV2({
         jobId: 'job-legacy-alias',
         snapshot: { routes: ['legacy-review'] },
         latestIssueDeadline: deadline(),
@@ -807,7 +811,7 @@ it.each(['custom-review', 'native:openai'])(
   },
 );
 
-it('freezes the alias-only source provider and credential on a legacy grant', async () => {
+it('freezes the alias-only source provider and credential on a grant', async () => {
   const db = database();
   try {
     const sources = Schema.decodeUnknownSync(RelayCatalogSources)([
@@ -823,7 +827,7 @@ it('freezes the alias-only source provider and credential on a legacy grant', as
     expect(fetch).not.toHaveBeenCalled();
 
     await expect(
-      createGrantControl(db).issue({
+      createGrantControl(db).issueV2({
         jobId: 'job-legacy',
         snapshot: { routes: ['legacy-review'] },
         latestIssueDeadline: deadline(),
@@ -838,6 +842,7 @@ it('freezes the alias-only source provider and credential on a legacy grant', as
         upstreamModel: 'legacy-model',
         providerSlug: 'custom-legacy',
         credentialAlias: 'billing',
+        profile: 'chat',
       },
     ]);
   } finally {
@@ -1189,13 +1194,6 @@ it('exposes the explicit allowlist and refreshes configured model limits', async
         },
       ],
     });
-    await expect(
-      createGrantControl(db).issue({
-        jobId: 'job-sol-v1',
-        snapshot: { routes: ['openai-platform/gpt-6.2-sol'] },
-        latestIssueDeadline: deadline(),
-      }),
-    ).resolves.toEqual({ kind: 'invalid' });
 
     const changed = createRelayCatalog(db, [
       {
@@ -1961,8 +1959,8 @@ it('retires historical Messages and Gemini routes without blocking sibling disco
       descriptors: [{ routeId: 'go/sibling', profile: 'chat' }],
     });
     await expect(
-      createGrantControl(db).issue({
-        jobId: 'job-retired-v1',
+      createGrantControl(db).issueV2({
+        jobId: 'job-retired-v2',
         snapshot: { routes: ['go/historical'] },
         latestIssueDeadline: deadline(),
       }),

@@ -3,16 +3,8 @@ import type { RunnerJobBinding } from './runner-job-client';
 import type { GitHubAdapter } from './github-adapter-contract';
 import type { ReviewPublicationStateStore } from './review-state-store';
 import type { D1DatabaseLike } from './review-state-store';
+import type { RelayCatalogSnapshot } from '../../inference-worker/src/catalog';
 import type { RelayControl } from './runner-llm-control';
-
-type CoreRelayCatalog = Omit<
-  import('../../inference-worker/src/catalog').RelayCatalogSnapshot,
-  'efforts'
-> & {
-  // Old relay deployments do not return the effort catalog. Keep it optional so
-  // Core can roll forward before the inference Worker is upgraded.
-  readonly efforts?: import('../../inference-worker/src/catalog').RelayCatalogSnapshot['efforts'];
-};
 
 export interface CoreEnv {
   readonly RUNNER: RunnerJobBinding;
@@ -25,7 +17,7 @@ export interface CoreWorkerEnv extends Partial<CoreEnv> {
     catalog(input?: {
       readonly includeModels?: boolean;
       readonly models?: boolean;
-    }): Promise<CoreRelayCatalog>;
+    }): Promise<RelayCatalogSnapshot>;
     refreshCatalog(scheduledTime: number): Promise<void>;
   };
   readonly GITHUB_APP_ID: string;

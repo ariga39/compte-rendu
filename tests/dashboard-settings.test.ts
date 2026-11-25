@@ -15,15 +15,18 @@ afterEach(() => {
 const relay = {
   catalog: async () => ({
     routes: ['model/a'],
+    efforts: {},
     lastAttemptAt: null,
     lastSuccessAt: null,
     rejected: 0,
     lastRefreshError: null,
   }),
   refreshCatalog: async () => {},
-  issue: async () => ({ kind: 'invalid' as const }),
+  issueV2: async () => ({ kind: 'invalid' as const }),
   revoke: async () => ({ kind: 'revoked' as const }),
   usage: async () => null,
+  effortStates: async () => ({ routes: [] }),
+  effortDetails: async () => null,
 };
 
 function createApp() {
@@ -270,15 +273,18 @@ it('requires an allowlisted GitHub UID on every model change and preserves the p
     INFERENCE_RELAY: {
       catalog: async () => ({
         routes: ['model/a'],
+        efforts: {},
         lastAttemptAt: null,
         lastSuccessAt: null,
         rejected: 0,
         lastRefreshError: 'refresh failed',
       }),
       refreshCatalog: async () => {},
-      issue: async () => ({ kind: 'invalid' }),
+      issueV2: async () => ({ kind: 'invalid' }),
       revoke: async () => ({ kind: 'revoked' }),
       usage: async () => null,
+      effortStates: async () => ({ routes: [] }),
+      effortDetails: async () => null,
     },
   });
   let profile: Record<string, unknown> | Response = { id: 42 };
@@ -566,9 +572,11 @@ it('loads and saves concurrency through Settings when the catalog is unavailable
         };
       },
       refreshCatalog: async () => {},
-      issue: async () => ({ kind: 'invalid' as const }),
+      issueV2: async () => ({ kind: 'invalid' as const }),
       revoke: async () => ({ kind: 'revoked' as const }),
       usage: async () => null,
+      effortStates: async () => ({ routes: [] }),
+      effortDetails: async () => null,
     },
   });
   stubGitHub(() => ({ id: 42, login: 'operator' }));

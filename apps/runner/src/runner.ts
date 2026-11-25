@@ -76,7 +76,6 @@ type MaintenanceStatus = {
 
 export interface RunnerOptions {
   readonly sandboxBackend?: SandboxBackend;
-  readonly llmGrantVersion?: 1 | 2;
   readonly authToken?: string;
   readonly modelConfig?: string;
   readonly evidenceRoot?: string;
@@ -137,12 +136,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
     process.env.RUNNER_CONCURRENCY,
   );
   let effectiveConcurrency = startupConcurrency;
-  const llmServiceSocketRaw = process.env.RUNNER_LLM_SERVICE_SOCKET;
-  if (llmServiceSocketRaw !== undefined && llmServiceSocketRaw.trim().length > 0) {
-    throw new Error(
-      'RUNNER_LLM_SERVICE_SOCKET is no longer supported; use RUNNER_LLM_RELAY with an HTTPS inference origin',
-    );
-  }
   if (nonEmpty(process.env.MODEL_SECRET_COMMAND) !== undefined) {
     throw new Error(
       'MODEL_SECRET_COMMAND is no longer supported: direct-provider model credentials were removed. Configure managed inference with REVIEW_MODEL_CONFIG and the callback credentials instead.',
@@ -193,12 +186,16 @@ export const createRunner = (options: RunnerOptions = {}) => {
       'Managed inference requires a dedicated inference hostname distinct from the callback host',
     );
   }
-  const grantVersion = String(options.llmGrantVersion ?? process.env.RUNNER_LLM_GRANT_VERSION ?? 1);
-  if (grantVersion !== '1' && grantVersion !== '2')
-    throw new Error('Invalid RUNNER_LLM_GRANT_VERSION');
+  const configuredGrantVersion = process.env.RUNNER_LLM_GRANT_VERSION?.trim();
+  if (
+    configuredGrantVersion !== undefined &&
+    configuredGrantVersion !== '' &&
+    configuredGrantVersion !== '2'
+  ) {
+    throw new Error('RUNNER_LLM_GRANT_VERSION must be unset or 2; grant v1 is no longer supported');
+  }
   const relayFetch = options.callbackFetch ?? globalThis.fetch;
   const llmServiceClient = createRelayLlmServiceClient({
-    grantVersion: grantVersion === '2' ? 2 : 1,
     origin: relayOrigin,
     token: relayToken,
     fetch: relayFetch,
@@ -313,7 +310,6 @@ export const createRunner = (options: RunnerOptions = {}) => {
     grants: grantRevoker,
     llmServiceClient,
     readTokenClient,
-    grantVersion,
     serviceBaseUrl,
     modelResource,
     log,

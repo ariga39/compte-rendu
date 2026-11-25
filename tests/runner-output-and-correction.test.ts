@@ -211,9 +211,16 @@ describe('Runner Job HTTP interface', () => {
       'result-schema-failure',
     ],
     [
+      'a retired JSON submission',
+      sessionExportJson('scenario-session', {
+        text: JSON.stringify({ decision: 'comment', markdown: '## Review:\n\nNo findings.' }),
+      }),
+      'result-schema-failure',
+    ],
+    [
       'invalid final decision',
       sessionExportJson('scenario-session', {
-        text: JSON.stringify({ decision: 'maybe', markdown: '## Review:\n\nNo findings.' }),
+        text: decisionText('maybe', '## Review:\n\nNo findings.'),
       }),
       'result-schema-failure',
     ],
@@ -262,7 +269,7 @@ describe('Runner Job HTTP interface', () => {
     expect(terminal).not.toHaveProperty('result');
   });
   it('rejects a malformed final assistant instead of using earlier text', async () => {
-    const validText = JSON.stringify({ decision: 'comment', markdown: defaultReviewMarkdown });
+    const validText = decisionText('comment', defaultReviewMarkdown);
     const sessionExport = JSON.stringify({
       info: {
         id: 'scenario-session',
@@ -320,7 +327,7 @@ describe('Runner Job HTTP interface', () => {
           content: [
             {
               type: 'text',
-              text: JSON.stringify({ decision: 'comment', markdown: defaultReviewMarkdown }),
+              text: decisionText('comment', defaultReviewMarkdown),
             },
             { type: 'text', text: 123 },
           ],
@@ -347,7 +354,7 @@ describe('Runner Job HTTP interface', () => {
         { output: completedWithoutSubmitJsonl('session-reminder'), finalText: null },
         {
           output: finalMarkdownJsonl(reminderMarkdown, 'session-reminder'),
-          finalText: JSON.stringify({ decision: 'comment', markdown: reminderMarkdown }),
+          finalText: decisionText('comment', reminderMarkdown),
         },
       ],
     });
@@ -387,7 +394,7 @@ describe('Runner Job HTTP interface', () => {
   it('accepts a V2 final-text session with one correction turn', async () => {
     const sessionId = 'ses_synthetic_final_text';
     const markdown = '## Review:\nNo blocking defects.';
-    const finalText = JSON.stringify({ decision: 'approve', markdown });
+    const finalText = decisionText('approve', markdown);
     const firstTurn = JSON.stringify({
       type: 'text',
       sessionID: sessionId,
@@ -507,7 +514,7 @@ describe('Runner Job HTTP interface', () => {
         {
           output: finalMarkdownJsonl(markdown, session),
           exitCode: 0,
-          finalText: JSON.stringify({ decision: 'comment', markdown }),
+          finalText: decisionText('comment', markdown),
         },
       ],
     });
@@ -542,7 +549,7 @@ describe('Runner Job HTTP interface', () => {
         {
           output: finalMarkdownJsonl(markdown, session),
           exitCode: 1,
-          finalText: JSON.stringify({ decision: 'comment', markdown }),
+          finalText: decisionText('comment', markdown),
         },
       ],
     });
@@ -648,7 +655,7 @@ describe('Runner Job HTTP interface', () => {
           },
           {
             output: finalMarkdownJsonl(reminderMarkdown, 'session-reminder'),
-            finalText: JSON.stringify({ decision: 'comment', markdown: reminderMarkdown }),
+            finalText: decisionText('comment', reminderMarkdown),
           },
         ],
       });
@@ -695,10 +702,7 @@ describe('Runner Job HTTP interface', () => {
         part: {
           type: 'text',
           messageID: 'msg-reminder',
-          text: JSON.stringify({
-            decision: 'comment',
-            markdown: '## Review:\n\nReminder without a stop.',
-          }),
+          text: decisionText('comment', '## Review:\n\nReminder without a stop.'),
         },
       }),
     ].join('\n');

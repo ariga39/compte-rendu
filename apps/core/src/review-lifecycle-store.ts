@@ -182,11 +182,11 @@ const deliverySelect = `
 const STALE_CLAIM_SWEEP_LIMIT = 64;
 const staleScheduledRunPage = `SELECT run_id, delivery_id, check_run_id FROM review_runs
   WHERE status = 'scheduled' AND runner_job_id IS NOT NULL
-    AND COALESCE(claimed_at, created_at) <= ?
+    AND claimed_at <= ?
     AND (result_received_at IS NULL OR result_received_at <= ?)
     AND publication_started_at IS NULL
     AND (publication_claimed_at IS NULL OR publication_claimed_at <= ?)
-  ORDER BY COALESCE(claimed_at, created_at) ASC, run_id ASC
+  ORDER BY claimed_at ASC, run_id ASC
   LIMIT ?`;
 
 export type ExpiredClaimCheckHandler = (runIds: readonly string[]) => Promise<void>;
@@ -533,7 +533,7 @@ export const createReviewLifecycleStore = (
                            OR runner_cleanup_status = 'destroyed'
                            OR (
                              runner_job_id IS NOT NULL
-                             AND COALESCE(claimed_at, created_at) <= ?
+                             AND claimed_at <= ?
                            )
                          ))
                      )

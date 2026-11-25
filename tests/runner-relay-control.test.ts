@@ -53,12 +53,16 @@ describe('Runner relay control client', () => {
         ...(typeof authorization === 'string' ? { authorization } : {}),
         body,
       });
-      if (incoming.url === '/runner-llm/issue') {
+      if (incoming.url === '/runner-llm/issue-v2') {
         outgoing.writeHead(201, { 'content-type': 'application/json' });
         outgoing.end(
           JSON.stringify({
             token: 'job-bearer',
             expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            descriptors: [
+              { routeId: 'reviewer-a', profile: 'chat' },
+              { routeId: 'reviewer-b', profile: 'chat' },
+            ],
           }),
         );
         return;
@@ -95,7 +99,7 @@ describe('Runner relay control client', () => {
 
       expect(requests).toEqual([
         {
-          path: '/runner-llm/issue',
+          path: '/runner-llm/issue-v2',
           authorization: 'Bearer relay-callback-token',
           body: {
             runId: 'run-1',
@@ -222,7 +226,6 @@ describe('Runner relay control client', () => {
     ],
   ])('classifies %s without exposing the body or credential', async (_label, respond, reason) => {
     const client = createRelayLlmServiceClient({
-      grantVersion: 2,
       origin: 'https://relay.example',
       token: 'relay-token',
       fetch: async () => respond(),
@@ -244,7 +247,6 @@ describe('Runner relay control client', () => {
     vi.useFakeTimers();
     try {
       const client = createRelayLlmServiceClient({
-        grantVersion: 2,
         origin: 'https://relay.example',
         token: 'relay-token',
         fetch: async () => new Promise<Response>(() => undefined),
@@ -318,28 +320,25 @@ describe('Runner relay configuration', () => {
     expect(transmitted).toBe(0);
   });
 
-  it.each(['/run/user/1000/compte-rendu-llm/control.sock', 'relative/control.sock'])(
-    'fails closed when the retired local service socket is configured: %s',
-    async (socketPath) => {
-      const previous = process.env.RUNNER_LLM_SERVICE_SOCKET;
-      process.env.RUNNER_LLM_SERVICE_SOCKET = socketPath;
-      try {
-        expect(() =>
-          createRunner({
-            authToken: 'runner-test-token',
-            modelConfig: JSON.stringify({
-              id: 'opencode-go/deepseek-review',
-              definition: { name: 'DeepSeek review' },
-            }),
-            claimUrl: '',
-          }),
-        ).toThrow(/RUNNER_LLM_SERVICE_SOCKET|Unix socket|retired|relay/i);
-      } finally {
-        if (previous === undefined) delete process.env.RUNNER_LLM_SERVICE_SOCKET;
-        else process.env.RUNNER_LLM_SERVICE_SOCKET = previous;
-      }
+  it('ignores the retired local service socket setting', async () => {
+    vi.stubEnv('RUNNER_LLM_SERVICE_SOCKET', 'relative/control.sock');
+    const runner = createRunner(relayBaseOptions());
+    await runner.close();
+  });
+
+  it.each([undefined, '2'])(
+    'starts with RUNNER_LLM_GRANT_VERSION unset or 2: %s',
+    async (value) => {
+      vi.stubEnv('RUNNER_LLM_GRANT_VERSION', value ?? '');
+      const runner = createRunner(relayBaseOptions());
+      await runner.close();
     },
   );
+
+  it.each(['1', '3'])('fails closed when RUNNER_LLM_GRANT_VERSION=%s', (value) => {
+    vi.stubEnv('RUNNER_LLM_GRANT_VERSION', value);
+    expect(() => createRunner(relayBaseOptions())).toThrow(/grant v1|RUNNER_LLM_GRANT_VERSION/);
+  });
 });
 
 describe('Runner relay admission and recovery', () => {
@@ -497,12 +496,13 @@ describe('Runner relay admission and recovery', () => {
         const path = new URL(inputUrl).pathname;
         if (!path.startsWith('/runner-llm/')) return execution.callbackFetch(input, init);
         const body = typeof init?.body === 'string' ? JSON.parse(init.body) : {};
-        if (path === '/runner-llm/issue') {
+        if (path === '/runner-llm/issue-v2') {
           issued.push(body as Record<string, unknown>);
           return Response.json(
             {
               token: 'relay-job-token',
               expiresAt: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
+              descriptors: [{ routeId: 'reviewer-a', profile: 'chat' }],
             },
             { status: 201 },
           );
@@ -581,11 +581,12 @@ describe('Runner relay admission and recovery', () => {
         if (!path.startsWith('/runner-llm/')) return execution.callbackFetch(input, init);
         const bodyValue = typeof init?.body === 'string' ? JSON.parse(init.body) : {};
         requests.push({ path, body: bodyValue as Record<string, unknown> });
-        if (path === '/runner-llm/issue') {
+        if (path === '/runner-llm/issue-v2') {
           return Response.json(
             {
               token: 'relay-job-token',
               expiresAt: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
+              descriptors: [{ routeId: 'reviewer-a', profile: 'chat' }],
             },
             { status: 201 },
           );
@@ -624,7 +625,7 @@ describe('Runner relay admission and recovery', () => {
       });
       await execution.waitForTerminal('relay-issue-job');
       expect(requests).toContainEqual({
-        path: '/runner-llm/issue',
+        path: '/runner-llm/issue-v2',
         body: {
           runId: 'run-relay-issue',
           jobId: 'relay-issue-job',

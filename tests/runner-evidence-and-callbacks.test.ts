@@ -365,11 +365,7 @@ describe('Runner Job HTTP interface', () => {
           content: [
             {
               type: 'text',
-              text:
-                JSON.stringify({
-                  decision: 'comment',
-                  markdown: '## Review:\n\nNo findings.',
-                }) + ' '.repeat(70 * 1024),
+              text: 'DECISION: comment\n\n## Review:\n\nNo findings.' + ' '.repeat(70 * 1024),
             },
           ],
         },

@@ -15,14 +15,17 @@ const env = (database: SqliteD1Database): CoreWorkerEnv => ({
     },
     catalog: async () => ({
       routes: [],
+      efforts: {},
       lastAttemptAt: null,
       lastSuccessAt: null,
       rejected: 0,
       lastRefreshError: null,
     }),
-    issue: async () => ({ kind: 'invalid' }),
+    issueV2: async () => ({ kind: 'invalid' }),
     revoke: async () => ({ kind: 'revoked' }),
     usage: async () => null,
+    effortStates: async () => ({ routes: [] }),
+    effortDetails: async () => null,
   },
 });
 

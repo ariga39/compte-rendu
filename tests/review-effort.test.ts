@@ -38,10 +38,11 @@ const environment = (database: SqliteD1Database, overrides: Record<string, unkno
   INFERENCE_RELAY: {
     catalog: async () => catalog(),
     refreshCatalog: async () => {},
-    issue: async () => ({ kind: 'invalid' as const }),
     issueV2: async () => ({ kind: 'invalid' as const }),
     revoke: async () => ({ kind: 'revoked' as const }),
     usage: async () => null,
+    effortStates: async () => ({ routes: [] }),
+    effortDetails: async () => null,
     ...overrides,
   },
 });
@@ -204,9 +205,8 @@ it('freezes effort controls and generations at admission and advances only on ex
   }
 });
 
-it('issues the frozen route efforts to the v2 grant and refuses v1 explicit efforts', async () => {
+it('issues the frozen route efforts to the v2 grant', async () => {
   const database = new SqliteD1Database();
-  const v1: unknown[] = [];
   const v2: unknown[] = [];
   try {
     const store = createD1ReviewStateStore(database);
@@ -242,10 +242,6 @@ it('issues the frozen route efforts to the v2 grant and refuses v1 explicit effo
       INFERENCE_RELAY: {
         catalog: async () => catalog(),
         refreshCatalog: async () => {},
-        issue: async (input) => {
-          v1.push(input);
-          return { kind: 'issued' as const, token: 'v1', expiresAt: '2030-01-01T00:00:00Z' };
-        },
         issueV2: async (input) => {
           v2.push(input);
           return {
@@ -257,6 +253,8 @@ it('issues the frozen route efforts to the v2 grant and refuses v1 explicit effo
         },
         revoke: async () => ({ kind: 'revoked' as const }),
         usage: async () => null,
+        effortStates: async () => ({ routes: [] }),
+        effortDetails: async () => null,
       },
     });
     const issue = (path: string) =>
@@ -286,8 +284,6 @@ it('issues the frozen route efforts to the v2 grant and refuses v1 explicit effo
         latestIssueDeadline: expect.any(Number),
       },
     ]);
-    expect((await issue('/runner-llm/issue')).status).toBe(409);
-    expect(v1).toEqual([]);
   } finally {
     database.close();
   }
@@ -295,7 +291,6 @@ it('issues the frozen route efforts to the v2 grant and refuses v1 explicit effo
 
 it('does not freeze an unused synthesis route and drops old ungranted snapshot entries', async () => {
   const database = new SqliteD1Database();
-  const v1: unknown[] = [];
   const v2: unknown[] = [];
   try {
     const single = {
@@ -363,10 +358,6 @@ it('does not freeze an unused synthesis route and drops old ungranted snapshot e
       INFERENCE_RELAY: {
         catalog: async () => catalog(),
         refreshCatalog: async () => {},
-        issue: async (input) => {
-          v1.push(input);
-          return { kind: 'issued' as const, token: 'v1', expiresAt: '2030-01-01T00:00:00Z' };
-        },
         issueV2: async (input) => {
           v2.push(input);
           return {
@@ -378,6 +369,8 @@ it('does not freeze an unused synthesis route and drops old ungranted snapshot e
         },
         revoke: async () => ({ kind: 'revoked' as const }),
         usage: async () => null,
+        effortStates: async () => ({ routes: [] }),
+        effortDetails: async () => null,
       },
     });
     const issue = (path: string) =>
@@ -404,8 +397,6 @@ it('does not freeze an unused synthesis route and drops old ungranted snapshot e
         latestIssueDeadline: expect.any(Number),
       },
     ]);
-    expect((await issue('/runner-llm/issue')).status).toBe(409);
-    expect(v1).toEqual([]);
   } finally {
     database.close();
   }
@@ -462,11 +453,6 @@ it('omits default generation-only entries for a non-Chat reviewer and keeps rese
           efforts: { [deepseek]: [{ name: 'high', controls: deepseekControls }] },
         }),
         refreshCatalog: async () => {},
-        issue: async () => ({
-          kind: 'issued' as const,
-          token: 'v1',
-          expiresAt: '2030-01-01T00:00:00Z',
-        }),
         issueV2: async (input) => {
           // The real relay rejects a generation-only entry on a non-Chat route.
           if (input.snapshot.efforts?.some((effort) => effort.routeId !== deepseek))
@@ -484,6 +470,8 @@ it('omits default generation-only entries for a non-Chat reviewer and keeps rese
         },
         revoke: async () => ({ kind: 'revoked' as const }),
         usage: async () => null,
+        effortStates: async () => ({ routes: [] }),
+        effortDetails: async () => null,
       },
     });
     const issue = (runId: string, jobId: string) =>
@@ -675,7 +663,6 @@ it('hides a relay fallback marker once an explicit reset advances the route gene
     INFERENCE_RELAY: {
       catalog: async () => catalog(),
       refreshCatalog: async () => {},
-      issue: async () => ({ kind: 'invalid' as const }),
       issueV2: async () => ({ kind: 'invalid' as const }),
       revoke: async () => ({ kind: 'revoked' as const }),
       usage: async () => null,
@@ -689,6 +676,7 @@ it('hides a relay fallback marker once an explicit reset advances the route gene
           },
         ],
       }),
+      effortDetails: async () => null,
     },
   });
   stubGitHub({ id: 42, login: 'operator' });
@@ -770,10 +758,10 @@ it('returns bounded per-request effort details only to the current editor', asyn
     INFERENCE_RELAY: {
       catalog: async () => catalog(),
       refreshCatalog: async () => {},
-      issue: async () => ({ kind: 'invalid' as const }),
       issueV2: async () => ({ kind: 'invalid' as const }),
       revoke: async () => ({ kind: 'revoked' as const }),
       usage: async () => null,
+      effortStates: async () => ({ routes: [] }),
       effortDetails: async (input) => {
         asked.push(input.jobId);
         return detail;

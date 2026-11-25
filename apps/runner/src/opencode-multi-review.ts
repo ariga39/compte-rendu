@@ -279,7 +279,7 @@ function modelConfig(descriptor: ModelRouteDescriptor, baseURL: string) {
 export const multiReviewConfig = (options: {
   readonly selection: MultiReviewSelection;
   readonly serviceBaseUrl: string;
-  readonly descriptors?: readonly ModelRouteDescriptor[] | undefined;
+  readonly descriptors: readonly ModelRouteDescriptor[];
   readonly shellPermissionRules: ReadonlyArray<readonly [string, 'allow' | 'deny']>;
   readonly reviewerTask: string;
 }): string => {
@@ -287,7 +287,7 @@ export const multiReviewConfig = (options: {
   const reviewerPermissionsValue = reviewerPermissions(options.shellPermissionRules);
   const baseURL = options.serviceBaseUrl;
   const descriptorModels = new Map<string, Record<string, unknown>>();
-  for (const descriptor of options.descriptors ?? []) {
+  for (const descriptor of options.descriptors) {
     const identity = routeModelIdentity(descriptor.routeId, options.descriptors);
     const models = descriptorModels.get(identity.providerID) ?? {};
     models[identity.id] = {
@@ -298,30 +298,18 @@ export const multiReviewConfig = (options: {
     };
     descriptorModels.set(identity.providerID, models);
   }
-  const providers = options.descriptors
-    ? Object.fromEntries(
-        [...descriptorModels].map(([id, models]) => [
-          id,
-          {
-            name: 'Compte-rendu service',
-            canonical: id === MULTI_PROVIDER_ID ? 'opencode-go' : id,
-            package: '@opencode/ai/providers/openai-compatible',
-            settings: { baseURL },
-            models,
-          },
-        ]),
-      )
-    : {
-        [MULTI_PROVIDER_ID]: {
-          name: 'Compte-rendu service',
-          canonical: 'opencode-go',
-          package: '@opencode/ai/providers/openai-compatible',
-          settings: { baseURL, apiKey: relayCredential },
-          models: Object.fromEntries(
-            dedupedRoutes(options.selection).map((route) => [route, { settings: { baseURL } }]),
-          ),
-        },
-      };
+  const providers = Object.fromEntries(
+    [...descriptorModels].map(([id, models]) => [
+      id,
+      {
+        name: 'Compte-rendu service',
+        canonical: id === MULTI_PROVIDER_ID ? 'opencode-go' : id,
+        package: '@opencode/ai/providers/openai-compatible',
+        settings: { baseURL },
+        models,
+      },
+    ]),
+  );
   const referenceFor = (route: string) => routeModelIdentity(route, options.descriptors).reference;
   if (roster.length === 1) {
     const route = roster[0]!.route;

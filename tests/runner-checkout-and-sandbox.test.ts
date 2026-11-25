@@ -1068,7 +1068,10 @@ describe('Runner Job HTTP interface', () => {
       'https://inference.example/v1',
     );
     expect(config.providers['compte-rendu']?.models['deepseek-review']).toEqual({
-      settings: { baseURL: 'https://inference.example/v1' },
+      settings: {
+        baseURL: 'https://inference.example/v1',
+        apiKey: '{env:OPENCODE_API_KEY}',
+      },
     });
     expect(config.agents.review.model).toBe('compte-rendu/deepseek-review');
     const permissions = config.agents.review.permissions;

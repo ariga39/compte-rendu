@@ -254,6 +254,16 @@ failed-cleanup jobs against the original backend. An undelivered terminal result
 may be lost during the switch. Re-trigger the review once the same PR is eligible.
 Continue with step 2 and verify publication on the next review.
 
+### Grant v2-only cutover
+
+The inference Worker no longer serves `/runner-llm/issue`; `/runner-llm/issue-v2`
+is the sole grant path and always returns frozen route descriptors. Drain all
+Runners, deploy the inference Worker, the application Worker and the matching
+Runner in one window, then resume. Keep `RUNNER_LLM_GRANT_VERSION` unset or set
+to `2`; a Runner configured with `1` fails startup. Existing v1 grants are
+short-lived and drained work must finish before the cutover, so a rollback needs
+the previous binaries and their original configuration.
+
 ### Migrating an existing two-Worker installation
 
 Keep the public Worker name/domain, D1 and R2 IDs, VPC service, allowlists,

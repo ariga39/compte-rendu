@@ -84,7 +84,7 @@ describe('Runner multi-model review', () => {
         content: [
           {
             type: 'text',
-            text: JSON.stringify({ decision: 'request_changes', markdown: synthesisMarkdown }),
+            text: decisionText('request_changes', synthesisMarkdown),
           },
         ],
       },
@@ -139,7 +139,7 @@ describe('Runner multi-model review', () => {
       part: {
         type: 'text',
         messageID: 'msg-root-final',
-        text: JSON.stringify({ decision: 'request_changes', markdown: synthesisMarkdown }),
+        text: decisionText('request_changes', synthesisMarkdown),
       },
     }),
   ].join('\n');
@@ -225,7 +225,7 @@ describe('Runner multi-model review', () => {
       part: {
         type: 'text',
         messageID: 'msg-root-continuation',
-        text: JSON.stringify({ decision: 'request_changes', markdown: synthesisMarkdown }),
+        text: decisionText('request_changes', synthesisMarkdown),
       },
     }),
   ].join('\n');
@@ -281,7 +281,6 @@ describe('Runner multi-model review', () => {
       evidenceRoot: join(controlRoot, 'evidence'),
       authToken: 'runner-test-token',
       modelConfig: multiModelConfig,
-      llmGrantVersion: overrides.descriptors ? 2 : 1,
       callbackUrl: 'https://ingress.test/runner-callback',
       callbackToken: 'callback-token',
       log: {
@@ -502,26 +501,6 @@ describe('Runner multi-model review', () => {
           limit: { context: 1_050_000, output: 128_000 },
         },
       },
-    });
-  });
-
-  it('keeps the v1 provider and references when descriptors are absent', () => {
-    const config = JSON.parse(
-      multiReviewConfig({
-        selection: {
-          reviewers: ['review-provider/gpt-6-luna'],
-          synthesis: 'review-provider/gpt-6-luna',
-        },
-        serviceBaseUrl: 'https://inference.example/v1',
-        shellPermissionRules: [],
-        reviewerTask: 'review task',
-      }),
-    );
-    expect(config.model).toBe('compte-rendu/review-provider/gpt-6-luna');
-    expect(config.agents.review.model).toBe('compte-rendu/review-provider/gpt-6-luna');
-    expect(Object.keys(config.providers)).toEqual(['compte-rendu']);
-    expect(config.providers['compte-rendu'].models).toEqual({
-      'review-provider/gpt-6-luna': { settings: { baseURL: 'https://inference.example/v1' } },
     });
   });
 
@@ -1112,7 +1091,7 @@ describe('Runner multi-model review', () => {
 
   it('uses only the reviewer route for a one-model roster with a distinct synthesis alias', async () => {
     const reviewer = 'deepseek-v4.1-flash';
-    const finalText = JSON.stringify({ decision: 'request_changes', markdown: synthesisMarkdown });
+    const finalText = decisionText('request_changes', synthesisMarkdown);
     const directExport = JSON.stringify({
       info: {
         id: rootSession,
@@ -1469,25 +1448,6 @@ describe('Runner multi-model review', () => {
       evidenceFailure: 'credential-in-output',
       terminal: { status: 'failed', reason: 'evidence' },
     });
-  });
-
-  it('accepts unrelated extra fields in the final submission and publishes only decision and markdown', async () => {
-    const withExtras = JSON.parse(rootExport);
-    withExtras.messages[0].content[0].text = JSON.stringify({
-      decision: 'request_changes',
-      markdown: synthesisMarkdown,
-      findings: [{ id: 'f1', location: 'x', claim: 'c', impact: 'i', evidence: 'e' }],
-      coverage: [],
-    });
-    const result = await runScenario({ rootExport: JSON.stringify(withExtras) });
-
-    expect(result.terminal).toMatchObject({
-      status: 'succeeded',
-      result: { version: 2, decision: 'request_changes', markdown: synthesisMarkdown },
-    });
-    expect(
-      (result.terminal as { result?: { findings?: unknown } }).result?.findings,
-    ).toBeUndefined();
   });
 
   it('uses only the last assistant message and ignores earlier invalid text', async () => {

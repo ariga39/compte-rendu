@@ -243,11 +243,8 @@ replacement before the next save.
 `POST /runner-llm/issue-v2` receives the frozen `{routeId, generation, name,
 controls}` entries for the routes the job actually uses, and the relay validates
 them against its trusted history. Entries for routes outside the grant, including
-an unused synthesis route in an older snapshot, are not forwarded. The legacy v1
-grant does not carry efforts. Core refuses a v1 grant with an explicit effort for
-an executed route rather than silently dropping it, and Runner fails the job with
-a configuration failure in the same situation. The thawed job snapshot and
-`multi-review.json` retain the frozen selection, including efforts.
+an unused synthesis route in an older snapshot, are not forwarded. The thawed job
+snapshot and `multi-review.json` retain the frozen selection, including efforts.
 
 ### Fallback state and explicit reset
 

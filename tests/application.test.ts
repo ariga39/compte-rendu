@@ -64,19 +64,23 @@ it('issues a relay grant only to the Runner owning the frozen review routes', as
     INFERENCE_RELAY: {
       catalog: async () => ({
         routes: [],
+        efforts: {},
         lastAttemptAt: null,
         lastSuccessAt: null,
         rejected: 0,
         lastRefreshError: null,
       }),
       refreshCatalog: async () => {},
-      issue: async () => ({
+      issueV2: async () => ({
         kind: 'issued' as const,
         token: 'test-grant',
         expiresAt: '2030-01-01T00:00:00Z',
+        descriptors: [{ routeId: 'provider/original', profile: 'chat' as const }],
       }),
       revoke: async () => ({ kind: 'revoked' as const }),
       usage: async () => null,
+      effortStates: async () => ({ routes: [] }),
+      effortDetails: async () => null,
     },
   });
   try {
@@ -101,7 +105,7 @@ it('issues a relay grant only to the Runner owning the frozen review routes', as
     const payload = { runId: claim.runId, jobId: 'job', attempt: 1, routes: ['provider/original'] };
     const issue = (overrides = {}, token = 'test-callback-token') =>
       application.fetch(
-        new Request('https://reviews.test/runner-llm/issue', {
+        new Request('https://reviews.test/runner-llm/issue-v2', {
           method: 'POST',
           headers: { authorization: 'Bearer ' + token },
           body: JSON.stringify({ ...payload, ...overrides }),
@@ -119,7 +123,11 @@ it('issues a relay grant only to the Runner owning the frozen review routes', as
     expect((await issue({ routes: ['x'.repeat(16 * 1024)] })).status).toBe(413);
     const issued = await issue();
     expect(issued.status).toBe(201);
-    expect(await issued.json()).toEqual({ token: 'test-grant', expiresAt: '2030-01-01T00:00:00Z' });
+    expect(await issued.json()).toEqual({
+      token: 'test-grant',
+      expiresAt: '2030-01-01T00:00:00Z',
+      descriptors: [{ routeId: 'provider/original', profile: 'chat' }],
+    });
   } finally {
     database.close();
   }
@@ -129,7 +137,6 @@ it('issues a versioned relay grant with only frozen client descriptors', async (
   const database = new SqliteD1Database();
   const store = createD1ReviewStateStore(database, 'provider/original');
   const issuedV2: unknown[] = [];
-  const issuedV1: unknown[] = [];
   const application = createApplication({
     REVIEW_DB: database,
     GITHUB_APP_ID: '1',
@@ -140,16 +147,13 @@ it('issues a versioned relay grant with only frozen client descriptors', async (
     INFERENCE_RELAY: {
       catalog: async () => ({
         routes: [],
+        efforts: {},
         lastAttemptAt: null,
         lastSuccessAt: null,
         rejected: 0,
         lastRefreshError: null,
       }),
       refreshCatalog: async () => {},
-      issue: async (input) => {
-        issuedV1.push(input);
-        return { kind: 'issued' as const, token: 'v1-token', expiresAt: '2030-01-01T00:00:00Z' };
-      },
       issueV2: async (input) => {
         issuedV2.push(input);
         return {
@@ -161,6 +165,8 @@ it('issues a versioned relay grant with only frozen client descriptors', async (
       },
       revoke: async () => ({ kind: 'revoked' as const }),
       usage: async () => null,
+      effortStates: async () => ({ routes: [] }),
+      effortDetails: async () => null,
     },
   });
   try {
@@ -219,7 +225,6 @@ it('issues a versioned relay grant with only frozen client descriptors', async (
         latestIssueDeadline: expect.any(Number),
       },
     ]);
-    expect(issuedV1).toEqual([]);
 
     const v1 = await application.fetch(
       new Request('https://reviews.test/runner-llm/issue', {
@@ -228,9 +233,7 @@ it('issues a versioned relay grant with only frozen client descriptors', async (
         body: JSON.stringify(payload),
       }),
     );
-    expect(v1.status).toBe(201);
-    expect(await v1.json()).toEqual({ token: 'v1-token', expiresAt: '2030-01-01T00:00:00Z' });
-    expect(issuedV1).toHaveLength(1);
+    expect(v1.status).toBe(404);
   } finally {
     database.close();
   }
@@ -250,18 +253,26 @@ it('returns the stored 503 when Runner LLM control reads malformed configuration
     INFERENCE_RELAY: {
       catalog: async () => ({
         routes: [],
+        efforts: {},
         lastAttemptAt: null,
         lastSuccessAt: null,
         rejected: 0,
         lastRefreshError: null,
       }),
       refreshCatalog: async () => {},
-      issue: async (input) => {
+      issueV2: async (input) => {
         issued.push(input);
-        return { kind: 'issued' as const, token: 'token', expiresAt: '2030-01-01T00:00:00Z' };
+        return {
+          kind: 'issued' as const,
+          token: 'token',
+          expiresAt: '2030-01-01T00:00:00Z',
+          descriptors: [{ routeId: 'provider/original', profile: 'chat' as const }],
+        };
       },
       revoke: async () => ({ kind: 'revoked' as const }),
       usage: async () => null,
+      effortStates: async () => ({ routes: [] }),
+      effortDetails: async () => null,
     },
   });
   try {
@@ -287,7 +298,7 @@ it('returns the stored 503 when Runner LLM control reads malformed configuration
       `UPDATE review_runs SET review_configuration = '{"selection":' WHERE run_id = '${claim.runId}'`,
     );
     const response = await application.fetch(
-      new Request('https://reviews.test/runner-llm/issue', {
+      new Request('https://reviews.test/runner-llm/issue-v2', {
         method: 'POST',
         headers: { authorization: 'Bearer runner' },
         body: JSON.stringify({
@@ -319,15 +330,18 @@ it('fails closed when the relay cannot issue version 2 grants', async () => {
     INFERENCE_RELAY: {
       catalog: async () => ({
         routes: [],
+        efforts: {},
         lastAttemptAt: null,
         lastSuccessAt: null,
         rejected: 0,
         lastRefreshError: null,
       }),
       refreshCatalog: async () => {},
-      issue: async () => ({ kind: 'invalid' as const }),
+      issueV2: async () => ({ kind: 'invalid' as const }),
       revoke: async () => ({ kind: 'revoked' as const }),
       usage: async () => null,
+      effortStates: async () => ({ routes: [] }),
+      effortDetails: async () => null,
     },
   });
   try {
@@ -379,15 +393,18 @@ it('allows authenticated recovery and usage reads after a claim has cleared', as
     INFERENCE_RELAY: {
       catalog: async () => ({
         routes: [],
+        efforts: {},
         lastAttemptAt: null,
         lastSuccessAt: null,
         rejected: 0,
         lastRefreshError: null,
       }),
       refreshCatalog: async () => {},
-      issue: async () => ({ kind: 'invalid' as const }),
+      issueV2: async () => ({ kind: 'invalid' as const }),
       revoke: async () => ({ kind: 'revoked' as const }),
       usage: async ({ jobId }) => (jobId === 'retired' ? null : { version: 1, models: [] }),
+      effortStates: async () => ({ routes: [] }),
+      effortDetails: async () => null,
     },
   });
   const post = (operation: string, jobId: string, token: string) =>
@@ -424,15 +441,18 @@ it.each(['', 'broken route'])(
         INFERENCE_RELAY: {
           catalog: async () => ({
             routes: [],
+            efforts: {},
             lastAttemptAt: null,
             lastSuccessAt: null,
             rejected: 0,
             lastRefreshError: null,
           }),
           refreshCatalog: async () => {},
-          issue: async () => ({ kind: 'invalid' as const }),
+          issueV2: async () => ({ kind: 'invalid' as const }),
           revoke: async () => ({ kind: 'revoked' as const }),
           usage: async () => null,
+          effortStates: async () => ({ routes: [] }),
+          effortDetails: async () => null,
         },
       });
       expect((await app.fetch(new Request('https://reviews.test/api/dashboard'))).status).toBe(200);
