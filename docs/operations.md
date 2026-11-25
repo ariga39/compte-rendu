@@ -217,9 +217,16 @@ Use the following sequence for a breaking upgrade or rollback, per instance:
    Deploy with `apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc` and verify the
    Worker before starting the replacement Runner. For a one-step incompatible
    schema change, keep HTTP and scheduled writers quiesced during the switch.
-4. Check the replacement artifact on disk, start it and verify service health,
-   concurrency and Sandbox recovery. The drain flag is in memory. Starting the
-   replacement enables claiming as soon as its startup scan succeeds.
+4. Start the replacement Runner only when the Worker is ready. The drain flag
+   is in memory. The replacement enables claiming as soon as its startup scan
+   succeeds.
+
+For either release path, back up the existing Runner artifact before replacement
+and verify the installed artifact’s SHA256 against the tested build before
+starting it. After startup, verify service health, configured concurrency and
+Sandbox recovery status. Verify the behavior affected by the release. For
+publication changes, use the next controlled review to check the exact revision,
+review output and visible GitHub publication.
 
 ### Review deadline rollout
 
@@ -268,8 +275,8 @@ migration history belongs to that Worker; do not copy it into the public Worker.
 To roll back this migration, restore the previous ingress deployment and Core
 Cron together. Database and bucket contents remain in place.
 
-If a compatible release is bad, stop webhook delivery if it is generating new
-runs. Roll back the affected Worker to its last known-good deployment in the
+If a bad release is receiving new runs from webhooks, stop webhook delivery.
+For a compatible rollback, revert the affected Worker to its last known-good deployment in the
 Cloudflare Workers deployment controls, using the matching application build and
 compatible database schema. For a breaking rollback, follow the same four steps above using the prior
 matching pair and a compatible schema. Do not delete D1 tables or edit the applied migration
