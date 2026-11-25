@@ -35,7 +35,6 @@ const relayBaseOptions = (baseUrl = 'https://relay.example/v1') => ({
   callbackToken: 'callback-token',
   callbackFetch: async () => new Response(null, { status: 204 }),
   claimUrl: '',
-  llmRelay: true,
   modelConfig: relayModelConfig(baseUrl),
 });
 
@@ -294,7 +293,7 @@ describe('Runner relay configuration', () => {
     );
   });
 
-  it('does not admit relay work without the callback transport settings', () => {
+  it('fails startup without the callback transport settings', () => {
     expect(() =>
       createRunner({
         ...relayBaseOptions(),
@@ -395,7 +394,7 @@ describe('Runner relay admission and recovery', () => {
 
   it('fails a relay claim without a frozen selection before checkout', async () => {
     const commands: string[] = [];
-    const execution = createClaimExecution();
+    const execution = createClaimExecution({ reviewConfiguration: null });
     const runner = createRunner({
       destroyRetryDelaysMs: [0],
       ...relayBaseOptions(),
@@ -642,10 +641,10 @@ describe('Runner relay admission and recovery', () => {
     }
   });
 
-  it('claims in direct mode regardless of a stale grant marker', async () => {
+  it('claims with an existing managed-relay environment and ignores a stale grant marker', async () => {
     const root = await evidenceRoot();
     const markerRoot = join(root, 'llm-grant-pending');
-    const jobId = 'direct-stale-job';
+    const jobId = 'managed-stale-job';
     await mkdir(markerRoot, { recursive: true, mode: 0o700 });
     await writeFile(
       join(markerRoot, `${createHash('sha256').update(jobId).digest('hex')}.marker`),
@@ -653,21 +652,23 @@ describe('Runner relay admission and recovery', () => {
       { mode: 0o600 },
     );
     const execution = createClaimExecution();
-    vi.stubEnv('MODEL_SECRET_COMMAND', 'secret-resolver get MODEL_API_KEY');
+    let claims = 0;
+    const previous = process.env.RUNNER_LLM_RELAY;
+    process.env.RUNNER_LLM_RELAY = '1';
     const runner = createRunner({
       destroyRetryDelaysMs: [0],
       evidenceRoot: root,
       authToken: 'runner-test-token',
-      modelConfig: JSON.stringify({
-        id: 'opencode-go/deepseek-flash',
-        definition: { name: 'DeepSeek V4.1 Flash' },
-      }),
+      modelConfig: relayModelConfig(),
       callbackUrl: 'https://ingress.test/runner-callback',
       callbackToken: 'callback-token',
       callbackFetch: execution.callbackFetch,
       claimUrl: 'https://ingress.test/runner-claim',
       claimIntervalMs: 10,
-      claimFetch: execution.claimFetch,
+      claimFetch: async () => {
+        claims += 1;
+        return new Response(null, { status: 204 });
+      },
       process: async (_command, args) => ({
         exitCode: args[0] === 'ls' ? 0 : 1,
         stdout: '',
@@ -676,9 +677,11 @@ describe('Runner relay admission and recovery', () => {
       }),
     });
     try {
-      await vi.waitFor(() => expect(execution.claimRequests.length).toBeGreaterThan(0));
+      await vi.waitFor(() => expect(claims).toBeGreaterThan(0));
     } finally {
       await runner.close();
+      if (previous === undefined) delete process.env.RUNNER_LLM_RELAY;
+      else process.env.RUNNER_LLM_RELAY = previous;
     }
   });
 });

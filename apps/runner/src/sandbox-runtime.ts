@@ -100,10 +100,10 @@ export interface SandboxJobSpec {
   readonly modelResource: string;
   /**
    * Absolute host path to a private mode-0600 file holding the job's model
-   * grant token. Backends that proxy credentials on the host keep it out of the
-   * guest, command line, configuration and evidence.
+   * grant token. Backends proxy it on the host so it stays out of the guest,
+   * command line, configuration and evidence.
    */
-  readonly modelTokenFile?: string;
+  readonly modelTokenFile: string;
   readonly githubResource: string;
   /** Per-job GitHub read token; backends pass it via child env, never argv. */
   readonly githubReadToken: string;
@@ -253,7 +253,6 @@ export const sandboxBackendReconcileOrphans = async (
 
 export interface SandboxBackendContext {
   readonly hostRun: HostRun;
-  readonly relayEnabled: boolean;
 }
 
 export interface SandboxBackendRegistration {

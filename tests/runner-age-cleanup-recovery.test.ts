@@ -150,7 +150,6 @@ describe('age cleanup and same-PR blocker release', () => {
           baseUrl: 'https://llm.internal.example/v1',
           definition: { name: 'Review' },
         }),
-        llmRelay: true,
         claimUrl: '',
         callbackUrl: 'https://reviews.test/runner-callback',
         callbackToken: 'callback-token',

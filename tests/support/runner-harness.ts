@@ -17,7 +17,7 @@ import type { SandboxBackend, SandboxHealth } from '../../apps/runner/src/sandbo
 import { createD1ReviewStateStore } from '../../apps/core/src/index';
 import { SqliteD1Database } from './d1-database';
 import { claimRunnerJob } from './runner-claim';
-import { createClaimExecution } from './runner-execution';
+import { createClaimExecution, defaultManagedReviewConfiguration } from './runner-execution';
 
 delete process.env.REVIEW_MODEL_CONFIG;
 
@@ -38,7 +38,7 @@ export const sessionExportJson = (
   } = {},
 ) => {
   const agent = options.agent ?? 'review';
-  const model = options.model ?? { providerID: 'opencode-go', id: 'deepseek-flash' };
+  const model = options.model ?? { providerID: 'compte-rendu', id: 'deepseek-review' };
   const text =
     options.text === null
       ? undefined
@@ -80,8 +80,14 @@ export const sharedEvidenceRoot = join(
   `compte-rendu-runner-evidence-${process.pid}-${randomUUID()}`,
 );
 
+// A managed Runner always has a frozen selection; Core materializes the
+// installation default at admission. Tests that do not care about the roster
+// get this single-reviewer selection.
+export const defaultReviewSelection = defaultManagedReviewConfiguration;
+
 export const standardModelConfig = JSON.stringify({
   id: 'opencode-go/deepseek-flash',
+  baseUrl: 'https://inference.example/v1',
   definition: {
     name: 'DeepSeek V4.1 Flash',
     reasoning: true,
@@ -253,6 +259,10 @@ export const withCleanupTestDefaults = (original: RunnerProcess): RunnerProcess 
 export type ClaimExecution = ReturnType<typeof createClaimExecution>;
 export type RunnerOptions = NonNullable<Parameters<typeof createProductionRunner>[0]>;
 
+const RELAY_AWARE_FETCH = Symbol('relay-aware-fetch');
+const isRelayAwareFetch = (fetch: typeof globalThis.fetch): boolean =>
+  (fetch as typeof fetch & { [RELAY_AWARE_FETCH]?: boolean })[RELAY_AWARE_FETCH] === true;
+
 export const withAutoClaim = (
   options: RunnerOptions,
 ): {
@@ -269,6 +279,45 @@ export const withAutoClaim = (
     options.evidenceRoot === undefined
       ? mkdtempSync(join(tmpdir(), 'compte-rendu-runner-evidence-'))
       : undefined;
+  // Every managed Runner needs a live grant control. Keep an explicit
+  // relay-aware test transport, and supply the smallest realistic managed
+  // control for a plain callback mock that only understands Core routes.
+  const claimFetch =
+    options.claimFetch === undefined
+      ? execution.claimFetch
+      : async (input: RequestInfo | URL, init?: RequestInit) => {
+          const response = await options.claimFetch!(input, init);
+          if (response.status !== 200) return response;
+          const claimed = await response
+            .clone()
+            .json()
+            .catch(() => undefined);
+          if (
+            claimed === null ||
+            typeof claimed !== 'object' ||
+            Array.isArray(claimed) ||
+            (claimed as { reviewConfiguration?: unknown }).reviewConfiguration !== undefined
+          )
+            return response;
+          return Response.json(
+            { ...(claimed as object), reviewConfiguration: defaultReviewSelection },
+            { status: 200 },
+          );
+        };
+  const relayAware =
+    options.callbackFetch !== undefined && isRelayAwareFetch(options.callbackFetch);
+  const defaultRelay = relayAware ? undefined : createRelayControl();
+  const plainCallbackFetch =
+    options.callbackFetch === undefined
+      ? execution.callbackFetch
+      : async (input: RequestInfo | URL, init?: RequestInit) => {
+          execution.callbackRequests.push(new Request(input, init));
+          return options.callbackFetch!(input, init);
+        };
+  const callbackFetch =
+    defaultRelay === undefined
+      ? plainCallbackFetch
+      : routeRelayControl(defaultRelay, plainCallbackFetch);
   return {
     execution,
     cleanupRoot,
@@ -276,20 +325,14 @@ export const withAutoClaim = (
       ...options,
       evidenceRoot: options.evidenceRoot ?? cleanupRoot,
       claimUrl: autoClaim ? 'https://ingress.test/runner-claim' : options.claimUrl,
-      ...(autoClaim ? { claimFetch: execution.claimFetch } : {}),
+      ...(options.claimFetch === undefined && !autoClaim ? {} : { claimFetch }),
       claimIntervalMs: options.claimIntervalMs ?? (autoClaim ? 1 : undefined),
       modelConfig: options.modelConfig ?? standardModelConfig,
       callbackUrl: options.callbackUrl ?? 'https://ingress.test/runner-callback',
       callbackToken: options.callbackToken ?? 'callback-token',
       progressFetch: options.progressFetch ?? (async () => new Response(null, { status: 202 })),
       evidenceFetch: options.evidenceFetch ?? (async () => new Response(null, { status: 202 })),
-      callbackFetch:
-        options.callbackFetch === undefined
-          ? execution.callbackFetch
-          : async (input, init) => {
-              execution.callbackRequests.push(new Request(input, init));
-              return options.callbackFetch!(input, init);
-            },
+      callbackFetch,
     },
   };
 };
@@ -343,7 +386,12 @@ export const withClaimSubmission = (
         ? () => {
             throw new Error('this Runner was configured with an explicit claim transport');
           }
-        : (job: Parameters<ClaimExecution['enqueue']>[0]) => execution.enqueue(job),
+        : (job: Parameters<ClaimExecution['enqueue']>[0]) =>
+            execution.enqueue(
+              job.reviewConfiguration === undefined
+                ? { ...job, reviewConfiguration: defaultReviewSelection }
+                : job,
+            ),
     waitForTerminal:
       execution === undefined
         ? async () => {
@@ -471,7 +519,6 @@ export const createRunner = (options: TestRunnerOptions = {}) => {
 };
 
 beforeEach(async () => {
-  vi.stubEnv('MODEL_SECRET_COMMAND', 'secret-resolver get MODEL_API_KEY');
   await rm(sharedEvidenceRoot, {
     recursive: true,
     force: true,
@@ -592,6 +639,7 @@ export const routeRelayControl = (
     if (new URL(inputUrl).pathname.startsWith('/runner-llm/')) return control.fetch(input, init);
     return callback(input, init);
   }) as typeof fetch;
+  Object.defineProperty(routed, RELAY_AWARE_FETCH, { value: true });
   return routed;
 };
 
@@ -676,14 +724,8 @@ export const runAgentScenario = async (scenario: {
   let msbPresent = false;
   let msbName: string | undefined;
   let cleanupRemovalFailures = scenario.cleanupRemovalFailures ?? 0;
-  const reviewConfiguration =
-    scenario.reviewConfiguration ??
-    (scenario.relayControl === undefined
-      ? undefined
-      : {
-          revision: 1,
-          selection: { reviewers: ['deepseek-review'], synthesis: 'deepseek-review' },
-        });
+  const relayControl = scenario.relayControl ?? createRelayControl();
+  const reviewConfiguration = scenario.reviewConfiguration ?? defaultReviewSelection;
   const jobInput = {
     ...runnerJobFields,
     id: scenario.jobId ?? runnerJobFields.id,
@@ -714,9 +756,8 @@ export const runAgentScenario = async (scenario: {
       sandboxBackend: scenario.sandboxBackend,
       evidenceRoot: scenario.evidenceRoot ?? sharedEvidenceRoot,
       authToken: 'runner-test-token',
-      modelConfig: scenario.modelConfig,
+      modelConfig: scenario.modelConfig ?? relayInferenceModelConfig(),
       progressFetch: scenario.progressFetch,
-      llmRelay: scenario.relayControl === undefined ? undefined : true,
       claimUrl: 'https://ingress.test/runner-claim',
       claimFetch: execution.claimFetch,
       claimIntervalMs: scenario.claimIntervalMs,
@@ -725,26 +766,21 @@ export const runAgentScenario = async (scenario: {
       callbackTimeoutMs: scenario.callbackTimeoutMs,
       callbackRetryDelaysMs: scenario.callbackRetryDelaysMs,
       destroyRetryDelaysMs: scenario.destroyRetryDelaysMs,
-      callbackFetch: async (input: RequestInfo | URL, init?: RequestInit) => {
-        const inputUrl =
-          input instanceof Request ? input.url : input instanceof URL ? input.href : String(input);
-        if (
-          scenario.relayControl !== undefined &&
-          new URL(inputUrl).pathname.startsWith('/runner-llm/')
-        ) {
-          return scenario.relayControl.fetch(input, init);
-        }
-        const request = new Request(input, init);
-        execution.callbackRequests.push(request);
-        if (scenario.callbackThrows !== undefined) {
-          throw new Error(scenario.callbackThrows);
-        }
-        if (scenario.callbackHangs === true) {
-          return new Promise<Response>(() => undefined);
-        }
-        const status = scenario.callbackStatuses?.[execution.callbackRequests.length - 1] ?? 202;
-        return new Response(null, { status });
-      },
+      callbackFetch: routeRelayControl(
+        relayControl,
+        async (input: RequestInfo | URL, init?: RequestInit) => {
+          const request = new Request(input, init);
+          execution.callbackRequests.push(request);
+          if (scenario.callbackThrows !== undefined) {
+            throw new Error(scenario.callbackThrows);
+          }
+          if (scenario.callbackHangs === true) {
+            return new Promise<Response>(() => undefined);
+          }
+          const status = scenario.callbackStatuses?.[execution.callbackRequests.length - 1] ?? 202;
+          return new Response(null, { status });
+        },
+      ),
       evidenceFetch: async (input: RequestInfo | URL, init?: RequestInit) => {
         const request = new Request(input, init);
         scenario.evidenceRequests?.push(request);
@@ -804,14 +840,8 @@ export const runAgentScenario = async (scenario: {
         }
         await writeEvidenceFixture(args, options, scenario.output);
         if (args[0] === 'cp' && /opencode-export-[A-Za-z0-9._:-]+\.json$/.test(args[1])) {
-          const sessionExport =
-            scenario.sessionExport ??
-            (scenario.relayControl === undefined
-              ? undefined
-              : sessionExportJson('scenario-session', {
-                  model: { providerID: 'compte-rendu', id: 'deepseek-review' },
-                }));
-          if (sessionExport !== undefined) await writeFile(args[2], sessionExport, { mode: 0o600 });
+          const sessionExport = scenario.sessionExport ?? sessionExportJson('scenario-session');
+          await writeFile(args[2], sessionExport, { mode: 0o600 });
         }
         if (args[0] === 'create') {
           createArgs = args;

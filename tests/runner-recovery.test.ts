@@ -233,7 +233,6 @@ describe('Runner confirmed cleanup recovery', () => {
           evidenceRoot: root,
           claimUrl: '',
           modelConfig,
-          llmRelay: true,
           callbackFetch: routeRelayControl(relay, async (input, init) => {
             reports.push(new Request(input, init));
             return new Response(null, { status: 202 });

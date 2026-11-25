@@ -13,8 +13,11 @@ RUNNER_CALLBACK_TOKEN=<static-runner-callback-token>
 REVIEW_MODEL_CONFIG={"id":"opencode-go/deepseek-review","baseUrl":"https://<INFERENCE_FQDN>/v1","definition":{"name":"DeepSeek review"}}
 ```
 
-An existing `RUNNER_LLM_RELAY_GENERATION` setting is ignored; no issuer
-generation is required.
+Managed inference is the Runner's only model credential path. `RUNNER_LLM_RELAY=1`
+and an unset value are equivalent; direct-provider configuration such as
+`MODEL_SECRET_COMMAND` or a model config without this relay `baseUrl` is
+rejected at startup. An existing `RUNNER_LLM_RELAY_GENERATION` setting is
+ignored; no issuer generation is required.
 
 Use the HTTPS callback origin and its Runner bearer for grant control. The inference hostname must be a separate HTTPS FQDN on port 443 with base path `/v1`. The Sandbox receives a job-scoped credential through the runtime’s secret injection mechanism. Supplier credentials and the Gateway Run token stay in Cloudflare.
 

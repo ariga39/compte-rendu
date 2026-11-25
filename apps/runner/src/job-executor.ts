@@ -48,13 +48,10 @@ export interface JobExecutorDependencies {
   readonly evidenceTimeoutMs: number;
   readonly progressFetch: typeof fetch;
   readonly grants: GrantRevoker;
-  readonly llmServiceClient?: LlmServiceClient | undefined;
+  readonly llmServiceClient: LlmServiceClient;
   readonly readTokenClient?: ReadTokenClient | undefined;
-  readonly relayEnabled: boolean;
   readonly grantVersion: string;
-  readonly modelId?: string | undefined;
-  readonly openCodeConfig?: string | undefined;
-  readonly serviceBaseUrl?: URL | undefined;
+  readonly serviceBaseUrl: URL;
   readonly modelResource: string;
   readonly log?: OperationalLog | undefined;
   readonly retire: (handle: JobHandle) => void;
@@ -85,10 +82,7 @@ export const createJobExecutor = (deps: JobExecutorDependencies) => {
     grants: grantRevoker,
     llmServiceClient,
     readTokenClient,
-    relayEnabled,
     grantVersion,
-    modelId,
-    openCodeConfig,
     serviceBaseUrl,
     modelResource,
     log,
@@ -142,7 +136,6 @@ export const createJobExecutor = (deps: JobExecutorDependencies) => {
     const evidencePath = join(evidenceRoot, evidenceId);
     const multiConfiguration = job.input.reviewConfiguration;
     const multiSelection = multiConfiguration?.selection ?? undefined;
-    const multi = multiSelection !== undefined;
     const directExecution = multiSelection !== undefined && multiSelection.reviewers.length === 1;
     let evidenceStartedAt: string | undefined;
     let evidenceReady = false;
@@ -152,10 +145,6 @@ export const createJobExecutor = (deps: JobExecutorDependencies) => {
       // Phase 1: evidence root and immutable admission invariants.
       evidenceStartedAt = currentIso();
       job.executionStartedAt = evidenceStartedAt;
-      if (!multi && (modelId === undefined || openCodeConfig === undefined)) {
-        failure = { reason: 'agent' };
-        return;
-      }
       await mkdir(evidencePath, { recursive: true, mode: 0o700 });
       await chmod(evidencePath, 0o700);
       evidenceReady = true;
@@ -177,9 +166,9 @@ export const createJobExecutor = (deps: JobExecutorDependencies) => {
         failure = deadlineFailure(job);
         return;
       }
-      // Remote relay execution never infers a default route: Core must have
+      // Managed execution never infers a default route: Core must have
       // materialized the frozen selection at admission. Fail before checkout.
-      if (relayEnabled && multiSelection === undefined) {
+      if (multiSelection === undefined) {
         failure = { reason: 'configuration' };
         return;
       }
@@ -194,7 +183,6 @@ export const createJobExecutor = (deps: JobExecutorDependencies) => {
             ? [multiSelection.reviewers[0]!]
             : dedupedRoutes(multiSelection);
       if (
-        relayEnabled &&
         grantVersion === '1' &&
         (multiConfiguration?.efforts?.some(
           (effort) => effort.name !== undefined && executionRoutes.includes(effort.routeId),
@@ -203,12 +191,6 @@ export const createJobExecutor = (deps: JobExecutorDependencies) => {
       ) {
         failure = { reason: 'configuration' };
         return;
-      }
-      if (multi) {
-        if (llmServiceClient === undefined || serviceBaseUrl === undefined) {
-          failure = { reason: 'agent' };
-          return;
-        }
       }
       // Phase 2: checkout and merge-base verification.
       update(job, { status: 'running', stage: 'checkout' });
@@ -230,14 +212,12 @@ export const createJobExecutor = (deps: JobExecutorDependencies) => {
       }
 
       // Phase 3: issue the job grant and stage its private token file.
-      if (llmServiceClient !== undefined && multiSelection !== undefined) {
-        const grant = await issueJobGrant(job, executionRoutes, grantLifecycle);
-        if (!grant.ok) {
-          failure = { reason: 'agent' };
-          return;
-        }
-        job.descriptors = grant.descriptors;
+      const grant = await issueJobGrant(job, executionRoutes, grantLifecycle);
+      if (!grant.ok) {
+        failure = { reason: 'agent' };
+        return;
       }
+      job.descriptors = grant.descriptors;
       if (job.abortRequested) return;
 
       // Phase 4-5: construct the sandbox and run the review agent.
@@ -246,8 +226,6 @@ export const createJobExecutor = (deps: JobExecutorDependencies) => {
         commands,
         evidencePath,
         mergeBaseSha,
-        modelId,
-        openCodeConfig,
         serviceBaseUrl,
         modelResource,
       });

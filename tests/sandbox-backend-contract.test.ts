@@ -84,7 +84,6 @@ const createFixture = async (kind: 'sbx' | 'microsandbox'): Promise<Fixture> => 
     customSecrets: [],
     cascade: true,
   };
-  vi.stubEnv('MODEL_SECRET_COMMAND', 'secret-resolver get MODEL_API_KEY');
   if (kind === 'microsandbox') {
     const home = join(root, 'msb');
     await mkdir(join(home, 'db'), { recursive: true });
@@ -212,8 +211,8 @@ const createFixture = async (kind: 'sbx' | 'microsandbox'): Promise<Fixture> => 
   };
   const backend =
     kind === 'sbx'
-      ? createSbxSandboxBackend({ hostRun, relayEnabled: false })
-      : createMicrosandboxSandboxBackend({ hostRun, relayEnabled: true, image: 'review-image' });
+      ? createSbxSandboxBackend({ hostRun })
+      : createMicrosandboxSandboxBackend({ hostRun, image: 'review-image' });
   return { backend, spec, root, hostRun, commands, state };
 };
 

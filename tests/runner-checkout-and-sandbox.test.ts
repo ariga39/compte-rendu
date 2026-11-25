@@ -657,7 +657,6 @@ describe('Runner Job HTTP interface', () => {
     const events: unknown[] = [];
     const repositoryUrl = 'https://github.com/acme/reviewed.git';
     const repositoryReadToken = 'checkout-diagnostic-secret';
-    vi.stubEnv('MODEL_SECRET_COMMAND', 'model-secret-resolver');
     const runner = createRunner({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
@@ -754,8 +753,6 @@ describe('Runner Job HTTP interface', () => {
     const baseSha = '1111111111111111111111111111111111111111';
     const headSha = '2222222222222222222222222222222222222222';
     const repositoryReadToken = 'checkout-token-must-not-appear';
-    const resolverCommand = 'secret-resolver --token resolver-secret';
-    vi.stubEnv('MODEL_SECRET_COMMAND', resolverCommand);
     const runner = createRunner({
       evidenceRoot: sharedEvidenceRoot,
       authToken: 'runner-test-token',
@@ -768,7 +765,7 @@ describe('Runner Job HTTP interface', () => {
         if (args[0] === 'create') {
           return {
             exitCode: 1,
-            stderr: `mkfs.ext4: command not found ${repositoryReadToken} ${resolverCommand}`,
+            stderr: `mkfs.ext4: command not found ${repositoryReadToken}`,
             stdout: '',
             timedOut: false,
             truncated: false,
@@ -822,7 +819,7 @@ describe('Runner Job HTTP interface', () => {
       streamError: false,
       abortRequested: false,
       processError: false,
-      stderr: 'mkfs.ext4: command not found [redacted] [redacted]',
+      stderr: 'mkfs.ext4: command not found [redacted]',
     });
     expect(events).toContainEqual({
       phase: 'runner',
@@ -852,7 +849,6 @@ describe('Runner Job HTTP interface', () => {
       });
     });
     expect(JSON.stringify(events)).not.toContain(repositoryReadToken);
-    expect(JSON.stringify(events)).not.toContain(resolverCommand);
   });
   it('delivers the single-source review contract and exact revision through the OpenCode sandbox boundary', async () => {
     const baseSha = '1111111111111111111111111111111111111111';
@@ -1049,22 +1045,32 @@ describe('Runner Job HTTP interface', () => {
     expect(configContent).toBeDefined();
     const config = JSON.parse(configContent!.slice('OPENCODE_CONFIG_CONTENT='.length)) as {
       model: string;
-      providers: Record<string, { models: Record<string, Record<string, unknown>> }>;
+      providers: Record<
+        string,
+        {
+          canonical?: string;
+          settings?: { baseURL?: string };
+          models: Record<string, Record<string, unknown>>;
+        }
+      >;
       agents: {
         review: {
           description: string;
           mode: string;
+          model?: string;
           permissions: Array<{ action: string; resource: string; effect: string }>;
         };
       };
     };
-    expect(config.model).toBe('opencode-go/deepseek-flash');
-    expect(config.providers['opencode-go']?.models['deepseek-flash']).toEqual({
-      name: 'DeepSeek V4.1 Flash',
-      capabilities: { reasoning: { supported: true } },
-      limit: { context: 1000000, output: 384000 },
-      cost: { input: 0.15, output: 0.6, cache: { read: 0.003 } },
+    expect(config.model).toBe('compte-rendu/deepseek-review');
+    expect(config.providers['compte-rendu']?.canonical).toBe('opencode-go');
+    expect(config.providers['compte-rendu']?.settings?.baseURL).toBe(
+      'https://inference.example/v1',
+    );
+    expect(config.providers['compte-rendu']?.models['deepseek-review']).toEqual({
+      settings: { baseURL: 'https://inference.example/v1' },
     });
+    expect(config.agents.review.model).toBe('compte-rendu/deepseek-review');
     const permissions = config.agents.review.permissions;
     const rule = (action: string, resource: string, effect: string) =>
       permissions.find(
@@ -1107,89 +1113,33 @@ describe('Runner Job HTTP interface', () => {
     expect(deliveredPrompt).not.toContain('submit_review');
     expect(deliveredPrompt).not.toContain('## Review:');
   });
-  it('routes the deployment-configured model through trusted config, CLI, and evidence', async () => {
-    const definition = {
-      name: 'Test Model',
-      reasoning: true,
-      interleaved: { field: 'reasoning_details' },
-      limit: { context: 200000, output: 8192 },
-      cost: { input: 0.1, output: 0.2, cache_read: 0.01 },
-    };
+  it('runs a one-reviewer managed selection through relay config, CLI, network, and evidence', async () => {
     const result = await runAgentScenario({
-      runId: 'run-deployment-model',
+      runId: 'run-managed-single',
       output: finalMarkdownJsonl(),
-      modelConfig: JSON.stringify({ id: 'opencode-go/test-model-7', definition }),
-      sessionExport: sessionExportJson('scenario-session', {
-        model: { providerID: 'opencode-go', id: 'test-model-7' },
-      }),
-    });
-
-    expect(result.terminal.status).toBe('succeeded');
-    expect(result.terminal.evidenceId).toEqual(expect.any(String));
-    expect(result.manifest.model).toBe('opencode-go/test-model-7');
-    const modelIndex = result.agentArgs?.indexOf('--model') ?? -1;
-    expect(result.agentArgs?.[modelIndex + 1]).toBe('opencode-go/test-model-7');
-    const configContent = result.createArgs?.find((value) =>
-      value.startsWith('OPENCODE_CONFIG_CONTENT='),
-    );
-    expect(JSON.parse(configContent!.slice('OPENCODE_CONFIG_CONTENT='.length))).toMatchObject({
-      model: 'opencode-go/test-model-7',
-      providers: {
-        'opencode-go': {
-          models: {
-            'test-model-7': {
-              name: 'Test Model',
-              capabilities: { reasoning: { supported: true } },
-              limit: { context: 200000, output: 8192 },
-              cost: { input: 0.1, output: 0.2, cache: { read: 0.01 } },
-            },
-          },
-        },
+      reviewConfiguration: {
+        revision: 1,
+        selection: { reviewers: ['deepseek-review'], synthesis: 'deepseek-review' },
       },
     });
-  });
-  it('relies on the bundled catalog when the deployment config omits a definition', async () => {
-    const result = await runAgentScenario({
-      runId: 'run-deployment-model-catalog',
-      output: finalMarkdownJsonl(),
-      modelConfig: JSON.stringify({ id: 'opencode-go/test-model-catalog' }),
-      sessionExport: sessionExportJson('scenario-session', {
-        model: { providerID: 'opencode-go', id: 'test-model-catalog' },
-      }),
-    });
 
-    expect(result.terminal.status).toBe('succeeded');
-    expect(result.manifest.model).toBe('opencode-go/test-model-catalog');
-    const configContent = result.createArgs?.find((value) =>
-      value.startsWith('OPENCODE_CONFIG_CONTENT='),
-    );
-    const config = JSON.parse(configContent!.slice('OPENCODE_CONFIG_CONTENT='.length)) as {
-      model: string;
-      providers?: unknown;
-    };
-    expect(config.model).toBe('opencode-go/test-model-catalog');
-    expect(config.providers).toBeUndefined();
-  });
-  it('routes a custom base URL through provider options, credential host, network, and cleanup', async () => {
-    const result = await runAgentScenario({
-      runId: 'run-custom-base-url',
-      output: finalMarkdownJsonl(),
-      modelConfig: JSON.stringify({
-        id: 'opencode-go/test-model-7',
-        baseUrl: 'https://model.example.test/v1',
-      }),
-      sessionExport: sessionExportJson('scenario-session', {
-        model: { providerID: 'opencode-go', id: 'test-model-7' },
-      }),
+    expect(result.terminal).toMatchObject({
+      status: 'succeeded',
+      sandbox: { cleanup: 'destroyed' },
     });
-
-    expect(result.terminal.status).toBe('succeeded');
-    expect(result.manifest.model).toBe('opencode-go/test-model-7');
-    expect(result.secretArgs?.[result.secretArgs.indexOf('--host') + 1]).toBe('model.example.test');
-    expect(result.allowedResources).toContain('model.example.test:443');
+    expect(result.manifest.model).toBe('compte-rendu/deepseek-review');
+    expect(result.manifest.selection).toMatchObject({
+      reviewers: ['deepseek-review'],
+      synthesis: 'deepseek-review',
+    });
+    const modelIndex = result.agentArgs?.indexOf('--model') ?? -1;
+    expect(result.agentArgs?.[modelIndex + 1]).toBe('compte-rendu/deepseek-review');
+    expect(result.agentArgs).toEqual(expect.arrayContaining(['--agent', 'review']));
+    expect(result.secretArgs?.[result.secretArgs.indexOf('--host') + 1]).toBe('inference.example');
+    expect(result.allowedResources).toContain('inference.example:443');
     expect(result.allowedResources).not.toContain('opencode.ai:443');
     expect(
-      result.removedRuleIds.some((id) => id.endsWith('-runner-job-test-model.example.test:443')),
+      result.removedRuleIds.some((id) => id.endsWith('-runner-job-test-inference.example:443')),
     ).toBe(true);
     const configContent = result.createArgs?.find((value) =>
       value.startsWith('OPENCODE_CONFIG_CONTENT='),
@@ -1199,65 +1149,23 @@ describe('Runner Job HTTP interface', () => {
       providers: Record<
         string,
         {
-          package?: string;
+          canonical?: string;
           settings?: { baseURL?: string };
-          models?: Record<string, { settings?: { baseURL?: string } }>;
+          models: Record<string, { settings?: { baseURL?: string } }>;
         }
       >;
+      agents: Record<string, { model?: string }>;
     };
-    expect(config.model).toBe('opencode-go/test-model-7');
-    expect(config.providers['opencode-go']?.package).toBe(
-      '@opencode/ai/providers/openai-compatible',
+    expect(config.model).toBe('compte-rendu/deepseek-review');
+    expect(config.providers['compte-rendu']?.canonical).toBe('opencode-go');
+    expect(config.providers['compte-rendu']?.settings?.baseURL).toBe(
+      'https://inference.example/v1',
     );
-    expect(config.providers['opencode-go']?.settings?.baseURL).toBe(
-      'https://model.example.test/v1',
+    expect(config.providers['compte-rendu']?.models['deepseek-review']?.settings?.baseURL).toBe(
+      'https://inference.example/v1',
     );
-    expect(config.providers['opencode-go']?.models?.['test-model-7']?.settings?.baseURL).toBe(
-      'https://model.example.test/v1',
-    );
-  });
-  it('derives an explicit HTTPS port for the custom route and coexists with a definition', async () => {
-    const definition = { name: 'Test Model', reasoning: true };
-    const result = await runAgentScenario({
-      runId: 'run-custom-base-url-port',
-      output: finalMarkdownJsonl(),
-      modelConfig: JSON.stringify({
-        id: 'opencode-go/test-model-7',
-        baseUrl: 'https://model.example.test:8443/v1',
-        definition,
-      }),
-      sessionExport: sessionExportJson('scenario-session', {
-        model: { providerID: 'opencode-go', id: 'test-model-7' },
-      }),
-    });
-
-    expect(result.terminal.status).toBe('succeeded');
-    expect(result.manifest.model).toBe('opencode-go/test-model-7');
-    expect(result.secretArgs?.[result.secretArgs.indexOf('--host') + 1]).toBe('model.example.test');
-    expect(result.allowedResources).toContain('model.example.test:8443');
-    expect(result.allowedResources).not.toContain('opencode.ai:443');
-    expect(
-      result.removedRuleIds.some((id) => id.endsWith('-runner-job-test-model.example.test:8443')),
-    ).toBe(true);
-    const configContent = result.createArgs?.find((value) =>
-      value.startsWith('OPENCODE_CONFIG_CONTENT='),
-    );
-    expect(JSON.parse(configContent!.slice('OPENCODE_CONFIG_CONTENT='.length))).toMatchObject({
-      model: 'opencode-go/test-model-7',
-      providers: {
-        'opencode-go': {
-          package: '@opencode/ai/providers/openai-compatible',
-          settings: { baseURL: 'https://model.example.test:8443/v1' },
-          models: {
-            'test-model-7': {
-              name: 'Test Model',
-              capabilities: { reasoning: { supported: true } },
-              settings: { baseURL: 'https://model.example.test:8443/v1' },
-            },
-          },
-        },
-      },
-    });
+    expect(config.agents.review?.model).toBe('compte-rendu/deepseek-review');
+    expect(config.agents['multi-review-supervisor']).toBeUndefined();
   });
   it('reviews a behind target from merge base to head while retaining admitted revision facts', async () => {
     const baseSha = '1111111111111111111111111111111111111111';
@@ -1627,11 +1535,12 @@ describe('Runner sandbox runtime selection', () => {
   it('defaults to the sbx runtime when no sandbox runtime is configured', () => {
     expect(() => createRunner(base)).not.toThrow();
   });
-  it('requires an explicit locally loaded image and the managed relay for microsandbox', () => {
+  it('requires an explicit locally loaded image for microsandbox', async () => {
     vi.stubEnv('RUNNER_SANDBOX_RUNTIME', 'microsandbox');
     expect(() => createRunner(base)).toThrow(/MICROSANDBOX_IMAGE/);
     vi.stubEnv('MICROSANDBOX_IMAGE', 'review:v1');
-    expect(() => createRunner(base)).toThrow(/managed HTTPS/);
+    const runner = createRunner(base);
+    await runner.close();
   });
   it('rejects an unknown sandbox runtime before claiming or admitting work', () => {
     const previous = process.env.RUNNER_SANDBOX_RUNTIME;

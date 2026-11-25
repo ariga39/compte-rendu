@@ -14,7 +14,7 @@ record historical assumptions and observations, not current deployment policy.
 | Dashboard operator → application Worker | GitHub App user session, current GitHub identity, instance UID allowlist and same-origin mutations  |
 | Runner → public Worker                  | Authenticated claim, progress, read-token renewal and callback with persisted job/attempt ownership |
 | Agent → GitHub                          | Repository-scoped read token injected through the runtime proxy; no publication credential          |
-| Agent → model                           | Direct-provider proxy, or restricted expiring job grant to the managed inference Worker             |
+| Agent → model                           | Restricted expiring job grant through the managed inference Worker                                  |
 | Inference Worker → AI Gateway           | Account-scoped Gateway Run token and BYOK alias from the frozen grant mapping                       |
 | Runner → host resources                 | Per-job runtime ownership, bounded commands, deadlines, redaction and confirmed teardown            |
 | Core module → public dashboard          | DB-only projection; unknown/private/expired repository identity removed server-side                 |
@@ -59,7 +59,7 @@ host-side TLS credential injection and deny-by-default HTTPS rules scoped to the
 inference hostname and GitHub API. Cleanup verifies the original catalog, exact
 VM name and `created_at` age. See the [microsandbox guide](microsandbox.md).
 
-Managed inference permits the configured HTTPS inference hostname. Grant control uses the application origin and a Runner credential kept outside the Sandbox. The inference Worker constructs its upstream URL and headers from its own configuration and the frozen grant.
+Managed inference is the only model credential path. It permits the configured HTTPS inference hostname, and grant control uses the application origin and a Runner credential kept outside the Sandbox. The inference Worker constructs its upstream URL and headers from its own configuration and the frozen grant. Runner rejects `MODEL_SECRET_COMMAND`, a disabled `RUNNER_LLM_RELAY`, and a direct-only model configuration at startup rather than falling back to a provider endpoint.
 
 ## Credentials and lifecycle
 

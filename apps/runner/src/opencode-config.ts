@@ -27,18 +27,6 @@ const ReviewModelDefinition = Schema.Struct({
     }),
   ),
 });
-const ModelBaseUrl = Schema.URLFromString.check(
-  Schema.makeFilter(
-    (url) =>
-      url.protocol === 'https:' &&
-      url.username === '' &&
-      url.password === '' &&
-      url.search === '' &&
-      url.hash === '' &&
-      !url.hostname.includes('*'),
-    { expected: 'absolute HTTPS URL without credentials, query, fragment, or wildcard host' },
-  ),
-);
 // Managed relay inference uses the sandbox's credential proxy over HTTPS. Only
 // the configured FQDN on port 443 with an exact /v1 base path is accepted.
 const RelayServiceBaseUrl = Schema.URLFromString.check(
@@ -56,42 +44,32 @@ const RelayServiceBaseUrl = Schema.URLFromString.check(
     { expected: 'HTTPS FQDN on port 443 with /v1 path' },
   ),
 );
+// Legacy `id` and `definition` fields remain accepted from an already-deployed
+// managed configuration but no longer select the model: Core freezes the route
+// selection and the grant supplies its descriptor.
 const ReviewModelConfig = Schema.Struct({
-  id: Schema.String.check(Schema.isPattern(/^opencode-go\/[A-Za-z0-9._:-]{1,128}$/)),
-  baseUrl: Schema.optional(ModelBaseUrl),
-  definition: Schema.optional(ReviewModelDefinition),
-});
-const RelayServiceReviewModelConfig = Schema.Struct({
-  id: Schema.String.check(Schema.isPattern(/^opencode-go\/[A-Za-z0-9._:-]{1,128}$/)),
+  id: Schema.optional(
+    Schema.String.check(Schema.isPattern(/^opencode-go\/[A-Za-z0-9._:-]{1,128}$/)),
+  ),
   baseUrl: RelayServiceBaseUrl,
   definition: Schema.optional(ReviewModelDefinition),
 });
 export type ReviewModelConfigValue = Schema.Schema.Type<typeof ReviewModelConfig>;
-export type ReviewModelDefinitionValue = Schema.Schema.Type<typeof ReviewModelDefinition>;
-
-export type ModelTransport = 'direct' | 'relay';
 
 export const decodeReviewModelConfig = (
   raw: string | undefined,
-  transport: ModelTransport,
 ): ReviewModelConfigValue | undefined =>
   raw === undefined
     ? undefined
     : Option.getOrUndefined(
-        Schema.decodeUnknownOption(
-          Schema.fromJsonString(
-            transport === 'relay' ? RelayServiceReviewModelConfig : ReviewModelConfig,
-          ),
-          { onExcessProperty: 'error' },
-        )(raw),
+        Schema.decodeUnknownOption(Schema.fromJsonString(ReviewModelConfig), {
+          onExcessProperty: 'error',
+        })(raw),
       );
 
-// Native OpenCode 2 configuration. The v1 `provider.options.baseURL` normalizer
-// does not apply to this deployment's custom gateway, so the endpoint must be
-// set through native `providers['opencode-go'].settings.baseURL`. The agent uses
-// the native `agents`/`permissions` ruleset, and the command runner is `shell`,
-// not `bash`. Rules are ordered and last-match-wins, so the catch-all deny comes
-// first and the specific allow rules follow.
+// The agent uses native `agents`/`permissions` rules, and the command runner is
+// `shell`, not `bash`. Rules are ordered and last-match-wins, so the catch-all
+// deny comes first and the specific allow rules follow.
 export const shellPermissionRules: ReadonlyArray<readonly [string, 'allow' | 'deny']> = [
   ['*', 'deny'],
   ['gh *', 'deny'],
@@ -136,81 +114,6 @@ export const shellPermissionRules: ReadonlyArray<readonly [string, 'allow' | 'de
   ['python *', 'deny'],
   ['./*', 'deny'],
 ];
-
-const nativeModelDefinition = (definition: ReviewModelDefinitionValue) => ({
-  ...(definition.name === undefined ? {} : { name: definition.name }),
-  ...(definition.reasoning === undefined
-    ? {}
-    : { capabilities: { reasoning: { supported: definition.reasoning } } }),
-  ...(definition.limit === undefined ? {} : { limit: definition.limit }),
-  ...(definition.cost === undefined
-    ? {}
-    : {
-        cost: {
-          input: definition.cost.input,
-          output: definition.cost.output,
-          ...(definition.cost.cache_read === undefined
-            ? {}
-            : { cache: { read: definition.cost.cache_read } }),
-        },
-      }),
-});
-
-export const trustedOpenCodeConfig = (config: ReviewModelConfigValue) => {
-  const baseURL = config.baseUrl?.toString();
-  const nativeModel =
-    config.definition === undefined ? undefined : nativeModelDefinition(config.definition);
-  // A custom gateway needs an explicit provider package and settings; without
-  // them the built-in `opencode-go` provider keeps its own opencode.ai endpoint.
-  // The selected model already carries its own catalog URL, and the provider
-  // overlay only clears it for new/changed models, so the model-level
-  // `settings.baseURL` must be set too (even when the definition is absent).
-  const nativeModelEntry =
-    nativeModel === undefined && baseURL === undefined
-      ? undefined
-      : {
-          ...nativeModel,
-          ...(baseURL === undefined ? {} : { settings: { baseURL } }),
-        };
-  const providerEntry =
-    baseURL === undefined && nativeModelEntry === undefined
-      ? undefined
-      : {
-          'opencode-go': {
-            ...(baseURL === undefined
-              ? {}
-              : {
-                  package: '@opencode/ai/providers/openai-compatible',
-                  settings: { baseURL, apiKey: '{env:OPENCODE_API_KEY}' },
-                }),
-            ...(nativeModelEntry === undefined
-              ? {}
-              : { models: { [config.id.slice('opencode-go/'.length)]: nativeModelEntry } }),
-          },
-        };
-  const permissions = [
-    { action: '*', resource: '*', effect: 'deny' as const },
-    ...shellPermissionRules.map(([resource, effect]) => ({ action: 'shell', resource, effect })),
-    { action: 'edit', resource: '*', effect: 'deny' as const },
-    { action: 'external_directory', resource: '*', effect: 'allow' as const },
-    { action: 'glob', resource: '*', effect: 'allow' as const },
-    { action: 'grep', resource: '*', effect: 'allow' as const },
-    { action: 'read', resource: '*', effect: 'allow' as const },
-    { action: 'skill', resource: '*', effect: 'allow' as const },
-    { action: 'webfetch', resource: '*', effect: 'deny' as const },
-  ];
-  return JSON.stringify({
-    model: config.id,
-    ...(providerEntry === undefined ? {} : { providers: providerEntry }),
-    agents: {
-      review: {
-        description: 'Pull request reviewer',
-        mode: 'primary',
-        permissions,
-      },
-    },
-  });
-};
 
 const OpenCodeErrorEvent = Schema.Struct({ type: Schema.Literal('error') });
 const OpenCodeRecoverableError = Schema.Struct({

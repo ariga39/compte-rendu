@@ -409,9 +409,9 @@ for an explicitly dedicated, drained host with a backup, and re-initialize
 afterward. The Runner adds only its own per-job allow rules on top of the host
 baseline; it never establishes the host default.
 
-Install the repository dependencies and build the runner. The resolver command
-must not contain a model secret; `MODEL_SECRET_COMMAND` is never sent to the
-Worker:
+Install the repository dependencies and build the runner. The Runner never
+holds a direct provider credential; managed inference supplies a short-lived
+per-job grant:
 
 ```sh
 corepack pnpm install --frozen-lockfile
@@ -487,14 +487,12 @@ the upgrade only made it worth verifying.
 
 Use the pinned OpenCode 2 image. Runner uses standalone mode with fresh per-job
 state and proxy-only credentials; never copy personal OpenCode auth/state into
-the image or job. It translates `REVIEW_MODEL_CONFIG` to native V2 provider/model
-settings. Final output is a `DECISION` header plus raw Markdown (the earlier JSON
-`decision` + `markdown` form remains accepted), with one same-session correction
-before cleanup; no submission plugin is installed. See
-[review decisions](review-decisions-design.md).
-
-The environment example below is **direct-provider mode**. For the recommended
-managed relay and configurable multi-model selection, use the [relay environment](llm-service.md#remote-relay-transport).
+the image or job. Managed inference is the only model credential path: each job
+gets a short-lived grant, and Runner configures OpenCode from the frozen route
+selection and grant descriptors. Final output is a `DECISION` header plus raw
+Markdown (the earlier JSON `decision` + `markdown` form remains accepted), with
+one same-session correction before cleanup; no submission plugin is installed.
+See [review decisions](review-decisions-design.md).
 
 The runner listens only on IPv4 loopback port `8080`. It runs as the persistent
 service below on the host that also runs the remotely managed Tunnel connector.
@@ -510,8 +508,8 @@ ${EDITOR:-vi} <ABSOLUTE_RUNNER_ENV_FILE>
 ```
 
 ```ini
-REVIEW_MODEL_CONFIG={"id":"opencode-go/deepseek-flash","definition":{"name":"DeepSeek V4.1 Flash","reasoning":true,"limit":{"context":1000000,"output":384000},"cost":{"input":0.15,"output":0.6,"cache_read":0.003}}}
-MODEL_SECRET_COMMAND=<host-secret-resolver-command>
+RUNNER_LLM_RELAY=1
+REVIEW_MODEL_CONFIG={"id":"opencode-go/deepseek-review","baseUrl":"https://<INFERENCE_FQDN>/v1","definition":{"name":"DeepSeek review"}}
 RUNNER_AUTH_TOKEN=<runner-application-token>
 RUNNER_CALLBACK_URL=https://<INGRESS_HOST>/runner-callback
 RUNNER_CALLBACK_TOKEN=<static-runner-callback-token>
@@ -523,36 +521,22 @@ Confirm the file is still mode `0600` after editing; never commit it. The
 and the matching Worker secrets.
 
 `REVIEW_MODEL_CONFIG` is required deployment configuration, read once when the
-Runner starts. Its `id` selects an `opencode-go/<model-id>` model; there is no
-default model. The optional `definition` registers that model when the pinned
-OpenCode image's bundled catalog does not contain it. The example above uses
-the [official model metadata](https://models.dev) for DeepSeek V4.1 Flash.
-For a model already in the bundled catalog, supply only `id`.
+Runner starts. Its `baseUrl` must be the dedicated inference Worker origin: an
+HTTPS FQDN on port 443 with the exact `/v1` base path, distinct from the
+callback hostname. The Sandbox receives a job-scoped grant through the runtime's
+host-side credential proxy, and model traffic is allowed only to that hostname.
+Cleanup removes that Job's exact network rule. The optional `id` and `definition`
+fields remain accepted from an existing managed deployment but no longer select
+the model; the frozen dashboard route selection does. Change the selection in
+the dashboard instead of editing this file.
 
-Change this JSON in the Runner's service environment and restart the Runner to
-switch models; a source change, rebuild, or Worker deployment is unnecessary.
-The selected ID is used consistently by OpenCode and the evidence manifest.
-Missing or invalid model configuration prevents queue claims and returns `503`
-for authenticated Job admission.
-
-To use a gateway compatible with the selected `opencode-go` model, add an
-optional `baseUrl`, for example `"baseUrl": "https://model.example.com/v1"`.
-It must be an absolute HTTPS URL without embedded credentials, a query, a
-fragment, or wildcard hostname. When omitted, OpenCode uses the official provider endpoint. The
-Runner sets the configured URL in OpenCode 2's provider and model
-`settings.baseURL`, scopes the
-Docker credential proxy to its hostname, and allows model traffic only to its
-host and port (443 by default). Cleanup removes that Job's exact network rule.
-
-Set `MODEL_SECRET_COMMAND` to a host resolver for the API key belonging to that
-gateway, then restart the Runner with both settings applied. Keep the key out
-of `REVIEW_MODEL_CONFIG`; the Sandbox receives only Docker's placeholder, and
-the host proxy supplies the credential. Review permissions remain unchanged.
-Under `sbx` 0.48 the command runs from a fresh temporary host directory, so use
-an absolute program path and absolute file references (for example
-`/usr/bin/cat /run/secrets/model-key`); relative commands such as `cat token` no
-longer resolve against the project or daemon working directory. Keep the helper
-and every file it reads outside writable sandbox mounts.
+The Runner rejects direct-provider configuration at startup:
+`MODEL_SECRET_COMMAND`, an explicit disabled `RUNNER_LLM_RELAY` (`0`, `false`,
+`off`, `no`), a missing or non-HTTPS callback origin or token, a missing
+`REVIEW_MODEL_CONFIG`, or a `baseUrl` that is not the dedicated port-443 `/v1`
+inference origin fails with a clear error before any claim or process starts.
+`RUNNER_LLM_RELAY=1` and an unset value are both accepted for compatibility
+with an existing deployment. There is no fallback to a provider endpoint.
 
 ### Sandbox runtime selection
 
@@ -880,7 +864,7 @@ uses the temporary invocation described above.
    corepack pnpm dlx wrangler@4.124.0 secret put RUNNER_AUTH_TOKEN --config apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc
    ```
 
-   The application Worker holds the GitHub App private key and shares the Runner authentication token with the Runner. In managed relay mode, AI Gateway holds the upstream model credential and the inference Worker holds the Gateway Run token.
+   The application Worker holds the GitHub App private key and shares the Runner authentication token with the Runner. On the managed inference path, AI Gateway holds the upstream model credential and the inference Worker holds the Gateway Run token.
    Cloudflare's `secret put` creates and deploys a new Worker version
    immediately, so complete the D1 migration before these commands. Worker
    secrets are encrypted bindings and are intentionally separate from
@@ -966,14 +950,14 @@ limits.
 
 Deploy Core migration `0012_review_configuration.sql` and the multi-model-capable
 Runner before enabling a selection. This execution path requires sbx or microsandbox, OpenCode 2,
-and the managed relay. A selection can contain one reviewer; it runs directly with the same prompt
+and the managed relay. A selection can contain one reviewer; it runs as a single reviewer with the same prompt
 and output contract used for multiple reviewers. Jobs retain the selection
 frozen when admitted.
 
 Configure the [relay model catalog](llm-service.md#managed-relay-model-catalog) and verify it lists every selected route. Preserve old route IDs and their mappings while queued and running jobs reference them.
 
 Set the installation default with `RELAY_DEFAULT_MODEL_ROUTE`. Sign in to
-`/settings` to select one reviewer for direct review or multiple reviewers
+`/settings` to select one reviewer for single-reviewer execution or multiple reviewers
 and a synthesis model. Changes apply to newly admitted jobs. For access setup,
 the bearer-protected API and revision conflicts, see [review configuration](review-configuration.md).
 

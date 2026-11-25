@@ -480,7 +480,6 @@ describe('Core admission, claims, and manual policy', () => {
     const schedule = (event: ReviewEvent) => core.schedule(event);
     await schedule(eligibleEvent);
     let polled = false;
-    vi.stubEnv('MODEL_SECRET_COMMAND', 'secret-resolver get MODEL_API_KEY');
     const runner: ReturnType<typeof createRunner> = createRunner({
       authToken: 'runner-auth-token',
       claimUrl: 'https://reviews.test/runner-claim',
@@ -507,7 +506,10 @@ describe('Core admission, claims, and manual policy', () => {
         return reply;
       },
       evidenceRoot: '/tmp/cr-test-in-flight-supersession',
-      modelConfig: JSON.stringify({ id: 'opencode-go/test-model' }),
+      modelConfig: JSON.stringify({
+        id: 'opencode-go/test-model',
+        baseUrl: 'https://inference.example/v1',
+      }),
       progressFetch: async () => new Response(null, { status: 202 }),
       process: async () => ({ exitCode: 0, stdout: '', timedOut: false, truncated: false }),
     });
