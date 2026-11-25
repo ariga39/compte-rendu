@@ -1228,12 +1228,13 @@ restarting the upgraded Runner, remove any `MODEL_SECRET_COMMAND` entry from
 its environment file or service unit, even if the relay was already enabled.
 The Runner rejects this retired setting at startup.
 
-If rolling back to a direct-provider Runner, first pause webhook admissions
-and let the managed Runner finish all queued and running reviews. Verify the
-Core queue is empty, then drain and stop the managed Runner. Restore the
-matching Core revision, database schema, and direct-provider Runner configuration
-before restarting and resuming admissions. A direct-provider Runner cannot
-execute jobs with a frozen managed selection.
+Before a rollback across model protocols, pause admissions and finish every
+queued and running review with the current Runner. Once Core's queue is empty,
+drain and stop it. For a managed v1 target, save a v1-compatible Chat roster
+and default route without effort or limit overrides, and configure the matching
+grant version on the rollback Runner. For a direct-provider target, restore
+its original model and credential configuration. Restore the matching Worker
+revisions, schema and Runner artifact before restarting and resuming admissions.
 
 A direct-provider installation has an old Runner without a relay client. Prepare
 one target-release checkout and both configs first, outside the maintenance
@@ -1273,7 +1274,7 @@ window, then drain and switch. Only these differences apply:
    Manually add only these relay entries to that target-worktree application
    config; keep its private routes, D1/R2 bindings, allowlists, origins, Check
    name and secret references:
-   - add `{"binding":"INFERENCE_RELAY","service":"<INSTANCE_NAME>-inference","entrypoint":"InferenceWorker"}` to the existing `services` array; keep other service entries
+   - add `{"binding":"INFERENCE_RELAY","service":"<INSTANCE_NAME>-inference","entrypoint":"InferenceWorker"}` to `services`; create this array if absent, or append to it while keeping existing entries. Leave `vpc_services` in place
    - `vars.RELAY_DEFAULT_MODEL_ROUTE`: the relay config's `defaultRoute`
    - `account_id`: only if the retained config has none
 
@@ -1295,25 +1296,32 @@ window, then drain and switch. Only these differences apply:
    later migration so the first apply stops before them:
 
    ```sh
-   HOLD_DIR="$(mktemp -d "$TARGET_CHECKOUT/.migration-hold.XXXXXX")"
+   set -e
    (
-     set -eu
+     HOLD_DIR="$(mktemp -d "$TARGET_CHECKOUT/.migration-hold.XXXXXX")"
      trap 'mv "$HOLD_DIR"/*.sql apps/core/migrations/ 2>/dev/null || true; rmdir "$HOLD_DIR"' EXIT
-     for migration in apps/core/migrations/0*.sql; do
+     for migration in apps/core/migrations/*.sql; do
        version=${migration##*/}
        version=${version%%_*}
-       version=${version%.sql}
-       version=${version#0}; version=${version#0}; version=${version#0}
        if [ "$version" -ge 19 ]; then mv "$migration" "$HOLD_DIR"/; fi
      done
      corepack pnpm dlx wrangler@4.124.0 d1 migrations apply REVIEW_DB --remote --config apps/dashboard/wrangler.$INSTANCE_NAME.jsonc
    )
    ```
 
-   Do not repeat step 7 (application secrets). Keep the existing application
-   secrets; only add an individually missing required secret before deploying
-   with step 8. After the application Worker is deployed and verified, rerun
-   the step 6 `REVIEW_DB` migration so `0019` and later migrations apply.
+   Preserve the application secrets, adding any missing required secret
+   individually. Deploy the target application from its merged config:
+
+   ```sh
+   cd "$TARGET_CHECKOUT"
+   corepack pnpm dlx wrangler@4.124.0 deploy --config "apps/dashboard/wrangler.$INSTANCE_NAME.jsonc"
+   ```
+
+   Confirm the deployment lists `INFERENCE_RELAY` bound to this instance's
+   inference Worker. Verify the target application serves requests and completes
+   its scheduled handler, then apply remaining application migrations with the
+   step 6 `REVIEW_DB` command. Confirm the default route through the deployed
+   application as described in step 9 before admission resumes.
 
 7. Before starting the new Runner, migrate the existing
    `<ABSOLUTE_RUNNER_ENV_FILE>`: remove `MODEL_SECRET_COMMAND`, any disabled
