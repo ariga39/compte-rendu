@@ -187,7 +187,6 @@ export const createClaimScheduler = (deps: ClaimSchedulerDependencies): ClaimSch
       readonly body?: string;
       readonly headers?: Record<string, string>;
     },
-    onResponse?: (response: Response) => void,
   ) =>
     runWithHostDeadline(
       { timeoutMs: deps.claimTimeoutMs, signal: controller.signal },
@@ -198,7 +197,6 @@ export const createClaimScheduler = (deps: ClaimSchedulerDependencies): ClaimSch
           ...(init.body === undefined ? {} : { body: init.body }),
           signal,
         });
-        onResponse?.(response);
         // The deadline must cover the body as well: a 200 whose body never ends
         // otherwise keeps ownership ambiguous and blocks drain indefinitely.
         if (init.method !== 'POST' || response.status !== 200) return { response };
@@ -208,20 +206,12 @@ export const createClaimScheduler = (deps: ClaimSchedulerDependencies): ClaimSch
         };
       },
     );
-  const postClaim = (
-    body: unknown,
-    controller: AbortController,
-    onResponse?: (response: Response) => void,
-  ) =>
-    claimRequest(
-      controller,
-      {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body),
-      },
-      onResponse,
-    );
+  const postClaim = (body: unknown, controller: AbortController) =>
+    claimRequest(controller, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
   // HEAD shares the claim URL, auth and deadline but has no request body. An
   // old Worker rejects it with 405 without claiming; it cannot be mistaken for
   // a claim.
@@ -332,16 +322,11 @@ export const createClaimScheduler = (deps: ClaimSchedulerDependencies): ClaimSch
     const controller = new AbortController();
     claimInFlightController = controller;
     try {
-      const { response, body } = await postClaim(
-        { requestId: claimRequestId },
-        controller,
-        (seen) => {
-          // A 200 proves Core took ownership even if its body stalls or fails
-          // validation. Halt polling and retain the request ID for replay.
-          if (seen.status === 200) claimPollingHalted = true;
-        },
-      );
+      const { response, body } = await postClaim({ requestId: claimRequestId }, controller);
       if (response.status === 200) {
+        // Reaching this branch means the bounded body read completed inside the
+        // same deadline. A timeout or transport failure never sets the halt:
+        // the retained claimRequestId replays at the normal interval instead.
         continuePolling = false;
         claimPollingHalted = true;
         if (body === undefined || body.kind !== 'ok') {
