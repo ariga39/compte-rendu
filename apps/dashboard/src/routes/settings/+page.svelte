@@ -69,7 +69,7 @@
   const driftingEfforts = $derived(
     (data.settings?.effortDrift ?? []).filter((route) => selectedRoutes.includes(route)),
   );
-  const currentEfforts = $derived(
+  const executingEfforts = $derived(
     Object.fromEntries(
       Object.entries(effortChoices).filter(
         ([route, name]) => selectedRoutes.includes(route) && name !== '',
@@ -82,11 +82,17 @@
       : {
           reviewers,
           synthesis,
-          ...(Object.keys(currentEfforts).length === 0 ? {} : { efforts: currentEfforts }),
+          ...(Object.keys(executingEfforts).length === 0 ? {} : { efforts: executingEfforts }),
         },
   );
+  // Edit detection must compare the full saved selection, including an effort
+  // on a non-executing synthesis route. A concurrency-only save then never
+  // sends a filtered selection that would discard that effort.
+  const editedSelection = $derived(
+    defaults ? null : { reviewers, synthesis, efforts: effortChoices },
+  );
   const selectionDirty = $derived(
-    selectionSignature(nextSelection) !== loadedSelectionSignature,
+    selectionSignature(editedSelection) !== loadedSelectionSignature,
   );
   const concurrencyOnly = $derived(concurrencyDirty && !selectionDirty);
   const selectionUnavailable = $derived(

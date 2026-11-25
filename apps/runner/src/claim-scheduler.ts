@@ -5,6 +5,7 @@ import {
   RUNNER_CONCURRENCY_DEFAULT,
   RUNNER_CONCURRENCY_HEADER,
   RunnerJobInput,
+  readBoundedBody,
   sanitizeOperationalLogEvent,
   type OperationalLog,
   type OperationalLogEvent,
@@ -20,6 +21,11 @@ import type { JobExecutionInput } from './job-executor.js';
 import { HostRequestAbortError, runWithHostDeadline } from './host-request.js';
 
 const MAX_REQUEST_BYTES = 64 * 1024;
+
+type ClaimResponse = {
+  readonly response: Response;
+  readonly body?: Awaited<ReturnType<typeof readBoundedBody>>;
+};
 
 export interface ClaimSchedulerDependencies {
   readonly backend: SandboxBackend;
@@ -181,21 +187,41 @@ export const createClaimScheduler = (deps: ClaimSchedulerDependencies): ClaimSch
       readonly body?: string;
       readonly headers?: Record<string, string>;
     },
+    onResponse?: (response: Response) => void,
   ) =>
-    runWithHostDeadline({ timeoutMs: deps.claimTimeoutMs, signal: controller.signal }, (signal) =>
-      deps.claimFetch(deps.claimUrl!, {
-        method: init.method,
-        headers: { authorization: `Bearer ${deps.callbackToken}`, ...init.headers },
-        ...(init.body === undefined ? {} : { body: init.body }),
-        signal,
-      }),
+    runWithHostDeadline(
+      { timeoutMs: deps.claimTimeoutMs, signal: controller.signal },
+      async (signal): Promise<ClaimResponse> => {
+        const response = await deps.claimFetch(deps.claimUrl!, {
+          method: init.method,
+          headers: { authorization: `Bearer ${deps.callbackToken}`, ...init.headers },
+          ...(init.body === undefined ? {} : { body: init.body }),
+          signal,
+        });
+        onResponse?.(response);
+        // The deadline must cover the body as well: a 200 whose body never ends
+        // otherwise keeps ownership ambiguous and blocks drain indefinitely.
+        if (init.method !== 'POST' || response.status !== 200) return { response };
+        return {
+          response,
+          body: await readBoundedBody(response.body, MAX_REQUEST_BYTES),
+        };
+      },
     );
-  const postClaim = (body: unknown, controller: AbortController) =>
-    claimRequest(controller, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-    });
+  const postClaim = (
+    body: unknown,
+    controller: AbortController,
+    onResponse?: (response: Response) => void,
+  ) =>
+    claimRequest(
+      controller,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+      onResponse,
+    );
   // HEAD shares the claim URL, auth and deadline but has no request body. An
   // old Worker rejects it with 405 without claiming; it cannot be mistaken for
   // a claim.
@@ -204,7 +230,7 @@ export const createClaimScheduler = (deps: ClaimSchedulerDependencies): ClaimSch
     const controller = new AbortController();
     claimInFlightController = controller;
     try {
-      const response = await headClaim(controller);
+      const { response } = await headClaim(controller);
       if (response.status === 204) requestConcurrency(response);
       else {
         // Old Worker 405 or any other outcome leaves the current target alone.
@@ -306,18 +332,25 @@ export const createClaimScheduler = (deps: ClaimSchedulerDependencies): ClaimSch
     const controller = new AbortController();
     claimInFlightController = controller;
     try {
-      const response = await postClaim({ requestId: claimRequestId }, controller);
+      const { response, body } = await postClaim(
+        { requestId: claimRequestId },
+        controller,
+        (seen) => {
+          // A 200 proves Core took ownership even if its body stalls or fails
+          // validation. Halt polling and retain the request ID for replay.
+          if (seen.status === 200) claimPollingHalted = true;
+        },
+      );
       if (response.status === 200) {
         continuePolling = false;
         claimPollingHalted = true;
-        const body = await response.arrayBuffer();
-        if (body.byteLength > MAX_REQUEST_BYTES) {
+        if (body === undefined || body.kind !== 'ok') {
           claimFailure = { reason: 'oversized-response' };
           throw new Error('Claimed Runner Job exceeded the request bound');
         }
         let payload: unknown;
         try {
-          payload = JSON.parse(new TextDecoder().decode(body));
+          payload = JSON.parse(body.text);
         } catch {
           claimFailure = { reason: 'malformed-response' };
           throw new Error('Claimed Runner Job was not JSON');
