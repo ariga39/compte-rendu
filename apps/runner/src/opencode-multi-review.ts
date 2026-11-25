@@ -203,22 +203,28 @@ export const participantId = (index: number) => `reviewer-${index}`;
 
 export const modelReference = (route: string) => `${MULTI_PROVIDER_ID}/${route}`;
 
+// OpenCode treats a literal `__proto__` provider or model key as missing. Escape
+// only that exact local key; `~` is outside the route-id alphabet, so a real
+// route can never generate it. The descriptor's modelID still carries the wire
+// route.
+const localConfigKey = (value: string) => (value === '__proto__' ? '~__proto__' : value);
+
 export const routeModelIdentity = (
   route: string,
   descriptors?: readonly ModelRouteDescriptor[],
 ): { readonly providerID: string; readonly id: string; readonly reference: string } => {
   const slash = route.indexOf('/');
-  if (descriptors !== undefined && slash > 0 && slash < route.length - 1)
-    return {
-      providerID: route.slice(0, slash),
-      id: route.slice(slash + 1),
-      reference: route,
-    };
+  if (descriptors !== undefined && slash > 0 && slash < route.length - 1) {
+    const providerID = localConfigKey(route.slice(0, slash));
+    const id = localConfigKey(route.slice(slash + 1));
+    return { providerID, id, reference: `${providerID}/${id}` };
+  }
   let id = route;
   if (descriptors !== undefined)
     while (descriptors.some((descriptor) => descriptor.routeId === modelReference(id)))
       id = modelReference(id);
-  return { providerID: MULTI_PROVIDER_ID, id, reference: modelReference(id) };
+  const localId = localConfigKey(id);
+  return { providerID: MULTI_PROVIDER_ID, id: localId, reference: modelReference(localId) };
 };
 
 export const dedupedRoutes = (selection: MultiReviewSelection): readonly string[] => [
