@@ -517,8 +517,6 @@ describe('Runner same-PR admission', () => {
     const newHead = '3'.repeat(40);
     const oldId = 'same-pr-old';
     const replacementId = 'same-pr-replacement';
-    const oldName = `compte-rendu-${oldId}`;
-    const replacementName = `compte-rendu-${replacementId}`;
     const present = new Map<string, { workspace: string; config: string }>();
     const created: string[] = [];
     const agentSandboxes: string[] = [];
@@ -565,7 +563,7 @@ describe('Runner same-PR admission', () => {
       }
       if (args[0] === 'rm' && args[1] === '--force') {
         const name = args[2]!;
-        const exitCode = name === oldName ? 1 : 0;
+        const exitCode = created[0] === name ? 1 : 0;
         removals.push({ name, exitCode });
         if (exitCode === 0) present.delete(name);
         return { ...ok, exitCode };
@@ -625,6 +623,7 @@ describe('Runner same-PR admission', () => {
         status: 'failed',
         sandbox: { cleanup: 'failed' },
       });
+      const oldName = created[0]!;
       expect(present.has(oldName)).toBe(true);
       expect(await maintenance()).toMatchObject({ activeJobs: 0, cleanupBlockedJobs: 1 });
 
@@ -649,7 +648,6 @@ describe('Runner same-PR admission', () => {
       expect(agentSandboxes).toEqual([oldName]);
       // The unresolved original VM is neither reused nor removed without proof.
       expect(present.has(oldName)).toBe(true);
-      expect(present.has(replacementName)).toBe(false);
       expect(removals).toContainEqual({ name: oldName, exitCode: 1 });
       expect(removals).not.toContainEqual({ name: oldName, exitCode: 0 });
       expect(await maintenance()).toMatchObject({ activeJobs: 0, cleanupBlockedJobs: 1 });

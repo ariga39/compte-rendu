@@ -57,7 +57,7 @@ Inspect effective scoped policy during installation and upgrades.
 microsandbox runs each job in a local KVM microVM with read-only staging,
 host-side TLS credential injection and deny-by-default HTTPS rules scoped to the
 inference hostname and GitHub API. Cleanup verifies the original catalog, exact
-VM name and owner nonce. See the [microsandbox guide](microsandbox.md).
+VM name and `created_at` age. See the [microsandbox guide](microsandbox.md).
 
 Managed inference permits the configured HTTPS inference hostname. Grant control uses the application origin and a Runner credential kept outside the Sandbox. The inference Worker constructs its upstream URL and headers from its own configuration and the frozen grant.
 
@@ -76,15 +76,18 @@ Managed inference permits the configured HTTPS inference hostname. Grant control
   Sandbox destruction and grant revocation end job capabilities.
 
 Normal completion, failure, timeout and cancellation attempt cleanup. Hard process
-or host failure can leave an owned Sandbox and a claimed run behind. For sbx,
-startup reconciliation uses a per-instance private ownership record plus an exact
-inspect name and workspace/config match; co-located Runners sharing an evidence
-root do not scan each other's records. It never deletes from name, prefix or
-unrelated metadata, verifies native secret absence, reports bounded Job/step
-diagnostics without stderr content on failure, and retains ambiguous records for retry. Microsandbox checks the original
-catalog, exact VM name and owner nonce. Cleanup skips live jobs. Expiration of
-an unknown pending Core claim releases same-PR scheduling without attesting to
-VM destruction; a known failed cleanup remains blocking until confirmed.
+or host failure can leave a claimed run and a timestamped Sandbox behind. Both
+backends sweep only the reserved `compte-rendu-<epoch>-<jobId>` shape after the
+attempt budget plus a finalization margin, skip live local jobs, require complete
+inventory, and verify absence after removal. Broad sbx sweeping only considers
+UUID job identities; exact cleanup from a trusted manifest may name a direct
+claim. sbx expects create-time non-editable scoped rules to cascade from `rm` and
+fails closed on a surviving unremovable attachment. Microsandbox checks the
+original catalog and `created_at`; a same-name lookup in another catalog is not
+absence proof. A physical sweep never changes Core. Expiration of an unknown
+pending Core claim releases same-PR scheduling without attesting to VM
+destruction; a known failed cleanup remains blocking until the retained-evidence
+confirmation callback is accepted.
 
 ## Evidence and observability
 

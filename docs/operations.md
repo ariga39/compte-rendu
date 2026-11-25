@@ -79,7 +79,7 @@ The per-instance numeric GitHub UID list in `DASHBOARD_MODEL_EDITOR_IDS` authori
 
 An authorized same-origin `POST /api/jobs/:runId/cancel` accepts a queued review immediately (200). A claimed review returns 202 until Runner confirms cleanup. Repeating the request retrieves its current cancellation state. A 409 means publication or another terminal outcome already won. Cancelling never withdraws a published GitHub review.
 
-The Worker ends the GitHub Check immediately and requests a stop using the recorded Runner job and attempt. A failed Check update is best effort and is not retried from a queue. The minute cron durably retries the Runner stop if the Worker or Runner was unavailable. A Runner 404 leaves cleanup unconfirmed. A known failed cleanup uses the verified maintenance procedure below and blocks the same PR until exact destruction is confirmed. Unknown pending cleanup does not qualify for that procedure; only an exact late original callback can update it, and any actual orphan is identified and removed through backend ownership. A later run is blocked while a cancelled claim is inside the 90-minute execution budget; after that budget an unknown pending cleanup stops blocking, while a known failed cleanup continues to block. Cleanup visibility and queue blocking are independent: cancelled pending cleanup remains visible until confirmed.
+The Worker ends the GitHub Check immediately and requests a stop using the recorded Runner job and attempt. A failed Check update is best effort and is not retried from a queue. The minute cron durably retries the Runner stop if the Worker or Runner was unavailable. A Runner 404 leaves cleanup unconfirmed. A known failed cleanup uses the verified maintenance procedure below and blocks the same PR until exact destruction is confirmed. Unknown pending cleanup does not qualify for that procedure; only an exact late original callback can update it, and any actual orphan is identified and removed through the backend age sweep. A later run is blocked while a cancelled claim is inside the 90-minute execution budget; after that budget an unknown pending cleanup stops blocking, while a known failed cleanup continues to block. Cleanup visibility and queue blocking are independent: cancelled pending cleanup remains visible until confirmed.
 
 ## Operations and troubleshooting
 
@@ -327,15 +327,15 @@ curl --fail --silent --show-error --config "$RUNNER_CURL_CONFIG" \
 ```
 
 Wait for `drained: true` before restarting. It requires maintenance mode, a
-successful Sandbox ownership scan, no active jobs or in-flight claim, no halted
-claim loop and no terminal job with unconfirmed cleanup. Inspect an ownership
+successful Sandbox age sweep, no active jobs or in-flight claim, no halted
+claim loop and no terminal job with unconfirmed cleanup. Inspect a sweep
 failure rather than forcing a restart to clear it. Resume only clears the
-maintenance pause and may retry the Sandbox ownership scan; it never clears an
-ownership-related claim halt or failed cleanup. If maintenance is cancelled,
+maintenance pause and may retry the Sandbox age sweep; it never clears a failed
+cleanup or an ambiguous claim halt. If maintenance is cancelled,
 send `POST /maintenance/resume` with the same curl configuration. Drain is
 in-memory: a restarted Runner begins normal claiming automatically after its
-startup ownership scan. Starting a replacement is therefore a resume; start it
-only when the Worker is ready.
+startup age sweep. Starting a replacement is therefore a resume; start it only
+when the Worker is ready.
 
 The explicit cleanup recovery accepts only a retained failed-cleanup job for the
 active sbx or microsandbox runtime where the request and evidence match the exact
@@ -360,10 +360,10 @@ Runner and check Sandbox inventory before restarting shared services.
 
 Look up a completed review by run ID on the dashboard or through
 `GET /api/jobs/:runId`. Core keeps the outcome and evidence reference in D1.
-Keep the Runner evidence directory and instance identity stable across restarts.
-The Runner uses local ownership records to find resources left by an interrupted
-job. When a backend becomes reachable again, cleanup retries against that
-backend and removes the local record after verifying absence. Historical review
+Keep the Runner evidence directory stable across restarts. The Runner uses the
+reserved timestamped Sandbox name to find resources left by an interrupted job.
+When a backend becomes reachable again, cleanup retries against that backend and
+removes only a verified expired resource. Historical review
 details remain available through Core even after the private Runner job endpoint
 returns 404. Archived evidence has its own retention policy.
 
@@ -377,22 +377,22 @@ without draining; once callback or result-shape acceptance changes, use the
 paired breaking-release sequence above. Do not interrupt live jobs just to update
 documentation or the dashboard. Relay grants survive Worker restarts in D1. Runner revocation is bounded per job and grants expire after six hours; startup does not replay pending revocations. Interrupted agent jobs cannot resume.
 
-A hard crash can leave owned sbx resources. On startup Runner checks its private
-`sandbox-owners/<instanceId>/` records under the evidence root and removes only a
-provably owned Sandbox, its exact scoped network policies and its scoped secrets.
-`instanceId` is `RUNNER_INSTANCE_ID` or `port-<PORT>`, so co-located Runners
-sharing an evidence root do not reconcile each other's live jobs. If the returned
-name or exact workspace/config path does not match, inspection fails, native
-secret absence cannot be confirmed, or removal cannot be confirmed, the record is
-retained for automatic retry. A single foreign or malformed record does not gate
-unrelated jobs. An authenticated `sbx ls` probe failure marks a backend-wide
-outage and pauses new claims until access returns. Microsandbox similarly checks
-the original catalog and VM owner label. An unresolved ownership record keeps
-drain pending. Use the recovery event to inspect the record and the exact backend
-resource. Restore backend access for transient failures. For a foreign or malformed
-record, verify the actual owner and rule out any local cleanup obligation before
-moving the record aside. Leave foreign VMs untouched. The ownership scan retries
-automatically after 30 seconds; maintenance resume can trigger it immediately.
+A hard crash can leave owned sbx resources. Runner names every Sandbox
+`compte-rendu-<epoch>-<jobId>` and periodically sweeps exact names older than the
+ninety-minute attempt budget plus a thirty-minute finalization margin. It removes
+the exact VM, verifies absence, removes only editable orphan rules, and confirms
+policy and secret absence. Create-time non-editable scoped rules are expected to
+cascade from `sbx rm --force`; a surviving unremovable attachment keeps cleanup
+failed. Inventory failures and truncation authorize no removal, and a live local
+job is skipped. The sweep also runs at startup without delaying new claims.
+Microsandbox uses the same age name, a strict `ls --format json` array, `created_at`
+corroboration and absence in the original catalog. If two sweeps race, the loser's
+nonzero `rm` is accepted only when final exact absence is confirmed in that same
+catalog; a present VM or invalid inspection remains a failure. A same-name lookup in another
+catalog reporting "not found" is never absence proof. An unresolved sweep keeps
+drain pending; restore backend access for transient failures. Pre-sweeper
+`compte-rendu-<jobId>` resources have no trustworthy age: drain and remove them
+manually before upgrading.
 
 ### Recover failed cleanup
 
@@ -401,7 +401,8 @@ Restoring backend access allows the Runner to retry orphan cleanup automatically
 A run with `cleanup=failed` is recovered through the verified maintenance procedure below and keeps blocking the same PR until exact destruction is confirmed; elapsed time never unlocks it. Expired `cleanup=pending` does not qualify for that procedure; only an exact late original callback can update it, and an actual orphan is identified and removed through backend ownership rather than this recovery endpoint. Cancelled, superseded, and expired scheduling-timeout pending cleanup remains visible in cleanup attention until confirmed. An expired scheduling timeout with only pending cleanup blocks later reviews only while its durable claim is inside the 90-minute execution budget; after that budget, later reviews proceed automatically while the retained `pending` status remains visible as an orphan-cleanup risk. Cleanup visibility and queue blocking are independent. Restarting Runner does not clear that database ownership. While a blocker is inside the budget, or while a known failed cleanup remains unconfirmed, the queued task displays “Waiting for previous review cleanup”; an ordinary running review does not produce this warning.
 
 After restoring Docker authentication, confirm the original job has stopped and
-identify its exact Sandbox from the retained manifest (`compte-rendu-<jobId>`).
+identify its exact Sandbox from the retained manifest
+(`compte-rendu-<epoch>-<jobId>`).
 Inspect it with `sbx inspect <sandboxName>` and, if it still exists, remove only
 that Sandbox with `sbx rm --force <sandboxName>`. Verify its absence with another
 inspect; authentication or transport failures are not proof of absence. Do not
@@ -448,8 +449,8 @@ or another permanent 4xx response is a terminal delivery rejection: Runner does
 not replay the original callback and sends no second recovery request. Only
 408/429/5xx or timeout/network failures remain retryable. Other 4xx responses stop
 automatic delivery with a bounded job/run/status diagnostic. When exact absence
-fails because the owned Sandbox still exists, Runner runs the ownership reaper
-only for that job before the next attempt and skips every other ownership record.
+fails because the exact retained Sandbox still exists, Runner re-runs the exact-name
+reaper before the next attempt and skips every other resource.
 An accepted callback reopens the same-PR queue. A single job cleanup failure that
 does not fail the inventory probe leaves unrelated work claimable. A known failed
 cleanup never becomes claimable through elapsed time; an unknown pending cleanup
@@ -480,7 +481,7 @@ failure does not block the same PR and needs no Sandbox recovery.
 If both the real Sandbox destruction and the scratch removal fail, the terminal
 state is `failed` with `sandbox.cleanup: failed`; the same PR remains blocked.
 Scratch cleanup alone never proves Sandbox absence. Recovery succeeds only when
-the configured backend can still prove its own exact VM ownership/absence and the
+the configured backend can still prove its own exact VM absence and the
 retained manifest records the backend's `hostCleanupConfirmed: true`. Runner
 scratch failure must not turn that proof false, and unresolved backend proof must
 not be replaced by a guessed or fabricated value. Historical

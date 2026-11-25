@@ -314,8 +314,8 @@ describe('Runner Job HTTP interface', () => {
           headSha: '2222222222222222222222222222222222222222',
         });
       },
-      process: async () => {
-        processCalls += 1;
+      process: async (_command, args) => {
+        if (!['ls', 'policy', 'secret'].includes(args[0]!)) processCalls += 1;
         return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
       },
     });
@@ -373,8 +373,8 @@ describe('Runner Job HTTP interface', () => {
           return new Response(null, { status: 204 });
         },
         claimIntervalMs: 1,
-        process: async () => {
-          processCalls += 1;
+        process: async (_command, args) => {
+          if (!['ls', 'policy', 'secret'].includes(args[0]!)) processCalls += 1;
           return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
         },
       });
@@ -390,8 +390,8 @@ describe('Runner Job HTTP interface', () => {
       authToken: 'runner-test-token',
       modelConfig: standardModelConfig,
       evidenceRoot: sharedEvidenceRoot,
-      process: async () => {
-        processCalls += 1;
+      process: async (_command, args) => {
+        if (!['ls', 'policy', 'secret'].includes(args[0]!)) processCalls += 1;
         return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
       },
     });
@@ -446,8 +446,8 @@ describe('Runner concurrency', () => {
         return new Response(null, { status: 204 });
       },
       claimIntervalMs: 1,
-      process: async (): Promise<RunnerProcessResult> => {
-        processCalls += 1;
+      process: async (_command: string, args: readonly string[]): Promise<RunnerProcessResult> => {
+        if (!['ls', 'policy', 'secret'].includes(args[0]!)) processCalls += 1;
         return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
       },
     };
@@ -963,7 +963,6 @@ describe('Runner concurrency', () => {
     const jobB = independentJob(43, 'run-oversized-b');
     const jobC = independentJob(44, 'run-oversized-c');
     const jobD = independentJob(45, 'run-oversized-d');
-    const sandboxA = `compte-rendu-${jobA.id}`;
     const bigExport = (() => {
       const exported = JSON.parse(sessionExportJson('oversized-session')) as {
         messages: unknown[];
@@ -1023,16 +1022,17 @@ describe('Runner concurrency', () => {
       },
       process: async (_command, args, options = {}) => {
         const sandbox = args.find((value) => value.startsWith('compte-rendu-'));
-        const sessionId = sandbox === sandboxA ? 'oversized-session' : 'concurrency-session';
+        const sessionId =
+          sandbox?.endsWith(jobA.id) === true ? 'oversized-session' : 'concurrency-session';
         if (args[0] === 'exec' && args.includes('--agent')) {
-          if (sandbox === `compte-rendu-${jobB.id}`) {
+          if (sandbox?.endsWith(jobB.id) === true) {
             bAgentStarted();
             await gateB;
-          } else if (sandbox === `compte-rendu-${jobC.id}`) {
+          } else if (sandbox?.endsWith(jobC.id) === true) {
             cAgents += 1;
             cAgentStarted();
             await gateC;
-          } else if (sandbox === `compte-rendu-${jobD.id}`) {
+          } else if (sandbox?.endsWith(jobD.id) === true) {
             dAgents += 1;
             dAgentStarted();
           }
@@ -1230,7 +1230,7 @@ describe('Runner concurrency', () => {
       ]);
       expect((await waitForTerminal(runner, unrelated.id)).status).toBe('succeeded');
 
-      expect(createdSandboxes).not.toContain(`compte-rendu-${contradictory.id}`);
+      expect(createdSandboxes.some((name) => name.endsWith(contradictory.id))).toBe(false);
       expect(clones).toBe(2);
       expect(callbackBodies).toContainEqual({
         runId: contradictory.runId,

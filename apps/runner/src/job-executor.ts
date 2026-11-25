@@ -28,6 +28,7 @@ import type { ReadTokenClient } from './read-token-client.js';
 import { createReadTokenLease } from './read-token-lease.js';
 import { currentIso } from './runner-clock.js';
 import { stop } from './runner-process.js';
+import { sandboxResourceName } from './sandbox-resource-name.js';
 import type { RunnerProcess, SandboxBackend } from './sandbox-runtime.js';
 
 export type { JobExecutionInput } from './execution-job.js';
@@ -292,7 +293,7 @@ export const createJobExecutor = (deps: JobExecutorDependencies) => {
       state: handle.state,
       input: { ...input, claimDeadlineAt },
       id: handle.id,
-      sandboxName: `compte-rendu-${handle.id}`,
+      sandboxName: sandboxResourceName(handle.id),
       get abortRequested() {
         return handle.abortRequested;
       },

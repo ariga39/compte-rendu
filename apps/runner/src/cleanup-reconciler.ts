@@ -4,7 +4,9 @@ import {
   sandboxBackendHealth,
   sandboxBackendReconcileOrphans,
   type SandboxBackend,
+  type SandboxRecoveryProof,
 } from './sandbox-runtime.js';
+import { sandboxResourceIdentity } from './sandbox-resource-name.js';
 import type { GrantRevoker } from './grant-revoker.js';
 import type { JobRegistry } from './job-registry.js';
 import {
@@ -21,12 +23,16 @@ import {
 } from '@compte-rendu/contracts';
 
 const CLEANUP_RECOVERY_RETRY_INTERVAL_MS = 30_000;
+/** Cheap inventory sweep cadence; age, not this interval, decides removal. */
+const SANDBOX_SWEEP_INTERVAL_MS = 10 * 60_000;
 
 type CleanupRecoveryResult = {
   readonly accepted: boolean;
   readonly status: 202 | 409 | 502;
   readonly retryable?: boolean;
   readonly verificationFailed?: boolean;
+  readonly sandboxName?: string;
+  readonly recoveryProof?: SandboxRecoveryProof;
   readonly error?: string;
 };
 
@@ -98,6 +104,8 @@ export const createCleanupReconciler = (deps: CleanupReconcilerDependencies) => 
     }
     recoveringCleanup.add(input.jobId);
     let verificationFailed = false;
+    let sandboxName: string | undefined;
+    let recoveryProof: SandboxRecoveryProof | undefined;
     try {
       const recovered = await Effect.runPromise(
         recoverCallback(evidenceRoot, input, sandboxBackend.kind).pipe(Effect.option),
@@ -105,14 +113,24 @@ export const createCleanupReconciler = (deps: CleanupReconcilerDependencies) => 
       if (Option.isNone(recovered))
         return { accepted: false, status: 409, error: 'cleanup recovery rejected' };
       const manifest = recovered.value.manifest;
-      const sandboxName = manifest.sandboxName ?? `compte-rendu-${input.jobId}`;
+      const exactSandboxName = manifest.sandboxName;
+      const identity =
+        exactSandboxName === undefined ? undefined : sandboxResourceIdentity(exactSandboxName);
+      if (
+        exactSandboxName === undefined ||
+        identity === undefined ||
+        identity.jobId !== input.jobId
+      )
+        return { accepted: false, status: 409, error: 'cleanup recovery rejected' };
+      sandboxName = exactSandboxName;
+      recoveryProof = recovered.value.recoveryProof;
       if (sandboxBackend.confirmCleanupAbsent === undefined)
         return { accepted: false, status: 409, error: 'cleanup recovery rejected' };
       try {
         await sandboxBackend.confirmCleanupAbsent({
           jobId: input.jobId,
           sandboxName,
-          recoveryProof: recovered.value.recoveryProof,
+          recoveryProof,
         });
       } catch (error) {
         verificationFailed = true;
@@ -167,19 +185,25 @@ export const createCleanupReconciler = (deps: CleanupReconcilerDependencies) => 
         status: 502,
         retryable: true,
         verificationFailed,
+        ...(sandboxName === undefined ? {} : { sandboxName }),
+        ...(recoveryProof === undefined ? {} : { recoveryProof }),
         error: 'cleanup recovery not confirmed',
       };
     } finally {
       recoveringCleanup.delete(input.jobId);
     }
   };
-  // Remove only this job's owned Sandbox record. Other records are skipped, so
-  // a foreign or unrelated marker is never touched by an automatic retry.
-  const removeOwnedSandboxForJob = async (jobId: string): Promise<boolean> => {
+  // Remove only the exact retained Sandbox. Other resources are skipped, so a
+  // foreign or unrelated name is never touched by an automatic retry.
+  const removeSandboxForJob = async (
+    jobId: string,
+    sandboxName: string,
+    recoveryProof: SandboxRecoveryProof | undefined,
+  ): Promise<boolean> => {
     try {
       const result = await sandboxBackendReconcileOrphans(sandboxBackend, {
         isLiveJob: () => false,
-        onlyJobId: jobId,
+        only: { jobId, sandboxName, ...(recoveryProof === undefined ? {} : { recoveryProof }) },
       });
       return result.ok;
     } catch {
@@ -221,8 +245,8 @@ export const createCleanupReconciler = (deps: CleanupReconcilerDependencies) => 
           job.cleanupRecoveryPending = false;
           job.cleanupRecoveryRetryAt = undefined;
         } else {
-          if (result.verificationFailed === true && !isClosed())
-            await removeOwnedSandboxForJob(job.id);
+          if (result.verificationFailed === true && result.sandboxName !== undefined && !isClosed())
+            await removeSandboxForJob(job.id, result.sandboxName, result.recoveryProof);
           job.cleanupRecoveryRetryAt = Date.now() + CLEANUP_RECOVERY_RETRY_INTERVAL_MS;
         }
       }
@@ -338,12 +362,24 @@ export const createCleanupReconciler = (deps: CleanupReconcilerDependencies) => 
     });
     return run;
   };
-  let sandboxRecovery = startSandboxRecovery();
+  void startSandboxRecovery();
+  let sandboxSweepTimer: ReturnType<typeof setTimeout> | undefined;
+  const schedulePeriodicSandboxSweep = () => {
+    if (isClosed()) return;
+    sandboxSweepTimer = setTimeout(() => {
+      sandboxSweepTimer = undefined;
+      if (isClosed()) return;
+      void startSandboxRecovery().finally(schedulePeriodicSandboxSweep);
+    }, SANDBOX_SWEEP_INTERVAL_MS);
+    if (typeof sandboxSweepTimer === 'object' && sandboxSweepTimer !== null)
+      sandboxSweepTimer.unref?.();
+  };
+  schedulePeriodicSandboxSweep();
   retrySandboxRecovery = () => {
     if (isClosed() || sandboxRecovered !== false) return;
     onRetry();
-    sandboxRecovery = startSandboxRecovery();
-    void sandboxRecovery.then((recovered) => {
+    const run = startSandboxRecovery();
+    void run.then((recovered) => {
       if (recovered) requestNext();
     });
   };
@@ -390,9 +426,7 @@ export const createCleanupReconciler = (deps: CleanupReconcilerDependencies) => 
       scheduleDeferredCleanupRecovery();
   };
 
-  const startup = sandboxRecovery;
   return {
-    startup,
     recover: recoverRetainedCleanup,
     reconcileFailed: reconcileFailedCleanups,
     scheduleDeferred: scheduleDeferredCleanupRecovery,
@@ -406,6 +440,10 @@ export const createCleanupReconciler = (deps: CleanupReconcilerDependencies) => 
       if (sandboxRecoveryTimer !== undefined) {
         clearTimeout(sandboxRecoveryTimer);
         sandboxRecoveryTimer = undefined;
+      }
+      if (sandboxSweepTimer !== undefined) {
+        clearTimeout(sandboxSweepTimer);
+        sandboxSweepTimer = undefined;
       }
       if (deferredCleanupRecoveryTimer !== undefined) {
         clearTimeout(deferredCleanupRecoveryTimer);

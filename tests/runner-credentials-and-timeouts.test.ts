@@ -552,7 +552,12 @@ describe('Runner Job HTTP interface', () => {
         (event) => event.stderr !== undefined,
       );
       expect(cleanupDiagnostics.length).toBeGreaterThan(0);
-      expect(cleanupDiagnostics.every((event) => event.stderr?.includes('[redacted]'))).toBe(true);
+      expect(cleanupDiagnostics.some((event) => event.stderr?.includes('[redacted]'))).toBe(true);
+      expect(
+        cleanupDiagnostics
+          .filter((event) => event.stderr?.includes('not found') !== true)
+          .every((event) => event.stderr?.includes('[redacted]')),
+      ).toBe(true);
       expect(JSON.stringify(logEvents)).not.toContain(canary);
       expect(JSON.stringify(result.terminal)).not.toContain(canary);
       expect(JSON.stringify(result.manifest)).not.toContain(canary);
@@ -923,7 +928,7 @@ describe('Runner Job HTTP interface', () => {
       process: async (_command, args, options = {}) => {
         await writeEvidenceFixture(args, options, resultLine);
         return {
-          exitCode: args[0] === 'secret' && args[1] === 'rm' ? 1 : 0,
+          exitCode: args[0] === 'rm' && args[1] === '--force' ? 1 : 0,
           stdout: args.includes('rev-parse')
             ? `${baseSha}\n${headSha}\n`
             : args.includes('session')
@@ -999,7 +1004,7 @@ describe('Runner Job HTTP interface', () => {
           await writeEvidenceFixture(args, options, 'unused');
           return { exitCode: 0, stdout: '', timedOut: false, truncated: false };
         }
-        if (args[0] === 'secret' && args[1] === 'rm') {
+        if (args[0] === 'rm' && args[1] === '--force') {
           return { exitCode: 1, stdout: '', timedOut: false, truncated: false };
         }
         return {

@@ -65,6 +65,7 @@ describe('Runner terminal callback retention', () => {
         callbackRetryDelaysMs: [0, 0, 0, 0, 0],
       });
       const replayRequests: Request[] = [];
+      const executionCalls: string[][] = [];
       const restarted = createRunner({
         authToken: 'runner-test-token',
         evidenceRoot,
@@ -72,6 +73,10 @@ describe('Runner terminal callback retention', () => {
         callbackFetch: async (input, init) => {
           replayRequests.push(new Request(input, init));
           return new Response(null, { status: 202 });
+        },
+        process: async (_command, args) => {
+          if (!['ls', 'policy', 'secret'].includes(args[0]!)) executionCalls.push([...args]);
+          return { exitCode: 1, stdout: '', timedOut: false, truncated: false };
         },
       });
       try {
@@ -91,6 +96,7 @@ describe('Runner terminal callback retention', () => {
         );
         expect(response.status).toBe(404);
         expect(replayRequests).toHaveLength(0);
+        expect(executionCalls).toEqual([]);
       } finally {
         await restarted.close();
       }
@@ -266,6 +272,7 @@ describe('Runner confirmed cleanup recovery', () => {
     await mkdir(join(root, 'db'));
     await writeFile(join(root, 'db', 'msb.db'), '');
     let runner: ReturnType<typeof createRunner> | undefined;
+    let removalAttempts = 0;
     try {
       const callbacks: Request[] = [];
       const scenario = await runAgentScenario({
@@ -278,6 +285,9 @@ describe('Runner confirmed cleanup recovery', () => {
         cleanupRemovalFailures: 1,
         callbackRequests: callbacks,
         callbackStatuses: [202, 503, 202],
+        onProcess: (args) => {
+          if (args[0] === 'rm') removalAttempts += 1;
+        },
         onRunner: (started) => {
           runner = started;
         },
@@ -297,25 +307,12 @@ describe('Runner confirmed cleanup recovery', () => {
           activeJobs: number;
           cleanupBlockedJobs: number;
         };
-      const markerFiles = async () => {
-        const owners = await readdir(join(root, 'sandbox-owners')).catch(() => []);
-        const files: string[] = [];
-        for (const owner of owners) {
-          files.push(
-            ...(await readdir(join(root, 'sandbox-owners', owner, 'microsandbox')).catch(() => [])),
-          );
-        }
-        return files;
-      };
-      // A verification failure schedules the scoped owned reaper. It removes
-      // the surviving VM and marker while the failed job stays mapped.
-      await vi.waitFor(
-        async () => {
-          expect(await markerFiles()).toEqual([]);
-          expect(await maintenance()).toMatchObject({ activeJobs: 0, cleanupBlockedJobs: 1 });
-        },
-        { timeout: 5_000 },
-      );
+      // Wait for the failed destroy plus the exact-name reaper's retry before
+      // advancing the clock, so the deferred recovery timer sees a settled VM.
+      await vi.waitFor(() => expect(removalAttempts).toBeGreaterThanOrEqual(2), {
+        timeout: 5_000,
+      });
+      expect(await maintenance()).toMatchObject({ activeJobs: 0, cleanupBlockedJobs: 1 });
       let now = Date.now();
       const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
       try {
@@ -517,9 +514,7 @@ describe('Runner confirmed cleanup recovery', () => {
       cleanupFailure: true,
       evidenceRoot,
     });
-    // Exercise the explicit recovery contract; startup reconciliation only
-    // handles ownership records retained from an interrupted Runner.
-    await rm(join(evidenceRoot, 'sandbox-owners'), { recursive: true, force: true });
+    // Exercise the explicit recovery contract rather than the startup sweep.
     const evidenceId = scenario.terminal.evidenceId as string;
     const callbackPath = join(evidenceRoot, evidenceId, 'callback.json');
     if (failure === 'legacy-host-cleanup') {
@@ -605,7 +600,16 @@ describe('Runner confirmed cleanup recovery', () => {
           'legacy-untagged-callback',
         ].includes(failure)
       )
-        expect(commands).toEqual([]);
+        expect(
+          commands.filter(
+            (args) =>
+              !(
+                (args[0] === 'ls' && args[1] === '-q') ||
+                (args[0] === 'policy' && args[1] === 'ls') ||
+                (args[0] === 'secret' && args[1] === 'ls')
+              ),
+          ),
+        ).toEqual([]);
       expect(await readFile(callbackPath, 'utf8')).toBe(original);
     } finally {
       await runner.close();
@@ -1016,115 +1020,6 @@ describe('Runner backend outage recovery', () => {
       await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 10 });
     }
   });
-
-  it('keeps foreign ownership records and a rejected cleanup visible', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'cr-permanent-rescan-'));
-    const previousTmp = process.env.TMPDIR;
-    process.env.TMPDIR = root;
-    const instanceId = 'permanent-rescan';
-    const ownershipRoot = join(root, 'sandbox-owners', instanceId);
-    await mkdir(ownershipRoot, { recursive: true });
-    const foreignPath = join(ownershipRoot, 'foreign.json');
-    await writeFile(foreignPath, '{}', { mode: 0o600 });
-    const baseSha = '1'.repeat(40);
-    const headSha = '2'.repeat(40);
-    const jobId = 'permanent-rescan-job';
-    let backendUp = true;
-    let reports = 0;
-    const events: unknown[] = [];
-    const ok = { exitCode: 0, stdout: '', timedOut: false, truncated: false };
-    const authFailure = { ...ok, exitCode: 1, stderr: 'not signed in' };
-    const runner = createProductionRunnerWithMergeBase({
-      evidenceRoot: root,
-      instanceId,
-      authToken: 'runner-test-token',
-      modelConfig: standardModelConfig,
-      claimIntervalMs: 2,
-      callbackUrl: 'https://ingress.test/runner-callback',
-      callbackToken: 'callback-token',
-      callbackFetch: async (_input, init) => {
-        const body = typeof init?.body === 'string' ? init.body : '{}';
-        const parsed = JSON.parse(body) as {
-          status?: string;
-          sandbox?: { cleanup?: string };
-        };
-        if (parsed.status === 'failed' && parsed.sandbox?.cleanup === 'destroyed') reports += 1;
-        return new Response(null, { status: 403 });
-      },
-      log: { record: (event) => void events.push(event) },
-      process: async (_command, args) => {
-        if (args[0] === 'ls') return backendUp ? ok : authFailure;
-        if (args[0] === 'secret' && args[1] === 'set-custom') {
-          backendUp = false;
-          return authFailure;
-        }
-        if (!backendUp) return authFailure;
-        const proof = sbxNativeProof(args);
-        if (proof !== undefined) return proof;
-        if (args[0] === 'inspect')
-          return { ...ok, exitCode: 1, stderr: `error: sandbox '${args[1]}' not found` };
-        if (args[0] === 'policy' && args[1] === 'ls') return { ...ok, stdout: '{"rules":[]}' };
-        if (args.includes('rev-parse')) return { ...ok, stdout: `${baseSha}\n${headSha}\n` };
-        return ok;
-      },
-    });
-    try {
-      runner.enqueue({
-        ...runnerJobFields,
-        id: jobId,
-        runId: 'run-permanent-rescan',
-        attempt: 1,
-        pullRequestNumber: 50,
-        repositoryUrl: 'https://github.com/acme/reviewed.git',
-        baseSha,
-        headSha,
-      });
-      expect(await waitForTerminal(runner, jobId)).toMatchObject({
-        status: 'failed',
-        sandbox: { cleanup: 'failed' },
-      });
-      backendUp = true;
-      await vi.waitFor(() => expect(reports).toBe(1));
-      // A permanent rejection stops automatic delivery and never touches the
-      // foreign ownership record of another job.
-      const resumed = await runner.handle(
-        new Request('http://runner/maintenance/resume', {
-          method: 'POST',
-          headers: { authorization: 'Bearer runner-test-token' },
-        }),
-      );
-      expect(resumed.status).toBe(200);
-      // An explicit ownership rescan may retry the owned cleanup, but a
-      // permanent rejection still stops the automatic retry loop.
-      await vi.waitFor(() => expect(reports).toBeGreaterThanOrEqual(2));
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      expect(reports).toBe(2);
-      expect(await readFile(foreignPath, 'utf8')).toBe('{}');
-      const status = (await (
-        await runner.handle(
-          new Request('http://runner/maintenance', {
-            headers: { authorization: 'Bearer runner-test-token' },
-          }),
-        )
-      ).json()) as { activeJobs: number; cleanupBlockedJobs: number };
-      expect(status).toMatchObject({ activeJobs: 0, cleanupBlockedJobs: 1 });
-      const retained = await runner.handle(
-        new Request(`http://runner/jobs/${jobId}`, {
-          headers: { authorization: 'Bearer runner-test-token' },
-        }),
-      );
-      expect(retained.status).toBe(200);
-      expect(await retained.json()).toMatchObject({
-        status: 'failed',
-        sandbox: { cleanup: 'failed' },
-      });
-    } finally {
-      await runner.close();
-      if (previousTmp === undefined) delete process.env.TMPDIR;
-      else process.env.TMPDIR = previousTmp;
-      await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 10 });
-    }
-  }, 20_000);
 
   it('keeps unrelated claims moving after a single job cleanup failure', async () => {
     const root = await mkdtemp(join(tmpdir(), 'cr-single-cleanup-failure-'));
