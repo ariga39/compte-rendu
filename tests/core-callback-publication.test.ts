@@ -242,7 +242,7 @@ describe('Core callbacks and publication', () => {
     }
   });
 
-  it('does not publish callbacks for unknown, failed, or superseded runs', async () => {
+  it('does not publish callbacks for unknown, failed, or superseded runs or stale attempts', async () => {
     const database = new SqliteD1Database();
     const stateStore = createD1ReviewStateStore(database);
     const failed = await stateStore.claimReview({
@@ -333,6 +333,17 @@ describe('Core callbacks and publication', () => {
       expect((await worker.fetch(await callback(superseded.runId, 'superseded-job'))).status).toBe(
         202,
       );
+      await claimRunnerJob(stateStore, {
+        runId: replacement.runId,
+        jobId: 'replacement-job',
+        attempt: 2,
+        occurredAt: '2026-09-01T00:00:04.000Z',
+      });
+      const current = await stateStore.getRunOutcome(replacement.runId);
+      expect(current).toMatchObject({ runnerJobId: 'replacement-job', runnerAttempt: 2 });
+      const stale = await worker.fetch(await callback(replacement.runId, 'previous-job'));
+      expect(stale.status).toBe(409);
+      expect(await stateStore.getRunOutcome(replacement.runId)).toEqual(current);
       expect(stored).toHaveLength(2);
       expect(published).toHaveLength(0);
     } finally {
