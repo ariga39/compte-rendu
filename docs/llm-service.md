@@ -21,13 +21,13 @@ ignored; no issuer generation is required.
 
 Use the HTTPS callback origin and its Runner bearer for grant control. The inference hostname must be a separate HTTPS FQDN on port 443 with base path `/v1`. The Sandbox receives a job-scoped credential through the runtime’s secret injection mechanism. Supplier credentials and the Gateway Run token stay in Cloudflare.
 
-The Runner calls `/runner-llm/issue` with the run ID, job ID, attempt and routes. The profile-aware endpoint is `/runner-llm/issue-v2`; it returns only the grant token, expiry and one client descriptor per frozen route: `{ routeId, profile, limit?, metadata? }` where `profile` is `chat` or `responses`. `metadata` carries only the OpenCode-supported model description, such as name, family, release date, capabilities and cost. The descriptor omits the upstream model, provider slug, credential alias and URL. v1 remains a Chat Completions-only contract and keeps its historical response shape. Grants expire after four review budgets (currently six hours); Sandbox resource lifetime stays pinned separately at two hours. The Runner revokes by job ID on completion or cancellation with a bounded retry. An unconfirmed revocation fails only that review and never blocks later admissions; the fixed expiry bounds a lost response or crash. See [maintenance drain](operations.md#drain-before-maintenance).
+The Runner calls `/runner-llm/issue-v2` with the run ID, job ID, attempt and routes. It returns only the grant token, expiry and one client descriptor per frozen route: `{ routeId, profile, limit?, metadata? }` where `profile` is `chat` or `responses`. `metadata` carries only the OpenCode-supported model description, such as name, family, release date, capabilities and cost. The descriptor omits the upstream model, provider slug, credential alias and URL. This is the sole grant path; `/runner-llm/issue` is removed. Grants expire after four review budgets (currently six hours); Sandbox resource lifetime stays pinned separately at two hours. The Runner revokes by job ID on completion or cancellation with a bounded retry. An unconfirmed revocation fails only that review and never blocks later admissions; the fixed expiry bounds a lost response or crash. See [maintenance drain](operations.md#drain-before-maintenance).
 
 ### Upgrading an installation with the former local service
 
-Use the previous Runner to finish any queued jobs without frozen selections and drain running work. Remove `RUNNER_LLM_SERVICE_SOCKET` from the effective Runner environment before starting the new binary. This release no longer reads `llm-grant-pending` markers or `RUNNER_LLM_RELAY_GENERATION`; leftovers are ignored. A rollback binary still needs its original configuration and credentials. Keep rollback binaries, configuration and credentials together.
+Use the previous Runner to finish any queued jobs without frozen selections and drain running work. This release ignores `RUNNER_LLM_SERVICE_SOCKET`, the retired `llm-grant-pending` markers and `RUNNER_LLM_RELAY_GENERATION`; leftovers are harmless. A rollback binary still needs its original configuration and credentials. Keep rollback binaries, configuration and credentials together.
 
-Managed grant v1 supports Chat Completions only. Use grant v2 for every roster containing a non-Chat route, including Responses, or a route with configured context or output limits. Check the [inference protocols](#inference-protocols) available in your deployed release. Installations using the former ChatGPT subscription backend need a provider credential supported by Gateway BYOK before migrating.
+Grant v2 supports every configured route, including Chat Completions and Responses, plus context and output limits. Check the [inference protocols](#inference-protocols) available in your deployed release. Installations using the former ChatGPT subscription backend need a provider credential supported by Gateway BYOK before migrating.
 
 ### Change a review model without restarting
 
@@ -107,9 +107,8 @@ frozen controls. Effort changes never alter alias/discovery visibility.
 Only `reasoning_effort` (`minimal`, `low`, `medium`, `high`, `max`) or
 `thinking.type: "disabled"` is accepted, exactly one per effort. The browser
 submits route IDs and effort names only. Core resolves the trusted controls and
-freezes `{routeId, generation, name, controls}` at admission. The v2 grant sends
-that frozen list to the relay; v1 rejects any explicit effort instead of silently
-dropping it. The relay validates snapshot entries by Chat protocol and granted
+freezes `{routeId, generation, name, controls}` at admission. The grant sends that
+frozen list to the relay. The relay validates snapshot entries by Chat protocol and granted
 route only, never against the mutable current menu, so a later settings edit does
 not invalidate an admitted job.
 
@@ -170,13 +169,13 @@ allowance consumption. Consult the provider’s billing data for that amount.
 
 ### Runner grant version
 
-Set `RUNNER_LLM_GRANT_VERSION=2` for a current Runner, Core and inference
-Worker. Use `1` only for a rollback to a compatible older deployment. In v2 the
-Runner requests
+`RUNNER_LLM_GRANT_VERSION` must be unset or `2`; the Runner always requests
 `/runner-llm/issue-v2` and configures each selected model from the returned
-route descriptor. The descriptor selects a bundled adapter and can specify
-context and output limits plus the OpenCode-supported model description. All
-models use the existing sandbox inference hostname and job credential. Issuance is attempted once. An unavailable v2
+route descriptor. An explicit value of `1` or anything other than `2` fails
+startup so a half-upgraded unit cannot issue legacy grants. The descriptor
+selects a bundled adapter and can specify context and output limits plus the
+OpenCode-supported model description. All models use the existing sandbox
+inference hostname and job credential. Issuance is attempted once. An unavailable v2
 endpoint or a descriptor set that differs from the frozen selection fails the
 job and triggers grant cleanup. A failed issuance records a fixed `grant`
 Runner diagnostic. An invalid body on a successful response, including a

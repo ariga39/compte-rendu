@@ -259,11 +259,6 @@ export const makeCoreRuntime = (
   const effortDetail = (runId: string, cursor?: string) =>
     Effect.gen(function* () {
       const noStore = { 'cache-control': 'no-store' };
-      if (env.INFERENCE_RELAY?.effortDetails === undefined)
-        return Response.json(
-          { error: 'effort details unavailable' },
-          { status: 503, headers: noStore },
-        );
       const outcome = yield* port(() => stateStore.getRunOutcome(runId));
       if (outcome?.runnerJobId === undefined)
         return Response.json(
@@ -271,7 +266,7 @@ export const makeCoreRuntime = (
           { status: 404, headers: noStore },
         );
       const detail = yield* port(() =>
-        env.INFERENCE_RELAY!.effortDetails!({
+        env.INFERENCE_RELAY!.effortDetails({
           jobId: outcome.runnerJobId!,
           ...(cursor === undefined || cursor === '' ? {} : { cursor }),
         }),

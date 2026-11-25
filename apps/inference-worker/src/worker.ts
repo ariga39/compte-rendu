@@ -12,7 +12,6 @@ import {
   createGrantControl,
   type D1DatabaseLike,
   type IssueGrantInput,
-  type IssueGrantResult,
   type IssueGrantV2Result,
   type RevokeGrantInput,
   type RevokeGrantResult,
@@ -177,10 +176,6 @@ export class InferenceWorker extends WorkerEntrypoint<InferenceWorkerEnv> {
 
   refreshCatalog(scheduledTime: number) {
     return this.#modelCatalog().refresh(scheduledTime);
-  }
-
-  issue(input: IssueGrantInput): Promise<IssueGrantResult> {
-    return createGrantControl(this.env.RELAY_DB).issue(input);
   }
 
   issueV2(input: IssueGrantInput): Promise<IssueGrantV2Result> {

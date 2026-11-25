@@ -23,15 +23,7 @@ const RequestGrant = Schema.Struct({
 export interface RelayControl {
   revoke(input: { jobId: string }): Promise<{ kind: 'revoked' | 'invalid' }>;
   usage(input: { jobId: string }): Promise<ModelUsageSummary | null>;
-  issue(input: {
-    jobId: string;
-    snapshot: { routes: readonly string[]; efforts?: readonly FrozenRouteEffort[] };
-    latestIssueDeadline: number;
-  }): Promise<
-    | { kind: 'issued'; token: string; expiresAt: string }
-    | { kind: 'duplicate' | 'deadline-exceeded' | 'invalid' }
-  >;
-  issueV2?(input: {
+  issueV2(input: {
     jobId: string;
     snapshot: { routes: readonly string[]; efforts?: readonly FrozenRouteEffort[] };
     latestIssueDeadline: number;
@@ -44,8 +36,8 @@ export interface RelayControl {
       }
     | { kind: 'duplicate' | 'deadline-exceeded' | 'invalid' }
   >;
-  effortStates?(): Promise<{ routes: readonly EffortRouteState[] }>;
-  effortDetails?(input: { jobId: string; cursor?: string }): Promise<EffortJobDetail | null>;
+  effortStates(): Promise<{ routes: readonly EffortRouteState[] }>;
+  effortDetails(input: { jobId: string; cursor?: string }): Promise<EffortJobDetail | null>;
 }
 
 export function handleRunnerLlmControl(
@@ -54,20 +46,18 @@ export function handleRunnerLlmControl(
   callbackToken?: string,
 ): Effect.Effect<Response> {
   const path = new URL(request.url).pathname;
-  const issuePath = path === '/runner-llm/issue-v2' ? 2 : path === '/runner-llm/issue' ? 1 : null;
-  if (issuePath === null && !['/runner-llm/usage', '/runner-llm/revoke'].includes(path))
+  const isIssue = path === '/runner-llm/issue-v2';
+  if (!isIssue && !['/runner-llm/usage', '/runner-llm/revoke'].includes(path))
     return Effect.succeed(new Response(null, { status: 404 }));
   if (request.method !== 'POST') return Effect.succeed(new Response(null, { status: 405 }));
   if (!callbackToken || request.headers.get('authorization') !== 'Bearer ' + callbackToken)
     return Effect.succeed(new Response(null, { status: 401 }));
   if (!env.INFERENCE_RELAY) return Effect.succeed(new Response(null, { status: 503 }));
-  if (issuePath === 2 && env.INFERENCE_RELAY.issueV2 === undefined)
-    return Effect.succeed(new Response(null, { status: 503 }));
   return Effect.gen(function* () {
     const payload = yield* Effect.tryPromise(() => readBoundedRequestBody(request, 16 * 1024));
     if (payload.kind !== 'ok') return new Response(null, { status: 413 });
     const body = payload.text;
-    if (issuePath === null) {
+    if (!isIssue) {
       const job = Schema.decodeUnknownOption(
         Schema.fromJsonString(Schema.Struct({ jobId: JobId })),
         { onExcessProperty: 'error' },
@@ -114,39 +104,11 @@ export function handleRunnerLlmControl(
       (effort) =>
         allowed.has(effort.routeId) && (effort.name !== undefined || effort.generation > 0),
     );
-    // v1 cannot carry explicit controls. Refuse the grant rather than silently
-    // dropping the operator's selection.
-    if (
-      issuePath === 1 &&
-      efforts.some((effort) => effort.name !== undefined || effort.controls !== undefined)
-    )
-      return new Response(null, { status: 409 });
     const snapshot =
-      issuePath === 2 && efforts.length > 0
-        ? { routes: [...allowed], efforts }
-        : { routes: [...allowed] };
+      efforts.length > 0 ? { routes: [...allowed], efforts } : { routes: [...allowed] };
     const latestIssueDeadline = now + RUNNER_LLM_CONTROL_TIMEOUT_MS;
-    if (issuePath === 2) {
-      const reply = yield* Effect.tryPromise(() =>
-        env.INFERENCE_RELAY!.issueV2!({
-          jobId,
-          snapshot,
-          latestIssueDeadline,
-        }),
-      );
-      if (reply.kind !== 'issued')
-        return new Response(null, { status: reply.kind === 'duplicate' ? 409 : 503 });
-      return Response.json(
-        {
-          token: reply.token,
-          expiresAt: reply.expiresAt,
-          descriptors: reply.descriptors,
-        },
-        { status: 201, headers: { 'cache-control': 'no-store' } },
-      );
-    }
     const reply = yield* Effect.tryPromise(() =>
-      env.INFERENCE_RELAY!.issue({
+      env.INFERENCE_RELAY!.issueV2({
         jobId,
         snapshot,
         latestIssueDeadline,
@@ -155,7 +117,11 @@ export function handleRunnerLlmControl(
     if (reply.kind !== 'issued')
       return new Response(null, { status: reply.kind === 'duplicate' ? 409 : 503 });
     return Response.json(
-      { token: reply.token, expiresAt: reply.expiresAt },
+      {
+        token: reply.token,
+        expiresAt: reply.expiresAt,
+        descriptors: reply.descriptors,
+      },
       { status: 201, headers: { 'cache-control': 'no-store' } },
     );
   }).pipe(

@@ -43,10 +43,7 @@ export const sessionExportJson = (
     options.text === null
       ? undefined
       : (options.text ??
-        JSON.stringify({
-          decision: options.decision ?? 'comment',
-          markdown: options.markdown ?? defaultReviewMarkdown,
-        }));
+        `DECISION: ${options.decision ?? 'comment'}\n\n${options.markdown ?? defaultReviewMarkdown}`);
   return JSON.stringify({
     info: { id, outcome: options.outcome ?? 'succeeded', agent, model },
     messages: [
@@ -107,7 +104,7 @@ export const finalMarkdownJsonl = (
     part: {
       type: 'text',
       messageID: 'msg-final',
-      text: JSON.stringify({ decision: 'comment', markdown }),
+      text: `DECISION: comment\n\n${markdown}`,
     },
   });
 
@@ -577,7 +574,7 @@ export const createRelayControl = (
       ...(authorization === undefined ? {} : { authorization }),
       body,
     });
-    if (path === '/runner-llm/issue' || path === '/runner-llm/issue-v2') {
+    if (path === '/runner-llm/issue-v2') {
       if (options.issuance === 'http')
         return new Response('http-response-body-canary', { status: 503 });
       if (options.issuance === 'transport') throw new Error('transport-response-canary');
@@ -587,13 +584,15 @@ export const createRelayControl = (
           headers: { 'content-type': 'application/json' },
         });
       const jobId = String(body.jobId);
+      const routes = body.routes as string[];
       const token = options.token ?? `relay-grant-token-${(counter += 1)}`;
       active.set(token, jobId);
-      issued.push({ jobId, routes: body.routes as string[], token });
+      issued.push({ jobId, routes, token });
       return Response.json(
         {
           token,
-          ...(path.endsWith('issue-v2') ? { descriptors: options.descriptors } : {}),
+          descriptors:
+            options.descriptors ?? routes.map((routeId) => ({ routeId, profile: 'chat' })),
           expiresAt: new Date(
             Date.now() + (options.issuance === 'short' ? 1000 : 2 * 60 * 60 * 1000),
           ).toISOString(),

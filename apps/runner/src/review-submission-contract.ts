@@ -14,10 +14,6 @@ const DecisionHeader = /^DECISION: (approve|request_changes|comment)\r?\n\r?\n/;
 const decodeSubmission = Schema.decodeUnknownOption(ReviewSubmissionSchema);
 
 export const parseReviewSubmission = (text: string): ReviewSubmission | undefined => {
-  const json = Option.getOrUndefined(
-    Schema.decodeUnknownOption(Schema.fromJsonString(ReviewSubmissionSchema))(text),
-  );
-  if (json !== undefined) return json;
   const header = DecisionHeader.exec(text);
   if (header === null) return undefined;
   return Option.getOrUndefined(

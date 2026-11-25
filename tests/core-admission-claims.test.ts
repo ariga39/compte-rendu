@@ -1125,7 +1125,7 @@ describe('Core admission, claims, and manual policy', () => {
     }
   });
 
-  it('expires a migrated owned claim whose claimed_at predates 0009', async () => {
+  it('expires an owned claim older than the claim lease', async () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(new Date('2026-09-01T00:00:00Z'));
     const database = new SqliteD1Database();
@@ -1151,8 +1151,8 @@ describe('Core admission, claims, and manual policy', () => {
         occurredAt: '2026-09-01T00:00:01.000Z',
       });
       database.database
-        .prepare('UPDATE review_runs SET claimed_at = NULL WHERE run_id = ?')
-        .run(stale.runId);
+        .prepare('UPDATE review_runs SET claimed_at = ? WHERE run_id = ?')
+        .run('2026-09-01T00:00:01.000Z', stale.runId);
 
       const successor = await stateStore.claimReview({
         deliveryId: 'delivery-migrated-successor',
@@ -1194,7 +1194,7 @@ describe('Core admission, claims, and manual policy', () => {
       eligible: false,
     },
   ] as const)(
-    'applies the created_at fallback to $label cancelled ownership',
+    'applies the ownership timestamp to $label cancelled ownership',
     async ({ createdAt, eligible }) => {
       vi.useFakeTimers({ toFake: ['Date'] });
       vi.setSystemTime(new Date('2026-09-01T00:00:00Z'));
@@ -1226,8 +1226,8 @@ describe('Core admission, claims, and manual policy', () => {
           occurredAt: '2026-09-01T00:00:02.000Z',
         });
         database.database
-          .prepare('UPDATE review_runs SET claimed_at = NULL, created_at = ? WHERE run_id = ?')
-          .run(createdAt, stale.runId);
+          .prepare('UPDATE review_runs SET claimed_at = ?, created_at = ? WHERE run_id = ?')
+          .run(createdAt, createdAt, stale.runId);
 
         vi.setSystemTime(new Date('2026-09-01T01:31:00Z'));
         const manual = await stateStore.claimReview({

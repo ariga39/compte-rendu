@@ -46,7 +46,7 @@ describe('Inference Worker grant issue', () => {
     const { database, control } = setup();
     try {
       const before = await d1Now(database);
-      const issued = await control.issue({
+      const issued = await control.issueV2({
         jobId: 'job-issue',
         snapshot,
         latestIssueDeadline: before + 60_000,
@@ -68,7 +68,7 @@ describe('Inference Worker grant issue', () => {
     const { database, control } = setup();
     try {
       const now = await d1Now(database);
-      const issued = await control.issue({
+      const issued = await control.issueV2({
         jobId: 'job-hash',
         snapshot,
         latestIssueDeadline: now + 60_000,
@@ -91,14 +91,14 @@ describe('Inference Worker grant issue', () => {
     try {
       const now = await d1Now(database);
       await expect(
-        control.issue({
+        control.issueV2({
           jobId: 'job-delayed',
           snapshot,
           latestIssueDeadline: now,
         }),
       ).resolves.toEqual({ kind: 'deadline-exceeded' });
       await expect(
-        control.issue({
+        control.issueV2({
           jobId: 'job-delayed',
           snapshot,
           latestIssueDeadline: (await d1Now(database)) + 60_000,
@@ -114,8 +114,8 @@ describe('Inference Worker grant issue', () => {
     try {
       const deadline = (await d1Now(database)) + 60_000;
       const results = await Promise.all([
-        control.issue({ jobId: 'job-duplicate', snapshot, latestIssueDeadline: deadline }),
-        control.issue({
+        control.issueV2({ jobId: 'job-duplicate', snapshot, latestIssueDeadline: deadline }),
+        control.issueV2({
           jobId: 'job-duplicate',
           snapshot: { routes: ['other-review'] },
           latestIssueDeadline: deadline,
@@ -124,7 +124,7 @@ describe('Inference Worker grant issue', () => {
 
       expect(results.map((result) => result.kind).sort()).toEqual(['duplicate', 'issued']);
       await expect(
-        control.issue({
+        control.issueV2({
           jobId: 'job-duplicate',
           snapshot,
           latestIssueDeadline: (await d1Now(database)) + 60_000,
@@ -139,7 +139,7 @@ describe('Inference Worker grant issue', () => {
     const { database, control } = setup();
     try {
       await expect(
-        control.issue({
+        control.issueV2({
           jobId: 'job-unknown-route',
           snapshot: { routes: ['deepseek-review', 'unknown-review'] },
           latestIssueDeadline: (await d1Now(database)) + 60_000,
@@ -161,17 +161,17 @@ describe('Inference Worker grant issue', () => {
       const before = mutationCounts(database);
       const deadline = (await d1Now(database)) + 60_000;
       await expect(
-        control.issue({ jobId: '', snapshot, latestIssueDeadline: deadline } as never),
+        control.issueV2({ jobId: '', snapshot, latestIssueDeadline: deadline } as never),
       ).resolves.toEqual({ kind: 'invalid' });
       await expect(
-        control.issue({
+        control.issueV2({
           jobId: 'job-empty-routes',
           snapshot: { routes: [] },
           latestIssueDeadline: deadline,
         } as never),
       ).resolves.toEqual({ kind: 'invalid' });
       await expect(
-        control.issue({
+        control.issueV2({
           jobId: 'job-excess',
           snapshot,
           latestIssueDeadline: deadline,
@@ -228,42 +228,6 @@ describe('Inference Worker grant issue', () => {
     }
   });
 
-  it('keeps a v1 grant mapping compatible and rejects a non-chat profile', async () => {
-    const { database, control } = setup();
-    try {
-      const issued = await control.issue({
-        jobId: 'job-v1-chat',
-        snapshot,
-        latestIssueDeadline: (await d1Now(database)) + 60_000,
-      });
-      expect(issued.kind).toBe('issued');
-      const grant = database.database
-        .prepare('SELECT route_mapping FROM grants WHERE job_id = ?')
-        .get('job-v1-chat') as { readonly route_mapping: string };
-      expect(JSON.parse(grant.route_mapping)).toContainEqual({
-        routeId: 'deepseek-review',
-        upstreamModel: 'deepseek-review-native',
-        providerSlug: 'review-provider',
-        credentialAlias: 'default',
-      });
-      expect(JSON.parse(grant.route_mapping)[0]).not.toHaveProperty('profile');
-      expect(JSON.parse(grant.route_mapping)[0]).not.toHaveProperty('limit');
-
-      database.database
-        .prepare(`UPDATE catalog_routes SET profile = ? WHERE route_id = ?`)
-        .run('responses', 'other-review');
-      await expect(
-        control.issue({
-          jobId: 'job-v1-non-chat',
-          snapshot: { routes: ['other-review'] },
-          latestIssueDeadline: (await d1Now(database)) + 60_000,
-        }),
-      ).resolves.toEqual({ kind: 'invalid' });
-    } finally {
-      database.close();
-    }
-  });
-
   it('rejects a persisted retired profile instead of defaulting it to chat', async () => {
     const { database, control } = setup();
     try {
@@ -271,64 +235,12 @@ describe('Inference Worker grant issue', () => {
         .prepare(`UPDATE catalog_routes SET profile = ? WHERE route_id = ?`)
         .run('messages', 'other-review');
       await expect(
-        control.issue({
+        control.issueV2({
           jobId: 'job-retired-profile',
           snapshot: { routes: ['other-review'] },
           latestIssueDeadline: (await d1Now(database)) + 60_000,
         }),
       ).resolves.toEqual({ kind: 'invalid' });
-      await expect(
-        control.issueV2({
-          jobId: 'job-retired-profile-v2',
-          snapshot: { routes: ['other-review'] },
-          latestIssueDeadline: (await d1Now(database)) + 60_000,
-        }),
-      ).resolves.toEqual({ kind: 'invalid' });
-    } finally {
-      database.close();
-    }
-  });
-
-  it('reads a legacy frozen grant mapping as chat', async () => {
-    const { database } = setup();
-    try {
-      const token = 'legacy-grant-token-1234567890';
-      const now = await d1Now(database);
-      database.database
-        .prepare(
-          `INSERT INTO grants (
-            job_id, token_hash, snapshot, route_mapping, issued_at, expires_at,
-            latest_issue_deadline, revoked_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`,
-        )
-        .run(
-          'job-legacy',
-          sha256(token),
-          JSON.stringify({ routes: ['deepseek-review'] }),
-          JSON.stringify([
-            {
-              routeId: 'deepseek-review',
-              upstreamModel: 'deepseek-review-native',
-              providerSlug: 'review-provider',
-              credentialAlias: 'default',
-            },
-          ]),
-          now,
-          now + 60_000,
-          now + 60_000,
-        );
-      await expect(authenticateGrant(database, `Bearer ${token}`)).resolves.toMatchObject({
-        jobId: 'job-legacy',
-        routes: [
-          {
-            routeId: 'deepseek-review',
-            upstreamModel: 'deepseek-review-native',
-            providerSlug: 'review-provider',
-            credentialAlias: 'default',
-            profile: 'chat',
-          },
-        ],
-      });
     } finally {
       database.close();
     }
@@ -339,7 +251,7 @@ describe('Inference Worker grant expiry', () => {
   it('rejects an issued grant at its fixed lifetime without requiring revocation', async () => {
     const { database, control } = setup();
     try {
-      const issued = await control.issue({
+      const issued = await control.issueV2({
         jobId: 'job-expiry',
         snapshot,
         latestIssueDeadline: (await d1Now(database)) + 60_000,
@@ -367,7 +279,7 @@ describe('Inference Worker grant revoke', () => {
         kind: 'revoked',
       });
       await expect(
-        control.issue({
+        control.issueV2({
           jobId: 'job-tombstone',
           snapshot,
           latestIssueDeadline: (await d1Now(database)) + 60_000,
@@ -385,7 +297,7 @@ describe('Inference Worker grant revoke', () => {
     const { database, control } = setup();
     try {
       await expect(
-        control.issue({
+        control.issueV2({
           jobId: 'job-revoke',
           snapshot,
           latestIssueDeadline: (await d1Now(database)) + 60_000,
@@ -399,7 +311,7 @@ describe('Inference Worker grant revoke', () => {
         kind: 'revoked',
       });
       await expect(
-        control.issue({
+        control.issueV2({
           jobId: 'job-revoke',
           snapshot,
           latestIssueDeadline: (await d1Now(database)) + 60_000,

@@ -21,7 +21,7 @@ export interface GrantLifecycle {
 }
 
 export type GrantIssueResult =
-  | { readonly ok: true; readonly descriptors: readonly ModelRouteDescriptor[] | undefined }
+  | { readonly ok: true; readonly descriptors: readonly ModelRouteDescriptor[] }
   | { readonly ok: false };
 
 /**

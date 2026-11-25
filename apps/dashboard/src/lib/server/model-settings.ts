@@ -94,11 +94,12 @@ export function modelSettings(request: Request, env: ApplicationEnv): Effect.Eff
     const generations = new Map(saved.map((entry) => [entry.routeId, entry.generation]));
     let effortStates: readonly EffortRouteState[] = [];
     let effortStateUnavailable = false;
-    if (env.INFERENCE_RELAY?.effortStates !== undefined) {
+    if (env.INFERENCE_RELAY !== undefined) {
       // A reset advances Core's generation without clearing the relay row.
       // A state from an older generation no longer applies to new requests.
       const states = yield* Effect.promise(() =>
-        env.INFERENCE_RELAY!.effortStates!()
+        env
+          .INFERENCE_RELAY!.effortStates()
           .then((value) => ({ kind: 'ok' as const, value }))
           .catch(() => ({ kind: 'failed' as const })),
       );

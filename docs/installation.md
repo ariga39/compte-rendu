@@ -533,7 +533,6 @@ ${EDITOR:-vi} <ABSOLUTE_RUNNER_ENV_FILE>
 
 ```ini
 RUNNER_LLM_RELAY=1
-RUNNER_LLM_GRANT_VERSION=2
 REVIEW_MODEL_CONFIG={"id":"opencode-go/deepseek-review","baseUrl":"https://<INFERENCE_FQDN>/v1","definition":{"name":"DeepSeek review"}}
 RUNNER_AUTH_TOKEN=<runner-application-token>
 RUNNER_CALLBACK_URL=https://<INGRESS_HOST>/runner-callback
@@ -541,9 +540,8 @@ RUNNER_CALLBACK_TOKEN=<static-runner-callback-token>
 RUNNER_CONCURRENCY=1
 ```
 
-Set `RUNNER_LLM_GRANT_VERSION=2` explicitly. The current Runner, Core and
-inference Worker support v2 route descriptors; v1 remains only for a rollback to
-a compatible older deployment.
+Grant v2 is the only issuance path. Leave `RUNNER_LLM_GRANT_VERSION` unset, or
+set it to `2`; an explicit `1` fails startup instead of issuing a legacy grant.
 
 Confirm the file is still mode `0600` after editing; never commit it. The
 `RUNNER_AUTH_TOKEN` and `RUNNER_CALLBACK_TOKEN` values belong only in this file
@@ -1228,8 +1226,8 @@ For an already managed installation, keep the generated Worker configs and the
 existing Runner environment file with its valid values. Before restarting the
 upgraded Runner, remove `MODEL_SECRET_COMMAND`, `RUNNER_LLM_SERVICE_SOCKET`, and
 any disabled `RUNNER_LLM_RELAY` value (`0`, `false`, `off`, `no`, or any other
-non-enabled value; only `1`, `true`, `yes`, `on`, or unset are accepted). Set
-`RUNNER_LLM_GRANT_VERSION=2` for the current v2 roster. The Runner rejects the
+non-enabled value; only `1`, `true`, `yes`, `on`, or unset are accepted). Remove any old
+`RUNNER_LLM_GRANT_VERSION=1` setting. This release issues v2 grants by default. The Runner rejects the
 removed command/socket and disabled relay at startup.
 
 Before a rollback across model protocols, pause admissions and finish every
@@ -1237,10 +1235,10 @@ queued and running review with the current Runner. Once Core's queue is empty,
 drain and stop it. Before restoring a roster, verify against the target-version
 inference and application Workers that every reviewer, synthesis and default
 route plus the required provider credentials and configuration is supported;
-explicitly check paths the target cannot serve, such as `native:openai`.
+replace any unsupported path, including `native:openai` if the target lacks it.
 For a managed v1 target, save only a verified v1-compatible Chat roster and
-default route without effort or limit overrides, and configure the matching
-grant version on the rollback Runner. For a direct-provider target, restore its
+default route without effort or limit overrides, and restore the matching grant
+configuration from the historical Runner backup. For a direct-provider target, restore its
 original model and credential configuration. Restore that verified roster and
 default route before switching the matching Worker revisions, schema and Runner
 artifact, then restart and resume admissions.

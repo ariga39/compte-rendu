@@ -5,7 +5,7 @@ import { env } from 'cloudflare:test';
 import type {
   D1DatabaseLike,
   IssueGrantInput,
-  IssueGrantResult,
+  IssueGrantV2Result,
   RevokeGrantInput,
   RevokeGrantResult,
 } from '../../apps/inference-worker/src/grants';
@@ -13,7 +13,7 @@ import type { ModelProfile, ModelUsageSummary } from '../../packages/contracts/s
 
 interface InferenceBinding {
   fetch(request: Request): Promise<Response>;
-  issueV2(input: IssueGrantInput): Promise<IssueGrantResult>;
+  issueV2(input: IssueGrantInput): Promise<IssueGrantV2Result>;
   revoke(input: RevokeGrantInput): Promise<RevokeGrantResult>;
   usage(input: { jobId: string }): Promise<ModelUsageSummary | null>;
 }

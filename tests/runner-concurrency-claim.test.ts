@@ -15,15 +15,18 @@ const environment = (database: SqliteD1Database) => ({
   INFERENCE_RELAY: {
     catalog: async () => ({
       routes: [...selection.reviewers],
+      efforts: {},
       lastAttemptAt: null,
       lastSuccessAt: null,
       rejected: 0,
       lastRefreshError: null,
     }),
     refreshCatalog: async () => {},
-    issue: async () => ({ kind: 'invalid' as const }),
+    issueV2: async () => ({ kind: 'invalid' as const }),
     revoke: async () => ({ kind: 'revoked' as const }),
     usage: async () => null,
+    effortStates: async () => ({ routes: [] }),
+    effortDetails: async () => null,
   },
 });
 

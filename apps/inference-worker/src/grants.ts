@@ -6,7 +6,7 @@ import {
   type ModelRouteDescriptor,
   type ModelRouteMetadata,
 } from '@compte-rendu/contracts';
-import { FrozenRouteMapping, RouteId, legacyFrozenMapping, type FrozenRoute } from './routes.ts';
+import { FrozenRouteMapping, RouteId, type FrozenRoute } from './routes.ts';
 import { modelRouteMetadata } from './model-metadata.ts';
 
 export const GRANT_TTL_MS = 4 * REVIEW_ATTEMPT_BUDGET_MS;
@@ -38,12 +38,6 @@ export const IssueGrantInput = Schema.Struct({
 });
 export type IssueGrantInput = typeof IssueGrantInput.Type;
 
-export type IssueGrantResult =
-  | { readonly kind: 'issued'; readonly token: string; readonly expiresAt: string }
-  | { readonly kind: 'duplicate' }
-  | { readonly kind: 'deadline-exceeded' }
-  | { readonly kind: 'invalid' };
-
 export type IssueGrantV2Result =
   | {
       readonly kind: 'issued';
@@ -61,7 +55,6 @@ export type RevokeGrantInput = typeof RevokeGrantInput.Type;
 export type RevokeGrantResult = { readonly kind: 'revoked' } | { readonly kind: 'invalid' };
 
 export interface InferenceGrantControl {
-  issue(input: IssueGrantInput): Promise<IssueGrantResult>;
   issueV2(input: IssueGrantInput): Promise<IssueGrantV2Result>;
   revoke(input: RevokeGrantInput): Promise<RevokeGrantResult>;
 }
@@ -124,8 +117,8 @@ const metadataFromStored = (value: string | null): ModelRouteMetadata | undefine
   }
 };
 
-const issueFor = (database: D1DatabaseLike, version: 1 | 2) =>
-  Effect.fn('InferenceGrantControl.issue')(function* (input: IssueGrantInput) {
+const issue = (database: D1DatabaseLike) =>
+  Effect.fn('InferenceGrantControl.issueV2')(function* (input: IssueGrantInput) {
     const decoded = Schema.decodeUnknownOption(IssueGrantInput, {
       onExcessProperty: 'error',
     })(input);
@@ -162,14 +155,6 @@ const issueFor = (database: D1DatabaseLike, version: 1 | 2) =>
       decoded.value.snapshot.routes.map((id) => catalog.get(id)),
     );
     if (Option.isNone(frozen)) return { kind: 'invalid' as const };
-    // v1 is a Chat Completions-only legacy contract. It must not hand a non-chat
-    // profile to a Runner that cannot route it, and it must never silently drop
-    // an explicit effort selection.
-    if (version === 1) {
-      if ((decoded.value.snapshot.efforts?.length ?? 0) > 0) return { kind: 'invalid' as const };
-      if (frozen.value.some((route) => route.profile !== 'chat'))
-        return { kind: 'invalid' as const };
-    }
 
     // The frozen snapshot is authoritative; never re-check against the mutable
     // catalog effort menu. Validate only protocol/route compatibility here.
@@ -220,7 +205,7 @@ const issueFor = (database: D1DatabaseLike, version: 1 | 2) =>
           decoded.value.jobId,
           tokenHash,
           JSON.stringify(decoded.value.snapshot),
-          JSON.stringify(version === 1 ? legacyFrozenMapping(withEffort) : withEffort),
+          JSON.stringify(withEffort),
           GRANT_TTL_MS,
           decoded.value.latestIssueDeadline,
           decoded.value.latestIssueDeadline,
@@ -257,8 +242,7 @@ const issueFor = (database: D1DatabaseLike, version: 1 | 2) =>
   });
 
 export const createGrantControl = (database: D1DatabaseLike): InferenceGrantControl => {
-  const issue = issueFor(database, 1);
-  const issueV2 = issueFor(database, 2);
+  const issueV2 = issue(database);
 
   const revoke = Effect.fn('InferenceGrantControl.revoke')(function* (input: RevokeGrantInput) {
     const decoded = Schema.decodeUnknownOption(RevokeGrantInput, {
@@ -295,7 +279,6 @@ export const createGrantControl = (database: D1DatabaseLike): InferenceGrantCont
   });
 
   return {
-    issue: (input) => Effect.runPromise(issue(input)),
     issueV2: async (input) => {
       const result = await Effect.runPromise(issueV2(input));
       if (result.kind !== 'issued') return result;

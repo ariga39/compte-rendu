@@ -12,7 +12,6 @@ import { REVIEW_ATTEMPT_BUDGET_MS } from '../../packages/contracts/src';
 import type {
   D1DatabaseLike,
   IssueGrantInput,
-  IssueGrantResult,
   IssueGrantV2Result,
   RevokeGrantInput,
   RevokeGrantResult,
@@ -26,7 +25,6 @@ interface InferenceBinding {
   catalog(): Promise<RelayCatalogSnapshot>;
   refreshCatalog(at: number): Promise<void>;
   fetch(request: Request): Promise<Response>;
-  issue(input: IssueGrantInput): Promise<IssueGrantResult>;
   issueV2(input: IssueGrantInput): Promise<IssueGrantV2Result>;
   revoke(input: RevokeGrantInput): Promise<RevokeGrantResult>;
   usage(input: { jobId: string }): Promise<ModelUsageSummary | null>;
@@ -90,7 +88,7 @@ const upstreamState = async (): Promise<UpstreamState> => {
 };
 
 const issue = async (jobId: string, routes = snapshot.routes) => {
-  const result = await runtime.INFERENCE.issue({
+  const result = await runtime.INFERENCE.issueV2({
     jobId,
     snapshot: { routes },
     latestIssueDeadline: (await d1Now()) + 60_000,
@@ -143,7 +141,7 @@ describe('Inference Worker runtime boundaries', () => {
       expect(response.status).toBe(404);
     }
     await expect(
-      runtime.INFERENCE.issue({
+      runtime.INFERENCE.issueV2({
         jobId: 'runtime-public',
         snapshot,
         latestIssueDeadline: now + 60_000,
@@ -212,25 +210,7 @@ describe('Inference Worker runtime boundaries', () => {
     }
   });
 
-  it('rejects explicit efforts on the v1 grant and invalid effort snapshots on v2', async () => {
-    const now = await d1Now();
-    await expect(
-      runtime.INFERENCE.issue({
-        jobId: 'runtime-v1-effort',
-        snapshot: {
-          routes: ['deepseek-review'],
-          efforts: [
-            {
-              routeId: 'deepseek-review',
-              name: 'high',
-              generation: 0,
-              controls: { reasoning_effort: 'high' },
-            },
-          ],
-        },
-        latestIssueDeadline: now + 60_000,
-      }),
-    ).resolves.toEqual({ kind: 'invalid' });
+  it('rejects invalid effort snapshots on v2', async () => {
     for (const efforts of [
       [
         {
@@ -259,7 +239,7 @@ describe('Inference Worker runtime boundaries', () => {
         runtime.INFERENCE.issueV2({
           jobId: `runtime-invalid-effort-${efforts.length}-${efforts[0]!.routeId}`,
           snapshot: { routes: ['deepseek-review'], efforts },
-          latestIssueDeadline: now + 60_000,
+          latestIssueDeadline: (await d1Now()) + 60_000,
         }),
       ).resolves.toEqual({ kind: 'invalid' });
     }
@@ -325,7 +305,7 @@ describe('Inference Worker runtime boundaries', () => {
 
   it('issues and revokes through the service-binding RPC interface', async () => {
     const now = await d1Now();
-    const issued = await runtime.INFERENCE.issue({
+    const issued = await runtime.INFERENCE.issueV2({
       jobId: 'runtime-rpc',
       snapshot,
       latestIssueDeadline: now + 60_000,
@@ -341,7 +321,7 @@ describe('Inference Worker runtime boundaries', () => {
       kind: 'revoked',
     });
     await expect(
-      runtime.INFERENCE.issue({
+      runtime.INFERENCE.issueV2({
         jobId: 'runtime-rpc',
         snapshot,
         latestIssueDeadline: (await d1Now()) + 60_000,
@@ -400,7 +380,7 @@ describe('Inference Worker runtime boundaries', () => {
   it('rejects an expired issue deadline over RPC', async () => {
     const now = await d1Now();
     await expect(
-      runtime.INFERENCE.issue({
+      runtime.INFERENCE.issueV2({
         jobId: 'runtime-expired',
         snapshot,
         latestIssueDeadline: now,
@@ -410,7 +390,7 @@ describe('Inference Worker runtime boundaries', () => {
 
   it('rejects a frozen snapshot route absent from the trusted catalog', async () => {
     await expect(
-      runtime.INFERENCE.issue({
+      runtime.INFERENCE.issueV2({
         jobId: 'runtime-unknown-route',
         snapshot: { routes: ['deepseek-review', 'missing-review'] },
         latestIssueDeadline: (await d1Now()) + 60_000,
@@ -1942,7 +1922,7 @@ it('serves a claimed model through application control, managed inference, and d
     reviewConfiguration: { selection: { reviewers: string[] } };
   };
   const routes = claim.reviewConfiguration.selection.reviewers;
-  const issued = await post('/runner-llm/issue', {
+  const issued = await post('/runner-llm/issue-v2', {
     jobId: claim.id,
     runId: claim.runId,
     attempt: claim.attempt,

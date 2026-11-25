@@ -50,7 +50,6 @@ export interface JobExecutorDependencies {
   readonly grants: GrantRevoker;
   readonly llmServiceClient: LlmServiceClient;
   readonly readTokenClient?: ReadTokenClient | undefined;
-  readonly grantVersion: string;
   readonly serviceBaseUrl: URL;
   readonly modelResource: string;
   readonly log?: OperationalLog | undefined;
@@ -82,7 +81,6 @@ export const createJobExecutor = (deps: JobExecutorDependencies) => {
     grants: grantRevoker,
     llmServiceClient,
     readTokenClient,
-    grantVersion,
     serviceBaseUrl,
     modelResource,
     log,
@@ -172,26 +170,12 @@ export const createJobExecutor = (deps: JobExecutorDependencies) => {
         failure = { reason: 'configuration' };
         return;
       }
-      // Explicit effort controls require the profile-aware v2 grant. A v1
-      // issuer cannot carry them, so fail closed instead of silently dropping
-      // the operator's selection. Only routes this job actually calls count; an
-      // unused synthesis route must not block a single reviewer.
       const executionRoutes =
         multiSelection === undefined
           ? []
           : directExecution
             ? [multiSelection.reviewers[0]!]
             : dedupedRoutes(multiSelection);
-      if (
-        grantVersion === '1' &&
-        (multiConfiguration?.efforts?.some(
-          (effort) => effort.name !== undefined && executionRoutes.includes(effort.routeId),
-        ) ??
-          false)
-      ) {
-        failure = { reason: 'configuration' };
-        return;
-      }
       // Phase 2: checkout and merge-base verification.
       update(job, { status: 'running', stage: 'checkout' });
       job.progress?.stage('checkout');

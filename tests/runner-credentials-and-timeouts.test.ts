@@ -5,6 +5,7 @@ import {
   RunnerProcessResult,
   completedWithoutSubmitJsonl,
   createRunner,
+  decisionText,
   finalMarkdownJsonl,
   readTextTree,
   runAgentScenario,
@@ -133,7 +134,7 @@ describe('Runner Job HTTP interface', () => {
         { output: completedWithoutSubmitJsonl('session-reminder'), finalText: null },
         {
           output: finalMarkdownJsonl(reminderMarkdown, 'session-reminder'),
-          finalText: JSON.stringify({ decision: 'comment', markdown: reminderMarkdown }),
+          finalText: decisionText('comment', reminderMarkdown),
           credentialObserved: true,
         },
       ],
@@ -244,7 +245,7 @@ describe('Runner Job HTTP interface', () => {
         rounds: [
           {
             output: finalMarkdownJsonl(markdown, 'session-reminder'),
-            finalText: JSON.stringify({ decision: 'comment', markdown }),
+            finalText: decisionText('comment', markdown),
             advanceMs: 61 * 60 * 1000,
           },
         ],
@@ -262,7 +263,7 @@ describe('Runner Job HTTP interface', () => {
         rounds: [
           {
             output: finalMarkdownJsonl(markdown, 'session-reminder'),
-            finalText: JSON.stringify({ decision: 'comment', markdown }),
+            finalText: decisionText('comment', markdown),
             timedOut: true,
             advanceMs: 90 * 60 * 1000 + 1,
           },
@@ -296,7 +297,7 @@ describe('Runner Job HTTP interface', () => {
         rounds: [
           {
             output: finalMarkdownJsonl(markdown, 'session-reminder'),
-            finalText: JSON.stringify({ decision: 'comment', markdown }),
+            finalText: decisionText('comment', markdown),
           },
         ],
       });
@@ -402,7 +403,7 @@ describe('Runner Job HTTP interface', () => {
         rounds: [
           {
             output: finalMarkdownJsonl(markdown, 'session-reminder'),
-            finalText: JSON.stringify({ decision: 'comment', markdown }),
+            finalText: decisionText('comment', markdown),
           },
         ],
       });
@@ -479,7 +480,7 @@ describe('Runner Job HTTP interface', () => {
         rounds: [
           {
             output: finalMarkdownJsonl(markdown, 'session-reminder'),
-            finalText: JSON.stringify({ decision: 'comment', markdown }),
+            finalText: decisionText('comment', markdown),
           },
         ],
       });
@@ -541,7 +542,7 @@ describe('Runner Job HTTP interface', () => {
         rounds: [
           {
             output: finalMarkdownJsonl(markdown, 'session-reminder'),
-            finalText: JSON.stringify({ decision: 'comment', markdown }),
+            finalText: decisionText('comment', markdown),
           },
         ],
       });
@@ -619,7 +620,7 @@ describe('Runner Job HTTP interface', () => {
               : []),
             {
               output: finalMarkdownJsonl(markdown, 'session-reminder'),
-              finalText: JSON.stringify({ decision: 'comment', markdown }),
+              finalText: decisionText('comment', markdown),
               advanceMs: crossing === 'inspection' ? 0 : 2 * 60 * 1000,
             },
           ],
@@ -666,7 +667,7 @@ describe('Runner Job HTTP interface', () => {
         rounds: [
           {
             output: finalMarkdownJsonl(markdown, 'session-reminder'),
-            finalText: JSON.stringify({ decision: 'comment', markdown }),
+            finalText: decisionText('comment', markdown),
           },
         ],
       });
@@ -698,7 +699,7 @@ describe('Runner Job HTTP interface', () => {
         rounds: [
           {
             output: finalMarkdownJsonl(markdown, 'session-reminder'),
-            finalText: JSON.stringify({ decision: 'comment', markdown }),
+            finalText: decisionText('comment', markdown),
           },
         ],
       });
@@ -711,7 +712,7 @@ describe('Runner Job HTTP interface', () => {
         rounds: [
           {
             output: finalMarkdownJsonl(markdown, 'session-reminder'),
-            finalText: JSON.stringify({ decision: 'comment', markdown }),
+            finalText: decisionText('comment', markdown),
           },
         ],
       });
