@@ -52,6 +52,7 @@ export interface ReviewOutcome {
   runnerAttempt?: number;
   commentId?: number;
   checkRunId?: number;
+  resultReceivedAt?: string;
   cleanup?: RunnerCleanupStatus;
   evidence?: ReviewEvidenceMetadata;
 }
@@ -66,22 +67,6 @@ export interface ReviewEvidenceMetadata {
   readonly submissionCompletedAt?: string;
   readonly cleanupCompletedAt?: string;
 }
-
-export interface ReviewCleanupRecovery {
-  readonly runId: string;
-  readonly jobId: string;
-  readonly attempt: number;
-  readonly evidenceId: string;
-  readonly baseSha: GitHubShaValue;
-  readonly headSha: GitHubShaValue;
-  readonly sandboxName: string;
-  readonly confirmedAt: string;
-}
-
-export type ReviewCleanupRecoveryResult =
-  | { readonly kind: 'recovered'; readonly cleanupCompletedAt: string }
-  | { readonly kind: 'already'; readonly cleanupCompletedAt: string }
-  | { readonly kind: 'rejected' };
 
 export interface ReviewDeliveryRecord {
   deliveryId: string;

@@ -4,7 +4,7 @@ import { createD1ReviewStateStore } from '../apps/core/src/index';
 import { createGitHubPublicationAdapter } from '../apps/core/src/github-review-adapter';
 import { SqliteD1Database } from './support/d1-database';
 import { claimRunnerJob } from './support/runner-claim';
-import { eligibleEvent, coreEnv } from './support/core-worker-harness';
+import { eligibleEvent, coreEnv, recordTestEvidence } from './support/core-worker-harness';
 
 describe('Core cancelled Check retry feedback', () => {
   it('schedules a fresh run when a failed Check is rerequested through the Worker', async () => {
@@ -132,7 +132,7 @@ describe('Core cancelled Check retry feedback', () => {
           uploadedAt: '2026-09-12T00:00:30.000Z',
         };
         if (initialCleanup === 'failed')
-          await stateStore.recordEvidence({ runId, evidence, sandboxCleanup: 'failed' });
+          await recordTestEvidence(stateStore, { runId, evidence, sandboxCleanup: 'failed' });
 
         let permission: 'read' | 'write' = 'read';
         const updates: unknown[] = [];
@@ -198,7 +198,7 @@ describe('Core cancelled Check retry feedback', () => {
           }),
         ).resolves.toEqual({ kind: 'empty' });
 
-        await stateStore.recordEvidence({ runId, evidence, sandboxCleanup: 'destroyed' });
+        await recordTestEvidence(stateStore, { runId, evidence, sandboxCleanup: 'destroyed' });
         vi.setSystemTime(new Date('2026-09-12T00:01:05Z'));
         expect((await retry(`retry-${initialCleanup}-recovered`)).status).toBe(202);
         expect(updates).toHaveLength(1);

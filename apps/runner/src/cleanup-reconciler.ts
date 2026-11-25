@@ -1,14 +1,18 @@
-import { join } from 'node:path';
-import { Option, Effect } from 'effect';
-import type { SandboxBackend } from './sandbox-runtime.js';
+import { Effect, Option } from 'effect';
+import {
+  sandboxBackendCheckReady,
+  sandboxBackendHealth,
+  sandboxBackendReconcileOrphans,
+  type SandboxBackend,
+} from './sandbox-runtime.js';
 import type { GrantRevoker } from './grant-revoker.js';
 import type { JobRegistry } from './job-registry.js';
-import { recoverCallback, ReplayCallbackRequest } from './callback-recovery.js';
 import {
-  deliveryStatusRetryable,
-  writeManifestAtomically,
-  type BoundedDelivery,
-} from './evidence-store.js';
+  cleanupConfirmedCallbackBody,
+  recoverCallback,
+  ReplayCallbackRequest,
+} from './callback-recovery.js';
+import { deliveryStatusRetryable, type BoundedDelivery } from './evidence-store.js';
 import { currentIso } from './runner-clock.js';
 import {
   sanitizeOperationalLogEvent,
@@ -118,25 +122,14 @@ export const createCleanupReconciler = (deps: CleanupReconcilerDependencies) => 
       }
       if (llmServiceClient !== undefined && !(await grantRevoker.revoke(input.jobId, true)))
         throw new Error('grant revocation not confirmed');
-      const report = { ...input, sandboxName, confirmedAt: currentIso() };
-      await writeManifestAtomically(
-        join(evidenceRoot, input.evidenceId, 'cleanup-recovery.json'),
-        report,
-      );
-      const reportUrl = new URL('/runner-cleanup-recovery', callbackUrl).href;
-      const reportBody = JSON.stringify(report);
-      let delivery = await postBounded(reportUrl, reportBody);
-      let deliveryKind: 'report' | 'callback' = 'report';
-      if (!delivery.ok && delivery.reason === 'http-error' && delivery.status === 409) {
-        deliveryKind = 'callback';
-        delivery = await postBounded(callbackUrl, recovered.value.body);
-        if (delivery.ok) {
-          // Core accepted the original callback. Retry the report already built
-          // above once; a repeated 409 is permanent.
-          deliveryKind = 'report';
-          delivery = await postBounded(reportUrl, reportBody);
-        }
-      }
+      const confirmedAt = currentIso();
+      const body = cleanupConfirmedCallbackBody(recovered.value, confirmedAt);
+      if (body === undefined)
+        return { accepted: false, status: 502, error: 'cleanup recovery not confirmed' };
+      // One real v2 failed callback. Core owns the terminal state and retry
+      // semantics; Runner never sends a second cleanup report or replays the
+      // original failed callback here.
+      const delivery = await postBounded(callbackUrl, body);
       if (delivery.ok) {
         const job = jobRegistry.get(input.jobId);
         if (job !== undefined) {
@@ -149,26 +142,15 @@ export const createCleanupReconciler = (deps: CleanupReconcilerDependencies) => 
       const retryable =
         delivery.reason !== 'http-error' || deliveryStatusRetryable(delivery.status);
       if (!retryable) {
-        if (deliveryKind === 'callback') {
-          await recordLog({
-            phase: 'runner',
-            outcome: 'callback',
-            runId: input.runId,
-            jobId: input.jobId,
-            attempt: input.attempt,
-            result: 'http-error',
-            status: delivery.status ?? 0,
-          });
-        } else {
-          await recordLog({
-            phase: 'runner',
-            outcome: 'cleanup-recovery',
-            runId: input.runId,
-            jobId: input.jobId,
-            attempt: input.attempt,
-            status: delivery.status ?? 0,
-          });
-        }
+        await recordLog({
+          phase: 'runner',
+          outcome: 'callback',
+          runId: input.runId,
+          jobId: input.jobId,
+          attempt: input.attempt,
+          result: 'http-error',
+          status: delivery.status ?? 0,
+        });
         return {
           accepted: false,
           status: 502,
@@ -197,7 +179,7 @@ export const createCleanupReconciler = (deps: CleanupReconcilerDependencies) => 
   // a foreign or unrelated marker is never touched by an automatic retry.
   const removeOwnedSandboxForJob = async (jobId: string): Promise<boolean> => {
     try {
-      const result = await sandboxBackend.reconcileOrphans({
+      const result = await sandboxBackendReconcileOrphans(sandboxBackend, {
         isLiveJob: () => false,
         onlyJobId: jobId,
       });
@@ -261,6 +243,16 @@ export const createCleanupReconciler = (deps: CleanupReconcilerDependencies) => 
       // Diagnostics must not change the recovery outcome.
     }
   };
+  const idleRecovery = {
+    ok: true,
+    recovered: 0,
+    recoveredJobIds: [] as readonly string[],
+    failures: [] as readonly {
+      readonly jobId: string;
+      readonly sandboxName: string;
+      readonly step: string;
+    }[],
+  };
   let sandboxRecovered: boolean | undefined;
   const scheduleSandboxRecoveryRetry = () => {
     if (isClosed() || sandboxRecoveryTimer !== undefined) return;
@@ -274,7 +266,10 @@ export const createCleanupReconciler = (deps: CleanupReconcilerDependencies) => 
   const isLiveCleanupOwner = (jobId: string) => jobRegistry.isLive(jobId, isClosed());
   const runSandboxRecovery = () => {
     sandboxRecovered = undefined;
-    const recovery = sandboxBackend.reconcileOrphans({ isLiveJob: isLiveCleanupOwner });
+    const recovery =
+      sandboxBackend.reconcileOrphans === undefined
+        ? Promise.resolve(idleRecovery)
+        : sandboxBackendReconcileOrphans(sandboxBackend, { isLiveJob: isLiveCleanupOwner });
     return recovery
       .then(async (result) => {
         sandboxRecovered = result.ok;
@@ -377,8 +372,8 @@ export const createCleanupReconciler = (deps: CleanupReconcilerDependencies) => 
       return;
     }
     let needsRecovery = [...jobRegistry.values()].some((job) => job.cleanupRecoveryPending);
-    if (sandboxBackend.health() === 'outage') {
-      const ready = await sandboxBackend.checkReady();
+    if (sandboxBackendHealth(sandboxBackend) === 'outage') {
+      const ready = await sandboxBackendCheckReady(sandboxBackend);
       if (ready !== 'ready') {
         scheduleDeferredCleanupRecovery();
         return;
@@ -391,7 +386,7 @@ export const createCleanupReconciler = (deps: CleanupReconcilerDependencies) => 
     const accepted = await reconcileFailedCleanups();
     if (accepted) requestNext();
     if (
-      sandboxBackend.health() === 'outage' ||
+      sandboxBackendHealth(sandboxBackend) === 'outage' ||
       [...jobRegistry.values()].some((job) => job.cleanupRecoveryPending)
     )
       scheduleDeferredCleanupRecovery();

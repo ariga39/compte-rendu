@@ -25,9 +25,10 @@ export const claimExpiryCutoff = (occurredAt: string) => {
     : '1970-01-01T00:00:00.000Z';
 };
 
-// A running claim blocks only for its execution budget. Terminal owners keep
-// their unresolved cleanup status and identity without serializing the PR
-// forever; a later verification can still correct them.
+// A running claim blocks only for its execution budget. A known failed cleanup
+// has no native TTL proof, so it blocks until destruction is confirmed and is
+// never released by time. An unknown/unreported pending cleanup still expires
+// with its durable claim budget so a lost Runner cannot deadlock the PR.
 export const samePullRequestBlockingClause = (
   candidate: string,
   current: string,
@@ -41,7 +42,11 @@ export const samePullRequestBlockingClause = (
       ${candidate}.status = 'scheduled'
       OR (
         ${candidate}.status IN ('failed', 'superseded', 'cancelled')
-        AND ${candidate}.runner_cleanup_status IN ('pending', 'failed')
+        AND ${candidate}.runner_cleanup_status = 'failed'
+      )
+      OR (
+        ${candidate}.status IN ('failed', 'superseded', 'cancelled')
+        AND ${candidate}.runner_cleanup_status = 'pending'
         AND (COALESCE(${candidate}.claimed_at, ${candidate}.created_at) > '${expiredBefore}')
       )
     )`;

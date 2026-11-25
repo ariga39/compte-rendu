@@ -40,7 +40,7 @@ it('serves public data in-process without exposing trusted Core endpoints', asyn
         body: '{}',
       }),
     );
-    expect(recovery.status).toBe(401);
+    expect(recovery.status).toBe(404);
     const configuration = await application.fetch(
       new Request('https://reviews.test/api/review-configuration'),
     );

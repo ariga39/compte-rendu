@@ -12,8 +12,6 @@ export {
   type ReviewApproval,
   type ReviewCheckSetupDefer,
   type ReviewCheckSetupStatus,
-  type ReviewCleanupRecovery,
-  type ReviewCleanupRecoveryResult,
   type ReviewDeliveryRecord,
   type ReviewDisposition,
   type ReviewEvidenceMetadata,

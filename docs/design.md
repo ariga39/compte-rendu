@@ -162,8 +162,10 @@ without cancelling jobs or in-flight claim reservations. At startup Runner
 reconciles Sandbox ownership records; it does not scan or replay grant markers
 from a previous release. Resume changes only the maintenance pause and may retry
 the Sandbox ownership scan. Exact cleanup recovery can resolve an eligible failed
-cleanup and retry the sandbox scan; it is limited to sbx or microsandbox jobs whose
-retained evidence and callback still show matching failed cleanup; see
+cleanup without a separate recovery channel: Runner verifies the retained failed
+callback and manifest, confirms the exact Sandbox is absent, and sends one real
+slim `failed` callback with cleanup `destroyed`. Core then applies that terminal
+failure and unlocks the same PR; see
 [maintenance operations](operations.md#drain-before-maintenance).
 A terminal revocation failure after bounded retries fails that job without a vote
 but does not close admission or claims in that process. Grants have a fixed lifetime
@@ -177,10 +179,10 @@ the evidence directory is available. An
 explicit authenticated `POST /maintenance/replay-callback` replays it only after
 matching the operator's job/run/attempt, evidence ID and immutable SHAs against
 the local `manifest.json` and confirming that cleanup is `destroyed`. Replay does
-not decode or re-hash the six diagnostic attachments: both the current slim
-callback and a legacy inline callback remain recoverable after a rolling upgrade.
-This works across Runner restarts; it does not reconstruct old callbacks or rerun
-agent work. Core's existing callback ownership, revision freshness and publication
+not decode or re-hash the six diagnostic attachments: an older local callback is
+re-read, tagged as v2 and sent in the current slim shape, preserving an old
+Markdown-string result as-is. This works across Runner restarts; it does not
+reconstruct missing callbacks or rerun agent work. Core's existing callback ownership, revision freshness and publication
 reconciliation remain authoritative. Acceptance is distinct from publication.
 There is no automatic replay queue; see
 [callback recovery](operations.md#replay-a-lost-terminal-callback).
@@ -194,8 +196,12 @@ manifest and session metadata, truncating only an individual oversized artifact
 with an explicit marker.
 
 A slim `version: 2` terminal callback carries identity, attempt, status, stage,
-cleanup, timestamps, the validated structured result and only an evidence ID and
-status. It does not inline diagnostic artifacts. Core writes the small
+cleanup, timestamps, the validated result and only an evidence ID and status.
+New callbacks also carry immutable base/head SHAs, while older issued v2 archives
+may omit them and remain compatible. Core rejects any present SHA that differs
+from the current owner, and accepts a legacy Markdown-string result so an old
+review conclusion is preserved verbatim. The callback does not inline diagnostic
+artifacts. Core writes the small
 authoritative `reviews/<runId>/publications/<jobId>/<attempt>.json` record before
 publication; scheduled reconciliation reads that attempt-specific record and
 falls back to the legacy `reviews/<runId>` archive only when no record exists.
@@ -227,9 +233,12 @@ that cannot fit the shared upload budget is truncated and marked as such, so the
 terminal result never turns into an evidence failure.
 
 Normal success, failure, timeout and cancellation finalize evidence and destroy
-the Sandbox before callback. A Runner crash can interrupt a review before it delivers a verdict.
-On a later admission or claim attempt, Core expires an abandoned claim after
-its original 90-minute budget. A fresh run for the same PR can then proceed.
+the Sandbox before callback. A known `cleanup=failed` blocks the same PR until an
+exact destruction confirmation arrives; it is never released by elapsed time.
+An unknown `cleanup=pending` still follows the original 90-minute claim budget so
+a lost Runner cannot deadlock the PR. A Runner crash can interrupt a review before
+it delivers a verdict. On a later admission or claim attempt, Core expires an
+abandoned claim after that budget. A fresh run for the same PR can then proceed.
 Runner reconciles owned sbx and microsandbox resources independently.
 
 ## Multi-model review jobs
@@ -262,8 +271,10 @@ This selection/service path supports sbx and microsandbox.
 Runner builds one instance-level sandbox backend once at startup. Each backend
 validates its own configuration, owns its executable/environment, readiness and
 outage state, ownership records, orphan reconciliation and any cleanup-absence
-proof. The Runner only asks for `health`, `checkReady`, `reconcileOrphans`,
-optional `confirmCleanupAbsent` and per-job sandboxes. Adding a backend means
+proof. Readiness and recovery hooks (`health`, `checkReady`, `reconcileOrphans`,
+`confirmCleanupAbsent`) are optional, so a backend with native expiry can omit
+no-op plumbing. The Runner treats an absent hook as ready/no-op and asks only for
+per-job sandboxes. Adding a backend means
 adding one implementation and one registration; Runner, Core and the public
 contract stay unchanged.
 
@@ -377,7 +388,7 @@ an execution gate. Do not extend fail-closed into unrelated speculative controls
 owners instead of holding every execution object:
 
 - `JobRegistry` retains only the public state and small lifecycle handle for an
-  admitted job: identity, SHAs, cleanup-recovery flags, `abort()` and `done`.
+  admitted job: identity, SHAs, cleanup state, `abort()` and `done`.
   Sandboxes, child processes, token leases, sessions, grants and host temporary
   directories are not stored there.
 - `ClaimScheduler` owns single-flight claiming, claim reservation IDs, queued
@@ -459,34 +470,36 @@ Recovery diagnostics identify the job, step and command status and omit stderr.
 ### Failed-cleanup reconciliation
 
 An authenticated Runner maintenance operation can reconcile a failed sbx or
-microsandbox run whose original host-directory cleanup was
-confirmed and whose exact Sandbox is now absent. The configured backend receives
-the recorded backend-owned recovery proof and rechecks its policies/secrets or
-its original catalog identity. It revokes the
-job grant before reporting recovery. Original terminal evidence remains immutable;
-separate local and R2 recovery records provide the audit trail. Core matches the
-failed, superseded or cancelled run, job, attempt and immutable SHAs before
-confirming cleanup. Destroyed cleanup is monotonic under delayed callbacks. The
-queued-task projection exposes an anonymous cleanup-block reason only when an
-unresolved terminal same-PR run blocks claiming.
+microsandbox run whose original host-directory cleanup was confirmed and whose
+exact Sandbox is now absent. Runner reads the retained local `callback.json` and
+`manifest.json` without modifying either file, verifies the six identity fields,
+the backend runtime, the exact Sandbox name, the failed terminal status, failed
+cleanup and host-cleanup confirmation, then asks the backend for its absence
+proof. It makes a bounded grant revocation when the relay is configured and sends
+one real slim `version: 2` `failed` callback to `POST /runner-callback`. That
+callback preserves the original failure, usage, lifecycle, evidence and
+timestamps and changes only cleanup to `destroyed` and its completion time to the
+verification time. Core matches the current job/attempt and any present immutable
+SHAs, preserves the original failure and usage, updates cleanup monotonically and
+immediately releases the same-PR queue. There is no separate recovery report,
+local recovery file or R2 audit object.
 
 After an in-process sbx access outage, Runner pauses new claims and automatically
 repeats the same retained-evidence and exact-absence recovery without blocking
 unrelated claims. When access returns, affected jobs become immediately eligible.
-A transient report or verification failure retries the expensive check no more
-than once every 30 seconds per pending job. A Core 409 on the cleanup report
-can indicate that the original terminal callback has not arrived. Runner replays the
-retained verified callback and immediately retries the same report once. A
-repeated 409 is permanent. After that, only 408/429/5xx or timeout/network
-failures remain retryable; other 4xx responses or a permanent callback rejection
-stop automatic delivery with bounded job/run/status diagnostics. When exact absence fails because
-the owned Sandbox still exists, Runner runs the ownership reaper scoped to that
-job before the next attempt; other ownership records are skipped. Already-absent
-evidence keeps the normal verification and report path. The terminal verdict is
-unchanged and completed work never restarts. While the job is in memory, Runner can report verified cleanup using its retained
+A transient verification or callback-delivery failure retries the expensive check
+no more than once every 30 seconds per pending job. A Core 409 or other permanent
+4xx is a terminal delivery rejection: Runner does not replay a second callback,
+and stops automatic delivery with a bounded job/run/status diagnostic. Only
+408/429/5xx or timeout/network failures remain retryable. When exact absence fails
+because the owned Sandbox still exists, Runner runs the ownership reaper scoped
+to that job before the next attempt; other ownership records are skipped. The
+terminal verdict is unchanged and completed work never restarts.
+
+While the job is in memory, Runner can report verified cleanup using its retained
 manifest and callback. After a restart the ownership scan removes verified orphan
-resources. Core can still show unconfirmed cleanup until an exact callback arrives.
-Later reviews become eligible after the original 90-minute claim budget, including
-when a restart loses an in-memory staged claim request ID. Legacy evidence lacking host
-confirmation, unknown retired-backend identity and retired-backend recovery remain
-outside this operation; see the operations guide.
+resources. A known failed cleanup blocks later reviews until this confirmation;
+unknown pending cleanup follows the original 90-minute claim budget, including
+when a restart loses an in-memory staged claim request ID. Legacy evidence lacking
+host confirmation, an unknown retired-backend identity and retired-backend
+recovery remain outside this operation; see the operations guide.

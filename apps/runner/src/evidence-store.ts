@@ -472,7 +472,13 @@ export interface CallbackSenderOptions {
 
 export interface CallbackDeliveryInput {
   readonly evidencePath: string;
-  readonly identity: { readonly id: string; readonly runId: string; readonly attempt: number };
+  readonly identity: {
+    readonly id: string;
+    readonly runId: string;
+    readonly attempt: number;
+    readonly baseSha: string;
+    readonly headSha: string;
+  };
   readonly status: import('@compte-rendu/contracts').RunnerJobResponse['status'];
   readonly stage: import('@compte-rendu/contracts').RunnerJobResponse['stage'];
   readonly failure: import('@compte-rendu/contracts').RunnerJobResponse['failure'];
@@ -533,6 +539,8 @@ const sendCallback = async (
     id: identity.id,
     runId: identity.runId,
     attempt: identity.attempt,
+    baseSha: identity.baseSha,
+    headSha: identity.headSha,
     status,
     stage,
     lifecycle,

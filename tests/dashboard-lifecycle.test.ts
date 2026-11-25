@@ -2,6 +2,7 @@ import { expect, it, vi } from 'vitest';
 import { createCoreWorker } from '../apps/core/src/core-worker';
 import { createD1ReviewStateStore, createReviewCoordinator } from '../apps/core/src/index';
 import { SqliteD1Database } from './support/d1-database';
+import { recordTestEvidence } from './support/core-worker-harness';
 
 const time = (seconds: number) => `2026-01-01T00:00:${String(seconds).padStart(2, '0')}.000Z`;
 const fixture = async (claim = true) => {
@@ -143,11 +144,6 @@ it('counts the received cohort and independently overlapping cleanup attention',
 
 it('projects an authenticated failed callback through a fresh dashboard worker', async () => {
   const { database, identity, detail } = await fixture();
-  const empty = {
-    content: '',
-    size: 0,
-    sha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
-  };
   const worker = createCoreWorker(
     {
       REVIEW_DB: database,
@@ -162,19 +158,14 @@ it('projects an authenticated failed callback through a fresh dashboard worker',
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-compte-rendu-runner-callback': 'verified' },
       body: JSON.stringify({
+        version: 2,
         id: identity.jobId,
         runId: identity.runId,
         attempt: 1,
         status: 'failed',
         stage: 'cleanup',
         sandbox: { cleanup: 'destroyed' },
-        evidence: {
-          id: 'evidence',
-          status: 'incomplete',
-          manifest: empty,
-          opencodeJsonl: empty,
-          opencodeStderr: empty,
-        },
+        evidence: { id: 'evidence', status: 'incomplete' },
         timestamps: {},
         failure: { reason: 'invalid-output' },
       }),
@@ -375,7 +366,7 @@ it('does not report fresh progress when a terminal snapshot is repeated', async 
 it('retains callback observation times after supersession without treating cleanup finish as success', async () => {
   const { store, identity, detail } = await fixture();
   await store.markRunSuperseded({ runId: identity.runId, occurredAt: time(10) });
-  await store.recordEvidence({
+  await recordTestEvidence(store, {
     runId: identity.runId,
     sandboxCleanup: 'failed',
     evidence: {
@@ -403,7 +394,7 @@ it('retains callback observation times after supersession without treating clean
 
 it('does not disclose arbitrary callback strings as public observation timestamps', async () => {
   const { store, identity, detail } = await fixture();
-  await store.recordEvidence({
+  await recordTestEvidence(store, {
     runId: identity.runId,
     evidence: {
       key: `reviews/${identity.runId}`,

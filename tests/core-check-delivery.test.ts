@@ -7,7 +7,6 @@ import {
   eligibleEvent,
   coreEnv,
   deferred,
-  evidenceField,
   successfulCallback,
   failedCallback,
   runnerClaimRequest,
@@ -264,13 +263,6 @@ describe('Core Check setup and delivery reconciliation', () => {
       await inProgressStarted.promise;
       const callback = JSON.parse(await successfulCallback(claimed.runId, claimed.id));
       callback.result = { version: 2, decision: 'request_changes', markdown: callback.result };
-      const manifest = JSON.parse(
-        Buffer.from(callback.evidence.manifest.content, 'base64').toString(),
-      );
-      manifest.result = callback.result;
-      callback.evidence.manifest = await evidenceField(
-        Buffer.from(JSON.stringify(manifest)).toString('base64'),
-      );
 
       expect(
         (

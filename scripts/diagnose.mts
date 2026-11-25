@@ -170,7 +170,14 @@ const targetFromArgument = (argument: string): DiagnosticTarget | undefined => {
 };
 
 const reportField = (
-  field: { readonly content: string; readonly size: number; readonly sha256: string } | undefined,
+  field:
+    | {
+        readonly content: string;
+        readonly size: number;
+        readonly sha256: string;
+        readonly truncated?: boolean;
+      }
+    | undefined,
 ) =>
   field === undefined
     ? { present: false }
@@ -178,12 +185,14 @@ const reportField = (
         present: true,
         size: field.size,
         sha256: field.sha256,
+        ...(field.truncated === true ? { truncated: true } : {}),
       };
 
 const EvidenceField = Schema.Struct({
   content: Schema.String,
   size: NonNegativeInt,
   sha256: Sha256,
+  truncated: Schema.optionalKey(Schema.Boolean),
 });
 const R2Snapshot = Schema.Struct({
   key: Identifier,
@@ -218,13 +227,23 @@ const R2ObjectV1 = Schema.Struct({
   evidenceId: Identifier,
   evidence: Schema.Union([CompleteEvidence, IncompleteEvidence]),
 });
+const UploadedEvidence = Schema.Struct({
+  id: Identifier,
+  status: Schema.Literals(['complete', 'incomplete']),
+  manifest: EvidenceField,
+  opencodeJsonl: EvidenceField,
+  opencodeStderr: EvidenceField,
+  validatedReview: Schema.optional(EvidenceField),
+  opencodeSessionList: Schema.optional(EvidenceField),
+  opencodeExport: Schema.optional(Schema.Struct({ sessionId: Identifier, content: EvidenceField })),
+});
 const R2ObjectV2 = Schema.Struct({
   version: Schema.Literal(2),
   runId: Identifier,
   jobId: Identifier,
   attempt: Schema.Int,
   evidenceId: Identifier,
-  evidence: Schema.Union([CompleteEvidence, IncompleteEvidence]),
+  evidence: UploadedEvidence,
   timestamps: Schema.optional(Schema.Unknown),
 });
 const R2Object = Schema.Union([R2ObjectV1, R2ObjectV2]);
@@ -331,9 +350,11 @@ const workflowText = (output: string, runId: string): DiagnosticWorkflowSnapshot
 
 const validatedEvidence = async (value: R2Value) => {
   // Historical and uploaded archives are read for diagnosis. Per-file hashes
-  // are retained metadata, not a read gate: a truncated or older artifact must
-  // still be inspectable.
+  // are retained metadata, not a read gate: a truncated or unreadable artifact
+  // is shown as retained metadata while every readable material stays visible.
+  // Identity and D1/R2 hash correlation below remain the read gate.
   const manifest = decodeJsonArtifact(value.evidence.manifest, RunnerManifest);
+  if (manifest === undefined) return undefined;
   const sessionList =
     value.evidence.opencodeSessionList === undefined
       ? undefined
@@ -342,20 +363,39 @@ const validatedEvidence = async (value: R2Value) => {
     value.evidence.opencodeExport === undefined
       ? undefined
       : decodeJsonArtifact(value.evidence.opencodeExport.content, SessionExport);
-  const sessionIds =
+  const readableSessionIds =
     sessionList === undefined
-      ? []
+      ? undefined
       : Array.isArray(sessionList)
         ? sessionList.map((session) => session.id)
         : 'sessions' in sessionList
           ? sessionList.sessions.map((session) => session.id)
           : [];
+  // A readable session list must match the manifest exactly. When it is
+  // truncated or unreadable, the manifest remains the authoritative list and
+  // no session metrics are inferred from partial JSON.
   if (
-    manifest === undefined ||
-    (value.evidence.status === 'complete' &&
-      (sessionList === undefined ||
-        sessionExport === undefined ||
-        value.evidence.validatedReview === undefined))
+    readableSessionIds !== undefined &&
+    (manifest.sessionIds.length !== readableSessionIds.length ||
+      manifest.sessionIds.some((id, index) => id !== readableSessionIds[index]))
+  ) {
+    return undefined;
+  }
+  const sessionIds = readableSessionIds ?? manifest.sessionIds;
+  // If an export is readable, its session identity must agree with the
+  // envelope and the manifest. An unreadable/truncated export is retained as a
+  // missing diagnostic instead of invalidating the rest of the archive.
+  if (
+    value.evidence.opencodeExport !== undefined &&
+    sessionExport === undefined &&
+    !sessionIds.includes(value.evidence.opencodeExport.sessionId)
+  ) {
+    return undefined;
+  }
+  if (
+    sessionExport !== undefined &&
+    (sessionExport.info.id !== value.evidence.opencodeExport?.sessionId ||
+      !sessionIds.includes(sessionExport.info.id))
   ) {
     return undefined;
   }
@@ -365,19 +405,22 @@ const validatedEvidence = async (value: R2Value) => {
     manifest.evidenceId !== value.evidenceId ||
     value.evidenceId !== value.evidence.id ||
     manifest.evidence.id !== value.evidence.id ||
-    manifest.evidence.status !== value.evidence.status ||
-    manifest.sessionIds.length !== sessionIds.length ||
-    manifest.sessionIds.some((id, index) => id !== sessionIds[index]) ||
-    (value.evidence.status === 'complete' &&
-      (sessionIds.length === 0 ||
-        value.evidence.opencodeExport === undefined ||
-        sessionExport?.info.id !== value.evidence.opencodeExport.sessionId ||
-        !sessionIds.includes(sessionExport?.info.id ?? '') ||
-        value.evidence.validatedReview.content.length === 0))
+    manifest.evidence.status !== value.evidence.status
   ) {
     return undefined;
   }
-  return { value, manifest, sessionIds, sessionExport };
+  return {
+    value,
+    manifest,
+    sessionIds,
+    sessionExport,
+    readable: {
+      manifest: true,
+      sessionList: sessionList !== undefined,
+      sessionExport: sessionExport !== undefined,
+      validatedReview: value.evidence.validatedReview !== undefined,
+    },
+  };
 };
 
 export const runDiagnostic = async (argument: string, sources: DiagnosticSources) => {
@@ -653,6 +696,7 @@ export const runDiagnostic = async (argument: string, sources: DiagnosticSources
             evidenceId: evidence.id,
             sessionId: evidence.opencodeExport?.sessionId,
             sessionIds: evidenceDetails.sessionIds,
+            readable: evidenceDetails.readable,
             timestamps: {
               executionStartedAt: manifest?.startedAt,
               submissionCompletedAt: d1?.run?.evidence?.submissionCompletedAt,

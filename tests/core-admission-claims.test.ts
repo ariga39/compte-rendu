@@ -10,12 +10,6 @@ import {
   runnerResponse,
   coreEnv,
   deferred,
-  evidenceField,
-  jsonlArtifact,
-  sessionListArtifact,
-  exportArtifact,
-  reviewArtifact,
-  manifestArtifact,
   successfulCallback,
   abortedCallback,
   postHogEvents,
@@ -617,7 +611,7 @@ describe('Core admission, claims, and manual policy', () => {
         status: 'aborted',
         sandbox: { cleanup: 'destroyed' },
       });
-      expect((await stateStore.getRunOutcome(runId))?.runnerJobId).toBeUndefined();
+      expect((await stateStore.getRunOutcome(runId))?.runnerJobId).toBe(id);
     } finally {
       release.resolve();
       vi.unstubAllEnvs();
@@ -1763,13 +1757,6 @@ describe('Core admission, claims, and manual policy', () => {
       );
       const callback = JSON.parse(await successfulCallback(claim.runId));
       callback.result = { version: 2, decision: 'request_changes', markdown: callback.result };
-      const manifest = JSON.parse(
-        Buffer.from(callback.evidence.manifest.content, 'base64').toString(),
-      );
-      manifest.result = callback.result;
-      callback.evidence.manifest = await evidenceField(
-        Buffer.from(JSON.stringify(manifest)).toString('base64'),
-      );
       const response = await worker.fetch(
         new Request('https://core.internal/runner-results', {
           method: 'POST',
@@ -1797,7 +1784,7 @@ describe('Core admission, claims, and manual policy', () => {
   );
 
   it.each([false, true])(
-    'stores evidence and publishes even when optional usage persistence fails (%s)',
+    'publishes without inline evidence even when optional usage persistence fails (%s)',
     async (usageWriteFails) => {
       const database = new SqliteD1Database();
       const stateStore = createD1ReviewStateStore(database);
@@ -1853,6 +1840,7 @@ describe('Core admission, claims, and manual policy', () => {
 
       try {
         const callbackBody = JSON.stringify({
+          version: 2,
           id: 'runner-job-1',
           runId: claimed.runId,
           attempt: 1,
@@ -1860,19 +1848,7 @@ describe('Core admission, claims, and manual policy', () => {
           usage: { version: 1, models: [] },
           stage: 'cleanup',
           sandbox: { cleanup: 'destroyed' },
-          evidence: {
-            id: 'evidence-1',
-            status: 'complete',
-            manifest: await evidenceField(manifestArtifact(claimed.runId, 'runner-job-1', 1)),
-            opencodeJsonl: await evidenceField(jsonlArtifact),
-            opencodeStderr: await evidenceField(''),
-            validatedReview: await evidenceField(reviewArtifact),
-            opencodeSessionList: await evidenceField(sessionListArtifact),
-            opencodeExport: {
-              sessionId: 'session-1',
-              content: await evidenceField(exportArtifact),
-            },
-          },
+          evidence: { id: 'evidence-1', status: 'complete' },
           timestamps: {
             executionStartedAt: '2026-09-01T00:00:01.000Z',
             submissionCompletedAt: '2026-09-01T00:00:02.000Z',
@@ -1932,25 +1908,8 @@ describe('Core admission, claims, and manual policy', () => {
 
         expect(response.status).toBe(202);
         expect(stored.map((entry) => entry.key)).toEqual([
-          `reviews/${claimed.runId}`,
           `reviews/${claimed.runId}/publications/runner-job-1/1.json`,
         ]);
-        const evidenceObject = JSON.parse(
-          stored.find((entry) => entry.key === `reviews/${claimed.runId}`)?.value as string,
-        ) as {
-          evidence: Record<string, unknown>;
-        };
-        expect(evidenceObject.evidence).toEqual({
-          id: 'evidence-1',
-          status: 'complete',
-          manifest: await evidenceField(manifestArtifact(claimed.runId, 'runner-job-1', 1)),
-          opencodeJsonl: await evidenceField(jsonlArtifact),
-          opencodeStderr: await evidenceField(''),
-          validatedReview: await evidenceField(reviewArtifact),
-          opencodeSessionList: await evidenceField(sessionListArtifact),
-          opencodeExport: { sessionId: 'session-1', content: await evidenceField(exportArtifact) },
-        });
-        expect(evidenceObject.evidence).not.toHaveProperty('files');
         expect(reviews).toEqual([
           {
             event: 'COMMENT',
@@ -1978,20 +1937,13 @@ describe('Core admission, claims, and manual policy', () => {
           }),
         );
         expect(replay.status).toBe(202);
-        expect(stored).toHaveLength(2);
+        expect(stored).toHaveLength(1);
         expect(reviews).toHaveLength(1);
         expect(checkUpdates).toHaveLength(1);
         await expect(stateStore.getRunOutcome(claimed.runId)).resolves.toMatchObject({
           status: 'completed',
-          evidence: {
-            key: `reviews/${claimed.runId}`,
-            status: 'complete',
-            size: expect.any(Number),
-            sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
-            executionStartedAt: '2026-09-01T00:00:01.000Z',
-            submissionCompletedAt: '2026-09-01T00:00:02.000Z',
-            cleanupCompletedAt: '2026-09-01T00:00:03.000Z',
-          },
+          cleanup: 'destroyed',
+          resultReceivedAt: expect.any(String),
         });
       } finally {
         database.close();
@@ -2073,13 +2025,6 @@ describe('Core admission, claims, and manual policy', () => {
       );
       const callback = JSON.parse(await successfulCallback(claimed.runId));
       callback.result = { version: 2, decision: 'request_changes', markdown: callback.result };
-      const manifest = JSON.parse(
-        Buffer.from(callback.evidence.manifest.content, 'base64').toString(),
-      );
-      manifest.result = callback.result;
-      callback.evidence.manifest = await evidenceField(
-        Buffer.from(JSON.stringify(manifest)).toString('base64'),
-      );
       const request = () =>
         new Request('https://core.internal/runner-results', {
           method: 'POST',

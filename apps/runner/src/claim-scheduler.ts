@@ -7,7 +7,11 @@ import {
   type OperationalLog,
   type OperationalLogEvent,
 } from '@compte-rendu/contracts';
-import type { SandboxBackend } from './sandbox-runtime.js';
+import {
+  sandboxBackendCheckReady,
+  sandboxBackendHealth,
+  type SandboxBackend,
+} from './sandbox-runtime.js';
 import type { JobRegistry } from './job-registry.js';
 import type { CleanupReconciler } from './cleanup-reconciler.js';
 import type { JobExecutionInput } from './job-executor.js';
@@ -115,8 +119,8 @@ export const createClaimScheduler = (deps: ClaimSchedulerDependencies): ClaimSch
     await deps.cleanup.startup.catch(() => undefined);
     if (deps.isClosed()) return;
     let needsCleanupRecovery = deps.cleanup.pendingCount() > 0;
-    if (deps.backend.health() === 'outage') {
-      const ready = await deps.backend.checkReady();
+    if (sandboxBackendHealth(deps.backend) === 'outage') {
+      const ready = await sandboxBackendCheckReady(deps.backend);
       if (ready !== 'ready') {
         scheduleClaim();
         return;
@@ -150,7 +154,7 @@ export const createClaimScheduler = (deps: ClaimSchedulerDependencies): ClaimSch
     ) {
       return;
     }
-    const readiness = await deps.backend.checkReady();
+    const readiness = await sandboxBackendCheckReady(deps.backend);
     if (readiness !== 'ready') {
       await recordClaimGateFailure('runtime-preflight-failed', false);
       scheduleClaim();
@@ -227,7 +231,7 @@ export const createClaimScheduler = (deps: ClaimSchedulerDependencies): ClaimSch
           claimFailure ??= { reason: 'invalid-response' };
           throw new Error('Claimed Runner Job failed schema validation');
         }
-        if (deps.backend.health() === 'outage') {
+        if (sandboxBackendHealth(deps.backend) === 'outage') {
           if (!stagedOutageLogged) {
             stagedOutageLogged = true;
             await recordLog({

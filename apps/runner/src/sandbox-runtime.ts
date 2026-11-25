@@ -153,18 +153,12 @@ export interface JobSandbox {
 
 export type SandboxHealth = 'ready' | 'unready' | 'outage';
 
-export type SandboxRecoveryStep =
-  | 'record'
-  | 'inspect'
-  | 'ownership'
-  | 'policy-list'
-  | 'policy-remove'
-  | 'policy-verify'
-  | 'sandbox-remove'
-  | 'sandbox-verify'
-  | 'secret-remove'
-  | 'secret-verify'
-  | 'record-remove';
+/**
+ * A backend-defined recovery step used only in diagnostics. Keeping this open
+ * lets a TTL-based backend report its own short labels without implementing
+ * every backend-specific sub-step that exists in another adapter.
+ */
+export type SandboxRecoveryStep = string;
 
 export interface SandboxRecoveryFailure {
   readonly jobId: string;
@@ -203,18 +197,44 @@ export interface SandboxCleanupConfirmation {
  * A process-lifetime sandbox backend. It owns configuration validation,
  * readiness/outage state, ownership records and orphan reconciliation. A new
  * backend only implements this interface and adds one registry entry below.
+ * Readiness and recovery hooks are optional so a backend with native expiry
+ * does not need no-op plumbing.
  */
 export interface SandboxBackend {
   readonly kind: string;
   /** Synchronous, no-I/O view used by maintenance and claim-race checks. */
-  health(): SandboxHealth;
+  health?(): SandboxHealth;
   /** Bounded readiness check used before claim and by cleanup retries. */
-  checkReady(): Promise<SandboxHealth>;
-  reconcileOrphans(input: OrphanReconcileInput): Promise<OrphanReconcileResult>;
+  checkReady?(): Promise<SandboxHealth>;
+  reconcileOrphans?(input: OrphanReconcileInput): Promise<OrphanReconcileResult>;
   /** Proves a recorded sandbox and its scoped host resources are absent. */
   confirmCleanupAbsent?(input: SandboxCleanupConfirmation): Promise<void>;
   createJob(spec: SandboxJobSpec): JobSandbox;
 }
+
+const idleOrphanReconcileResult: OrphanReconcileResult = {
+  ok: true,
+  recovered: 0,
+  recoveredJobIds: [],
+  failures: [],
+};
+
+/** A backend without a readiness hook is always ready. */
+export const sandboxBackendHealth = (backend: SandboxBackend): SandboxHealth =>
+  backend.health?.() ?? 'ready';
+
+/** A backend without a readiness check needs no pre-claim probe. */
+export const sandboxBackendCheckReady = async (backend: SandboxBackend): Promise<SandboxHealth> =>
+  backend.checkReady === undefined ? 'ready' : backend.checkReady();
+
+/** A backend without ownership records has nothing to reconcile. */
+export const sandboxBackendReconcileOrphans = async (
+  backend: SandboxBackend,
+  input: OrphanReconcileInput,
+): Promise<OrphanReconcileResult> =>
+  backend.reconcileOrphans === undefined
+    ? idleOrphanReconcileResult
+    : backend.reconcileOrphans(input);
 
 export interface SandboxBackendContext {
   readonly hostRun: HostRun;

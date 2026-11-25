@@ -24,10 +24,14 @@ provide `GH_TOKEN` for repositories that require it. To include a retained
 historical Workflow whose instance ID is the run ID, also set
 `DIAGNOSTIC_WORKFLOW_NAME=<INSTANCE_NAME>-review`.
 
-Missing sources are reported without suppressing available sources. Normal
-diagnosis never uses SSH; it mentions SSH only as a fallback for Runner-host
-loss or cleanup recovery. Output contains sanitized identities, states,
-timestamps, bounded stderr metadata, and artifact presence/size/hash—not
+Missing sources are reported without suppressing available sources. A complete
+archive with one truncated or unreadable diagnostic artifact still shows every
+readable manifest, session list and review material; the affected artifact is
+marked truncated and no session metric is inferred from partial JSON. Historical
+D1/R2 size and SHA correlation and manifest identity still gate the report.
+Normal diagnosis never uses SSH; it mentions SSH only as a fallback for
+Runner-host loss or cleanup recovery. Output contains sanitized identities,
+states, timestamps, bounded stderr metadata, and artifact presence/size/hash—not
 credentials, repository contents, review bodies, or raw model/session/tool
 output.
 
@@ -57,8 +61,8 @@ malformed, oversized or failed archives are reported by Runner but never change
 the review result or publication state. Terminal execution, submission and
 cleanup timestamps come from the authoritative callback and are never updated by
 the later upload. Historical `version: 1` inline archives remain readable by
-`pnpm diagnose`; per-artifact hashes are retained metadata rather than a read
-gate.
+`pnpm diagnose`; per-artifact hashes and truncation markers are retained metadata
+rather than a read gate.
 
 Publication and diagnostics share the `EVIDENCE_BUCKET` binding. Publication
 depends on it to create and later reconcile the small publication record (and,
@@ -75,7 +79,7 @@ The per-instance numeric GitHub UID list in `DASHBOARD_MODEL_EDITOR_IDS` authori
 
 An authorized same-origin `POST /api/jobs/:runId/cancel` accepts a queued review immediately (200). A claimed review returns 202 until Runner confirms cleanup. Repeating the request retrieves its current cancellation state. A 409 means publication or another terminal outcome already won. Cancelling never withdraws a published GitHub review.
 
-The Worker ends the GitHub Check and requests a stop using the recorded Runner job and attempt. The minute cron retries pending deliveries if the Worker or Runner was unavailable. A Runner 404 leaves cleanup unconfirmed. A known failed cleanup uses the verified maintenance procedure below. Expired pending cleanup does not qualify for that procedure; only an exact late original callback can update it, and any actual orphan is identified and removed through backend ownership. A later run is blocked only while the cancelled claim is inside the 90-minute execution budget; after that budget later reviews proceed automatically. Cleanup visibility and queue blocking are independent: cancelled pending cleanup remains visible until confirmed.
+The Worker ends the GitHub Check and requests a stop using the recorded Runner job and attempt. The minute cron retries pending deliveries if the Worker or Runner was unavailable. A Runner 404 leaves cleanup unconfirmed. A known failed cleanup uses the verified maintenance procedure below and blocks the same PR until exact destruction is confirmed. Unknown pending cleanup does not qualify for that procedure; only an exact late original callback can update it, and any actual orphan is identified and removed through backend ownership. A later run is blocked while a cancelled claim is inside the 90-minute execution budget; after that budget an unknown pending cleanup stops blocking, while a known failed cleanup continues to block. Cleanup visibility and queue blocking are independent: cancelled pending cleanup remains visible until confirmed.
 
 ## Operations and troubleshooting
 
@@ -137,9 +141,9 @@ Interpret the boundaries separately:
 - Cleanup is a separate outcome. A failed remove command can be followed by a
   confirmed exact-name absence; consult the final cleanup result, not an
   isolated exit code. Unknown or truncated inspection output does not prove
-  destruction. A failed or unconfirmed cleanup can block the next job for the
-  same PR until its 90-minute claim budget expires or destruction is confirmed;
-  other PRs continue normally.
+  destruction. A known failed cleanup blocks the next job for the same PR until
+  destruction is confirmed and is never released by time; an unknown pending
+  cleanup follows the 90-minute claim budget. Other PRs continue normally.
 
 The dashboard remains a projection of Core's persisted state, not a live Runner
 probe. PostHog is lifecycle telemetry, not the diagnostic source for command or
@@ -283,8 +287,9 @@ The explicit cleanup recovery accepts only a retained failed-cleanup job for the
 active sbx or microsandbox runtime where the request and evidence match the exact
 job/run/attempt/evidence/SHAs, host cleanup was confirmed, and both the retained
 manifest and callback still record failed cleanup. On success it makes a bounded
-grant revocation for that job and retries the Sandbox ownership scan in the same
-process. Leftover `llm-grant-pending` files from an older Runner are ignored.
+grant revocation for that job and sends one real slim `v2` `failed` callback with
+cleanup `destroyed`. Core preserves the original failure and usage and unlocks the
+same PR. Leftover `llm-grant-pending` files from an older Runner are ignored.
 
 A terminal grant revocation failure after bounded retries fails that job without
 a vote; admission and claims stay open, and later same-PR work is governed by the
@@ -337,7 +342,7 @@ automatically after 30 seconds; maintenance resume can trigger it immediately.
 
 Restoring backend access allows the Runner to retry orphan cleanup automatically. The probe resumes claims after a backend-wide sbx outage.
 
-A run with `cleanup=failed` is recovered through the verified maintenance procedure below. Expired `cleanup=pending` does not qualify for that procedure; only an exact late original callback can update it, and an actual orphan is identified and removed through backend ownership rather than this recovery endpoint. Cancelled, superseded, and expired scheduling-timeout pending cleanup remains visible in cleanup attention until confirmed. An expired failed scheduling timeout with only pending cleanup blocks later reviews only while its durable claim is inside the 90-minute execution budget; after that budget, later reviews proceed automatically while the retained `pending` status remains visible as an orphan-cleanup risk. Cleanup visibility and queue blocking are independent. Restarting Runner does not clear that database ownership. While a blocker is inside the budget, the queued task displays “Waiting for previous review cleanup”; an ordinary running review does not produce this warning.
+A run with `cleanup=failed` is recovered through the verified maintenance procedure below and keeps blocking the same PR until exact destruction is confirmed; elapsed time never unlocks it. Expired `cleanup=pending` does not qualify for that procedure; only an exact late original callback can update it, and an actual orphan is identified and removed through backend ownership rather than this recovery endpoint. Cancelled, superseded, and expired scheduling-timeout pending cleanup remains visible in cleanup attention until confirmed. An expired scheduling timeout with only pending cleanup blocks later reviews only while its durable claim is inside the 90-minute execution budget; after that budget, later reviews proceed automatically while the retained `pending` status remains visible as an orphan-cleanup risk. Cleanup visibility and queue blocking are independent. Restarting Runner does not clear that database ownership. While a blocker is inside the budget, or while a known failed cleanup remains unconfirmed, the queued task displays “Waiting for previous review cleanup”; an ordinary running review does not produce this warning.
 
 After restoring Docker authentication, confirm the original job has stopped and
 identify its exact Sandbox from the retained manifest (`compte-rendu-<jobId>`).
@@ -361,50 +366,54 @@ curl --fail-with-body --silent --show-error --config "$RUNNER_CURL_CONFIG" \
   "$RUNNER_ORIGIN/maintenance/recover-cleanup"
 ```
 
-This operation accepts retained failed sbx or microsandbox
-callbacks, including jobs cancelled after their Core run was superseded, with
-valid callback evidence and the runtime's host-cleanup confirmation
-(`hostCleanupConfirmed: true` for sbx and microsandbox). It verifies the immutable identity and artifact
-hashes, requires the exact Sandbox to be absent, removes only its scoped sbx
-network policies and secrets, and revokes its LLM grant when configured.
-An existing Sandbox is never deleted by this recovery operation. Authentication
-errors, truncated inventory or failed removal leave cleanup unresolved.
+This operation accepts retained failed sbx or microsandbox callbacks, including
+jobs cancelled after their Core run was superseded, with valid callback evidence
+and the runtime's host-cleanup confirmation (`hostCleanupConfirmed: true` for sbx
+and microsandbox). It verifies the immutable identity and exact absence, removes
+only its scoped sbx network policies and secrets, and revokes its LLM grant when
+configured. It then sends one `v2` `failed` callback that keeps the original
+failure, usage, lifecycle, evidence and timestamps and changes only cleanup to
+`destroyed` plus the confirmation time. Core validates the current owner and any
+present immutable SHAs, preserves the real failure and usage, and immediately
+releases the same-PR queue. An existing Sandbox is never deleted by this recovery
+operation. Authentication errors, truncated inventory or failed removal leave
+cleanup unresolved.
 
 Runner also pauses new claims when a failed sbx cleanup is followed by a failed
 authenticated inventory probe, confirming a host-wide access outage. Other
 healthy Runners can keep claiming. It retries the probe on its idle cadence and,
 when access returns, immediately makes the same retained-evidence and
 exact-absence recovery eligible for each affected in-memory job without holding
-unrelated claims. The bounded retry also runs while drained. After a transient report or verification
-failure, expensive cleanup work is retried at most once every 30 seconds per
-pending job; unrelated claim polling continues. A Core 409 on the cleanup report
-replays the retained verified terminal callback and retries the same report once
-in the same recovery invocation; a repeated 409 is permanent. Only 408/429/5xx or
-timeout/network failures remain retryable afterward. Other 4xx responses or a
-permanent callback rejection stop automatic delivery with a bounded
-job/run/status diagnostic. When exact absence fails
-because the owned Sandbox still exists, Runner runs the ownership reaper only for
-that job before the next attempt and skips every other ownership record. An
-accepted report reopens the same-PR queue. A single job cleanup failure that does
-not fail the inventory probe leaves unrelated work claimable. A restart can lose a staged claim. Later reviews of that PR become eligible automatically
-once the original 90-minute claim budget expires.
+unrelated claims. The bounded retry also runs while drained. After a transient
+verification or delivery failure, expensive cleanup work is retried at most once
+every 30 seconds per pending job; unrelated claim polling continues. A Core 409
+or another permanent 4xx response is a terminal delivery rejection: Runner does
+not replay the original callback and sends no second recovery request. Only
+408/429/5xx or timeout/network failures remain retryable. Other 4xx responses stop
+automatic delivery with a bounded job/run/status diagnostic. When exact absence
+fails because the owned Sandbox still exists, Runner runs the ownership reaper
+only for that job before the next attempt and skips every other ownership record.
+An accepted callback reopens the same-PR queue. A single job cleanup failure that
+does not fail the inventory probe leaves unrelated work claimable. A known failed
+cleanup never becomes claimable through elapsed time; an unknown pending cleanup
+still follows the original 90-minute claim budget when a restart loses a staged
+claim.
 
-The original callback, manifest and terminal failure stay unchanged. Runner writes
-`cleanup-recovery.json` separately and sends an authenticated recovery report.
-Core retains a separate `cleanup-recoveries/` audit object and updates only the
-matching failed, superseded or cancelled run's cleanup state and completion time. The original
-terminal status and job identity remain unchanged; confirmed destruction releases
-the same-PR queue block without discarding recovery identity. New same-PR work can
-then be claimed. A delayed original callback cannot reverse
-this confirmation. HTTP 202 means Core accepted the report. Retrying the operation
-is safe; concurrent recovery of the same local job is rejected. Drain cannot
-finish while a recovery operation is in progress.
+The original callback and manifest stay byte-for-byte unchanged. There is no
+separate local recovery file or Core recovery report; Core's normal terminal
+callback path owns the state change. The original terminal failure and job
+identity are preserved, cleanup/result-arrival telemetry describes the real
+callback, and confirmed destruction releases the queue block. A delayed original
+`cleanup=failed` callback cannot reverse this confirmation or overwrite the first
+confirmed cleanup time. HTTP 202 means Core accepted the callback. Retrying the
+operation is safe; concurrent recovery of the same local job is rejected. Drain
+cannot finish while a recovery operation is in progress.
 
 HTTP 400 rejects invalid identity input; 401 rejects authentication; 409 rejects
-active jobs, mismatched or unsupported evidence; 502 means cleanup or report
+active jobs, mismatched or unsupported evidence; 502 means cleanup or callback
 delivery was not confirmed; 503 means callback configuration is unavailable.
-Check the database-backed dashboard after recovery. A local audit file alone is
-not proof that Core accepted the report.
+Check the database-backed dashboard after recovery. Local files alone are not
+proof that Core accepted the callback.
 
 Older archives without host-cleanup confirmation, missing retained callbacks,
 failed host-directory removal and retired-backend ownership recovery are unsupported.
@@ -456,10 +465,12 @@ curl --fail-with-body --silent --show-error --config "$RUNNER_CURL_CONFIG" \
 
 Runner reads only its configured evidence directory, checks the local
 `manifest.json` for the requested identities, revisions and confirmed cleanup,
-then sends the retained callback body as-is through its configured authenticated
-callback URL. It does not decode or re-hash the six diagnostic attachments, so a
-current slim callback and an inline callback retained from before a rolling
-upgrade are both recoverable. It does not start a Sandbox or rerun the model.
+then sends the retained callback in the current slim `v2` shape through its
+configured authenticated callback URL. A legacy local body without a version tag
+is normalized by adding `version: 2`; the real v2 schema drops the six inline
+attachments and preserves an old Markdown-string result verbatim. The verified
+manifest supplies base/head SHAs for archives issued before those fields existed.
+It does not start a Sandbox or rerun the model.
 Missing, inconsistent or unconfirmed evidence is rejected; archives from before
 callback retention was introduced cannot be reconstructed by this operation. The
 same limitation applies to failures before an evidence directory or valid manifest

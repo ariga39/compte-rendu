@@ -129,11 +129,13 @@ export const createJobRegistry = () => {
           candidate.pullRequestNumber !== input.pullRequestNumber
         )
           return false;
-        // Live executions always serialize. A retained terminal execution only
-        // blocks until its durable claim budget expires, matching Core's fallback.
+        // Live executions always serialize. A known failed cleanup blocks until
+        // it is confirmed destroyed; an unknown/unreported cleanup only blocks
+        // until its durable claim budget expires, matching Core's fallback.
         if (candidate.state.status === 'queued' || candidate.state.status === 'running')
           return true;
-        return candidate.claimDeadlineAt > now;
+        if (candidate.state.sandbox.cleanup === 'failed') return true;
+        return candidate.state.sandbox.cleanup === 'pending' && candidate.claimDeadlineAt > now;
       });
     },
     isLive(jobId: string, closed: boolean) {

@@ -116,7 +116,7 @@ describe('microsandbox ownership recovery', () => {
     };
 
     await expect(
-      createMsbBackend(ownershipRoot, command).reconcileOrphans({ isLiveJob: () => false }),
+      createMsbBackend(ownershipRoot, command).reconcileOrphans!({ isLiveJob: () => false }),
     ).resolves.toEqual({
       ok: false,
       recovered: 0,
@@ -160,7 +160,7 @@ describe('microsandbox ownership recovery', () => {
       code: 'ENOENT',
     });
     await expect(
-      createMsbBackend(ownershipRoot, command).reconcileOrphans({ isLiveJob: () => false }),
+      createMsbBackend(ownershipRoot, command).reconcileOrphans!({ isLiveJob: () => false }),
     ).resolves.toEqual({
       ok: true,
       recovered: 0,
@@ -200,7 +200,7 @@ describe('microsandbox ownership recovery', () => {
       return options?.captureStdout === true ? { ...ok, stdout: '' } : ok;
     };
     await expect(
-      createMsbBackend(ownershipRoot, command).reconcileOrphans({
+      createMsbBackend(ownershipRoot, command).reconcileOrphans!({
         isLiveJob: (id) => id === live.id,
       }),
     ).resolves.toMatchObject({ recovered: 1, recoveredJobIds: [stale.id] });
@@ -447,7 +447,7 @@ describe('microsandbox ownership recovery', () => {
     // A non-directory marker root makes readdir fail with ENOTDIR, not ENOENT.
     await writeFile(join(ownershipRoot, 'microsandbox'), 'not a directory');
 
-    const result = await createMsbBackend(ownershipRoot).reconcileOrphans({
+    const result = await createMsbBackend(ownershipRoot).reconcileOrphans!({
       isLiveJob: () => false,
     });
 

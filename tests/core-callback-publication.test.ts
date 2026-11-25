@@ -344,7 +344,7 @@ describe('Core callbacks and publication', () => {
       const stale = await worker.fetch(await callback(replacement.runId, 'previous-job'));
       expect(stale.status).toBe(409);
       expect(await stateStore.getRunOutcome(replacement.runId)).toEqual(current);
-      expect(stored).toHaveLength(2);
+      expect(stored).toHaveLength(0);
       expect(published).toHaveLength(0);
     } finally {
       database.close();
@@ -856,7 +856,7 @@ describe('Core callbacks and publication', () => {
     ]);
   });
 
-  it('publishes a correlated successful callback even when its legacy evidence metadata is inconsistent', async () => {
+  it('publishes a correlated successful v2 callback without an inline evidence archive', async () => {
     const database = new SqliteD1Database();
     const stateStore = createD1ReviewStateStore(database);
     const claimed = await stateStore.claimReview({
@@ -904,10 +904,7 @@ describe('Core callbacks and publication', () => {
       },
     );
     try {
-      const callback = JSON.parse(await successfulCallback(claimed.runId)) as {
-        evidence: { manifest: { sha256: string } };
-      };
-      callback.evidence.manifest.sha256 = '0'.repeat(64);
+      const callback = JSON.parse(await successfulCallback(claimed.runId)) as unknown;
       const response = await worker.fetch(
         new Request('https://core.internal/runner-results', {
           method: 'POST',
@@ -925,7 +922,6 @@ describe('Core callbacks and publication', () => {
       expect(reactions).toEqual([]);
       expect(reviews).toHaveLength(1);
       expect(stored.map((entry) => entry.key)).toEqual([
-        `reviews/${claimed.runId}`,
         `reviews/${claimed.runId}/publications/runner-job-1/1.json`,
       ]);
     } finally {

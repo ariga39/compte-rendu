@@ -10,6 +10,7 @@ import {
 } from '@compte-rendu/contracts';
 import {
   createSandboxBackend,
+  sandboxBackendHealth,
   type HostRun,
   type RunnerProcess,
   type SandboxBackend,
@@ -104,6 +105,8 @@ export interface RunnerOptions {
   readonly evidenceFetch?: typeof fetch;
   readonly evidenceTimeoutMs?: number;
   readonly callbackRetryDelaysMs?: readonly number[];
+  /** Short settle delays before retrying one owned Sandbox destroy. */
+  readonly destroyRetryDelaysMs?: readonly number[];
   readonly progressFetch?: typeof fetch;
   /** Fetch for the authenticated read-token refresh; defaults to callbackFetch. */
   readonly readTokenFetch?: typeof fetch;
@@ -320,7 +323,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
   const maintenanceStatus = (): MaintenanceStatus => {
     const activeJobs = jobRegistry.activeCount();
     const cleanupBlockedJobs = jobRegistry.cleanupBlockedCount();
-    const outage = sandboxBackend.health() === 'outage';
+    const outage = sandboxBackendHealth(sandboxBackend) === 'outage';
     const claim = scheduler.status();
     return {
       draining: claim.draining,
@@ -367,6 +370,7 @@ export const createRunner = (options: RunnerOptions = {}) => {
     callbackFetch,
     callbackTimeoutMs,
     callbackRetryDelaysMs,
+    destroyRetryDelaysMs: options.destroyRetryDelaysMs,
     evidenceUrl,
     evidenceFetch,
     evidenceTimeoutMs,

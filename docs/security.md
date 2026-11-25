@@ -83,7 +83,8 @@ root do not scan each other's records. It never deletes from name, prefix or
 unrelated metadata, verifies native secret absence, reports bounded Job/step
 diagnostics without stderr content on failure, and retains ambiguous records for retry. Microsandbox checks the original
 catalog, exact VM name and owner nonce. Cleanup skips live jobs. Expiration of
-a Core claim releases same-PR scheduling without attesting to VM destruction.
+an unknown pending Core claim releases same-PR scheduling without attesting to
+VM destruction; a known failed cleanup remains blocking until confirmed.
 
 ## Evidence and observability
 
