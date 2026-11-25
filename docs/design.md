@@ -144,8 +144,11 @@ one. A temporary compatibility path needs a concrete reason, a recorded removal
 date and a cleanup issue.
 
 An upgrade or rare crash may lose an in-flight or undelivered review. Re-trigger
-the review and it runs again in a fresh Sandbox; the original run keeps its own
-outcome and cleanup state.
+it in a fresh Sandbox once same-PR admission is eligible: an expired pending
+claim becomes eligible after its 90-minute budget, while a known `cleanup=failed`
+requires confirmed destruction. See
+[troubleshooting recovery](operations.md#operations-and-troubleshooting). The
+original run keeps its own outcome and cleanup state.
 
 ## Runner Job and pull interface
 

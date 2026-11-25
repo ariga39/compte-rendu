@@ -178,29 +178,37 @@ validated lifecycle event and registers each with `waitUntil()`.
 
 ## Update and rollback
 
-Worker and Runner are upgraded together in a brief maintenance window. Drain or
-stop Runners before switching versions; mixed-version operation is not a default
-requirement. For a normal release:
+A compatible update, including documentation-only changes, may deploy without a
+drain. A breaking release upgrades the Worker and Runner as one pair in a brief
+maintenance window; mixed-version operation is not a default requirement.
+
+For a compatible or documentation-only update, run the applicable checks, merge
+any tracked configuration changes, deploy any affected Worker, and verify the
+affected behavior. No drain or version pairing is required.
+
+For a breaking release:
 
 1. Run `corepack pnpm check`, `corepack pnpm test`, and
    `corepack pnpm build` against the immutable checkout being released.
-2. If there is a new migration, review it and apply it remotely with the D1
-   migration command in the installation guide. Prefer additive, backward-compatible changes.
-3. Back up the existing gitignored instance configurations. Compare the tracked
+2. Back up the existing gitignored instance configurations. Compare the tracked
    `apps/dashboard/wrangler.jsonc` template between
    the deployed and target revisions, then merge the relevant changes into the
    retained instance files: new bindings/variables, migrations, compatibility
    settings, assets and Cron changes. Preserve instance account/resource IDs,
    `DASHBOARD_ORIGIN`, domains, allowlists, branding and deliberate overrides; reconcile changed
    defaults rather than blindly replacing them. Render only when instance files
-   are absent, then restore those instance settings from the backup. Deploy using
-   `apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc`.
-4. If Runner changed, finish the drain procedure below, back up its artifact,
-   install the tested merged build and restart it. Verify the artifact hash,
-   service health, configured concurrency and Sandbox recovery status.
-5. Verify the behavior affected by the release. For publication changes, inspect
-   a controlled review's exact revision, output and visible GitHub publication;
-   do not create reviews solely for screenshots.
+   are absent, then restore those instance settings from the backup. Prepare the
+   matching Worker and Runner artifacts, but do not deploy yet.
+3. Pause claims on every Runner served by the Worker being upgraded: drain it and wait for `drained: true`, or stop it
+   when it cannot drain. Confirm `activeJobs: 0`, no in-flight claim and no
+   unresolved cleanup obligation. See [drain before maintenance](#drain-before-maintenance).
+4. Apply any reviewed migration with the D1 command in the installation guide,
+   then deploy the matching Core Worker/Ingress and each Runner with claims still
+   paused, using `apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc`.
+5. Verify artifact hash, service health, configured concurrency, Sandbox recovery
+   status. Resume claims once this instance runs the matching pair and passes
+   those checks. Verify publication changes on the next review by inspecting
+   its exact revision, output and visible GitHub publication.
 
 ### Review deadline rollout
 
@@ -266,9 +274,12 @@ migration history belongs to that Worker; do not copy it into the public Worker.
 To roll back this migration, restore the previous ingress deployment and Core
 Cron together. Database and bucket contents remain in place.
 
-If a release is bad, stop webhook delivery if it is generating new runs. Roll
-back the affected Worker to its last known-good deployment in the Cloudflare
-Workers deployment controls. Use the matching application build and compatible database schema. Do not delete D1 tables or edit the applied migration ledger to undo
+If a compatible release is bad, stop webhook delivery if it is generating new
+runs. Roll back the affected Worker to its last known-good deployment in the
+Cloudflare Workers deployment controls, using the matching application build and
+compatible database schema. For a breaking release, pause claims and wait for
+drained or stopped Runners before reverting the matching Worker/Runner pair, then
+resume only after the same checks pass. Do not delete D1 tables or edit the applied migration ledger to undo
 a release. A schema rollback is a separate, reviewed migration or an operator
 approved D1 recovery action.
 
@@ -351,9 +362,10 @@ For the first upgrade from a Runner without these endpoints, arrange a quiet
 window and wait for queued and claimed work to finish. Disabling webhooks alone
 does not remove queued work; zero concurrency is invalid.
 
-Back up artifacts/configuration before replacement. Within the maintenance
-window, deploy Core/contracts support before a Runner that emits a new result
-shape, with claims paused. Do not interrupt live jobs just to update
+Back up artifacts/configuration before replacement. A compatible Core/contracts
+addition that only prepares for a new Runner result shape may deploy Worker-first
+without draining; once callback or result-shape acceptance changes, use the
+paired breaking-release sequence above. Do not interrupt live jobs just to update
 documentation or the dashboard. Relay grants survive Worker restarts in D1. Runner revocation is bounded per job and grants expire after six hours; startup does not replay pending revocations. Interrupted agent jobs cannot resume.
 
 A hard crash can leave owned sbx resources. On startup Runner checks its private
