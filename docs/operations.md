@@ -207,11 +207,16 @@ Use the following sequence for a breaking upgrade or rollback, per instance:
    Deploy with `apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc` and verify the
    Worker before starting the replacement Runner. For a one-step incompatible
    schema change, keep HTTP and scheduled writers quiesced during the switch.
+   For a Runner that reads concurrency from Core, send an authenticated
+   `HEAD /runner-claim` before startup with
+   the Runner callback bearer and require `204` plus a present
+   `x-compte-rendu-concurrency` value that is a positive integer or the
+   `default` sentinel. Do not start the Runner if an old Worker returns `405`
+   or the header is missing or invalid.
 5. Start the replacement Runner only when the Worker is ready. The drain flag
    is in memory. The replacement enables claiming as soon as its startup scan
-   succeeds. Verify that authenticated `HEAD /runner-claim` returns `204`
-   with the desired concurrency. Set concurrency in Dashboard Settings;
-   `RUNNER_CONCURRENCY` supplies the startup fallback.
+   succeeds. Set concurrency in Dashboard Settings; `RUNNER_CONCURRENCY`
+   supplies the startup fallback.
 
 For either release path, back up the existing Runner artifact before replacement
 and verify the installed artifact’s SHA256 against the tested build before

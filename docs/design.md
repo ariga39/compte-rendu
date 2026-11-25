@@ -259,7 +259,7 @@ Tests observe public behavior through these established seams:
 | Core typed service                | Admission events, metadata invalidation, Runner protocol results, publication and public projection                   |
 | Review coordinator                | Policy, deduplication, freshness, terminal publication through external adapters                                      |
 | Runner HTTP/process/runtime ports | Admission, capacity, agent result, evidence, deadlines and confirmed cleanup                                          |
-| LLM control/inference HTTP        | Grants, route authorization, native streaming, cancellation and sanitization                                         |
+| LLM control/inference HTTP        | Grants, route authorization, native streaming, cancellation and sanitization                                          |
 | Core store ports                  | Persisted run/disclosure queries and atomic ownership transitions by transaction owner                                |
 | Built dashboard in browser        | Navigation, filters, privacy expiry, refresh and accessibility                                                        |
 
