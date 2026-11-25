@@ -536,6 +536,19 @@ describe('Inference Worker public streaming', () => {
           ],
         },
       ],
+      [
+        'prior provider-stored audio reference',
+        {
+          ...base,
+          messages: [
+            {
+              role: 'assistant',
+              content: 'Earlier audio response',
+              audio: { id: 'audio_1' },
+            },
+          ],
+        },
+      ],
       ['hosted web search options', { ...base, web_search_options: {} }],
       ['previous response lookup', { ...base, previous_response_id: 'resp_1' }],
       ['server conversation', { ...base, conversation: 'conv_1' }],
@@ -568,7 +581,7 @@ describe('Inference Worker public streaming', () => {
       {
         role: 'assistant',
         content: [{ type: 'refusal', refusal: 'I cannot help with that.' }],
-        audio: { id: 'audio_1' },
+        audio: null,
       },
       {
         role: 'assistant',

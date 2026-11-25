@@ -198,8 +198,9 @@ Responses terminal events are capped at 4 MiB; larger events fail the turn.
 
 Both protocols validate only the security boundary: the grant-bound model and
 route, local function tools and tool selection, local text/reasoning/function
-parts, and request size. Hosted tools, remote media or file references and
-server-side state are rejected; other optional provider fields are forwarded
+parts, and request size. Hosted tools, remote media or file references, prior
+provider-stored audio references and server-side state are rejected; other
+optional provider fields, including Chat audio output settings, are forwarded
 unchanged. The relay still forces the frozen model, `store: false` and
 `stream: true`.
 
