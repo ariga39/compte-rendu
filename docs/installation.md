@@ -52,14 +52,11 @@ that cancellation path.
 
 The tracked [`apps/dashboard/wrangler.jsonc`](../apps/dashboard/wrangler.jsonc)
 is the neutral deployment template. Core and ingress remain internal code modules;
-there is no Worker-to-Worker `CORE` binding. From the repository root, render one
-deployment-only sibling configuration for the chosen instance:
+there is no Worker-to-Worker `CORE` binding. Step 4 of
+[Cloudflare provisioning](#cloudflare-provisioning) renders one deployment-only
+sibling configuration for the chosen instance.
 
-```sh
-corepack pnpm render:wrangler <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '<GITHUB_BOT_AUTHOR_IDS_JSON>' '<GITHUB_CHECK_NAME>' '<RELAY_CONFIG_FILE>'
-```
-
-Managed inference is required, so a first render must include
+Managed inference is required, so that first render must include
 `<RELAY_CONFIG_FILE>` (see [Configure the managed inference relay](#configure-the-managed-inference-relay)).
 Prepare that file before rendering; the renderer refuses to overwrite an
 existing generated config and cannot add relay settings later.
@@ -345,6 +342,9 @@ Install the App on the owning account with **Only select repositories**, then
 select the target repository or repositories. Do not choose all repositories
 unless that is an explicit operator decision. GitHub describes this choice in
 [Installing your own GitHub App](https://docs.github.com/en/apps/using-github-apps/installing-your-own-github-app).
+Complete this installation before the initial render: the renderer requires a
+non-empty installation-ID allowlist. Leave webhook delivery inactive until the
+Worker is deployed and the default catalog route and Runner are ready.
 
 Pass the numeric installation ID for each enabled App installation in the
 renderer allowlist. The allowlist is deployment configuration, not a repository
@@ -358,8 +358,9 @@ Enable the App webhook with:
   fixed hostname.
 - Webhook secret: one high-entropy value, entered into both GitHub and the
   ingress `WEBHOOK_SECRET` Worker secret.
-- Active delivery: enabled only after the Worker is deployed and the
-  ingress secret is present.
+- Active delivery: enabled only after the Worker is deployed, the ingress
+  `WEBHOOK_SECRET` is present, the catalog exposes the default route, and the
+  Runner is ready.
 
 GitHub signs deliveries with the configured secret in
 `X-Hub-Signature-256`; the ingress verifies that HMAC before forwarding any
@@ -504,7 +505,9 @@ service below on the host that also runs the remotely managed Tunnel connector.
 On a first installation, create its environment file with mode `0600` and put
 each required variable on one line in systemd `EnvironmentFile` syntax. Values
 are not shell-expanded, so do not use `export` or backslash continuations, and
-keep the JSON on one line. On an upgrade, keep the existing file and values;
+keep the JSON on one line. On a managed upgrade, keep the existing file and
+values. A direct-provider Runner must replace its managed fields as described
+in [Upgrading a direct-provider installation](#upgrading-a-direct-provider-installation);
 the `install` command truncates the destination:
 
 ```sh
@@ -514,12 +517,17 @@ ${EDITOR:-vi} <ABSOLUTE_RUNNER_ENV_FILE>
 
 ```ini
 RUNNER_LLM_RELAY=1
+RUNNER_LLM_GRANT_VERSION=2
 REVIEW_MODEL_CONFIG={"id":"opencode-go/deepseek-review","baseUrl":"https://<INFERENCE_FQDN>/v1","definition":{"name":"DeepSeek review"}}
 RUNNER_AUTH_TOKEN=<runner-application-token>
 RUNNER_CALLBACK_URL=https://<INGRESS_HOST>/runner-callback
 RUNNER_CALLBACK_TOKEN=<static-runner-callback-token>
 RUNNER_CONCURRENCY=1
 ```
+
+Set `RUNNER_LLM_GRANT_VERSION=2` explicitly. The current Runner, Core and
+inference Worker support v2 route descriptors; v1 remains only for a rollback to
+a compatible older deployment.
 
 Confirm the file is still mode `0600` after editing; never commit it. The
 `RUNNER_AUTH_TOKEN` and `RUNNER_CALLBACK_TOKEN` values belong only in this file
@@ -788,7 +796,7 @@ template. Also enable a `workers.dev` subdomain for the public ingress URL. See
 Run these commands from the repository root. Every `wrangler` command below
 uses the temporary invocation described above.
 
-1. Install and check the repository:
+1. Install, check and build the repository once:
 
    ```sh
    corepack pnpm install --frozen-lockfile
@@ -797,41 +805,79 @@ uses the temporary invocation described above.
    corepack pnpm build
    ```
 
-2. Choose an instance name and create the D1 database with its derived name:
+2. Create and install the dedicated product GitHub App before rendering. Use
+   the permissions and subscriptions in
+   [GitHub App setup](#github-app-permissions-and-installation), generate and
+   download its private key, approve `Checks: Write`, install or approve it on
+   the selected repositories, and record `<GITHUB_APP_ID>`,
+   `<GITHUB_INSTALLATION_IDS_JSON>`, optional `<GITHUB_BOT_AUTHOR_IDS_JSON>` and
+   `<GITHUB_CHECK_NAME>`. Keep webhook delivery inactive; its URL does not exist
+   until step 10. The renderer requires at least one installation ID, so
+   installation must precede step 4. Retain the private key securely for step 7;
+   do not commit it or reuse the repository-operations App credentials.
+
+3. Create both D1 databases and the private R2 bucket. `<RELAY_D1_DATABASE_ID>`
+   is the separate relay grants database required by the managed inference
+   Worker:
 
    ```sh
    corepack pnpm dlx wrangler@4.124.0 d1 create <INSTANCE_NAME>-review-state
-   ```
-
-   Create the private R2 bucket and apply one 90-day official R2 lifecycle
-   rule. The rule name and `reviews/` prefix are positional arguments in
-   Wrangler 4.124.0; this is bucket configuration, not application cleanup
-   code:
-
-   ```sh
+   corepack pnpm dlx wrangler@4.124.0 d1 create <INSTANCE_NAME>-relay-grants
    corepack pnpm dlx wrangler@4.124.0 r2 bucket create <INSTANCE_NAME>-review-evidence
    corepack pnpm dlx wrangler@4.124.0 r2 bucket lifecycle add <INSTANCE_NAME>-review-evidence review-evidence-retention reviews/ --expire-days 90 --force
    ```
 
+   Copy the returned IDs as `<D1_DATABASE_ID>` and `<RELAY_D1_DATABASE_ID>`.
    The lifecycle rule is evaluated by Cloudflare R2 and expires objects under
    `reviews/` automatically. Cleanup confirmation no longer writes a separate
    recovery object or prefix: Core applies the normal terminal callback state.
-
-   Copy only the returned `database_id` into the renderer command below. Do
-   not edit either tracked template or copy any account ID, token, or other
+   Do not edit either tracked template or copy any account ID, token, or other
    output into the repository.
 
-3. Render deployment-only configs from the repository root:
+4. Create the untracked relay config file with the values required by the
+   renderer, then render both Worker configs. The relay config requires a
+   32-character account ID, the relay D1 database ID, an inference hostname, a
+   Gateway ID, the default route and one or more catalog sources:
+
+   ```json
+   {
+     "accountId": "<CLOUDFLARE_ACCOUNT_ID>",
+     "databaseId": "<RELAY_D1_DATABASE_ID>",
+     "hostname": "<INFERENCE_FQDN>",
+     "gatewayId": "<AI_GATEWAY_ID>",
+     "defaultRoute": "<DEFAULT_MODEL_ROUTE>",
+     "catalogSources": [
+       {
+         "url": "https://<MODELS_HOST>/v1/models",
+         "prefix": "<REVIEW_ROUTE_PREFIX>",
+         "providerSlug": "<GATEWAY_PROVIDER_SLUG>",
+         "credentialAlias": "<BYOK_CREDENTIAL_ALIAS>"
+       }
+     ]
+   }
+   ```
 
    ```sh
    corepack pnpm render:wrangler <INSTANCE_NAME> <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '<GITHUB_BOT_AUTHOR_IDS_JSON>' '<GITHUB_CHECK_NAME>' '<RELAY_CONFIG_FILE>'
    ```
 
-   This writes `apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc`. Use these generated paths
-   for every deployment operation below; never modify the tracked templates.
+   This writes `apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc` and
+   `apps/inference-worker/wrangler.<INSTANCE_NAME>.jsonc`. Use these generated
+   paths for every operation below; never modify the tracked templates.
 
-4. Apply the tracked D1 migration remotely. Use the binding name from the
-   generated config, not a guessed database identifier:
+5. Deploy the relay before the application Worker. Provision the Gateway, BYOK
+   provider and catalog sources described in the
+   [managed relay catalog](llm-service.md#managed-relay-model-catalog), apply the
+   relay migrations, set its Run token, and deploy it on the dedicated
+   hostname:
+
+   ```sh
+   corepack pnpm dlx wrangler@4.124.0 d1 migrations apply RELAY_DB --remote --config apps/inference-worker/wrangler.<INSTANCE_NAME>.jsonc
+   corepack pnpm dlx wrangler@4.124.0 secret put AI_GATEWAY_RUN_TOKEN --config apps/inference-worker/wrangler.<INSTANCE_NAME>.jsonc
+   corepack pnpm dlx wrangler@4.124.0 deploy --config apps/inference-worker/wrangler.<INSTANCE_NAME>.jsonc
+   ```
+
+6. Apply the application migrations to `REVIEW_DB`:
 
    ```sh
    corepack pnpm dlx wrangler@4.124.0 d1 migrations list REVIEW_DB --remote --config apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc
@@ -839,85 +885,92 @@ uses the temporary invocation described above.
    ```
 
    Apply **all** pending files from [the migration directory](../apps/core/migrations/)
-   in order. They cover run state, ownership/cleanup, evidence, publication,
-   Checks, dashboard visibility/lifecycle, branch refs, decisions and frozen
-   review configuration. Do not edit applied migrations or replace the database.
-   New Core code must not run against an older schema.
+   in order. This is a fresh database, so the upgrade-only `0019` ordering does
+   not apply. Do not edit applied migrations or replace the database. Legacy
+   Durable Object migration history belongs only to the retired Core Worker;
+   the unified public Worker does not own those classes. See the
+   [existing-installation migration procedure](operations.md#update-and-rollback).
 
-   Legacy Durable Object migration history belongs only to the retired Core
-   Worker. The unified public Worker does not own those classes; do not copy
-   their migration entries into its configuration. See the existing-installation
-   migration procedure in [Operations](operations.md#update-and-rollback).
-
-5. Enter the two core secrets. Each command prompts for the value; do not
-   append a value to the command line, use `echo`, or redirect a secret from a
-   shell command:
-
-   Before these `secret put` commands, create a dedicated Compte rendu
-   product GitHub App and generate/download its private key. Supply that App's
-   numeric, non-secret App ID to the renderer command in step 3.
-
-   The local repository-operations App and private key are not the product
-   identity; do not reuse them. Do not install or approve the App yet; after
-   the Worker is deployed, complete the final webhook configuration and
-   installation sequence in step 8. Follow GitHub's
-   [private-key guidance](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/managing-private-keys-for-github-apps)
-   when generating and downloading the key.
+7. Enter the application Worker secrets. Each command prompts for the value; do
+   not append a value to the command line, use `echo`, or redirect a secret from
+   a shell command. Use the product App private key generated in step 2; the
+   renderer already received its numeric App ID in step 4.
 
    ```sh
    corepack pnpm dlx wrangler@4.124.0 secret put GITHUB_APP_PRIVATE_KEY --config apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc
    corepack pnpm dlx wrangler@4.124.0 secret put RUNNER_AUTH_TOKEN --config apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc
-   ```
-
-   The application Worker holds the GitHub App private key and shares the Runner authentication token with the Runner. On the managed inference path, AI Gateway holds the upstream model credential and the inference Worker holds the Gateway Run token.
-   Cloudflare's `secret put` creates and deploys a new Worker version
-   immediately, so complete the D1 migration before these commands. Worker
-   secrets are encrypted bindings and are intentionally separate from
-   plaintext `vars`:
-   [Worker secrets](https://developers.cloudflare.com/workers/configuration/secrets/).
-
-6. Enter the webhook and Runner callback secrets into the same Worker:
-
-   ```sh
    corepack pnpm dlx wrangler@4.124.0 secret put WEBHOOK_SECRET --config apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc
    corepack pnpm dlx wrangler@4.124.0 secret put RUNNER_CALLBACK_TOKEN --config apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc
    ```
 
-   `WEBHOOK_SECRET` must match the GitHub App. `RUNNER_CALLBACK_TOKEN` must
-   match the Runner and authenticates claim, callback and progress requests.
+   The application Worker holds the GitHub App private key and shares the Runner
+   authentication token with the Runner. AI Gateway holds the upstream model
+   credential and the inference Worker holds the Gateway Run token.
+   Cloudflare's `secret put` creates and deploys a new Worker version
+   immediately, so apply the application migrations first. `WEBHOOK_SECRET`
+   must match the GitHub App. `RUNNER_CALLBACK_TOKEN` must match the Runner and
+   authenticates claim, callback and progress requests. Worker secrets are
+   encrypted bindings and are intentionally separate from plaintext `vars`:
+   [Worker secrets](https://developers.cloudflare.com/workers/configuration/secrets/).
 
-7. Build and deploy the single SvelteKit Worker:
+8. Deploy the application Worker:
 
    ```sh
-   corepack pnpm build
    corepack pnpm dlx wrangler@4.124.0 deploy --config apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc
    ```
 
-   Confirm `RUNNER`, `REVIEW_DB`, `EVIDENCE_BUCKET`, `ASSETS` and the Cron
-   trigger are present. Record the public URL as `<INGRESS_URL>`; the retained
-   name is `<INSTANCE_NAME>-ingress` so existing domains and callback URLs remain
-   stable. No separate Core Worker deployment is needed.
+   Confirm `RUNNER`, `REVIEW_DB`, `EVIDENCE_BUCKET`, `ASSETS`, `INFERENCE_RELAY`
+   and the Cron trigger are present. Record the public URL as `<INGRESS_URL>`;
+   the retained name is `<INSTANCE_NAME>-ingress` so existing domains and
+   callback URLs remain stable. No separate Core Worker deployment is needed.
 
-8. After the Worker is deployed, configure the final webhook URL as
-   `<INGRESS_URL>`, set the matching webhook secret, and confirm the final
-   permissions and all subscriptions listed in [GitHub App setup](#github-app-permissions-and-installation),
-   including `pull_request`, `issue_comment`, `check_run`, `check_suite` and repository metadata events. Only
-   then perform the one GitHub App installation or approval for the selected
-   repositories. Activate delivery after installation and send a test delivery
-   only after activation.
+9. Wait for the real catalog refresh to expose the default route. Use either
+   readiness path:
 
-9. Keep the generated, gitignored instance configurations for upgrades. They
-   include choices such as account, domain, assets, Cron and Check branding.
-   The renderer refuses to overwrite them. Back them up privately; do not discard
-   instance settings and regenerate a default configuration for an upgrade.
-   On each upgrade, merge tracked template changes into those retained files as
-   described in [Update and rollback](operations.md#update-and-rollback).
+   - **API:** configure the
+     [operator token](review-configuration.md#operator-api), then query the
+     [authenticated catalog](llm-service.md#managed-relay-model-catalog). Keep
+     the bearer value in a mode-0600 curl config file; never print it or put it
+     in command arguments:
+
+     ```sh
+     corepack pnpm dlx wrangler@4.124.0 secret put REVIEW_CONFIGURATION_TOKEN --config apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc
+     curl --fail --silent --show-error --config <PRIVATE_CURL_CONFIG> "https://<INGRESS_HOST>/api/review-configuration/catalog"
+     ```
+
+   - **Dashboard:** sign in to `https://<INGRESS_HOST>/settings` with an account
+     listed in `DASHBOARD_MODEL_EDITOR_IDS` and open the catalog.
+
+   Confirm the `defaultRoute` from the relay config is present and its source
+   refresh succeeded. Then start or restart the Runner with the managed
+   environment from [Runner configuration](#runner-configuration) and verify its
+   maintenance status per
+   [drain and status](operations.md#drain-before-maintenance). Do not send
+   webhook deliveries before both checks pass.
+
+10. Only now enable webhook delivery. Set the webhook URL to `<INGRESS_URL>`,
+    use the same high-entropy value as the ingress `WEBHOOK_SECRET`, confirm the
+    permissions and all subscriptions listed in
+    [GitHub App setup](#github-app-permissions-and-installation), and set
+    delivery to **Active**. The App installation itself was completed in step 2.
+    Send a test delivery only after activation.
+
+11. Keep the generated, gitignored instance configurations for upgrades. They
+    include choices such as account, domain, assets, Cron and Check branding.
+    The renderer refuses to overwrite them. Back them up privately; do not
+    discard instance settings and regenerate a default configuration for an
+    upgrade. On each upgrade, merge tracked template changes into those retained
+    files as described in
+    [Update and rollback](operations.md#update-and-rollback).
 
 The application Worker needs the following base settings. Add the [dashboard login configuration](review-configuration.md#dashboard-sign-in-and-model-settings) for operator access and the [relay bindings](#configure-the-managed-inference-relay) for managed inference.
 
-| Worker                    | Plain variable                                 | Secrets                                                                                  | Non-secret bindings                                |
-| ------------------------- | ---------------------------------------------- | ---------------------------------------------------------------------------------------- | -------------------------------------------------- |
-| `<INSTANCE_NAME>-ingress` | `GITHUB_APP_ID`, allowlists, branding settings | `GITHUB_APP_PRIVATE_KEY`, `RUNNER_AUTH_TOKEN`, `WEBHOOK_SECRET`, `RUNNER_CALLBACK_TOKEN` | `REVIEW_DB`, `EVIDENCE_BUCKET`, `RUNNER`, `ASSETS` |
+| Worker                    | Plain variable                                                              | Secrets                                                                                                                         | Non-secret bindings                                                   |
+| ------------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| `<INSTANCE_NAME>-ingress` | `GITHUB_APP_ID`, allowlists, `RELAY_DEFAULT_MODEL_ROUTE`, branding settings | `GITHUB_APP_PRIVATE_KEY`, `RUNNER_AUTH_TOKEN`, `WEBHOOK_SECRET`, `RUNNER_CALLBACK_TOKEN`; optional `REVIEW_CONFIGURATION_TOKEN` | `REVIEW_DB`, `EVIDENCE_BUCKET`, `RUNNER`, `ASSETS`, `INFERENCE_RELAY` |
+
+`REVIEW_CONFIGURATION_TOKEN` is optional and enables the operator API and
+catalog read; review execution does not depend on it.
 
 `GITHUB_APP_ID`, `ALLOWED_INSTALLATION_IDS`, and `ALLOWED_BOT_AUTHOR_IDS` are
 deployment configuration, not secrets. Supply them only through the renderer:
@@ -1135,87 +1188,20 @@ the renderer over existing files.
 
 For the first render only, the renderer accepts the Check name as the seventh
 argument, before the eighth relay config file. Include the Bot allowlist
-argument when supplying it; use `[]` when that option is unused. For example:
+argument when supplying it; use `[]` when that option is unused. Pass the name
+in the step 4 render command, or an empty quoted argument when unused.
 
-```sh
-corepack pnpm render:wrangler ariga39-ai-reviewers <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '[]' 'Ariga39 AI Review' '<RELAY_CONFIG_FILE>'
-```
+## Configure the managed inference relay
 
-### Configure the managed inference relay
+Managed inference is part of the linear [Cloudflare provisioning](#cloudflare-provisioning)
+path above. Step 3 creates or reuses `<INSTANCE_NAME>-relay-grants`; step 4
+prepares the required relay config and renders both Worker configs; step 5
+applies relay migrations, sets `AI_GATEWAY_RUN_TOKEN` and deploys the relay
+before the application Worker. Provider and catalog details remain in the
+[managed relay catalog](llm-service.md#managed-relay-model-catalog). There is
+no separate fresh-install procedure.
 
-Use one relay D1 database, inference hostname, Gateway, BYOK credential and scoped
-Gateway Run token per installation. Provision them in the same account as the
-application Worker. Give the relay only its own D1 binding. In AI Gateway, set
-the upstream API base (including its version path) when using a custom provider.
-For OpenAI Platform, select the built-in `native:openai` destination and
-store the upstream credential in that account’s Secrets Store. Configure the
-matching BYOK alias in this gateway.
-The Run token belongs in the inference Worker's `AI_GATEWAY_RUN_TOKEN` secret.
-The Runner receives job grants through the existing authenticated callback origin.
-
-Create the separate relay D1 database and the untracked relay config file before
-the first render:
-
-```sh
-corepack pnpm dlx wrangler@4.124.0 d1 create <INSTANCE_NAME>-relay-grants
-```
-
-Copy only the returned database ID. Keep the relay config outside the repository;
-it contains deployment identifiers and catalog sources. The example below uses a
-public model list. Protected lists and fixed aliases are described in the
-[relay catalog configuration](llm-service.md#managed-relay-model-catalog).
-
-```json
-{
-  "accountId": "<CLOUDFLARE_ACCOUNT_ID>",
-  "databaseId": "<RELAY_D1_DATABASE_ID>",
-  "hostname": "inference.example.net",
-  "gatewayId": "review",
-  "defaultRoute": "review-provider/deepseek-v4.1-flash",
-  "catalogSources": [
-    {
-      "url": "https://models.example.net/v1/models",
-      "prefix": "review-provider/",
-      "providerSlug": "custom-review",
-      "credentialAlias": "default"
-    }
-  ]
-}
-```
-
-The first `render:wrangler` call must pass the Check name as the seventh
-positional argument and this file as the eighth. Use an empty quoted Check name
-when unused; positional arguments cannot be skipped. The renderer writes
-instance-specific files to `apps/dashboard` and `apps/inference-worker`. It
-refuses to overwrite existing generated files, so it cannot add relay settings
-to an installation that was rendered without them. Prepare the file before the
-first render. For an installation with custom application routes or bindings,
-compare the generated files to the live configuration and carry those settings
-forward.
-
-#### Fresh installation
-
-1. Apply the inference Worker's migrations against its relay D1 database, then
-   deploy the inference Worker on the dedicated hostname with its Run secret.
-2. Deploy the application Worker with the private `INFERENCE_RELAY` binding and
-   keep `RELAY_DEFAULT_MODEL_ROUTE` on a route the new Runner can serve. Confirm
-   that the operator catalog endpoint lists every selected reviewer and
-   synthesis route after the scheduled refresh.
-3. Configure the Runner with its managed environment:
-   `RUNNER_CALLBACK_URL`, `RUNNER_CALLBACK_TOKEN`, and a `REVIEW_MODEL_CONFIG`
-   whose `baseUrl` is the dedicated HTTPS inference FQDN on port 443 ending in
-   `/v1`. Do not set `MODEL_SECRET_COMMAND`. If a selected route uses a non-Chat
-   protocol or declares a context or output limit, set
-   `RUNNER_LLM_GRANT_VERSION=2` only when the Runner and both Workers support
-   v2, and verify the inference Worker serves that protocol before enabling it.
-   Then start the Runner.
-4. Run a fresh PR review. Verify the published review is for the claimed
-   revision and the Check terminates. In the archived session exports, confirm
-   that each selected reviewer completed its own review and returned a
-   conclusion. Check the per-model usage, verify grant reuse is denied after
-   cleanup, and confirm the Sandbox is gone.
-
-#### Upgrading a direct-provider installation
+### Upgrading a direct-provider installation
 
 An already managed installation does not repeat this cutover. It also does not
 need to pause admissions, drain, or rerender merely for an ordinary update; use
@@ -1224,13 +1210,12 @@ retained generated files.
 
 A direct-provider installation has an old Runner without a relay client. Prepare
 one target-release checkout and both configs first, outside the maintenance
-window, then drain and switch:
+window, then drain and switch. Only these differences apply:
 
-1. Create a persistent clean worktree at the target revision and render
-   candidate configs with the existing instance IDs. The renderer refuses to run
-   where a generated config exists, so do not use the retained checkout. Read
-   the App ID, D1 ID, VPC Service ID, allowlists and Check name from the
-   retained `apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc`:
+1. Create a persistent clean worktree at the target revision and build there.
+   Create or reuse `<INSTANCE_NAME>-relay-grants` and prepare `$RELAY_CONFIG` as
+   in steps 3–4, using the existing instance IDs, then run the step 4 renderer
+   command in the worktree:
 
    ```sh
    INSTANCE_NAME=<INSTANCE_NAME>
@@ -1241,22 +1226,27 @@ window, then drain and switch:
    git -C "$MAIN_CHECKOUT" worktree add --detach "$TARGET_CHECKOUT" <TARGET_REVISION>
    cd "$TARGET_CHECKOUT"
    corepack pnpm install --frozen-lockfile
-   corepack pnpm render:wrangler "$INSTANCE_NAME" <GITHUB_APP_ID> <D1_DATABASE_ID> <RUNNER_VPC_SERVICE_ID> '<GITHUB_INSTALLATION_IDS_JSON>' '<GITHUB_BOT_AUTHOR_IDS_JSON>' '<GITHUB_CHECK_NAME>' "$RELAY_CONFIG"
+   # run the step 4 renderer command here with the existing IDs and "$RELAY_CONFIG"
+   corepack pnpm check
+   corepack pnpm test
+   corepack pnpm build
    ```
 
-2. Keep `MAIN_CHECKOUT` only as the backup of the old config and artifact.
-   Copy its application config into `TARGET_CHECKOUT`; leave the generated
-   inference config there unchanged:
+   Do not render in the retained checkout. Keep `MAIN_CHECKOUT` only as the
+   backup of the old config and artifact.
+
+2. Copy the retained application config into `TARGET_CHECKOUT`; leave the
+   generated inference config there unchanged:
 
    ```sh
    cp "$MAIN_CHECKOUT/apps/dashboard/wrangler.$INSTANCE_NAME.jsonc" \
      "$TARGET_CHECKOUT/apps/dashboard/wrangler.$INSTANCE_NAME.jsonc"
    ```
 
-3. Manually add only these relay entries to that target-worktree application
+   Manually add only these relay entries to that target-worktree application
    config; keep its private routes, D1/R2 bindings, allowlists, origins, Check
    name and secret references:
-   - `services`: `{"binding":"INFERENCE_RELAY","service":"<INSTANCE_NAME>-inference","entrypoint":"InferenceWorker"}`
+   - add `{"binding":"INFERENCE_RELAY","service":"<INSTANCE_NAME>-inference","entrypoint":"InferenceWorker"}` to the existing `services` array; keep other service entries
    - `vars.RELAY_DEFAULT_MODEL_ROUTE`: the relay config's `defaultRoute`
    - `account_id`: only if the retained config has none
 
@@ -1265,64 +1255,49 @@ window, then drain and switch:
    `<INSTANCE_NAME>-relay-grants` (the relay D1 ID) and required secret
    `AI_GATEWAY_RUN_TOKEN`.
 
-4. From `TARGET_CHECKOUT`, run the release checks and build both Workers and
-   the Runner:
-
-   ```sh
-   corepack pnpm check
-   corepack pnpm test
-   corepack pnpm build
-   ```
-
-5. Pause inbound admissions, for example by disabling the GitHub App webhook.
-6. Let the existing Core and old Runner finish all queued and running Jobs, then
+3. Pause inbound admissions, for example by disabling the GitHub App webhook.
+4. Let the existing Core and old Runner finish all queued and running Jobs, then
    confirm Core shows none remaining. Resolve failed cleanup with the
    [maintenance procedure](operations.md#recover-failed-cleanup).
-7. Drain the old Runner and wait for `drained: true`, then stop it. Do not deploy
+5. Drain the old Runner and wait for `drained: true`, then stop it. Do not deploy
    the managed Core before this point: a newly frozen selection would otherwise
    be claimed by a Runner that cannot serve it.
-8. From `TARGET_CHECKOUT`, apply pending `REVIEW_DB` migrations before `0019`,
-   then apply the relay migrations and deploy both Workers. If `0019` is
-   already applied, skip the subshell and run the normal `REVIEW_DB` migration
-   now (the command in step 9). If it is pending, hold `0019` and any later
-   migrations in a private directory inside this target worktree; the subshell
-   restores them on success or failure:
+6. From `TARGET_CHECKOUT`, follow step 5 (relay) and then step 6
+   (`REVIEW_DB`) in order. The only difference is `0019`: if it is already
+   applied, use the normal step 6 migration; otherwise hold `0019` and every
+   later migration so the first apply stops before them:
 
    ```sh
-   set -e
+   HOLD_DIR="$(mktemp -d "$TARGET_CHECKOUT/.migration-hold.XXXXXX")"
    (
-     HOLD_DIR="$(mktemp -d "$TARGET_CHECKOUT/.migration-hold.XXXXXX")"
+     set -eu
      trap 'mv "$HOLD_DIR"/*.sql apps/core/migrations/ 2>/dev/null || true; rmdir "$HOLD_DIR"' EXIT
-     for migration in apps/core/migrations/*.sql; do
+     for migration in apps/core/migrations/0*.sql; do
        version=${migration##*/}
        version=${version%%_*}
+       version=${version%.sql}
+       version=${version#0}; version=${version#0}; version=${version#0}
        if [ "$version" -ge 19 ]; then mv "$migration" "$HOLD_DIR"/; fi
      done
      corepack pnpm dlx wrangler@4.124.0 d1 migrations apply REVIEW_DB --remote --config apps/dashboard/wrangler.$INSTANCE_NAME.jsonc
    )
-   corepack pnpm dlx wrangler@4.124.0 d1 migrations apply RELAY_DB --remote --config apps/inference-worker/wrangler.$INSTANCE_NAME.jsonc
-   corepack pnpm dlx wrangler@4.124.0 secret put AI_GATEWAY_RUN_TOKEN --config apps/inference-worker/wrangler.$INSTANCE_NAME.jsonc
-   corepack pnpm dlx wrangler@4.124.0 deploy --config apps/inference-worker/wrangler.$INSTANCE_NAME.jsonc
-   corepack pnpm dlx wrangler@4.124.0 deploy --config apps/dashboard/wrangler.$INSTANCE_NAME.jsonc
    ```
 
-9. Verify the deployed application Worker serves requests and completes a
-   scheduled run, then run the normal `REVIEW_DB` migration in the required
-   [check retry storage order](operations.md#check-retry-storage-removal). It
-   applies `0019` and any later pending migrations:
+   Do not repeat step 7 (application secrets). Keep the existing application
+   secrets; only add an individually missing required secret before deploying
+   with step 8. After the application Worker is deployed and verified, rerun
+   the step 6 `REVIEW_DB` migration so `0019` and later migrations apply.
 
-   ```sh
-   corepack pnpm dlx wrangler@4.124.0 d1 migrations apply REVIEW_DB --remote --config apps/dashboard/wrangler.$INSTANCE_NAME.jsonc
-   ```
+7. Before starting the new Runner, migrate the existing
+   `<ABSOLUTE_RUNNER_ENV_FILE>`: remove `MODEL_SECRET_COMMAND`, any disabled
+   `RUNNER_LLM_RELAY` value and `RUNNER_LLM_SERVICE_SOCKET`; set
+   `RUNNER_LLM_RELAY=1` and `RUNNER_LLM_GRANT_VERSION=2`; set
+   `RUNNER_CALLBACK_URL=https://<INGRESS_HOST>/runner-callback` and
+   `RUNNER_CALLBACK_TOKEN=<static-runner-callback-token>`; and replace
+   `REVIEW_MODEL_CONFIG` with the managed config whose `baseUrl` is
+   `https://<INFERENCE_FQDN>/v1`. Keep `RUNNER_AUTH_TOKEN` and concurrency.
 
-10. Enable the verified build from `TARGET_CHECKOUT` as the new Runner. Back up
-    the old artifact and environment file, update the unit's `<REPO_ROOT>` to
-    `$TARGET_CHECKOUT` as described in
-    [KVM permissions and the persistent Runner service](#kvm-permissions-and-the-persistent-runner-service),
-    verify `apps/runner/dist/runner.js`, and start it with the managed
-    environment from the fresh installation sequence.
-11. Re-enable the webhook. Confirm the catalog, then run a fresh PR review and
-    apply the same acceptance checks as a fresh installation. If a route uses a
-    non-Chat protocol or declares a context or output limit, set
-    `RUNNER_LLM_GRANT_VERSION=2` only after verifying that the Runner and both
-    Workers support v2.
+   Then continue with step 9 to wait for the catalog `defaultRoute`, point the
+   Runner unit's `<REPO_ROOT>` at `$TARGET_CHECKOUT` and start it as described
+   in [KVM permissions and the persistent Runner service](#kvm-permissions-and-the-persistent-runner-service).
+   Finish with step 10 to enable webhook delivery and run the acceptance review.
