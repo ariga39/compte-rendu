@@ -167,10 +167,17 @@ request, and admission reads the state in the same statement that records the
 request.
 
 `effortStates()` returns the current route markers for settings.
-`effortDetails({jobId, cursor})` returns at most 20 authorized per-request
-attempt observations with keyset pagination. The terminal `ModelUsageSummary`
-carries a small per-route outcome summary aggregated across the whole job; it
-never embeds per-request attempts.
+`effortDetails({jobId, cursor, route?})` returns at most 20 authorized
+per-request attempt observations with keyset pagination; `route` narrows the
+page to one reviewer route. Each request carries its ledger `status`, and each
+attempt carries the allowlisted control sent on the wire plus the control the
+upstream reported when it supplied one. Responses records one attempt with the
+same single finalization write that stores its usage; the relay does not add a
+D1 round trip or retain the raw response. Attempt controls decode both Chat and
+Responses shapes, while historical rows without attempt detail remain readable
+and are never backfilled. The terminal `ModelUsageSummary` carries a small
+per-route outcome summary aggregated across the whole job; it never embeds
+per-request attempts.
 
 For performance acceptance, compare the same streaming upstream, route count and
 concurrency across three groups: no selected effort, explicit effort, and shared

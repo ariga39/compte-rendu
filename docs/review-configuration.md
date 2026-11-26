@@ -299,12 +299,26 @@ never called has no execution outcome. The page does not claim to know the
 upstream's internal thinking strength.
 
 The current editor may load bounded per-request ledger records with `GET
-/api/jobs/:runId/effort-details` (optional `cursor`). The endpoint requires the
-same editor authorization as settings and reads the relay `effortDetails()`
-control call; it never exposes prompts, raw upstream bodies, credentials,
-signatures or reasoning content. Each request lists at most two attempts with
-the sent and reported allowlisted controls and `complete`, `rejected` or
-`incomplete` status. `nextCursor` supports further retained pages. A missing
-grant or an expired ledger returns a controlled "no longer retained" response;
-an interrupted or missing record is `incomplete`, not a confirmed "not sent" or
-"not reported".
+/api/jobs/:runId/effort-details` (optional `cursor` and `route`). The endpoint
+requires the same editor authorization as settings and reads the relay
+`effortDetails()` control call; it never exposes prompts, raw upstream bodies,
+credentials, signatures or reasoning content. `route` filters the retained rows
+to one reviewer route, so an operator can jump directly to a specific model
+across pages instead of paging through other requests. An invalid route is a
+`400`, not a "no longer retained" `404`.
+
+Each request returns its ledger `status` (`pending`, `complete` or
+`incomplete`), the configured effort, at most two attempts with the sent and
+reported allowlisted controls, and `complete`, `rejected` or `incomplete` per
+attempt. `nextCursor` supports further retained pages. A missing grant or an
+expired ledger returns a controlled "no longer retained" response.
+
+The UI keeps these dimensions separate. A completed request with no retained
+attempt row shows a neutral "attempt detail not recorded"; it is not a crash and
+not a running request. A `pending` row with no attempt row says only that no
+completion or attempt record was retained: a failed request can still carry
+`pending` because partial saving does not change the status column. An
+unrecognised or absent sent control is shown as "no allowlisted effort
+recorded", never asserted to be the upstream default. An absent upstream report
+is "not reported by upstream". Historical rows are read as-is; the ledger is not
+backfilled.

@@ -5,7 +5,14 @@ import { MAX_RESPONSES_TERMINAL_BYTES } from '../../apps/inference-worker/src/re
 import { responsesSecondTurnFixture } from '../fixtures/responses-second-turn';
 import { responsesMultipartToolOutputFixture } from '../fixtures/responses-multipart';
 
-import { control, issueGrant, post, runtime, upstreamState } from './inference-protocol-helpers';
+import {
+  control,
+  d1Now,
+  issueGrant,
+  post,
+  runtime,
+  upstreamState,
+} from './inference-protocol-helpers';
 
 const questions = {
   responses: {
@@ -799,6 +806,216 @@ describe('Responses route authentication and native streaming', () => {
     await expect(
       runtime.INFERENCE.usage({ jobId: 'responses-unterminated-frame' }),
     ).resolves.toMatchObject({ models: [{ requests: 1, incompleteRequests: 1 }] });
+  });
+
+  it('records the sent and upstream-reported Responses effort through a tool turn', async () => {
+    await control('responses-effort-echo');
+    const token = await issueGrant('responses-effort-detail', [
+      {
+        ...questions.responses,
+        effort: { name: 'low', controls: { reasoning: { effort: 'low' } } },
+      },
+    ]);
+
+    const response = await post(token, '/v1/responses', responsesBody());
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('event: response.completed');
+
+    const [upstream] = (await upstreamState()).requests;
+    const body = JSON.parse(upstream!.body) as Record<string, unknown>;
+    expect(body.reasoning).toEqual({ effort: 'low' });
+    expect(body.input).toEqual(responsesBody().input);
+    expect(body.tools).toEqual(responsesBody().tools);
+
+    await expect(
+      runtime.INFERENCE.effortDetails({ jobId: 'responses-effort-detail' }),
+    ).resolves.toEqual({
+      jobId: 'responses-effort-detail',
+      nextCursor: null,
+      requests: [
+        {
+          requestId: expect.any(String),
+          route: 'sol-review',
+          status: 'complete',
+          selected: 'low',
+          generation: 0,
+          fallback: null,
+          reason: null,
+          attempts: [
+            {
+              attempt: 1,
+              sent: { reasoning: { effort: 'low' } },
+              reported: { reasoning: { effort: 'low' } },
+              result: 'complete',
+            },
+          ],
+        },
+      ],
+    });
+    await runtime.INFERENCE.revoke({ jobId: 'responses-effort-detail' });
+  });
+
+  it('keeps a completed request with an omitted upstream effort distinct from missing evidence', async () => {
+    await control('responses-success');
+    const token = await issueGrant('responses-effort-detail-omitted', [
+      {
+        ...questions.responses,
+        effort: { name: 'low', controls: { reasoning: { effort: 'low' } } },
+      },
+    ]);
+    const response = await post(token, '/v1/responses', responsesBody());
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('event: response.completed');
+
+    const details = await runtime.INFERENCE.effortDetails({
+      jobId: 'responses-effort-detail-omitted',
+    });
+    expect(details?.requests[0]).toMatchObject({
+      status: 'complete',
+      selected: 'low',
+      attempts: [
+        {
+          attempt: 1,
+          sent: { reasoning: { effort: 'low' } },
+          reported: null,
+          result: 'complete',
+        },
+      ],
+    });
+
+    // A completed historical row without attempt evidence projects as complete
+    // with an empty attempt list, never as pending or incomplete.
+    await runtime.RELAY_DB.prepare(
+      `INSERT INTO inference_requests
+        (request_id, job_id, route, model, status, created_at, effort_name, effort_generation)
+       VALUES (?, ?, ?, ?, 'complete', ?, 'low', 0)`,
+    )
+      .bind(
+        'responses-historical-complete',
+        'responses-effort-detail-omitted',
+        'sol-review',
+        'gpt-sol-native',
+        await d1Now(),
+      )
+      .run();
+    const withHistory = await runtime.INFERENCE.effortDetails({
+      jobId: 'responses-effort-detail-omitted',
+    });
+    expect(
+      withHistory?.requests.find(
+        (request) => request.requestId === 'responses-historical-complete',
+      ),
+    ).toMatchObject({ status: 'complete', attempts: [] });
+    await runtime.INFERENCE.revoke({ jobId: 'responses-effort-detail-omitted' });
+  });
+
+  it('records only allowlisted Responses controls sent from a Default route', async () => {
+    await control('responses-effort-echo');
+    const token = await issueGrant('responses-effort-passthrough', [questions.responses]);
+    const forwarded = await post(token, '/v1/responses', {
+      ...responsesBody(),
+      reasoning: { effort: 'high', summary: 'auto' },
+    });
+    expect(forwarded.status).toBe(200);
+    await forwarded.text();
+    const unknown = await post(token, '/v1/responses', {
+      ...responsesBody(),
+      reasoning: { effort: 'extreme', summary: 'auto' },
+    });
+    expect(unknown.status).toBe(200);
+    await unknown.text();
+    const omitted: Record<string, unknown> = { ...responsesBody() };
+    delete omitted.reasoning;
+    const absent = await post(token, '/v1/responses', omitted);
+    expect(absent.status).toBe(200);
+    await absent.text();
+
+    const details = await runtime.INFERENCE.effortDetails({
+      jobId: 'responses-effort-passthrough',
+    });
+    expect(details?.requests.map((request) => request.attempts[0]?.sent)).toEqual([
+      { reasoning: { effort: 'high' } },
+      null,
+      null,
+    ]);
+    await expect(
+      runtime.INFERENCE.usage({ jobId: 'responses-effort-passthrough' }),
+    ).resolves.toMatchObject({ models: [{ requests: 3 }] });
+    const usage = await runtime.INFERENCE.usage({ jobId: 'responses-effort-passthrough' });
+    expect(usage?.efforts).toBeUndefined();
+    await runtime.INFERENCE.revoke({ jobId: 'responses-effort-passthrough' });
+  });
+
+  it('persists an incomplete Responses attempt and never projects it as running', async () => {
+    await control('responses-effort-failed');
+    const token = await issueGrant('responses-effort-incomplete', [
+      {
+        ...questions.responses,
+        effort: { name: 'low', controls: { reasoning: { effort: 'low' } } },
+      },
+    ]);
+    const response = await post(token, '/v1/responses', responsesBody());
+    expect(response.status).toBe(200);
+    await expect(response.text()).rejects.toThrow();
+
+    const pending = await runtime.INFERENCE.effortDetails({
+      jobId: 'responses-effort-incomplete',
+    });
+    expect(pending?.requests[0]).toMatchObject({
+      status: 'pending',
+      attempts: [
+        {
+          attempt: 1,
+          sent: { reasoning: { effort: 'low' } },
+          reported: { reasoning: { effort: 'max' } },
+          result: 'incomplete',
+        },
+      ],
+    });
+
+    await runtime.INFERENCE.revoke({ jobId: 'responses-effort-incomplete' });
+    const sealed = await runtime.INFERENCE.effortDetails({
+      jobId: 'responses-effort-incomplete',
+    });
+    expect(sealed?.requests[0]).toMatchObject({
+      status: 'incomplete',
+      attempts: [{ attempt: 1, result: 'incomplete' }],
+    });
+  });
+
+  it('filters request details by route across a mixed-protocol job', async () => {
+    const token = await issueGrant('responses-mixed-routes', [questions.responses, questions.chat]);
+    await control('responses-success');
+    const responsesResponse = await post(token, '/v1/responses', responsesBody());
+    expect(responsesResponse.status).toBe(200);
+    await responsesResponse.text();
+    await control('success');
+    const chatResponse = await post(token, '/v1/chat/completions', {
+      model: questions.chat.routeId,
+      messages: [],
+    });
+    expect(chatResponse.status).toBe(200);
+    await chatResponse.text();
+
+    const responsesOnly = await runtime.INFERENCE.effortDetails({
+      jobId: 'responses-mixed-routes',
+      route: questions.responses.routeId,
+    });
+    expect(responsesOnly?.requests.map((request) => request.route)).toEqual([
+      questions.responses.routeId,
+    ]);
+    expect(responsesOnly?.nextCursor).toBeNull();
+    const chatOnly = await runtime.INFERENCE.effortDetails({
+      jobId: 'responses-mixed-routes',
+      route: questions.chat.routeId,
+    });
+    expect(chatOnly?.requests).toHaveLength(1);
+    expect(chatOnly?.requests[0]).toMatchObject({
+      route: questions.chat.routeId,
+      status: 'complete',
+      attempts: [{ attempt: 1, sent: null, reported: null, result: 'complete' }],
+    });
+    await runtime.INFERENCE.revoke({ jobId: 'responses-mixed-routes' });
   });
 
   it('rejects the wrong protocol for a frozen route before contacting upstream', async () => {

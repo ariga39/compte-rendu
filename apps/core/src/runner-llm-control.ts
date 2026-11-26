@@ -37,7 +37,11 @@ export interface RelayControl {
     | { kind: 'duplicate' | 'deadline-exceeded' | 'invalid' }
   >;
   effortStates(): Promise<{ routes: readonly EffortRouteState[] }>;
-  effortDetails(input: { jobId: string; cursor?: string }): Promise<EffortJobDetail | null>;
+  effortDetails(input: {
+    jobId: string;
+    cursor?: string;
+    route?: string;
+  }): Promise<EffortJobDetail | null>;
 }
 
 export function handleRunnerLlmControl(

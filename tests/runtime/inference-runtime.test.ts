@@ -29,7 +29,11 @@ interface InferenceBinding {
   revoke(input: RevokeGrantInput): Promise<RevokeGrantResult>;
   usage(input: { jobId: string }): Promise<ModelUsageSummary | null>;
   effortStates(): Promise<{ routes: readonly EffortRouteState[] }>;
-  effortDetails(input: { jobId: string; cursor?: string }): Promise<EffortJobDetail | null>;
+  effortDetails(input: {
+    jobId: string;
+    cursor?: string;
+    route?: string;
+  }): Promise<EffortJobDetail | null>;
   sweep(): Promise<number>;
   scheduled(): Promise<void>;
 }

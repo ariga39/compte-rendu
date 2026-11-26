@@ -2,7 +2,9 @@ import { Option, Schema } from 'effect';
 import {
   isResponsesEffortControls,
   modelIdentity,
+  ResponsesEffortControls,
   type ObservedTokenFields,
+  type RouteEffortControls,
 } from '@compte-rendu/contracts';
 import type { FrozenRoute } from './routes.ts';
 import type {
@@ -137,6 +139,22 @@ export const responsesUpstreamBody = (
   return outbound;
 };
 
+// A value outside the wire allowlist stays forwarded unchanged but is not
+// retained as a control. Both the outbound body and the upstream report use
+// this single decoder.
+const responsesEffortControlsFromReasoning = (reasoning: unknown): RouteEffortControls | null => {
+  if (!isRecord(reasoning) || reasoning.effort === undefined) return null;
+  const decoded = Schema.decodeUnknownOption(ResponsesEffortControls)({
+    reasoning: { effort: reasoning.effort },
+  });
+  return Option.isNone(decoded) ? null : decoded.value;
+};
+
+// Record exactly what the upstream request carries.
+export const responsesEffortControlsFromBody = (
+  body: Record<string, unknown>,
+): RouteEffortControls | null => responsesEffortControlsFromReasoning(body.reasoning);
+
 const TokenNumber = Schema.Int.check(
   Schema.isGreaterThanOrEqualTo(0),
   Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER),
@@ -169,6 +187,7 @@ const ResponsesEvent = Schema.Struct({
       model: Schema.optionalKey(Schema.Unknown),
       usage: Schema.optionalKey(Schema.Unknown),
       error: Schema.optionalKey(Schema.Unknown),
+      reasoning: Schema.optionalKey(Schema.Unknown),
     }),
   ),
   usage: Schema.optionalKey(Schema.Unknown),
@@ -202,7 +221,12 @@ export const observeResponsesFrame = (frame: SseFrame): StreamObservationDetails
   const jsonType = value.type;
   const observed = observedTokens(value.response?.usage ?? value.usage);
   const model = modelIdentity(value.response?.model ?? value.model);
-  const details = model === null ? { usage: observed } : { usage: observed, model };
+  const reported = responsesEffortControlsFromReasoning(value.response?.reasoning);
+  const details = {
+    usage: observed,
+    ...(model === null ? {} : { model }),
+    ...(reported === null ? {} : { reportedEffort: reported }),
+  };
 
   // A completed outcome requires agreement between the SSE event name and the
   // JSON type when both are present, plus response.status "completed".
@@ -236,6 +260,7 @@ export const ResponsesStreamAdapter: ProtocolStreamAdapter = {
   maxTerminalBytes: MAX_RESPONSES_TERMINAL_BYTES,
   upstreamPath: () => '/responses',
   observe: observeResponsesFrame,
+  sentEffort: responsesEffortControlsFromBody,
   encode: encodeSseFrame,
 };
 

@@ -5,6 +5,7 @@ import {
   type EffortJobDetail,
   type EffortOutcomeKind,
   type EffortRequestDetail,
+  type EffortRequestStatus,
   type EffortRouteState,
   type EffortRouteSummary,
   type ModelUsageSummary,
@@ -290,6 +291,7 @@ const USAGE_GROUP_LIMIT = MODEL_USAGE_ROW_LIMIT + 1;
 interface RequestEffortRow {
   readonly request_id: string;
   readonly route: string;
+  readonly status: EffortRequestStatus;
   readonly effort_name: string | null;
   readonly effort_generation: number | null;
   readonly fallback: EffortOutcomeKind | null;
@@ -348,20 +350,23 @@ const readEffortRows = async (
   database: D1DatabaseLike,
   jobId: string,
   cursor?: DetailCursor | null,
+  route?: string,
   limit = DETAIL_PAGE_SIZE + 1,
 ): Promise<readonly RequestEffortRow[]> => {
   const rows = await database
     .prepare(
-      `SELECT request_id, route, effort_name, effort_generation, fallback,
+      `SELECT request_id, route, status, effort_name, effort_generation, fallback,
         fallback_reason, attempt_one, attempt_two, created_at
       FROM inference_requests
       WHERE job_id = ?
+        ${route === undefined ? '' : 'AND route = ?'}
         ${cursor === null || cursor === undefined ? '' : 'AND (created_at > ? OR (created_at = ? AND request_id > ?))'}
       ORDER BY created_at, request_id
       LIMIT ?`,
     )
     .bind(
       jobId,
+      ...(route === undefined ? [] : [route]),
       ...(cursor === null || cursor === undefined
         ? []
         : [cursor.createdAt, cursor.createdAt, cursor.requestId]),
@@ -510,6 +515,7 @@ export const readEffortDetails = async (
   database: D1DatabaseLike,
   jobId: string,
   cursorValue?: string,
+  routeValue?: string,
 ): Promise<EffortJobDetail | null> => {
   const grant = await database
     .prepare('SELECT token_hash FROM grants WHERE job_id = ?')
@@ -519,7 +525,12 @@ export const readEffortDetails = async (
   const cursor = cursorValue === undefined ? undefined : decodeCursor(cursorValue);
   if (cursorValue !== undefined && cursor === null)
     return { jobId, requests: [], nextCursor: null };
-  const rows = await readEffortRows(database, jobId, cursor);
+  const rows = await readEffortRows(
+    database,
+    jobId,
+    cursor,
+    routeValue === undefined || routeValue === '' ? undefined : routeValue,
+  );
   const page = rows.slice(0, DETAIL_PAGE_SIZE);
   const last = page[page.length - 1];
   return {
@@ -527,6 +538,7 @@ export const readEffortDetails = async (
     requests: page.map((row): EffortRequestDetail => ({
       requestId: row.request_id,
       route: row.route,
+      status: row.status,
       selected: row.effort_name,
       generation: row.effort_generation,
       fallback: row.fallback,

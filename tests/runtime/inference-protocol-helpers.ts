@@ -10,6 +10,7 @@ import type {
   RevokeGrantResult,
 } from '../../apps/inference-worker/src/grants';
 import type {
+  EffortJobDetail,
   ModelProfile,
   ModelUsageSummary,
   RouteEffortControls,
@@ -20,6 +21,11 @@ interface InferenceBinding {
   issueV2(input: IssueGrantInput): Promise<IssueGrantV2Result>;
   revoke(input: RevokeGrantInput): Promise<RevokeGrantResult>;
   usage(input: { jobId: string }): Promise<ModelUsageSummary | null>;
+  effortDetails(input: {
+    jobId: string;
+    cursor?: string;
+    route?: string;
+  }): Promise<EffortJobDetail | null>;
 }
 
 interface UpstreamState {
@@ -101,7 +107,7 @@ export const issueGrant = async (jobId: string, routes: readonly TestRoute[]) =>
     },
     latestIssueDeadline: (await d1Now()) + 60_000,
   });
-  if (result.kind !== 'issued') throw new Error('expected profiled grant');
+  if (result.kind !== 'issued') throw new Error(`expected profiled grant: ${result.kind}`);
   return result.token;
 };
 

@@ -67,6 +67,38 @@ const responsesSuccessWire = () =>
     },
   });
 
+const responsesEffortSuccessWire = (effort) =>
+  responsesEvent('response.created', {
+    type: 'response.created',
+    response: { status: 'in_progress', model: 'gpt-sol-native', reasoning: { effort } },
+  }) +
+  responsesEvent('response.output_text.delta', {
+    type: 'response.output_text.delta',
+    response: { status: 'in_progress', model: 'gpt-sol-native' },
+    delta: 'Reviewed',
+  }) +
+  responsesEvent('response.completed', {
+    type: 'response.completed',
+    response: {
+      status: 'completed',
+      model: 'gpt-sol-native',
+      reasoning: { effort },
+      usage: responsesUsage(20, 8, 10, 4),
+    },
+  });
+
+const responsesEffortFailedWire = (effort) =>
+  responsesEvent('response.failed', {
+    type: 'response.failed',
+    response: {
+      status: 'failed',
+      model: 'gpt-sol-native',
+      reasoning: { effort },
+      usage: responsesUsage(50, 0, 1, 0),
+      error: { code: 'server_error', message: 'private upstream diagnostic' },
+    },
+  });
+
 const responsesUsage = (input, cached, output, reasoning) => ({
   input_tokens: input,
   input_tokens_details: { cached_tokens: cached },
@@ -490,6 +522,17 @@ export default {
       return deepseekRejection(parsed?.reasoning_effort ?? 'missing');
     }
     if (scenario === 'responses-success') return streamResponse(responsesSuccessWire());
+    if (scenario === 'responses-effort-echo') {
+      let parsed = null;
+      try {
+        parsed = JSON.parse(body);
+      } catch {
+        parsed = null;
+      }
+      return streamResponse(responsesEffortSuccessWire(parsed?.reasoning?.effort ?? 'low'));
+    }
+    if (scenario === 'responses-effort-failed')
+      return streamResponse(responsesEffortFailedWire('max'));
     if (scenario === 'responses-incomplete') return streamResponse(responsesIncompleteWire());
     if (scenario === 'responses-failed') return streamResponse(responsesFailedWire());
     if (scenario === 'responses-error-event') return streamResponse(responsesErrorWire());
