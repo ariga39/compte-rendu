@@ -958,21 +958,29 @@ describe('Runner Job HTTP interface', () => {
       expect(skill.body).not.toContain('LICENSE.md');
       expect(skill.body).not.toContain('NOTICE.md');
       for (const section of [
-        "Start from the project's operating model",
-        'Spot code that exists only because a model wrote it',
-        'Weigh likelihood, harm and the cost of the fix',
-        'Apply the production bar only to production paths',
-        'Treat retirement as a decision, not a gap',
+        'Trust Boundary and Static Inspection',
+        'Anchor Judgment in the Operating Model',
+        'Stage 1: Adversarial Defect Discovery',
+        'Local Tooling and Test Harnesses',
+        'Active Documentation and Documented Invariants',
+        'Unjustified Complexity and Bloat',
+        'Evidence Discipline Under Partial Visibility',
+        'Multi-Round Review Continuity',
+        'Stage 2: Calibrated Merge Judgment',
       ])
         expect(skill.body).toContain(section);
       expect(skill.body.replace(/\s+/g, ' ')).toContain(
-        'Do not, however, keep widening the hunt into remote environmental edge cases',
+        'Do not move goalposts by inventing progressively lower-probability environmental edge cases',
       );
       expect(skill.body.replace(/\s+/g, ' ')).toContain(
-        'A fault that appears only when all commits act together still counts',
+        'evaluate the combined change as a whole rather than only the latest commit delta',
       );
-      expect(skill.body.replace(/\s+/g, ' ')).toContain('`approve` does not require perfection');
-      expect(skill.body.replace(/\s+/g, ' ')).toContain('rare but credible path');
+      expect(skill.body.replace(/\s+/g, ' ')).toContain(
+        'minor polish neither breaks behavior nor misleads operators',
+      );
+      expect(skill.body.replace(/\s+/g, ' ')).toContain(
+        'Severe harms such as broken security boundaries or irreversible data/state corruption justify blocking even when rare',
+      );
     }
     const deliveredPrompt = (agentArgs?.join(' ') ?? '').replace(/\s+/g, ' ');
     expect(deliveredPrompt).not.toContain('First load the pr-review skill');
@@ -1021,18 +1029,27 @@ describe('Runner Job HTTP interface', () => {
     expect(deliveredPrompt).toContain('`approve` does not require perfection');
     expect(deliveredPrompt).toContain('optionally include 1-2 brief non-blocking notes');
     expect(deliveredPrompt).toContain(
-      'Reserve `DECISION: request_changes` for a concrete, high-confidence blocking issue',
+      'Reserve `DECISION: request_changes` for a concrete, high-confidence blocking defect',
     );
-    expect(deliveredPrompt).toContain('significant avoidable complexity or AI-slop');
+    expect(deliveredPrompt).toContain(
+      'a verified misleading factual error in active documentation or contracts',
+    );
+    expect(deliveredPrompt).toContain('a clear violation of a documented architectural invariant');
+    expect(deliveredPrompt).toContain(
+      'Do not block for unrequested production hardening of local scripts or test harnesses',
+    );
+    expect(deliveredPrompt).toContain('material avoidable complexity or AI-slop');
     expect(deliveredPrompt).toContain('a rare but credible irreversible loss');
     expect(deliveredSkills.get('code-review')?.body.replace(/\s+/g, ' ')).toContain(
-      'follow affected values into callers, consumers, configuration, storage, boundaries and tests',
+      'Trace every affected path end-to-end across callers, configuration, persistence, documentation, and tests',
     );
     expect(deliveredSkills.get('code-review')?.body.replace(/\s+/g, ' ')).toContain(
-      'find the changed line or behavior',
+      'Name the exact changed behavior, the concrete triggering conditions, and the practical consequence',
     );
     expect(deliveredPrompt).toContain('Return at most five findings');
-    expect(deliveredSkills.get('code-review')?.body).toContain('Check the premise');
+    expect(deliveredSkills.get('code-review')?.body).toContain(
+      'understand stated author intent as a hypothesis to test against the diff',
+    );
     expect(deliveredPrompt).toContain('TLDR:');
     expect(deliveredPrompt).toContain('decision');
     expect(deliveredPrompt).toContain('Markdown');
@@ -1131,7 +1148,7 @@ describe('Runner Job HTTP interface', () => {
     expect(deliveredPrompt).toContain(baseSha);
     expect(deliveredPrompt).toContain(headSha);
     expect(deliveredSkills.get('code-review')?.body.replace(/\s+/g, ' ')).toContain(
-      'Weigh likelihood, harm and the cost of the fix',
+      'Weigh three factors together',
     );
     expect(deliveredPrompt).toContain('TLDR:');
     expect(deliveredPrompt).toContain('Return your final answer in exactly this form');
