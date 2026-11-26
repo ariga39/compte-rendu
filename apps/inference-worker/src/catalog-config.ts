@@ -1,5 +1,10 @@
 import { Schema } from 'effect';
-import { ModelProfile, ModelRouteLimit, RouteEffortOption } from '@compte-rendu/contracts';
+import {
+  effortControlsProfile,
+  ModelProfile,
+  ModelRouteLimit,
+  RouteEffortOption,
+} from '@compte-rendu/contracts';
 import { CredentialAlias, ProviderSlug, RouteId } from './route-schema.ts';
 
 export { RouteId } from './route-schema.ts';
@@ -73,24 +78,30 @@ export const RelayCatalogSource = Schema.Union([
         ...(source.profile ? [source.profile] : []),
         ...(source.profiles ?? []),
       ];
-      // Reasoning effort injection is implemented for Chat only in this release.
-      // An explicit alias/model profile is already knowable. Discovery routes are
-      // revalidated against their effective profile during refresh.
+      // Each route's controls must match the protocol its explicit or discovered
+      // profile will use. Discovery routes are revalidated against their
+      // effective profile during refresh.
       const choices =
         configuredProfiles.length > 0 ? configuredProfiles : [sourceDefaultProfile(source)];
-      for (const routeId of Object.keys(source.efforts ?? {})) {
+      for (const [routeId, options] of Object.entries(source.efforts ?? {})) {
+        // An empty menu declares no protocol. Do not infer Chat from absence.
+        const [first] = options;
+        if (first === undefined) continue;
+        const requiredProfile = effortControlsProfile(first.controls);
+        if (options.some((option) => effortControlsProfile(option.controls) !== requiredProfile))
+          return false;
         const override = source.models?.[routeId];
         if (override !== undefined) {
-          if (override.profile !== 'chat') return false;
+          if (override.profile !== requiredProfile) return false;
           continue;
         }
         if (Object.hasOwn(source.aliases ?? {}, routeId)) {
-          if (sourceDefaultProfile(source) !== 'chat') return false;
+          if (sourceDefaultProfile(source) !== requiredProfile) return false;
           continue;
         }
         // An alias-only source has no other selectable route IDs.
         if (!('prefix' in source)) return false;
-        if (!choices.includes('chat')) return false;
+        if (!choices.includes(requiredProfile)) return false;
       }
       return true;
     },

@@ -24,9 +24,41 @@ export const ChatEffortControls = Schema.Struct({
 );
 export type ChatEffortControls = typeof ChatEffortControls.Type;
 
+export const ResponsesEffortValue = Schema.Literals([
+  'none',
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+]);
+export type ResponsesEffortValue = typeof ResponsesEffortValue.Type;
+
+export const ResponsesEffortControls = Schema.Struct({
+  reasoning: Schema.Struct({
+    effort: ResponsesEffortValue,
+  }),
+});
+export type ResponsesEffortControls = typeof ResponsesEffortControls.Type;
+
+// The two control shapes use disjoint top-level keys, so a configured option
+// can be validated against the route's protocol without a wrapper tag.
+export const RouteEffortControls = Schema.Union([ChatEffortControls, ResponsesEffortControls]);
+export type RouteEffortControls = typeof RouteEffortControls.Type;
+
+// Decoded controls use the disjoint wire keys, not a second schema decode.
+export const isResponsesEffortControls = (
+  controls: RouteEffortControls,
+): controls is ResponsesEffortControls => 'reasoning' in controls;
+export const isChatEffortControls = (
+  controls: RouteEffortControls,
+): controls is ChatEffortControls => !isResponsesEffortControls(controls);
+export const effortControlsProfile = (controls: RouteEffortControls): 'chat' | 'responses' =>
+  'reasoning' in controls ? 'responses' : 'chat';
+
 export const RouteEffortOption = Schema.Struct({
   name: EffortName,
-  controls: ChatEffortControls,
+  controls: RouteEffortControls,
 });
 export type RouteEffortOption = typeof RouteEffortOption.Type;
 
@@ -37,7 +69,7 @@ export const FrozenRouteEffort = Schema.Struct({
   routeId: ModelRouteId,
   generation: Schema.Natural,
   name: Schema.optionalKey(EffortName),
-  controls: Schema.optionalKey(ChatEffortControls),
+  controls: Schema.optionalKey(RouteEffortControls),
 }).check(
   Schema.makeFilter((effort) => (effort.name !== undefined) === (effort.controls !== undefined), {
     expected: 'effort name and controls together, or neither',
@@ -47,7 +79,7 @@ export type FrozenRouteEffort = typeof FrozenRouteEffort.Type;
 
 export const AppliedRouteEffort = Schema.Struct({
   name: EffortName,
-  controls: ChatEffortControls,
+  controls: RouteEffortControls,
 });
 export type AppliedRouteEffort = typeof AppliedRouteEffort.Type;
 

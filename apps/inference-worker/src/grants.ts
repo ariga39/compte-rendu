@@ -1,5 +1,6 @@
 import { Effect, Option, Schema } from 'effect';
 import {
+  effortControlsProfile,
   FrozenRouteEffort,
   REVIEW_ATTEMPT_BUDGET_MS,
   ModelRouteLimit,
@@ -168,10 +169,10 @@ const issue = (database: D1DatabaseLike) =>
         withEffort.push(route);
         continue;
       }
-      // Explicit controls are Chat-only. Generation-only metadata is accepted
-      // for any granted profile and ignored where it has no meaning, so a legacy
-      // Chat snapshot stays usable after the route's profile changes.
-      if (effort.name !== undefined && route.profile !== 'chat')
+      // Explicit controls must match the granted protocol. Generation-only
+      // metadata is accepted for any profile and ignored where it has no
+      // meaning, so a legacy Chat snapshot stays usable after a profile change.
+      if (effort.controls !== undefined && effortControlsProfile(effort.controls) !== route.profile)
         return { kind: 'invalid' as const };
       withEffort.push({
         ...route,

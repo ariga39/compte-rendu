@@ -9,7 +9,11 @@ import type {
   RevokeGrantInput,
   RevokeGrantResult,
 } from '../../apps/inference-worker/src/grants';
-import type { ModelProfile, ModelUsageSummary } from '../../packages/contracts/src';
+import type {
+  ModelProfile,
+  ModelUsageSummary,
+  RouteEffortControls,
+} from '../../packages/contracts/src';
 
 interface InferenceBinding {
   fetch(request: Request): Promise<Response>;
@@ -67,6 +71,7 @@ type TestRoute = {
   readonly providerSlug: string;
   readonly credentialAlias: string;
   readonly profile?: ModelProfile;
+  readonly effort?: { readonly name: string; readonly controls: RouteEffortControls };
 };
 
 export const issueGrant = async (jobId: string, routes: readonly TestRoute[]) => {
@@ -85,9 +90,15 @@ export const issueGrant = async (jobId: string, routes: readonly TestRoute[]) =>
       )
       .run();
   }
+  const efforts = routes.flatMap((route) =>
+    route.effort === undefined ? [] : [{ routeId: route.routeId, generation: 0, ...route.effort }],
+  );
   const result = await runtime.INFERENCE.issueV2({
     jobId,
-    snapshot: { routes: routes.map((route) => route.routeId) },
+    snapshot: {
+      routes: routes.map((route) => route.routeId),
+      ...(efforts.length === 0 ? {} : { efforts }),
+    },
     latestIssueDeadline: (await d1Now()) + 60_000,
   });
   if (result.kind !== 'issued') throw new Error('expected profiled grant');

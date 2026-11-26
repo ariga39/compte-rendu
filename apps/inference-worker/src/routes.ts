@@ -1,6 +1,7 @@
 import { Option, Schema } from 'effect';
 import {
   AppliedRouteEffort,
+  effortControlsProfile,
   ModelProfile,
   ModelRouteLimit,
   SafeModel,
@@ -19,7 +20,13 @@ export const FrozenRoute = Schema.Struct({
   limit: Schema.optionalKey(ModelRouteLimit),
   effortGeneration: Schema.optionalKey(Schema.Natural),
   effort: Schema.optionalKey(AppliedRouteEffort),
-});
+}).check(
+  Schema.makeFilter(
+    (route) =>
+      route.effort === undefined || effortControlsProfile(route.effort.controls) === route.profile,
+    { expected: 'frozen effort controls match the route protocol' },
+  ),
+);
 export type FrozenRoute = typeof FrozenRoute.Type;
 
 export const FrozenRouteMapping = Schema.Array(FrozenRoute).check(
