@@ -1290,6 +1290,13 @@ describe('Runner multi-model review', () => {
       expect(prompt).not.toContain('First load the pr-review skill');
       expect(prompt).not.toContain('submit_review');
       expect(prompt).not.toContain('## Review:');
+      expect(prompt).toContain('`approve` does not require perfection');
+      expect(prompt).toContain('optionally include 1-2 brief non-blocking notes');
+      expect(prompt).toContain(
+        'Reserve `DECISION: request_changes` for a concrete, high-confidence blocking issue',
+      );
+      expect(prompt).toContain('significant avoidable complexity or AI-slop');
+      expect(prompt).toContain('a rare but credible irreversible loss');
     }
     expect(singlePrompt).toContain('There is one configured reviewer');
     expect(singlePrompt).not.toContain('reviewer-1');
@@ -1309,6 +1316,8 @@ describe('Runner multi-model review', () => {
         '"Perform one independent review using the complete task and output contract in your system instructions."',
     );
     expect(multiSupervisorPrompt).not.toContain('The token is a capability, never review evidence');
+    expect(multiSupervisorPrompt).not.toContain('`approve` does not require perfection');
+    expect(multiSupervisorPrompt).not.toContain('optionally include 1-2 brief non-blocking notes');
   });
 
   it('uses only the reviewer route for a one-model roster with a distinct synthesis alias', async () => {

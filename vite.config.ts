@@ -18,8 +18,6 @@ export default defineConfig({
     },
   },
   fmt: {
-    // Preserve vendored license texts byte-for-byte.
-    ignorePatterns: ['apps/runner/skills/*/LICENSE.md'],
     semi: true,
     singleQuote: true,
   },
