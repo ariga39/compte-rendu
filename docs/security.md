@@ -35,9 +35,8 @@ is insufficient.
 
 OpenCode runs standalone with fresh per-job state, without repository configuration
 or host skills, MCP configuration or SSH-agent sharing. One reviewed `code-review` skill
-and its third-party license and attribution notices are embedded in the Runner
-and staged into each job's isolated configuration; they do not grant additional
-permissions.
+is embedded in the Runner and staged into each job's isolated configuration; it does
+not grant additional permissions.
 The packaged policy allows
 read/search and bounded Git/GitHub read commands. It denies repository programs,
 builds/tests, edits and GitHub writes. Repository contents and PR discussion are
@@ -120,5 +119,5 @@ dependency.
 - Grant and upstream boundaries: `apps/inference-worker/src/grants.ts`, `relay.ts`
 - Agent permissions and prompt: `apps/runner/src/opencode-multi-review.ts`,
   `review-prompt.ts`
-- Bundled review method and provenance: `apps/runner/skills/code-review/SKILL.md`,
-  `apps/runner/src/review-skill.ts` (packaged with `LICENSE.md` and `NOTICE.md`)
+- Bundled review method: `apps/runner/skills/code-review/SKILL.md`,
+  `apps/runner/src/review-skill.ts`

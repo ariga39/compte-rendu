@@ -439,11 +439,10 @@ corepack pnpm install --frozen-lockfile
 corepack pnpm --filter @compte-rendu/runner build
 ```
 
-The Runner bundle includes one general `code-review` skill with its third-party
-license and attribution notices. Each job receives these files in its isolated
-OpenCode config; no host skill installation, runtime download or extra file
-transfer is needed.
-See [review skill boundaries](design.md) for its scope and source attribution.
+The Runner bundle includes one general `code-review` skill. Each job receives it
+in its isolated OpenCode config; no host skill installation, runtime download or
+extra file transfer is needed.
+See [review skill boundaries](design.md) for its scope.
 
 ### Offline Sandbox template deployment
 
