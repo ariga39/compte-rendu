@@ -773,6 +773,7 @@ it('returns bounded per-request effort details only to the current editor', asyn
   const asked: { jobId: string; cursor?: string; route?: string }[] = [];
   const detail: EffortJobDetail = {
     jobId: 'detail-job',
+    routes: [deepseek, mimo],
     nextCursor: null,
     requests: [
       {

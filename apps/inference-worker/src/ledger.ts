@@ -518,13 +518,17 @@ export const readEffortDetails = async (
   routeValue?: string,
 ): Promise<EffortJobDetail | null> => {
   const grant = await database
-    .prepare('SELECT token_hash FROM grants WHERE job_id = ?')
+    .prepare('SELECT token_hash, route_mapping FROM grants WHERE job_id = ?')
     .bind(jobId)
-    .first<{ readonly token_hash: string | null }>();
+    .first<{ readonly token_hash: string | null; readonly route_mapping: string | null }>();
   if (grant === null || grant.token_hash === null) return null;
+  // Reuse the grant read for the frozen route list. A legacy grant without a
+  // mapping leaves it empty; the operator UI may then use routes discovered in
+  // retained request rows.
+  const routes = parseFrozenMapping(grant.route_mapping)?.map((route) => route.routeId) ?? [];
   const cursor = cursorValue === undefined ? undefined : decodeCursor(cursorValue);
   if (cursorValue !== undefined && cursor === null)
-    return { jobId, requests: [], nextCursor: null };
+    return { jobId, routes, requests: [], nextCursor: null };
   const rows = await readEffortRows(
     database,
     jobId,
@@ -535,6 +539,7 @@ export const readEffortDetails = async (
   const last = page[page.length - 1];
   return {
     jobId,
+    routes,
     requests: page.map((row): EffortRequestDetail => ({
       requestId: row.request_id,
       route: row.route,
