@@ -100,7 +100,8 @@ export const streamFrameIsError = (frame: StreamFrame): boolean =>
   frame.response?.status === 'failed';
 
 // Only explicit, bounded Chat control fields reported by the upstream are
-// accepted. Values that do not form one valid control are "not reported".
+// accepted. Values that do not form one valid control are not retained as a
+// recognised report.
 const decodeChatEffortControls = Schema.decodeUnknownOption(ChatEffortControls);
 
 export const streamFrameEffortReport = (frame: StreamFrame): ChatEffortControls | null => {

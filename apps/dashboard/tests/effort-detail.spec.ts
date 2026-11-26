@@ -92,7 +92,7 @@ test('shows a completed Responses request, its sent and reported effort, and exp
   await expect(page.getByTestId('effort-request-id-req-responses')).toHaveText('req-responses');
 });
 
-test('distinguishes a completed Chat request whose upstream omits effort', async ({
+test('distinguishes a completed Chat request without a recognized upstream report', async ({
   page,
   harness,
   base,
@@ -128,7 +128,9 @@ test('distinguishes a completed Chat request whose upstream omits effort', async
   const requestRow = page.getByTestId('effort-request-req-chat');
   await expect(requestRow).toContainText('Complete');
   await expect(requestRow).toContainText('reasoning_effort=high');
-  await expect(requestRow).toContainText('Not reported by upstream');
+  await expect(requestRow).toContainText('Reported');
+  await expect(requestRow).toContainText('No recognized effort recorded');
+  await expect(requestRow).not.toContainText('Not reported by upstream');
   await expect(requestRow).not.toContainText('Record incomplete');
   await expect(requestRow).not.toContainText('Attempt detail not recorded');
 });
