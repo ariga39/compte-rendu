@@ -1,0 +1,170 @@
+{
+  "version": 2,
+  "description": "Pinned offline paired evaluation set for the #449 code-review skill calibration. Cases are commit ranges. The runner is packet-only: it preloads the diff and selected context, disables tools, and compares the rendered skill and output contract. Raw diffs, transcripts and answer keys stay in the private evidence directory.",
+  "model": "opencode-go/deepseek-v4.1-flash",
+  "productCommit": "40192d8ae55217ec104a6e7d65e98577a1263639",
+  "limits": {
+    "caseTimeoutMs": 900000,
+    "maxOutputBytes": 16777216
+  },
+  "arms": {
+    "legacy": {
+      "ref": "979f5596c82364ce2d190203c2fdea5bab8cabfe",
+      "prompt": "apps/runner/src/review-prompt.ts",
+      "skill": "apps/runner/skills/code-review/SKILL.md"
+    },
+    "candidate": {
+      "ref": "40192d8ae55217ec104a6e7d65e98577a1263639",
+      "prompt": "apps/runner/src/review-prompt.ts",
+      "skill": "apps/runner/skills/code-review/SKILL.md"
+    }
+  },
+  "cases": [
+    {
+      "id": "cr421-cleanup-race",
+      "repository": "compte-rendu",
+      "repoLabel": "ariga39/compte-rendu",
+      "pullRequest": 421,
+      "base": "3aeaf46baeae7fb1d4d8e733ea0b233112b829a0",
+      "head": "85b0673b9634a0a94bf9cbbb66f9da98ec128401",
+      "title": "Resolve verified sandbox cleanup through the terminal callback",
+      "expected": "request_changes",
+      "expectedThemes": [
+        "a host-directory cleanup failure leaves same-PR claims permanently blocked",
+        "the recovery path rejects host-cleanup confirmation so the block has no operator remedy"
+      ],
+      "notes": "Pin before 4af8a6c, which fixes host scratch cleanup independence. This range contains the real host-scratch blocking defect, not the already-fixed version.",
+      "contextPaths": ["AGENTS.md", "README.md"]
+    },
+    {
+      "id": "dsh10-round1",
+      "repository": "dsh-lianson",
+      "repoLabel": "ariga39/dsh-lianson",
+      "pullRequest": 10,
+      "base": "f711d41e6ad1db33663fce82bc45ac167b669dc2",
+      "head": "d407a439381d3b1907d1789a93b0c1399e8b68df",
+      "title": "Exercise the real dsh Web host with a keyless end-to-end test",
+      "expected": "request_changes",
+      "expectedThemes": [
+        "a real Round-1 blocker in the new keyless end-to-end test",
+        "prefer a concrete bug over local-tooling hardening"
+      ],
+      "notes": "Known Round-1 blockers include fileURLToPath misuse, a signalCode/browser-close hang, an aria-expanded toggle defect and a missing session/writer-held readiness check. Any one genuinely consequential bug is a valid finding; decision substance is reviewed manually.",
+      "contextPaths": ["docs/requirements.md", "docs/design-brief.md"]
+    },
+    {
+      "id": "cr448-profile-precedence",
+      "repository": "compte-rendu",
+      "repoLabel": "ariga39/compte-rendu",
+      "pullRequest": 448,
+      "base": "e9ba46dd063c7775e8f86d7514acedc28ae8f40f",
+      "head": "90f80caea95f538c56ce1ff6fd6f9772e96ec8bf",
+      "title": "Keep steady-state installation and operations guides",
+      "expected": "request_changes",
+      "expectedThemes": [
+        "docs/llm-service.md states the wrong effective model-profile precedence",
+        "the stated precedence conflicts with the included implementing catalog source"
+      ],
+      "notes": "The active steady-state doc contains a factual precedence error. The implementing source is included in the packet for both arms so the finding can be verified rather than guessed.",
+      "contextPaths": [
+        "AGENTS.md",
+        "README.md",
+        "apps/inference-worker/src/catalog.ts",
+        "apps/inference-worker/src/catalog-config.ts",
+        "apps/inference-worker/src/model-catalog-wire.ts"
+      ],
+      "diffPathspecs": ["docs", ":!docs/archive/**"]
+    },
+    {
+      "id": "cr429-retire-replay",
+      "repository": "compte-rendu",
+      "repoLabel": "ariga39/compte-rendu",
+      "pullRequest": 429,
+      "base": "02f111b7def0eb900515ba37113fc4e656f7c40b",
+      "head": "a2821dc2db61ab278403abf864a276f13f3d0d15",
+      "title": "Retire manual replay of terminal Runner callbacks",
+      "expected": "approve",
+      "expectedThemes": [],
+      "notes": "Deliberate retirement under a maintenance-window, single-operator operating model. A demand to restore rolling-upgrade replay compatibility is a false positive.",
+      "contextPaths": ["AGENTS.md", "README.md"]
+    },
+    {
+      "id": "cr430-retire-legacy-formats",
+      "repository": "compte-rendu",
+      "repoLabel": "ariga39/compte-rendu",
+      "pullRequest": 430,
+      "base": "8c55da2e3870791d4b95a95bb1d8137cd43731ef",
+      "head": "8df7743e90e165abcd0acb6fde7fd37676133a03",
+      "title": "Retire legacy review callback and publication formats",
+      "expected": "approve",
+      "expectedThemes": [],
+      "notes": "Deliberate breaking format retirement. Blocking for mixed-version compatibility is a false positive; a concrete regression in the remaining path still counts.",
+      "contextPaths": ["AGENTS.md", "README.md"]
+    },
+    {
+      "id": "cr448-retirement-convergence",
+      "repository": "compte-rendu",
+      "repoLabel": "ariga39/compte-rendu",
+      "pullRequest": 448,
+      "base": "e9ba46dd063c7775e8f86d7514acedc28ae8f40f",
+      "head": "1148e0d21fd6ddfdd46fb1be78a4e51ee677238e",
+      "title": "Keep steady-state installation and operations guides",
+      "expected": "approve",
+      "expectedThemes": [],
+      "notes": "The active profile-precedence error is fixed at this pin. The historical formal reviewers nevertheless asked to restore retired two-Worker/cron/0019 guidance; that is the false-positive pattern to measure. The included implementing source verifies the corrected precedence.",
+      "contextPaths": [
+        "AGENTS.md",
+        "README.md",
+        "apps/inference-worker/src/catalog.ts",
+        "apps/inference-worker/src/catalog-config.ts",
+        "apps/inference-worker/src/model-catalog-wire.ts"
+      ],
+      "diffPathspecs": ["docs", ":!docs/archive/**"]
+    },
+    {
+      "id": "dsh10-postfix",
+      "repository": "dsh-lianson",
+      "repoLabel": "ariga39/dsh-lianson",
+      "pullRequest": 10,
+      "base": "f711d41e6ad1db33663fce82bc45ac167b669dc2",
+      "head": "c85b044609ab37ab8b3680992493618efb12a47b",
+      "title": "Exercise the real dsh Web host with a keyless end-to-end test",
+      "expected": "approve",
+      "expectedThemes": [],
+      "notes": "Round-1 blockers are fixed at this pin. The expected behaviour is convergence: approve, with at most brief non-blocking notes, not another local-tooling hardening round.",
+      "contextPaths": ["docs/requirements.md", "docs/design-brief.md"]
+    },
+    {
+      "id": "dsh10-complexity-hooks",
+      "repository": "dsh-lianson",
+      "repoLabel": "ariga39/dsh-lianson",
+      "pullRequest": 10,
+      "base": "4999d05b1a7068fee34898a994095ad9b5338c40",
+      "head": "19230381388fc2538d7e52d6c1fc6cb8e4f0b932",
+      "title": "Exercise the real dsh Web host with a keyless end-to-end test",
+      "expected": "request_changes",
+      "expectedThemes": [
+        "ephemeral localhost harness token scrubbing is unnecessary complexity",
+        "a single-use git checkout wrapper and its synthetic hook test are disproportionate"
+      ],
+      "notes": "Concrete avoidable hardening in local bootstrap/test tooling. The issue explicitly treats localhost smoke-token redaction as outside the production bar.",
+      "contextPaths": ["docs/requirements.md", "docs/design-brief.md"]
+    },
+    {
+      "id": "dsh10-complexity-probe",
+      "repository": "dsh-lianson",
+      "repoLabel": "ariga39/dsh-lianson",
+      "pullRequest": 10,
+      "base": "19230381388fc2538d7e52d6c1fc6cb8e4f0b932",
+      "head": "768781175d9690d9fb943705f525b7d6e2c1b3ea",
+      "title": "Exercise the real dsh Web host with a keyless end-to-end test",
+      "expected": "request_changes",
+      "expectedThemes": [
+        "a two-module subprocess wrapper around one Chromium launch is premature abstraction",
+        "browser close errors are silently swallowed"
+      ],
+      "notes": "Concrete avoidable abstraction: a 21-line wrapper plus a child script to perform one launch-and-close probe.",
+      "contextPaths": ["docs/requirements.md", "docs/design-brief.md"]
+    }
+  ]
+}
