@@ -1032,13 +1032,13 @@ describe('Runner Job HTTP interface', () => {
       'Reserve `DECISION: request_changes` for a concrete, high-confidence blocking defect',
     );
     expect(deliveredPrompt).toContain(
-      'a verified factual contradiction in active documentation or contracts',
+      'a verified misleading factual error in active documentation or contracts',
     );
     expect(deliveredPrompt).toContain('a clear violation of a documented architectural invariant');
     expect(deliveredPrompt).toContain(
       'Do not block for unrequested production hardening of local scripts or test harnesses',
     );
-    expect(deliveredPrompt).toContain('avoidable complexity or AI-slop whose removal simplifies');
+    expect(deliveredPrompt).toContain('material avoidable complexity or AI-slop');
     expect(deliveredPrompt).toContain('a rare but credible irreversible loss');
     expect(deliveredSkills.get('code-review')?.body.replace(/\s+/g, ' ')).toContain(
       'Trace every affected path end-to-end across callers, configuration, persistence, documentation, and tests',

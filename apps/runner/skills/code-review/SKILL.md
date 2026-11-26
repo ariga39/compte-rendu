@@ -43,8 +43,8 @@ Examine unhappy paths, boundary inputs, concurrency edges, and lifecycle transit
 
 For local developer scripts, bootstrap utilities, and test harnesses, separate unrequested production hardening from genuine behavioral bugs:
 
-- **Do not demand production-service hardening** that the tool's role does not require—such as scrubbing ephemeral local test tokens, self-healing interrupted local builds, or supporting unclaimed platforms.
-- **Do flag real behavioral defects** in those tools as concrete bugs: teardown hangs, broken path or encoding handling, silently swallowed harness or test errors, flaky UI toggles, or missing assertions that let a broken system pass.
+- **Do not demand production hardening beyond the tool's stated role** (e.g., extra credential redaction, partial-state self-healing, or undeclared environments).
+- **Do flag real behavioral defects** in those tools as concrete bugs: hangs, silent failures, broken input or path handling, or false-green assertions.
 
 Failing fast and clearly is the bar for local tooling and tests. Hanging, breaking silently, or producing false greens fails that bar.
 
@@ -94,11 +94,11 @@ After completing Stage 1, evaluate each substantiated finding and decide whether
 Let the three factors govern trade-offs directly:
 
 - Severe harms such as broken security boundaries or irreversible data/state corruption justify blocking even when rare, provided the triggering mechanism is concrete.
-- Concrete defects with near-zero or negative ongoing complexity cost—such as correcting a verified factual error in active docs or removing avoidable bloat—warrant blocking rather than being waved through.
+- Concrete defects with near-zero or negative ongoing complexity cost—specifically misleading factual errors in active docs or material bloat whose removal simplifies the change—warrant blocking rather than being waved through; do not block on minor wording polish or slight verbosity.
 - Low-probability edge cases whose prevention would introduce disproportionate ongoing state or complexity should not block merge, and often should be dropped rather than requested.
 
 Choose the final disposition strictly from the weighted evidence:
 
-- **`request_changes`:** At least one high-confidence concrete defect remains with a proportionate fix—functional, concurrency, or teardown bugs; broken security boundaries or irreversible data/state corruption; verified factual errors in active documentation or contracts; clear violations of documented architectural invariants; or clear avoidable complexity/bloat whose removal simplifies the code.
+- **`request_changes`:** At least one high-confidence concrete defect remains with a proportionate fix—functional, concurrency, or teardown bugs; broken security boundaries or irreversible data/state corruption; misleading factual errors in active documentation or contracts; clear violations of documented architectural invariants; or material avoidable complexity/bloat whose removal simplifies the code.
 - **`approve`:** No blocker remains—including when guarding against a low-probability edge case would require disproportionate ongoing state or complexity, or when minor polish neither breaks behavior nor misleads operators. Include at most one or two brief non-blocking notes when genuinely useful, and drop speculative or low-value remarks.
 - **`comment`:** Missing evidence or uninspectable context prevents reaching a definite merge judgment.

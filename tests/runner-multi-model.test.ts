@@ -1296,13 +1296,13 @@ describe('Runner multi-model review', () => {
         'Reserve `DECISION: request_changes` for a concrete, high-confidence blocking defect',
       );
       expect(prompt).toContain(
-        'a verified factual contradiction in active documentation or contracts',
+        'a verified misleading factual error in active documentation or contracts',
       );
       expect(prompt).toContain('a clear violation of a documented architectural invariant');
       expect(prompt).toContain(
         'Do not block for unrequested production hardening of local scripts or test harnesses',
       );
-      expect(prompt).toContain('avoidable complexity or AI-slop whose removal simplifies');
+      expect(prompt).toContain('material avoidable complexity or AI-slop');
       expect(prompt).toContain('a rare but credible irreversible loss');
     }
     expect(singlePrompt).toContain('There is one configured reviewer');
@@ -1326,7 +1326,7 @@ describe('Runner multi-model review', () => {
     expect(multiSupervisorPrompt).not.toContain('`approve` does not require perfection');
     expect(multiSupervisorPrompt).not.toContain('optionally include 1-2 brief non-blocking notes');
     expect(multiSupervisorPrompt).not.toContain(
-      'a verified factual contradiction in active documentation or contracts',
+      'a verified misleading factual error in active documentation or contracts',
     );
     expect(multiSupervisorPrompt).not.toContain(
       'Do not block for unrequested production hardening of local scripts or test harnesses',
