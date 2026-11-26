@@ -13,17 +13,18 @@
   import Badge from '#lib/components/Badge.svelte';
   import type { BadgeTone } from '#lib/format.ts';
 
-  let {
-    runId,
-    operator,
-    routes = [],
-  }: { runId: string; operator: boolean; routes?: string[] } = $props();
+  let { runId, operator }: { runId: string; operator: boolean } = $props();
 
   let loading = $state(false);
+  let loaded = $state(false);
   let detail = $state<EffortJobDetail | null>(null);
   let requests = $state<EffortRequestDetail[]>([]);
   let error = $state<string | null>(null);
   let routeFilter = $state('');
+  // The grant's frozen route list survives filtering. Discovered routes only
+  // cover a genuinely legacy grant without a mapping.
+  let frozenRoutes = $state<string[]>([]);
+  let discoveredRoutes = $state<string[]>([]);
   // A drawer or full-page navigation reuses the component instance. Every load
   // carries a version so a late reply cannot overwrite a newer run or route.
   let loadVersion = 0;
@@ -35,17 +36,18 @@
     activeRunId = current;
     loadVersion += 1;
     loading = false;
+    loaded = false;
     detail = null;
     requests = [];
     error = null;
     routeFilter = '';
+    frozenRoutes = [];
+    discoveredRoutes = [];
   });
 
   const knownRoutes = $derived.by(() => {
-    const seen = new Set<string>();
-    for (const route of routes) if (route.length > 0) seen.add(route);
-    for (const request of requests) seen.add(request.route);
-    return [...seen];
+    const source = frozenRoutes.length > 0 ? frozenRoutes : discoveredRoutes;
+    return [...new Set(source)];
   });
 
   type RequestState = 'complete' | 'incomplete' | 'pending';
@@ -168,6 +170,11 @@
         return;
       }
       detail = decoded.value;
+      loaded = true;
+      frozenRoutes = [...decoded.value.routes];
+      const discovered = new Set(discoveredRoutes);
+      for (const request of decoded.value.requests) discovered.add(request.route);
+      discoveredRoutes = [...discovered];
       requests =
         cursor === undefined
           ? [...decoded.value.requests]
@@ -197,7 +204,7 @@
       Authorized request-level records are kept for the relay ledger retention period. They show
       what was sent and what the upstream reported, not its internal thinking strength.
     </p>
-    {#if detail === null}
+    {#if !loaded}
       <button
         class="bx--btn bx--btn--tertiary bx--btn--sm"
         data-testid="load-effort-details"
@@ -229,7 +236,11 @@
         </div>
       {/if}
       {#if requests.length === 0}
-        <p class="muted">No request-level records were retained for this selection.</p>
+        {#if loading}
+          <p class="muted" aria-busy="true">Loading request details…</p>
+        {:else}
+          <p class="muted">No request-level records were retained for this selection.</p>
+        {/if}
       {:else}
         <ol class="requests">
           {#each requests as request, index (request.requestId)}
@@ -345,7 +356,7 @@
             </li>
           {/each}
         </ol>
-        {#if detail.nextCursor !== null}
+        {#if detail !== null && detail.nextCursor !== null}
           <button
             class="bx--btn bx--btn--tertiary bx--btn--sm"
             data-testid="load-more-effort-details"

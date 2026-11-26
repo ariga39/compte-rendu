@@ -169,7 +169,10 @@ request.
 `effortStates()` returns the current route markers for settings.
 `effortDetails({jobId, cursor, route?})` returns at most 20 authorized
 per-request attempt observations with keyset pagination; `route` narrows the
-page to one reviewer route. Each request carries its ledger `status`, and each
+page to one reviewer route. It also projects the grant's frozen route IDs, so
+the operator route selector does not depend on usage publication, effort
+selection or the first page's contents. Each request carries its ledger
+`status`, and each
 attempt carries the allowlisted control sent on the wire plus the control the
 upstream reported when it supplied a recognised one; an unrecognised report is
 not retained. Responses records one attempt with the

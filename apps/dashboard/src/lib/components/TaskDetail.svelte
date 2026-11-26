@@ -105,12 +105,6 @@
   const runtime = $derived(dash.data?.detail.milestones.find((entry) => entry.stage === 'sandbox')?.runtime);
   const runtimeLabel = $derived(runtime === undefined ? 'Not recorded' : (runtimeLabels.get(runtime) ?? runtime));
   const timeline = $derived(dash.data ? mergeMilestones(dash.data.detail) : []);
-  const effortRoutes = $derived.by(() => {
-    const seen = new Set<string>();
-    for (const entry of dash.data?.detail.efforts?.selection ?? []) seen.add(entry.route);
-    for (const model of dash.data?.detail.usage?.models ?? []) seen.add(model.route);
-    return [...seen];
-  });
   const currentStage = $derived(dash.data?.task.processing ?? dash.data?.task.stage);
   const currentIndex = $derived(dash.data?.task.status === 'scheduled'
     ? timeline.findLastIndex((entry) => entry.stage === currentStage)
@@ -596,7 +590,7 @@
           <EffortSummary efforts={dash.data.detail.efforts} />
         {/if}
         {#key runId}
-          <EffortRequestDetails runId={runId} operator={operator()} routes={effortRoutes} />
+          <EffortRequestDetails runId={runId} operator={operator()} />
         {/key}
 
       </section>

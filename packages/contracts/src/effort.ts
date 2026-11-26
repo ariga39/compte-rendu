@@ -136,6 +136,9 @@ export type EffortRequestDetail = typeof EffortRequestDetail.Type;
 
 export const EffortJobDetail = Schema.Struct({
   jobId: Schema.NonEmptyString,
+  // The grant's frozen route list; available before usage is published and
+  // independent of which routes appear on the first request page.
+  routes: Schema.Array(ModelRouteId),
   requests: Schema.Array(EffortRequestDetail).check(Schema.isMaxLength(32)),
   nextCursor: Schema.NullOr(Schema.String.check(Schema.isMaxLength(512))),
 });

@@ -831,6 +831,7 @@ describe('Responses route authentication and native streaming', () => {
       runtime.INFERENCE.effortDetails({ jobId: 'responses-effort-detail' }),
     ).resolves.toEqual({
       jobId: 'responses-effort-detail',
+      routes: ['sol-review'],
       nextCursor: null,
       requests: [
         {
@@ -1046,6 +1047,53 @@ describe('Responses route authentication and native streaming', () => {
       attempts: [{ attempt: 1, sent: null, reported: null, result: 'complete' }],
     });
     await runtime.INFERENCE.revoke({ jobId: 'responses-mixed-routes' });
+  });
+
+  it('projects the frozen route list before usage and filters a route beyond the first page', async () => {
+    await issueGrant('responses-frozen-routes', [questions.responses, questions.chat]);
+    const now = await d1Now();
+    const insert = runtime.RELAY_DB.prepare(
+      `INSERT INTO inference_requests
+        (request_id, job_id, route, model, status, created_at)
+       VALUES (?, ?, ?, ?, 'complete', ?)`,
+    );
+    for (let index = 0; index < 20; index += 1) {
+      await insert
+        .bind(
+          `frozen-a-${String(index).padStart(2, '0')}`,
+          'responses-frozen-routes',
+          questions.responses.routeId,
+          questions.responses.upstreamModel,
+          now + index,
+        )
+        .run();
+    }
+    await insert
+      .bind(
+        'frozen-b',
+        'responses-frozen-routes',
+        questions.chat.routeId,
+        questions.chat.upstreamModel,
+        now + 20,
+      )
+      .run();
+
+    const first = await runtime.INFERENCE.effortDetails({ jobId: 'responses-frozen-routes' });
+    expect(first?.routes).toEqual([questions.responses.routeId, questions.chat.routeId]);
+    expect(first?.requests).toHaveLength(20);
+    expect(first?.requests.every((request) => request.route === questions.responses.routeId)).toBe(
+      true,
+    );
+    expect(first?.nextCursor).toEqual(expect.any(String));
+
+    const filtered = await runtime.INFERENCE.effortDetails({
+      jobId: 'responses-frozen-routes',
+      route: questions.chat.routeId,
+    });
+    expect(filtered?.routes).toEqual([questions.responses.routeId, questions.chat.routeId]);
+    expect(filtered?.requests.map((request) => request.requestId)).toEqual(['frozen-b']);
+    expect(filtered?.nextCursor).toBeNull();
+    await runtime.INFERENCE.revoke({ jobId: 'responses-frozen-routes' });
   });
 
   it('rejects the wrong protocol for a frozen route before contacting upstream', async () => {

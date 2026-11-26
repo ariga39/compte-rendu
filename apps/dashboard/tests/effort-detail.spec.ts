@@ -36,6 +36,7 @@ const request = (
 
 const page1 = (overrides: Partial<EffortJobDetail> = {}): EffortJobDetail => ({
   jobId: 'job-effort',
+  routes: [responsesRoute, chatRoute],
   nextCursor: null,
   requests: [
     request({
@@ -344,6 +345,116 @@ test('filters request details by route and resets pagination', async ({ page, ha
   await expect(page.getByTestId('effort-request-req-chat')).toBeVisible();
   await expect(page.getByTestId('effort-request-req-responses')).toHaveCount(0);
   expect(asked.at(-1)).toBe('/api/jobs/run-effort/effort-details');
+});
+
+test('keeps every frozen route selectable with empty usage and all-Default configuration', async ({
+  page,
+  harness,
+  base,
+}) => {
+  harness.setSession(operator());
+  const routeA = chatRoute;
+  const routeB = responsesRoute;
+  const defaults = publicTask('run-defaults', { identity: publicIdentity() });
+  const asked: string[] = [];
+  const bodyFor = (route: string, requestId: string, nextCursor: string | null = null) =>
+    page1({
+      routes: [routeA, routeB],
+      nextCursor,
+      requests: [request({ requestId, route, selected: null, attempts: [] })],
+    });
+  harness.setHandler((url) => {
+    if (url.pathname === '/api/jobs/run-defaults/effort-details') {
+      asked.push(url.pathname + url.search);
+      const filtered = url.searchParams.get('route');
+      if (filtered === routeB) return ok(bodyFor(routeB, 'request-b'));
+      if (filtered === routeA) return ok(bodyFor(routeA, 'request-a'));
+      return ok(bodyFor(routeA, 'request-a', 'next-page'));
+    }
+    if (url.pathname === '/api/jobs/run-defaults') return ok(detailData(defaults));
+    return { status: 404 };
+  });
+  await page.goto(base + '/jobs/run-defaults');
+  await page.getByTestId('load-effort-details').click();
+
+  const filter = page.getByTestId('effort-route-filter');
+  await expect(filter.locator('option')).toHaveCount(3);
+  expect(await filter.locator('option').allTextContents()).toEqual(['All routes', routeA, routeB]);
+  await expect(page.getByTestId('effort-request-request-a')).toBeVisible();
+  await expect(page.getByTestId('load-more-effort-details')).toBeVisible();
+
+  // Route B is absent from the first page, but the frozen grant list still
+  // offers it without waiting for usage to be published.
+  await filter.selectOption(routeB);
+  await expect(page.getByTestId('effort-request-request-b')).toBeVisible();
+  await expect(page.getByTestId('effort-request-request-a')).toHaveCount(0);
+  await expect(page.getByTestId('load-more-effort-details')).toHaveCount(0);
+  await expect(filter.locator('option')).toHaveCount(3);
+
+  await filter.selectOption(routeA);
+  await expect(page.getByTestId('effort-request-request-a')).toBeVisible();
+  await expect(page.getByTestId('effort-request-request-b')).toHaveCount(0);
+
+  await filter.selectOption('');
+  await expect(page.getByTestId('effort-request-request-a')).toBeVisible();
+  await expect(page.getByTestId('load-more-effort-details')).toBeVisible();
+  expect(asked).toEqual([
+    '/api/jobs/run-defaults/effort-details',
+    '/api/jobs/run-defaults/effort-details?route=' + encodeURIComponent(routeB),
+    '/api/jobs/run-defaults/effort-details?route=' + encodeURIComponent(routeA),
+    '/api/jobs/run-defaults/effort-details',
+  ]);
+});
+
+test('keeps discovered routes only for a legacy grant without a frozen mapping', async ({
+  page,
+  harness,
+  base,
+}) => {
+  harness.setSession(operator());
+  const legacy = publicTask('run-legacy', { identity: publicIdentity() });
+  const bodyFor = (route: string, requestId: string) =>
+    page1({
+      routes: [],
+      requests: [request({ requestId, route, selected: null, attempts: [] })],
+    });
+  harness.setHandler((url) => {
+    if (url.pathname === '/api/jobs/run-legacy/effort-details') {
+      const filtered = url.searchParams.get('route');
+      if (filtered === responsesRoute) return ok(bodyFor(responsesRoute, 'request-b'));
+      return ok(
+        page1({
+          routes: [],
+          requests: [
+            request({
+              requestId: 'request-a',
+              route: chatRoute,
+              selected: null,
+              attempts: [],
+            }),
+            request({
+              requestId: 'request-b',
+              route: responsesRoute,
+              selected: null,
+              attempts: [],
+            }),
+          ],
+        }),
+      );
+    }
+    if (url.pathname === '/api/jobs/run-legacy') return ok(detailData(legacy));
+    return { status: 404 };
+  });
+  await page.goto(base + '/jobs/run-legacy');
+  await page.getByTestId('load-effort-details').click();
+
+  const filter = page.getByTestId('effort-route-filter');
+  await expect(filter.locator('option')).toHaveCount(3);
+  await filter.selectOption(responsesRoute);
+  await expect(page.getByTestId('effort-request-request-b')).toBeVisible();
+  await expect(filter.locator('option')).toHaveCount(3);
+  await filter.selectOption(chatRoute);
+  await expect(page.getByTestId('effort-request-request-a')).toBeVisible();
 });
 
 test('resets loaded request details when drawer navigation changes the task', async ({

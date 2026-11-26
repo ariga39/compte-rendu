@@ -307,6 +307,14 @@ to one reviewer route, so an operator can jump directly to a specific model
 across pages instead of paging through other requests. An invalid route is a
 `400`, not a "no longer retained" `404`.
 
+The operator response also projects the grant's frozen route IDs. The route
+selector therefore lists every reviewer route even when usage has not been
+published, every route uses the Default effort, or the route's requests sit
+beyond the first page. It no longer reconstructs the list from the public
+admission selection or usage snapshot. A legacy grant without a frozen mapping
+returns an empty list; only then does the page fall back to routes already
+discovered in retained request rows.
+
 Each request returns its ledger `status` (`pending`, `complete` or
 `incomplete`), the configured effort, at most two attempts with the sent and
 reported allowlisted controls, and `complete`, `rejected` or `incomplete` per
