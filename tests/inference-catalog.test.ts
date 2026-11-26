@@ -158,6 +158,7 @@ it('accepts protocol-native Responses effort controls on Responses routes only',
   const responsesEfforts = [
     { name: 'low', controls: { reasoning: { effort: 'low' as const } } },
     { name: 'minimal', controls: { reasoning: { effort: 'minimal' as const } } },
+    { name: 'max', controls: { reasoning: { effort: 'max' as const } } },
   ];
   const discovered = {
     url: 'https://api.openai.example/v1/models',

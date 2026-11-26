@@ -156,13 +156,13 @@ describe('Responses route authentication and native streaming', () => {
     const token = await issueGrant('responses-effort-merge', [
       {
         ...questions.responses,
-        effort: { name: 'low', controls: { reasoning: { effort: 'low' } } },
+        effort: { name: 'max', controls: { reasoning: { effort: 'max' } } },
       },
     ]);
     const requestBody = {
       ...responsesBody(),
       tool_choice: 'auto',
-      reasoning: { effort: 'high', summary: 'auto' },
+      reasoning: { effort: 'low', summary: 'auto' },
     };
 
     const response = await post(token, '/v1/responses', requestBody);
@@ -171,7 +171,7 @@ describe('Responses route authentication and native streaming', () => {
 
     const [upstream] = (await upstreamState()).requests;
     const body = JSON.parse(upstream!.body) as Record<string, unknown>;
-    expect(body.reasoning).toEqual({ effort: 'low', summary: 'auto' });
+    expect(body.reasoning).toEqual({ effort: 'max', summary: 'auto' });
     expect(body.model).toBe('gpt-sol-native');
     expect(body.store).toBe(false);
     expect(body.stream).toBe(true);
