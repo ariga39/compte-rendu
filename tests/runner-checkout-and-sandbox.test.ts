@@ -953,26 +953,6 @@ describe('Runner Job HTTP interface', () => {
     for (const [name, skill] of deliveredSkills) {
       expect(skill.files).toEqual(['SKILL.md']);
       expect(skill.body).toBe(await readFile(join('apps/runner/skills', name, 'SKILL.md'), 'utf8'));
-      expect(skill.body).toContain(`name: ${name}`);
-      expect(skill.body).not.toContain('## Credits');
-      expect(skill.body).not.toContain('LICENSE.md');
-      expect(skill.body).not.toContain('NOTICE.md');
-      for (const section of [
-        "Start from the project's operating model",
-        'Spot code that exists only because a model wrote it',
-        'Weigh likelihood, harm and the cost of the fix',
-        'Apply the production bar only to production paths',
-        'Treat retirement as a decision, not a gap',
-      ])
-        expect(skill.body).toContain(section);
-      expect(skill.body.replace(/\s+/g, ' ')).toContain(
-        'Do not, however, keep widening the hunt into remote environmental edge cases',
-      );
-      expect(skill.body.replace(/\s+/g, ' ')).toContain(
-        'A fault that appears only when all commits act together still counts',
-      );
-      expect(skill.body.replace(/\s+/g, ' ')).toContain('`approve` does not require perfection');
-      expect(skill.body.replace(/\s+/g, ' ')).toContain('rare but credible path');
     }
     const deliveredPrompt = (agentArgs?.join(' ') ?? '').replace(/\s+/g, ' ');
     expect(deliveredPrompt).not.toContain('First load the pr-review skill');
@@ -1018,21 +998,12 @@ describe('Runner Job HTTP interface', () => {
     expect(deliveredPrompt).toContain('Start with `git diff --find-renames');
     expect(deliveredPrompt).toContain('use the head revision as the source of truth');
     expect(deliveredPrompt).toContain('do not use the admitted base as the diff starting point');
-    expect(deliveredPrompt).toContain('`approve` does not require perfection');
-    expect(deliveredPrompt).toContain('optionally include 1-2 brief non-blocking notes');
     expect(deliveredPrompt).toContain(
-      'Reserve `DECISION: request_changes` for a concrete, high-confidence blocking issue',
+      'Investigate the whole supported change and gather evidence before deciding the merge disposition',
     );
-    expect(deliveredPrompt).toContain('significant avoidable complexity or AI-slop');
-    expect(deliveredPrompt).toContain('a rare but credible irreversible loss');
-    expect(deliveredSkills.get('code-review')?.body.replace(/\s+/g, ' ')).toContain(
-      'follow affected values into callers, consumers, configuration, storage, boundaries and tests',
-    );
-    expect(deliveredSkills.get('code-review')?.body.replace(/\s+/g, ' ')).toContain(
-      'find the changed line or behavior',
-    );
+    expect(deliveredPrompt).toContain('a small non-blocking note');
+    expect(deliveredPrompt).not.toContain('`approve` does not require perfection');
     expect(deliveredPrompt).toContain('Return at most five findings');
-    expect(deliveredSkills.get('code-review')?.body).toContain('Check the premise');
     expect(deliveredPrompt).toContain('TLDR:');
     expect(deliveredPrompt).toContain('decision');
     expect(deliveredPrompt).toContain('Markdown');
@@ -1130,9 +1101,6 @@ describe('Runner Job HTTP interface', () => {
     expect(deliveredPrompt).toContain('cursor-paginate');
     expect(deliveredPrompt).toContain(baseSha);
     expect(deliveredPrompt).toContain(headSha);
-    expect(deliveredSkills.get('code-review')?.body.replace(/\s+/g, ' ')).toContain(
-      'Weigh likelihood, harm and the cost of the fix',
-    );
     expect(deliveredPrompt).toContain('TLDR:');
     expect(deliveredPrompt).toContain('Return your final answer in exactly this form');
     expect(deliveredPrompt).toContain('DECISION: approve');

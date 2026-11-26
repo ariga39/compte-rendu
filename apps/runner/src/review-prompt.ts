@@ -61,11 +61,10 @@ const outputInstruction =
   'Concision, the TLDR template and review style are instructions, not additional validity rules.';
 
 const reviewDecisionGuidance =
-  "Calibrate the decision against the repository's actual operating model. " +
-  '`approve` does not require perfection: when the complete review finds no realistic blocker, return `DECISION: approve` and optionally include 1-2 brief non-blocking notes. ' +
-  'Reserve `DECISION: request_changes` for a concrete, high-confidence blocking issue: a real bug, a broken security boundary, silent data loss, or significant avoidable complexity or AI-slop. ' +
-  'Weigh both likelihood and severity: a rare but credible irreversible loss, credential exposure, or corruption of shared or published data can still block; a rare inconvenience that heals on retry or matches a documented non-goal usually should not. ' +
-  'Do not block for a stylistic preference or a fix whose ongoing complexity exceeds the realistic risk. ';
+  'Investigate the whole supported change and gather evidence before deciding the merge disposition. ' +
+  'Weigh the realistic likelihood and severity of a problem against the ongoing cost of correcting it. ' +
+  'You may add a small non-blocking note when it helps the author, but keep it separate from the merge decision. ' +
+  'Reserve `request_changes` for a material, evidence-backed blocker whose correction is proportionate; do not block on taste or on a theoretical edge case whose remedy costs more than the realistic risk. ';
 
 const reviewOutputInstruction = `${reviewDecisionGuidance}${outputInstruction}`;
 
