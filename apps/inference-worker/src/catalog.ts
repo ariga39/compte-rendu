@@ -1,5 +1,6 @@
 import { Option, Schema } from 'effect';
 import {
+  effortControlsProfile,
   RouteEfforts,
   type ModelProfile,
   type ModelRouteLimit,
@@ -22,6 +23,11 @@ import {
 } from './catalog-config';
 
 const validId = Schema.is(CatalogModelId);
+
+const effortsMatchProfile = (
+  efforts: readonly RouteEffortOption[],
+  profile: ModelProfile,
+): boolean => efforts.every((option) => effortControlsProfile(option.controls) === profile);
 
 const normalizedLimit = (limit: ModelRouteLimit): ModelRouteLimit => ({
   ...(limit.context === undefined ? {} : { context: limit.context }),
@@ -132,9 +138,9 @@ const readSource = async (
       // omitted rather than failing the source snapshot.
       if (profile === undefined) continue;
       const efforts = source.efforts?.[routeId] ?? [];
-      // A declared Chat effort on a route whose effective profile is not Chat
-      // invalidates the source refresh instead of silently dropping the menu.
-      if (efforts.length > 0 && profile !== 'chat') {
+      // Declared controls must match the route's effective protocol.
+      // Otherwise the source refresh fails instead of silently dropping the menu.
+      if (!effortsMatchProfile(efforts, profile)) {
         rejected += 1;
         continue;
       }
@@ -204,7 +210,7 @@ function candidateSources(sources: readonly Source[], gateway: GatewayConfig | n
           efforts: source.efforts?.[id] ?? [],
           metadata: null,
         };
-        if (resolved.efforts.length > 0 && resolved.profile !== 'chat') {
+        if (!effortsMatchProfile(resolved.efforts, resolved.profile)) {
           group.invalid = true;
           continue;
         }

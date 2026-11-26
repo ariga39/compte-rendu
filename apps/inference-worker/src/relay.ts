@@ -2,6 +2,7 @@ import { Effect, Option, Schema } from 'effect';
 import {
   ChatEffortControls,
   decodeStreamFrame,
+  isChatEffortControls,
   streamEventIsError,
   streamFrameEffortReport,
   streamFrameIsError,
@@ -103,17 +104,23 @@ const headersFor = (gateway: GatewayConfig, grant: AuthenticatedGrant, route: Fr
   session_id: grant.jobId,
 });
 
+const chatEffortControls = (route: FrozenRoute): ChatEffortControls | null => {
+  const controls = route.effort?.controls;
+  return controls !== undefined && isChatEffortControls(controls) ? controls : null;
+};
+
 const chatUpstreamBody = (
   body: Record<string, unknown>,
   route: FrozenRoute,
   omitThinkingControls: boolean,
 ): Record<string, unknown> => {
   const outbound = { ...body };
-  if (omitThinkingControls || route.effort !== undefined) {
+  const controls = chatEffortControls(route);
+  if (omitThinkingControls || controls !== null) {
     for (const key of CHAT_THINKING_KEYS) delete outbound[key];
   }
-  if (!omitThinkingControls && route.effort !== undefined) {
-    Object.assign(outbound, route.effort.controls);
+  if (!omitThinkingControls && controls !== null) {
+    Object.assign(outbound, controls);
   }
   return {
     ...outbound,
@@ -195,7 +202,7 @@ export const relayInference = (options: InferenceRelayOptions): Effect.Effect<Re
     const attempts: MutableAttempt[] = [
       {
         attempt: 1,
-        sent: sharedFallback ? null : (route.effort?.controls ?? passthroughControls(body)),
+        sent: sharedFallback ? null : (chatEffortControls(route) ?? passthroughControls(body)),
         reported: null,
         result: 'incomplete',
       },

@@ -220,8 +220,11 @@ The value is only a name. Requests never carry upstream thinking fields. Core
 resolves the name against the relay catalog (`efforts[route][] = {name, controls}`)
 and rejects an unknown route, an unknown name or any extra field. The relay
 catalog is trusted input; the browser cannot invent `reasoning_effort`,
-`thinking`, budgets or aliases. A route without a name keeps the client's
-existing request behaviour. Removing a name returns that route to the default.
+`thinking`, `reasoning`, budgets or aliases. This menu applies to both Chat and
+Responses routes; Responses routes select a `reasoning.effort` name through the
+same settings control and freeze it the same way. A route without a name keeps
+the client's existing request behaviour. Removing a name returns that route to
+the default.
 
 Saving writes the public selection and an internal frozen snapshot. It freezes
 only the routes that this selection actually executes: the single reviewer, or
@@ -229,8 +232,8 @@ all reviewers plus synthesis when there is more than one reviewer. A different
 configured synthesis route is not frozen or granted for a single-reviewer job.
 Each execution route gets one generation and, when chosen, the name and trusted
 controls from the catalog. Default generation-0 entries without an explicit
-effort are omitted because they carry no instruction and would be invalid on a
-non-Chat route. Admission copies the snapshot into the run's
+effort are omitted because they carry no instruction; a nonzero generation is
+kept for reset semantics. Admission copies the snapshot into the run's
 `reviewConfiguration` in the same D1 statement that creates the run. Changing or
 removing a catalog option later does not rewrite an existing save or queued job.
 Editor-facing settings show a missing saved name as unavailable and require a

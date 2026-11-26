@@ -228,6 +228,80 @@ describe('Inference Worker grant issue', () => {
     }
   });
 
+  it('freezes Responses effort controls only on a Responses route', async () => {
+    const { database, control } = setup();
+    try {
+      database.database
+        .prepare(`UPDATE catalog_routes SET profile = ? WHERE route_id = ?`)
+        .run('responses', 'deepseek-review');
+      const deadline = (await d1Now(database)) + 60_000;
+      const responsesControls = { reasoning: { effort: 'low' as const } };
+      const issued = await control.issueV2({
+        jobId: 'job-responses-effort',
+        snapshot: {
+          routes: ['deepseek-review'],
+          efforts: [
+            {
+              routeId: 'deepseek-review',
+              generation: 0,
+              name: 'low',
+              controls: responsesControls,
+            },
+          ],
+        },
+        latestIssueDeadline: deadline,
+      });
+      expect(issued).toMatchObject({
+        kind: 'issued',
+        descriptors: [{ routeId: 'deepseek-review', profile: 'responses' }],
+      });
+      const grant = database.database
+        .prepare('SELECT route_mapping FROM grants WHERE job_id = ?')
+        .get('job-responses-effort') as { readonly route_mapping: string };
+      expect(JSON.parse(grant.route_mapping)[0].effort).toEqual({
+        name: 'low',
+        controls: responsesControls,
+      });
+
+      await expect(
+        control.issueV2({
+          jobId: 'job-chat-responses-controls',
+          snapshot: {
+            routes: ['other-review'],
+            efforts: [
+              {
+                routeId: 'other-review',
+                generation: 0,
+                name: 'low',
+                controls: responsesControls,
+              },
+            ],
+          },
+          latestIssueDeadline: deadline,
+        }),
+      ).resolves.toEqual({ kind: 'invalid' });
+      await expect(
+        control.issueV2({
+          jobId: 'job-responses-chat-controls',
+          snapshot: {
+            routes: ['deepseek-review'],
+            efforts: [
+              {
+                routeId: 'deepseek-review',
+                generation: 0,
+                name: 'high',
+                controls: { reasoning_effort: 'high' },
+              },
+            ],
+          },
+          latestIssueDeadline: deadline,
+        }),
+      ).resolves.toEqual({ kind: 'invalid' });
+    } finally {
+      database.close();
+    }
+  });
+
   it('rejects a persisted retired profile instead of defaulting it to chat', async () => {
     const { database, control } = setup();
     try {

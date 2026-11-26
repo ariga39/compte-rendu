@@ -404,6 +404,44 @@ test('selects a per-route effort, saves it, shows the fallback marker and resets
   await expect(page.getByRole('status')).toContainText('re-enabled');
 });
 
+test('selects and saves a Responses route effort from the catalog menu', async ({
+  page,
+  harness,
+  base,
+}) => {
+  const route = 'openai-platform/gpt-6.1-terra';
+  harness.setHandler((url, req) => {
+    if (url.pathname !== '/api/model-settings') return { status: 404 };
+    if (req.method === 'PUT') return { status: 200, json: { revision: 3 } };
+    return {
+      status: 200,
+      json: {
+        routes: [route],
+        efforts: {
+          [route]: [
+            { name: 'low', controls: { reasoning: { effort: 'low' } } },
+            { name: 'high', controls: { reasoning: { effort: 'high' } } },
+          ],
+        },
+        configuration: {
+          revision: 2,
+          selection: { reviewers: [route], synthesis: route },
+        },
+      },
+    };
+  });
+  await page.goto(base + '/settings');
+  await expect(page.getByText('No configurable efforts for this route.')).toHaveCount(0);
+  const effort = page.getByLabel(`Thinking effort for ${route}`);
+  await effort.selectOption('low');
+  const saved = page.waitForRequest((request) => request.method() === 'PUT');
+  await page.getByRole('button', { name: 'Save changes' }).click();
+  expect((await saved).postDataJSON()).toEqual({
+    revision: 2,
+    selection: { reviewers: [route], synthesis: route, efforts: { [route]: 'low' } },
+  });
+});
+
 test('shows a saved effort that is no longer in the catalog and blocks saving', async ({
   page,
   harness,

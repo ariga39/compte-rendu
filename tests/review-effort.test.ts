@@ -105,6 +105,55 @@ it('resolves operator effort names against the trusted catalog without accepting
   }
 });
 
+it('saves a Responses reviewer effort through the existing settings chain', async () => {
+  const database = new SqliteD1Database();
+  const route = 'openai-platform/gpt-6.1-terra';
+  const controls = { reasoning: { effort: 'low' as const } };
+  try {
+    const core = createCoreWorker(
+      environment(database, {
+        catalog: async () => ({
+          ...catalog(),
+          routes: [route],
+          efforts: { [route]: [{ name: 'low', controls }] },
+        }),
+      }),
+    );
+    const selection = { reviewers: [route], synthesis: route, efforts: { [route]: 'low' } };
+    const saved = await core.handleReviewConfiguration(
+      settingsRequest('PUT', { revision: 0, selection }),
+    );
+    expect(saved.status).toBe(200);
+    expect(await saved.json()).toEqual({ revision: 1, selection, concurrency: null });
+    const row = database.database
+      .prepare('SELECT effort_snapshot FROM review_configuration WHERE id = 1')
+      .get() as { effort_snapshot: string };
+    expect(JSON.parse(row.effort_snapshot)).toEqual([
+      { routeId: route, generation: 0, name: 'low', controls },
+    ]);
+
+    const cleared = { reviewers: [route], synthesis: route };
+    expect(
+      (
+        await core.handleReviewConfiguration(
+          settingsRequest('PUT', { revision: 1, selection: cleared }),
+        )
+      ).status,
+    ).toBe(200);
+    expect(
+      JSON.parse(
+        (
+          database.database
+            .prepare('SELECT effort_snapshot FROM review_configuration WHERE id = 1')
+            .get() as { effort_snapshot: string }
+        ).effort_snapshot,
+      ),
+    ).toEqual([]);
+  } finally {
+    database.close();
+  }
+});
+
 it('freezes effort controls and generations at admission and advances only on explicit reset', async () => {
   const database = new SqliteD1Database();
   try {

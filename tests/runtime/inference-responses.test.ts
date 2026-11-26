@@ -151,6 +151,86 @@ describe('Responses route authentication and native streaming', () => {
     expect(JSON.parse(upstream!.body).text).toEqual(text);
   });
 
+  it('injects the frozen Responses effort while preserving other reasoning and tool fields', async () => {
+    await control('responses-success');
+    const token = await issueGrant('responses-effort-merge', [
+      {
+        ...questions.responses,
+        effort: { name: 'low', controls: { reasoning: { effort: 'low' } } },
+      },
+    ]);
+    const requestBody = {
+      ...responsesBody(),
+      tool_choice: 'auto',
+      reasoning: { effort: 'high', summary: 'auto' },
+    };
+
+    const response = await post(token, '/v1/responses', requestBody);
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('event: response.completed');
+
+    const [upstream] = (await upstreamState()).requests;
+    const body = JSON.parse(upstream!.body) as Record<string, unknown>;
+    expect(body.reasoning).toEqual({ effort: 'low', summary: 'auto' });
+    expect(body.model).toBe('gpt-sol-native');
+    expect(body.store).toBe(false);
+    expect(body.stream).toBe(true);
+    expect(body.tools).toEqual(requestBody.tools);
+    expect(body.tool_choice).toEqual(requestBody.tool_choice);
+    expect(body.input).toEqual(requestBody.input);
+    expect(body.include).toEqual(requestBody.include);
+  });
+
+  it('creates reasoning when the caller omits or nulls it on an effort route', async () => {
+    const cases = [
+      ['omitted', undefined],
+      ['null', null],
+    ] as const;
+    for (const [name, reasoning] of cases) {
+      await control('responses-success');
+      const token = await issueGrant(`responses-effort-${name}`, [
+        {
+          ...questions.responses,
+          effort: { name: 'low', controls: { reasoning: { effort: 'low' } } },
+        },
+      ]);
+      const requestBody: Record<string, unknown> = { ...responsesBody() };
+      if (reasoning === undefined) delete requestBody.reasoning;
+      else requestBody.reasoning = reasoning;
+
+      const response = await post(token, '/v1/responses', requestBody);
+      expect(response.status, name).toBe(200);
+      expect(await response.text()).toContain('event: response.completed');
+      const [upstream] = (await upstreamState()).requests;
+      const body = JSON.parse(upstream!.body) as Record<string, unknown>;
+      expect(body.reasoning, name).toEqual({ effort: 'low' });
+    }
+  });
+
+  it('keeps caller reasoning untouched when the route uses the default effort', async () => {
+    await control('responses-success');
+    const token = await issueGrant('responses-effort-default', [questions.responses]);
+    const callerReasoning = { effort: 'high', summary: 'auto' };
+    const first = await post(token, '/v1/responses', {
+      ...responsesBody(),
+      reasoning: callerReasoning,
+    });
+    expect(first.status).toBe(200);
+    expect(await first.text()).toContain('event: response.completed');
+    let upstream = (await upstreamState()).requests[0]!;
+    expect((JSON.parse(upstream.body) as { reasoning: unknown }).reasoning).toEqual(
+      callerReasoning,
+    );
+
+    const withoutReasoning: Record<string, unknown> = { ...responsesBody() };
+    delete withoutReasoning.reasoning;
+    const second = await post(token, '/v1/responses', withoutReasoning);
+    expect(second.status).toBe(200);
+    expect(await second.text()).toContain('event: response.completed');
+    upstream = (await upstreamState()).requests[1]!;
+    expect(JSON.parse(upstream.body) as Record<string, unknown>).not.toHaveProperty('reasoning');
+  });
+
   it('passes benign optional fields through while forcing model, stream and store', async () => {
     await control('responses-success');
     const token = await issueGrant('responses-benign-fields', [questions.responses]);
@@ -245,6 +325,8 @@ describe('Responses route authentication and native streaming', () => {
       ['provider content cache', { ...base, cachedContent: 'cached-content' }],
       ['non-streaming', { ...base, stream: false }],
       ['stored response', { ...base, store: true }],
+      ['string reasoning', { ...base, reasoning: 'low' }],
+      ['array reasoning', { ...base, reasoning: [] }],
       ['unsupported include', { ...base, include: ['message.output_text.logprobs'] }],
       ['oversized output cap', { ...base, max_output_tokens: 256_001 }],
       ['hosted web search', { ...base, tools: [{ type: 'web_search_preview' }] }],

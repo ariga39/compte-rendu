@@ -151,6 +151,148 @@ it('rejects effort menus with conflicting or non-Chat controls in configuration'
   ).toMatchObject({ _tag: 'None' });
 });
 
+it('accepts protocol-native Responses effort controls on Responses routes only', () => {
+  const decode = Schema.decodeUnknownOption(RelayCatalogSources, {
+    onExcessProperty: 'error',
+  });
+  const responsesEfforts = [
+    { name: 'low', controls: { reasoning: { effort: 'low' as const } } },
+    { name: 'minimal', controls: { reasoning: { effort: 'minimal' as const } } },
+  ];
+  const discovered = {
+    url: 'https://api.openai.example/v1/models',
+    prefix: 'openai-platform/',
+    providerSlug: 'custom-openai',
+    credentialAlias: 'sol',
+    models: { 'openai-platform/gpt-6.1-terra': { profile: 'responses' as const } },
+    efforts: { 'openai-platform/gpt-6.1-terra': responsesEfforts },
+  };
+  expect(decode([discovered])).toMatchObject({ _tag: 'Some' });
+  expect(
+    decode([
+      {
+        ...discovered,
+        efforts: { 'openai-platform/gpt-6.1-terra': [] },
+      },
+    ]),
+  ).toMatchObject({ _tag: 'Some' });
+  expect(
+    decode([
+      {
+        providerSlug: 'custom-legacy',
+        credentialAlias: 'default',
+        profile: 'responses' as const,
+        aliases: { legacy: 'gpt-6.1-terra' },
+        efforts: { legacy: responsesEfforts },
+      },
+    ]),
+  ).toMatchObject({ _tag: 'Some' });
+  expect(
+    decode([
+      {
+        url: 'https://api.openai.example/v1/models',
+        prefix: 'openai-platform/',
+        providerSlug: 'custom-openai',
+        credentialAlias: 'sol',
+        profiles: ['chat', 'responses'] as const,
+        efforts: { 'openai-platform/gpt-6.1-terra': responsesEfforts },
+      },
+    ]),
+  ).toMatchObject({ _tag: 'Some' });
+
+  const chatControls = [{ name: 'high', controls: { reasoning_effort: 'high' as const } }];
+  const invalid = [
+    {
+      ...discovered,
+      efforts: { 'openai-platform/gpt-6.1-terra': chatControls },
+    },
+    {
+      ...discovered,
+      models: { 'openai-platform/gpt-6.1-terra': { profile: 'chat' as const } },
+    },
+    {
+      ...discovered,
+      efforts: {
+        'openai-platform/gpt-6.1-terra': [
+          { name: 'mixed', controls: { reasoning: { effort: 'low' } } },
+          ...chatControls,
+        ],
+      },
+    },
+    {
+      ...discovered,
+      efforts: {
+        'openai-platform/gpt-6.1-terra': [
+          { name: 'extra', controls: { reasoning: { effort: 'low', summary: 'auto' } } },
+        ],
+      },
+    },
+    {
+      ...discovered,
+      efforts: {
+        'openai-platform/gpt-6.1-terra': [{ name: 'empty', controls: { reasoning: {} } }],
+      },
+    },
+    {
+      ...discovered,
+      efforts: {
+        'openai-platform/gpt-6.1-terra': [
+          { name: 'invalid', controls: { reasoning: { effort: 'extreme' } } },
+        ],
+      },
+    },
+  ];
+  for (const source of invalid) expect(decode([source])).toMatchObject({ _tag: 'None' });
+});
+
+it('publishes Responses efforts only when the discovered profile matches the controls', async () => {
+  const db = database();
+  const routeId = 'p/terrain';
+  const effortOptions = [{ name: 'low', controls: { reasoning: { effort: 'low' as const } } }];
+  const source = {
+    url: 'https://models.example/v1/models',
+    prefix: 'p/',
+    providerSlug: 'custom-review',
+    credentialAlias: 'default',
+    profiles: ['chat', 'responses'] as const,
+    efforts: { [routeId]: effortOptions },
+  };
+  try {
+    vi.stubGlobal('fetch', async () =>
+      Response.json({
+        data: [{ id: 'terrain', api: { responses: {} }, recommended_api: 'responses' }],
+      }),
+    );
+    await createRelayCatalog(db, [source]).refresh(50);
+    expect(await createRelayCatalog(db, [source]).get()).toMatchObject({
+      routes: [routeId],
+      efforts: { [routeId]: effortOptions },
+      lastRefreshError: null,
+    });
+
+    vi.stubGlobal('fetch', async () =>
+      Response.json({
+        data: [
+          {
+            id: 'terrain',
+            api: { 'chat-completions': {}, responses: {} },
+            recommended_api: 'chat-completions',
+          },
+        ],
+      }),
+    );
+    await createRelayCatalog(db, [source]).refresh(100);
+    expect(await createRelayCatalog(db, [source]).get()).toMatchObject({
+      routes: [routeId],
+      efforts: { [routeId]: effortOptions },
+      lastSuccessAt: new Date(50).toISOString(),
+      lastRefreshError: 'refresh failed',
+    });
+  } finally {
+    db.close();
+  }
+});
+
 it('keeps the models allowlist behavior while sparse efforts stay orthogonal', async () => {
   const db = database();
   const source = {

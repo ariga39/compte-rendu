@@ -62,11 +62,12 @@ Grant revocation and confirmed Sandbox destruction still run before final succes
 
 ### Reasoning effort injection and route fallback
 
-Chat routes may declare a narrow, protocol-validated effort menu in the relay
-catalog. The menu is a sparse source-level `efforts` map keyed by the actual
-route ID; it is orthogonal to the optional `models` allowlist. Existing
-`models` profile/limit allowlists keep their current behavior. For the initial
-target models, on an otherwise unrestricted discovery source:
+Chat and Responses routes may declare a narrow, protocol-validated effort menu
+in the relay catalog. Controls mirror the upstream wire shape and must match the
+route's effective protocol. The menu is a sparse source-level `efforts` map keyed
+by the actual route ID; it is orthogonal to the optional `models` allowlist.
+Existing `models` profile/limit allowlists keep their current behavior. For the
+initial Chat target models, on an otherwise unrestricted discovery source:
 
 ```json
 {
@@ -85,29 +86,61 @@ target models, on an otherwise unrestricted discovery source:
 }
 ```
 
-Routes without an entry (including newly discovered ones) keep an empty menu.
-Declaring an effort on a route with an explicit non-Chat profile, or on a
-discovery route whose effective profile resolves to non-Chat, rejects that
-source refresh. With an existing `models` allowlist, only allowlisted routes
-remain visible; `efforts` never re-enables a filtered route.
+A Responses route uses the protocol-native `reasoning.effort` control. When the
+source has an explicit `models` allowlist, declare the route there as well as in
+`efforts`:
+
+```json
+{
+  "discovery": "gateway",
+  "prefix": "openai-platform/",
+  "providerSlug": "native:openai",
+  "credentialAlias": "review",
+  "models": {
+    "openai-platform/gpt-6.1-terra": { "profile": "responses" }
+  },
+  "efforts": {
+    "openai-platform/gpt-6.1-terra": [
+      { "name": "low", "controls": { "reasoning": { "effort": "low" } } },
+      { "name": "high", "controls": { "reasoning": { "effort": "high" } } }
+    ]
+  }
+}
+```
+
+Routes without an entry (including newly discovered ones) keep an empty menu,
+and an empty array declares no protocol. Chat controls (`reasoning_effort` or
+`thinking`) are accepted only when the route resolves to Chat; Responses
+controls (`reasoning.effort`) are accepted only when it resolves to Responses.
+A mismatch, mixed protocols under one route, or extra control fields rejects
+that source refresh. With an existing `models` allowlist, only allowlisted
+routes remain visible; `efforts` never re-enables a filtered route.
 
 The menu is mutable only through a successful source publication. Changing,
 removing or adding a same-name effort updates new grants; a failed refresh
 keeps the previous menu and model snapshot, and already-admitted jobs keep their
 frozen controls. Effort changes never alter alias/discovery visibility.
 
-Only `reasoning_effort` (`minimal`, `low`, `medium`, `high`, `max`) or
-`thinking.type: "disabled"` is accepted, exactly one per effort. The browser
-submits route IDs and effort names only. Core resolves the trusted controls and
-freezes `{routeId, generation, name, controls}` at admission. The grant sends that
-frozen list to the relay. The relay validates snapshot entries by Chat protocol and granted
-route only, never against the mutable current menu, so a later settings edit does
-not invalidate an admitted job.
+Chat accepts `reasoning_effort` (`minimal`, `low`, `medium`, `high`, `max`) or
+`thinking.type: "disabled"`. Responses accepts `reasoning.effort` (`none`,
+`minimal`, `low`, `medium`, `high`, `xhigh`). Exactly one protocol-native
+control is allowed per effort. The browser submits route IDs and effort names
+only. Core resolves the trusted controls and freezes
+`{routeId, generation, name, controls}` at admission. The grant sends that frozen
+list to the relay. The relay validates snapshot controls against the granted
+route's protocol only, never against the mutable current menu, so a later
+settings edit does not invalidate an admitted job.
 
-For a request with an explicit effort, the relay removes every competing
+For a Chat request with an explicit effort, the relay removes every competing
 top-level Chat thinking control (including client `reasoning_effort`) and adds
-only the frozen controls. With no selected effort, client controls pass through
-unchanged.
+only the frozen controls. For a Responses request with an explicit effort, the
+relay overwrites only `reasoning.effort` and keeps the caller's other
+`reasoning` options, such as `summary`. With no selected effort, client controls
+pass through unchanged for both protocols.
+
+Automatic fallback remains limited to the verified DeepSeek Chat case below.
+A Responses effort rejection is an ordinary upstream failure; it is not retried
+and does not write shared fallback state.
 
 A fallback is enabled only for the verified DeepSeek Chat deserializer rejection
 ([OpenCode Go field report](https://github.com/anomalyco/models.dev/issues/3962),
@@ -265,10 +298,21 @@ entry declares its trusted profile and optional `limit`:
 }
 ```
 
+#### Model visibility
+
+The provider model listing (`GET /models`) and the selectable review catalog
+serve different purposes. The upstream list alone does not prove tool-calling
+support or Responses protocol compatibility. When a source configures an
+explicit `models` map, only listed entries that are also discovered become
+selectable; discovered IDs outside the map stay invisible. To add a model such
+as Terra, add it to `models` with its profile (and, when wanted, its `efforts`
+menu), redeploy the inference Worker, then wait for or trigger a catalog refresh.
+Adding it to `efforts` alone does not make it visible.
+
 An explicit `capabilities.tools.supported: false` always omits that model, even
 for a legacy unqualified source. Malformed rich capability metadata fails the
-source refresh and keeps the previous snapshot. A route that declares Chat
-efforts must actually resolve to Chat; for example,
+source refresh and keeps the previous snapshot. A route that declares effort
+controls must actually resolve to the matching protocol; for example,
 `models: { "<ROUTE_ID>": { "profile": "chat" } }` forces Chat when the source
 would otherwise choose Responses. For a negotiating source, rich entries that
 advertise only retired Messages or Gemini operations are omitted instead of

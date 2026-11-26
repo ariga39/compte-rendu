@@ -126,9 +126,9 @@ const buildSnapshot = (input: {
     const name = requested[routeId];
     if (name === undefined) {
       // A default generation adds nothing: the relay has no fallback state to
-      // apply before generation 0 advances, and a generation-only entry on a
-      // non-Chat route would be rejected. Preserve only a nonzero generation so
-      // an ordinary post-reset save cannot reactivate the old shared marker.
+      // apply before generation 0 advances and generation-only metadata carries
+      // no instruction. Preserve only a nonzero generation so an ordinary
+      // post-reset save cannot reactivate the old shared marker.
       if (generation > 0) snapshot.push({ routeId, generation });
       continue;
     }

@@ -1,5 +1,9 @@
 import { Option, Schema } from 'effect';
-import { modelIdentity, type ObservedTokenFields } from '@compte-rendu/contracts';
+import {
+  isResponsesEffortControls,
+  modelIdentity,
+  type ObservedTokenFields,
+} from '@compte-rendu/contracts';
 import type { FrozenRoute } from './routes.ts';
 import type {
   ProtocolStreamAdapter,
@@ -102,6 +106,10 @@ export const validateResponsesBody = (raw: unknown): Record<string, unknown> | n
   )
     return null;
   if (!isLocalToolChoice(raw.tool_choice, false)) return null;
+  // Reasoning is merged as an object on an explicit effort route; rejecting
+  // other JSON shapes here keeps that merge from spreading a primitive.
+  if (raw.reasoning !== undefined && raw.reasoning !== null && !isRecord(raw.reasoning))
+    return null;
   const input = raw.input;
   if (
     typeof input !== 'string' &&
@@ -114,12 +122,20 @@ export const validateResponsesBody = (raw: unknown): Record<string, unknown> | n
 export const responsesUpstreamBody = (
   raw: Record<string, unknown>,
   route: FrozenRoute,
-): Record<string, unknown> => ({
-  ...raw,
-  model: route.upstreamModel,
-  store: false,
-  stream: true,
-});
+): Record<string, unknown> => {
+  const outbound: Record<string, unknown> = {
+    ...raw,
+    model: route.upstreamModel,
+    store: false,
+    stream: true,
+  };
+  const controls = route.effort?.controls;
+  if (controls === undefined || !isResponsesEffortControls(controls)) return outbound;
+  outbound.reasoning = isRecord(raw.reasoning)
+    ? { ...raw.reasoning, effort: controls.reasoning.effort }
+    : { effort: controls.reasoning.effort };
+  return outbound;
+};
 
 const TokenNumber = Schema.Int.check(
   Schema.isGreaterThanOrEqualTo(0),
