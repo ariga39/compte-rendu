@@ -169,16 +169,6 @@ drain. A compatible change that touches one service does not require the full
 sequence below. A breaking release uses the matching release sequence in a brief
 maintenance window; mixed-version operation is not a default requirement.
 
-Current installations run a public application Worker and an inference Worker.
-If you still run separate ingress and Core Workers, use the
-[historical installation guide](https://github.com/ariga39/compte-rendu/blob/e9ba46dd063c7775e8f86d7514acedc28ae8f40f/docs/installation.md)
-and [two-Worker migration procedure](https://github.com/ariga39/compte-rendu/blob/e9ba46dd063c7775e8f86d7514acedc28ae8f40f/docs/operations.md#migrating-an-existing-two-worker-installation).
-Disable the old Core cron when handing scheduled work to the unified
-application. Verify that only one scheduler writes to the shared `REVIEW_DB`.
-On rollback, disable the unified application's cron before restoring the old
-Core cron and ingress deployment. For older grant, callback, deadline or
-direct-provider cutovers, use the instructions for the target release.
-
 For every deployment:
 
 1. Run `corepack pnpm check`, `corepack pnpm test`, and
@@ -195,13 +185,6 @@ For every deployment:
    quiescing Worker HTTP/webhooks and scheduled writers during the schema/code
    switch. Retire obsolete fields and tables only after the old Worker no longer
    uses them.
-
-Operators crossing a release that predates the Check-retry removal and still
-carries `review_check_deliveries` should handle that table separately: deploy
-and verify the Worker and scheduled handler that no longer use it, then apply
-migration 0019. Pending Check updates are not replayed. If an old Check is left
-unfinished, re-trigger the review for a new Check. See the
-[historical 0019 runbook](https://github.com/ariga39/compte-rendu/blob/e9ba46dd063c7775e8f86d7514acedc28ae8f40f/docs/operations.md#check-retry-storage-removal).
 
 For compatible Worker changes, apply the required additive migrations, deploy the
 affected Worker, and verify its behavior. A documentation-only change needs no

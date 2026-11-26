@@ -540,9 +540,6 @@ RUNNER_CONCURRENCY=1
 
 Grant v2 is the only issuance path. Leave `RUNNER_LLM_GRANT_VERSION` unset, or
 set it to `2`; an explicit `1` fails startup instead of issuing a legacy grant.
-The Runner rejects the retired `RUNNER_SETTINGS_FILE` setting at startup.
-[Preserve the effective concurrency](#change-concurrency-without-restarting)
-before removing it from an existing installation.
 
 Confirm the file is still mode `0600` after editing; never commit it. The
 `RUNNER_AUTH_TOKEN` and `RUNNER_CALLBACK_TOKEN` values belong only in this file
@@ -598,7 +595,7 @@ CPU, memory, disk, and model throughput of the default. Prefer the smallest
 value that removes head-of-line blocking. This setting reuses the existing D1
 durable queue and adds no new queue, scheduler, or retry system.
 
-`RUNNER_CONCURRENCY` is the startup fallback. It applies until Core delivers a
+`RUNNER_CONCURRENCY` is the startup fallback and defaults to 1. It applies until Core delivers a
 deployment desired value, and whenever the D1 value is explicitly cleared.
 
 ### Change concurrency without restarting
@@ -610,10 +607,7 @@ Runner concurrency**, or through the authenticated operator API described in
 positive safe integer. There is no product-enforced concurrency cap or local
 maximum setting; size each host for
 the value you set, and Core delivers the stored value to every Runner attached
-to the deployment. Before replacing a Runner, preserve the current effective
-concurrency: set that value in Dashboard Settings, or set `RUNNER_CONCURRENCY`
-to it before removing the retired `RUNNER_SETTINGS_FILE`. With no D1 value the
-Runner uses `RUNNER_CONCURRENCY`, which defaults to `1`.
+to the deployment.
 
 Every `POST /runner-claim` 200 and 204 response carries the value in
 `x-compte-rendu-concurrency`. When the Runner has no free slot, it reads the
