@@ -909,6 +909,36 @@ describe('Responses route authentication and native streaming', () => {
     await runtime.INFERENCE.revoke({ jobId: 'responses-effort-detail-omitted' });
   });
 
+  it('does not retain an upstream effort outside the wire allowlist', async () => {
+    await control('responses-effort-unrecognized');
+    const token = await issueGrant('responses-effort-unrecognized', [
+      {
+        ...questions.responses,
+        effort: { name: 'low', controls: { reasoning: { effort: 'low' } } },
+      },
+    ]);
+    const response = await post(token, '/v1/responses', responsesBody());
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('event: response.completed');
+
+    const details = await runtime.INFERENCE.effortDetails({
+      jobId: 'responses-effort-unrecognized',
+    });
+    expect(details?.requests[0]).toMatchObject({
+      status: 'complete',
+      selected: 'low',
+      attempts: [
+        {
+          attempt: 1,
+          sent: { reasoning: { effort: 'low' } },
+          reported: null,
+          result: 'complete',
+        },
+      ],
+    });
+    await runtime.INFERENCE.revoke({ jobId: 'responses-effort-unrecognized' });
+  });
+
   it('records only allowlisted Responses controls sent from a Default route', async () => {
     await control('responses-effort-echo');
     const token = await issueGrant('responses-effort-passthrough', [questions.responses]);

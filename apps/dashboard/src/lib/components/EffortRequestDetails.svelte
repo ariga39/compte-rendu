@@ -117,8 +117,11 @@
   // default" from it.
   const sentLabel = (attempt: EffortRequestDetail['attempts'][number]) =>
     attempt.sent === null ? 'No allowlisted effort recorded' : controlLabel(attempt.sent);
+  // A null report can mean the provider omitted the field or supplied a value
+  // outside the wire allowlist, so never claim the upstream said nothing.
+  const NO_RECOGNIZED_REPORT = 'No recognized effort recorded';
   const reportedLabel = (attempt: EffortRequestDetail['attempts'][number]) =>
-    attempt.reported === null ? 'Not reported by upstream' : controlLabel(attempt.reported);
+    attempt.reported === null ? NO_RECOGNIZED_REPORT : controlLabel(attempt.reported);
   const differs = (attempt: EffortRequestDetail['attempts'][number]) =>
     attempt.sent !== null &&
     attempt.reported !== null &&
@@ -271,7 +274,12 @@
                       </span>
                       <span class="muted">Sent: <code>{sentLabel(last)}</code></span>
                       <span class="muted">
-                        Reported: <code>{reportedLabel(last)}</code>
+                        Reported:
+                        {#if last.reported === null}
+                          {reportedLabel(last)}
+                        {:else}
+                          <code>{controlLabel(last.reported)}</code>
+                        {/if}
                       </span>
                       {#if differs(last)}
                         <Badge tone="warn">Differs from sent</Badge>
@@ -321,7 +329,7 @@
                               <dt>Reported</dt>
                               <dd>
                                 {#if attempt.reported === null}
-                                  <span class="muted">Not reported by upstream</span>
+                                  <span class="muted">{reportedLabel(attempt)}</span>
                                 {:else}
                                   <code>{controlLabel(attempt.reported)}</code>
                                 {/if}

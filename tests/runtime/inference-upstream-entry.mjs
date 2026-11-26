@@ -533,6 +533,8 @@ export default {
     }
     if (scenario === 'responses-effort-failed')
       return streamResponse(responsesEffortFailedWire('max'));
+    if (scenario === 'responses-effort-unrecognized')
+      return streamResponse(responsesEffortSuccessWire('turbo'));
     if (scenario === 'responses-incomplete') return streamResponse(responsesIncompleteWire());
     if (scenario === 'responses-failed') return streamResponse(responsesFailedWire());
     if (scenario === 'responses-error-event') return streamResponse(responsesErrorWire());

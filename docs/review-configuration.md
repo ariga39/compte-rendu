@@ -319,6 +319,7 @@ not a running request. A `pending` row with no attempt row says only that no
 completion or attempt record was retained: a failed request can still carry
 `pending` because partial saving does not change the status column. An
 unrecognised or absent sent control is shown as "no allowlisted effort
-recorded", never asserted to be the upstream default. An absent upstream report
-is "not reported by upstream". Historical rows are read as-is; the ledger is not
-backfilled.
+recorded", never asserted to be the upstream default. A missing or unrecognised
+upstream report is "no recognized effort recorded": a null report does not prove
+the provider omitted the field, because a value outside the allowlist is also
+dropped to null. Historical rows are read as-is; the ledger is not backfilled.
