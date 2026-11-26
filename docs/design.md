@@ -206,8 +206,9 @@ configuration directory. The Runner excludes repository configuration and host
 skills, MCP and SSH settings; budgets and egress are enforced outside the model,
 because a prompt is not a security boundary. The bundled `code-review` skill owns
 only the review method and cannot change scope, tool permissions, orchestration
-or the final output contract. The decision to replace the earlier topic-skill
-proposal is recorded in the
+or the final output contract. Its method lineage, credits and licenses are
+packaged with it; the decision to replace the earlier topic-skill proposal is
+recorded in the
 [archived source comparison](https://github.com/ariga39/compte-rendu/blob/e9ba46dd063c7775e8f86d7514acedc28ae8f40f/docs/archive/review-oriented-skills-research.md)
 and [#406](https://github.com/ariga39/compte-rendu/issues/406).
 

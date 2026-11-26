@@ -99,6 +99,8 @@ export const runAgentStage = async (
     const directory = join(configDirectory, 'skills', skill.name);
     await mkdir(directory, { recursive: true });
     await writeFile(join(directory, 'SKILL.md'), skill.body);
+    await writeFile(join(directory, 'LICENSE.md'), skill.license);
+    await writeFile(join(directory, 'NOTICE.md'), skill.notice);
   }
   const activeOpenCodeConfig = multiReviewConfig({
     selection: multiSelection,
