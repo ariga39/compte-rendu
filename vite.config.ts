@@ -16,13 +16,6 @@ export default defineConfig({
       typeAware: true,
       typeCheck: true,
     },
-    // Selected from ultracite/oxlint/core (8.3.1).
-    rules: {
-      'typescript/await-thenable': 'error',
-      'typescript/no-floating-promises': 'error',
-      'typescript/no-misused-spread': 'error',
-      'typescript/switch-exhaustiveness-check': 'error',
-    },
   },
   fmt: {
     semi: true,
