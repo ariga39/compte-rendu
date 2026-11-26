@@ -3,6 +3,7 @@ import { RelayCatalogSources } from './catalog-config';
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import { Effect, Option, Schema } from 'effect';
 import {
+  ModelRouteId,
   readBoundedRequestBody,
   type EffortJobDetail,
   type ModelProfile,
@@ -40,6 +41,7 @@ const CatalogInput = Schema.Struct({
 const DetailInput = Schema.Struct({
   jobId: Schema.NonEmptyString,
   cursor: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(512))),
+  route: Schema.optionalKey(ModelRouteId),
 });
 
 export interface InferenceWorkerEnv {
@@ -199,10 +201,16 @@ export class InferenceWorker extends WorkerEntrypoint<InferenceWorkerEnv> {
   effortDetails(input: {
     readonly jobId: string;
     readonly cursor?: string;
+    readonly route?: string;
   }): Promise<EffortJobDetail | null> {
     const decoded = Schema.decodeUnknownOption(DetailInput, { onExcessProperty: 'error' })(input);
     if (Option.isNone(decoded)) return Promise.resolve(null);
-    return readEffortDetails(this.env.RELAY_DB, decoded.value.jobId, decoded.value.cursor);
+    return readEffortDetails(
+      this.env.RELAY_DB,
+      decoded.value.jobId,
+      decoded.value.cursor,
+      decoded.value.route,
+    );
   }
 
   sweep(): Promise<number> {

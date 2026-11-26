@@ -2,6 +2,7 @@ import {
   DEFAULT_REVIEW_NAME,
   EffortJobDetail,
   MetadataInvalidationEvent,
+  ModelRouteId,
   REVIEW_ATTEMPT_BUDGET_MS,
   ReviewEvent,
 } from '@compte-rendu/contracts';
@@ -66,7 +67,11 @@ export interface CoreRuntimeShape {
   readonly reconcilePublications: (now: number) => Effect.Effect<void, unknown>;
   readonly reconcileRecoveries: (now: number) => Effect.Effect<void, unknown>;
   readonly refreshMetadata: () => Effect.Effect<RefreshSummary, unknown>;
-  readonly effortDetail: (runId: string, cursor?: string) => Effect.Effect<Response, never>;
+  readonly effortDetail: (
+    runId: string,
+    cursor?: string,
+    route?: string,
+  ) => Effect.Effect<Response, never>;
   readonly dashboardConfig: () => Effect.Effect<Response, never>;
   readonly dashboardOverview: () => Effect.Effect<Response, unknown>;
   readonly listPublicJobs: (searchParams: URLSearchParams) => Effect.Effect<Response, unknown>;
@@ -256,9 +261,15 @@ export const makeCoreRuntime = (
     return summary;
   });
 
-  const effortDetail = (runId: string, cursor?: string) =>
+  const effortDetail = (runId: string, cursor?: string, route?: string) =>
     Effect.gen(function* () {
       const noStore = { 'cache-control': 'no-store' };
+      const routeValue = route === undefined || route === '' ? undefined : route;
+      if (
+        routeValue !== undefined &&
+        Option.isNone(Schema.decodeUnknownOption(ModelRouteId)(routeValue))
+      )
+        return Response.json({ error: 'invalid route' }, { status: 400, headers: noStore });
       const outcome = yield* port(() => stateStore.getRunOutcome(runId));
       if (outcome?.runnerJobId === undefined)
         return Response.json(
@@ -269,6 +280,7 @@ export const makeCoreRuntime = (
         env.INFERENCE_RELAY!.effortDetails({
           jobId: outcome.runnerJobId!,
           ...(cursor === undefined || cursor === '' ? {} : { cursor }),
+          ...(routeValue === undefined ? {} : { route: routeValue }),
         }),
       );
       if (detail === null)

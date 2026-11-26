@@ -770,7 +770,7 @@ it('hides a relay fallback marker once an explicit reset advances the route gene
 
 it('returns bounded per-request effort details only to the current editor', async () => {
   const database = new SqliteD1Database();
-  const asked: string[] = [];
+  const asked: { jobId: string; cursor?: string; route?: string }[] = [];
   const detail: EffortJobDetail = {
     jobId: 'detail-job',
     nextCursor: null,
@@ -778,6 +778,7 @@ it('returns bounded per-request effort details only to the current editor', asyn
       {
         requestId: 'request-1',
         route: deepseek,
+        status: 'complete',
         selected: 'high',
         generation: 0,
         fallback: 'switched',
@@ -812,7 +813,7 @@ it('returns bounded per-request effort details only to the current editor', asyn
       usage: async () => null,
       effortStates: async () => ({ routes: [] }),
       effortDetails: async (input) => {
-        asked.push(input.jobId);
+        asked.push(input);
         return detail;
       },
     },
@@ -845,7 +846,23 @@ it('returns bounded per-request effort details only to the current editor', asyn
     const allowed = await app.fetch(new Request(origin + path, { headers: { cookie } }));
     expect(allowed.status).toBe(200);
     expect(await allowed.json()).toEqual(detail);
-    expect(asked).toEqual(['detail-job']);
+    const filtered = await app.fetch(
+      new Request(origin + path + '?route=' + encodeURIComponent(deepseek) + '&cursor=next-page', {
+        headers: { cookie },
+      }),
+    );
+    expect(filtered.status).toBe(200);
+    expect(asked).toEqual([
+      { jobId: 'detail-job' },
+      { jobId: 'detail-job', cursor: 'next-page', route: deepseek },
+    ]);
+    const invalid = await app.fetch(
+      new Request(origin + path + '?route=' + encodeURIComponent('not a route'), {
+        headers: { cookie },
+      }),
+    );
+    expect(invalid.status).toBe(400);
+    expect(asked).toHaveLength(2);
   } finally {
     database.close();
     vi.unstubAllGlobals();

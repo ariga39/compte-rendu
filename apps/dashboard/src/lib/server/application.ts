@@ -126,7 +126,11 @@ export function createApplication(env: ApplicationEnv, dependencies: CoreWorkerD
           );
           if (operator instanceof Response) return operator;
           return yield* withCore((core) =>
-            core.effortDetail(effortDetail[1], url.searchParams.get('cursor') ?? undefined),
+            core.effortDetail(
+              effortDetail[1],
+              url.searchParams.get('cursor') ?? undefined,
+              url.searchParams.get('route') ?? undefined,
+            ),
           );
         }).pipe(
           Effect.catch(() =>

@@ -113,15 +113,19 @@ export type EffortRouteState = typeof EffortRouteState.Type;
 
 export const EffortAttemptDetail = Schema.Struct({
   attempt: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 2 })),
-  sent: Schema.NullOr(ChatEffortControls),
-  reported: Schema.NullOr(ChatEffortControls),
+  sent: Schema.NullOr(RouteEffortControls),
+  reported: Schema.NullOr(RouteEffortControls),
   result: Schema.Literals(['complete', 'rejected', 'incomplete']),
 });
 export type EffortAttemptDetail = typeof EffortAttemptDetail.Type;
 
+export const EffortRequestStatus = Schema.Literals(['pending', 'complete', 'incomplete']);
+export type EffortRequestStatus = typeof EffortRequestStatus.Type;
+
 export const EffortRequestDetail = Schema.Struct({
   requestId: Schema.NonEmptyString.check(Schema.isMaxLength(128)),
   route: ModelRouteId,
+  status: EffortRequestStatus,
   selected: Schema.NullOr(EffortName),
   generation: Schema.NullOr(Schema.Natural),
   fallback: Schema.NullOr(EffortOutcomeKind),

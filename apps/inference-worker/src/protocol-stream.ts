@@ -1,11 +1,21 @@
 import { Effect } from 'effect';
-import type { ObservedTokenFields, UpstreamUsage } from '@compte-rendu/contracts';
+import type {
+  EffortAttemptDetail,
+  ObservedTokenFields,
+  RouteEffortControls,
+  UpstreamUsage,
+} from '@compte-rendu/contracts';
 import {
   createBoundedSseDecoder,
   DEFAULT_SSE_FRAME_OVERHEAD_BYTES,
   type SseFrame,
 } from './bounded-sse.ts';
-import { finalizeComplete, savePartial, type AuthenticatedGrant } from './ledger.ts';
+import {
+  finalizeComplete,
+  savePartial,
+  type AuthenticatedGrant,
+  type EffortFinalization,
+} from './ledger.ts';
 import type { D1DatabaseLike } from './grants.ts';
 import type { FrozenRoute } from './routes.ts';
 import { gatewayHeaders, gatewayUrl, type GatewayConfig, type GatewayPath } from './gateway.ts';
@@ -19,6 +29,7 @@ export interface StreamObservationDetails {
   readonly observation: StreamObservation;
   readonly usage?: ObservedTokenFields;
   readonly model?: string;
+  readonly reportedEffort?: RouteEffortControls;
 }
 
 export interface ProtocolStreamAdapter {
@@ -29,6 +40,8 @@ export interface ProtocolStreamAdapter {
     readonly grant: AuthenticatedGrant;
     readonly route: FrozenRoute;
   }): Record<string, string>;
+  /** The allowlisted effort control present on the actual outbound body. */
+  sentEffort?(body: Record<string, unknown>): RouteEffortControls | null;
   observe(frame: SseFrame): StreamObservationDetails;
   encode(frame: SseFrame): Uint8Array;
   /** Create a fresh adapter for one request when observation is stateful. */
@@ -87,6 +100,8 @@ export const relayProtocolStream = (options: ProtocolStreamOptions): Effect.Effe
     const { database, requestId, gateway, grant, route, body, request, waitUntil } = options;
     const adapter = options.adapter.create?.() ?? options.adapter;
     const fetchUpstream = options.fetch ?? globalThis.fetch;
+    const sentEffort = adapter.sentEffort?.(body) ?? null;
+    let reportedEffort: RouteEffortControls | null = null;
     const controller = new AbortController();
     const usage: { -readonly [K in keyof UpstreamUsage]: UpstreamUsage[K] } = {
       model: null,
@@ -107,9 +122,16 @@ export const relayProtocolStream = (options: ProtocolStreamOptions): Effect.Effe
       clearTimeout(expiryTimer);
       request.signal.removeEventListener('abort', onRequestAbort);
     };
+    const effortFinalization = (result: EffortAttemptDetail['result']): EffortFinalization => ({
+      routeId: route.routeId,
+      generation: route.effortGeneration ?? null,
+      fallback: null,
+      reason: null,
+      attempts: [{ attempt: 1, sent: sentEffort, reported: reportedEffort, result }],
+    });
     const persistPartial = async (): Promise<boolean> => {
       try {
-        await savePartial(database, requestId, usage);
+        await savePartial(database, requestId, usage, effortFinalization('incomplete'));
         return true;
       } catch {
         logWarning('relay.accounting.failed');
@@ -121,7 +143,11 @@ export const relayProtocolStream = (options: ProtocolStreamOptions): Effect.Effe
       finalizeStarted = true;
       if (!complete) return persistPartial();
       try {
-        if (!(await finalizeComplete(database, requestId, usage)).completed) return false;
+        if (
+          !(await finalizeComplete(database, requestId, usage, effortFinalization('complete')))
+            .completed
+        )
+          return false;
         usage.complete = true;
         return true;
       } catch {
@@ -214,6 +240,7 @@ export const relayProtocolStream = (options: ProtocolStreamOptions): Effect.Effe
     const observe = (frame: SseFrame) => {
       const details = adapter.observe(frame);
       if (details.model !== undefined) usage.model = details.model;
+      if (details.reportedEffort !== undefined) reportedEffort = details.reportedEffort;
       Object.assign(usage, details.usage ?? {});
       return details.observation;
     };
