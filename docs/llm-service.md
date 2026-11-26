@@ -238,16 +238,17 @@ Choose discovery according to how that provider exposes its model list.
   upstream model ID. A source with only aliases makes no discovery request.
   A discovery source can also declare aliases for the same upstream.
 
-A source that sets neither `profile` nor `profiles` is an explicit legacy Chat
-source: every reviewable entry and alias resolves to Chat, and advertised
-protocol metadata does not filter it. Set `profile` to a default profile or
-`profiles` to the distinct profiles the source may publish (`chat`, `responses`)
-to negotiate protocols. Only a negotiating source filters rich entries by their
-advertised `api` operations and publishes only configured protocols; an entry
-that advertises none of them is omitted. Rich entries prefer the default when it
-is eligible. Aliases use the source default profile; an ID-only discovered entry
-can use only a Chat default, because a non-Chat operation cannot be verified
-without explicit metadata. `models` is an explicit allowlist keyed by review
+Chat is the legacy default only for an entry that has neither a source-level
+`profile`/`profiles` value nor an explicit `profile` under `models`; advertised
+protocol metadata does not filter those entries. Set `profile` to a default
+profile or `profiles` to the distinct profiles the source may publish (`chat`,
+`responses`) to negotiate protocols. Only a negotiating source filters rich
+entries by their advertised `api` operations and publishes only configured
+protocols; an entry that advertises none of them is omitted. Rich entries prefer
+the default when it is eligible. Aliases use an explicit `models` profile
+override when present, otherwise the source default. Without a model override,
+an ID-only entry can use only a Chat default because discovery cannot verify
+a non-Chat operation. `models` is an explicit allowlist keyed by review
 route ID. Use it for ID-only endpoints that list unrelated models: only
 named routes become visible, and each entry declares its trusted profile and
 optional `limit`:
