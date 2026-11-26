@@ -63,9 +63,10 @@ const outputInstruction =
 const reviewDecisionGuidance =
   "Calibrate the decision against the repository's actual operating model. " +
   '`approve` does not require perfection: when the complete review finds no realistic blocker, return `DECISION: approve` and optionally include 1-2 brief non-blocking notes. ' +
-  'Reserve `DECISION: request_changes` for a concrete, high-confidence blocking issue: a real bug, a broken security boundary, silent data loss, or significant avoidable complexity or AI-slop. ' +
-  'Weigh both likelihood and severity: a rare but credible irreversible loss, credential exposure, or corruption of shared or published data can still block; a rare inconvenience that heals on retry or matches a documented non-goal usually should not. ' +
-  'Do not block for a stylistic preference or a fix whose ongoing complexity exceeds the realistic risk. ';
+  'Reserve `DECISION: request_changes` for a concrete, high-confidence blocking defect with a proportionate fix: a functional, concurrency, or teardown bug; a broken security or trust boundary; irreversible data/state loss; a verified factual contradiction in active documentation or contracts; a clear violation of a documented architectural invariant; or avoidable complexity or AI-slop whose removal simplifies the code. ' +
+  'Do not block for unrequested production hardening of local scripts or test harnesses, restoration of retired migrations or rolling-upgrade compatibility the project does not guarantee, or a fix whose ongoing complexity exceeds the realistic risk. ' +
+  'Weigh harm, realism under the documented operating model, and fix/maintenance cost together: a rare but credible irreversible loss, credential exposure, or corruption of shared or published data can still block, while a rare inconvenience that heals on retry or matches a documented non-goal usually should not. ' +
+  'Do not block for a stylistic preference. ';
 
 const reviewOutputInstruction = `${reviewDecisionGuidance}${outputInstruction}`;
 
