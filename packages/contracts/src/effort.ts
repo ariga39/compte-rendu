@@ -24,6 +24,8 @@ export const ChatEffortControls = Schema.Struct({
 );
 export type ChatEffortControls = typeof ChatEffortControls.Type;
 
+// Wire-valid Responses effort values. The operator still declares each route's
+// selectable subset, so this list does not claim every model supports them all.
 export const ResponsesEffortValue = Schema.Literals([
   'none',
   'minimal',
@@ -31,6 +33,7 @@ export const ResponsesEffortValue = Schema.Literals([
   'medium',
   'high',
   'xhigh',
+  'max',
 ]);
 export type ResponsesEffortValue = typeof ResponsesEffortValue.Type;
 

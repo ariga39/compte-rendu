@@ -122,9 +122,11 @@ keeps the previous menu and model snapshot, and already-admitted jobs keep their
 frozen controls. Effort changes never alter alias/discovery visibility.
 
 Chat accepts `reasoning_effort` (`minimal`, `low`, `medium`, `high`, `max`) or
-`thinking.type: "disabled"`. Responses accepts `reasoning.effort` (`none`,
-`minimal`, `low`, `medium`, `high`, `xhigh`). Exactly one protocol-native
-control is allowed per effort. The browser submits route IDs and effort names
+`thinking.type: "disabled"`. Responses accepts the API's `reasoning.effort`
+values (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`). That enum
+describes wire-valid values, not a claim that every model supports every value;
+the selectable menu remains the operator-declared per-route subset. Exactly one
+protocol-native control is allowed per effort. The browser submits route IDs and effort names
 only. Core resolves the trusted controls and freezes
 `{routeId, generation, name, controls}` at admission. The grant sends that frozen
 list to the relay. The relay validates snapshot controls against the granted
