@@ -165,16 +165,16 @@ restart cannot recreate error output that was never kept.
 ## Update and rollback
 
 A compatible update, including documentation-only changes, may deploy without a
-drain. A breaking release uses the pair sequence below in a brief maintenance
-window; mixed-version operation is not a default requirement.
+drain. A compatible change that touches one service does not require the full
+sequence below. A breaking release uses the matching release sequence in a brief
+maintenance window; mixed-version operation is not a default requirement.
 
 For every deployment:
 
 1. Run `corepack pnpm check`, `corepack pnpm test`, and
    `corepack pnpm build` against the immutable checkout being released.
-2. Back up the existing gitignored instance configurations. Compare the tracked
-   `apps/dashboard/wrangler.jsonc` template between
-   the deployed and target revisions, then merge the relevant changes into the
+2. Back up the existing gitignored instance configurations. Compare the Wrangler templates for the affected Workers
+   between the deployed and target revisions, then merge the relevant changes into the
    retained instance files: new bindings/variables, migrations, compatibility
    settings, assets and Cron changes. Preserve instance account/resource IDs,
    `DASHBOARD_ORIGIN`, domains, allowlists, branding and deliberate overrides; reconcile changed
@@ -203,20 +203,20 @@ Use the following sequence for a breaking upgrade or rollback, per instance:
    including blockers in Core that survived a Runner restart.
 3. Verify each Runner reports `drained: true` and Core shows no unresolved
    cleanup blockers. Stop those Runner processes.
-4. Switch to the matching Worker and schema in the reviewed migration order.
-   Deploy with `apps/dashboard/wrangler.<INSTANCE_NAME>.jsonc` and verify the
-   Worker before starting the replacement Runner. For a one-step incompatible
-   schema change, keep HTTP and scheduled writers quiesced during the switch.
-   For a Runner that reads concurrency from Core, send an authenticated
-   `HEAD /runner-claim` before startup with
-   the Runner callback bearer and require `204` plus a present
-   `x-compte-rendu-concurrency` value that is a positive integer or the
-   `default` sentinel. Do not start the Runner if an old Worker returns `405`
-   or the header is missing or invalid.
-5. Start the replacement Runner only when the Worker is ready. The drain flag
-   is in memory. The replacement enables claiming as soon as its startup scan
-   succeeds. Set concurrency in Dashboard Settings; `RUNNER_CONCURRENCY`
-   supplies the startup fallback.
+4. Follow the target release's installation guide for its configuration,
+   bindings and database migrations. When switching the managed grant protocol,
+   deploy and verify the target inference Worker first, then the matching
+   application Worker. Keep HTTP and scheduled writers quiesced during an
+   incompatible schema change.
+5. Verify the target application's readiness before starting the matching
+   Runner. On releases with authenticated `HEAD /runner-claim`, send that
+   request with the Runner callback bearer and check the response specified by
+   the target release. The current contract requires `204` and an
+   `x-compte-rendu-concurrency` header containing a positive integer or
+   `default`. For earlier releases, use their documented readiness check.
+   A real `POST /runner-claim` can reserve work.
+6. Start the matching Runner when its dependencies are ready. Its drain flag is
+   in memory, so it can claim work as soon as its startup scan succeeds.
 
 For either release path, back up the existing Runner artifact before replacement
 and verify the installed artifact’s SHA256 against the tested build before
@@ -227,11 +227,12 @@ publication changes, use the next controlled review to check the exact revision,
 review output and visible GitHub publication.
 
 If a bad release is receiving new runs from webhooks, stop webhook delivery.
-For a compatible rollback, revert the affected Worker to its last known-good deployment in the
-Cloudflare Workers deployment controls, using the matching application build and
-compatible database schema. For a breaking rollback, follow the breaking release procedure above using the prior
-matching pair and a compatible schema. Do not delete D1 tables or edit the applied migration
-ledger to undo a release. A schema rollback is a separate, reviewed migration or
+For a compatible rollback, revert the affected Worker to its last known-good
+deployment in the Cloudflare Workers deployment controls, using the matching
+application build and compatible database schema. For a breaking rollback,
+follow the breaking release procedure above with the prior release's matched
+inference Worker, application Worker, schema and Runner. Do not delete D1 tables
+or edit the applied migration ledger to undo a release. A schema rollback is a separate, reviewed migration or
 an operator approved D1 recovery action.
 
 ## Drain before maintenance
@@ -310,9 +311,9 @@ details remain available through Core even after the private Runner job endpoint
 returns 404. Archived evidence has its own retention policy.
 
 Back up artifacts/configuration before replacement. A compatible Core/contracts
-addition that only prepares for a new Runner result shape may deploy Worker-first
-without draining; once callback or result-shape acceptance changes, use the
-paired breaking-release sequence above. Do not interrupt live jobs just to update
+addition that only prepares for a new Runner result shape may deploy the affected
+Worker first without draining; once callback or result-shape acceptance changes,
+use the breaking-release sequence above. Do not interrupt live jobs just to update
 documentation or the dashboard. Relay grants survive Worker restarts in D1. Runner revocation is bounded per job and grants expire after six hours; startup does not replay pending revocations. Interrupted agent jobs cannot resume.
 
 A hard crash can leave owned sbx resources. Runner names every Sandbox
