@@ -238,20 +238,18 @@ Choose discovery according to how that provider exposes its model list.
   upstream model ID. A source with only aliases makes no discovery request.
   A discovery source can also declare aliases for the same upstream.
 
-Chat is the legacy default only for an entry that has neither a source-level
-`profile`/`profiles` value nor an explicit `profile` under `models`; advertised
-protocol metadata does not filter those entries. Set `profile` to a default
-profile or `profiles` to the distinct profiles the source may publish (`chat`,
-`responses`) to negotiate protocols. Only a negotiating source filters rich
-entries by their advertised `api` operations and publishes only configured
-protocols; an entry that advertises none of them is omitted. Rich entries prefer
-the default when it is eligible. Aliases use an explicit `models` profile
-override when present, otherwise the source default. Without a model override,
-an ID-only entry can use only a Chat default because discovery cannot verify
-a non-Chat operation. `models` is an explicit allowlist keyed by review
-route ID. Use it for ID-only endpoints that list unrelated models: only
-named routes become visible, and each entry declares its trusted profile and
-optional `limit`:
+Profile resolution uses this order. An explicit `profile` under `models` wins
+over source and advertised profiles for that entry or alias. Without an override, Chat is the legacy default
+only for a source with no `profile`/`profiles`: reviewable entries and aliases
+resolve to Chat, and advertised protocol metadata does not filter them. With
+source profiles configured, a rich entry considers only advertised profiles
+that are also configured: omit it when none match; otherwise prefer an eligible
+`recommended_api`, then the source default when eligible, then the first
+eligible configured profile. An ID-only entry uses Chat only when the source
+default is Chat; otherwise omit it unless `models` supplies an override.
+`models` is an explicit allowlist keyed by review route ID. Use it for ID-only
+endpoints that list unrelated models: only named routes become visible, and each
+entry declares its trusted profile and optional `limit`:
 
 ```json
 {
@@ -267,13 +265,13 @@ optional `limit`:
 }
 ```
 
-For an ID-only listing, a non-chat profile is never inferred from the source
-default. Responses routes require an explicit `models`
-entry; a qualified source may still expose a chat default without one. An
-explicit `capabilities.tools.supported: false` always omits that model, even for
-a legacy unqualified source. Malformed rich capability metadata fails the source
-refresh and keeps the previous snapshot. For a negotiating source, rich entries
-that advertise only retired Messages or Gemini operations are omitted instead of
+An explicit `capabilities.tools.supported: false` always omits that model, even
+for a legacy unqualified source. Malformed rich capability metadata fails the
+source refresh and keeps the previous snapshot. A route that declares Chat
+efforts must actually resolve to Chat; for example,
+`models: { "<ROUTE_ID>": { "profile": "chat" } }` forces Chat when the source
+would otherwise choose Responses. For a negotiating source, rich entries that
+advertise only retired Messages or Gemini operations are omitted instead of
 defaulting to Chat; a legacy Chat source does not use advertised protocols to
 filter.
 

@@ -186,6 +186,13 @@ For every deployment:
    switch. Retire obsolete fields and tables only after the old Worker no longer
    uses them.
 
+Operators crossing a release that predates the Check-retry removal and still
+carries `review_check_deliveries` should handle that table separately: deploy
+and verify the Worker and scheduled handler that no longer use it, then apply
+migration 0019. Pending Check updates are not replayed. If an old Check is left
+unfinished, re-trigger the review for a new Check. See the
+[historical 0019 runbook](https://github.com/ariga39/compte-rendu/blob/e9ba46dd063c7775e8f86d7514acedc28ae8f40f/docs/operations.md#check-retry-storage-removal).
+
 For compatible Worker changes, apply the required additive migrations, deploy the
 affected Worker, and verify its behavior. A documentation-only change needs no
 service restart. Drain a Runner before replacing its running process.
