@@ -860,7 +860,7 @@ describe('Runner Job HTTP interface', () => {
     let agentArgs: readonly string[] | undefined;
     let configRootAtSandboxBoundary: string | undefined;
     let openCodeConfig: string | undefined;
-    const deliveredSkills = new Map<string, { body: string; license: string; notice: string }>();
+    const deliveredSkills = new Map<string, { body: string; files: readonly string[] }>();
     let sandboxEnvironment: NodeJS.ProcessEnv | undefined;
     const process = async (
       _command: string,
@@ -885,10 +885,10 @@ describe('Runner Job HTTP interface', () => {
           );
           const skillsRoot = join(configRootAtSandboxBoundary, 'opencode', 'skills');
           for (const name of await readdir(skillsRoot).catch(() => [])) {
+            const directory = join(skillsRoot, name);
             deliveredSkills.set(name, {
-              body: await readFile(join(skillsRoot, name, 'SKILL.md'), 'utf8'),
-              license: await readFile(join(skillsRoot, name, 'LICENSE.md'), 'utf8'),
-              notice: await readFile(join(skillsRoot, name, 'NOTICE.md'), 'utf8'),
+              body: await readFile(join(directory, 'SKILL.md'), 'utf8'),
+              files: (await readdir(directory)).sort(),
             });
           }
         }
@@ -951,16 +951,28 @@ describe('Runner Job HTTP interface', () => {
     expect(createArgs?.some((value) => value.startsWith('XDG_CONFIG_HOME='))).toBe(true);
     expect([...deliveredSkills.keys()]).toEqual(['code-review']);
     for (const [name, skill] of deliveredSkills) {
+      expect(skill.files).toEqual(['SKILL.md']);
       expect(skill.body).toBe(await readFile(join('apps/runner/skills', name, 'SKILL.md'), 'utf8'));
       expect(skill.body).toContain(`name: ${name}`);
-      expect(skill.body).toContain('## Credits');
-      expect(skill.license).toBe(
-        await readFile(join('apps/runner/skills', name, 'LICENSE.md'), 'utf8'),
+      expect(skill.body).not.toContain('## Credits');
+      expect(skill.body).not.toContain('LICENSE.md');
+      expect(skill.body).not.toContain('NOTICE.md');
+      for (const section of [
+        "Start from the project's operating model",
+        'Spot code that exists only because a model wrote it',
+        'Weigh likelihood, harm and the cost of the fix',
+        'Apply the production bar only to production paths',
+        'Treat retirement as a decision, not a gap',
+      ])
+        expect(skill.body).toContain(section);
+      expect(skill.body.replace(/\s+/g, ' ')).toContain(
+        'Do not, however, keep widening the hunt into remote environmental edge cases',
       );
-      expect(skill.license.length).toBeGreaterThan(1000);
-      expect(skill.notice).toBe(
-        await readFile(join('apps/runner/skills', name, 'NOTICE.md'), 'utf8'),
+      expect(skill.body.replace(/\s+/g, ' ')).toContain(
+        'A fault that appears only when all commits act together still counts',
       );
+      expect(skill.body.replace(/\s+/g, ' ')).toContain('`approve` does not require perfection');
+      expect(skill.body.replace(/\s+/g, ' ')).toContain('rare but credible path');
     }
     const deliveredPrompt = (agentArgs?.join(' ') ?? '').replace(/\s+/g, ' ');
     expect(deliveredPrompt).not.toContain('First load the pr-review skill');
@@ -1006,14 +1018,21 @@ describe('Runner Job HTTP interface', () => {
     expect(deliveredPrompt).toContain('Start with `git diff --find-renames');
     expect(deliveredPrompt).toContain('use the head revision as the source of truth');
     expect(deliveredPrompt).toContain('do not use the admitted base as the diff starting point');
+    expect(deliveredPrompt).toContain('`approve` does not require perfection');
+    expect(deliveredPrompt).toContain('optionally include 1-2 brief non-blocking notes');
+    expect(deliveredPrompt).toContain(
+      'Reserve `DECISION: request_changes` for a concrete, high-confidence blocking issue',
+    );
+    expect(deliveredPrompt).toContain('significant avoidable complexity or AI-slop');
+    expect(deliveredPrompt).toContain('a rare but credible irreversible loss');
     expect(deliveredSkills.get('code-review')?.body.replace(/\s+/g, ' ')).toContain(
-      'follow affected callers, types, configuration, tests and history',
+      'follow affected values into callers, consumers, configuration, storage, boundaries and tests',
     );
     expect(deliveredSkills.get('code-review')?.body.replace(/\s+/g, ' ')).toContain(
-      'Locate the changed line or behavior responsible',
+      'find the changed line or behavior',
     );
     expect(deliveredPrompt).toContain('Return at most five findings');
-    expect(deliveredSkills.get('code-review')?.body).toContain('Challenge the premise');
+    expect(deliveredSkills.get('code-review')?.body).toContain('Check the premise');
     expect(deliveredPrompt).toContain('TLDR:');
     expect(deliveredPrompt).toContain('decision');
     expect(deliveredPrompt).toContain('Markdown');
@@ -1112,7 +1131,7 @@ describe('Runner Job HTTP interface', () => {
     expect(deliveredPrompt).toContain(baseSha);
     expect(deliveredPrompt).toContain(headSha);
     expect(deliveredSkills.get('code-review')?.body.replace(/\s+/g, ' ')).toContain(
-      'Challenge avoidable complexity',
+      'Weigh likelihood, harm and the cost of the fix',
     );
     expect(deliveredPrompt).toContain('TLDR:');
     expect(deliveredPrompt).toContain('Return your final answer in exactly this form');

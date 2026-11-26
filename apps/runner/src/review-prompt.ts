@@ -60,11 +60,20 @@ const outputInstruction =
   'Never label an incomplete review or a context/tooling failure approve. Do not infer the decision from finding counts or process exit codes. ' +
   'Concision, the TLDR template and review style are instructions, not additional validity rules.';
 
+const reviewDecisionGuidance =
+  "Calibrate the decision against the repository's actual operating model. " +
+  '`approve` does not require perfection: when the complete review finds no realistic blocker, return `DECISION: approve` and optionally include 1-2 brief non-blocking notes. ' +
+  'Reserve `DECISION: request_changes` for a concrete, high-confidence blocking issue: a real bug, a broken security boundary, silent data loss, or significant avoidable complexity or AI-slop. ' +
+  'Weigh both likelihood and severity: a rare but credible irreversible loss, credential exposure, or corruption of shared or published data can still block; a rare inconvenience that heals on retry or matches a documented non-goal usually should not. ' +
+  'Do not block for a stylistic preference or a fix whose ongoing complexity exceeds the realistic risk. ';
+
+const reviewOutputInstruction = `${reviewDecisionGuidance}${outputInstruction}`;
+
 const reviewTaskSection = (input: ReviewPromptInput): string => {
   const task =
     `Review ${input.repositoryName} pull request #${input.pullRequestNumber}. ` +
     `${reviewScope} ${reviewLimits} ${reviewContext(input)} ${reviewSkill}`;
-  return `Review task:\n${task}\n\nFinal output:\n${outputInstruction}`;
+  return `Review task:\n${task}\n\nFinal output:\n${reviewOutputInstruction}`;
 };
 
 // Native foreground subagents receive this trusted per-job contract through
