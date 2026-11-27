@@ -133,10 +133,11 @@ reads that exact review to confirm. Each reset permits one bounded retry, rescan
 the reviews and rechecking the PR state before any further dismissal. A changed
 head at claim time supersedes the queued run, releases its reserved Runner claim
 and cancels its check without a failure comment. A merge can close the PR without
-changing its head SHA: if the post-list read observes a merge, or a rejected
-dismissal is followed by a recheck that observes one, Core leaves the earlier vote
-intact and supersedes the obsolete round without failing its check. An open PR
-still requires confirmed dismissal. An eager reset failure is logged with the
+changing its head SHA: if the post-list read observes a merge, or any failed
+dismissal is followed by a recheck that observes one, Core supersedes the obsolete
+round without failing its check. A vote not already dismissed by a concurrent
+reset stays intact; a dismissal already confirmed by that reset is not restored.
+An open PR still requires confirmed dismissal. An eager reset failure is logged with the
 failing GitHub operation and available HTTP status, then retried on claim; it
 cannot overwrite a Runner that has already confirmed the reset. If claim-time confirmation fails,
 the round records `review_reset_failed` and is not delivered to a Runner; the GitHub Check fails rather than

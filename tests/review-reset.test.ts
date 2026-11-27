@@ -734,6 +734,32 @@ it('supersedes without failing when the PR merges while dismissal fails', async 
   }
 });
 
+it('supersedes when a concurrent cleanup confirmed dismissal while the PR merged', async () => {
+  const f = await resetFixture();
+  try {
+    expect(await f.send()).toBe('accepted');
+    await f.settle();
+    f.reviews[0]!.state = 'APPROVED';
+    f.controls.beforeDismiss = async () => {
+      f.controls.merged = true;
+      f.controls.deny = true;
+      f.reviews[0]!.state = 'DISMISSED';
+    };
+    expect((await f.claim()).status).toBe(204);
+    expect(f.reviews[0]!.state).toBe('DISMISSED');
+    expect(await f.store.getDeliveryOutcome(event.deliveryId)).toMatchObject({
+      status: 'superseded',
+    });
+    expect(f.checks[0]).toMatchObject({ status: 'completed', conclusion: 'cancelled' });
+    expect(f.logs).not.toContainEqual(expect.objectContaining({ reason: 'review_reset_failed' }));
+    const runId = f.checks[0]!.external_id;
+    expect((await f.store.getRunOutcome(runId))?.runnerJobId).toBeUndefined();
+  } finally {
+    await f.settle();
+    f.database.close();
+  }
+});
+
 it('supersedes a first-round queued run when the head changed before delivery', async () => {
   const f = await resetFixture({ firstRound: true });
   try {
