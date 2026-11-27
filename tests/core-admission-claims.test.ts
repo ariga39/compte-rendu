@@ -16,6 +16,7 @@ import {
   scheduleEligibleReview,
   claimGithub,
 } from './support/core-worker-harness';
+import { REVIEW_PUBLICATION_FOOTER } from './support/review-publication';
 
 describe('Core admission, claims, and manual policy', () => {
   it('durably schedules an eligible webhook without admitting a Job or minting a read token', async () => {
@@ -1838,7 +1839,7 @@ describe('Core admission, claims, and manual policy', () => {
           {
             event: 'COMMENT',
             commit_id: eligibleEvent.headSha,
-            body: `<!-- compte-rendu:run:${claimed.runId} -->\n## Review:\n\nNo defects found.\n`,
+            body: `<!-- compte-rendu:run:${claimed.runId} -->\n## Review:\n\nNo defects found.\n${REVIEW_PUBLICATION_FOOTER}`,
           },
         ]);
         expect(checkUpdates).toEqual([

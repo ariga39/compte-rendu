@@ -35,8 +35,12 @@ new reviews; the former JSON object containing `decision` and `markdown` is not 
 current wire format. Runner validates the shared structural contract: exactly
 one known decision on the header line, non-empty Markdown after the separator and
 the size bound. It also verifies the exact session and authoritative normal
-completion. The final Markdown is preserved unchanged for Core publication, and
-historical stored terminal results remain readable.
+completion. The validated Markdown is preserved unchanged in the stored terminal
+result, and historical stored terminal results remain readable. For every
+successful GitHub publication, Core keeps the run marker as the first line and
+the decision event intact and appends one fixed English advisory footer after
+the review Markdown stating that the AI review may be wrong and is reference
+only. Failure comments keep their separate existing form.
 
 One prompt serves every roster size, including a single configured model. It
 asks for concise adversarial review: challenge the PR's claimed need, verify its

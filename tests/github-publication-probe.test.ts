@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import type { GitHubAdapter } from '../apps/core/src/index';
 import type { RunnerJobInput } from '../packages/contracts/src';
 import { createGitHubPublicationProbe } from '../scripts/github-publication-probe.mts';
+import { REVIEW_PUBLICATION_FOOTER } from './support/review-publication';
 
 const job: RunnerJobInput = {
   id: 'probe-job-1',
@@ -112,7 +113,7 @@ describe('GitHub publication probe', () => {
       payload: {
         event: 'COMMENT',
         commit_id: job.headSha,
-        body: `<!-- compte-rendu:run:${job.runId} -->\n${successfulCallback.result.markdown}`,
+        body: `<!-- compte-rendu:run:${job.runId} -->\n${successfulCallback.result.markdown}${REVIEW_PUBLICATION_FOOTER}`,
       },
     });
     expect(`${rawCallback}\n${JSON.stringify(capturedReview)}`).not.toContain(
@@ -417,7 +418,7 @@ describe('GitHub publication probe', () => {
       payload: {
         event: 'COMMENT',
         commit_id: secondJob.headSha,
-        body: `<!-- compte-rendu:run:${secondJob.runId} -->\n${secondCallback.result.markdown}`,
+        body: `<!-- compte-rendu:run:${secondJob.runId} -->\n${secondCallback.result.markdown}${REVIEW_PUBLICATION_FOOTER}`,
       },
     });
     for (const file of await readdir(evidenceRoot)) {

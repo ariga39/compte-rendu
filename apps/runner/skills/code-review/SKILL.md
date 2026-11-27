@@ -91,6 +91,8 @@ After completing Stage 1, evaluate each substantiated finding and decide whether
 2. **Realism:** How plausibly does it occur under the repository's documented operating model?
 3. **Fix and maintenance cost:** How much ongoing code complexity, state, or indirection does the fix add or remove?
 
+Suggest a concrete, practical way to address each finding in the finding itself, not just a description of the problem. Prefer proportionate options, and weigh implementation and maintenance cost against the concrete benefit in this project and PR. Do not list low-benefit, high-cost work as a required change; report it as a brief non-blocking note or drop it, and avoid demanding work that would clearly exceed the PR's scope or the project's positioning. A real severe regression still blocks even when a full redesign is outside the PR's scope: narrowing or reverting the offending part can be the concrete option.
+
 Let the three factors govern trade-offs directly:
 
 - Severe harms such as broken security boundaries or irreversible data/state corruption justify blocking even when rare, provided the triggering mechanism is concrete.

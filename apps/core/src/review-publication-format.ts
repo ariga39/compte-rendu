@@ -1,5 +1,8 @@
 import type { ReviewDecision } from '@compte-rendu/contracts';
 
+const REVIEW_PUBLICATION_FOOTER =
+  '\n\n---\n\n_AI reviews can be wrong. Treat these suggestions as guidance and use your judgment about which to accept._';
+
 export const formatReviewPublicationMarker = (runId: string) =>
   `<!-- compte-rendu:run:${runId} -->`;
 
@@ -19,5 +22,5 @@ export const formatReviewPublicationPayload = <HeadSha extends string>(input: {
         ? ('REQUEST_CHANGES' as const)
         : ('COMMENT' as const),
   commit_id: input.headSha,
-  body: `${formatReviewPublicationMarker(input.runId)}\n${input.markdown}`,
+  body: `${formatReviewPublicationMarker(input.runId)}\n${input.markdown}${REVIEW_PUBLICATION_FOOTER}`,
 });

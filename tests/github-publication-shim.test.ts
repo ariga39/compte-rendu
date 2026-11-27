@@ -4,6 +4,7 @@ import type { GitHubAdapter } from '../apps/core/src/index';
 import { createReviewCoordinator } from './support/review-coordinator';
 import type { ReviewEvent } from '../packages/contracts/src';
 import { createGitHubPublicationShim } from './support/github-publication-shim';
+import { REVIEW_PUBLICATION_FOOTER } from './support/review-publication';
 
 const eligiblePullRequest: ReviewEvent = {
   deliveryId: 'delivery-shim-1',
@@ -61,7 +62,7 @@ describe('GitHub publication shim', () => {
         payload: {
           event: 'COMMENT',
           commit_id: eligiblePullRequest.headSha,
-          body: `<!-- compte-rendu:run:${runId} -->\n${body}`,
+          body: `<!-- compte-rendu:run:${runId} -->\n${body}${REVIEW_PUBLICATION_FOOTER}`,
         },
       },
     ]);
