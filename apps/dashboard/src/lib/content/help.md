@@ -90,7 +90,7 @@ The decision is the review's original conclusion at the time it ran, not current
 
 - **Published**: the review was published to GitHub.
 - **Failed**: the review did not finish successfully; the phase and reason are shown when they were recorded.
-- **Superseded**: a newer revision replaced this review before publication. A superseded review keeps its own page.
+- **Superseded**: this review run is no longer current, for example because the PR merged or its head changed. A superseded review keeps its own page.
 - **Cancelled**: an operator stopped the review before publication. It published no review and is not a failure. **Cancelling** means the request was accepted and cleanup confirmation is still outstanding. A cancelled review keeps its own page and public identity rules.
 
 ## Timestamps and older records

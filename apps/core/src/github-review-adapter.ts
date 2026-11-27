@@ -523,7 +523,7 @@ export const createGitHubPublicationAdapter = (
                     title: 'Review cancelled',
                     summary:
                       cancellationReason !== 'manual'
-                        ? 'A newer pull request revision replaced this run.'
+                        ? 'This review run is no longer current.'
                         : retryBlocked === 'cleanup-pending'
                           ? `An operator cancelled this review. At the last retry, sandbox cleanup for a review attempt on this pull request was not confirmed, so ${retryQueued === true ? 'the new review was queued' : 'the retry was declined'}. Check the task details for the current state.`
                           : retryBlocked === 'cleanup-failed'
@@ -569,7 +569,12 @@ export const createGitHubPublicationAdapter = (
       if (previousRunIds.length === 0) return;
       if (options.getReviewAuthorLogin === undefined)
         throw new ReviewConfirmationFailed('Review author unavailable');
-      const login = await options.getReviewAuthorLogin();
+      let login: string;
+      try {
+        login = await options.getReviewAuthorLogin();
+      } catch (error) {
+        throw reviewResetError('read_app', error);
+      }
       const markers = new Set(previousRunIds.map(formatReviewPublicationMarker));
       let path: string;
       try {
