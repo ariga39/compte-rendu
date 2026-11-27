@@ -11,6 +11,7 @@ import { createReviewCoordinator } from './support/review-coordinator';
 import type { ReviewEvent } from '../packages/contracts/src';
 import { SqliteD1Database } from './support/d1-database';
 import { recordTestEvidence } from './support/core-worker-harness';
+import { REVIEW_PUBLICATION_FOOTER } from './support/review-publication';
 
 const reviewOutput = (
   markdown: string,
@@ -140,7 +141,7 @@ describe('Review coordinator', () => {
         {
           event,
           commit_id: eligiblePrivatePullRequest.headSha,
-          body: `<!-- compte-rendu:run:${runId} -->\n## Review: findings`,
+          body: `<!-- compte-rendu:run:${runId} -->\n## Review: findings${REVIEW_PUBLICATION_FOOTER}`,
         },
       ]);
     },
@@ -206,7 +207,7 @@ describe('Review coordinator', () => {
       {
         event: 'COMMENT',
         commit_id: eligiblePrivatePullRequest.headSha,
-        body: `<!-- compte-rendu:run:${runId} -->\n${finalMarkdown}`,
+        body: `<!-- compte-rendu:run:${runId} -->\n${finalMarkdown}${REVIEW_PUBLICATION_FOOTER}`,
       },
     ]);
     expect(await stateStore.getRunOutcome(runId)).toMatchObject({ status: 'completed' });
