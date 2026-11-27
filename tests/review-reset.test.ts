@@ -170,6 +170,7 @@ const resetFixture = async (options: { firstRound?: boolean } = {}) => {
     malformed: false,
     endless: false,
     loseDismissal: false,
+    merged: false,
     currentHead: headSha,
     onList: async () => {},
     beforeDismiss: async () => {},
@@ -186,7 +187,11 @@ const resetFixture = async (options: { firstRound?: boolean } = {}) => {
       });
     if (url.pathname === '/repos/example/repo/pulls/42') {
       if (controls.headUnavailable) return new Response(null, { status: 503 });
-      return Response.json({ head: { sha: controls.currentHead } });
+      return Response.json({
+        head: { sha: controls.currentHead },
+        merged: controls.merged,
+        merged_at: controls.merged ? '2026-10-02T00:00:00.000Z' : null,
+      });
     }
     if (request.method === 'GET' && url.pathname.endsWith('/check-runs'))
       return Response.json({ check_runs: checks });
@@ -227,6 +232,7 @@ const resetFixture = async (options: { firstRound?: boolean } = {}) => {
     const dismissal = url.pathname.match(/\/reviews\/(\d+)\/dismissals$/);
     if (request.method === 'PUT' && dismissal) {
       await controls.beforeDismiss();
+      if (controls.merged) return new Response(null, { status: 422 });
       if (controls.deny) return new Response(null, { status: 403 });
       const target = reviews.find((r) => r.id === Number(dismissal[1]));
       if (!target) return new Response(null, { status: 404 });
@@ -306,7 +312,13 @@ describe('review reset failure and concurrency', () => {
       expect((await f.claim()).status).toBe(503);
       expect(f.reviews[0]!.state).toBe('APPROVED');
       expect(f.checks[0]).toMatchObject({ status: 'completed', conclusion: 'failure' });
-      expect(f.logs).toContainEqual(expect.objectContaining({ reason: 'review_reset_failed' }));
+      expect(f.logs).toContainEqual(
+        expect.objectContaining({
+          reason: 'review_reset_failed',
+          operation: 'dismiss_review',
+          status: 403,
+        }),
+      );
       const outcome = await f.store.getDeliveryOutcome(event.deliveryId);
       expect(outcome?.status).toBe('failed');
       const runId = f.checks[0]!.external_id;
@@ -319,6 +331,37 @@ describe('review reset failure and concurrency', () => {
       f.database.close();
     }
   });
+});
+
+it('records claim-time reset diagnostics when the eager reset already succeeded', async () => {
+  const f = await resetFixture();
+  try {
+    expect(await f.send()).toBe('accepted');
+    await f.settle();
+    expect(f.reviews[0]!.state).toBe('DISMISSED');
+    f.reviews[0]!.state = 'CHANGES_REQUESTED';
+    f.controls.deny = true;
+    expect((await f.claim()).status).toBe(503);
+    expect(f.reviews[0]!.state).toBe('CHANGES_REQUESTED');
+    const failures = f.logs.filter(
+      (entry) =>
+        typeof entry === 'object' &&
+        entry !== null &&
+        'reason' in entry &&
+        entry.reason === 'review_reset_failed',
+    );
+    expect(failures).toEqual([
+      expect.objectContaining({ operation: 'dismiss_review', status: 403 }),
+    ]);
+    const runId = f.checks[0]!.external_id;
+    const detail = await f.worker.getPublicJobDetail(runId);
+    expect(await detail.json()).toMatchObject({
+      task: { failure: { phase: 'scheduling', reason: 'review_reset_failed' } },
+    });
+  } finally {
+    await f.settle();
+    f.database.close();
+  }
 });
 
 it('cannot bypass a pending reset by claiming while the webhook is still running', async () => {
@@ -520,6 +563,57 @@ it('supersedes a stale queued round without dismissing votes or reporting failur
     ).toBe('accepted');
     await f.settle();
     expect((await f.claim()).status).toBe(200);
+  } finally {
+    await f.settle();
+    f.database.close();
+  }
+});
+
+it('supersedes without dismissing when the PR merged before the reset', async () => {
+  const f = await resetFixture();
+  try {
+    f.reviews[0]!.state = 'CHANGES_REQUESTED';
+    f.controls.merged = true;
+    expect(await f.send()).toBe('accepted');
+    await f.settle();
+    expect(f.reviews[0]!.state).toBe('CHANGES_REQUESTED');
+    expect((await f.claim()).status).toBe(204);
+    expect(f.reviews[0]!.state).toBe('CHANGES_REQUESTED');
+    expect(await f.store.getDeliveryOutcome(event.deliveryId)).toMatchObject({
+      status: 'superseded',
+    });
+    expect(f.checks[0]).toMatchObject({ status: 'completed', conclusion: 'cancelled' });
+    expect(f.logs).not.toContainEqual(expect.objectContaining({ reason: 'review_reset_failed' }));
+    const runId = f.checks[0]!.external_id;
+    expect((await f.store.getRunOutcome(runId))?.runnerJobId).toBeUndefined();
+    const detail = await f.worker.getPublicJobDetail(runId);
+    expect(await detail.json()).toMatchObject({ task: { cleanup: 'unknown' } });
+  } finally {
+    await f.settle();
+    f.database.close();
+  }
+});
+
+it('supersedes without failing when the PR merges while dismissal fails', async () => {
+  const f = await resetFixture();
+  try {
+    expect(await f.send()).toBe('accepted');
+    await f.settle();
+    f.reviews[0]!.state = 'CHANGES_REQUESTED';
+    f.controls.beforeDismiss = async () => {
+      f.controls.merged = true;
+    };
+    expect((await f.claim()).status).toBe(204);
+    expect(f.reviews[0]!.state).toBe('CHANGES_REQUESTED');
+    expect(await f.store.getDeliveryOutcome(event.deliveryId)).toMatchObject({
+      status: 'superseded',
+    });
+    expect(f.checks[0]).toMatchObject({ status: 'completed', conclusion: 'cancelled' });
+    expect(f.logs).not.toContainEqual(expect.objectContaining({ reason: 'review_reset_failed' }));
+    const runId = f.checks[0]!.external_id;
+    expect((await f.store.getRunOutcome(runId))?.runnerJobId).toBeUndefined();
+    const detail = await f.worker.getPublicJobDetail(runId);
+    expect(await detail.json()).toMatchObject({ task: { cleanup: 'unknown' } });
   } finally {
     await f.settle();
     f.database.close();

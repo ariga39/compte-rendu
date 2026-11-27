@@ -130,10 +130,15 @@ D1 remain historical records; this changes the effective GitHub vote, not histor
 A dismissal is confirmed by exact review ID, author, body, commit and `DISMISSED`
 state. If a request response is lost or another reset already succeeded, Core
 reads that exact review to confirm. Each reset permits one bounded retry, rescanning
-the reviews and rechecking the head before any further dismissal. A changed head
-at claim time supersedes the queued run, releases its reserved Runner claim and
-cancels its check without a failure comment. An eager reset failure is logged and retried on claim; it cannot overwrite a
-Runner that has already confirmed the reset. If claim-time confirmation fails,
+the reviews and rechecking the PR state before any further dismissal. A changed
+head at claim time supersedes the queued run, releases its reserved Runner claim
+and cancels its check without a failure comment. A merge can close the PR without
+changing its head SHA: if the post-list read observes a merge, or a rejected
+dismissal is followed by a recheck that observes one, Core leaves the earlier vote
+intact and supersedes the obsolete round without failing its check. An open PR
+still requires confirmed dismissal. An eager reset failure is logged with the
+failing GitHub operation and available HTTP status, then retried on claim; it
+cannot overwrite a Runner that has already confirmed the reset. If claim-time confirmation fails,
 the round records `review_reset_failed` and is not delivered to a Runner; the GitHub Check fails rather than
 claiming the old vote was cleared. A partial failure does not restore votes already
 dismissed. Correct permission/service issues, then request `/ai-review` to retry.

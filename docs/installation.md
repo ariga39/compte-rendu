@@ -296,9 +296,11 @@ when GitHub changes an endpoint. The general rule to request the minimum is in
 
 New rounds dismiss only this App's earlier votes on that PR. Protected-branch
 review-dismissal policies can restrict this even with Pull requests write access.
-If GitHub rejects dismissal, the new round fails with `review_reset_failed` before
-Runner admission. Adjust the repository policy for the intended App identity;
-do not grant broader access or disable protections automatically. See
+If GitHub rejects dismissal on an open PR, the new round fails with
+`review_reset_failed` before Runner admission. If the PR merged before or during
+the dismissal, its earlier vote stays intact and the obsolete round is superseded
+without a failed check. Adjust the repository policy for the intended App
+identity; do not grant broader access or disable protections automatically. See
 [GitHub's dismissal permissions](https://docs.github.com/en/rest/pulls/reviews#dismiss-a-review-for-a-pull-request).
 
 Subscribe the App to:
