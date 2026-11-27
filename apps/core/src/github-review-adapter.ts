@@ -689,6 +689,12 @@ export const createGitHubPublicationAdapter = (
             )
           );
         }
+        if (dismissalError !== undefined) {
+          // A concurrent reset may have confirmed the dismissal while a merge
+          // closed the PR. Recheck even when the readback already agrees.
+          const stale = await staleOnMerge();
+          if (stale) return stale;
+        }
       }
     },
     createReview: async ({ repositoryId, pullRequestNumber, installationId, payload }) => {
