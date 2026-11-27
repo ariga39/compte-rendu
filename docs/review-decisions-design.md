@@ -135,8 +135,8 @@ head at claim time supersedes the queued run, releases its reserved Runner claim
 and cancels its check without a failure comment. A merge can close the PR without
 changing its head SHA: if the post-list read observes a merge, or any failed
 dismissal is followed by a recheck that observes one, Core supersedes the obsolete
-round without failing its check. A vote not already dismissed by a concurrent
-reset stays intact; a dismissal already confirmed by that reset is not restored.
+round without failing its check. Any dismissal GitHub completed before the merge
+remains in effect, including earlier dismissals in the same reset.
 An open PR still requires confirmed dismissal. An eager reset failure is logged with the
 failing GitHub operation and available HTTP status, then retried on claim; it
 cannot overwrite a Runner that has already confirmed the reset. If claim-time confirmation fails,
