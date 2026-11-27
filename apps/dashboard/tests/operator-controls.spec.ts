@@ -36,7 +36,7 @@ test('a cancelled review is distinct from failure and supersession', async ({
   await expect(page.locator('.fact', { hasText: 'Cancelled' })).toBeVisible();
   await expect(page.locator('.fact', { hasText: 'Cancellation requested' })).toHaveCount(0);
   expect(text).not.toContain('Did not finish successfully.');
-  expect(text).not.toContain('A newer revision replaced this review.');
+  expect(text).not.toContain('This review run is no longer current.');
   await expect(page.locator('[data-testid="cancel-review"]')).toHaveCount(0);
 });
 

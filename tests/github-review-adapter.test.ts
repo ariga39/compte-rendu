@@ -79,7 +79,7 @@ describe('per-run dashboard Check links', () => {
         expect(checks[1].details_url).toBe('https://dashboard.example/jobs/run-two');
       }
 
-      expect(checks[0].output?.summary).toContain('newer pull request revision');
+      expect(checks[0].output?.summary).toContain('no longer current');
       await github.updateCheckRun!({
         ...input,
         checkRunId: 1,

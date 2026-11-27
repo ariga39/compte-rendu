@@ -3,6 +3,7 @@ import type { CoreWorkerDependencies } from './support/core-worker-runtime';
 import { createCoreWorker } from './support/core-worker-runtime';
 import { createD1ReviewStateStore } from '../apps/core/src/review-state-store';
 import { createGitHubPublicationAdapter } from '../apps/core/src/github-review-adapter';
+import { GitHubRequestError } from '../apps/core/src/github-http';
 import type { ReviewEvent } from '../packages/contracts/src';
 import { scheduleReviewEvent } from './support/core-worker-harness';
 import { SqliteD1Database } from './support/d1-database';
@@ -173,6 +174,7 @@ const resetFixture = async (options: { firstRound?: boolean } = {}) => {
     loseDismissalResponse: false,
     readbackUnavailable: false,
     malformedConfirmation: false,
+    reviewAuthorStatus: undefined as number | undefined,
     merged: false,
     currentHead: headSha,
     onList: async () => {},
@@ -276,7 +278,11 @@ const resetFixture = async (options: { firstRound?: boolean } = {}) => {
     github: createGitHubPublicationAdapter({
       token: 'fixture',
       fetch: remote,
-      getReviewAuthorLogin: async () => 'review-app[bot]',
+      getReviewAuthorLogin: async () => {
+        if (controls.reviewAuthorStatus !== undefined)
+          throw new GitHubRequestError(controls.reviewAuthorStatus);
+        return 'review-app[bot]';
+      },
     }),
   };
   const worker = createCoreWorker(env, dependencies);
@@ -404,6 +410,27 @@ it('rechecks a merge when the dismissal confirmation is malformed', async () => 
     });
     expect(f.checks[0]).toMatchObject({ status: 'completed', conclusion: 'cancelled' });
     expect(f.logs).not.toContainEqual(expect.objectContaining({ reason: 'review_reset_failed' }));
+  } finally {
+    await f.settle();
+    f.database.close();
+  }
+});
+
+it('keeps the GitHub status when the review author lookup fails', async () => {
+  const f = await resetFixture();
+  try {
+    f.controls.reviewAuthorStatus = 403;
+    expect(await f.send()).toBe('accepted');
+    await f.settle();
+    expect((await f.claim()).status).toBe(503);
+    expect(f.reviews[0]!.state).toBe('APPROVED');
+    expect(f.logs).toContainEqual(
+      expect.objectContaining({
+        reason: 'review_reset_failed',
+        operation: 'read_app',
+        status: 403,
+      }),
+    );
   } finally {
     await f.settle();
     f.database.close();

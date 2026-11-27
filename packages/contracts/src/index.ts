@@ -500,6 +500,7 @@ export type RunnerProcessErrorCode = typeof RunnerProcessErrorCode.Type;
 export const ReviewResetOperation = Schema.Literals([
   'list_reviews',
   'read_pull_request',
+  'read_app',
   'dismiss_review',
   'confirm_dismissal',
 ]);

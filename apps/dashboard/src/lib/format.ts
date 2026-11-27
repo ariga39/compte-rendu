@@ -176,7 +176,7 @@ export function outcomeSummary(task: TaskState): string {
   }
   if (task.status === 'completed') return 'Review published to GitHub.';
   if (task.status === 'failed') return 'Did not finish successfully.';
-  if (task.status === 'superseded') return 'A newer revision replaced this review.';
+  if (task.status === 'superseded') return 'This review run is no longer current.';
   return STATUS_LABEL[task.status] ?? 'Not recorded';
 }
 

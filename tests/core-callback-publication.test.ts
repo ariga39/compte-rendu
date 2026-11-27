@@ -1046,7 +1046,7 @@ describe('Core callbacks and publication', () => {
           conclusion: 'cancelled',
           output: {
             title: 'Review cancelled',
-            summary: 'A newer pull request revision replaced this run.',
+            summary: 'This review run is no longer current.',
           },
         },
       },
