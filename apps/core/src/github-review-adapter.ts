@@ -571,13 +571,24 @@ export const createGitHubPublicationAdapter = (
         throw new ReviewConfirmationFailed('Review author unavailable');
       const login = await options.getReviewAuthorLogin();
       const markers = new Set(previousRunIds.map(formatReviewPublicationMarker));
-      const path = await pullRequestPath(repositoryId, pullRequestNumber, installationId);
+      let path: string;
+      try {
+        path = await pullRequestPath(repositoryId, pullRequestNumber, installationId);
+      } catch (error) {
+        throw reviewResetError('read_pull_request', error);
+      }
       const readForReset = async () => {
         try {
           return await readPullRequest(repositoryId, pullRequestNumber, installationId);
         } catch (error) {
           throw reviewResetError('read_pull_request', error);
         }
+      };
+      const staleOnMerge = async () => {
+        const current = await readForReset();
+        return pullRequestMerged(current)
+          ? { kind: 'stale' as const, currentHeadSha: current.head.sha }
+          : undefined;
       };
       const candidates: Array<typeof ConfirmedReview.Type> = [];
       let complete = false;
@@ -591,7 +602,12 @@ export const createGitHubPublicationAdapter = (
         } catch (error) {
           throw reviewResetError('list_reviews', error);
         }
-        const reviews = await Schema.decodeUnknownPromise(Schema.Array(ListedReview))(value);
+        let reviews: ReadonlyArray<typeof ListedReview.Type>;
+        try {
+          reviews = await Schema.decodeUnknownPromise(Schema.Array(ListedReview))(value);
+        } catch (error) {
+          throw reviewResetError('list_reviews', error);
+        }
         for (const review of reviews) {
           if (
             review.user?.type === 'Bot' &&
@@ -606,15 +622,21 @@ export const createGitHubPublicationAdapter = (
           break;
         }
       }
-      if (!complete) throw new Error('GitHub review listing exceeded the safe page limit');
-      let pullRequest = await readForReset();
+      if (!complete)
+        throw reviewResetError(
+          'list_reviews',
+          new Error('GitHub review listing exceeded the safe page limit'),
+        );
+      const pullRequest = await readForReset();
       if (pullRequestMerged(pullRequest))
         return { kind: 'stale', currentHeadSha: pullRequest.head.sha };
       if (pullRequest.head.sha !== headSha)
         return { kind: 'stale', currentHeadSha: pullRequest.head.sha };
       for (const review of candidates) {
         let value: unknown;
-        let dismissalError: unknown;
+        let responseAvailable = false;
+        let dismissalError: GitHubReviewResetError | undefined;
+        let confirmationError: GitHubReviewResetError | undefined;
         try {
           value = await requestJson(installationId, `${path}/reviews/${review.id}/dismissals`, {
             method: 'PUT',
@@ -623,20 +645,27 @@ export const createGitHubPublicationAdapter = (
               message: 'A new review round has started; this earlier verdict no longer applies.',
             }),
           });
+          responseAvailable = true;
         } catch (error) {
           dismissalError = reviewResetError('dismiss_review', error);
           try {
             // Another reset may have won, or GitHub may have applied a lost response.
             value = await requestJson(installationId, `${path}/reviews/${review.id}`);
-          } catch {
-            pullRequest = await readForReset();
-            if (pullRequestMerged(pullRequest))
-              return { kind: 'stale', currentHeadSha: pullRequest.head.sha };
-            throw dismissalError;
+            responseAvailable = true;
+          } catch (error) {
+            confirmationError = reviewResetError('confirm_dismissal', error);
           }
         }
-        const dismissed = await Schema.decodeUnknownPromise(ConfirmedReview)(value);
+        let dismissed: typeof ConfirmedReview.Type | undefined;
+        if (responseAvailable) {
+          try {
+            dismissed = await Schema.decodeUnknownPromise(ConfirmedReview)(value);
+          } catch (error) {
+            confirmationError = reviewResetError('confirm_dismissal', error);
+          }
+        }
         if (
+          dismissed === undefined ||
           dismissed.id !== review.id ||
           dismissed.state !== 'DISMISSED' ||
           dismissed.user.type !== 'Bot' ||
@@ -644,11 +673,15 @@ export const createGitHubPublicationAdapter = (
           dismissed.body !== review.body ||
           dismissed.commit_id !== review.commit_id
         ) {
-          // A merge can reject the dismissal without changing the head SHA.
-          pullRequest = await readForReset();
-          if (pullRequestMerged(pullRequest))
-            return { kind: 'stale', currentHeadSha: pullRequest.head.sha };
+          // A merge can reject or obscure the dismissal without changing the head SHA.
+          try {
+            const stale = await staleOnMerge();
+            if (stale) return stale;
+          } catch (error) {
+            throw confirmationError ?? dismissalError ?? error;
+          }
           throw (
+            confirmationError ??
             dismissalError ??
             reviewResetError(
               'dismiss_review',

@@ -170,6 +170,9 @@ const resetFixture = async (options: { firstRound?: boolean } = {}) => {
     malformed: false,
     endless: false,
     loseDismissal: false,
+    loseDismissalResponse: false,
+    readbackUnavailable: false,
+    malformedConfirmation: false,
     merged: false,
     currentHead: headSha,
     onList: async () => {},
@@ -236,6 +239,7 @@ const resetFixture = async (options: { firstRound?: boolean } = {}) => {
       if (controls.deny) return new Response(null, { status: 403 });
       const target = reviews.find((r) => r.id === Number(dismissal[1]));
       if (!target) return new Response(null, { status: 404 });
+      if (controls.loseDismissalResponse) throw new Error('lost dismissal response');
       if (target.state === 'DISMISSED') return new Response(null, { status: 422 });
       target.state = 'DISMISSED';
       if (controls.loseDismissal) {
@@ -245,8 +249,11 @@ const resetFixture = async (options: { firstRound?: boolean } = {}) => {
       return Response.json(target);
     }
     const exact = url.pathname.match(/\/reviews\/(\d+)$/);
-    if (request.method === 'GET' && exact)
+    if (request.method === 'GET' && exact) {
+      if (controls.readbackUnavailable) return new Response(null, { status: 503 });
+      if (controls.malformedConfirmation) return Response.json({});
       return Response.json(reviews.find((r) => r.id === Number(exact[1])));
+    }
     return new Response(null, { status: 404 });
   };
   const env = {
@@ -331,6 +338,113 @@ describe('review reset failure and concurrency', () => {
       f.database.close();
     }
   });
+});
+
+it('keeps the confirmation lookup status when the dismissal response is lost', async () => {
+  const f = await resetFixture();
+  try {
+    f.controls.loseDismissalResponse = true;
+    f.controls.readbackUnavailable = true;
+    expect(await f.send()).toBe('accepted');
+    await f.settle();
+    expect((await f.claim()).status).toBe(503);
+    expect(f.reviews[0]!.state).toBe('APPROVED');
+    const failures = f.logs.filter(
+      (entry) =>
+        typeof entry === 'object' &&
+        entry !== null &&
+        'reason' in entry &&
+        entry.reason === 'review_reset_failed',
+    );
+    expect(failures).toContainEqual(
+      expect.objectContaining({ operation: 'confirm_dismissal', status: 503 }),
+    );
+    expect(failures).not.toContainEqual(expect.objectContaining({ operation: 'dismiss_review' }));
+  } finally {
+    await f.settle();
+    f.database.close();
+  }
+});
+
+it('labels malformed dismissal confirmation as a confirmation failure', async () => {
+  const f = await resetFixture();
+  try {
+    f.controls.loseDismissalResponse = true;
+    f.controls.malformedConfirmation = true;
+    expect(await f.send()).toBe('accepted');
+    await f.settle();
+    expect((await f.claim()).status).toBe(503);
+    expect(f.reviews[0]!.state).toBe('APPROVED');
+    expect(f.logs).toContainEqual(
+      expect.objectContaining({
+        reason: 'review_reset_failed',
+        operation: 'confirm_dismissal',
+      }),
+    );
+  } finally {
+    await f.settle();
+    f.database.close();
+  }
+});
+
+it('rechecks a merge when the dismissal confirmation is malformed', async () => {
+  const f = await resetFixture();
+  try {
+    expect(await f.send()).toBe('accepted');
+    await f.settle();
+    f.reviews[0]!.state = 'CHANGES_REQUESTED';
+    f.controls.beforeDismiss = async () => {
+      f.controls.merged = true;
+    };
+    f.controls.malformedConfirmation = true;
+    expect((await f.claim()).status).toBe(204);
+    expect(f.reviews[0]!.state).toBe('CHANGES_REQUESTED');
+    expect(await f.store.getDeliveryOutcome(event.deliveryId)).toMatchObject({
+      status: 'superseded',
+    });
+    expect(f.checks[0]).toMatchObject({ status: 'completed', conclusion: 'cancelled' });
+    expect(f.logs).not.toContainEqual(expect.objectContaining({ reason: 'review_reset_failed' }));
+  } finally {
+    await f.settle();
+    f.database.close();
+  }
+});
+
+it('keeps the GitHub status when the repository path lookup fails', async () => {
+  const f = await resetFixture();
+  try {
+    f.controls.repositoryUnavailable = true;
+    expect(await f.send()).toBe('accepted');
+    await f.settle();
+    expect(f.logs).toContainEqual(
+      expect.objectContaining({
+        reason: 'review_reset_failed',
+        operation: 'read_pull_request',
+        status: 503,
+      }),
+    );
+  } finally {
+    await f.settle();
+    f.database.close();
+  }
+});
+
+it('labels malformed review listings as a listing failure', async () => {
+  const f = await resetFixture();
+  try {
+    f.controls.malformed = true;
+    expect(await f.send()).toBe('accepted');
+    await f.settle();
+    expect(f.logs).toContainEqual(
+      expect.objectContaining({
+        reason: 'review_reset_failed',
+        operation: 'list_reviews',
+      }),
+    );
+  } finally {
+    await f.settle();
+    f.database.close();
+  }
 });
 
 it('records claim-time reset diagnostics when the eager reset already succeeded', async () => {
