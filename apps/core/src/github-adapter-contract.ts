@@ -1,6 +1,15 @@
-import type { GitHubSha, ReviewDecision } from '@compte-rendu/contracts';
+import type { GitHubSha, ReviewDecision, ReviewResetOperation } from '@compte-rendu/contracts';
 
 type GitHubShaValue = typeof GitHubSha.Type;
+
+export class GitHubReviewResetError extends Error {
+  constructor(
+    readonly operation: ReviewResetOperation,
+    readonly status?: number,
+  ) {
+    super(`GitHub review reset failed during ${operation}`);
+  }
+}
 
 export interface GitHubAdapter {
   getPullRequest?(input: {

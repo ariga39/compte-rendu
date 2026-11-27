@@ -6,15 +6,17 @@ import {
   type OperationalLogEvent,
   type PublicTaskFailure,
   type ReviewDecision,
+  ReviewResetOperation,
 } from '@compte-rendu/contracts';
 import { DateTime, Effect, Option, Schema } from 'effect';
 import type { CancellationStore } from './cancellation-store';
 import type { CheckRunStore } from './check-run-store';
 import { currentIso, recordOperationalLog } from './core-observability';
-import type {
-  GitHubAdapter,
-  ReviewPublicationCreateResult,
-  ReviewPublicationPayload,
+import {
+  GitHubReviewResetError,
+  type GitHubAdapter,
+  type ReviewPublicationCreateResult,
+  type ReviewPublicationPayload,
 } from './github-adapter-contract';
 import type { ReviewCheckSetupDefer, ReviewJob, ReviewOutcome } from './review-records';
 import {
@@ -26,7 +28,13 @@ import type { ReviewLifecycleStore } from './review-lifecycle-store';
 
 export type ReviewCompletionStateStore = ReviewLifecycleStore & CheckRunStore & CancellationStore;
 
-class ReviewResetFailed extends Schema.TaggedError<ReviewResetFailed>()('ReviewResetFailed', {}) {}
+export class ReviewResetFailed extends Schema.TaggedError<ReviewResetFailed>()(
+  'ReviewResetFailed',
+  {
+    operation: Schema.optional(ReviewResetOperation),
+    status: Schema.optional(Schema.Int),
+  },
+) {}
 
 export const resetPreviousReviewVerdicts = Effect.fn('resetPreviousReviewVerdicts')(function* (
   github: GitHubAdapter,
@@ -47,7 +55,15 @@ export const resetPreviousReviewVerdicts = Effect.fn('resetPreviousReviewVerdict
         previousRunIds,
       });
     },
-    catch: () => new ReviewResetFailed(),
+    catch: (error) =>
+      new ReviewResetFailed(
+        error instanceof GitHubReviewResetError
+          ? {
+              operation: error.operation,
+              ...(error.status === undefined ? {} : { status: error.status }),
+            }
+          : {},
+      ),
   }).pipe(Effect.retry({ times: 1 }));
 });
 

@@ -4,9 +4,10 @@ import {
   DEFAULT_REVIEW_NAME,
   GitHubSha,
   RETRY_REVIEW_ACTION,
+  type ReviewResetOperation,
 } from '@compte-rendu/contracts';
 import { GitHubNotFoundError, GitHubRequestError, parseRetryAfterMs } from './github-http';
-import type { GitHubAdapter } from './github-adapter-contract';
+import { GitHubReviewResetError, type GitHubAdapter } from './github-adapter-contract';
 import { formatReviewPublicationMarker } from './review-publication-format';
 
 const Repository = Schema.Struct({
@@ -26,7 +27,12 @@ const RepositoryMetadataResponse = Schema.Struct({
 
 const PullRequest = Schema.Struct({
   head: Schema.Struct({ sha: GitHubSha }),
+  merged: Schema.optional(Schema.Boolean),
+  merged_at: Schema.optional(Schema.NullOr(Schema.String)),
 });
+
+const pullRequestMerged = (pullRequest: typeof PullRequest.Type) =>
+  pullRequest.merged === true || pullRequest.merged_at != null;
 
 const PullRequestDetails = Schema.Struct({
   draft: Schema.Boolean,
@@ -163,6 +169,14 @@ export const createGitHubPublicationAdapter = (
     return response.json();
   };
 
+  const reviewResetError = (operation: ReviewResetOperation, error: unknown) =>
+    error instanceof GitHubReviewResetError
+      ? error
+      : new GitHubReviewResetError(
+          operation,
+          error instanceof GitHubRequestError ? error.status : undefined,
+        );
+
   const repositoryName = async (repositoryId: number, installationId: number) => {
     const value = await requestJson(installationId, `/repositories/${repositoryId}`);
     return (await Schema.decodeUnknownPromise(Repository)(value)).full_name;
@@ -174,7 +188,7 @@ export const createGitHubPublicationAdapter = (
     installationId: number,
   ) => `/repos/${await repositoryName(repositoryId, installationId)}/pulls/${pullRequestNumber}`;
 
-  const currentHead = async (
+  const readPullRequest = async (
     repositoryId: number,
     pullRequestNumber: number,
     installationId: number,
@@ -183,8 +197,14 @@ export const createGitHubPublicationAdapter = (
       installationId,
       await pullRequestPath(repositoryId, pullRequestNumber, installationId),
     );
-    return (await Schema.decodeUnknownPromise(PullRequest)(value)).head.sha;
+    return await Schema.decodeUnknownPromise(PullRequest)(value);
   };
+
+  const currentHead = async (
+    repositoryId: number,
+    pullRequestNumber: number,
+    installationId: number,
+  ) => (await readPullRequest(repositoryId, pullRequestNumber, installationId)).head.sha;
 
   const confirmReview = async (
     value: unknown,
@@ -552,13 +572,25 @@ export const createGitHubPublicationAdapter = (
       const login = await options.getReviewAuthorLogin();
       const markers = new Set(previousRunIds.map(formatReviewPublicationMarker));
       const path = await pullRequestPath(repositoryId, pullRequestNumber, installationId);
+      const readForReset = async () => {
+        try {
+          return await readPullRequest(repositoryId, pullRequestNumber, installationId);
+        } catch (error) {
+          throw reviewResetError('read_pull_request', error);
+        }
+      };
       const candidates: Array<typeof ConfirmedReview.Type> = [];
       let complete = false;
       for (let page = 1; page <= maxReviewPages; page += 1) {
-        const value = await requestJson(
-          installationId,
-          `${path}/reviews?per_page=${pageSize}&page=${page}`,
-        );
+        let value: unknown;
+        try {
+          value = await requestJson(
+            installationId,
+            `${path}/reviews?per_page=${pageSize}&page=${page}`,
+          );
+        } catch (error) {
+          throw reviewResetError('list_reviews', error);
+        }
         const reviews = await Schema.decodeUnknownPromise(Schema.Array(ListedReview))(value);
         for (const review of reviews) {
           if (
@@ -575,10 +607,14 @@ export const createGitHubPublicationAdapter = (
         }
       }
       if (!complete) throw new Error('GitHub review listing exceeded the safe page limit');
-      const targetHead = await currentHead(repositoryId, pullRequestNumber, installationId);
-      if (targetHead !== headSha) return { kind: 'stale', currentHeadSha: targetHead };
+      let pullRequest = await readForReset();
+      if (pullRequestMerged(pullRequest))
+        return { kind: 'stale', currentHeadSha: pullRequest.head.sha };
+      if (pullRequest.head.sha !== headSha)
+        return { kind: 'stale', currentHeadSha: pullRequest.head.sha };
       for (const review of candidates) {
         let value: unknown;
+        let dismissalError: unknown;
         try {
           value = await requestJson(installationId, `${path}/reviews/${review.id}/dismissals`, {
             method: 'PUT',
@@ -587,9 +623,17 @@ export const createGitHubPublicationAdapter = (
               message: 'A new review round has started; this earlier verdict no longer applies.',
             }),
           });
-        } catch {
-          // Another reset may have won, or GitHub may have applied a lost response.
-          value = await requestJson(installationId, `${path}/reviews/${review.id}`);
+        } catch (error) {
+          dismissalError = reviewResetError('dismiss_review', error);
+          try {
+            // Another reset may have won, or GitHub may have applied a lost response.
+            value = await requestJson(installationId, `${path}/reviews/${review.id}`);
+          } catch {
+            pullRequest = await readForReset();
+            if (pullRequestMerged(pullRequest))
+              return { kind: 'stale', currentHeadSha: pullRequest.head.sha };
+            throw dismissalError;
+          }
         }
         const dismissed = await Schema.decodeUnknownPromise(ConfirmedReview)(value);
         if (
@@ -599,8 +643,19 @@ export const createGitHubPublicationAdapter = (
           dismissed.user.login !== login ||
           dismissed.body !== review.body ||
           dismissed.commit_id !== review.commit_id
-        )
-          throw new ReviewConfirmationFailed('Review dismissal was not confirmed');
+        ) {
+          // A merge can reject the dismissal without changing the head SHA.
+          pullRequest = await readForReset();
+          if (pullRequestMerged(pullRequest))
+            return { kind: 'stale', currentHeadSha: pullRequest.head.sha };
+          throw (
+            dismissalError ??
+            reviewResetError(
+              'dismiss_review',
+              new ReviewConfirmationFailed('Review dismissal was not confirmed'),
+            )
+          );
+        }
       }
     },
     createReview: async ({ repositoryId, pullRequestNumber, installationId, payload }) => {

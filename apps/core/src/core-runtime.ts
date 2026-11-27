@@ -149,6 +149,7 @@ export const makeCoreRuntime = (
     env,
     stateStore,
     github,
+    log,
     tokenProvider,
     completeReview: admission.completeReview,
     validateProgressSnapshot,

@@ -497,6 +497,14 @@ export type PullRequestFacts = typeof PullRequestFacts.Type;
 export const RunnerProcessErrorCode = Schema.Literals(['ENOENT', 'EACCES', 'EPERM']);
 export type RunnerProcessErrorCode = typeof RunnerProcessErrorCode.Type;
 
+export const ReviewResetOperation = Schema.Literals([
+  'list_reviews',
+  'read_pull_request',
+  'dismiss_review',
+  'confirm_dismissal',
+]);
+export type ReviewResetOperation = typeof ReviewResetOperation.Type;
+
 export type OperationalLogEvent =
   | {
       readonly phase: 'ingress';
@@ -561,6 +569,8 @@ export type OperationalLogEvent =
         | 'state_failure'
         | 'scheduling_failure'
         | 'review_reset_failed';
+      readonly operation?: ReviewResetOperation;
+      readonly status?: typeof RunnerHttpStatus.Type;
     }
   | {
       readonly phase: 'relay';

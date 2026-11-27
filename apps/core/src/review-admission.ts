@@ -14,6 +14,7 @@ import {
   publishExpiredClaimChecks,
   publishTerminalCheck,
   resetPreviousReviewVerdicts,
+  ReviewResetFailed,
   startCheckSetup,
   type ReviewCompletionStateStore,
 } from './review-publication';
@@ -153,12 +154,18 @@ const claimAndSchedule = (
     // Eager cleanup is retried by the claim path. A late failure here must not
     // overwrite a run whose Runner already confirmed the reset and started.
     yield* resetPreviousReviewVerdicts(github, stateStore, claim.runId, job).pipe(
-      Effect.catch(() =>
+      Effect.catch((error) =>
         recordOperationalLog(log, {
           phase: 'core',
           outcome: 'retryable',
           deliveryId,
           reason: 'review_reset_failed',
+          ...(error instanceof ReviewResetFailed && error.operation !== undefined
+            ? { operation: error.operation }
+            : {}),
+          ...(error instanceof ReviewResetFailed && error.status !== undefined
+            ? { status: error.status }
+            : {}),
         }),
       ),
     );

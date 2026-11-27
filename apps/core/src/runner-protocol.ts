@@ -11,9 +11,11 @@ import {
   RunnerTerminalCallback,
   readBoundedRequestBytes,
   readBoundedRequestBody,
+  type OperationalLog,
   type PublicTaskFailure,
+  type ReviewResetOperation,
 } from '@compte-rendu/contracts';
-import { currentIso } from './core-observability';
+import { currentIso, recordOperationalLog } from './core-observability';
 import type { GitHubAdapter } from './github-adapter-contract';
 import type { CoreWorkerEnv } from './core-worker';
 import type { D1ReviewStateStore } from './review-state-store';
@@ -25,6 +27,7 @@ import {
   publishExpiredClaimChecks,
   publishTerminalCheck,
   resetPreviousReviewVerdicts,
+  ReviewResetFailed,
 } from './review-publication';
 import { storePublicationRecord } from './publication-record';
 import {
@@ -52,6 +55,7 @@ export interface RunnerProtocolDependencies {
   readonly env: CoreWorkerEnv;
   readonly stateStore: D1ReviewStateStore;
   readonly github: GitHubAdapter;
+  readonly log?: OperationalLog;
   readonly tokenProvider: {
     getReadInstallationToken(
       installationId: number,
@@ -74,7 +78,7 @@ export interface RunnerProtocolDependencies {
 }
 
 export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) => {
-  const { env, stateStore, github, tokenProvider, completeReview, validateProgressSnapshot } =
+  const { env, stateStore, github, log, tokenProvider, completeReview, validateProgressSnapshot } =
     dependencies;
 
   const markRunFailed = (
@@ -710,6 +714,9 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
         });
 
       let preparationFailure: PublicTaskFailure | undefined;
+      let resetDiagnostics:
+        | { readonly operation?: ReviewResetOperation; readonly status?: number }
+        | undefined;
       const prepare = Effect.gen(function* () {
         // A prepared replay is an idempotent resend of the same handoff, so it
         // keeps the original decision instead of re-running freshness.
@@ -727,12 +734,17 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
           ? { kind: 'reset' as const }
           : yield* resetPreviousReviewVerdicts(github, stateStore, claim.runId, claim.job).pipe(
               Effect.match({
-                onFailure: () => ({ kind: 'failed' as const }),
+                onFailure: (error) => ({ kind: 'failed' as const, error }),
                 onSuccess: (result) => result ?? { kind: 'reset' as const },
               }),
             );
         if (reset.kind === 'failed') {
           preparationFailure = { phase: 'scheduling', reason: 'review_reset_failed' };
+          if (reset.error instanceof ReviewResetFailed)
+            resetDiagnostics = {
+              ...(reset.error.operation === undefined ? {} : { operation: reset.error.operation }),
+              ...(reset.error.status === undefined ? {} : { status: reset.error.status }),
+            };
           return yield* Effect.fail(new Error('Previous review reset failed'));
         }
         if (reset.kind === 'stale') return yield* supersedeStaleClaim();
@@ -872,6 +884,20 @@ export const createRunnerProtocol = (dependencies: RunnerProtocolDependencies) =
             return current && current.status !== 'scheduled'
               ? noContent()
               : new Response(null, { status: 503 });
+          if (preparationFailure?.reason === 'review_reset_failed' && current !== undefined) {
+            yield* recordOperationalLog(log, {
+              phase: 'core',
+              outcome: 'retryable',
+              deliveryId: current.deliveryId,
+              reason: 'review_reset_failed',
+              ...(resetDiagnostics?.operation === undefined
+                ? {}
+                : { operation: resetDiagnostics.operation }),
+              ...(resetDiagnostics?.status === undefined
+                ? {}
+                : { status: resetDiagnostics.status }),
+            });
+          }
           const failedAt = new Date().toISOString();
           if (current === undefined) {
             yield* port(() =>
